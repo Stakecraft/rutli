@@ -1,0 +1,34 @@
+# sbt / Scala
+target/
+project/target/
+project/project/
+.bsp/
+.bloop/
+.metals/
+metals.sbt
+
+# Java
+*.class
+*.jar
+!gradle/wrapper/*.jar
+
+# IDE / local tooling
+.idea/
+*.iml
+.vscode/
+.claude/
+
+# Canton runtime
+deploy/**/data/
+deploy/**/*.db
+deploy/**/log/
+*.log
+
+# Secrets — never commit key material or backend creds
+**/secrets/
+*.pem
+*.key
+!**/testdata/*.pem
+.env
+.env.*
+!.env.example

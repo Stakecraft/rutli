@@ -1,0 +1,21 @@
+// Phase 0 smoke test (Canton console bootstrap script).
+//
+// A standalone participant auto-initializes its identity on start. That initialization REQUIRES the
+// rutli driver to:
+//   (a) generate the namespace/identity key and node signing keys (generateSigningKeyPair), and
+//   (b) SIGN the identity topology transactions (NamespaceDelegation, OwnerToKeyMapping) with the
+//       namespace key via the driver's sign().
+// If this script completes, the KMS Driver integration works end-to-end.
+// Kept to minimal console API on purpose — println(x) over member-access pretty-printing.
+
+println("=== rutli Phase 0 smoke test ===")
+
+participant1.health.wait_for_initialized()
+
+println("participant id (namespace = fingerprint of driver-held key):")
+println(participant1.id)
+
+println("public keys generated through the rutli driver:")
+participant1.keys.public.list().foreach(k => println(k))
+
+println("=== OK: identity initialized and topology signed via rutli ===")
