@@ -1,0 +1,36 @@
+[package]
+name = "rutli-cosigner"
+description = "FROST cosigner daemon for the Rütli Canton KMS. Exposes a gRPC signing API (Sign/Health) backed by rutli-frost-core, and orchestrates DKG + two-round signing across the cosigner mesh. One share per node; the full key is never assembled."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "rutli-cosigner"
+path = "src/main.rs"
+
+[dependencies]
+rutli-frost-core = { path = "../core" }
+frost-ed25519 = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }
+protoc-bin-vendored = { workspace = true }
+
+[dev-dependencies]
+ed25519-dalek = { workspace = true }
+tempfile = "3"

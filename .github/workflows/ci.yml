@@ -63,7 +63,7 @@ jobs:
         run: cargo test --locked || cargo test
       - name: Clippy
         working-directory: frost
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
 
   conformance:
     name: Canton conformance suite

@@ -60,7 +60,9 @@ driver/            The Canton KmsDriver (Scala/JVM). Policy/routing shell + KmsB
   src/test/scala/...                Unit + conformance + live HSM integration tests.
 frost/             Rust workspace — the FROST-ed25519 MPC cluster.
   core/            rutli-frost-core: DKG, two-round signing, crash-safe nonce store (tested).
+  cosigner/        rutli-cosigner: gRPC cosigner daemon + DKG/sign orchestration (tested).
 deploy/devnet/     Canton 3.5.x devnet with crypto.provider = kms pointed at this driver.
+deploy/frost/      Docker-compose 2-of-3 cosigner cluster.
 scripts/           publish-canton-deps.sh (Canton artifacts), init-softhsm.sh (dev HSM token).
 docs/              architecture, wire-contract, phase-{0,1,2} docs.
 .github/workflows/ CI: JVM unit tests + assembly and Rust tests+clippy on PR; conformance nightly.

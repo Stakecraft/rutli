@@ -62,6 +62,11 @@ impl Cosigner {
         *self.key_package.identifier()
     }
 
+    /// The signing threshold `t` this share was generated for.
+    pub fn min_signers(&self) -> u16 {
+        *self.key_package.min_signers()
+    }
+
     pub fn public_key_package(&self) -> &frost::keys::PublicKeyPackage {
         &self.public_key_package
     }

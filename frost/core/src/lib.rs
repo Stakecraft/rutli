@@ -22,6 +22,10 @@
 //! The message signed for Canton is its 34-byte pre-hashed payload (`0x1220 ‖ sha256(tx)`, see
 //! docs/wire-contract.md) — plain Ed25519 over those bytes, not Ed25519ph.
 
+// The error enum wraps frost/io types that are large by value; boxing every `?` site to shrink the
+// Err variant would hurt readability more than it helps here.
+#![allow(clippy::result_large_err)]
+
 pub mod dkg;
 pub mod nonce_store;
 pub mod session;

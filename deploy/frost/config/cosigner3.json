@@ -1,0 +1,11 @@
+{
+  "identifier": 3,
+  "listen": "0.0.0.0:9103",
+  "threshold": 2,
+  "data_dir": "/data",
+  "peers": [
+    { "identifier": 1, "endpoint": "http://cosigner1:9101" },
+    { "identifier": 2, "endpoint": "http://cosigner2:9102" },
+    { "identifier": 3, "endpoint": "http://cosigner3:9103" }
+  ]
+}

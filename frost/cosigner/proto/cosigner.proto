@@ -1,0 +1,78 @@
+// Copyright 2026 StakeCraft
+// SPDX-License-Identifier: Apache-2.0
+syntax = "proto3";
+package rutli.cosigner.v1;
+
+// Client-facing signing API. This is what the Scala FrostBackend (the Canton KMS driver's MPC
+// backend) calls. The node it connects to acts as the session leader for that request.
+service Signer {
+  rpc Health(HealthRequest) returns (HealthReply);
+  rpc GroupKey(GroupKeyRequest) returns (GroupKeyReply);
+  rpc Dkg(DkgRequest) returns (DkgReply);
+  rpc Sign(SignRequest) returns (SignReply);
+}
+
+// Mesh-internal API: cosigner-to-cosigner. All FROST packages are carried as opaque bytes
+// (serde_json of the frost-ed25519 types) so the protocol schema is not pinned into protobuf.
+service Peer {
+  rpc SignRound1(SignRound1Request) returns (SignRound1Reply);
+  rpc SignRound2(SignRound2Request) returns (SignRound2Reply);
+  rpc DkgPart1(DkgPart1Request) returns (DkgPart1Reply);
+  rpc DkgPart2(DkgPart2Request) returns (DkgPart2Reply);
+  rpc DkgPart3(DkgPart3Request) returns (DkgPart3Reply);
+}
+
+message HealthRequest {}
+message HealthReply {
+  bool ok = 1;
+  string detail = 2;
+}
+
+message GroupKeyRequest { string key_id = 1; }
+message GroupKeyReply { bytes group_verifying_key = 1; } // 32-byte RFC 8032 Ed25519 key
+
+// Coordinate a distributed key generation across the whole configured cluster.
+message DkgRequest { string key_id = 1; }
+message DkgReply { bytes group_verifying_key = 1; }
+
+message SignRequest {
+  string key_id = 1;
+  bytes message = 2; // Canton's 34-byte pre-hashed payload
+}
+message SignReply { bytes signature = 1; } // 64-byte Ed25519 signature
+
+message SignRound1Request {
+  string key_id = 1;
+  string session_id = 2;
+}
+message SignRound1Reply { bytes commitments = 1; } // json SigningCommitments
+
+message SignRound2Request {
+  string key_id = 1;
+  string session_id = 2;
+  bytes message = 3;
+  bytes commitments_map = 4; // json BTreeMap<Identifier, SigningCommitments>
+}
+message SignRound2Reply { bytes share = 1; } // json SignatureShare
+
+message DkgPart1Request {
+  string dkg_id = 1;
+  string key_id = 2;
+  uint32 identifier = 3;
+  uint32 max_signers = 4;
+  uint32 min_signers = 5;
+}
+message DkgPart1Reply { bytes round1_package = 1; }
+
+message DkgPart2Request {
+  string dkg_id = 1;
+  bytes round1_map = 2; // json BTreeMap<Identifier, round1::Package>
+}
+message DkgPart2Reply { bytes round2_map = 1; } // json BTreeMap<Identifier, round2::Package> (addressed to others)
+
+message DkgPart3Request {
+  string dkg_id = 1;
+  bytes round1_map = 2;        // json BTreeMap<Identifier, round1::Package>
+  bytes round2_map_for_me = 3; // json BTreeMap<Identifier, round2::Package> addressed to this node
+}
+message DkgPart3Reply { bytes group_verifying_key = 1; }

@@ -1,0 +1,49 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+# Local 2-of-3 FROST cosigner cluster. Each node runs on a separate container (stand-in for the
+# separate hosts / accounts / regions a real deployment uses). Bring up, then trigger DKG once.
+#
+#   docker compose -f deploy/frost/docker-compose.yml up --build
+#   # then run DKG (any Signer endpoint), e.g. with grpcurl against localhost:9101 — Signer.Dkg
+#
+# ⚠️ Dev topology: plaintext gRPC, shares stored unencrypted in the named volumes. Production adds
+# mTLS between nodes, HSM/enclave-sealed shares, and genuinely independent hosts/accounts.
+
+x-cosigner: &cosigner
+  build:
+    context: ../../frost
+    dockerfile: Dockerfile
+  restart: unless-stopped
+
+services:
+  cosigner1:
+    <<: *cosigner
+    command: ["--config", "/config/cosigner1.json"]
+    volumes:
+      - ./config:/config:ro
+      - c1:/data
+    ports:
+      - "9101:9101"
+
+  cosigner2:
+    <<: *cosigner
+    command: ["--config", "/config/cosigner2.json"]
+    volumes:
+      - ./config:/config:ro
+      - c2:/data
+    ports:
+      - "9102:9102"
+
+  cosigner3:
+    <<: *cosigner
+    command: ["--config", "/config/cosigner3.json"]
+    volumes:
+      - ./config:/config:ro
+      - c3:/data
+    ports:
+      - "9103:9103"
+
+volumes:
+  c1:
+  c2:
+  c3:
