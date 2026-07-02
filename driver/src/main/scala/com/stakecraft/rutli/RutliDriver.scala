@@ -6,9 +6,11 @@ package com.stakecraft.rutli
 import com.digitalasset.canton.crypto.kms.driver.api.v1._
 import com.stakecraft.rutli.backend.KmsBackend
 import io.opentelemetry.context.Context
+import org.slf4j.Logger
 
 import scala.concurrent.{ExecutionContext, Future}
 import scala.util.control.NonFatal
+import scala.util.{Failure, Success}
 
 /** Canton KMS Driver implementation.
   *
@@ -20,9 +22,15 @@ import scala.util.control.NonFatal
   * Later phases add here (not in the backend): M-of-N quorum/approval enforcement, a tamper-evident
   * audit log, and replay/equivocation guards on signing. The OpenTelemetry trace context is
   * accepted per the SPI and can be propagated to those layers.
+  *
+  * With `auditLogging` enabled every operation is logged (op, keyId, algo, byte sizes, outcome).
+  * This is the plain-log precursor of the Phase 3 hash-chained audit log, and doubles as the
+  * wire-contract capture tool (see docs/wire-contract.md).
   */
 final class RutliDriver(
     backend: KmsBackend,
+    logger: Logger,
+    auditLogging: Boolean,
     // Passed as constructor params (not read from `backend`) so the trait's `require(...)` checks,
     // which run during construction, see initialized values regardless of field init order.
     override val supportedSigningKeySpecs: Set[SigningKeySpec],
@@ -38,60 +46,83 @@ final class RutliDriver(
       signingKeySpec: SigningKeySpec,
       keyName: Option[String],
   )(traceContext: Context): Future[String] =
-    wrap(backend.generateSigningKeyPair(signingKeySpec, keyName))
+    audited(s"generateSigningKeyPair spec=$signingKeySpec name=${keyName.getOrElse("-")}")(
+      backend.generateSigningKeyPair(signingKeySpec, keyName)
+    )(keyId => s"keyId=$keyId")
 
   override def generateEncryptionKeyPair(
       encryptionKeySpec: EncryptionKeySpec,
       keyName: Option[String],
   )(traceContext: Context): Future[String] =
-    wrap(backend.generateEncryptionKeyPair(encryptionKeySpec, keyName))
+    audited(s"generateEncryptionKeyPair spec=$encryptionKeySpec name=${keyName.getOrElse("-")}")(
+      backend.generateEncryptionKeyPair(encryptionKeySpec, keyName)
+    )(keyId => s"keyId=$keyId")
 
   override def generateSymmetricKey(keyName: Option[String])(
       traceContext: Context
   ): Future[String] =
-    wrap(backend.generateSymmetricKey(keyName))
+    audited(s"generateSymmetricKey name=${keyName.getOrElse("-")}")(
+      backend.generateSymmetricKey(keyName)
+    )(keyId => s"keyId=$keyId")
 
   override def sign(data: Array[Byte], keyId: String, algoSpec: SigningAlgoSpec)(
       traceContext: Context
   ): Future[Array[Byte]] =
-    wrap(backend.sign(data, keyId, algoSpec))
+    audited(s"sign keyId=$keyId algo=$algoSpec inBytes=${data.length}")(
+      backend.sign(data, keyId, algoSpec)
+    )(sig => s"sigBytes=${sig.length}")
 
   override def decryptAsymmetric(
       ciphertext: Array[Byte],
       keyId: String,
       algoSpec: EncryptionAlgoSpec,
   )(traceContext: Context): Future[Array[Byte]] =
-    wrap(backend.decryptAsymmetric(ciphertext, keyId, algoSpec))
+    audited(s"decryptAsymmetric keyId=$keyId algo=$algoSpec ctBytes=${ciphertext.length}")(
+      backend.decryptAsymmetric(ciphertext, keyId, algoSpec)
+    )(pt => s"ptBytes=${pt.length}")
 
   override def encryptSymmetric(data: Array[Byte], keyId: String)(
       traceContext: Context
   ): Future[Array[Byte]] =
-    wrap(backend.encryptSymmetric(data, keyId))
+    audited(s"encryptSymmetric keyId=$keyId ptBytes=${data.length}")(
+      backend.encryptSymmetric(data, keyId)
+    )(ct => s"ctBytes=${ct.length}")
 
   override def decryptSymmetric(ciphertext: Array[Byte], keyId: String)(
       traceContext: Context
   ): Future[Array[Byte]] =
-    wrap(backend.decryptSymmetric(ciphertext, keyId))
+    audited(s"decryptSymmetric keyId=$keyId ctBytes=${ciphertext.length}")(
+      backend.decryptSymmetric(ciphertext, keyId)
+    )(pt => s"ptBytes=${pt.length}")
 
   override def getPublicKey(keyId: String)(traceContext: Context): Future[PublicKey] =
-    wrap(backend.getPublicKey(keyId))
+    audited(s"getPublicKey keyId=$keyId")(
+      backend.getPublicKey(keyId)
+    )(pk => s"spec=${pk.spec} spkiBytes=${pk.key.length}")
 
   override def keyExistsAndIsActive(keyId: String)(traceContext: Context): Future[Unit] =
-    wrap(backend.keyExistsAndIsActive(keyId))
+    audited(s"keyExistsAndIsActive keyId=$keyId")(backend.keyExistsAndIsActive(keyId))(_ => "")
 
   override def deleteKey(keyId: String)(traceContext: Context): Future[Unit] =
-    wrap(backend.deleteKey(keyId))
+    audited(s"deleteKey keyId=$keyId")(backend.deleteKey(keyId))(_ => "")
 
   override def close(): Unit = backend.close()
 
-  /** Ensure every failed operation surfaces as a [[KmsDriverException]] per the SPI contract.
-    * Backend-thrown [[KmsDriverException]]s are preserved (including their retryable flag); any
-    * other failure is wrapped as non-retryable.
+  /** Wrap an operation: map failures to [[KmsDriverException]] per the SPI contract (preserving a
+    * backend-thrown exception's retryable flag, wrapping anything else as non-retryable), and emit
+    * an audit line when enabled.
     */
-  private def wrap[A](f: => Future[A]): Future[A] =
-    (try f
-     catch { case NonFatal(e) => Future.failed(e) }).recoverWith {
-      case e: KmsDriverException => Future.failed(e)
-      case NonFatal(e)           => Future.failed(KmsDriverException(e, retryable = false))
+  private def audited[A](op: => String)(f: => Future[A])(result: A => String): Future[A] = {
+    val fut =
+      (try f
+       catch { case NonFatal(e) => Future.failed(e) }).recoverWith {
+        case e: KmsDriverException => Future.failed(e)
+        case NonFatal(e)           => Future.failed(KmsDriverException(e, retryable = false))
+      }
+    if (auditLogging) fut.onComplete {
+      case Success(a) => logger.info(s"AUDIT $op ${result(a)} outcome=ok")
+      case Failure(e) => logger.info(s"AUDIT $op outcome=failed error=${e.getMessage}")
     }
+    fut
+  }
 }

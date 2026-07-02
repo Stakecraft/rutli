@@ -1,0 +1,88 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    # Weekly conformance run (Mondays 06:00 UTC) — heavier job, sees upstream Canton drift early.
+    - cron: "0 6 * * 1"
+
+env:
+  CANTON_TAG: v3.5.6
+
+jobs:
+  test:
+    name: Unit tests + assembly
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: sbt
+
+      - uses: sbt/setup-sbt@v1
+
+      - name: Cache Canton API artifacts (ivy local)
+        id: canton-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ivy2/local/com.daml
+          key: canton-api-${{ env.CANTON_TAG }}-v1
+
+      - name: Publish Canton kms-driver-api locally
+        if: steps.canton-cache.outputs.cache-hit != 'true'
+        run: scripts/publish-canton-deps.sh "$CANTON_TAG"
+
+      - name: Test
+        run: sbt -batch driver/test
+
+      - name: Assemble driver jar
+        run: sbt -batch driver/assembly
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rutli-driver
+          path: driver/target/scala-2.13/rutli-driver.jar
+
+  conformance:
+    name: Canton conformance suite
+    runs-on: ubuntu-latest
+    # Heavy (publishes a large slice of Canton locally) — run on schedule/manual, not per-PR.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: sbt
+
+      - uses: sbt/setup-sbt@v1
+
+      - name: Cache Canton module closure (ivy local)
+        id: canton-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ivy2/local/com.daml
+          key: canton-full-${{ env.CANTON_TAG }}-v1
+
+      - name: Install dpm
+        if: steps.canton-cache.outputs.cache-hit != 'true'
+        run: |
+          VER=$(curl -s https://api.github.com/repos/digital-asset/dpm/releases/latest | jq -r .tag_name)
+          curl -sL "https://github.com/digital-asset/dpm/releases/download/${VER}/dpm-${VER}-linux-amd64.tar.gz" | tar xz
+          sudo install -m 0755 dpm /usr/local/bin/dpm
+          dpm --version
+
+      - name: Publish Canton module closure locally
+        if: steps.canton-cache.outputs.cache-hit != 'true'
+        run: scripts/publish-canton-deps.sh --full "$CANTON_TAG"
+
+      - name: Conformance tests
+        run: CONFORMANCE=1 sbt -batch driver/test

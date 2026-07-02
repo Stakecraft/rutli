@@ -9,10 +9,11 @@ t-of-n quorum signs on its behalf.
 founding cantons swore the oath that created the Swiss Confederation — a federation born from an
 agreement between peers, with no single point of authority. Same idea, applied to your keys.*
 
-> Status: **Phase 0 passed** — the driver runs inside a real Canton 3.5.6 node: all node keys
-> (including an **Ed25519 namespace key**) are generated in the KMS and identity topology is signed
-> through it; the upstream conformance suite is green. Not production-ready — the current backend is
-> software-only. Do not put real key material behind this yet.
+> Status: **Phase 1 in progress.** The driver runs inside a real Canton 3.5.6 node — all node keys
+> (incl. an **Ed25519 namespace key**) are generated in the KMS and identity topology is signed
+> through it; the upstream conformance suite is green. Backends: `software` (Phase 0, testing only)
+> and `hsm` (Phase 1, PKCS#11 — verified against SoftHSM incl. key persistence across restart). The
+> FROST MPC backend (Phase 2) is [designed](docs/phase-2-frost.md), not yet built. Pre-production.
 
 ## Why
 
@@ -49,14 +50,16 @@ driver/            The Canton KmsDriver (Scala/JVM). Policy/routing shell + KmsB
   src/main/scala/com/stakecraft/rutli/
     RutliDriverFactory.scala       Factory (ServiceLoader entry point).
     RutliDriver.scala              KmsDriver SPI impl — delegates to a KmsBackend.
-    RutliConfig.scala              pureconfig-parsed driver config.
-    backend/KmsBackend.scala        The internal seam to HSM / MPC.
-    backend/SoftwareBackend.scala   Phase 0 only — BouncyCastle crypto, never production.
+    RutliConfig.scala              pureconfig-parsed driver config (+ HsmConfig).
+    backend/KmsBackend.scala        The internal seam — swappable key backend.
+    backend/SoftwareBackend.scala   Phase 0 — BouncyCastle, testing only.
+    backend/HsmBackend.scala        Phase 1 — PKCS#11 (SunPKCS11), production-usable.
   src/main/resources/META-INF/services/   ServiceLoader registration (two factory FQCN files).
-  src/test/scala/...                Conformance tests (extend KmsDriverTest / KmsDriverFactoryTest).
+  src/test/scala/...                Unit + conformance + live HSM integration tests.
 deploy/devnet/     Canton 3.5.x devnet with crypto.provider = kms pointed at this driver.
-scripts/           publish-canton-deps.sh — resolve the Canton API artifacts locally.
-docs/              Architecture, Phase 0 runbook.
+scripts/           publish-canton-deps.sh (Canton artifacts), init-softhsm.sh (dev HSM token).
+docs/              architecture, wire-contract, phase-{0,1,2} docs.
+.github/workflows/ CI: unit tests + assembly on PR; conformance suite nightly.
 ```
 
 ## Getting started (Phase 0)

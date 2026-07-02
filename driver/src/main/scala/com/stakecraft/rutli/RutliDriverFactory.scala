@@ -4,7 +4,7 @@
 package com.stakecraft.rutli
 
 import com.digitalasset.canton.crypto.kms.driver.api.v1.KmsDriverFactory
-import com.stakecraft.rutli.backend.SoftwareBackend
+import com.stakecraft.rutli.backend.{HsmBackend, KmsBackend, SoftwareBackend}
 import org.slf4j.Logger
 import pureconfig.{ConfigReader, ConfigWriter}
 
@@ -29,13 +29,17 @@ final class RutliDriverFactory extends KmsDriverFactory {
 
   override def configReader: ConfigReader[RutliConfig] = {
     import pureconfig.generic.semiauto._
+    implicit val hsmReader: ConfigReader[HsmConfig] = deriveReader[HsmConfig]
     deriveReader[RutliConfig]
   }
 
   override def configWriter(confidential: Boolean): ConfigWriter[RutliConfig] = {
     import pureconfig.generic.semiauto._
-    // No sensitive fields yet; when backend credentials (HSM PIN, mTLS keys) are added, omit them
-    // when `confidential` is true.
+    // Redact the HSM PIN when `confidential` (used e.g. when Canton echoes config back).
+    implicit val hsmWriter: ConfigWriter[HsmConfig] = {
+      val base = deriveWriter[HsmConfig]
+      if (confidential) base.contramap[HsmConfig](_.copy(pin = None)) else base
+    }
     deriveWriter[RutliConfig]
   }
 
@@ -47,11 +51,16 @@ final class RutliDriverFactory extends KmsDriverFactory {
     implicit val ec: ExecutionContext = executionContext
     val logger = loggerFactory(classOf[RutliDriver])
 
-    val backend = config.backend match {
+    val backend: KmsBackend = config.backend match {
       case "software" => new SoftwareBackend()
+      case "hsm" =>
+        val hsm = config.hsm.getOrElse(
+          throw new IllegalArgumentException("backend = \"hsm\" requires an `hsm { ... }` config block")
+        )
+        new HsmBackend(hsm)
       case other =>
         throw new IllegalArgumentException(
-          s"unsupported backend '$other'; Phase 0 supports only 'software'"
+          s"unsupported backend '$other'; supported: software, hsm"
         )
     }
 
@@ -60,6 +69,8 @@ final class RutliDriverFactory extends KmsDriverFactory {
     )
     new RutliDriver(
       backend,
+      logger,
+      config.auditLogging,
       backend.supportedSigningKeySpecs,
       backend.supportedSigningAlgoSpecs,
       backend.supportedEncryptionKeySpecs,

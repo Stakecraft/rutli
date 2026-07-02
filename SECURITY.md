@@ -12,9 +12,9 @@ signing, or encryption keys behind the `SoftwareBackend`.** Production requires 
 
 ## Reporting a vulnerability
 
-Do **not** open a public issue for security reports. Email <security@stakecraft.com> (TODO: confirm
-address / set up a GitHub private advisory). Include a description, reproduction, and impact. We aim
-to acknowledge within 72 hours.
+Do **not** open a public issue for security reports. Use GitHub private vulnerability reporting:
+**[Security → Report a vulnerability](https://github.com/Stakecraft/rutli/security/advisories/new)**.
+Include a description, reproduction, and impact. We aim to acknowledge within 72 hours.
 
 ## Design invariants (must not be violated)
 
