@@ -49,6 +49,22 @@ jobs:
           name: rutli-driver
           path: driver/target/scala-2.13/rutli-driver.jar
 
+  frost:
+    name: FROST core (Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: frost
+      - name: Test
+        working-directory: frost
+        run: cargo test --locked || cargo test
+      - name: Clippy
+        working-directory: frost
+        run: cargo clippy -- -D warnings
+
   conformance:
     name: Canton conformance suite
     runs-on: ubuntu-latest

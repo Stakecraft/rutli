@@ -9,11 +9,13 @@ t-of-n quorum signs on its behalf.
 founding cantons swore the oath that created the Swiss Confederation — a federation born from an
 agreement between peers, with no single point of authority. Same idea, applied to your keys.*
 
-> Status: **Phase 1 in progress.** The driver runs inside a real Canton 3.5.6 node — all node keys
-> (incl. an **Ed25519 namespace key**) are generated in the KMS and identity topology is signed
-> through it; the upstream conformance suite is green. Backends: `software` (Phase 0, testing only)
-> and `hsm` (Phase 1, PKCS#11 — verified against SoftHSM incl. key persistence across restart). The
-> FROST MPC backend (Phase 2) is [designed](docs/phase-2-frost.md), not yet built. Pre-production.
+> Status: **pre-production, phases 0–1 done, phase 2 core done.** The driver runs inside a real
+> Canton 3.5.6 node — all node keys (incl. an **Ed25519 namespace key**) are generated in the KMS
+> and identity topology is signed through it; the upstream conformance suite is green. Backends:
+> `software` (Phase 0, testing only) and `hsm` (Phase 1, PKCS#11 — verified against SoftHSM incl.
+> key persistence across restart). The [FROST MPC core](docs/phase-2-frost.md) (`frost/core`, Rust)
+> is implemented and tested — 2-of-3 DKG + threshold signing whose output passes strict
+> `ed25519-dalek` verification; the cosigner daemon + `FrostBackend` are in progress.
 
 ## Why
 
@@ -56,10 +58,12 @@ driver/            The Canton KmsDriver (Scala/JVM). Policy/routing shell + KmsB
     backend/HsmBackend.scala        Phase 1 — PKCS#11 (SunPKCS11), production-usable.
   src/main/resources/META-INF/services/   ServiceLoader registration (two factory FQCN files).
   src/test/scala/...                Unit + conformance + live HSM integration tests.
+frost/             Rust workspace — the FROST-ed25519 MPC cluster.
+  core/            rutli-frost-core: DKG, two-round signing, crash-safe nonce store (tested).
 deploy/devnet/     Canton 3.5.x devnet with crypto.provider = kms pointed at this driver.
 scripts/           publish-canton-deps.sh (Canton artifacts), init-softhsm.sh (dev HSM token).
 docs/              architecture, wire-contract, phase-{0,1,2} docs.
-.github/workflows/ CI: unit tests + assembly on PR; conformance suite nightly.
+.github/workflows/ CI: JVM unit tests + assembly and Rust tests+clippy on PR; conformance nightly.
 ```
 
 ## Getting started (Phase 0)

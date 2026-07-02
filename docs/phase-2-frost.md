@@ -1,4 +1,11 @@
-# Phase 2 — FROST-ed25519 MPC backend (design)
+# Phase 2 — FROST-ed25519 MPC backend
+
+> **Status:** the protocol core is implemented and tested — `frost/core` (`rutli-frost-core`):
+> DKG state machine, two-round signing sessions, crash-safe single-use nonce store. 5 e2e tests
+> prove a 2-of-3 DKG signs Canton's 34-byte payload into a 64-byte signature that
+> `ed25519-dalek`'s **strict** verifier accepts under the group key, nonce reuse is refused across
+> restarts, and below-threshold quorums cannot sign. Remaining: the cosigner daemon (gRPC/mTLS,
+> leader election), the Scala `FrostBackend`, and the `deploy/frost` end-to-end Canton test.
 
 The differentiator: the Canton **namespace / identity key** — the one whose compromise is
 catastrophic and irreversible — is never held whole by any machine. A `t`-of-`n` cluster produces

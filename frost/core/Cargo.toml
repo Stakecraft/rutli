@@ -1,0 +1,19 @@
+[package]
+name = "rutli-frost-core"
+description = "FROST-ed25519 threshold signing core for the Rütli Canton KMS: DKG, two-round signing sessions, and a crash-safe single-use nonce guard. No networking — the cosigner daemon layers gRPC on top."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+frost-ed25519 = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+ed25519-dalek = { workspace = true }
+tempfile = "3"

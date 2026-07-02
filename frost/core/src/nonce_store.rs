@@ -1,0 +1,73 @@
+// Copyright 2026 StakeCraft
+// SPDX-License-Identifier: Apache-2.0
+
+//! Crash-safe single-use guard for FROST signing nonces.
+//!
+//! THE failure mode of threshold Schnorr: releasing two round-2 signature shares computed from the
+//! same round-1 nonce commitment (for different messages / commitment sets) leaks this
+//! participant's key share. RFC 9591 mandates fresh random nonces per session; this store makes
+//! that single-use property survive crashes and restarts.
+//!
+//! Protocol: before a cosigner's round-2 share leaves the process, [`NonceStore::consume`] must
+//! succeed for the session id. `consume` creates a marker file with `O_EXCL` semantics and fsyncs
+//! the directory, so:
+//!   - a second `consume` for the same session (double-sign attempt, replayed request, retried
+//!     round) fails with [`CoreError::NonceReuse`];
+//!   - a crash after `consume` but before the share is sent errs on the safe side — the session is
+//!     burned, never reusable.
+//!
+//! Marker files are tiny and per-session; prune old ones operationally if ever needed (they are
+//! keyed by session UUID, not by message, so retention has no correctness impact).
+
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
+use std::path::PathBuf;
+
+use crate::{CoreError, Result};
+
+pub struct NonceStore {
+    dir: PathBuf,
+}
+
+impl NonceStore {
+    /// Open (creating if needed) a nonce store rooted at `dir`.
+    pub fn open(dir: impl Into<PathBuf>) -> Result<Self> {
+        let dir = dir.into();
+        fs::create_dir_all(&dir)?;
+        Ok(Self { dir })
+    }
+
+    /// Burn `session_id`. Ok exactly once per session; every later call is [`CoreError::NonceReuse`].
+    pub fn consume(&self, session_id: &str) -> Result<()> {
+        let path = self.marker_path(session_id)?;
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut f) => {
+                // Content is informational; the file's exclusive creation is the guarantee.
+                let _ = f.write_all(b"burned");
+                f.sync_all()?;
+                // fsync the directory so the marker survives power loss.
+                File::open(&self.dir)?.sync_all()?;
+                Ok(())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(CoreError::NonceReuse(session_id.to_string()))
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Whether a session has already been burned.
+    pub fn is_consumed(&self, session_id: &str) -> Result<bool> {
+        Ok(self.marker_path(session_id)?.exists())
+    }
+
+    fn marker_path(&self, session_id: &str) -> Result<PathBuf> {
+        // Session ids are cosigner-generated UUIDs; reject anything path-unsafe defensively.
+        if session_id.is_empty()
+            || !session_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(CoreError::NonceStore(format!("invalid session id: {session_id:?}")));
+        }
+        Ok(self.dir.join(format!("{session_id}.used")))
+    }
+}
