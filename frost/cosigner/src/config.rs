@@ -21,6 +21,19 @@ pub struct Config {
     /// present ours; when absent, the node runs plaintext (dev only).
     #[serde(default)]
     pub tls: Option<TlsConfig>,
+    /// Share sealing (encryption-at-rest for key shares). When present, shares are stored as
+    /// AES-256-GCM envelopes keyed from the referenced secret; when absent, shares are plaintext
+    /// JSON (dev only).
+    #[serde(default)]
+    pub share_seal: Option<ShareSealConfig>,
+}
+
+/// Where the share-sealing master secret comes from. The secret must be injected at runtime (secret
+/// manager, systemd credential, enclave bootstrap) — never stored in this config file or on disk.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShareSealConfig {
+    /// Name of the environment variable holding the master secret (e.g. `openssl rand -hex 32`).
+    pub secret_env: String,
 }
 
 /// Mutual-TLS material for the cosigner mesh (and the driver→cluster hop). All peers and the driver

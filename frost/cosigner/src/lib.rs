@@ -20,6 +20,7 @@ pub mod keystore;
 pub mod node;
 pub mod orchestrator;
 pub mod peer;
+pub mod seal;
 pub mod service;
 pub mod tls;
 

@@ -13,7 +13,9 @@
 use frost_ed25519 as frost;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use crate::seal::Sealer;
 use crate::{DaemonError, Result};
 
 #[derive(Serialize, Deserialize)]
@@ -24,13 +26,22 @@ pub struct Share {
 
 pub struct KeyStore {
     dir: PathBuf,
+    sealer: Option<Arc<Sealer>>,
 }
 
 impl KeyStore {
     pub fn open(dir: impl Into<PathBuf>) -> Result<Self> {
+        Self::open_with_sealer(dir, None)
+    }
+
+    /// Open the store with optional share sealing. With a sealer, every write is encrypted
+    /// (AES-256-GCM envelope); reads accept both sealed envelopes and legacy plaintext shares
+    /// (which get re-sealed on their next save). Without a sealer, reading a sealed share fails
+    /// loudly rather than pretending the data is available.
+    pub fn open_with_sealer(dir: impl Into<PathBuf>, sealer: Option<Arc<Sealer>>) -> Result<Self> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
-        Ok(Self { dir })
+        Ok(Self { dir, sealer })
     }
 
     fn path(&self, key_id: &str) -> Result<PathBuf> {
@@ -49,7 +60,12 @@ impl KeyStore {
     pub fn save(&self, key_id: &str, share: &Share) -> Result<()> {
         let path = self.path(key_id)?;
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(share)?)?;
+        let plain = serde_json::to_vec_pretty(share)?;
+        let bytes = match &self.sealer {
+            Some(s) => s.seal(&plain)?,
+            None => plain,
+        };
+        std::fs::write(&tmp, bytes)?;
         // Atomic replace so a crash never leaves a half-written share.
         std::fs::rename(&tmp, &path)?;
         Ok(())
@@ -60,7 +76,19 @@ impl KeyStore {
         if !path.exists() {
             return Err(DaemonError::UnknownKey(key_id.to_string()));
         }
-        Ok(serde_json::from_slice(&std::fs::read(&path)?)?)
+        let bytes = std::fs::read(&path)?;
+        let plain = match (&self.sealer, Sealer::is_sealed(&bytes)) {
+            (Some(s), true) => s.unseal(&bytes)?,
+            // Sealing on, legacy plaintext file: readable (migration path); re-sealed on next save.
+            (Some(_), false) => bytes,
+            (None, true) => {
+                return Err(DaemonError::Config(format!(
+                    "share {key_id} is sealed but share sealing is not configured on this node"
+                )))
+            }
+            (None, false) => bytes,
+        };
+        Ok(serde_json::from_slice(&plain)?)
     }
 
     pub fn nonce_dir(&self, key_id: &str) -> PathBuf {

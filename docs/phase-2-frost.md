@@ -43,7 +43,11 @@
 > A real consensus layer would only be warranted later if the cluster must self-manage membership or
 > coordinate proactive refresh without an external trigger; revisit then, not before.
 >
-> Remaining for Phase 2 hardening: share sealing (enclave/HSM per share), proactive share refresh,
+> - **Share sealing (software, done):** shares stored as AES-256-GCM envelopes, per-node key via
+>   HKDF from an operator-injected secret (`share_seal.secret_env`). Closes the at-rest exposure;
+>   enclave/HSM sealing (which also protects share memory during signing) plugs into the same seam.
+>
+> Remaining for Phase 2 hardening: enclave/HSM sealing ("MPC-of-HSM"), proactive share refresh,
 > and DR per the production-readiness list.
 
 The differentiator: the Canton **namespace / identity key** — the one whose compromise is

@@ -6,6 +6,12 @@ All notable changes to Rütli are documented here. Format loosely follows
 ## [Unreleased]
 
 ### Added
+- **Share sealing** (`share_seal.secret_env`): key shares are stored as AES-256-GCM envelopes,
+  keyed per node via HKDF-SHA256 from an operator-injected master secret (env var from a secret
+  manager — never on disk). A copied disk or backup of `data_dir` no longer yields usable shares.
+  Legacy plaintext shares remain readable for migration and are re-sealed on next write; a sealed
+  share is refused loudly when sealing is unconfigured or the secret is wrong. Software seam for
+  future enclave/HSM sealing.
 - **Tamper-evident audit log** (`audit-log-path`): every key operation appends a hash-chained JSONL
   entry (`hash = SHA-256(prev ‖ entry)`), fsynced before the result returns; the chain resumes
   across restarts and is verifiable offline (`HashChainedAuditLog.verify`). Any edit, reorder, or

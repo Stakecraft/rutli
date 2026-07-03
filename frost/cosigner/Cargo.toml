@@ -26,6 +26,10 @@ serde_json = { workspace = true }
 uuid = { workspace = true }
 hex = { workspace = true }
 thiserror = { workspace = true }
+aes-gcm = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+zeroize = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }

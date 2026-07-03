@@ -41,7 +41,23 @@ async fn main() -> Result<()> {
     tracing::info!(identifier = cfg.identifier, listen = %cfg.listen, "starting cosigner");
 
     let identifier = ident(cfg.identifier)?;
-    let keystore = KeyStore::open(cfg.data_dir.join("keys"))?;
+
+    // Share sealing: encryption-at-rest for key shares, keyed from an operator-injected secret.
+    let sealer = match &cfg.share_seal {
+        Some(seal_cfg) => {
+            tracing::info!(env = %seal_cfg.secret_env, "share sealing enabled (AES-256-GCM at rest)");
+            Some(Arc::new(rutli_cosigner::seal::Sealer::from_env(
+                &seal_cfg.secret_env,
+                cfg.identifier,
+            )?))
+        }
+        None => {
+            tracing::warn!("share sealing DISABLED — key shares stored as plaintext JSON (dev only)");
+            None
+        }
+    };
+
+    let keystore = KeyStore::open_with_sealer(cfg.data_dir.join("keys"), sealer)?;
     let node = Arc::new(Node::new(identifier, cfg.max_signers(), cfg.threshold, keystore));
 
     // Load mTLS material once (if configured). Plaintext otherwise (dev only).

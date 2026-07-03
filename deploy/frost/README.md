@@ -49,13 +49,13 @@ With TLS on, a plaintext client is refused at the handshake.
 
 ## ⚠️ Not fully production yet
 
-Even with mTLS, this dev topology stores shares as unencrypted JSON, all on one host. A production
+Even with mTLS and share sealing available, this dev topology runs all nodes on one host. A production
 deployment must additionally:
 
 - run each cosigner on a **separate host / cloud account / region** (independent blast radius);
 - issue certs from the operator PKI (short-lived, rotated) rather than the dev script;
 - seal each share in an **enclave/HSM** ("MPC-of-HSM");
 - add **proactive share refresh** and encrypted + cold (Shamir) share backups;
-- replace the static leader with **Raft** leader election.
+- (availability is handled by driver-side failover across the roster — see docs/phase-2-frost.md on why Raft is unnecessary here).
 
 See [`docs/phase-2-frost.md`](../../docs/phase-2-frost.md).
