@@ -11,6 +11,11 @@ ThisBuild / scalaVersion := "2.13.16"
 ThisBuild / organization := "com.stakecraft"
 ThisBuild / version      := "0.0.1-SNAPSHOT"
 
+// Canton nodes run on Java 17. Pin the bytecode target so the driver jar loads there even when the
+// build machine's default JDK is newer (class-file version skew otherwise breaks at runtime).
+ThisBuild / javacOptions  ++= Seq("--release", "17")
+ThisBuild / scalacOptions ++= Seq("-release", "17")
+
 // Pin to the Canton release the target nodes run. Latest stable at time of writing: tag v3.5.6.
 // NOTE on coordinates: building the v3.5.6 tag locally publishes the artifacts as
 //   com.daml %% kms-driver-api % 3.6.0-SNAPSHOT

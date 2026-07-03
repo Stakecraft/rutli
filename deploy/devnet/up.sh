@@ -24,9 +24,13 @@ fi
 # its classpath from a fixed jar + the EXTRA_CLASSPATH env var — lib/ is NOT globbed.
 export EXTRA_CLASSPATH="$DRIVER_JAR"
 
-echo "Starting Canton with the rutli driver (EXTRA_CLASSPATH=$EXTRA_CLASSPATH)..."
+# Which node config to use: canton.conf (software backend) by default, or e.g.
+# CANTON_CONF=canton-frost.conf for the FROST-cluster-backed run.
+CONF="${CANTON_CONF:-canton.conf}"
+
+echo "Starting Canton with the rutli driver (config=$CONF, EXTRA_CLASSPATH=$EXTRA_CLASSPATH)..."
 # `run` executes the script headless and exits — right shape for a smoke test.
 # Swap `run ... ` for `daemon` (plus --bootstrap) to keep the node up for interactive work.
 exec "$CANTON_HOME/bin/canton" run "$HERE/bootstrap.canton" \
-  --config "$HERE/canton.conf" \
+  --config "$HERE/$CONF" \
   --no-tty

@@ -18,10 +18,17 @@
 >   64-byte signature; non-Ed25519 keys fall through to the delegate. Config: `backend = "frost"`
 >   + `frost { endpoint, delegate }` (see `deploy/devnet/canton-frost.conf`).
 >
-> Remaining for Phase 2: the full `deploy/frost` ↔ **Canton devnet** e2e (a real participant boots
-> on `backend = "frost"`, its namespace key born via cluster DKG, topology signed by FROST), plus
-> hardening — mTLS between nodes and from the driver, and Raft leader election (v0 is
-> static-leader/plaintext).
+> - **Canton ↔ FROST end-to-end: PASSED (2026-07-03).** A real Canton 3.5.6 participant booted with
+>   `backend = "frost"` (`deploy/devnet/canton-frost.conf`): all three Ed25519 node keys (namespace,
+>   sequencer-auth, signing) were born via cluster DKG, the identity topology transactions were
+>   threshold-signed by the 2-of-3 quorum (`sign … inBytes=34 sigBytes=64 outcome=ok`), Canton's
+>   verifier accepted them and the node reached `initialized`. Shares on disk per node; only the
+>   signing quorum burned nonces. The participant's identity is the fingerprint of a key that never
+>   exists whole anywhere.
+>
+> Remaining for Phase 2 hardening: mTLS between nodes and from the driver, and Raft leader election
+> (v0 is static-leader/plaintext). Then share sealing, proactive refresh, and DR per the
+> production-readiness list.
 
 The differentiator: the Canton **namespace / identity key** — the one whose compromise is
 catastrophic and irreversible — is never held whole by any machine. A `t`-of-`n` cluster produces

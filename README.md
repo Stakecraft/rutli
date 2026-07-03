@@ -14,11 +14,11 @@ agreement between peers, with no single point of authority. Same idea, applied t
 > and identity topology is signed through it; the upstream conformance suite is green. Backends:
 > `software` (Phase 0, testing only) and `hsm` (Phase 1, PKCS#11 — verified against SoftHSM incl.
 > key persistence across restart). The [FROST MPC core](docs/phase-2-frost.md) (`frost/core`, Rust)
-> is implemented and tested — 2-of-3 DKG + threshold signing whose output passes strict
-> `ed25519-dalek` verification. The cosigner daemon and the driver's `FrostBackend` are done and
-> verified end-to-end: against a live 3-node cluster the driver runs DKG for the Ed25519 namespace
-> key and threshold-signs a Canton payload the stock JDK verifier accepts. Remaining: a full
-> Canton-node ↔ FROST devnet run, then mTLS + Raft hardening.
+> is implemented and **verified end-to-end with a real Canton node**: a participant booted with
+> `backend = "frost"`, its Ed25519 namespace key born via 3-node cluster DKG, and its identity
+> topology threshold-signed by a 2-of-3 quorum — accepted by Canton's verifier. No machine ever
+> held the whole key. Remaining before production: mTLS + Raft leader election, share sealing,
+> proactive refresh, DR procedures, and a third-party audit.
 
 ## Why
 
