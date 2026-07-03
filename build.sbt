@@ -9,7 +9,7 @@
 
 ThisBuild / scalaVersion := "2.13.16"
 ThisBuild / organization := "com.stakecraft"
-ThisBuild / version      := "0.0.1-SNAPSHOT"
+ThisBuild / version      := "0.1.0"
 
 // Canton nodes run on Java 17. Pin the bytecode target so the driver jar loads there even when the
 // build machine's default JDK is newer (class-file version skew otherwise breaks at runtime).

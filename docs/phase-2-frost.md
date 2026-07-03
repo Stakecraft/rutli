@@ -26,9 +26,13 @@
 >   signing quorum burned nonces. The participant's identity is the fingerprint of a key that never
 >   exists whole anywhere.
 >
-> Remaining for Phase 2 hardening: mTLS between nodes and from the driver, and Raft leader election
-> (v0 is static-leader/plaintext). Then share sealing, proactive refresh, and DR per the
-> production-readiness list.
+> - **Mutual TLS: done.** Both hops (cosigner↔cosigner mesh, driver→cluster) authenticate with
+>   mTLS against one cluster CA. Verified live: a 3-node mTLS cluster + driver runs DKG (over the
+>   TLS mesh) and threshold-signs, 3/3; a plaintext client is refused at the handshake. Certs via
+>   `scripts/gen-frost-certs.sh`; configs in `deploy/frost/config-tls`.
+>
+> Remaining for Phase 2 hardening: Raft leader election (v0 is static-leader), share sealing
+> (enclave/HSM per share), proactive share refresh, and DR per the production-readiness list.
 
 The differentiator: the Canton **namespace / identity key** — the one whose compromise is
 catastrophic and irreversible — is never held whole by any machine. A `t`-of-`n` cluster produces
