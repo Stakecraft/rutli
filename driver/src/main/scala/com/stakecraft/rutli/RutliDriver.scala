@@ -4,6 +4,7 @@
 package com.stakecraft.rutli
 
 import com.digitalasset.canton.crypto.kms.driver.api.v1._
+import com.stakecraft.rutli.audit.HashChainedAuditLog
 import com.stakecraft.rutli.backend.KmsBackend
 import io.opentelemetry.context.Context
 import org.slf4j.Logger
@@ -31,6 +32,7 @@ final class RutliDriver(
     backend: KmsBackend,
     logger: Logger,
     auditLogging: Boolean,
+    auditLog: Option[HashChainedAuditLog],
     // Passed as constructor params (not read from `backend`) so the trait's `require(...)` checks,
     // which run during construction, see initialized values regardless of field init order.
     override val supportedSigningKeySpecs: Set[SigningKeySpec],
@@ -106,11 +108,14 @@ final class RutliDriver(
   override def deleteKey(keyId: String)(traceContext: Context): Future[Unit] =
     audited(s"deleteKey keyId=$keyId")(backend.deleteKey(keyId))(_ => "")
 
-  override def close(): Unit = backend.close()
+  override def close(): Unit =
+    try backend.close()
+    finally auditLog.foreach(_.close())
 
   /** Wrap an operation: map failures to [[KmsDriverException]] per the SPI contract (preserving a
     * backend-thrown exception's retryable flag, wrapping anything else as non-retryable), and emit
-    * an audit line when enabled.
+    * audit records when enabled — a plain log line (`auditLogging`) and/or a tamper-evident entry
+    * in the hash-chained audit log (`auditLog`).
     */
   private def audited[A](op: => String)(f: => Future[A])(result: A => String): Future[A] = {
     val fut =
@@ -119,9 +124,21 @@ final class RutliDriver(
         case e: KmsDriverException => Future.failed(e)
         case NonFatal(e)           => Future.failed(KmsDriverException(e, retryable = false))
       }
-    if (auditLogging) fut.onComplete {
-      case Success(a) => logger.info(s"AUDIT $op ${result(a)} outcome=ok")
-      case Failure(e) => logger.info(s"AUDIT $op outcome=failed error=${e.getMessage}")
+    if (auditLogging || auditLog.isDefined) fut.onComplete { outcome =>
+      val (opName, detail) = {
+        val s = op
+        val space = s.indexOf(' ')
+        if (space < 0) (s, "") else (s.substring(0, space), s.substring(space + 1))
+      }
+      val line = outcome match {
+        case Success(a) => s"$detail ${result(a)} outcome=ok"
+        case Failure(e) => s"$detail outcome=failed error=${e.getMessage}"
+      }
+      if (auditLogging) logger.info(s"AUDIT $opName $line")
+      auditLog.foreach { log =>
+        try log.append(opName, line.trim)
+        catch { case NonFatal(e) => logger.error(s"audit log append failed: ${e.getMessage}") }
+      }
     }
     fut
   }

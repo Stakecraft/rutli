@@ -83,13 +83,19 @@ final class RutliDriverFactory extends KmsDriverFactory {
         )
     }
 
+    val auditLog = config.auditLogPath.map { p =>
+      logger.info(s"Hash-chained audit log at $p")
+      com.stakecraft.rutli.audit.HashChainedAuditLog.open(p)
+    }
+
     logger.info(
-      s"Starting Rutli driver (backend=${config.backend}, auditLogging=${config.auditLogging})"
+      s"Starting Rutli driver (backend=${config.backend}, auditLogging=${config.auditLogging}, auditLogPath=${config.auditLogPath.getOrElse("-")})"
     )
     new RutliDriver(
       backend,
       logger,
       config.auditLogging,
+      auditLog,
       backend.supportedSigningKeySpecs,
       backend.supportedSigningAlgoSpecs,
       backend.supportedEncryptionKeySpecs,

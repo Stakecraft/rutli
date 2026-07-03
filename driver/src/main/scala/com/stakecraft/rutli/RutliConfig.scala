@@ -11,7 +11,10 @@ package com.stakecraft.rutli
   *   - `frost` (Phase 2, not yet implemented): FROST-ed25519 MPC cluster for the namespace key.
   *
   * @param backend       Which key backend to use: "software" | "hsm" | "frost".
-  * @param auditLogging  Emit per-operation audit lines (precursor of the Phase 3 hash-chained log).
+  * @param auditLogging  Emit per-operation audit lines to the node log.
+  * @param auditLogPath  When set, additionally append every operation to a tamper-evident
+  *                      hash-chained JSONL audit log at this path (verifiable offline; see
+  *                      [[com.stakecraft.rutli.audit.HashChainedAuditLog]]).
   * @param hsm           HSM/PKCS#11 connection config; required when `backend = "hsm"`, and for the
   *                      delegate when `backend = "frost"` with `frost.delegate = "hsm"`.
   * @param frost         FROST cosigner-cluster config; required when `backend = "frost"`.
@@ -19,6 +22,7 @@ package com.stakecraft.rutli
 final case class RutliConfig(
     backend: String = "software",
     auditLogging: Boolean = false,
+    auditLogPath: Option[String] = None,
     hsm: Option[HsmConfig] = None,
     frost: Option[FrostConfig] = None,
 )

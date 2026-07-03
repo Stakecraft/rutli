@@ -6,6 +6,11 @@ All notable changes to Rütli are documented here. Format loosely follows
 ## [Unreleased]
 
 ### Added
+- **Tamper-evident audit log** (`audit-log-path`): every key operation appends a hash-chained JSONL
+  entry (`hash = SHA-256(prev ‖ entry)`), fsynced before the result returns; the chain resumes
+  across restarts and is verifiable offline (`HashChainedAuditLog.verify`). Any edit, reorder, or
+  deletion breaks the chain at the exact entry. Entries carry operation metadata only — never key
+  material or signatures. First piece of the Phase 3 institutional-controls layer.
 - **Driver-side failover** across the FROST cosigner roster (`frost.endpoints`): any live cosigner
   leads a request; a node is skipped only when unreachable, never masking a real error. Removes the
   single-leader availability gap without a consensus layer (FROST sessions are independent — no
