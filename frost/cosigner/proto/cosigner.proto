@@ -3,6 +3,12 @@
 syntax = "proto3";
 package rutli.cosigner.v1;
 
+// Java/Scala side (the KMS driver's FrostBackend) uses grpc-java stubs generated from this file.
+// These options only affect Java codegen; the Rust cosigner (tonic) ignores them.
+option java_multiple_files = true;
+option java_package = "com.stakecraft.rutli.grpc";
+option java_outer_classname = "CosignerProto";
+
 // Client-facing signing API. This is what the Scala FrostBackend (the Canton KMS driver's MPC
 // backend) calls. The node it connects to acts as the session leader for that request.
 service Signer {

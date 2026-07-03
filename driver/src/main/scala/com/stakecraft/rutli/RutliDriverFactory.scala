@@ -4,7 +4,7 @@
 package com.stakecraft.rutli
 
 import com.digitalasset.canton.crypto.kms.driver.api.v1.KmsDriverFactory
-import com.stakecraft.rutli.backend.{HsmBackend, KmsBackend, SoftwareBackend}
+import com.stakecraft.rutli.backend.{FrostBackend, HsmBackend, KmsBackend, SoftwareBackend}
 import org.slf4j.Logger
 import pureconfig.{ConfigReader, ConfigWriter}
 
@@ -30,6 +30,7 @@ final class RutliDriverFactory extends KmsDriverFactory {
   override def configReader: ConfigReader[RutliConfig] = {
     import pureconfig.generic.semiauto._
     implicit val hsmReader: ConfigReader[HsmConfig] = deriveReader[HsmConfig]
+    implicit val frostReader: ConfigReader[FrostConfig] = deriveReader[FrostConfig]
     deriveReader[RutliConfig]
   }
 
@@ -40,6 +41,7 @@ final class RutliDriverFactory extends KmsDriverFactory {
       val base = deriveWriter[HsmConfig]
       if (confidential) base.contramap[HsmConfig](_.copy(pin = None)) else base
     }
+    implicit val frostWriter: ConfigWriter[FrostConfig] = deriveWriter[FrostConfig]
     deriveWriter[RutliConfig]
   }
 
@@ -51,16 +53,28 @@ final class RutliDriverFactory extends KmsDriverFactory {
     implicit val ec: ExecutionContext = executionContext
     val logger = loggerFactory(classOf[RutliDriver])
 
-    val backend: KmsBackend = config.backend match {
+    def buildBackend(kind: String): KmsBackend = kind match {
       case "software" => new SoftwareBackend()
       case "hsm" =>
         val hsm = config.hsm.getOrElse(
-          throw new IllegalArgumentException("backend = \"hsm\" requires an `hsm { ... }` config block")
+          throw new IllegalArgumentException("hsm backend requires an `hsm { ... }` config block")
         )
         new HsmBackend(hsm)
       case other =>
+        throw new IllegalArgumentException(s"unsupported backend '$other'; supported: software, hsm")
+    }
+
+    val backend: KmsBackend = config.backend match {
+      case "software" | "hsm" => buildBackend(config.backend)
+      case "frost" =>
+        val frost = config.frost.getOrElse(
+          throw new IllegalArgumentException("backend = \"frost\" requires a `frost { ... }` block")
+        )
+        // Non-namespace keys go to the delegate backend (the HSM in production).
+        new FrostBackend(frost.endpoint, buildBackend(frost.delegate), logger)
+      case other =>
         throw new IllegalArgumentException(
-          s"unsupported backend '$other'; supported: software, hsm"
+          s"unsupported backend '$other'; supported: software, hsm, frost"
         )
     }
 

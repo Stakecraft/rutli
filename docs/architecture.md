@@ -71,8 +71,10 @@ Backends, added over the phases:
 - `HsmBackend` (PKCS#11) — Phase 1. Keys sealed in an HSM/enclave (SoftHSM → YubiHSM / Securosys /
   Nitro Enclave). FIPS 140-3 story off-the-shelf. ✅ implemented, verified vs SoftHSM. See
   [phase-1-hsm.md](phase-1-hsm.md).
-- `FrostBackend` — Phase 2. gRPC/mTLS to the Rust FROST-ed25519 MPC cluster. Namespace key only.
-  Designed: [phase-2-frost.md](phase-2-frost.md).
+- `FrostBackend` — Phase 2. gRPC to the Rust FROST-ed25519 MPC cluster for the namespace key;
+  delegates everything else to the HSM/software backend. ✅ implemented, live e2e verified against a
+  3-node cluster (DKG + threshold sign, JDK-verified). mTLS is a follow-up. See
+  [phase-2-frost.md](phase-2-frost.md).
 - `DklsBackend` — Phase 4. Threshold ECDSA P-256/P-384 for protocol/sequencer keys.
 
 Routing by key type lets each key sit on the right backend simultaneously (e.g. namespace key on

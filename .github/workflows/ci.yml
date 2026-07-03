@@ -11,6 +11,7 @@ on:
 
 env:
   CANTON_TAG: v3.5.6
+  SBT_OPTS: "-Xmx4g -Xss8m"
 
 jobs:
   test:

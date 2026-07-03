@@ -15,7 +15,10 @@ agreement between peers, with no single point of authority. Same idea, applied t
 > `software` (Phase 0, testing only) and `hsm` (Phase 1, PKCS#11 — verified against SoftHSM incl.
 > key persistence across restart). The [FROST MPC core](docs/phase-2-frost.md) (`frost/core`, Rust)
 > is implemented and tested — 2-of-3 DKG + threshold signing whose output passes strict
-> `ed25519-dalek` verification; the cosigner daemon + `FrostBackend` are in progress.
+> `ed25519-dalek` verification. The cosigner daemon and the driver's `FrostBackend` are done and
+> verified end-to-end: against a live 3-node cluster the driver runs DKG for the Ed25519 namespace
+> key and threshold-signs a Canton payload the stock JDK verifier accepts. Remaining: a full
+> Canton-node ↔ FROST devnet run, then mTLS + Raft hardening.
 
 ## Why
 
@@ -56,6 +59,8 @@ driver/            The Canton KmsDriver (Scala/JVM). Policy/routing shell + KmsB
     backend/KmsBackend.scala        The internal seam — swappable key backend.
     backend/SoftwareBackend.scala   Phase 0 — BouncyCastle, testing only.
     backend/HsmBackend.scala        Phase 1 — PKCS#11 (SunPKCS11), production-usable.
+    backend/FrostBackend.scala      Phase 2 — routes namespace key to the FROST cluster (gRPC).
+  src/main/java/com/stakecraft/rutli/grpc/   Generated gRPC stubs (scripts/gen-grpc-java.sh).
   src/main/resources/META-INF/services/   ServiceLoader registration (two factory FQCN files).
   src/test/scala/...                Unit + conformance + live HSM integration tests.
 frost/             Rust workspace — the FROST-ed25519 MPC cluster.

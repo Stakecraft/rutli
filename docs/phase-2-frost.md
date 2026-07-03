@@ -10,9 +10,18 @@
 >   **survives a downed cosigner**, shares persist across reload. Runnable via `deploy/frost`
 >   (Docker compose, 2-of-3).
 >
-> Remaining for Phase 2: the Scala `FrostBackend` (KMS driver → cosigner gRPC), mTLS + Raft leader
-> election (v0 is static-leader/plaintext), and the `deploy/frost` ↔ Canton end-to-end test
-> ("namespace key signed by FROST, verified by a real node").
+> - `driver` `FrostBackend` (Scala): composite backend routing the Ed25519 namespace key to the
+>   cluster over gRPC (checked-in grpc-java stubs from the shared proto) and delegating every other
+>   key to the HSM/software backend. **Live e2e verified** (`FrostBackendIT`, gated on
+>   `RUTLI_FROST_ENDPOINT`): against a real 3-node cluster it runs DKG for the namespace key,
+>   threshold-signs a Canton 34-byte payload, and the **stock JDK Ed25519 verifier accepts** the
+>   64-byte signature; non-Ed25519 keys fall through to the delegate. Config: `backend = "frost"`
+>   + `frost { endpoint, delegate }` (see `deploy/devnet/canton-frost.conf`).
+>
+> Remaining for Phase 2: the full `deploy/frost` ↔ **Canton devnet** e2e (a real participant boots
+> on `backend = "frost"`, its namespace key born via cluster DKG, topology signed by FROST), plus
+> hardening — mTLS between nodes and from the driver, and Raft leader election (v0 is
+> static-leader/plaintext).
 
 The differentiator: the Canton **namespace / identity key** — the one whose compromise is
 catastrophic and irreversible — is never held whole by any machine. A `t`-of-`n` cluster produces

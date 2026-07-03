@@ -20,6 +20,8 @@ ThisBuild / version      := "0.0.1-SNAPSHOT"
 val cantonOrg       = "com.daml"
 val cantonVersion   = "3.6.0-SNAPSHOT"
 val bouncyCastleVer = "1.78.1"
+val grpcVersion     = "1.82.1"
+val protobufVersion = "4.29.3"
 
 lazy val driver = (project in file("driver"))
   .settings(
@@ -57,6 +59,18 @@ lazy val driver = (project in file("driver"))
     Test / unmanagedSources / excludeFilter := (
       if (sys.env.contains("CONFORMANCE")) NothingFilter: FileFilter
       else ("*ConformanceTest.scala": FileFilter)
+    ),
+    // gRPC client for the FROST cosigner cluster. The Java stubs are generated ONCE from the shared
+    // proto (frost/cosigner/proto/cosigner.proto) with native protoc + protoc-gen-grpc-java and
+    // checked in under driver/src/main/java (regenerate with scripts/gen-grpc-java.sh). We do NOT
+    // use the sbt-protoc/scalapb bridge — its socket-based codegen plugin hangs in some sandboxes.
+    libraryDependencies ++= Seq(
+      "io.grpc"             % "grpc-netty-shaded" % grpcVersion,
+      "io.grpc"             % "grpc-protobuf"     % grpcVersion,
+      "io.grpc"             % "grpc-stub"         % grpcVersion,
+      "com.google.protobuf" % "protobuf-java"     % protobufVersion,
+      // javax.annotation.Generated referenced by the generated grpc stubs (compile-time only).
+      "org.apache.tomcat"   % "annotations-api"   % "6.0.53" % Provided,
     ),
     // Fat jar so the driver + BouncyCastle land on the Canton classpath as one artifact.
     assembly / assemblyJarName := "rutli-driver.jar",

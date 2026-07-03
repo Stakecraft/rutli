@@ -10,14 +10,28 @@ package com.stakecraft.rutli
   *   - `hsm` (Phase 1): keys in a PKCS#11 HSM / enclave. Requires the `hsm` block.
   *   - `frost` (Phase 2, not yet implemented): FROST-ed25519 MPC cluster for the namespace key.
   *
-  * @param backend       Which key backend to use: "software" | "hsm".
+  * @param backend       Which key backend to use: "software" | "hsm" | "frost".
   * @param auditLogging  Emit per-operation audit lines (precursor of the Phase 3 hash-chained log).
-  * @param hsm           HSM/PKCS#11 connection config; required when `backend = "hsm"`.
+  * @param hsm           HSM/PKCS#11 connection config; required when `backend = "hsm"`, and for the
+  *                      delegate when `backend = "frost"` with `frost.delegate = "hsm"`.
+  * @param frost         FROST cosigner-cluster config; required when `backend = "frost"`.
   */
 final case class RutliConfig(
     backend: String = "software",
     auditLogging: Boolean = false,
     hsm: Option[HsmConfig] = None,
+    frost: Option[FrostConfig] = None,
+)
+
+/** FROST backend config (Phase 2). The namespace/identity Ed25519 key is served by the cosigner
+  * cluster; all other keys are served by the `delegate` backend (typically the HSM).
+  *
+  * @param endpoint  gRPC target of any cosigner's Signer service (e.g. "localhost:9101").
+  * @param delegate  Backend for non-FROST keys: "hsm" | "software". Defaults to "hsm".
+  */
+final case class FrostConfig(
+    endpoint: String,
+    delegate: String = "hsm",
 )
 
 /** PKCS#11 connection config for the HSM backend (Phase 1).
