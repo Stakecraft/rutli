@@ -30,6 +30,7 @@ final class RutliDriverFactory extends KmsDriverFactory {
   override def configReader: ConfigReader[RutliConfig] = {
     import pureconfig.generic.semiauto._
     implicit val hsmReader: ConfigReader[HsmConfig] = deriveReader[HsmConfig]
+    implicit val frostTlsReader: ConfigReader[FrostTlsConfig] = deriveReader[FrostTlsConfig]
     implicit val frostReader: ConfigReader[FrostConfig] = deriveReader[FrostConfig]
     deriveReader[RutliConfig]
   }
@@ -41,6 +42,7 @@ final class RutliDriverFactory extends KmsDriverFactory {
       val base = deriveWriter[HsmConfig]
       if (confidential) base.contramap[HsmConfig](_.copy(pin = None)) else base
     }
+    implicit val frostTlsWriter: ConfigWriter[FrostTlsConfig] = deriveWriter[FrostTlsConfig]
     implicit val frostWriter: ConfigWriter[FrostConfig] = deriveWriter[FrostConfig]
     deriveWriter[RutliConfig]
   }
@@ -71,7 +73,7 @@ final class RutliDriverFactory extends KmsDriverFactory {
           throw new IllegalArgumentException("backend = \"frost\" requires a `frost { ... }` block")
         )
         // Non-namespace keys go to the delegate backend (the HSM in production).
-        new FrostBackend(frost.endpoint, buildBackend(frost.delegate), logger)
+        new FrostBackend(frost.endpoint, buildBackend(frost.delegate), logger, frost.tls)
       case other =>
         throw new IllegalArgumentException(
           s"unsupported backend '$other'; supported: software, hsm, frost"

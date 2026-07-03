@@ -33,14 +33,29 @@ Kill any single node and signing still works (2-of-3).
 One JSON file per node (`config/cosignerN.json`): its `identifier`, `listen` address, the signing
 `threshold`, a durable `data_dir`, and the full `peers` roster. See the files in `config/`.
 
-## ⚠️ Not production
+## Mutual TLS
 
-This dev topology uses plaintext gRPC and stores shares unencrypted in Docker volumes, all on one
-host. A production deployment must:
+Add a `tls { ca_cert, cert, key, domain }` block to each node's config and use `https://` peer
+endpoints; the server then **requires** a client cert signed by the cluster CA (real mTLS — the
+mesh and the driver both authenticate). Generate a dev trust domain:
+
+```sh
+scripts/gen-frost-certs.sh 3 deploy/frost/certs   # cluster CA + 3 cosigner certs + a driver cert
+```
+
+Example TLS configs are in `config-tls/` (mount `certs/` at `/certs`). The driver enables TLS via
+`frost.tls { ca-cert, cert, key, domain }` in its Canton config, pointing at the CA + `driver.{crt,key}`.
+With TLS on, a plaintext client is refused at the handshake.
+
+## ⚠️ Not fully production yet
+
+Even with mTLS, this dev topology stores shares as unencrypted JSON, all on one host. A production
+deployment must additionally:
 
 - run each cosigner on a **separate host / cloud account / region** (independent blast radius);
-- use **mTLS** with pinned certs between nodes and from the driver;
+- issue certs from the operator PKI (short-lived, rotated) rather than the dev script;
 - seal each share in an **enclave/HSM** ("MPC-of-HSM");
-- add **proactive share refresh** and encrypted + cold (Shamir) share backups.
+- add **proactive share refresh** and encrypted + cold (Shamir) share backups;
+- replace the static leader with **Raft** leader election.
 
 See [`docs/phase-2-frost.md`](../../docs/phase-2-frost.md).

@@ -21,6 +21,7 @@ pub mod node;
 pub mod orchestrator;
 pub mod peer;
 pub mod service;
+pub mod tls;
 
 /// Generated protobuf/tonic types.
 pub mod pb {

@@ -17,6 +17,25 @@ pub struct Config {
     pub data_dir: PathBuf,
     /// The full cosigner roster, including this node.
     pub peers: Vec<PeerConfig>,
+    /// Mutual-TLS config. When present, the gRPC server requires client certs and peer clients
+    /// present ours; when absent, the node runs plaintext (dev only).
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
+}
+
+/// Mutual-TLS material for the cosigner mesh (and the driver→cluster hop). All peers and the driver
+/// present certs signed by the same cluster CA; the CA cert is the single trust anchor.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TlsConfig {
+    /// PEM CA certificate that must sign every peer/client certificate (the trust anchor).
+    pub ca_cert: PathBuf,
+    /// PEM certificate this node presents (as server, and as client to peers).
+    pub cert: PathBuf,
+    /// PEM private key for `cert`.
+    pub key: PathBuf,
+    /// Expected TLS server-name (SNI/SAN) when dialing peers. Peer endpoints use `https://`.
+    #[serde(default)]
+    pub domain: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

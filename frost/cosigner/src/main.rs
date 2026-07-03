@@ -44,13 +44,22 @@ async fn main() -> Result<()> {
     let keystore = KeyStore::open(cfg.data_dir.join("keys"))?;
     let node = Arc::new(Node::new(identifier, cfg.max_signers(), cfg.threshold, keystore));
 
+    // Load mTLS material once (if configured). Plaintext otherwise (dev only).
+    let tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose()?;
+    if tls.is_some() {
+        tracing::info!("mutual TLS enabled (cluster CA trust anchor)");
+    } else {
+        tracing::warn!("running WITHOUT TLS — plaintext gRPC, do not use in production");
+    }
+
     // Build the peer roster: this node as a local peer, every other as a lazy gRPC client.
     let mut peers: Vec<Arc<dyn PeerApi>> = Vec::new();
     for p in &cfg.peers {
         if p.identifier == cfg.identifier {
             peers.push(Arc::new(LocalPeer::new(node.clone())));
         } else {
-            peers.push(Arc::new(GrpcPeer::connect_lazy(ident(p.identifier)?, &p.endpoint)?));
+            let client_tls = tls.as_ref().map(|t| t.client.clone());
+            peers.push(Arc::new(GrpcPeer::connect_lazy(ident(p.identifier)?, &p.endpoint, client_tls)?));
         }
     }
     peers.sort_by_key(|p| identifier_index(p.identifier()));
@@ -64,7 +73,11 @@ async fn main() -> Result<()> {
         .map_err(|e| DaemonError::Config(format!("bad listen addr {}: {e}", cfg.listen)))?;
     tracing::info!(%addr, "gRPC serving Signer + Peer");
 
-    tonic::transport::Server::builder()
+    let mut server = tonic::transport::Server::builder();
+    if let Some(t) = &tls {
+        server = server.tls_config(t.server.clone())?;
+    }
+    server
         .add_service(SignerServer::new(signer))
         .add_service(PeerServer::new(peer))
         .serve_with_shutdown(addr, shutdown())

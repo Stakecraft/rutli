@@ -101,11 +101,17 @@ pub struct GrpcPeer {
 }
 
 impl GrpcPeer {
-    pub fn connect_lazy(identifier: Identifier, endpoint: &str) -> Result<Self> {
-        let channel = tonic::transport::Endpoint::from_shared(endpoint.to_string())
-            .map_err(|e| crate::DaemonError::Config(format!("bad endpoint {endpoint}: {e}")))?
-            .connect_lazy();
-        Ok(Self { identifier, client: PeerClient::new(channel) })
+    pub fn connect_lazy(
+        identifier: Identifier,
+        endpoint: &str,
+        tls: Option<tonic::transport::ClientTlsConfig>,
+    ) -> Result<Self> {
+        let mut ep = tonic::transport::Endpoint::from_shared(endpoint.to_string())
+            .map_err(|e| crate::DaemonError::Config(format!("bad endpoint {endpoint}: {e}")))?;
+        if let Some(t) = tls {
+            ep = ep.tls_config(t)?;
+        }
+        Ok(Self { identifier, client: PeerClient::new(ep.connect_lazy()) })
     }
 }
 

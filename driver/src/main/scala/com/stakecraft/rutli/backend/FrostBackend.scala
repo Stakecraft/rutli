@@ -5,6 +5,7 @@ package com.stakecraft.rutli.backend
 
 import com.digitalasset.canton.crypto.kms.driver.api.v1._
 import com.google.protobuf.ByteString
+import com.stakecraft.rutli.FrostTlsConfig
 import com.stakecraft.rutli.grpc.{
   DkgRequest,
   GroupKeyRequest,
@@ -12,9 +13,11 @@ import com.stakecraft.rutli.grpc.{
   SignRequest,
   SignerGrpc,
 }
-import io.grpc.ManagedChannelBuilder
+import io.grpc.netty.shaded.io.grpc.netty.{GrpcSslContexts, NettyChannelBuilder}
+import io.grpc.{ManagedChannel, ManagedChannelBuilder}
 import org.slf4j.Logger
 
+import java.io.File
 import java.security.KeyFactory
 import java.security.spec.X509EncodedKeySpec
 import java.util.concurrent.TimeUnit
@@ -40,13 +43,28 @@ final class FrostBackend(
     endpoint: String,
     delegate: KmsBackend,
     logger: Logger,
+    tls: Option[FrostTlsConfig] = None,
     requestTimeout: FiniteDuration = 60.seconds,
 )(implicit ec: ExecutionContext)
     extends KmsBackend {
 
   import FrostBackend._
 
-  private val channel = ManagedChannelBuilder.forTarget(endpoint).usePlaintext().build()
+  private val channel: ManagedChannel = tls match {
+    case Some(t) =>
+      val ssl = GrpcSslContexts
+        .forClient()
+        .trustManager(new File(t.caCert))
+        .keyManager(new File(t.cert), new File(t.key))
+        .build()
+      val b = NettyChannelBuilder.forTarget(endpoint).sslContext(ssl)
+      t.domain.foreach(b.overrideAuthority)
+      logger.info(s"FROST: mutual TLS enabled for channel to $endpoint")
+      b.build()
+    case None =>
+      logger.warn(s"FROST: plaintext channel to $endpoint (no TLS) — do not use in production")
+      ManagedChannelBuilder.forTarget(endpoint).usePlaintext().build()
+  }
 
   private def stub: SignerGrpc.SignerBlockingStub =
     SignerGrpc.newBlockingStub(channel).withDeadlineAfter(requestTimeout.toMillis, TimeUnit.MILLISECONDS)

@@ -32,9 +32,21 @@ class FrostBackendIT extends AnyWordSpec with Matchers {
     d
   }
 
+  // Optional mTLS material (RUTLI_FROST_CA/CERT/KEY). When set, the channel is mutual-TLS.
+  private val tls: Option[FrostTlsConfig] = for {
+    ca <- sys.env.get("RUTLI_FROST_CA")
+    cert <- sys.env.get("RUTLI_FROST_CERT")
+    key <- sys.env.get("RUTLI_FROST_KEY")
+  } yield FrostTlsConfig(ca, cert, key, sys.env.get("RUTLI_FROST_DOMAIN").orElse(Some("localhost")))
+
   private def backend(): FrostBackend = {
     assume(endpoint.isDefined, "set RUTLI_FROST_ENDPOINT (e.g. localhost:9101) to run FROST e2e tests")
-    new FrostBackend(endpoint.get, new SoftwareBackend(), org.slf4j.LoggerFactory.getLogger("frost-it"))
+    new FrostBackend(
+      endpoint.get,
+      new SoftwareBackend(),
+      org.slf4j.LoggerFactory.getLogger("frost-it"),
+      tls,
+    )
   }
 
   "FrostBackend against a live cluster" should {
