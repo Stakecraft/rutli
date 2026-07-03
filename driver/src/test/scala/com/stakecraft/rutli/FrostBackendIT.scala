@@ -91,8 +91,9 @@ class FrostBackendIT extends AnyWordSpec with Matchers {
     }
 
     "fail over past a dead endpoint to a live cosigner" in {
+      assume(endpoint.isDefined, "set RUTLI_FROST_ENDPOINT to run FROST e2e tests")
       // A dead endpoint first, then the real one. Failover must skip the dead node transparently.
-      val b = backend(Seq("127.0.0.1:6553", endpoint.getOrElse("localhost:9101")))
+      val b = backend(Seq("127.0.0.1:6553", endpoint.get))
       try {
         await(b.health) shouldBe KmsDriverHealth.Ok
         val keyId = await(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("failover")))
