@@ -39,14 +39,12 @@ class FrostBackendIT extends AnyWordSpec with Matchers {
     key <- sys.env.get("RUTLI_FROST_KEY")
   } yield FrostTlsConfig(ca, cert, key, sys.env.get("RUTLI_FROST_DOMAIN").orElse(Some("localhost")))
 
+  private def backend(eps: Seq[String]): FrostBackend =
+    new FrostBackend(eps, new SoftwareBackend(), org.slf4j.LoggerFactory.getLogger("frost-it"), tls)
+
   private def backend(): FrostBackend = {
     assume(endpoint.isDefined, "set RUTLI_FROST_ENDPOINT (e.g. localhost:9101) to run FROST e2e tests")
-    new FrostBackend(
-      endpoint.get,
-      new SoftwareBackend(),
-      org.slf4j.LoggerFactory.getLogger("frost-it"),
-      tls,
-    )
+    backend(Seq(endpoint.get))
   }
 
   "FrostBackend against a live cluster" should {
@@ -90,6 +88,21 @@ class FrostBackendIT extends AnyWordSpec with Matchers {
       val b = backend()
       try await(b.health) shouldBe KmsDriverHealth.Ok
       finally b.close()
+    }
+
+    "fail over past a dead endpoint to a live cosigner" in {
+      // A dead endpoint first, then the real one. Failover must skip the dead node transparently.
+      val b = backend(Seq("127.0.0.1:6553", endpoint.getOrElse("localhost:9101")))
+      try {
+        await(b.health) shouldBe KmsDriverHealth.Ok
+        val keyId = await(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("failover")))
+        val pub = await(b.getPublicKey(keyId))
+        val sig = await(b.sign(digest, keyId, SigningAlgoSpec.Ed25519))
+        val jdkKey = KeyFactory.getInstance("Ed25519").generatePublic(new X509EncodedKeySpec(pub.key))
+        val v = JSignature.getInstance("Ed25519")
+        v.initVerify(jdkKey); v.update(digest)
+        v.verify(sig) shouldBe true
+      } finally b.close()
     }
   }
 }

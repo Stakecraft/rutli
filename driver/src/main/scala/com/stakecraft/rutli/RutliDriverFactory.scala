@@ -72,8 +72,11 @@ final class RutliDriverFactory extends KmsDriverFactory {
         val frost = config.frost.getOrElse(
           throw new IllegalArgumentException("backend = \"frost\" requires a `frost { ... }` block")
         )
+        val eps = frost.allEndpoints
+        if (eps.isEmpty)
+          throw new IllegalArgumentException("frost backend requires `endpoint` or `endpoints`")
         // Non-namespace keys go to the delegate backend (the HSM in production).
-        new FrostBackend(frost.endpoint, buildBackend(frost.delegate), logger, frost.tls)
+        new FrostBackend(eps, buildBackend(frost.delegate), logger, frost.tls)
       case other =>
         throw new IllegalArgumentException(
           s"unsupported backend '$other'; supported: software, hsm, frost"

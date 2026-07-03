@@ -14,7 +14,7 @@ import com.stakecraft.rutli.grpc.{
   SignerGrpc,
 }
 import io.grpc.netty.shaded.io.grpc.netty.{GrpcSslContexts, NettyChannelBuilder}
-import io.grpc.{ManagedChannel, ManagedChannelBuilder}
+import io.grpc.{ManagedChannel, ManagedChannelBuilder, Status, StatusRuntimeException}
 import org.slf4j.Logger
 
 import java.io.File
@@ -36,11 +36,16 @@ import scala.concurrent.{ExecutionContext, Future, blocking}
   * `generateSigningKeyPair(EcCurve25519)` runs a distributed key generation on the cluster and
   * returns the cluster key id; `sign` with that id calls the cluster's threshold Sign.
   *
-  * v0 talks plaintext gRPC to a single Signer endpoint (any cosigner leads the request). mTLS and
-  * multi-endpoint failover are follow-ups.
+  * '''Availability:''' the backend is configured with the full cosigner roster and fails over
+  * across endpoints — any live cosigner can lead a request (the cluster orchestrates the rest). A
+  * request is retried on the next endpoint only when the contacted node is unreachable
+  * (UNAVAILABLE / DEADLINE_EXCEEDED); a real application error (e.g. NOT_FOUND) from a live node is
+  * returned immediately, never masked by trying another node. This removes the single-leader
+  * availability gap without any cross-node consensus — FROST sessions are independent, so no Raft
+  * log is needed.
   */
 final class FrostBackend(
-    endpoint: String,
+    endpoints: Seq[String],
     delegate: KmsBackend,
     logger: Logger,
     tls: Option[FrostTlsConfig] = None,
@@ -50,7 +55,11 @@ final class FrostBackend(
 
   import FrostBackend._
 
-  private val channel: ManagedChannel = tls match {
+  require(endpoints.nonEmpty, "FrostBackend needs at least one cosigner endpoint")
+
+  private val channels: Vector[ManagedChannel] = endpoints.toVector.map(buildChannel)
+
+  private def buildChannel(endpoint: String): ManagedChannel = tls match {
     case Some(t) =>
       val ssl = GrpcSslContexts
         .forClient()
@@ -59,15 +68,30 @@ final class FrostBackend(
         .build()
       val b = NettyChannelBuilder.forTarget(endpoint).sslContext(ssl)
       t.domain.foreach(b.overrideAuthority)
-      logger.info(s"FROST: mutual TLS enabled for channel to $endpoint")
+      logger.info(s"FROST: mutual TLS channel to $endpoint")
       b.build()
     case None =>
       logger.warn(s"FROST: plaintext channel to $endpoint (no TLS) — do not use in production")
       ManagedChannelBuilder.forTarget(endpoint).usePlaintext().build()
   }
 
-  private def stub: SignerGrpc.SignerBlockingStub =
-    SignerGrpc.newBlockingStub(channel).withDeadlineAfter(requestTimeout.toMillis, TimeUnit.MILLISECONDS)
+  private def stubFor(ch: ManagedChannel): SignerGrpc.SignerBlockingStub =
+    SignerGrpc.newBlockingStub(ch).withDeadlineAfter(requestTimeout.toMillis, TimeUnit.MILLISECONDS)
+
+  /** Run `op` against cosigner endpoints in order, moving to the next only when the current node is
+    * unreachable. Any non-transport gRPC status is a real answer and is rethrown immediately. */
+  private def withFailover[A](what: String)(op: SignerGrpc.SignerBlockingStub => A): A = {
+    var lastError: RuntimeException = new IllegalStateException(s"no FROST endpoints for $what")
+    channels.iterator.zipWithIndex.foreach { case (ch, i) =>
+      try return op(stubFor(ch))
+      catch {
+        case e: StatusRuntimeException if isNodeDown(e.getStatus) =>
+          logger.warn(s"FROST: $what via ${endpoints(i)} unreachable (${e.getStatus.getCode}); failing over")
+          lastError = e
+      }
+    }
+    throw lastError
+  }
 
   // Advertise Ed25519 (served by the cluster) plus whatever the delegate backend supports.
   override def supportedSigningKeySpecs: Set[SigningKeySpec] =
@@ -87,7 +111,7 @@ final class FrostBackend(
       val keyId = frostKeyId(keyName)
       Future {
         logger.info(s"FROST: initiating distributed key generation for $keyId")
-        blocking(stub.dkg(DkgRequest.newBuilder().setKeyId(keyId).build()))
+        blocking(withFailover("dkg")(_.dkg(DkgRequest.newBuilder().setKeyId(keyId).build())))
         keyId
       }
     case other => delegate.generateSigningKeyPair(other, keyName)
@@ -104,10 +128,8 @@ final class FrostBackend(
   override def sign(data: Array[Byte], keyId: String, algo: SigningAlgoSpec): Future[Array[Byte]] =
     if (isFrostKey(keyId)) Future {
       require(algo == SigningAlgoSpec.Ed25519, s"FROST keys sign Ed25519 only, got $algo")
-      val reply = blocking(
-        stub.sign(SignRequest.newBuilder().setKeyId(keyId).setMessage(ByteString.copyFrom(data)).build())
-      )
-      val sig = reply.getSignature.toByteArray
+      val req = SignRequest.newBuilder().setKeyId(keyId).setMessage(ByteString.copyFrom(data)).build()
+      val sig = blocking(withFailover("sign")(_.sign(req))).getSignature.toByteArray
       require(sig.length == 64, s"expected 64-byte Ed25519 signature, got ${sig.length}")
       sig
     }
@@ -127,8 +149,8 @@ final class FrostBackend(
 
   override def getPublicKey(keyId: String): Future[PublicKey] =
     if (isFrostKey(keyId)) Future {
-      val reply = blocking(stub.groupKey(GroupKeyRequest.newBuilder().setKeyId(keyId).build()))
-      val raw = reply.getGroupVerifyingKey.toByteArray
+      val req = GroupKeyRequest.newBuilder().setKeyId(keyId).build()
+      val raw = blocking(withFailover("groupKey")(_.groupKey(req))).getGroupVerifyingKey.toByteArray
       require(raw.length == 32, s"expected 32-byte Ed25519 group key, got ${raw.length}")
       PublicKey(ed25519Spki(raw), SigningKeySpec.EcCurve25519)
     }
@@ -137,7 +159,7 @@ final class FrostBackend(
   override def keyExistsAndIsActive(keyId: String): Future[Unit] =
     if (isFrostKey(keyId)) Future {
       // groupKey returns NOT_FOUND if the cluster has no such key.
-      blocking(stub.groupKey(GroupKeyRequest.newBuilder().setKeyId(keyId).build()))
+      blocking(withFailover("groupKey")(_.groupKey(GroupKeyRequest.newBuilder().setKeyId(keyId).build())))
       ()
     }
     else delegate.keyExistsAndIsActive(keyId)
@@ -151,24 +173,30 @@ final class FrostBackend(
 
   override def health: Future[KmsDriverHealth] = {
     val cluster = Future {
-      val ok =
-        try blocking(stub.health(HealthRequest.newBuilder().build())).getOk
+      // Healthy if ANY cosigner answers — the cluster leads from whichever node is reachable.
+      val anyUp = channels.iterator.exists { ch =>
+        try stubFor(ch).health(HealthRequest.newBuilder().build()).getOk
         catch { case _: Throwable => false }
-      if (ok) KmsDriverHealth.Ok else KmsDriverHealth.Degraded("FROST cosigner cluster unreachable")
+      }
+      if (anyUp) KmsDriverHealth.Ok
+      else KmsDriverHealth.Degraded("no FROST cosigner reachable")
     }
     // Overall health is the worse of cluster + delegate.
-    cluster.flatMap(c => delegate.health.map {
-      case KmsDriverHealth.Ok => c
-      case worse              => worse
-    })
+    cluster.flatMap(c =>
+      delegate.health.map {
+        case KmsDriverHealth.Ok => c
+        case worse              => worse
+      }
+    )
   }
 
   override def close(): Unit = {
-    try {
-      channel.shutdown()
-      channel.awaitTermination(5, TimeUnit.SECONDS)
-      ()
-    } finally delegate.close()
+    try
+      channels.foreach { ch =>
+        ch.shutdown()
+        ch.awaitTermination(5, TimeUnit.SECONDS)
+      }
+    finally delegate.close()
   }
 }
 
@@ -176,6 +204,11 @@ object FrostBackend {
   private val FrostPrefix = "frost-"
 
   private def isFrostKey(keyId: String): Boolean = keyId.startsWith(FrostPrefix)
+
+  /** True when the status means "this contact node isn't serving" (so we should try the next),
+    * as opposed to a real application answer we must surface. */
+  private def isNodeDown(status: Status): Boolean =
+    status.getCode == Status.Code.UNAVAILABLE || status.getCode == Status.Code.DEADLINE_EXCEEDED
 
   private def frostKeyId(keyName: Option[String]): String = {
     val name = keyName.map(n => n.replaceAll("[^A-Za-z0-9_-]", "_")).getOrElse("key")

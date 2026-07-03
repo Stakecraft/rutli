@@ -17,8 +17,8 @@ agreement between peers, with no single point of authority. Same idea, applied t
 > is implemented and **verified end-to-end with a real Canton node**: a participant booted with
 > `backend = "frost"`, its Ed25519 namespace key born via 3-node cluster DKG, and its identity
 > topology threshold-signed by a 2-of-3 quorum — accepted by Canton's verifier. No machine ever
-> held the whole key. Remaining before production: mTLS + Raft leader election, share sealing,
-> proactive refresh, DR procedures, and a third-party audit.
+> held the whole key. Remaining before production: share sealing (enclave/HSM), proactive refresh,
+> DR procedures, and a third-party audit. (mTLS and driver-side failover are done.)
 
 ## Why
 

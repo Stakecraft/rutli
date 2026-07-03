@@ -26,16 +26,24 @@ final case class RutliConfig(
 /** FROST backend config (Phase 2). The namespace/identity Ed25519 key is served by the cosigner
   * cluster; all other keys are served by the `delegate` backend (typically the HSM).
   *
-  * @param endpoint  gRPC target of any cosigner's Signer service (e.g. "localhost:9101").
-  * @param delegate  Backend for non-FROST keys: "hsm" | "software". Defaults to "hsm".
-  * @param tls       Mutual-TLS material for the driver→cluster channel. When absent the channel is
-  *                  plaintext (dev only); production must set this.
+  * @param endpoint   Single cosigner Signer endpoint (e.g. "localhost:9101"). Convenience for the
+  *                   common one-target config; merged with `endpoints`.
+  * @param endpoints  The full cosigner roster for failover (any live node leads a request). Prefer
+  *                   this in production so a downed cosigner doesn't block signing.
+  * @param delegate   Backend for non-FROST keys: "hsm" | "software". Defaults to "hsm".
+  * @param tls        Mutual-TLS material for the driver→cluster channel. When absent the channel is
+  *                   plaintext (dev only); production must set this.
   */
 final case class FrostConfig(
-    endpoint: String,
+    endpoint: Option[String] = None,
+    endpoints: List[String] = Nil,
     delegate: String = "hsm",
     tls: Option[FrostTlsConfig] = None,
-)
+) {
+
+  /** All configured endpoints, `endpoints` first then the single `endpoint`, de-duplicated. */
+  def allEndpoints: List[String] = (endpoints ++ endpoint.toList).distinct
+}
 
 /** Mutual-TLS material for the driver→cluster gRPC channel. The driver presents a client cert
   * signed by the cluster CA; the cluster requires it (mTLS).

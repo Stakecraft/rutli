@@ -3,6 +3,14 @@
 All notable changes to Rütli are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Driver-side failover** across the FROST cosigner roster (`frost.endpoints`): any live cosigner
+  leads a request; a node is skipped only when unreachable, never masking a real error. Removes the
+  single-leader availability gap without a consensus layer (FROST sessions are independent — no
+  replicated log to keep consistent, so Raft would buy nothing here).
+
 ## [0.1.0] — 2026-07-03
 
 First tagged release. **Devnet-grade, pre-production** — verified end-to-end against a real Canton

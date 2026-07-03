@@ -31,8 +31,20 @@
 >   TLS mesh) and threshold-signs, 3/3; a plaintext client is refused at the handshake. Certs via
 >   `scripts/gen-frost-certs.sh`; configs in `deploy/frost/config-tls`.
 >
-> Remaining for Phase 2 hardening: Raft leader election (v0 is static-leader), share sealing
-> (enclave/HSM per share), proactive share refresh, and DR per the production-readiness list.
+> - **Availability: driver-side failover (done).** The driver is configured with the full cosigner
+>   roster (`frost.endpoints`) and fails over across them — any live cosigner leads a request; a
+>   node is skipped only when unreachable (UNAVAILABLE/DEADLINE_EXCEEDED), never masking a real
+>   application error. Verified: signing succeeds with a dead endpoint prepended to the roster.
+>
+> **On Raft:** we deliberately did **not** add a Raft/consensus layer. FROST signing sessions are
+> independent (keyed by session id), shares are write-once at DKG then read-only, and the nonce
+> store is per-node crash-safe — there is no replicated log to keep consistent, so "elect one
+> leader" buys nothing here. Client-side failover fully closes the single-leader availability gap.
+> A real consensus layer would only be warranted later if the cluster must self-manage membership or
+> coordinate proactive refresh without an external trigger; revisit then, not before.
+>
+> Remaining for Phase 2 hardening: share sealing (enclave/HSM per share), proactive share refresh,
+> and DR per the production-readiness list.
 
 The differentiator: the Canton **namespace / identity key** — the one whose compromise is
 catastrophic and irreversible — is never held whole by any machine. A `t`-of-`n` cluster produces
