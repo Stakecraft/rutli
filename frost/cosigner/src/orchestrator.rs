@@ -62,6 +62,48 @@ pub async fn run_dkg(peers: &Peers, key_id: &str) -> Result<[u8; 32]> {
     group_key.ok_or_else(|| DaemonError::Config("no peers configured for DKG".into()))
 }
 
+/// Coordinate a proactive refresh across every peer. Same three-part exchange as DKG, but each
+/// peer folds the fresh zero-sharing into its existing share. The group public key is unchanged
+/// (verified by every node); shares stolen before this refresh become useless. Requires all peers
+/// (like DKG) — refresh is a scheduled ceremony, not a per-request path.
+pub async fn run_refresh(peers: &Peers, key_id: &str) -> Result<[u8; 32]> {
+    let refresh_id = new_id("refresh");
+
+    let mut round1_map = BTreeMap::new();
+    for p in peers {
+        round1_map.insert(p.identifier(), p.refresh_part1(&refresh_id, key_id).await?);
+    }
+
+    let mut outbox: BTreeMap<Identifier, BTreeMap<Identifier, round2::Package>> = BTreeMap::new();
+    for p in peers {
+        outbox.insert(p.identifier(), p.refresh_part2(&refresh_id, &round1_map).await?);
+    }
+
+    let mut group_key: Option<[u8; 32]> = None;
+    for p in peers {
+        let me = p.identifier();
+        let mut inbox: BTreeMap<Identifier, round2::Package> = BTreeMap::new();
+        for (&from, packages) in outbox.iter() {
+            if from == me {
+                continue;
+            }
+            let pkg = packages.get(&me).ok_or_else(|| {
+                DaemonError::Disagreement(format!("missing refresh package from {from:?} to {me:?}"))
+            })?;
+            inbox.insert(from, pkg.clone());
+        }
+        let gk = p.refresh_part3(&refresh_id, &round1_map, &inbox).await?;
+        match group_key {
+            None => group_key = Some(gk),
+            Some(prev) if prev != gk => {
+                return Err(DaemonError::Disagreement("refresh diverged the group key".into()))
+            }
+            _ => {}
+        }
+    }
+    group_key.ok_or_else(|| DaemonError::Config("no peers configured for refresh".into()))
+}
+
 /// Coordinate one signature. Selects a threshold-sized quorum, tolerating peers that fail round 1
 /// (a downed cosigner), and aggregates the shares into a 64-byte Ed25519 signature.
 pub async fn sign(node: &Node, peers: &Peers, key_id: &str, message: &[u8]) -> Result<[u8; 64]> {

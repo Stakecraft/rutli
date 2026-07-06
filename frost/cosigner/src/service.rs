@@ -50,6 +50,15 @@ impl Signer for SignerSvc {
             .map_err(Status::from)?;
         Ok(Response::new(pb::SignReply { signature: sig.to_vec() }))
     }
+
+    async fn refresh(
+        &self,
+        req: Request<pb::RefreshRequest>,
+    ) -> Result<Response<pb::RefreshReply>, Status> {
+        let key_id = req.into_inner().key_id;
+        let key = orchestrator::run_refresh(&self.peers, &key_id).await.map_err(Status::from)?;
+        Ok(Response::new(pb::RefreshReply { group_verifying_key: key.to_vec() }))
+    }
 }
 
 pub struct PeerSvc {
@@ -112,6 +121,37 @@ impl Peer for PeerSvc {
             .node
             .dkg_part3(&r.dkg_id, &round1_map, &round2_for_me)
             .map_err(Status::from)?;
+        Ok(Response::new(pb::DkgPart3Reply { group_verifying_key: key.to_vec() }))
+    }
+
+    async fn refresh_part1(
+        &self,
+        req: Request<pb::RefreshPart1Request>,
+    ) -> Result<Response<pb::DkgPart1Reply>, Status> {
+        let r = req.into_inner();
+        let package = self.node.refresh_part1(&r.refresh_id, &r.key_id).map_err(Status::from)?;
+        Ok(Response::new(pb::DkgPart1Reply { round1_package: json(&package)? }))
+    }
+
+    async fn refresh_part2(
+        &self,
+        req: Request<pb::DkgPart2Request>,
+    ) -> Result<Response<pb::DkgPart2Reply>, Status> {
+        let r = req.into_inner();
+        let round1_map = de(&r.round1_map)?;
+        let round2_map = self.node.refresh_part2(&r.dkg_id, &round1_map).map_err(Status::from)?;
+        Ok(Response::new(pb::DkgPart2Reply { round2_map: json(&round2_map)? }))
+    }
+
+    async fn refresh_part3(
+        &self,
+        req: Request<pb::DkgPart3Request>,
+    ) -> Result<Response<pb::DkgPart3Reply>, Status> {
+        let r = req.into_inner();
+        let round1_map = de(&r.round1_map)?;
+        let round2_for_me = de(&r.round2_map_for_me)?;
+        let key =
+            self.node.refresh_part3(&r.dkg_id, &round1_map, &round2_for_me).map_err(Status::from)?;
         Ok(Response::new(pb::DkgPart3Reply { group_verifying_key: key.to_vec() }))
     }
 }

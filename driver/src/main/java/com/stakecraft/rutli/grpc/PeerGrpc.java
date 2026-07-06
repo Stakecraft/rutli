@@ -171,6 +171,99 @@ public final class PeerGrpc {
     return getDkgPart3Method;
   }
 
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.RefreshPart1Request,
+      com.stakecraft.rutli.grpc.DkgPart1Reply> getRefreshPart1Method;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "RefreshPart1",
+      requestType = com.stakecraft.rutli.grpc.RefreshPart1Request.class,
+      responseType = com.stakecraft.rutli.grpc.DkgPart1Reply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.RefreshPart1Request,
+      com.stakecraft.rutli.grpc.DkgPart1Reply> getRefreshPart1Method() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.RefreshPart1Request, com.stakecraft.rutli.grpc.DkgPart1Reply> getRefreshPart1Method;
+    if ((getRefreshPart1Method = PeerGrpc.getRefreshPart1Method) == null) {
+      synchronized (PeerGrpc.class) {
+        if ((getRefreshPart1Method = PeerGrpc.getRefreshPart1Method) == null) {
+          PeerGrpc.getRefreshPart1Method = getRefreshPart1Method =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.RefreshPart1Request, com.stakecraft.rutli.grpc.DkgPart1Reply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "RefreshPart1"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.RefreshPart1Request.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.DkgPart1Reply.getDefaultInstance()))
+              .setSchemaDescriptor(new PeerMethodDescriptorSupplier("RefreshPart1"))
+              .build();
+        }
+      }
+    }
+    return getRefreshPart1Method;
+  }
+
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.DkgPart2Request,
+      com.stakecraft.rutli.grpc.DkgPart2Reply> getRefreshPart2Method;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "RefreshPart2",
+      requestType = com.stakecraft.rutli.grpc.DkgPart2Request.class,
+      responseType = com.stakecraft.rutli.grpc.DkgPart2Reply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.DkgPart2Request,
+      com.stakecraft.rutli.grpc.DkgPart2Reply> getRefreshPart2Method() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.DkgPart2Request, com.stakecraft.rutli.grpc.DkgPart2Reply> getRefreshPart2Method;
+    if ((getRefreshPart2Method = PeerGrpc.getRefreshPart2Method) == null) {
+      synchronized (PeerGrpc.class) {
+        if ((getRefreshPart2Method = PeerGrpc.getRefreshPart2Method) == null) {
+          PeerGrpc.getRefreshPart2Method = getRefreshPart2Method =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.DkgPart2Request, com.stakecraft.rutli.grpc.DkgPart2Reply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "RefreshPart2"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.DkgPart2Request.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.DkgPart2Reply.getDefaultInstance()))
+              .setSchemaDescriptor(new PeerMethodDescriptorSupplier("RefreshPart2"))
+              .build();
+        }
+      }
+    }
+    return getRefreshPart2Method;
+  }
+
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.DkgPart3Request,
+      com.stakecraft.rutli.grpc.DkgPart3Reply> getRefreshPart3Method;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "RefreshPart3",
+      requestType = com.stakecraft.rutli.grpc.DkgPart3Request.class,
+      responseType = com.stakecraft.rutli.grpc.DkgPart3Reply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.DkgPart3Request,
+      com.stakecraft.rutli.grpc.DkgPart3Reply> getRefreshPart3Method() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.DkgPart3Request, com.stakecraft.rutli.grpc.DkgPart3Reply> getRefreshPart3Method;
+    if ((getRefreshPart3Method = PeerGrpc.getRefreshPart3Method) == null) {
+      synchronized (PeerGrpc.class) {
+        if ((getRefreshPart3Method = PeerGrpc.getRefreshPart3Method) == null) {
+          PeerGrpc.getRefreshPart3Method = getRefreshPart3Method =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.DkgPart3Request, com.stakecraft.rutli.grpc.DkgPart3Reply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "RefreshPart3"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.DkgPart3Request.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.DkgPart3Reply.getDefaultInstance()))
+              .setSchemaDescriptor(new PeerMethodDescriptorSupplier("RefreshPart3"))
+              .build();
+        }
+      }
+    }
+    return getRefreshPart3Method;
+  }
+
   /**
    * Creates a new async stub that supports all call types for the service
    */
@@ -272,6 +365,27 @@ public final class PeerGrpc {
         io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DkgPart3Reply> responseObserver) {
       io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getDkgPart3Method(), responseObserver);
     }
+
+    /**
+     */
+    default void refreshPart1(com.stakecraft.rutli.grpc.RefreshPart1Request request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DkgPart1Reply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getRefreshPart1Method(), responseObserver);
+    }
+
+    /**
+     */
+    default void refreshPart2(com.stakecraft.rutli.grpc.DkgPart2Request request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DkgPart2Reply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getRefreshPart2Method(), responseObserver);
+    }
+
+    /**
+     */
+    default void refreshPart3(com.stakecraft.rutli.grpc.DkgPart3Request request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DkgPart3Reply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getRefreshPart3Method(), responseObserver);
+    }
   }
 
   /**
@@ -348,6 +462,30 @@ public final class PeerGrpc {
       io.grpc.stub.ClientCalls.asyncUnaryCall(
           getChannel().newCall(getDkgPart3Method(), getCallOptions()), request, responseObserver);
     }
+
+    /**
+     */
+    public void refreshPart1(com.stakecraft.rutli.grpc.RefreshPart1Request request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DkgPart1Reply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getRefreshPart1Method(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     */
+    public void refreshPart2(com.stakecraft.rutli.grpc.DkgPart2Request request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DkgPart2Reply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getRefreshPart2Method(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     */
+    public void refreshPart3(com.stakecraft.rutli.grpc.DkgPart3Request request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DkgPart3Reply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getRefreshPart3Method(), getCallOptions()), request, responseObserver);
+    }
   }
 
   /**
@@ -404,6 +542,27 @@ public final class PeerGrpc {
       return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
           getChannel(), getDkgPart3Method(), getCallOptions(), request);
     }
+
+    /**
+     */
+    public com.stakecraft.rutli.grpc.DkgPart1Reply refreshPart1(com.stakecraft.rutli.grpc.RefreshPart1Request request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getRefreshPart1Method(), getCallOptions(), request);
+    }
+
+    /**
+     */
+    public com.stakecraft.rutli.grpc.DkgPart2Reply refreshPart2(com.stakecraft.rutli.grpc.DkgPart2Request request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getRefreshPart2Method(), getCallOptions(), request);
+    }
+
+    /**
+     */
+    public com.stakecraft.rutli.grpc.DkgPart3Reply refreshPart3(com.stakecraft.rutli.grpc.DkgPart3Request request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getRefreshPart3Method(), getCallOptions(), request);
+    }
   }
 
   /**
@@ -459,6 +618,27 @@ public final class PeerGrpc {
     public com.stakecraft.rutli.grpc.DkgPart3Reply dkgPart3(com.stakecraft.rutli.grpc.DkgPart3Request request) {
       return io.grpc.stub.ClientCalls.blockingUnaryCall(
           getChannel(), getDkgPart3Method(), getCallOptions(), request);
+    }
+
+    /**
+     */
+    public com.stakecraft.rutli.grpc.DkgPart1Reply refreshPart1(com.stakecraft.rutli.grpc.RefreshPart1Request request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getRefreshPart1Method(), getCallOptions(), request);
+    }
+
+    /**
+     */
+    public com.stakecraft.rutli.grpc.DkgPart2Reply refreshPart2(com.stakecraft.rutli.grpc.DkgPart2Request request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getRefreshPart2Method(), getCallOptions(), request);
+    }
+
+    /**
+     */
+    public com.stakecraft.rutli.grpc.DkgPart3Reply refreshPart3(com.stakecraft.rutli.grpc.DkgPart3Request request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getRefreshPart3Method(), getCallOptions(), request);
     }
   }
 
@@ -521,6 +701,30 @@ public final class PeerGrpc {
       return io.grpc.stub.ClientCalls.futureUnaryCall(
           getChannel().newCall(getDkgPart3Method(), getCallOptions()), request);
     }
+
+    /**
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.DkgPart1Reply> refreshPart1(
+        com.stakecraft.rutli.grpc.RefreshPart1Request request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getRefreshPart1Method(), getCallOptions()), request);
+    }
+
+    /**
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.DkgPart2Reply> refreshPart2(
+        com.stakecraft.rutli.grpc.DkgPart2Request request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getRefreshPart2Method(), getCallOptions()), request);
+    }
+
+    /**
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.DkgPart3Reply> refreshPart3(
+        com.stakecraft.rutli.grpc.DkgPart3Request request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getRefreshPart3Method(), getCallOptions()), request);
+    }
   }
 
   private static final int METHODID_SIGN_ROUND1 = 0;
@@ -528,6 +732,9 @@ public final class PeerGrpc {
   private static final int METHODID_DKG_PART1 = 2;
   private static final int METHODID_DKG_PART2 = 3;
   private static final int METHODID_DKG_PART3 = 4;
+  private static final int METHODID_REFRESH_PART1 = 5;
+  private static final int METHODID_REFRESH_PART2 = 6;
+  private static final int METHODID_REFRESH_PART3 = 7;
 
   private static final class MethodHandlers<Req, Resp> implements
       io.grpc.stub.ServerCalls.UnaryMethod<Req, Resp>,
@@ -564,6 +771,18 @@ public final class PeerGrpc {
           break;
         case METHODID_DKG_PART3:
           serviceImpl.dkgPart3((com.stakecraft.rutli.grpc.DkgPart3Request) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DkgPart3Reply>) responseObserver);
+          break;
+        case METHODID_REFRESH_PART1:
+          serviceImpl.refreshPart1((com.stakecraft.rutli.grpc.RefreshPart1Request) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DkgPart1Reply>) responseObserver);
+          break;
+        case METHODID_REFRESH_PART2:
+          serviceImpl.refreshPart2((com.stakecraft.rutli.grpc.DkgPart2Request) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DkgPart2Reply>) responseObserver);
+          break;
+        case METHODID_REFRESH_PART3:
+          serviceImpl.refreshPart3((com.stakecraft.rutli.grpc.DkgPart3Request) request,
               (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DkgPart3Reply>) responseObserver);
           break;
         default:
@@ -619,6 +838,27 @@ public final class PeerGrpc {
               com.stakecraft.rutli.grpc.DkgPart3Request,
               com.stakecraft.rutli.grpc.DkgPart3Reply>(
                 service, METHODID_DKG_PART3)))
+        .addMethod(
+          getRefreshPart1Method(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.RefreshPart1Request,
+              com.stakecraft.rutli.grpc.DkgPart1Reply>(
+                service, METHODID_REFRESH_PART1)))
+        .addMethod(
+          getRefreshPart2Method(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.DkgPart2Request,
+              com.stakecraft.rutli.grpc.DkgPart2Reply>(
+                service, METHODID_REFRESH_PART2)))
+        .addMethod(
+          getRefreshPart3Method(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.DkgPart3Request,
+              com.stakecraft.rutli.grpc.DkgPart3Reply>(
+                service, METHODID_REFRESH_PART3)))
         .build();
   }
 
@@ -672,6 +912,9 @@ public final class PeerGrpc {
               .addMethod(getDkgPart1Method())
               .addMethod(getDkgPart2Method())
               .addMethod(getDkgPart3Method())
+              .addMethod(getRefreshPart1Method())
+              .addMethod(getRefreshPart2Method())
+              .addMethod(getRefreshPart3Method())
               .build();
         }
       }

@@ -140,6 +140,37 @@ public final class SignerGrpc {
     return getSignMethod;
   }
 
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.RefreshRequest,
+      com.stakecraft.rutli.grpc.RefreshReply> getRefreshMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "Refresh",
+      requestType = com.stakecraft.rutli.grpc.RefreshRequest.class,
+      responseType = com.stakecraft.rutli.grpc.RefreshReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.RefreshRequest,
+      com.stakecraft.rutli.grpc.RefreshReply> getRefreshMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.RefreshRequest, com.stakecraft.rutli.grpc.RefreshReply> getRefreshMethod;
+    if ((getRefreshMethod = SignerGrpc.getRefreshMethod) == null) {
+      synchronized (SignerGrpc.class) {
+        if ((getRefreshMethod = SignerGrpc.getRefreshMethod) == null) {
+          SignerGrpc.getRefreshMethod = getRefreshMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.RefreshRequest, com.stakecraft.rutli.grpc.RefreshReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "Refresh"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.RefreshRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.RefreshReply.getDefaultInstance()))
+              .setSchemaDescriptor(new SignerMethodDescriptorSupplier("Refresh"))
+              .build();
+        }
+      }
+    }
+    return getRefreshMethod;
+  }
+
   /**
    * Creates a new async stub that supports all call types for the service
    */
@@ -234,6 +265,16 @@ public final class SignerGrpc {
         io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.SignReply> responseObserver) {
       io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getSignMethod(), responseObserver);
     }
+
+    /**
+     * <pre>
+     * Proactively refresh the shares for a key. Same group key out; shares re-randomized cluster-wide.
+     * </pre>
+     */
+    default void refresh(com.stakecraft.rutli.grpc.RefreshRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.RefreshReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getRefreshMethod(), responseObserver);
+    }
   }
 
   /**
@@ -302,6 +343,17 @@ public final class SignerGrpc {
       io.grpc.stub.ClientCalls.asyncUnaryCall(
           getChannel().newCall(getSignMethod(), getCallOptions()), request, responseObserver);
     }
+
+    /**
+     * <pre>
+     * Proactively refresh the shares for a key. Same group key out; shares re-randomized cluster-wide.
+     * </pre>
+     */
+    public void refresh(com.stakecraft.rutli.grpc.RefreshRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.RefreshReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getRefreshMethod(), getCallOptions()), request, responseObserver);
+    }
   }
 
   /**
@@ -351,6 +403,16 @@ public final class SignerGrpc {
       return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
           getChannel(), getSignMethod(), getCallOptions(), request);
     }
+
+    /**
+     * <pre>
+     * Proactively refresh the shares for a key. Same group key out; shares re-randomized cluster-wide.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.RefreshReply refresh(com.stakecraft.rutli.grpc.RefreshRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getRefreshMethod(), getCallOptions(), request);
+    }
   }
 
   /**
@@ -399,6 +461,16 @@ public final class SignerGrpc {
     public com.stakecraft.rutli.grpc.SignReply sign(com.stakecraft.rutli.grpc.SignRequest request) {
       return io.grpc.stub.ClientCalls.blockingUnaryCall(
           getChannel(), getSignMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * Proactively refresh the shares for a key. Same group key out; shares re-randomized cluster-wide.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.RefreshReply refresh(com.stakecraft.rutli.grpc.RefreshRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getRefreshMethod(), getCallOptions(), request);
     }
   }
 
@@ -453,12 +525,24 @@ public final class SignerGrpc {
       return io.grpc.stub.ClientCalls.futureUnaryCall(
           getChannel().newCall(getSignMethod(), getCallOptions()), request);
     }
+
+    /**
+     * <pre>
+     * Proactively refresh the shares for a key. Same group key out; shares re-randomized cluster-wide.
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.RefreshReply> refresh(
+        com.stakecraft.rutli.grpc.RefreshRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getRefreshMethod(), getCallOptions()), request);
+    }
   }
 
   private static final int METHODID_HEALTH = 0;
   private static final int METHODID_GROUP_KEY = 1;
   private static final int METHODID_DKG = 2;
   private static final int METHODID_SIGN = 3;
+  private static final int METHODID_REFRESH = 4;
 
   private static final class MethodHandlers<Req, Resp> implements
       io.grpc.stub.ServerCalls.UnaryMethod<Req, Resp>,
@@ -492,6 +576,10 @@ public final class SignerGrpc {
         case METHODID_SIGN:
           serviceImpl.sign((com.stakecraft.rutli.grpc.SignRequest) request,
               (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.SignReply>) responseObserver);
+          break;
+        case METHODID_REFRESH:
+          serviceImpl.refresh((com.stakecraft.rutli.grpc.RefreshRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.RefreshReply>) responseObserver);
           break;
         default:
           throw new AssertionError();
@@ -539,6 +627,13 @@ public final class SignerGrpc {
               com.stakecraft.rutli.grpc.SignRequest,
               com.stakecraft.rutli.grpc.SignReply>(
                 service, METHODID_SIGN)))
+        .addMethod(
+          getRefreshMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.RefreshRequest,
+              com.stakecraft.rutli.grpc.RefreshReply>(
+                service, METHODID_REFRESH)))
         .build();
   }
 
@@ -591,6 +686,7 @@ public final class SignerGrpc {
               .addMethod(getGroupKeyMethod())
               .addMethod(getDkgMethod())
               .addMethod(getSignMethod())
+              .addMethod(getRefreshMethod())
               .build();
         }
       }

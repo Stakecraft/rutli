@@ -47,8 +47,13 @@
 >   HKDF from an operator-injected secret (`share_seal.secret_env`). Closes the at-rest exposure;
 >   enclave/HSM sealing (which also protects share memory during signing) plugs into the same seam.
 >
-> Remaining for Phase 2 hardening: enclave/HSM sealing ("MPC-of-HSM"), proactive share refresh,
-> and DR per the production-readiness list.
+> - **Proactive share refresh (done):** `Signer.Refresh` RPC / `rutli-cosigner refresh` — dealer-free
+>   DKG-style re-randomization of all shares, group key (and node identity) unchanged, verified by
+>   every node before persisting. Limits an attacker to one refresh epoch; pre-refresh shares are
+>   dead afterwards (old+new shares cannot combine — tested).
+>
+> Remaining for Phase 2 hardening: enclave/HSM sealing ("MPC-of-HSM") and DR runbook per the
+> production-readiness list.
 
 The differentiator: the Canton **namespace / identity key** — the one whose compromise is
 catastrophic and irreversible — is never held whole by any machine. A `t`-of-`n` cluster produces

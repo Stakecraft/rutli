@@ -11,7 +11,7 @@ use std::sync::Arc;
 use frost_ed25519::Identifier;
 use rutli_cosigner::keystore::KeyStore;
 use rutli_cosigner::node::Node;
-use rutli_cosigner::orchestrator::{run_dkg, sign, Peers};
+use rutli_cosigner::orchestrator::{run_dkg, run_refresh, sign, Peers};
 use rutli_cosigner::peer::{LocalPeer, PeerApi};
 
 const N: u16 = 3;
@@ -56,6 +56,36 @@ async fn dkg_then_sign_across_cluster_verifies() {
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
     vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig))
         .expect("cluster signature must be a valid RFC 8032 Ed25519 signature");
+}
+
+#[tokio::test]
+async fn refresh_rotates_shares_keeping_group_key_and_still_signs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = cluster(&tmp);
+    let group_key = run_dkg(&peers, KEY_ID).await.unwrap();
+
+    let share_path = tmp.path().join("node-1").join(format!("{KEY_ID}.json"));
+    let before = std::fs::read(&share_path).unwrap();
+
+    // Proactive refresh — same group key out.
+    let after_key = run_refresh(&peers, KEY_ID).await.unwrap();
+    assert_eq!(after_key, group_key, "refresh must not change the group key (node identity stable)");
+    for n in &nodes {
+        assert_eq!(n.group_key(KEY_ID).unwrap(), group_key);
+    }
+
+    // Shares were actually rewritten on disk (re-randomized).
+    let after = std::fs::read(&share_path).unwrap();
+    assert_ne!(before, after, "refresh must rewrite the share on disk");
+
+    // Refreshed cluster still signs, verifiable under the unchanged group key.
+    let message = canton_digest(b"after refresh");
+    let sig = sign(&nodes[0], &peers, KEY_ID, &message).await.unwrap();
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
+    vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig)).unwrap();
+
+    // Refresh again — chains cleanly.
+    assert_eq!(run_refresh(&peers, KEY_ID).await.unwrap(), group_key);
 }
 
 #[tokio::test]

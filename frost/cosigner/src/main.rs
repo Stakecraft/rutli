@@ -7,14 +7,16 @@
 
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use frost_ed25519::Identifier;
 
 use rutli_cosigner::config::Config;
 use rutli_cosigner::keystore::KeyStore;
 use rutli_cosigner::node::Node;
 use rutli_cosigner::pb::peer_server::PeerServer;
+use rutli_cosigner::pb::signer_client::SignerClient;
 use rutli_cosigner::pb::signer_server::SignerServer;
+use rutli_cosigner::pb::RefreshRequest;
 use rutli_cosigner::peer::{GrpcPeer, LocalPeer, PeerApi};
 use rutli_cosigner::service::{PeerSvc, SignerSvc};
 use rutli_cosigner::{DaemonError, Result};
@@ -25,6 +27,23 @@ struct Args {
     /// Path to the JSON cluster config for this node.
     #[arg(short, long, env = "RUTLI_COSIGNER_CONFIG")]
     config: std::path::PathBuf,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Run the cosigner daemon (default).
+    Serve,
+    /// Trigger a proactive share refresh for a key against a running cluster, then exit.
+    Refresh {
+        /// The FROST key id to refresh (e.g. frost-participant1-namespace).
+        #[arg(long)]
+        key_id: String,
+        /// Signer endpoint to drive the refresh (default: the first peer in the roster).
+        #[arg(long)]
+        target: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -38,6 +57,10 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     let cfg = Config::load(&args.config)?;
+
+    if let Some(Command::Refresh { key_id, target }) = args.command {
+        return refresh_command(&cfg, &key_id, target).await;
+    }
     tracing::info!(identifier = cfg.identifier, listen = %cfg.listen, "starting cosigner");
 
     let identifier = ident(cfg.identifier)?;
@@ -98,6 +121,28 @@ async fn main() -> Result<()> {
         .add_service(PeerServer::new(peer))
         .serve_with_shutdown(addr, shutdown())
         .await?;
+    Ok(())
+}
+
+/// Operator command: connect to a running cosigner and drive a proactive refresh.
+async fn refresh_command(cfg: &Config, key_id: &str, target: Option<String>) -> Result<()> {
+    let endpoint = target
+        .or_else(|| cfg.peers.iter().find(|p| p.identifier != cfg.identifier).map(|p| p.endpoint.clone()))
+        .or_else(|| cfg.peers.first().map(|p| p.endpoint.clone()))
+        .ok_or_else(|| DaemonError::Config("no target endpoint for refresh".into()))?;
+
+    let mut ep = tonic::transport::Endpoint::from_shared(endpoint.clone())
+        .map_err(|e| DaemonError::Config(format!("bad endpoint {endpoint}: {e}")))?;
+    if let Some(tls_cfg) = &cfg.tls {
+        ep = ep.tls_config(rutli_cosigner::tls::load(tls_cfg)?.client)?;
+    }
+    tracing::info!(%endpoint, %key_id, "triggering proactive share refresh");
+    let mut client = SignerClient::new(ep.connect().await?);
+    let reply = client.refresh(RefreshRequest { key_id: key_id.to_string() }).await?.into_inner();
+    println!(
+        "refresh complete — group key unchanged: {}",
+        hex::encode(reply.group_verifying_key)
+    );
     Ok(())
 }
 

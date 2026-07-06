@@ -176,6 +176,132 @@ fn below_threshold_aggregation_fails() {
     }
 }
 
+/// Raw DKG (no Cosigner wrapper) so the test can hold each node's key package for refresh.
+fn raw_dkg() -> Vec<(Identifier, frost::keys::KeyPackage, frost::keys::PublicKeyPackage)> {
+    use frost::keys::dkg::{part1, part2, part3};
+    let ids: Vec<Identifier> =
+        (1u16..=MAX_SIGNERS).map(|i| Identifier::try_from(i).unwrap()).collect();
+    let mut r1s = BTreeMap::new();
+    let mut r1p = BTreeMap::new();
+    for &id in &ids {
+        let (s, p) = part1(id, MAX_SIGNERS, MIN_SIGNERS, rand::rngs::OsRng).unwrap();
+        r1s.insert(id, s);
+        r1p.insert(id, p);
+    }
+    let mut r2s = BTreeMap::new();
+    let mut r2out: BTreeMap<Identifier, BTreeMap<Identifier, frost::keys::dkg::round2::Package>> =
+        BTreeMap::new();
+    for &id in &ids {
+        let others: BTreeMap<_, _> =
+            r1p.iter().filter(|(&k, _)| k != id).map(|(&k, v)| (k, v.clone())).collect();
+        let (s, out) = part2(r1s.remove(&id).unwrap(), &others).unwrap();
+        r2s.insert(id, s);
+        r2out.insert(id, out);
+    }
+    ids.iter()
+        .map(|&id| {
+            let others: BTreeMap<_, _> =
+                r1p.iter().filter(|(&k, _)| k != id).map(|(&k, v)| (k, v.clone())).collect();
+            let inbox: BTreeMap<_, _> = r2out
+                .iter()
+                .filter(|(&from, _)| from != id)
+                .map(|(&from, o)| (from, o.get(&id).unwrap().clone()))
+                .collect();
+            let (kp, pkp) = part3(&r2s[&id], &others, &inbox).unwrap();
+            (id, kp, pkp)
+        })
+        .collect()
+}
+
+fn raw_sign(
+    signers: &[(Identifier, frost::keys::KeyPackage)],
+    pkp: &frost::keys::PublicKeyPackage,
+    msg: &[u8],
+) -> Result<Vec<u8>, frost::Error> {
+    let mut nonces = BTreeMap::new();
+    let mut commitments = BTreeMap::new();
+    for (id, kp) in signers {
+        let (n, c) = frost::round1::commit(kp.signing_share(), &mut rand::rngs::OsRng);
+        nonces.insert(*id, n);
+        commitments.insert(*id, c);
+    }
+    let sp = frost::SigningPackage::new(commitments, msg);
+    let mut shares = BTreeMap::new();
+    for (id, kp) in signers {
+        shares.insert(*id, frost::round2::sign(&sp, &nonces[id], kp)?);
+    }
+    frost::aggregate(&sp, &shares, pkp)?.serialize()
+}
+
+#[test]
+fn refresh_keeps_group_key_and_invalidates_pre_refresh_shares() {
+    use rutli_frost_core::refresh::RefreshParticipant;
+
+    let dealt = raw_dkg();
+    let ids: Vec<Identifier> = dealt.iter().map(|(id, _, _)| *id).collect();
+    let old_pkp = dealt[0].2.clone();
+    let group_key = group_verifying_key_bytes(&old_pkp).unwrap();
+
+    // --- distributed refresh (mirrors DKG orchestration) ---
+    let mut parts: BTreeMap<Identifier, RefreshParticipant> =
+        ids.iter().map(|&id| (id, RefreshParticipant::new(id, MAX_SIGNERS, MIN_SIGNERS))).collect();
+    let mut r1 = BTreeMap::new();
+    for (&id, p) in parts.iter_mut() {
+        r1.insert(id, p.part1().unwrap());
+    }
+    let mut r2out: BTreeMap<Identifier, BTreeMap<Identifier, frost::keys::dkg::round2::Package>> =
+        BTreeMap::new();
+    for (&id, p) in parts.iter_mut() {
+        let others: BTreeMap<_, _> =
+            r1.iter().filter(|(&k, _)| k != id).map(|(&k, v)| (k, v.clone())).collect();
+        r2out.insert(id, p.part2(&others).unwrap());
+    }
+    let mut refreshed: Vec<(Identifier, frost::keys::KeyPackage, frost::keys::PublicKeyPackage)> =
+        Vec::new();
+    for (&id, p) in parts.iter_mut() {
+        let (_, old_kp, old_pkp_i) = dealt.iter().find(|(i, _, _)| *i == id).unwrap();
+        let others: BTreeMap<_, _> =
+            r1.iter().filter(|(&k, _)| k != id).map(|(&k, v)| (k, v.clone())).collect();
+        let inbox: BTreeMap<_, _> = r2out
+            .iter()
+            .filter(|(&from, _)| from != id)
+            .map(|(&from, o)| (from, o.get(&id).unwrap().clone()))
+            .collect();
+        let (nkp, npkp) =
+            p.part3(&others, &inbox, old_pkp_i.clone(), old_kp.clone()).unwrap();
+        refreshed.push((id, nkp, npkp));
+    }
+
+    // Group key is unchanged — Canton's namespace key and node identity are stable.
+    for (_, _, npkp) in &refreshed {
+        assert_eq!(group_verifying_key_bytes(npkp).unwrap(), group_key, "group key must not change");
+    }
+    let new_pkp = refreshed[0].2.clone();
+
+    let msg = canton_digest(b"post-refresh topology");
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
+
+    // Refreshed shares sign fine under the same group key.
+    let quorum: Vec<_> = refreshed.iter().take(2).map(|(id, kp, _)| (*id, kp.clone())).collect();
+    let sig = raw_sign(&quorum, &new_pkp, &msg).unwrap();
+    vk.verify_strict(&msg, &ed25519_dalek::Signature::from_bytes(&sig.try_into().unwrap())).unwrap();
+
+    // An attacker with an OLD share + a NEW share cannot forge: the two are on different sharing
+    // polynomials now, so aggregation either errors or yields a signature that does not verify.
+    let old1 = (dealt[0].0, dealt[0].1.clone());
+    let new2 = (refreshed[1].0, refreshed[1].1.clone());
+    match raw_sign(&[old1, new2], &new_pkp, &msg) {
+        Err(_) => (),
+        Ok(bad) => {
+            let bad: [u8; 64] = bad.try_into().unwrap();
+            assert!(
+                vk.verify_strict(&msg, &ed25519_dalek::Signature::from_bytes(&bad)).is_err(),
+                "a pre-refresh share must not combine with post-refresh shares to sign"
+            );
+        }
+    }
+}
+
 #[test]
 fn signature_is_over_exactly_the_34_byte_payload() {
     let tmp = tempfile::tempdir().unwrap();

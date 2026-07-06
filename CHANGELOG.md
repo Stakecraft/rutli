@@ -6,6 +6,12 @@ All notable changes to Rütli are documented here. Format loosely follows
 ## [Unreleased]
 
 ### Added
+- **Proactive share refresh** (`Signer.Refresh` RPC + `rutli-cosigner refresh --key-id …`):
+  re-randomizes every cosigner's share via a dealer-free DKG-style ceremony while keeping the
+  group public key — and therefore the Canton node identity — unchanged. Shares stolen before a
+  refresh become useless afterwards, so an attacker must compromise ≥ t nodes within one refresh
+  epoch. Every node verifies the group key did not drift before persisting (a diverged refresh
+  aborts). Old + new shares cannot combine to sign (tested).
 - **Share sealing** (`share_seal.secret_env`): key shares are stored as AES-256-GCM envelopes,
   keyed per node via HKDF-SHA256 from an operator-injected master secret (env var from a secret
   manager — never on disk). A copied disk or backup of `data_dir` no longer yields usable shares.

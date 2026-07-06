@@ -16,6 +16,7 @@ use frost::Identifier;
 
 use rutli_frost_core::dkg::{group_verifying_key_bytes, DkgParticipant};
 use rutli_frost_core::nonce_store::NonceStore;
+use rutli_frost_core::refresh::RefreshParticipant;
 use rutli_frost_core::session::{aggregate, Cosigner};
 
 use crate::keystore::{KeyStore, Share};
@@ -26,6 +27,11 @@ struct DkgState {
     participant: DkgParticipant,
 }
 
+struct RefreshState {
+    key_id: String,
+    participant: RefreshParticipant,
+}
+
 pub struct Node {
     pub identifier: Identifier,
     pub max_signers: u16,
@@ -33,6 +39,7 @@ pub struct Node {
     keystore: KeyStore,
     cosigners: Mutex<std::collections::HashMap<String, Arc<Cosigner>>>,
     dkg_sessions: Mutex<std::collections::HashMap<String, DkgState>>,
+    refresh_sessions: Mutex<std::collections::HashMap<String, RefreshState>>,
 }
 
 impl Node {
@@ -44,6 +51,7 @@ impl Node {
             keystore,
             cosigners: Mutex::new(Default::default()),
             dkg_sessions: Mutex::new(Default::default()),
+            refresh_sessions: Mutex::new(Default::default()),
         }
     }
 
@@ -149,6 +157,68 @@ impl Node {
         // Drop any cached cosigner so it is reloaded fresh from the saved share.
         self.cosigners.lock().expect("cosigners lock").remove(&state.key_id);
         Ok(group_verifying_key_bytes(&public_key_package)?)
+    }
+
+    // -- proactive refresh peer ops (same three-part shape as DKG) --
+
+    pub fn refresh_part1(&self, refresh_id: &str, key_id: &str) -> Result<round1::Package> {
+        if !self.keystore.exists(key_id) {
+            return Err(DaemonError::UnknownKey(key_id.to_string()));
+        }
+        let mut participant = RefreshParticipant::new(self.identifier, self.max_signers, self.min_signers);
+        let package = participant.part1()?;
+        self.refresh_sessions
+            .lock()
+            .expect("refresh lock")
+            .insert(refresh_id.to_string(), RefreshState { key_id: key_id.to_string(), participant });
+        Ok(package)
+    }
+
+    pub fn refresh_part2(
+        &self,
+        refresh_id: &str,
+        round1_map: &BTreeMap<Identifier, round1::Package>,
+    ) -> Result<BTreeMap<Identifier, round2::Package>> {
+        let mut sessions = self.refresh_sessions.lock().expect("refresh lock");
+        let state =
+            sessions.get_mut(refresh_id).ok_or_else(|| DaemonError::UnknownDkg(refresh_id.into()))?;
+        let others = without_self(round1_map, self.identifier);
+        Ok(state.participant.part2(&others)?)
+    }
+
+    pub fn refresh_part3(
+        &self,
+        refresh_id: &str,
+        round1_map: &BTreeMap<Identifier, round1::Package>,
+        round2_for_me: &BTreeMap<Identifier, round2::Package>,
+    ) -> Result<[u8; 32]> {
+        let mut state = {
+            let mut sessions = self.refresh_sessions.lock().expect("refresh lock");
+            sessions.remove(refresh_id).ok_or_else(|| DaemonError::UnknownDkg(refresh_id.into()))?
+        };
+        let old = self.keystore.load(&state.key_id)?;
+        let old_group = group_verifying_key_bytes(&old.public_key_package)?;
+        let others = without_self(round1_map, self.identifier);
+        let (key_package, public_key_package) = state.participant.part3(
+            &others,
+            round2_for_me,
+            old.public_key_package,
+            old.key_package,
+        )?;
+
+        let new_group = group_verifying_key_bytes(&public_key_package)?;
+        if new_group != old_group {
+            // Never persist a share whose group key drifted — that would change the node identity.
+            return Err(DaemonError::Disagreement(format!(
+                "refresh changed the group key for {} — aborting",
+                state.key_id
+            )));
+        }
+
+        let share = Share { key_package, public_key_package };
+        self.keystore.save(&state.key_id, &share)?;
+        self.cosigners.lock().expect("cosigners lock").remove(&state.key_id);
+        Ok(new_group)
     }
 }
 

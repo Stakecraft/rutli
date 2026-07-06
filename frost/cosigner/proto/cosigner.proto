@@ -16,6 +16,8 @@ service Signer {
   rpc GroupKey(GroupKeyRequest) returns (GroupKeyReply);
   rpc Dkg(DkgRequest) returns (DkgReply);
   rpc Sign(SignRequest) returns (SignReply);
+  // Proactively refresh the shares for a key. Same group key out; shares re-randomized cluster-wide.
+  rpc Refresh(RefreshRequest) returns (RefreshReply);
 }
 
 // Mesh-internal API: cosigner-to-cosigner. All FROST packages are carried as opaque bytes
@@ -26,6 +28,9 @@ service Peer {
   rpc DkgPart1(DkgPart1Request) returns (DkgPart1Reply);
   rpc DkgPart2(DkgPart2Request) returns (DkgPart2Reply);
   rpc DkgPart3(DkgPart3Request) returns (DkgPart3Reply);
+  rpc RefreshPart1(RefreshPart1Request) returns (DkgPart1Reply);
+  rpc RefreshPart2(DkgPart2Request) returns (DkgPart2Reply);
+  rpc RefreshPart3(DkgPart3Request) returns (DkgPart3Reply);
 }
 
 message HealthRequest {}
@@ -40,6 +45,15 @@ message GroupKeyReply { bytes group_verifying_key = 1; } // 32-byte RFC 8032 Ed2
 // Coordinate a distributed key generation across the whole configured cluster.
 message DkgRequest { string key_id = 1; }
 message DkgReply { bytes group_verifying_key = 1; }
+
+// Proactively refresh shares for a key (same group key, re-randomized shares).
+message RefreshRequest { string key_id = 1; }
+message RefreshReply { bytes group_verifying_key = 1; } // unchanged; returned for confirmation
+
+message RefreshPart1Request {
+  string refresh_id = 1;
+  string key_id = 2;
+}
 
 message SignRequest {
   string key_id = 1;

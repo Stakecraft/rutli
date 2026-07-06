@@ -44,6 +44,19 @@ pub trait PeerApi: Send + Sync {
         round1_map: &BTreeMap<Identifier, round1::Package>,
         round2_for_me: &BTreeMap<Identifier, round2::Package>,
     ) -> Result<[u8; 32]>;
+
+    async fn refresh_part1(&self, refresh_id: &str, key_id: &str) -> Result<round1::Package>;
+    async fn refresh_part2(
+        &self,
+        refresh_id: &str,
+        round1_map: &BTreeMap<Identifier, round1::Package>,
+    ) -> Result<BTreeMap<Identifier, round2::Package>>;
+    async fn refresh_part3(
+        &self,
+        refresh_id: &str,
+        round1_map: &BTreeMap<Identifier, round1::Package>,
+        round2_for_me: &BTreeMap<Identifier, round2::Package>,
+    ) -> Result<[u8; 32]>;
 }
 
 /// This node, called in-process.
@@ -91,6 +104,25 @@ impl PeerApi for LocalPeer {
         round2_for_me: &BTreeMap<Identifier, round2::Package>,
     ) -> Result<[u8; 32]> {
         self.node.dkg_part3(dkg_id, round1_map, round2_for_me)
+    }
+
+    async fn refresh_part1(&self, refresh_id: &str, key_id: &str) -> Result<round1::Package> {
+        self.node.refresh_part1(refresh_id, key_id)
+    }
+    async fn refresh_part2(
+        &self,
+        refresh_id: &str,
+        round1_map: &BTreeMap<Identifier, round1::Package>,
+    ) -> Result<BTreeMap<Identifier, round2::Package>> {
+        self.node.refresh_part2(refresh_id, round1_map)
+    }
+    async fn refresh_part3(
+        &self,
+        refresh_id: &str,
+        round1_map: &BTreeMap<Identifier, round1::Package>,
+        round2_for_me: &BTreeMap<Identifier, round2::Package>,
+    ) -> Result<[u8; 32]> {
+        self.node.refresh_part3(refresh_id, round1_map, round2_for_me)
     }
 }
 
@@ -204,11 +236,62 @@ impl PeerApi for GrpcPeer {
             })
             .await?
             .into_inner();
-        let key: [u8; 32] = reply
-            .group_verifying_key
-            .as_slice()
-            .try_into()
-            .map_err(|_| crate::DaemonError::Disagreement("group key not 32 bytes".into()))?;
-        Ok(key)
+        to_group_key(reply.group_verifying_key)
     }
+
+    async fn refresh_part1(&self, refresh_id: &str, key_id: &str) -> Result<round1::Package> {
+        let reply = self
+            .client
+            .clone()
+            .refresh_part1(pb::RefreshPart1Request {
+                refresh_id: refresh_id.into(),
+                key_id: key_id.into(),
+            })
+            .await?
+            .into_inner();
+        Ok(serde_json::from_slice(&reply.round1_package)?)
+    }
+
+    async fn refresh_part2(
+        &self,
+        refresh_id: &str,
+        round1_map: &BTreeMap<Identifier, round1::Package>,
+    ) -> Result<BTreeMap<Identifier, round2::Package>> {
+        let reply = self
+            .client
+            .clone()
+            .refresh_part2(pb::DkgPart2Request {
+                dkg_id: refresh_id.into(),
+                round1_map: serde_json::to_vec(round1_map)?,
+            })
+            .await?
+            .into_inner();
+        Ok(serde_json::from_slice(&reply.round2_map)?)
+    }
+
+    async fn refresh_part3(
+        &self,
+        refresh_id: &str,
+        round1_map: &BTreeMap<Identifier, round1::Package>,
+        round2_for_me: &BTreeMap<Identifier, round2::Package>,
+    ) -> Result<[u8; 32]> {
+        let reply = self
+            .client
+            .clone()
+            .refresh_part3(pb::DkgPart3Request {
+                dkg_id: refresh_id.into(),
+                round1_map: serde_json::to_vec(round1_map)?,
+                round2_map_for_me: serde_json::to_vec(round2_for_me)?,
+            })
+            .await?
+            .into_inner();
+        to_group_key(reply.group_verifying_key)
+    }
+}
+
+fn to_group_key(bytes: Vec<u8>) -> Result<[u8; 32]> {
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| crate::DaemonError::Disagreement("group key not 32 bytes".into()))
 }
