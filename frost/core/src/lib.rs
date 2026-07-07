@@ -29,6 +29,7 @@
 pub mod dkg;
 pub mod nonce_store;
 pub mod refresh;
+pub mod repair;
 pub mod session;
 
 pub use frost_ed25519 as frost;

@@ -1445,6 +1445,7 @@ name = "rutli-frost-core"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek",
+ "frost-core",
  "frost-ed25519",
  "hex",
  "rand",

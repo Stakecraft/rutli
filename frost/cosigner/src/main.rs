@@ -44,6 +44,19 @@ enum Command {
         #[arg(long)]
         target: Option<String>,
     },
+    /// Copy this node's (sealed) key shares to a backup directory. Run with the node stopped.
+    Backup {
+        #[arg(long)]
+        out: std::path::PathBuf,
+    },
+    /// Restore this node's key shares from a backup directory. Run with the node stopped.
+    Restore {
+        #[arg(long)]
+        from: std::path::PathBuf,
+        /// Overwrite existing share files.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[tokio::main]
@@ -58,8 +71,11 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let cfg = Config::load(&args.config)?;
 
-    if let Some(Command::Refresh { key_id, target }) = args.command {
-        return refresh_command(&cfg, &key_id, target).await;
+    match args.command {
+        Some(Command::Refresh { key_id, target }) => return refresh_command(&cfg, &key_id, target).await,
+        Some(Command::Backup { out }) => return backup_command(&cfg, &out),
+        Some(Command::Restore { from, force }) => return restore_command(&cfg, &from, force),
+        _ => {}
     }
     tracing::info!(identifier = cfg.identifier, listen = %cfg.listen, "starting cosigner");
 
@@ -144,6 +160,52 @@ async fn refresh_command(cfg: &Config, key_id: &str, target: Option<String>) -> 
         hex::encode(reply.group_verifying_key)
     );
     Ok(())
+}
+
+/// Back up the (sealed) key-share files from data_dir/keys to `out`. Shares are encrypted at rest
+/// when sealing is enabled, so the backup carries no plaintext key material.
+fn backup_command(cfg: &Config, out: &std::path::Path) -> Result<()> {
+    let src = cfg.data_dir.join("keys");
+    std::fs::create_dir_all(out)?;
+    let n = copy_dir_files(&src, out, true)?;
+    println!("backed up {n} share file(s) from {} to {}", src.display(), out.display());
+    if cfg.share_seal.is_none() {
+        tracing::warn!("shares are NOT sealed — this backup contains plaintext key shares");
+    }
+    Ok(())
+}
+
+/// Restore key-share files from `from` into data_dir/keys.
+fn restore_command(cfg: &Config, from: &std::path::Path, force: bool) -> Result<()> {
+    let dst = cfg.data_dir.join("keys");
+    std::fs::create_dir_all(&dst)?;
+    let n = copy_dir_files(from, &dst, force)?;
+    println!("restored {n} share file(s) from {} to {}", from.display(), dst.display());
+    Ok(())
+}
+
+/// Copy regular files from `src` to `dst`. When `!overwrite`, existing destination files are an
+/// error (so a restore never clobbers a live share by accident).
+fn copy_dir_files(src: &std::path::Path, dst: &std::path::Path, overwrite: bool) -> Result<usize> {
+    if !src.is_dir() {
+        return Err(DaemonError::Config(format!("{} is not a directory", src.display())));
+    }
+    let mut count = 0;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        if entry.file_type()?.is_file() {
+            let target = dst.join(entry.file_name());
+            if target.exists() && !overwrite {
+                return Err(DaemonError::Config(format!(
+                    "{} exists; pass --force to overwrite",
+                    target.display()
+                )));
+            }
+            std::fs::copy(entry.path(), &target)?;
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 fn ident(id: u16) -> Result<Identifier> {

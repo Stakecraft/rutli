@@ -6,6 +6,13 @@ All notable changes to Rütli are documented here. Format loosely follows
 ## [Unreleased]
 
 ### Added
+- **Disaster recovery**: `rutli-cosigner backup`/`restore` copy a node's sealed shares to/from cold
+  storage (encrypted at rest, so backups carry no plaintext key material), and the Repairable
+  Threshold Scheme primitive (`rutli-frost-core::repair`) rebuilds a lost share from `t` survivors
+  with no backup and no key reconstruction — group key unchanged. Full runbook (single-node, disk
+  loss, below-threshold catastrophe, compromise, and the pre-go-live checklist) in
+  `docs/disaster-recovery.md`. Tested: a wiped node recovers from backup and the cluster signs;
+  a lost share is repaired from helpers and signs under the same group key.
 - **M-of-N signing approval** (`approval { ... }` policy): high-value keys (by key-id prefix) are
   gated — a `sign` is held until a threshold of named approvers each drop a valid Ed25519 signature
   over the request into a shared inbox, or it fails non-retryably at timeout. A random per-request

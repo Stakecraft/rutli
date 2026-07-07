@@ -89,6 +89,48 @@ async fn refresh_rotates_shares_keeping_group_key_and_still_signs() {
 }
 
 #[tokio::test]
+async fn a_lost_node_recovers_from_a_share_backup_and_the_cluster_signs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = cluster(&tmp);
+    let group_key = run_dkg(&peers, KEY_ID).await.unwrap();
+    drop(nodes);
+    drop(peers);
+
+    // Back up node-1's key dir (as `rutli-cosigner backup` does — a file copy of the sealed shares).
+    let keys1 = tmp.path().join("node-1");
+    let backup = tmp.path().join("backup-node-1");
+    std::fs::create_dir_all(&backup).unwrap();
+    for e in std::fs::read_dir(&keys1).unwrap() {
+        let e = e.unwrap();
+        if e.file_type().unwrap().is_file() {
+            std::fs::copy(e.path(), backup.join(e.file_name())).unwrap();
+        }
+    }
+
+    // Catastrophe: node-1's disk is wiped.
+    std::fs::remove_dir_all(&keys1).unwrap();
+
+    // Restore from backup, then rebuild the cluster.
+    std::fs::create_dir_all(&keys1).unwrap();
+    for e in std::fs::read_dir(&backup).unwrap() {
+        let e = e.unwrap();
+        if e.file_type().unwrap().is_file() {
+            std::fs::copy(e.path(), keys1.join(e.file_name())).unwrap();
+        }
+    }
+    let (nodes, peers) = cluster(&tmp);
+
+    // Same group key, and the recovered node participates in a valid signature.
+    for n in &nodes {
+        assert_eq!(n.group_key(KEY_ID).unwrap(), group_key);
+    }
+    let message = canton_digest(b"after restore");
+    let sig = sign(&nodes[0], &peers, KEY_ID, &message).await.unwrap();
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
+    vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig)).unwrap();
+}
+
+#[tokio::test]
 async fn signing_survives_one_downed_cosigner() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = cluster(&tmp);

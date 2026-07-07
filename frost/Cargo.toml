@@ -10,6 +10,7 @@ repository = "https://github.com/Stakecraft/rutli"
 
 [workspace.dependencies]
 frost-ed25519 = "2"
+frost-core = "2"
 rand = "0.8"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

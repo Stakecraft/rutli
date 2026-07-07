@@ -234,6 +234,42 @@ fn raw_sign(
 }
 
 #[test]
+fn lost_share_is_repaired_from_helpers_and_signs() {
+    use frost::keys::{IdentifierList, KeyPackage};
+    use rutli_frost_core::repair::{helper_step1, helper_step2, participant_step3};
+
+    // Trusted-dealer split just to obtain SecretShares (with commitments) for the test.
+    let (shares, pkp) =
+        frost::keys::generate_with_dealer(MAX_SIGNERS, MIN_SIGNERS, IdentifierList::Default, rand::rngs::OsRng)
+            .unwrap();
+    let group_key = group_verifying_key_bytes(&pkp).unwrap();
+
+    let id1 = Identifier::try_from(1u16).unwrap();
+    let id2 = Identifier::try_from(2u16).unwrap();
+    let id3 = Identifier::try_from(3u16).unwrap();
+
+    // id1 is destroyed with no backup. Helpers id2, id3 (a threshold) rebuild its share.
+    let helpers = [id2, id3];
+    let d2 = helper_step1(&helpers, &shares[&id2], id1).unwrap();
+    let d3 = helper_step1(&helpers, &shares[&id3], id1).unwrap();
+
+    // Each helper sums the deltas addressed to it.
+    let sigma2 = helper_step2(&[d2[&id2], d3[&id2]]);
+    let sigma3 = helper_step2(&[d2[&id3], d3[&id3]]);
+
+    // id1 reconstructs its KeyPackage from the sigmas + the public VSS commitment (any helper's).
+    let commitment = shares[&id2].commitment();
+    let repaired = participant_step3(&[sigma2, sigma3], id1, commitment).unwrap();
+
+    // The repaired share signs (with an untouched helper) and verifies under the SAME group key.
+    let msg = canton_digest(b"after repair");
+    let quorum = [(id1, repaired), (id2, KeyPackage::try_from(shares[&id2].clone()).unwrap())];
+    let sig = raw_sign(&quorum, &pkp, &msg).unwrap();
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
+    vk.verify_strict(&msg, &ed25519_dalek::Signature::from_bytes(&sig.try_into().unwrap())).unwrap();
+}
+
+#[test]
 fn refresh_keeps_group_key_and_invalidates_pre_refresh_shares() {
     use rutli_frost_core::refresh::RefreshParticipant;
 
