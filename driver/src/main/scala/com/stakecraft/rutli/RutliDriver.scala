@@ -124,28 +124,35 @@ final class RutliDriver(
     * in the hash-chained audit log (`auditLog`).
     */
   private def audited[A](op: => String)(f: => Future[A])(result: A => String): Future[A] = {
-    val fut =
+    val base =
       (try f
        catch { case NonFatal(e) => Future.failed(e) }).recoverWith {
         case e: KmsDriverException => Future.failed(e)
         case NonFatal(e)           => Future.failed(KmsDriverException(e, retryable = false))
       }
-    if (auditLogging || auditLog.isDefined) fut.onComplete { outcome =>
-      val (opName, detail) = {
-        val s = op
-        val space = s.indexOf(' ')
-        if (space < 0) (s, "") else (s.substring(0, space), s.substring(space + 1))
+    if (!auditLogging && auditLog.isEmpty) base
+    else
+      // Write-ahead: fold the audit record into the future so the operation's result is observable
+      // only AFTER the (fsynced) audit entry is durable — never leak a signature the log missed.
+      base.transform { outcome =>
+        emitAudit(op, outcome.map(result))
+        outcome
       }
-      val line = outcome match {
-        case Success(a) => s"$detail ${result(a)} outcome=ok"
-        case Failure(e) => s"$detail outcome=failed error=${e.getMessage}"
-      }
-      if (auditLogging) logger.info(s"AUDIT $opName $line")
-      auditLog.foreach { log =>
-        try log.append(opName, line.trim)
-        catch { case NonFatal(e) => logger.error(s"audit log append failed: ${e.getMessage}") }
-      }
+  }
+
+  private def emitAudit(op: String, rendered: scala.util.Try[String]): Unit = {
+    val (opName, detail) = {
+      val space = op.indexOf(' ')
+      if (space < 0) (op, "") else (op.substring(0, space), op.substring(space + 1))
     }
-    fut
+    val line = rendered match {
+      case Success(r) => s"$detail $r outcome=ok"
+      case Failure(e) => s"$detail outcome=failed error=${e.getMessage}"
+    }
+    if (auditLogging) logger.info(s"AUDIT $opName $line")
+    auditLog.foreach { log =>
+      try log.append(opName, line.trim)
+      catch { case NonFatal(e) => logger.error(s"audit log append failed: ${e.getMessage}") }
+    }
   }
 }
