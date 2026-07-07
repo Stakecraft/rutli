@@ -6,6 +6,13 @@ All notable changes to Rütli are documented here. Format loosely follows
 ## [Unreleased]
 
 ### Added
+- **M-of-N signing approval** (`approval { ... }` policy): high-value keys (by key-id prefix) are
+  gated — a `sign` is held until a threshold of named approvers each drop a valid Ed25519 signature
+  over the request into a shared inbox, or it fails non-retryably at timeout. A random per-request
+  nonce prevents replay; each approver counts at most once; signatures are verified against the
+  configured keys (cryptographic separation of duties, not a counter). Approver CLI:
+  `com.stakecraft.rutli.policy.ApproveCli` (`keygen`, `approve`). Default is no gating so nodes
+  bootstrap unchanged. Outcomes recorded in the hash-chained audit log. See `docs/approval-quorum.md`.
 - **Proactive share refresh** (`Signer.Refresh` RPC + `rutli-cosigner refresh --key-id …`):
   re-randomizes every cosigner's share via a dealer-free DKG-style ceremony while keeping the
   group public key — and therefore the Canton node identity — unchanged. Shares stolen before a

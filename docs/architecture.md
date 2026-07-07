@@ -127,9 +127,9 @@ Canton-compatible and FIPS-capable — which is exactly why Phase 1 ships on HSM
 - **Phase 1** — production `KmsDriver` on `HsmBackend`; all key types; FIPS-capable.
 - **Phase 2** — `FrostBackend`: Rust FROST-ed25519 MPC cluster for the namespace key; DKG,
   `t`-of-`n` signing, proactive share refresh.
-- **Phase 3** — policy/quorum engine, RBAC/separation-of-duties, ✅ hash-chained audit log
-  (`audit-log-path`, offline-verifiable), replay/equivocation guards, share backup/restore +
-  geo-distribution, key-ceremony runbook.
+- **Phase 3** — ✅ M-of-N approval / quorum engine (`approval`, cryptographic separation of duties;
+  see `docs/approval-quorum.md`), ✅ hash-chained audit log (`audit-log-path`, offline-verifiable),
+  replay/equivocation guards, share backup/restore + geo-distribution, key-ceremony runbook.
 - **Phase 4** — `DklsBackend`: threshold ECDSA (P-256/P-384) for protocol/sequencer keys.
 - **Phase 5** — Wallet Gateway signing-driver SPI (second seam); SOC2/ISO/DORA evidence pack;
   published third-party MPC audit.

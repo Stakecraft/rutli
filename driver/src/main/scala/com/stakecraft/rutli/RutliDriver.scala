@@ -33,6 +33,7 @@ final class RutliDriver(
     logger: Logger,
     auditLogging: Boolean,
     auditLog: Option[HashChainedAuditLog],
+    approvalGate: com.stakecraft.rutli.policy.ApprovalGate,
     // Passed as constructor params (not read from `backend`) so the trait's `require(...)` checks,
     // which run during construction, see initialized values regardless of field init order.
     override val supportedSigningKeySpecs: Set[SigningKeySpec],
@@ -71,7 +72,9 @@ final class RutliDriver(
       traceContext: Context
   ): Future[Array[Byte]] =
     audited(s"sign keyId=$keyId algo=$algoSpec inBytes=${data.length}")(
-      backend.sign(data, keyId, algoSpec)
+      // Human M-of-N approval (for keys the policy gates) runs BEFORE the backend signs, so quorum
+      // approval precedes even the threshold signature. Auto-approved keys pass through instantly.
+      approvalGate.authorize(keyId, data).flatMap(_ => backend.sign(data, keyId, algoSpec))
     )(sig => s"sigBytes=${sig.length}")
 
   override def decryptAsymmetric(
@@ -110,7 +113,10 @@ final class RutliDriver(
 
   override def close(): Unit =
     try backend.close()
-    finally auditLog.foreach(_.close())
+    finally {
+      try approvalGate.close()
+      finally auditLog.foreach(_.close())
+    }
 
   /** Wrap an operation: map failures to [[KmsDriverException]] per the SPI contract (preserving a
     * backend-thrown exception's retryable flag, wrapping anything else as non-retryable), and emit

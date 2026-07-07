@@ -18,6 +18,8 @@ package com.stakecraft.rutli
   * @param hsm           HSM/PKCS#11 connection config; required when `backend = "hsm"`, and for the
   *                      delegate when `backend = "frost"` with `frost.delegate = "hsm"`.
   * @param frost         FROST cosigner-cluster config; required when `backend = "frost"`.
+  * @param approval      M-of-N approval policy. When set, `sign` for matching keys is held until a
+  *                      quorum of configured approvers signs the request.
   */
 final case class RutliConfig(
     backend: String = "software",
@@ -25,6 +27,7 @@ final case class RutliConfig(
     auditLogPath: Option[String] = None,
     hsm: Option[HsmConfig] = None,
     frost: Option[FrostConfig] = None,
+    approval: Option[com.stakecraft.rutli.policy.ApprovalPolicy] = None,
 )
 
 /** FROST backend config (Phase 2). The namespace/identity Ed25519 key is served by the cosigner

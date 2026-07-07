@@ -29,9 +29,13 @@ final class RutliDriverFactory extends KmsDriverFactory {
 
   override def configReader: ConfigReader[RutliConfig] = {
     import pureconfig.generic.semiauto._
+    import com.stakecraft.rutli.policy.{Approver, ApprovalRule, ApprovalPolicy}
     implicit val hsmReader: ConfigReader[HsmConfig] = deriveReader[HsmConfig]
     implicit val frostTlsReader: ConfigReader[FrostTlsConfig] = deriveReader[FrostTlsConfig]
     implicit val frostReader: ConfigReader[FrostConfig] = deriveReader[FrostConfig]
+    implicit val ruleReader: ConfigReader[ApprovalRule] = deriveReader[ApprovalRule]
+    implicit val approverReader: ConfigReader[Approver] = deriveReader[Approver]
+    implicit val policyReader: ConfigReader[ApprovalPolicy] = deriveReader[ApprovalPolicy]
     deriveReader[RutliConfig]
   }
 
@@ -44,6 +48,10 @@ final class RutliDriverFactory extends KmsDriverFactory {
     }
     implicit val frostTlsWriter: ConfigWriter[FrostTlsConfig] = deriveWriter[FrostTlsConfig]
     implicit val frostWriter: ConfigWriter[FrostConfig] = deriveWriter[FrostConfig]
+    import com.stakecraft.rutli.policy.{Approver, ApprovalRule, ApprovalPolicy}
+    implicit val ruleWriter: ConfigWriter[ApprovalRule] = deriveWriter[ApprovalRule]
+    implicit val approverWriter: ConfigWriter[Approver] = deriveWriter[Approver]
+    implicit val policyWriter: ConfigWriter[ApprovalPolicy] = deriveWriter[ApprovalPolicy]
     deriveWriter[RutliConfig]
   }
 
@@ -88,14 +96,24 @@ final class RutliDriverFactory extends KmsDriverFactory {
       com.stakecraft.rutli.audit.HashChainedAuditLog.open(p)
     }
 
+    val approvalGate: com.stakecraft.rutli.policy.ApprovalGate = config.approval match {
+      case Some(policy) =>
+        logger.info(
+          s"M-of-N approval enabled: ${policy.rules.size} rule(s), ${policy.approvers.size} approver(s), inbox=${policy.inboxDir}"
+        )
+        new com.stakecraft.rutli.policy.FileApprovalGate(policy, logger)
+      case None => com.stakecraft.rutli.policy.AutoApproveGate
+    }
+
     logger.info(
-      s"Starting Rutli driver (backend=${config.backend}, auditLogging=${config.auditLogging}, auditLogPath=${config.auditLogPath.getOrElse("-")})"
+      s"Starting Rutli driver (backend=${config.backend}, auditLogging=${config.auditLogging}, auditLogPath=${config.auditLogPath.getOrElse("-")}, approval=${config.approval.isDefined})"
     )
     new RutliDriver(
       backend,
       logger,
       config.auditLogging,
       auditLog,
+      approvalGate,
       backend.supportedSigningKeySpecs,
       backend.supportedSigningAlgoSpecs,
       backend.supportedEncryptionKeySpecs,
