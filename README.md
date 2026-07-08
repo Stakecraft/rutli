@@ -1,99 +1,162 @@
 # Rütli
 
-Open-source, self-hosted **threshold key management for Canton Network & Splice node authority
-keys** — implemented as a Canton **KMS Driver** so it plugs into an unmodified Canton node. Think
-[Horcrux](https://github.com/strangelove-ventures/horcrux) for Canton: the node holds no keys; a
-t-of-n quorum signs on its behalf.
+**Open-source threshold key management for Canton Network & Splice node authority keys.**
 
-*Named after the [Rütli meadow](https://en.wikipedia.org/wiki/R%C3%BCtli), where in 1291 the three
-founding cantons swore the oath that created the Swiss Confederation — a federation born from an
-agreement between peers, with no single point of authority. Same idea, applied to your keys.*
+[![CI](https://github.com/Stakecraft/rutli/actions/workflows/ci.yml/badge.svg)](https://github.com/Stakecraft/rutli/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
-**→ [QUICKSTART.md](QUICKSTART.md)** — from `cargo test` to a Canton node with its namespace key in
-a FROST cluster, in three copy-paste steps.
+Rütli keeps a Canton node's most dangerous secret — its **namespace / identity key** — safe by never
+letting any single machine hold it. Instead of one server storing the key, a small cluster of
+machines each hold a *fragment*; signing happens by cooperation, and the whole key never exists
+anywhere. It plugs into an **unmodified Canton node** as a KMS driver, so there's nothing to fork.
 
-> Status: **pre-production, phases 0–1 done, phase 2 core done.** The driver runs inside a real
-> Canton 3.5.6 node — all node keys (incl. an **Ed25519 namespace key**) are generated in the KMS
-> and identity topology is signed through it; the upstream conformance suite is green. Backends:
-> `software` (Phase 0, testing only) and `hsm` (Phase 1, PKCS#11 — verified against SoftHSM incl.
-> key persistence across restart). The [FROST MPC core](docs/phase-2-frost.md) (`frost/core`, Rust)
-> is implemented and **verified end-to-end with a real Canton node**: a participant booted with
-> `backend = "frost"`, its Ed25519 namespace key born via 3-node cluster DKG, and its identity
-> topology threshold-signed by a 2-of-3 quorum — accepted by Canton's verifier. No machine ever
-> held the whole key. Remaining before production: share sealing (enclave/HSM), proactive refresh,
-> DR procedures, and a third-party audit. (mTLS and driver-side failover are done.)
+Think **[Horcrux](https://github.com/strangelove-ventures/horcrux) for Canton**: the node holds no
+key; a `t`-of-`n` quorum signs on its behalf.
 
-## Why
+> *Named after the [Rütli meadow](https://en.wikipedia.org/wiki/R%C3%BCtli), where in 1291 the three
+> founding cantons swore the oath that created the Swiss Confederation — a federation of peers with
+> no single point of authority. Same idea, applied to your keys.*
 
-Canton's most catastrophic secret is the **namespace / identity root key** — it defines a node's
-identity and authorizes topology transactions. Losing or leaking it means irrecoverable loss of
-all Canton Coin for parties hosted under that namespace, and counts as an "SV failure" that reduces
-the network's BFT fault-tolerance buffer. It is also **not rotatable**.
+**New here? → [QUICKSTART.md](QUICKSTART.md)** gets you from `cargo test` to a live Canton node with
+its namespace key in a threshold cluster in three copy-paste steps.
 
-Today the options for protecting it are: Canton's built-in KMS (AWS/GCP only, Enterprise Edition),
-proprietary self-hosted vaults (MPCH Stronghold — HSM/air-gap, closed source), or SaaS custodians
-(Fireblocks, Dfns). There is no **open-source, self-hosted, real-MPC** option the operator runs and
-certifies entirely within its own SOC 2 / ISO 27001 / DORA boundary. This project fills that gap —
-the "Web3Signer/Teku of Canton".
+---
 
-## How
+## Why it matters
 
-We implement the Canton **KMS Driver SPI** (`com.digitalasset.canton.crypto.kms.driver.api.v1`).
-Canton calls our driver for every private-key operation; the key never enters the Canton process.
-Behind the driver, a `KmsBackend` seam routes each key to the right isolation model:
+A Canton node's **namespace key** defines its on-chain identity and authorizes every topology change.
+If it leaks, an attacker controls the node. If it's lost, every party and Canton Coin balance hosted
+under that node is gone — permanently. And it **cannot be rotated**: there is no "issue a new one".
 
-| Canton key | Backend | Phase |
+Today the ways to protect it are all compromises: Canton's built-in KMS is **cloud-only** (AWS/GCP,
+Enterprise Edition); the sovereign alternatives are **proprietary** (MPCH Stronghold) or **SaaS
+custodians** (Fireblocks, Dfns). None is open-source, self-hosted, *and* real threshold-MPC — one a
+bank could run and certify entirely inside its own SOC 2 / ISO 27001 / DORA boundary.
+
+Rütli is that missing option — **the "Web3Signer/Teku of Canton."**
+
+## How it works
+
+```
+   Canton node                Rütli driver (a jar inside the node)         FROST cosigner cluster
+  ┌───────────┐   "sign this  ┌───────────────────────────────┐   sign    ┌───────────┐ share 1
+  │ participant├──────────────►│ policy · approval · audit log  ├──────────►│ cosigner A│  (region 1)
+  │  (unchanged)│   34-byte    │ routes by key type             │  rounds   ├───────────┤
+  └───────────┘   digest      └───────────────────────────────┘◄──────────┤ cosigner B│ share 2
+        ▲                                    │                   64-byte    ├───────────┤  (region 2)
+        └────────────────────────────────────┘   Ed25519 sig     signature  │ cosigner C│ share 3
+              standard Ed25519 signature — Canton can't tell it was threshold └───────────┘  (region 3)
+```
+
+Canton thinks it's talking to an ordinary KMS. The driver forwards each *"sign this digest"* to the
+cluster, which produces a **standard Ed25519 signature** — byte-for-byte indistinguishable from a
+single-signer one, so Canton's verifier accepts it unchanged. The key is *born distributed* (no
+trusted dealer) and never assembled, not even for an instant.
+
+Behind the driver, a swappable backend routes each key to the right protection:
+
+| Canton key | Backend | Isolation |
 |---|---|---|
-| Namespace / identity (Ed25519) | FROST-ed25519 MPC cluster (`t`-of-`n`, single operator, isolated hosts) | 2 |
-| Protocol / sequencer (ECDSA P-256/384) | Threshold ECDSA (DKLS23) or HSM | 4 |
-| Asymmetric encryption (ECIES/RSA-OAEP) | HSM / enclave (never threshold) | 1 |
+| **Namespace / identity** (Ed25519) | **FROST MPC cluster** | `t`-of-`n`, one share per host/account/region |
+| Protocol / sequencer (ECDSA) | HSM (or threshold ECDSA) | PKCS#11 hardware |
+| Encryption (ECIES / RSA-OAEP) | HSM / enclave | hardware, never threshold |
 
-**Delivery is HSM-first:** Phase 1 ships a correct, FIPS-capable driver on an HSM/enclave; MPC
-(FROST for the namespace key) lands in Phase 2. See [`docs/architecture.md`](docs/architecture.md).
+## Features
 
-## Repo layout
+- **Plugs into unmodified Canton** — implements the official KMS Driver SPI; passes the upstream
+  conformance suite. Verified end-to-end on a real Canton 3.5.6 node.
+- **Threshold signing (FROST-ed25519)** — DKG, two-round signing, standard RFC 8032 output,
+  crash-safe single-use nonce guard.
+- **Backends** — `software` (testing), `hsm` (PKCS#11, verified on SoftHSM), `frost` (the MPC cluster).
+- **Mutual TLS** across the mesh and from the driver, with **driver-side failover** (any live
+  cosigner leads — a downed node never blocks signing).
+- **Encryption at rest** — key shares sealed with AES-256-GCM (per-node keys from an operator secret).
+- **Proactive refresh** — rotate all shares on a schedule; same key, so an attacker's stolen share
+  expires.
+- **M-of-N human approval** — high-value signing held until a quorum of named approvers
+  cryptographically sign off (separation of duties, not a checkbox).
+- **Tamper-evident audit log** — every operation in a hash-chained, offline-verifiable journal.
+- **Signing journal** — persistent per-key record for replay detection, plus an optional rate limit.
+- **Disaster recovery** — encrypted backup/restore + a share-repair primitive, with a full runbook.
+- **Deploy** — Docker Compose and Kubernetes, dev and mTLS-hardened.
 
-```
-driver/            The Canton KmsDriver (Scala/JVM). Policy/routing shell + KmsBackend seam.
-  src/main/scala/com/stakecraft/rutli/
-    RutliDriverFactory.scala       Factory (ServiceLoader entry point).
-    RutliDriver.scala              KmsDriver SPI impl — delegates to a KmsBackend.
-    RutliConfig.scala              pureconfig-parsed driver config (+ HsmConfig).
-    backend/KmsBackend.scala        The internal seam — swappable key backend.
-    backend/SoftwareBackend.scala   Phase 0 — BouncyCastle, testing only.
-    backend/HsmBackend.scala        Phase 1 — PKCS#11 (SunPKCS11), production-usable.
-    backend/FrostBackend.scala      Phase 2 — routes namespace key to the FROST cluster (gRPC).
-  src/main/java/com/stakecraft/rutli/grpc/   Generated gRPC stubs (scripts/gen-grpc-java.sh).
-  src/main/resources/META-INF/services/   ServiceLoader registration (two factory FQCN files).
-  src/test/scala/...                Unit + conformance + live HSM integration tests.
-frost/             Rust workspace — the FROST-ed25519 MPC cluster.
-  core/            rutli-frost-core: DKG, two-round signing, crash-safe nonce store (tested).
-  cosigner/        rutli-cosigner: gRPC cosigner daemon + DKG/sign orchestration (tested).
-deploy/devnet/     Canton 3.5.x devnet with crypto.provider = kms pointed at this driver.
-deploy/frost/      Docker-compose 2-of-3 cosigner cluster.
-scripts/           publish-canton-deps.sh (Canton artifacts), init-softhsm.sh (dev HSM token).
-docs/              architecture, wire-contract, phase docs, and the operational runbooks:
-                   key-ceremony, disaster-recovery, approval-quorum.
-.github/workflows/ CI: JVM unit tests + assembly and Rust tests+clippy on PR; conformance nightly.
-```
+## Install & run
 
-## Getting started (Phase 0)
+Full walkthrough in **[QUICKSTART.md](QUICKSTART.md)**. The short version:
 
-Prereqs: JDK 17+, `sbt`. Then follow [`docs/phase-0-spike.md`](docs/phase-0-spike.md):
+**Prerequisites:** JDK 17, [sbt](https://www.scala-sbt.org/), Docker, [Rust](https://rustup.rs/), and
+a [Canton 3.5.6](https://github.com/digital-asset/canton/releases/tag/v3.5.6) release.
 
 ```sh
-scripts/publish-canton-deps.sh v3.5.6   # resolve Canton API artifacts (not on Maven Central)
-sbt driver/test                         # conformance suite green
-sbt driver/assembly                     # build the driver fat jar
-CANTON_HOME=/path/to/canton-3.5.6 deploy/devnet/up.sh   # boot a KMS-backed Canton node
+git clone https://github.com/Stakecraft/rutli.git && cd rutli
+
+# 1. Prove the threshold crypto (no Canton needed):
+( cd frost && cargo test )
+
+# 2. Build the driver and run a Canton node on it:
+scripts/publish-canton-deps.sh v3.5.6      # fetch the Canton KMS API (not on Maven Central), once
+sbt driver/assembly                        # -> driver/target/scala-2.13/rutli-driver.jar
+export CANTON_HOME=/path/to/canton-open-source-3.5.6
+deploy/devnet/up.sh                        # boots a participant whose keys live in the driver
+
+# 3. Put the namespace key in a real 3-node MPC cluster:
+docker compose -f deploy/frost/docker-compose.yml up --build -d
+CANTON_CONF=canton-frost.conf deploy/devnet/up.sh
 ```
+
+## Deployment
+
+- **Docker** — [`deploy/frost`](deploy/frost): `docker-compose.yml` (dev) and `docker-compose.tls.yml`
+  (mutual TLS + sealed shares).
+- **Kubernetes** — [`deploy/k8s`](deploy/k8s): StatefulSet with durable per-pod storage, mTLS, sealed
+  shares, and a NetworkPolicy. See its [README](deploy/k8s/README.md).
+
+Before protecting a real key, run the witnessed **[key ceremony](docs/key-ceremony.md)** and set up
+**[disaster recovery](docs/disaster-recovery.md)** — the namespace key is non-rotatable.
+
+## Documentation
+
+| Doc | What |
+|---|---|
+| [QUICKSTART.md](QUICKSTART.md) | Get running in minutes |
+| [docs/architecture.md](docs/architecture.md) | How it's built, and why |
+| [docs/phase-2-frost.md](docs/phase-2-frost.md) | The FROST cluster in depth |
+| [docs/key-ceremony.md](docs/key-ceremony.md) | Witnessed namespace-key generation |
+| [docs/approval-quorum.md](docs/approval-quorum.md) | M-of-N signing approval |
+| [docs/disaster-recovery.md](docs/disaster-recovery.md) | Backup, restore, recovery |
+| [docs/wire-contract.md](docs/wire-contract.md) | Exactly what Canton sends the driver |
+
+## Project layout
+
+```
+driver/    Canton KMS driver (Scala/JVM) — SPI impl + swappable KmsBackend + policy/audit
+frost/     Rust workspace — the FROST MPC cluster
+  core/      DKG, threshold signing, nonce guard, refresh, repair (the crypto)
+  cosigner/  the gRPC cosigner daemon
+deploy/    devnet, Docker Compose, and Kubernetes
+docs/      architecture + operational runbooks
+scripts/   Canton dep publishing, cert generation, SoftHSM setup
+```
+
+## Status
+
+Pre-production and **not yet audited** — do not put a production authority key behind it until a
+third-party security review is complete. The full stack above is implemented, CI-green, and verified
+end-to-end on a real Canton node. What remains for a 1.0 is external: a **security audit** and a
+**Splice testnet validator run**. See [CHANGELOG.md](CHANGELOG.md).
 
 ## Security
 
-This is security-critical infrastructure under active early development. It has **not** been
-audited. Never place production authority keys behind the `SoftwareBackend`. Report vulnerabilities
-privately (see `SECURITY.md`, TODO).
+Security-critical infrastructure. Never place production keys behind the `software` backend. Report
+vulnerabilities privately via GitHub's
+[Report a vulnerability](https://github.com/Stakecraft/rutli/security/advisories/new) — see
+[SECURITY.md](SECURITY.md).
+
+## Contributing
+
+Issues and PRs welcome. `sbt driver/test` (JVM) and `cd frost && cargo test && cargo clippy` (Rust)
+must pass; CI runs both on every PR.
 
 ## License
 
-[Apache-2.0](LICENSE).
+[Apache-2.0](LICENSE). Not affiliated with or endorsed by Digital Asset.
