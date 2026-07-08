@@ -20,6 +20,8 @@ package com.stakecraft.rutli
   * @param frost         FROST cosigner-cluster config; required when `backend = "frost"`.
   * @param approval      M-of-N approval policy. When set, `sign` for matching keys is held until a
   *                      quorum of configured approvers signs the request.
+  * @param signingJournal Persistent per-key signing journal (replay detection + optional rate
+  *                      limit). See [[com.stakecraft.rutli.guard.SigningJournal]].
   */
 final case class RutliConfig(
     backend: String = "software",
@@ -28,6 +30,20 @@ final case class RutliConfig(
     hsm: Option[HsmConfig] = None,
     frost: Option[FrostConfig] = None,
     approval: Option[com.stakecraft.rutli.policy.ApprovalPolicy] = None,
+    signingJournal: Option[SigningJournalConfig] = None,
+)
+
+/** Signing-journal config.
+  *
+  * @param dir            Directory for the append-only per-key journals.
+  * @param maxPerWindow   Optional hard cap on signatures per key per rolling window (a runaway /
+  *                       compromise brake); omit for detection-only.
+  * @param windowSeconds  The rolling window for `maxPerWindow`.
+  */
+final case class SigningJournalConfig(
+    dir: String,
+    maxPerWindow: Option[Int] = None,
+    windowSeconds: Long = 60,
 )
 
 /** FROST backend config (Phase 2). The namespace/identity Ed25519 key is served by the cosigner

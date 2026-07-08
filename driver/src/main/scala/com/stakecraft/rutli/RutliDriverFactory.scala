@@ -36,6 +36,7 @@ final class RutliDriverFactory extends KmsDriverFactory {
     implicit val ruleReader: ConfigReader[ApprovalRule] = deriveReader[ApprovalRule]
     implicit val approverReader: ConfigReader[Approver] = deriveReader[Approver]
     implicit val policyReader: ConfigReader[ApprovalPolicy] = deriveReader[ApprovalPolicy]
+    implicit val journalReader: ConfigReader[SigningJournalConfig] = deriveReader[SigningJournalConfig]
     deriveReader[RutliConfig]
   }
 
@@ -52,6 +53,7 @@ final class RutliDriverFactory extends KmsDriverFactory {
     implicit val ruleWriter: ConfigWriter[ApprovalRule] = deriveWriter[ApprovalRule]
     implicit val approverWriter: ConfigWriter[Approver] = deriveWriter[Approver]
     implicit val policyWriter: ConfigWriter[ApprovalPolicy] = deriveWriter[ApprovalPolicy]
+    implicit val journalWriter: ConfigWriter[SigningJournalConfig] = deriveWriter[SigningJournalConfig]
     deriveWriter[RutliConfig]
   }
 
@@ -105,8 +107,15 @@ final class RutliDriverFactory extends KmsDriverFactory {
       case None => com.stakecraft.rutli.policy.AutoApproveGate
     }
 
+    val signingJournal = config.signingJournal.map { j =>
+      logger.info(s"Signing journal at ${j.dir} (rateLimit=${j.maxPerWindow.map(m => s"$m/${j.windowSeconds}s").getOrElse("off")})")
+      val sj = new com.stakecraft.rutli.guard.SigningJournal(j.dir, j.maxPerWindow, j.windowSeconds, logger)
+      sj.recover()
+      sj
+    }
+
     logger.info(
-      s"Starting Rutli driver (backend=${config.backend}, auditLogging=${config.auditLogging}, auditLogPath=${config.auditLogPath.getOrElse("-")}, approval=${config.approval.isDefined})"
+      s"Starting Rutli driver (backend=${config.backend}, auditLogging=${config.auditLogging}, auditLogPath=${config.auditLogPath.getOrElse("-")}, approval=${config.approval.isDefined}, journal=${config.signingJournal.isDefined})"
     )
     new RutliDriver(
       backend,
@@ -114,6 +123,7 @@ final class RutliDriverFactory extends KmsDriverFactory {
       config.auditLogging,
       auditLog,
       approvalGate,
+      signingJournal,
       backend.supportedSigningKeySpecs,
       backend.supportedSigningAlgoSpecs,
       backend.supportedEncryptionKeySpecs,

@@ -34,6 +34,7 @@ final class RutliDriver(
     auditLogging: Boolean,
     auditLog: Option[HashChainedAuditLog],
     approvalGate: com.stakecraft.rutli.policy.ApprovalGate,
+    signingJournal: Option[com.stakecraft.rutli.guard.SigningJournal],
     // Passed as constructor params (not read from `backend`) so the trait's `require(...)` checks,
     // which run during construction, see initialized values regardless of field init order.
     override val supportedSigningKeySpecs: Set[SigningKeySpec],
@@ -73,8 +74,13 @@ final class RutliDriver(
   ): Future[Array[Byte]] =
     audited(s"sign keyId=$keyId algo=$algoSpec inBytes=${data.length}")(
       // Human M-of-N approval (for keys the policy gates) runs BEFORE the backend signs, so quorum
-      // approval precedes even the threshold signature. Auto-approved keys pass through instantly.
-      approvalGate.authorize(keyId, data).flatMap(_ => backend.sign(data, keyId, algoSpec))
+      // approval precedes even the threshold signature. Then the signing journal durably records the
+      // (key, digest) — and enforces any rate limit — before the signature is produced. Auto-
+      // approved, un-journalled keys pass straight through.
+      approvalGate.authorize(keyId, data).flatMap { _ =>
+        signingJournal.foreach(_.record(keyId, data)) // throws (fails the sign) if rate-limited
+        backend.sign(data, keyId, algoSpec)
+      }
     )(sig => s"sigBytes=${sig.length}")
 
   override def decryptAsymmetric(

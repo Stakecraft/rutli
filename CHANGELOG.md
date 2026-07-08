@@ -6,6 +6,13 @@ All notable changes to Rütli are documented here. Format loosely follows
 ## [Unreleased]
 
 ### Added
+- **Signing journal** (`signing-journal`): a persistent, per-key, append-only record of every
+  digest signed (fsynced before the signature is released), so there is a complete history for
+  equivocation *detection* and forensics; repeats of an already-signed digest are flagged and
+  counted (never blocked — Canton legitimately re-signs, and the driver only sees an opaque digest
+  with no height/round, so semantic double-sign protection is impossible at this layer and is not
+  claimed). Optional per-key rate limit (`max-per-window`) as a runaway/compromise brake. Rebuilds
+  its state from disk on restart. Records the digest only, never key material.
 - **Disaster recovery**: `rutli-cosigner backup`/`restore` copy a node's sealed shares to/from cold
   storage (encrypted at rest, so backups carry no plaintext key material), and the Repairable
   Threshold Scheme primitive (`rutli-frost-core::repair`) rebuilds a lost share from `t` survivors
