@@ -1,0 +1,56 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Per-node cosigner configs. Pod cosigner-<ordinal> runs cosigner-<ordinal+1>.json (identifier
+# ordinal+1). Peers are addressed by stable headless-Service DNS: identifier k -> pod cosigner-(k-1)
+# at https://cosigner-(k-1).rutli-cosigner:9101. mTLS verifies every peer against the shared SAN
+# `rutli-cosigner` (tls.domain). Shares are sealed with the cluster master secret in RUTLI_SEAL_SECRET
+# (each node derives its own per-node key). 2-of-3 here; edit for other t/n.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: rutli-cosigner-config
+  namespace: rutli
+data:
+  cosigner-1.json: |
+    {
+      "identifier": 1,
+      "listen": "0.0.0.0:9101",
+      "threshold": 2,
+      "data_dir": "/data",
+      "peers": [
+        { "identifier": 1, "endpoint": "https://cosigner-0.rutli-cosigner:9101" },
+        { "identifier": 2, "endpoint": "https://cosigner-1.rutli-cosigner:9101" },
+        { "identifier": 3, "endpoint": "https://cosigner-2.rutli-cosigner:9101" }
+      ],
+      "tls": { "ca_cert": "/certs/ca.crt", "cert": "/certs/cosigner1.crt", "key": "/certs/cosigner1.key", "domain": "rutli-cosigner" },
+      "share_seal": { "secret_env": "RUTLI_SEAL_SECRET" }
+    }
+  cosigner-2.json: |
+    {
+      "identifier": 2,
+      "listen": "0.0.0.0:9101",
+      "threshold": 2,
+      "data_dir": "/data",
+      "peers": [
+        { "identifier": 1, "endpoint": "https://cosigner-0.rutli-cosigner:9101" },
+        { "identifier": 2, "endpoint": "https://cosigner-1.rutli-cosigner:9101" },
+        { "identifier": 3, "endpoint": "https://cosigner-2.rutli-cosigner:9101" }
+      ],
+      "tls": { "ca_cert": "/certs/ca.crt", "cert": "/certs/cosigner2.crt", "key": "/certs/cosigner2.key", "domain": "rutli-cosigner" },
+      "share_seal": { "secret_env": "RUTLI_SEAL_SECRET" }
+    }
+  cosigner-3.json: |
+    {
+      "identifier": 3,
+      "listen": "0.0.0.0:9101",
+      "threshold": 2,
+      "data_dir": "/data",
+      "peers": [
+        { "identifier": 1, "endpoint": "https://cosigner-0.rutli-cosigner:9101" },
+        { "identifier": 2, "endpoint": "https://cosigner-1.rutli-cosigner:9101" },
+        { "identifier": 3, "endpoint": "https://cosigner-2.rutli-cosigner:9101" }
+      ],
+      "tls": { "ca_cert": "/certs/ca.crt", "cert": "/certs/cosigner3.crt", "key": "/certs/cosigner3.key", "domain": "rutli-cosigner" },
+      "share_seal": { "secret_env": "RUTLI_SEAL_SECRET" }
+    }

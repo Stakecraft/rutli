@@ -34,11 +34,15 @@ gen_cert() { # name  SAN-config
 
 for i in $(seq 1 "$N"); do
   echo "Generating cert for cosigner$i..."
-  gen_cert "cosigner$i" "subjectAltName=DNS:cosigner$i,DNS:localhost,IP:127.0.0.1"
+  # Every cosigner cert carries the SHARED SAN `rutli-cosigner` in addition to its own name. The
+  # driver/cosigner TLS `domain` is a single global verification name applied to every peer dial, so
+  # the mesh verifies peers against this shared SAN (works regardless of the actual DNS/pod name —
+  # Docker service `cosignerN`, k8s pod `cosigner-N.rutli-cosigner`, etc.).
+  gen_cert "cosigner$i" "subjectAltName=DNS:rutli-cosigner,DNS:cosigner$i,DNS:cosigner-$((i-1)),DNS:localhost,IP:127.0.0.1"
 done
 
 echo "Generating driver client cert..."
-gen_cert "driver" "subjectAltName=DNS:driver,DNS:localhost,IP:127.0.0.1"
+gen_cert "driver" "subjectAltName=DNS:rutli-cosigner,DNS:driver,DNS:localhost,IP:127.0.0.1"
 
 rm -f ca.srl
 chmod 600 ./*.key

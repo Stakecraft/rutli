@@ -1,0 +1,79 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Production-flavored 2-of-3 FROST cosigner cluster: mutual TLS between cosigners AND share sealing
+# (AES-256-GCM at rest). Still single-host (containers stand in for the separate hosts / accounts /
+# regions a real deployment MUST use) — but every other production control is on.
+#
+# Prerequisites:
+#   1. Certs:   scripts/gen-frost-certs.sh 3 deploy/frost/certs
+#   2. Seal secret (shared cluster master; each node derives its own per-node key via HKDF):
+#        export RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"     # from your secret manager in prod
+#   3. Bring up:
+#        RUTLI_SEAL_SECRET=… docker compose -f deploy/frost/docker-compose.tls.yml up --build
+#   4. DKG once against any Signer endpoint (localhost:9101), then point the Canton driver at the
+#      cluster with frost.tls (ca.crt + driver.{crt,key}, domain = "rutli-cosigner").
+#
+# The RUTLI_SEAL_SECRET must be present in the environment at `up` time; it is passed to every
+# cosigner (same master secret — the per-node key is derived internally, so this is safe).
+
+x-cosigner: &cosigner
+  build:
+    context: ../../frost
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  environment:
+    RUTLI_SEAL_SECRET: ${RUTLI_SEAL_SECRET:?set RUTLI_SEAL_SECRET (e.g. openssl rand -hex 32)}
+    RUST_LOG: info
+  volumes:
+    - ./config-tls:/config:ro
+    - ./certs:/certs:ro
+
+# gRPC is TLS-only; a plaintext TCP-open check on the node's own port is enough for liveness.
+x-healthcheck: &hc
+  interval: 10s
+  timeout: 3s
+  retries: 5
+  start_period: 5s
+
+services:
+  cosigner1:
+    <<: *cosigner
+    command: ["--config", "/config/cosigner1.json"]
+    volumes:
+      - ./config-tls:/config:ro
+      - ./certs:/certs:ro
+      - c1:/data
+    ports: ["9101:9101"]
+    healthcheck:
+      <<: *hc
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9101' 2>/dev/null || exit 1"]
+
+  cosigner2:
+    <<: *cosigner
+    command: ["--config", "/config/cosigner2.json"]
+    volumes:
+      - ./config-tls:/config:ro
+      - ./certs:/certs:ro
+      - c2:/data
+    ports: ["9102:9102"]
+    healthcheck:
+      <<: *hc
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9102' 2>/dev/null || exit 1"]
+
+  cosigner3:
+    <<: *cosigner
+    command: ["--config", "/config/cosigner3.json"]
+    volumes:
+      - ./config-tls:/config:ro
+      - ./certs:/certs:ro
+      - c3:/data
+    ports: ["9103:9103"]
+    healthcheck:
+      <<: *hc
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9103' 2>/dev/null || exit 1"]
+
+volumes:
+  c1:
+  c2:
+  c3:

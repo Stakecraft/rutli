@@ -1,0 +1,52 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Lock the cosigner signing port down to the mesh + the Canton driver. Requires a NetworkPolicy-
+# enforcing CNI (Calico, Cilium, …). Label the Canton participant pod `rutli.io/client: "true"` (in
+# any namespace) to let it reach the cluster; adjust the namespace selector to your Canton namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cosigner-ingress
+  namespace: rutli
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: rutli-cosigner
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        # peer-to-peer mesh (other cosigners)
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: rutli-cosigner
+        # the Canton driver (participant pod), labelled rutli.io/client=true
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              rutli.io/client: "true"
+      ports:
+        - { protocol: TCP, port: 9101 }
+---
+# DNS + peer egress for the cosigners themselves.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: cosigner-egress
+  namespace: rutli
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: rutli-cosigner
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: rutli-cosigner
+      ports:
+        - { protocol: TCP, port: 9101 }
+    - to: [] # DNS
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }

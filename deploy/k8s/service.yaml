@@ -1,0 +1,21 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Headless service: gives each StatefulSet pod a stable DNS name (cosigner-0.rutli-cosigner, …) for
+# the mesh and for the Canton driver's `frost.endpoints`.
+apiVersion: v1
+kind: Service
+metadata:
+  name: rutli-cosigner
+  namespace: rutli
+  labels:
+    app.kubernetes.io/name: rutli-cosigner
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true # peers must resolve each other during DKG before all are "ready"
+  selector:
+    app.kubernetes.io/name: rutli-cosigner
+  ports:
+    - name: grpc
+      port: 9101
+      targetPort: grpc

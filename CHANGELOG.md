@@ -6,6 +6,21 @@ All notable changes to Rütli are documented here. Format loosely follows
 ## [Unreleased]
 
 ### Added
+- **Deployment: Docker & Kubernetes.** A production-flavored compose
+  (`deploy/frost/docker-compose.tls.yml`, mutual TLS + sealed shares) alongside the dev one, and a
+  full k8s bundle (`deploy/k8s/`: StatefulSet with per-pod durable PVCs, headless service, mTLS,
+  sealed shares via a shared HKDF master secret, NetworkPolicy locking the signing port to the mesh
+  + the Canton driver, non-root/read-only-rootfs, anti-affinity) with a runbook covering image
+  build, cert/secret creation, DKG, and wiring the Canton driver. The mTLS mesh (cosigner↔cosigner
+  and driver↔cosigner) is now verified end-to-end.
+
+### Fixed
+- **mTLS cert model**: cosigner certs now carry a shared `rutli-cosigner` SAN, matched by the single
+  global `tls.domain` used for every peer dial — so the mutual-TLS mesh actually verifies across
+  Docker service names and k8s pod DNS alike (the previous per-node `domain` could not match all
+  peers). `gen-frost-certs.sh` and the TLS configs updated; TLS configs also enable share sealing.
+
+### Added
 - **Signing journal** (`signing-journal`): a persistent, per-key, append-only record of every
   digest signed (fsynced before the signature is released), so there is a complete history for
   equivocation *detection* and forensics; repeats of an already-signed digest are flagged and

@@ -1,0 +1,17 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Applies the cosigner cluster. Create the two Secrets out-of-band first (see secrets.example.yaml);
+# they are intentionally NOT listed here so real key material is never kustomize-managed from the repo.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: rutli
+resources:
+  - namespace.yaml
+  - cosigner-config.yaml
+  - service.yaml
+  - statefulset.yaml
+  - networkpolicy.yaml
+images:
+  - name: ghcr.io/stakecraft/rutli-cosigner
+    newTag: latest

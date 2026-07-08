@@ -1,0 +1,10 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: rutli
+  labels:
+    app.kubernetes.io/part-of: rutli
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/warn: restricted

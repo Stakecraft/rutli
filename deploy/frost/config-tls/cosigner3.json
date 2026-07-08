@@ -4,14 +4,26 @@
   "threshold": 2,
   "data_dir": "/data",
   "peers": [
-    { "identifier": 1, "endpoint": "https://cosigner1:9101" },
-    { "identifier": 2, "endpoint": "https://cosigner2:9102" },
-    { "identifier": 3, "endpoint": "https://cosigner3:9103" }
+    {
+      "identifier": 1,
+      "endpoint": "https://cosigner1:9101"
+    },
+    {
+      "identifier": 2,
+      "endpoint": "https://cosigner2:9102"
+    },
+    {
+      "identifier": 3,
+      "endpoint": "https://cosigner3:9103"
+    }
   ],
   "tls": {
     "ca_cert": "/certs/ca.crt",
     "cert": "/certs/cosigner3.crt",
     "key": "/certs/cosigner3.key",
-    "domain": "cosigner3"
+    "domain": "rutli-cosigner"
+  },
+  "share_seal": {
+    "secret_env": "RUTLI_SEAL_SECRET"
   }
 }
