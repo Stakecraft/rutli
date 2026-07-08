@@ -69,7 +69,8 @@ frost/             Rust workspace — the FROST-ed25519 MPC cluster.
 deploy/devnet/     Canton 3.5.x devnet with crypto.provider = kms pointed at this driver.
 deploy/frost/      Docker-compose 2-of-3 cosigner cluster.
 scripts/           publish-canton-deps.sh (Canton artifacts), init-softhsm.sh (dev HSM token).
-docs/              architecture, wire-contract, phase-{0,1,2} docs.
+docs/              architecture, wire-contract, phase docs, and the operational runbooks:
+                   key-ceremony, disaster-recovery, approval-quorum.
 .github/workflows/ CI: JVM unit tests + assembly and Rust tests+clippy on PR; conformance nightly.
 ```
 

@@ -131,7 +131,7 @@ Canton-compatible and FIPS-capable — which is exactly why Phase 1 ships on HSM
   see `docs/approval-quorum.md`), ✅ hash-chained audit log (`audit-log-path`, offline-verifiable),
   ✅ signing journal (`signing-journal`, replay detection + rate limit — honest about the
   no-height-metadata limit), ✅ share backup/restore + DR runbook (`docs/disaster-recovery.md`),
-  key-ceremony runbook (pending).
+  ✅ key-ceremony runbook (`docs/key-ceremony.md`).
 - **Phase 4** — `DklsBackend`: threshold ECDSA (P-256/P-384) for protocol/sequencer keys.
 - **Phase 5** — Wallet Gateway signing-driver SPI (second seam); SOC2/ISO/DORA evidence pack;
   published third-party MPC audit.
