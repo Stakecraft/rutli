@@ -38,14 +38,22 @@ Rütli is that missing option — **the "Web3Signer/Teku of Canton."**
 ## How it works
 
 ```
-   Canton node                Rütli driver (a jar inside the node)         FROST cosigner cluster
-  ┌───────────┐   "sign this  ┌───────────────────────────────┐   sign    ┌───────────┐ share 1
-  │ participant├──────────────►│ policy · approval · audit log  ├──────────►│ cosigner A│  (region 1)
-  │  (unchanged)│   34-byte    │ routes by key type             │  rounds   ├───────────┤
-  └───────────┘   digest      └───────────────────────────────┘◄──────────┤ cosigner B│ share 2
-        ▲                                    │                   64-byte    ├───────────┤  (region 2)
-        └────────────────────────────────────┘   Ed25519 sig     signature  │ cosigner C│ share 3
-              standard Ed25519 signature — Canton can't tell it was threshold └───────────┘  (region 3)
+Canton node  (unmodified)
+   │  sends "sign this" — a 34-byte digest
+   ▼
+Rütli driver  (a jar inside the node)
+   • policy · M-of-N approval · audit log
+   • routes each key to its backend
+   │  runs the threshold signing rounds
+   ▼
+FROST cluster  (t-of-n cosigners)
+   • cosigner A · B · C — one share each
+   • separate host / account / region
+   • the full key is never assembled
+   │  returns a 64-byte Ed25519 signature
+   ▼
+To Canton it's a normal Ed25519 signature —
+it can't tell it was threshold-signed.
 ```
 
 Canton thinks it's talking to an ordinary KMS. The driver forwards each *"sign this digest"* to the
