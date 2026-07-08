@@ -9,6 +9,9 @@ t-of-n quorum signs on its behalf.
 founding cantons swore the oath that created the Swiss Confederation — a federation born from an
 agreement between peers, with no single point of authority. Same idea, applied to your keys.*
 
+**→ [QUICKSTART.md](QUICKSTART.md)** — from `cargo test` to a Canton node with its namespace key in
+a FROST cluster, in three copy-paste steps.
+
 > Status: **pre-production, phases 0–1 done, phase 2 core done.** The driver runs inside a real
 > Canton 3.5.6 node — all node keys (incl. an **Ed25519 namespace key**) are generated in the KMS
 > and identity topology is signed through it; the upstream conformance suite is green. Backends:
