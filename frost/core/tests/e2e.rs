@@ -356,3 +356,40 @@ fn signature_is_over_exactly_the_34_byte_payload() {
         .verify_strict(&tampered, &ed25519_dalek::Signature::from_bytes(&sig))
         .is_err());
 }
+
+#[test]
+fn dkg_participant_rejects_out_of_order_calls_without_panic() {
+    use rutli_frost_core::dkg::DkgParticipant;
+    use rutli_frost_core::CoreError;
+    let id = Identifier::try_from(1u16).unwrap();
+    let r1: BTreeMap<Identifier, frost::keys::dkg::round1::Package> = BTreeMap::new();
+    let r2: BTreeMap<Identifier, frost::keys::dkg::round2::Package> = BTreeMap::new();
+
+    // part2 before part1 → recoverable error, not a panic.
+    let mut p = DkgParticipant::new(id, MAX_SIGNERS, MIN_SIGNERS);
+    assert!(matches!(p.part2(&r1), Err(CoreError::InvalidCeremonyState(_))));
+
+    // part3 before part2 → recoverable error.
+    let mut p = DkgParticipant::new(id, MAX_SIGNERS, MIN_SIGNERS);
+    p.part1().unwrap();
+    assert!(matches!(p.part3(&r1, &r2), Err(CoreError::InvalidCeremonyState(_))));
+}
+
+#[test]
+fn refresh_participant_rejects_out_of_order_calls_without_panic() {
+    use rutli_frost_core::refresh::RefreshParticipant;
+    use rutli_frost_core::CoreError;
+    let dealt = raw_dkg();
+    let (id, kp, pkp) = (dealt[0].0, dealt[0].1.clone(), dealt[0].2.clone());
+    let r1: BTreeMap<Identifier, frost::keys::dkg::round1::Package> = BTreeMap::new();
+    let r2: BTreeMap<Identifier, frost::keys::dkg::round2::Package> = BTreeMap::new();
+
+    // part2 before part1.
+    let mut p = RefreshParticipant::new(id, MAX_SIGNERS, MIN_SIGNERS);
+    assert!(matches!(p.part2(&r1), Err(CoreError::InvalidCeremonyState(_))));
+
+    // part3 before part2.
+    let mut p = RefreshParticipant::new(id, MAX_SIGNERS, MIN_SIGNERS);
+    p.part1().unwrap();
+    assert!(matches!(p.part3(&r1, &r2, pkp, kp), Err(CoreError::InvalidCeremonyState(_))));
+}

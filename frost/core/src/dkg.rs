@@ -51,7 +51,10 @@ impl DkgParticipant {
         &mut self,
         round1_packages: &BTreeMap<Identifier, round1::Package>,
     ) -> Result<BTreeMap<Identifier, round2::Package>> {
-        let r1 = self.r1_secret.take().expect("part1 must run before part2");
+        let r1 = self
+            .r1_secret
+            .take()
+            .ok_or(crate::CoreError::InvalidCeremonyState("dkg part2 before part1"))?;
         let (secret, packages) = part2(r1, round1_packages)?;
         self.r2_secret = Some(secret);
         Ok(packages)
@@ -64,7 +67,10 @@ impl DkgParticipant {
         round1_packages: &BTreeMap<Identifier, round1::Package>,
         round2_packages: &BTreeMap<Identifier, round2::Package>,
     ) -> Result<(frost::keys::KeyPackage, frost::keys::PublicKeyPackage)> {
-        let r2 = self.r2_secret.take().expect("part2 must run before part3");
+        let r2 = self
+            .r2_secret
+            .take()
+            .ok_or(crate::CoreError::InvalidCeremonyState("dkg part3 before part2"))?;
         let (key_package, public_key_package) = part3(&r2, round1_packages, round2_packages)?;
         Ok((key_package, public_key_package))
     }

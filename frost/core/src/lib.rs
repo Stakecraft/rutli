@@ -51,6 +51,9 @@ pub enum CoreError {
     #[error("unknown signing session: {0}")]
     UnknownSession(String),
 
+    #[error("ceremony called out of order: {0}")]
+    InvalidCeremonyState(&'static str),
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }

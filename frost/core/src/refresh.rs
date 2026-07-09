@@ -56,7 +56,10 @@ impl RefreshParticipant {
         &mut self,
         round1_packages: &BTreeMap<Identifier, round1::Package>,
     ) -> Result<BTreeMap<Identifier, round2::Package>> {
-        let r1 = self.r1_secret.take().expect("part1 must run before part2");
+        let r1 = self
+            .r1_secret
+            .take()
+            .ok_or(crate::CoreError::InvalidCeremonyState("refresh part2 before part1"))?;
         let (secret, packages) = refresh_dkg_part2(r1, round1_packages)?;
         self.r2_secret = Some(secret);
         Ok(packages)
@@ -71,7 +74,10 @@ impl RefreshParticipant {
         old_public_key_package: PublicKeyPackage,
         old_key_package: KeyPackage,
     ) -> Result<(KeyPackage, PublicKeyPackage)> {
-        let r2 = self.r2_secret.take().expect("part2 must run before part3");
+        let r2 = self
+            .r2_secret
+            .take()
+            .ok_or(crate::CoreError::InvalidCeremonyState("refresh part3 before part2"))?;
         let (key_package, public_key_package) = refresh_dkg_shares(
             &r2,
             round1_packages,

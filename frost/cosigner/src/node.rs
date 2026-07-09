@@ -193,16 +193,21 @@ impl Node {
         dkg_id: &str,
         round1_map: &BTreeMap<Identifier, round1::Package>,
     ) -> Result<BTreeMap<Identifier, round2::Package>> {
+        let mut sessions = self.dkg_sessions.lock().expect("dkg lock");
         let (key_id, result) = {
-            let mut sessions = self.dkg_sessions.lock().expect("dkg lock");
             let state = sessions.get_mut(dkg_id).ok_or_else(|| DaemonError::UnknownDkg(dkg_id.into()))?;
             let others = without_self(round1_map, self.identifier);
             (state.key_id.clone(), state.participant.part2(&others))
         };
-        if result.is_err() {
-            self.release_ceremony(&key_id, dkg_id);
+        match result {
+            Ok(packages) => Ok(packages),
+            Err(e) => {
+                sessions.remove(dkg_id); // prune the failed ceremony's session (no leak)
+                drop(sessions);
+                self.release_ceremony(&key_id, dkg_id);
+                Err(e.into())
+            }
         }
-        Ok(result?)
     }
 
     pub fn dkg_part3(
@@ -269,17 +274,22 @@ impl Node {
         refresh_id: &str,
         round1_map: &BTreeMap<Identifier, round1::Package>,
     ) -> Result<BTreeMap<Identifier, round2::Package>> {
+        let mut sessions = self.refresh_sessions.lock().expect("refresh lock");
         let (key_id, result) = {
-            let mut sessions = self.refresh_sessions.lock().expect("refresh lock");
             let state =
                 sessions.get_mut(refresh_id).ok_or_else(|| DaemonError::UnknownDkg(refresh_id.into()))?;
             let others = without_self(round1_map, self.identifier);
             (state.key_id.clone(), state.participant.part2(&others))
         };
-        if result.is_err() {
-            self.release_ceremony(&key_id, refresh_id);
+        match result {
+            Ok(packages) => Ok(packages),
+            Err(e) => {
+                sessions.remove(refresh_id);
+                drop(sessions);
+                self.release_ceremony(&key_id, refresh_id);
+                Err(e.into())
+            }
         }
-        Ok(result?)
     }
 
     pub fn refresh_part3(
