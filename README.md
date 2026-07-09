@@ -130,6 +130,7 @@ Before protecting a real key, run the witnessed **[key ceremony](docs/key-ceremo
 | [docs/architecture.md](docs/architecture.md) | How it's built, and why |
 | [docs/phase-2-frost.md](docs/phase-2-frost.md) | The FROST cluster in depth |
 | [docs/key-ceremony.md](docs/key-ceremony.md) | Witnessed namespace-key generation |
+| [docs/key-rotation.md](docs/key-rotation.md) | Which keys rotate, how, and why the root can't |
 | [docs/approval-quorum.md](docs/approval-quorum.md) | M-of-N signing approval |
 | [docs/disaster-recovery.md](docs/disaster-recovery.md) | Backup, restore, recovery |
 | [docs/wire-contract.md](docs/wire-contract.md) | Exactly what Canton sends the driver |
