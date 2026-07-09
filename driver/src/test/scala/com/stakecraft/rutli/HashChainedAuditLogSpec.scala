@@ -97,5 +97,38 @@ class HashChainedAuditLogSpec extends AnyWordSpec with Matchers {
       content should include("outcome=failed")
       content should not include "\"signature\"" // never logs key material or signatures
     }
+
+    "fail a sign closed when the durable audit append fails" in {
+      implicit val ec: ExecutionContext = ExecutionContext.global
+      def await[A](f: Future[A]): A = Await.result(f, 30.seconds)
+      val ctx = Context.root()
+
+      // An audit sink that always throws on append.
+      val throwingSink = new com.stakecraft.rutli.audit.AuditSink {
+        override def append(op: String, detail: String): Unit = throw new java.io.IOException("disk full")
+        override def close(): Unit = ()
+      }
+      val backend = new com.stakecraft.rutli.backend.SoftwareBackend()
+      val driver = new RutliDriver(
+        backend,
+        org.slf4j.LoggerFactory.getLogger("audit-failclosed"),
+        auditLogging = false,
+        auditLog = Some(throwingSink),
+        com.stakecraft.rutli.policy.AutoApproveGate,
+        signingJournal = None,
+        backend.supportedSigningKeySpecs,
+        backend.supportedSigningAlgoSpecs,
+        backend.supportedEncryptionKeySpecs,
+        backend.supportedEncryptionAlgoSpecs,
+      )
+      // Provision the key on the backend directly (bypass the audited driver path), then sign
+      // through the driver: even a *successful* backend sign must not return its result when the
+      // durable audit entry could not be written.
+      val keyId = await(backend.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")))
+      val ex = the[KmsDriverException] thrownBy
+        await(driver.sign(Array.fill(34)(7.toByte), keyId, SigningAlgoSpec.Ed25519)(ctx))
+      ex.getMessage.toLowerCase should include("audit")
+      ex.retryable shouldBe false
+    }
   }
 }

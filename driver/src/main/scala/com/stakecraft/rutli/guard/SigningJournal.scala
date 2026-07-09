@@ -82,21 +82,33 @@ final class SigningJournal(dir: String, maxPerWindow: Option[Int], windowSeconds
     stamps.add(nowMillis)
   }
 
-  /** Rebuild the in-memory digest sets from the on-disk journals (call once at startup). The keyId
-    * is read from each line (not the filename), so it round-trips exactly regardless of how the
-    * filename was sanitized. */
-  def recover(): Unit =
-    if (Files.isDirectory(root))
+  /** Rebuild in-memory state from the on-disk journals (call once at startup): the distinct-digest
+    * sets AND the rate-limit window. The keyId is read from each line (not the filename), so it
+    * round-trips exactly regardless of how the filename was sanitized. Rebuilding `recent` from the
+    * persisted timestamps means the per-key rate limit survives a restart — otherwise a crash-loop
+    * would reset the limiter every restart. */
+  def recover(nowMillis: Long = System.currentTimeMillis()): Unit =
+    if (Files.isDirectory(root)) {
+      val windowMs = windowSeconds * 1000
       Using(Files.list(root)) { s =>
         s.iterator().asScala.filter(_.getFileName.toString.endsWith(".jsonl")).foreach { f =>
           try Files.readAllLines(f).asScala.foreach { line =>
-            for { keyId <- field(line, "keyId"); digest <- field(line, "digest") }
+            for { keyId <- field(line, "keyId"); digest <- field(line, "digest") } {
               seen
                 .computeIfAbsent(keyId, _ => java.util.concurrent.ConcurrentHashMap.newKeySet[String]())
                 .add(digest)
+              // Reconstruct the rolling rate-limit window from entries still inside it.
+              if (maxPerWindow.isDefined) field(line, "ts").flatMap(parseTs).foreach { ts =>
+                if (ts >= nowMillis - windowMs)
+                  recent
+                    .computeIfAbsent(keyId, _ => new java.util.concurrent.CopyOnWriteArrayList[java.lang.Long]())
+                    .add(ts)
+              }
+            }
           } catch { case NonFatal(e) => logger.error(s"journal recover failed for $f: ${e.getMessage}") }
         }
       }
+    }
 
   private def journalFile(keyId: String): Path = root.resolve(s"${encodeKeyFileName(keyId)}.jsonl")
 
@@ -114,6 +126,11 @@ object SigningJournal {
 
   def sha256(b: Array[Byte]): Array[Byte] = MessageDigest.getInstance("SHA-256").digest(b)
   def hex(b: Array[Byte]): String = b.map("%02x".format(_)).mkString
+
+  /** Parse an ISO-8601 instant (as written in each journal line) back to epoch millis. */
+  private def parseTs(s: String): Option[Long] =
+    try Some(Instant.parse(s).toEpochMilli)
+    catch { case NonFatal(_) => None }
 
   private def esc(s: String): String = s.replace("\\", "\\\\").replace("\"", "\\\"")
 

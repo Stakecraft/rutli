@@ -26,14 +26,15 @@ import scala.util.Using
   * This is an integrity log, not a confidentiality mechanism: entries contain operation metadata
   * (op, keyId, sizes, outcome) — never key material, message bytes, or signatures.
   */
-final class HashChainedAuditLog private (file: File, private var lastHash: String, private var seq: Long) {
+final class HashChainedAuditLog private (file: File, private var lastHash: String, private var seq: Long)
+    extends AuditSink {
 
   import HashChainedAuditLog._
 
   private val out = new FileOutputStream(file, /*append=*/ true)
 
   /** Append one entry; returns after the line is fsynced. Thread-safe. */
-  def append(op: String, detail: String): Unit = synchronized {
+  override def append(op: String, detail: String): Unit = synchronized {
     val ts = Instant.now().toString
     val nextSeq = seq + 1
     val hash = entryHash(lastHash, nextSeq, ts, op, detail)
@@ -45,7 +46,7 @@ final class HashChainedAuditLog private (file: File, private var lastHash: Strin
     lastHash = hash
   }
 
-  def close(): Unit = synchronized(out.close())
+  override def close(): Unit = synchronized(out.close())
 }
 
 object HashChainedAuditLog {

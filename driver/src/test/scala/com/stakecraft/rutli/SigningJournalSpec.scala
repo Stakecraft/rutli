@@ -23,6 +23,25 @@ class SigningJournalSpec extends AnyWordSpec with Matchers {
 
   "SigningJournal" should {
 
+    "keep the rate limit enforced across a restart (recover rebuilds the window)" in {
+      val dir = tmpDir()
+      val t0 = 1000000L // fixed clock so the test is deterministic
+      // Fill the window: 3 signs allowed per 60s.
+      val j1 = new SigningJournal(dir, Some(3), 60, logger)
+      j1.record("frost-ns", "a".getBytes, t0)
+      j1.record("frost-ns", "b".getBytes, t0 + 1000)
+      j1.record("frost-ns", "c".getBytes, t0 + 2000)
+
+      // Restart: a fresh journal over the same dir must reconstruct the window, not reset it.
+      val j2 = new SigningJournal(dir, Some(3), 60, logger)
+      j2.recover(nowMillis = t0 + 3000)
+      // A 4th sign still inside the 60s window is refused — the limiter survived the restart.
+      a[SecurityException] should be thrownBy j2.record("frost-ns", "d".getBytes, t0 + 3000)
+
+      // Well after the window, the limit has cleared.
+      j2.record("frost-ns", "e".getBytes, t0 + 61000)
+    }
+
     "record distinct digests and flag repeats without blocking them" in {
       val dir = tmpDir()
       val j = new SigningJournal(dir, None, 60, logger)

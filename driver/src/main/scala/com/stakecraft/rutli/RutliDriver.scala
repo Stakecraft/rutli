@@ -4,7 +4,7 @@
 package com.stakecraft.rutli
 
 import com.digitalasset.canton.crypto.kms.driver.api.v1._
-import com.stakecraft.rutli.audit.HashChainedAuditLog
+import com.stakecraft.rutli.audit.AuditSink
 import com.stakecraft.rutli.backend.KmsBackend
 import io.opentelemetry.context.Context
 import org.slf4j.Logger
@@ -32,7 +32,7 @@ final class RutliDriver(
     backend: KmsBackend,
     logger: Logger,
     auditLogging: Boolean,
-    auditLog: Option[HashChainedAuditLog],
+    auditLog: Option[AuditSink],
     approvalGate: com.stakecraft.rutli.policy.ApprovalGate,
     signingJournal: Option[com.stakecraft.rutli.guard.SigningJournal],
     // Passed as constructor params (not read from `backend`) so the trait's `require(...)` checks,
@@ -138,15 +138,22 @@ final class RutliDriver(
       }
     if (!auditLogging && auditLog.isEmpty) base
     else
-      // Write-ahead: fold the audit record into the future so the operation's result is observable
-      // only AFTER the (fsynced) audit entry is durable — never leak a signature the log missed.
+      // Write-ahead + fail-closed: the operation's result is observable only AFTER the (fsynced)
+      // hash-chained audit entry is durable. If a SUCCESSFUL op cannot be logged, the operation
+      // fails rather than returning an unlogged signature. (The plain `auditLogging` logger line
+      // stays best-effort; a failed op is logged best-effort and its original error is preserved.)
       base.transform { outcome =>
-        emitAudit(op, outcome.map(result))
-        outcome
+        val appendError = emitAudit(op, outcome.map(result))
+        (outcome, appendError) match {
+          case (Success(_), Some(err)) => Failure(KmsDriverException(err, retryable = false))
+          case _                       => outcome
+        }
       }
   }
 
-  private def emitAudit(op: String, rendered: scala.util.Try[String]): Unit = {
+  /** Emit the audit records. Returns `Some(error)` iff the DURABLE (hash-chained) append failed —
+    * the caller uses that to fail a successful operation closed. The logger line is best-effort. */
+  private def emitAudit(op: String, rendered: scala.util.Try[String]): Option[Throwable] = {
     val (opName, detail) = {
       val space = op.indexOf(' ')
       if (space < 0) (op, "") else (op.substring(0, space), op.substring(space + 1))
@@ -156,9 +163,15 @@ final class RutliDriver(
       case Failure(e) => s"$detail outcome=failed error=${e.getMessage}"
     }
     if (auditLogging) logger.info(s"AUDIT $opName $line")
-    auditLog.foreach { log =>
-      try log.append(opName, line.trim)
-      catch { case NonFatal(e) => logger.error(s"audit log append failed: ${e.getMessage}") }
+    auditLog match {
+      case Some(log) =>
+        try { log.append(opName, line.trim); None }
+        catch {
+          case NonFatal(e) =>
+            logger.error(s"audit log append failed for $opName: ${e.getMessage}")
+            Some(new RuntimeException(s"audit log append failed for $opName: ${e.getMessage}", e))
+        }
+      case None => None
     }
   }
 }
