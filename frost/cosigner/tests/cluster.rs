@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use frost_ed25519::Identifier;
 use rutli_cosigner::keystore::KeyStore;
+use rutli_cosigner::DaemonError;
 use rutli_cosigner::node::Node;
 use rutli_cosigner::orchestrator::{run_dkg, run_refresh, sign, Peers};
 use rutli_cosigner::peer::{LocalPeer, PeerApi};
@@ -221,4 +222,51 @@ async fn shares_persist_across_node_reload() {
     let sig = sign(&reloaded[0], &peers2, KEY_ID, &message).await.unwrap();
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
     vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig)).unwrap();
+}
+
+// ── ceremony serialization (regression: concurrent DKG/refresh must not split-brain shares) ──
+
+#[tokio::test]
+async fn dkg_refuses_a_concurrent_ceremony_for_the_same_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, _peers) = cluster(&tmp);
+    let n = &nodes[0];
+    // One ceremony reserves the key at part1.
+    n.dkg_part1("ceremony-A", KEY_ID).unwrap();
+    // A different, overlapping ceremony for the same key is refused (would split-brain the shares).
+    let err = n.dkg_part1("ceremony-B", KEY_ID).unwrap_err();
+    assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "got {err:?}");
+}
+
+#[tokio::test]
+async fn dkg_refuses_when_the_key_already_exists() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = cluster(&tmp);
+    run_dkg(&peers, KEY_ID).await.unwrap(); // provision the key
+
+    // A fresh DKG against a provisioned key is refused — re-DKG would destroy the (non-rotatable) key.
+    let err = nodes[0].dkg_part1("ceremony-new", KEY_ID).unwrap_err();
+    assert!(matches!(err, DaemonError::KeyExists(_)), "got {err:?}");
+    // A full orchestrated re-DKG fails rather than overwriting.
+    assert!(run_dkg(&peers, KEY_ID).await.is_err(), "second DKG must fail, not overwrite");
+
+    // The original key still signs and verifies.
+    let msg = canton_digest(b"after refused re-dkg");
+    let sig = sign(&nodes[0], &peers, KEY_ID, &msg).await.unwrap();
+    let gk = nodes[0].group_key(KEY_ID).unwrap();
+    ed25519_dalek::VerifyingKey::from_bytes(&gk)
+        .unwrap()
+        .verify_strict(&msg, &ed25519_dalek::Signature::from_bytes(&sig))
+        .unwrap();
+}
+
+#[tokio::test]
+async fn refresh_refuses_a_concurrent_ceremony_for_the_same_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = cluster(&tmp);
+    run_dkg(&peers, KEY_ID).await.unwrap();
+    let n = &nodes[0];
+    n.refresh_part1("refresh-A", KEY_ID).unwrap();
+    let err = n.refresh_part1("refresh-B", KEY_ID).unwrap_err();
+    assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "got {err:?}");
 }

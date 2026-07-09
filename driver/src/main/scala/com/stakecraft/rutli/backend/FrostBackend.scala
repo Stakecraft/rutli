@@ -79,13 +79,20 @@ final class FrostBackend(
     SignerGrpc.newBlockingStub(ch).withDeadlineAfter(requestTimeout.toMillis, TimeUnit.MILLISECONDS)
 
   /** Run `op` against cosigner endpoints in order, moving to the next only when the current node is
-    * unreachable. Any non-transport gRPC status is a real answer and is rethrown immediately. */
-  private def withFailover[A](what: String)(op: SignerGrpc.SignerBlockingStub => A): A = {
+    * unreachable. Any non-transport gRPC status is a real answer and is rethrown immediately.
+    *
+    * `retryOn` decides which statuses count as "unreachable, try the next node". The default retries
+    * on UNAVAILABLE + DEADLINE_EXCEEDED (safe for idempotent ops: sign, groupKey). A DKG must NOT
+    * retry on DEADLINE_EXCEEDED — a slow-but-succeeding ceremony would otherwise be run a second time
+    * against another leader — so it passes the connection-only predicate. */
+  private def withFailover[A](what: String, retryOn: Status => Boolean = isNodeDown)(
+      op: SignerGrpc.SignerBlockingStub => A
+  ): A = {
     var lastError: RuntimeException = new IllegalStateException(s"no FROST endpoints for $what")
     channels.iterator.zipWithIndex.foreach { case (ch, i) =>
       try return op(stubFor(ch))
       catch {
-        case e: StatusRuntimeException if isNodeDown(e.getStatus) =>
+        case e: StatusRuntimeException if retryOn(e.getStatus) =>
           logger.warn(s"FROST: $what via ${endpoints(i)} unreachable (${e.getStatus.getCode}); failing over")
           lastError = e
       }
@@ -111,7 +118,10 @@ final class FrostBackend(
       val keyId = frostKeyId(keyName)
       Future {
         logger.info(s"FROST: initiating distributed key generation for $keyId")
-        blocking(withFailover("dkg")(_.dkg(DkgRequest.newBuilder().setKeyId(keyId).build())))
+        // DKG is a one-shot ceremony: only fail over if the endpoint is unreachable at the
+        // connection level (no ceremony started). Never retry on DEADLINE_EXCEEDED — a slow but
+        // in-flight DKG must not be run a second time against another leader.
+        blocking(withFailover("dkg", connectionRefused)(_.dkg(DkgRequest.newBuilder().setKeyId(keyId).build())))
         keyId
       }
     case other => delegate.generateSigningKeyPair(other, keyName)
@@ -209,6 +219,11 @@ object FrostBackend {
     * as opposed to a real application answer we must surface. */
   private def isNodeDown(status: Status): Boolean =
     status.getCode == Status.Code.UNAVAILABLE || status.getCode == Status.Code.DEADLINE_EXCEEDED
+
+  /** Stricter predicate for non-idempotent ops (DKG): only the endpoint being unreachable at the
+    * connection level — never a timeout, which may mean the op is still running. */
+  private def connectionRefused(status: Status): Boolean =
+    status.getCode == Status.Code.UNAVAILABLE
 
   private def frostKeyId(keyName: Option[String]): String = {
     val name = keyName.map(n => n.replaceAll("[^A-Za-z0-9_-]", "_")).getOrElse("key")

@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use frost_ed25519 as frost;
 use frost::keys::dkg::{round1, round2};
@@ -32,6 +33,20 @@ struct RefreshState {
     participant: RefreshParticipant,
 }
 
+/// A per-key ceremony guard: only one DKG/refresh may be in progress for a given key at a time.
+/// Owner is the ceremony id; a guard whose ceremony crashed mid-flight is preempted after the
+/// orphan timeout (an in-progress ceremony releases its guard at part3 / on clean failure, so this
+/// only ever applies to a leader that died between part1 and part3).
+struct CeremonyGuard {
+    owner: String,
+    kind: &'static str,
+    started: Instant,
+}
+
+/// How long an orphaned ceremony guard blocks a new ceremony for the same key. Longer than any
+/// realistic DKG/refresh round-trip; shorter than a human's patience for a crashed ceremony.
+const CEREMONY_ORPHAN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
 pub struct Node {
     pub identifier: Identifier,
     pub max_signers: u16,
@@ -40,6 +55,8 @@ pub struct Node {
     cosigners: Mutex<std::collections::HashMap<String, Arc<Cosigner>>>,
     dkg_sessions: Mutex<std::collections::HashMap<String, DkgState>>,
     refresh_sessions: Mutex<std::collections::HashMap<String, RefreshState>>,
+    // key_id -> the ceremony currently allowed to (re)write that key's share.
+    ceremonies: Mutex<std::collections::HashMap<String, CeremonyGuard>>,
 }
 
 impl Node {
@@ -52,6 +69,35 @@ impl Node {
             cosigners: Mutex::new(Default::default()),
             dkg_sessions: Mutex::new(Default::default()),
             refresh_sessions: Mutex::new(Default::default()),
+            ceremonies: Mutex::new(Default::default()),
+        }
+    }
+
+    /// Reserve `key_id` for ceremony `owner`. Fails if a *different*, non-orphaned ceremony holds it
+    /// — this is what serializes concurrent DKG/refresh and prevents split-brain shares.
+    fn acquire_ceremony(&self, key_id: &str, owner: &str, kind: &'static str) -> Result<()> {
+        let mut guards = self.ceremonies.lock().expect("ceremonies lock");
+        if let Some(cur) = guards.get(key_id) {
+            if cur.owner != owner && cur.started.elapsed() < CEREMONY_ORPHAN_TIMEOUT {
+                return Err(DaemonError::CeremonyInProgress {
+                    key_id: key_id.to_string(),
+                    kind: cur.kind,
+                    other: cur.owner.clone(),
+                });
+            }
+        }
+        guards.insert(
+            key_id.to_string(),
+            CeremonyGuard { owner: owner.to_string(), kind, started: Instant::now() },
+        );
+        Ok(())
+    }
+
+    /// Release the guard for `key_id` iff `owner` still holds it.
+    fn release_ceremony(&self, key_id: &str, owner: &str) {
+        let mut guards = self.ceremonies.lock().expect("ceremonies lock");
+        if guards.get(key_id).map(|c| c.owner == owner).unwrap_or(false) {
+            guards.remove(key_id);
         }
     }
 
@@ -119,13 +165,27 @@ impl Node {
     // -- DKG peer ops --
 
     pub fn dkg_part1(&self, dkg_id: &str, key_id: &str) -> Result<round1::Package> {
+        // DKG must never clobber a provisioned key — the namespace key is non-rotatable, so an
+        // accidental re-DKG (failover retry, ops mistake) would destroy the node's identity.
+        if self.keystore.exists(key_id) {
+            return Err(DaemonError::KeyExists(key_id.to_string()));
+        }
+        // Serialize against any other DKG/refresh for this key (prevents split-brain shares).
+        self.acquire_ceremony(key_id, dkg_id, "dkg")?;
         let mut participant = DkgParticipant::new(self.identifier, self.max_signers, self.min_signers);
-        let package = participant.part1()?;
-        self.dkg_sessions
-            .lock()
-            .expect("dkg lock")
-            .insert(dkg_id.to_string(), DkgState { key_id: key_id.to_string(), participant });
-        Ok(package)
+        match participant.part1() {
+            Ok(package) => {
+                self.dkg_sessions
+                    .lock()
+                    .expect("dkg lock")
+                    .insert(dkg_id.to_string(), DkgState { key_id: key_id.to_string(), participant });
+                Ok(package)
+            }
+            Err(e) => {
+                self.release_ceremony(key_id, dkg_id);
+                Err(e.into())
+            }
+        }
     }
 
     pub fn dkg_part2(
@@ -133,10 +193,16 @@ impl Node {
         dkg_id: &str,
         round1_map: &BTreeMap<Identifier, round1::Package>,
     ) -> Result<BTreeMap<Identifier, round2::Package>> {
-        let mut sessions = self.dkg_sessions.lock().expect("dkg lock");
-        let state = sessions.get_mut(dkg_id).ok_or_else(|| DaemonError::UnknownDkg(dkg_id.into()))?;
-        let others = without_self(round1_map, self.identifier);
-        Ok(state.participant.part2(&others)?)
+        let (key_id, result) = {
+            let mut sessions = self.dkg_sessions.lock().expect("dkg lock");
+            let state = sessions.get_mut(dkg_id).ok_or_else(|| DaemonError::UnknownDkg(dkg_id.into()))?;
+            let others = without_self(round1_map, self.identifier);
+            (state.key_id.clone(), state.participant.part2(&others))
+        };
+        if result.is_err() {
+            self.release_ceremony(&key_id, dkg_id);
+        }
+        Ok(result?)
     }
 
     pub fn dkg_part3(
@@ -149,6 +215,21 @@ impl Node {
             let mut sessions = self.dkg_sessions.lock().expect("dkg lock");
             sessions.remove(dkg_id).ok_or_else(|| DaemonError::UnknownDkg(dkg_id.into()))?
         };
+        let outcome = self.finish_dkg(&mut state, round1_map, round2_for_me);
+        self.release_ceremony(&state.key_id, dkg_id); // release on success and failure alike
+        outcome
+    }
+
+    fn finish_dkg(
+        &self,
+        state: &mut DkgState,
+        round1_map: &BTreeMap<Identifier, round1::Package>,
+        round2_for_me: &BTreeMap<Identifier, round2::Package>,
+    ) -> Result<[u8; 32]> {
+        // Re-check under the ceremony guard: refuse if the key was provisioned meanwhile.
+        if self.keystore.exists(&state.key_id) {
+            return Err(DaemonError::KeyExists(state.key_id.clone()));
+        }
         let others = without_self(round1_map, self.identifier);
         let (key_package, public_key_package) = state.participant.part3(&others, round2_for_me)?;
 
@@ -165,13 +246,22 @@ impl Node {
         if !self.keystore.exists(key_id) {
             return Err(DaemonError::UnknownKey(key_id.to_string()));
         }
+        // Serialize against any other DKG/refresh for this key (prevents split-brain shares).
+        self.acquire_ceremony(key_id, refresh_id, "refresh")?;
         let mut participant = RefreshParticipant::new(self.identifier, self.max_signers, self.min_signers);
-        let package = participant.part1()?;
-        self.refresh_sessions
-            .lock()
-            .expect("refresh lock")
-            .insert(refresh_id.to_string(), RefreshState { key_id: key_id.to_string(), participant });
-        Ok(package)
+        match participant.part1() {
+            Ok(package) => {
+                self.refresh_sessions
+                    .lock()
+                    .expect("refresh lock")
+                    .insert(refresh_id.to_string(), RefreshState { key_id: key_id.to_string(), participant });
+                Ok(package)
+            }
+            Err(e) => {
+                self.release_ceremony(key_id, refresh_id);
+                Err(e.into())
+            }
+        }
     }
 
     pub fn refresh_part2(
@@ -179,11 +269,17 @@ impl Node {
         refresh_id: &str,
         round1_map: &BTreeMap<Identifier, round1::Package>,
     ) -> Result<BTreeMap<Identifier, round2::Package>> {
-        let mut sessions = self.refresh_sessions.lock().expect("refresh lock");
-        let state =
-            sessions.get_mut(refresh_id).ok_or_else(|| DaemonError::UnknownDkg(refresh_id.into()))?;
-        let others = without_self(round1_map, self.identifier);
-        Ok(state.participant.part2(&others)?)
+        let (key_id, result) = {
+            let mut sessions = self.refresh_sessions.lock().expect("refresh lock");
+            let state =
+                sessions.get_mut(refresh_id).ok_or_else(|| DaemonError::UnknownDkg(refresh_id.into()))?;
+            let others = without_self(round1_map, self.identifier);
+            (state.key_id.clone(), state.participant.part2(&others))
+        };
+        if result.is_err() {
+            self.release_ceremony(&key_id, refresh_id);
+        }
+        Ok(result?)
     }
 
     pub fn refresh_part3(
@@ -196,6 +292,17 @@ impl Node {
             let mut sessions = self.refresh_sessions.lock().expect("refresh lock");
             sessions.remove(refresh_id).ok_or_else(|| DaemonError::UnknownDkg(refresh_id.into()))?
         };
+        let outcome = self.finish_refresh(&mut state, round1_map, round2_for_me);
+        self.release_ceremony(&state.key_id, refresh_id);
+        outcome
+    }
+
+    fn finish_refresh(
+        &self,
+        state: &mut RefreshState,
+        round1_map: &BTreeMap<Identifier, round1::Package>,
+        round2_for_me: &BTreeMap<Identifier, round2::Package>,
+    ) -> Result<[u8; 32]> {
         let old = self.keystore.load(&state.key_id)?;
         let old_group = group_verifying_key_bytes(&old.public_key_package)?;
         let others = without_self(round1_map, self.identifier);

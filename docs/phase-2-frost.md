@@ -115,6 +115,25 @@ Why cluster-side, not a driver-side coordinator:
   can stall signing, never forge.
 - The cluster is independently testable and deployable, exactly like Horcrux's cosigner set.
 
+## Ceremony safety (DKG / refresh)
+
+DKG and refresh rewrite a key's shares, so they must never overlap or clobber a live key:
+
+- **DKG never overwrites a provisioned key.** `dkg_part1` refuses if the key already exists
+  (`KeyExists`) — an accidental re-DKG (a failover retry, an ops mistake) would otherwise generate a
+  brand-new key and **destroy the non-rotatable namespace key**.
+- **One ceremony per key at a time.** Each node holds a per-key ceremony guard: a second DKG or
+  refresh for the same key (a different ceremony id) is refused (`CeremonyInProgress`) until the
+  first releases at part 3, or its guard expires (orphan timeout, for a leader that died
+  mid-ceremony). This prevents two overlapping ceremonies from leaving nodes with shares on
+  *different* sharing polynomials — which share the group key but cannot sign together (split-brain).
+- **The driver never auto-retries DKG.** `FrostBackend` fails a DKG over to another endpoint only on
+  a connection-level `UNAVAILABLE`, never on `DEADLINE_EXCEEDED` — a slow-but-succeeding ceremony
+  must not be run a second time against a different leader.
+
+Concurrent ceremonies therefore fail closed (refused, retry later), never corrupt. Signing is
+unaffected — each signature uses a fresh session id and is fully independent.
+
 ## The one dangerous failure mode: nonce reuse
 
 Reusing a round-1 nonce commitment across two different messages **leaks the share's secret**. This
