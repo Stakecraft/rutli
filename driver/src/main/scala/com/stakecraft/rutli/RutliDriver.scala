@@ -41,6 +41,7 @@ final class RutliDriver(
     override val supportedSigningAlgoSpecs: Set[SigningAlgoSpec],
     override val supportedEncryptionKeySpecs: Set[EncryptionKeySpec],
     override val supportedEncryptionAlgoSpecs: Set[EncryptionAlgoSpec],
+    blockingPool: Option[java.util.concurrent.ExecutorService] = None,
 )(implicit ec: ExecutionContext)
     extends KmsDriver {
 
@@ -119,10 +120,11 @@ final class RutliDriver(
 
   override def close(): Unit =
     try backend.close()
-    finally {
+    finally
       try approvalGate.close()
-      finally auditLog.foreach(_.close())
-    }
+      finally
+        try auditLog.foreach(_.close())
+        finally blockingPool.foreach(_.shutdownNow())
 
   /** Wrap an operation: map failures to [[KmsDriverException]] per the SPI contract (preserving a
     * backend-thrown exception's retryable flag, wrapping anything else as non-retryable), and emit

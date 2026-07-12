@@ -12,6 +12,7 @@
 
 use frost_ed25519 as frost;
 use serde::{Deserialize, Serialize};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -65,9 +66,16 @@ impl KeyStore {
             Some(s) => s.seal(&plain)?,
             None => plain,
         };
-        std::fs::write(&tmp, bytes)?;
-        // Atomic replace so a crash never leaves a half-written share.
+        // Write + fsync the temp file, atomically rename, then fsync the directory — so a share
+        // survives power loss as durably as the nonce store (which already fsyncs). Without this a
+        // crash right after DKG could lose the just-generated share while peers kept theirs.
+        {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(&bytes)?;
+            f.sync_all()?;
+        }
         std::fs::rename(&tmp, &path)?;
+        std::fs::File::open(&self.dir)?.sync_all()?; // fsync the directory entry (the rename)
         Ok(())
     }
 

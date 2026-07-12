@@ -65,6 +65,16 @@ final class RutliDriverFactory extends KmsDriverFactory {
     implicit val ec: ExecutionContext = executionContext
     val logger = loggerFactory(classOf[RutliDriver])
 
+    // FROST gRPC calls and approval polling BLOCK. Run them on a dedicated bounded daemon pool so a
+    // burst of gated signs or a slow cluster can't starve Canton's shared ExecutionContext. Only
+    // created when a blocking component is actually configured; shut down in RutliDriver.close().
+    val blockingPool: Option[java.util.concurrent.ExecutorService] =
+      if (config.backend == "frost" || config.approval.isDefined)
+        Some(RutliDriverFactory.newBlockingPool("rutli-blocking"))
+      else None
+    val blockingEc: ExecutionContext =
+      blockingPool.map(ExecutionContext.fromExecutor).getOrElse(executionContext)
+
     def buildBackend(kind: String): KmsBackend = kind match {
       case "software" => new SoftwareBackend()
       case "hsm" =>
@@ -86,7 +96,7 @@ final class RutliDriverFactory extends KmsDriverFactory {
         if (eps.isEmpty)
           throw new IllegalArgumentException("frost backend requires `endpoint` or `endpoints`")
         // Non-namespace keys go to the delegate backend (the HSM in production).
-        new FrostBackend(eps, buildBackend(frost.delegate), logger, frost.tls)
+        new FrostBackend(eps, buildBackend(frost.delegate), logger, frost.tls)(blockingEc)
       case other =>
         throw new IllegalArgumentException(
           s"unsupported backend '$other'; supported: software, hsm, frost"
@@ -103,7 +113,7 @@ final class RutliDriverFactory extends KmsDriverFactory {
         logger.info(
           s"M-of-N approval enabled: ${policy.rules.size} rule(s), ${policy.approvers.size} approver(s), inbox=${policy.inboxDir}"
         )
-        new com.stakecraft.rutli.policy.FileApprovalGate(policy, logger)
+        new com.stakecraft.rutli.policy.FileApprovalGate(policy, logger)(blockingEc)
       case None => com.stakecraft.rutli.policy.AutoApproveGate
     }
 
@@ -128,6 +138,7 @@ final class RutliDriverFactory extends KmsDriverFactory {
       backend.supportedSigningAlgoSpecs,
       backend.supportedEncryptionKeySpecs,
       backend.supportedEncryptionAlgoSpecs,
+      blockingPool,
     )
   }
 }
@@ -136,4 +147,19 @@ object RutliDriverFactory {
 
   /** The driver name referenced by the Canton node config: `crypto.kms.name = "rutli"`. */
   val driverName: String = "rutli"
+
+  /** A bounded pool of daemon threads for blocking work (FROST RPCs, approval polling). Daemon so
+    * it never blocks JVM shutdown; bounded so it can't spawn unboundedly under load. */
+  private def newBlockingPool(name: String): java.util.concurrent.ExecutorService = {
+    val counter = new java.util.concurrent.atomic.AtomicInteger(0)
+    val size = math.max(4, Runtime.getRuntime.availableProcessors)
+    java.util.concurrent.Executors.newFixedThreadPool(
+      size,
+      (r: Runnable) => {
+        val t = new Thread(r, s"$name-${counter.incrementAndGet()}")
+        t.setDaemon(true)
+        t
+      },
+    )
+  }
 }
