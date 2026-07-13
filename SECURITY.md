@@ -25,7 +25,8 @@ Include a description, reproduction, and impact. We aim to acknowledge within 72
 - FROST signing: fresh per-session nonce commitments, never reused; good CSPRNG; strict per-session
   nonce state; canonical encoding of the group public key and `R` enforced at the boundary.
 - Threshold **decryption** is not attempted with bespoke crypto — encryption keys stay in an HSM.
-- Audit log entries are append-only and tamper-evident (hash-chained) once Phase 3 lands.
+- Audit log entries are append-only and tamper-evident (hash-chained), fsynced write-ahead, and a
+  successful op that cannot be logged fails closed. (`audit-log-path`.)
 
 ## Scope reminder
 

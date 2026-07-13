@@ -8,7 +8,8 @@ package com.stakecraft.rutli
   *
   *   - `software` (Phase 0): in-process BouncyCastle crypto. Integration testing only.
   *   - `hsm` (Phase 1): keys in a PKCS#11 HSM / enclave. Requires the `hsm` block.
-  *   - `frost` (Phase 2, not yet implemented): FROST-ed25519 MPC cluster for the namespace key.
+  *   - `frost` (Phase 2): FROST-ed25519 MPC cluster for the namespace key; other keys delegate to
+  *     `hsm`/`software`. Requires the `frost` block.
   *
   * @param backend       Which key backend to use: "software" | "hsm" | "frost".
   * @param auditLogging  Emit per-operation audit lines to the node log.

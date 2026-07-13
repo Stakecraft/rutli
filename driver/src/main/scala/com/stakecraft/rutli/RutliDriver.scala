@@ -20,9 +20,9 @@ import scala.util.{Failure, Success}
   * operation to a [[com.stakecraft.rutli.backend.KmsBackend]]. It performs no cryptography of
   * its own and never holds private key material.
   *
-  * Later phases add here (not in the backend): M-of-N quorum/approval enforcement, a tamper-evident
-  * audit log, and replay/equivocation guards on signing. The OpenTelemetry trace context is
-  * accepted per the SPI and can be propagated to those layers.
+  * Enforced here (not in the backend): M-of-N approval, the tamper-evident hash-chained audit log,
+  * and the per-key signing journal (replay detection + rate limit). The OpenTelemetry trace context
+  * is accepted per the SPI and can be propagated to those layers.
   *
   * With `auditLogging` enabled every operation is logged (op, keyId, algo, byte sizes, outcome).
   * This is the plain-log precursor of the Phase 3 hash-chained audit log, and doubles as the

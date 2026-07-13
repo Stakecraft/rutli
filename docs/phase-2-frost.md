@@ -16,7 +16,8 @@
 >   `RUTLI_FROST_ENDPOINT`): against a real 3-node cluster it runs DKG for the namespace key,
 >   threshold-signs a Canton 34-byte payload, and the **stock JDK Ed25519 verifier accepts** the
 >   64-byte signature; non-Ed25519 keys fall through to the delegate. Config: `backend = "frost"`
->   + `frost { endpoint, delegate }` (see `deploy/devnet/canton-frost.conf`).
+>   + `frost { endpoints, delegate }` (plural — the full roster, for failover; see
+>   `deploy/devnet/canton-frost.conf`).
 >
 > - **Canton ↔ FROST end-to-end: PASSED (2026-07-03).** A real Canton 3.5.6 participant booted with
 >   `backend = "frost"` (`deploy/devnet/canton-frost.conf`): all three Ed25519 node keys (namespace,
@@ -103,7 +104,8 @@ RutliDriver (JVM)  ──FrostBackend──►  gRPC/mTLS  ──►  Cosigner c
 The `FrostBackend` is a **dumb client**: it submits `{keyId, digest}` and awaits a 64-byte
 signature. Round orchestration lives *inside* the cluster:
 
-1. Cosigners elect a leader (Raft). The leader drives each signing session.
+1. The node the driver contacts is the leader for that request (static leader; the driver fails over
+   to another cosigner if it's unreachable — no Raft, see the note above). The leader drives the session.
 2. **Round 1 (commit):** leader collects nonce commitments `(Dᵢ, Eᵢ)` from ≥ `t` cosigners.
 3. **Round 2 (sign):** leader sends the digest + commitment set; each cosigner returns a signature
    share `zᵢ`.
@@ -162,8 +164,8 @@ is *the* FROST footgun. Mitigations, all mandatory:
 2. `FrostBackend` (Scala) implementing `KmsBackend` — maps `generateSigningKeyPair`(Ed25519) and
    `sign` to the gRPC calls; every other op (encryption, symmetric, non-Ed25519 signing) delegates
    to the co-located `HsmBackend` (composite backend, routing by key type).
-3. Rust cosigner: `frost-ed25519` + a Raft crate (e.g. `openraft`) + tonic (gRPC) + a crash-safe
-   nonce store. Package as a small static binary + container.
+3. Rust cosigner: `frost-ed25519` + tonic (gRPC) + a crash-safe nonce store, packaged as a small
+   static binary + container. (No Raft — static leader + driver-side failover; see the note above.)
 4. `deploy/frost/` — docker-compose bringing up `n=3, t=2` cosigners + the devnet participant, for
    an end-to-end "namespace key signed by FROST, verified by Canton" integration test.
 

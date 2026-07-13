@@ -36,8 +36,10 @@ correctly and the key that resulted is the one the node now carries.
 - [ ] `n` cosigner hosts provisioned, each in its own trust domain, clocks synced.
 - [ ] Cluster mTLS PKI generated and distributed: `scripts/gen-frost-certs.sh <n>` → one CA, one
       cert per cosigner, one driver client cert. CA private key handled per your PKI policy.
-- [ ] A per-cosigner seal secret minted (`openssl rand -hex 32`) and stored in each host's secret
-      manager, exposed to the daemon as `RUTLI_SEAL_SECRET`. **Never on disk, never in the config.**
+- [ ] One shared cluster seal master secret minted (`openssl rand -hex 32`) and placed in each
+      host's secret manager, exposed to the daemon as `RUTLI_SEAL_SECRET`. Each node derives its own
+      per-node encryption key from it via HKDF (salted by node id) — so it's one secret, distinct
+      keys. **Never on disk, never in the config.**
 - [ ] Each cosigner JSON config authored with `"tls": { … }` and
       `"share_seal": { "secret_env": "RUTLI_SEAL_SECRET" }` set (see `deploy/frost/config-tls/`).
       Plaintext / no-TLS is disqualifying for a real ceremony.

@@ -73,8 +73,8 @@ Backends, added over the phases:
   [phase-1-hsm.md](phase-1-hsm.md).
 - `FrostBackend` — Phase 2. gRPC to the Rust FROST-ed25519 MPC cluster for the namespace key;
   delegates everything else to the HSM/software backend. ✅ implemented, live e2e verified against a
-  3-node cluster (DKG + threshold sign, JDK-verified). mTLS is a follow-up. See
-  [phase-2-frost.md](phase-2-frost.md).
+  3-node cluster (DKG + threshold sign, JDK-verified) — with mutual TLS across the mesh and from the
+  driver, and driver-side failover. See [phase-2-frost.md](phase-2-frost.md).
 - `DklsBackend` — Phase 4. Threshold ECDSA P-256/P-384 for protocol/sequencer keys.
 
 Routing by key type lets each key sit on the right backend simultaneously (e.g. namespace key on
@@ -89,11 +89,13 @@ rotated), so keys must be **born inside the KMS**. The cluster therefore runs di
 generation (DKG) at node bootstrap — the full private key never exists anywhere, not even for a
 moment at creation. Strictly stronger than sharding, and the only option Canton leaves open anyway.
 
-**2. Cluster-side coordination (leader election), not a driver-side coordinator.** Horcrux's
-cosigners elect a leader (Raft) and orchestrate signing rounds among themselves; the validator-facing
-side is a dumb client. We adopt the same shape: the share nodes coordinate the FROST rounds
-internally, and the `FrostBackend` in the driver just submits `sign(hash, keyId)` to the cluster and
-awaits the aggregated signature. This keeps round orchestration and nonce-session state out of the
+**2. Cluster-side coordination, not a driver-side coordinator.** Horcrux's cosigners coordinate
+signing among themselves and the validator-facing side is a dumb client. We adopt the same shape,
+but deliberately **without** a Raft/consensus layer: the node the driver contacts leads that request
+(static leader), the driver fails over to another cosigner if it's unreachable, and the share nodes
+coordinate the FROST rounds internally. FROST sessions are independent, so no replicated log is
+needed (see phase-2-frost.md). The `FrostBackend` just submits `sign(hash, keyId)` and awaits the
+aggregated signature. This keeps round orchestration and nonce-session state out of the
 Canton JVM, survives driver/node restarts cleanly, and makes the cluster independently testable. A
 compromised or crashed client can stall signing but never touches key material or nonce state.
 
