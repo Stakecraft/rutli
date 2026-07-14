@@ -393,3 +393,27 @@ fn refresh_participant_rejects_out_of_order_calls_without_panic() {
     p.part1().unwrap();
     assert!(matches!(p.part3(&r1, &r2, pkp, kp), Err(CoreError::InvalidCeremonyState(_))));
 }
+
+#[test]
+fn in_flight_sign_sessions_are_freed_on_completion_and_abort() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cosigners = dkg_cluster(&tmp);
+    let c = &cosigners[0];
+
+    // Three round-1 sessions minted, none completed yet.
+    c.round1("s1").unwrap();
+    c.round1("s2").unwrap();
+    c.round1("s3").unwrap();
+    assert_eq!(c.pending_count(), 3);
+
+    // Aborting a session frees its RAM nonces (leader gave up / timed out).
+    c.abort("s2");
+    assert_eq!(c.pending_count(), 2);
+
+    // A completed 2-of-3 signature consumes the leader's pending session (round2 removes it).
+    let msg = canton_digest(b"free-on-complete");
+    sign_with(&[&cosigners[0], &cosigners[1]], "s-complete", &msg).unwrap();
+    // s-complete for cosigner 0 was minted and removed by round2 → not left pending.
+    // (s1, s3 remain orphaned but are pruned by TTL on future round1s.)
+    assert!(c.pending_count() <= 2);
+}

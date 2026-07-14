@@ -29,6 +29,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use frost_ed25519 as frost;
 use frost::round1::{SigningCommitments, SigningNonces};
@@ -46,8 +47,14 @@ pub struct Cosigner {
     key_package: frost::keys::KeyPackage,
     public_key_package: frost::keys::PublicKeyPackage,
     nonce_store: NonceStore,
-    pending: Mutex<BTreeMap<String, SigningNonces>>,
+    // session id -> (nonces, when round1 minted them). Orphaned entries (round1 without round2 —
+    // leader gave up / crashed) are pruned by age so RAM cannot grow unbounded.
+    pending: Mutex<BTreeMap<String, (SigningNonces, Instant)>>,
 }
+
+/// Max lifetime of an un-completed round-1 session before it is pruned. Comfortably longer than any
+/// real sign round-trip; a leader that hasn't finished by then has abandoned the session.
+const PENDING_TTL: Duration = Duration::from_secs(5 * 60);
 
 impl Cosigner {
     pub fn new(
@@ -81,10 +88,10 @@ impl Cosigner {
         }
         let (nonces, commitments) =
             frost::round1::commit(self.key_package.signing_share(), &mut OsRng);
-        self.pending
-            .lock()
-            .expect("pending lock")
-            .insert(session_id.to_string(), nonces);
+        let mut pending = self.pending.lock().expect("pending lock");
+        // Prune orphaned sessions so pending can't grow without bound.
+        pending.retain(|_, (_, started)| started.elapsed() < PENDING_TTL);
+        pending.insert(session_id.to_string(), (nonces, Instant::now()));
         Ok(commitments)
     }
 
@@ -97,7 +104,7 @@ impl Cosigner {
         message: &[u8],
         commitments: &BTreeMap<Identifier, SigningCommitments>,
     ) -> Result<SignatureShare> {
-        let nonces = self
+        let (nonces, _started) = self
             .pending
             .lock()
             .expect("pending lock")
@@ -116,6 +123,11 @@ impl Cosigner {
     /// session id itself stays usable only if round 2 never ran.
     pub fn abort(&self, session_id: &str) {
         self.pending.lock().expect("pending lock").remove(session_id);
+    }
+
+    /// Number of in-flight (round-1, not yet round-2) sessions. For observability/tests.
+    pub fn pending_count(&self) -> usize {
+        self.pending.lock().expect("pending lock").len()
     }
 }
 
