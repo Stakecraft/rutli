@@ -117,6 +117,16 @@ Why cluster-side, not a driver-side coordinator:
   can stall signing, never forge.
 - The cluster is independently testable and deployable, exactly like Horcrux's cosigner set.
 
+## Who can call the Signer API
+
+mTLS restricts the cluster to holders of cluster-CA-signed certs, but a *cosigner* cert should not
+be able to request arbitrary signatures. Set `signer_allowlist` (a list of client-cert Common Names,
+typically just the driver's — `"driver"` from `gen-frost-certs.sh`) so only the driver may call the
+sensitive Signer RPCs (`Dkg`/`Sign`/`Refresh`/`GroupKey`); `Health` stays open for liveness. The
+mesh Peer API is unaffected. When `signer_allowlist` is unset the daemon warns and allows any
+cluster cert (still behind the ceremony guard). The TLS example configs and the k8s ConfigMap set
+`"signer_allowlist": ["driver"]`.
+
 ## Ceremony safety (DKG / refresh)
 
 DKG and refresh rewrite a key's shares, so they must never overlap or clobber a live key:

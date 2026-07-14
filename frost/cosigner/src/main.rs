@@ -119,7 +119,18 @@ async fn main() -> Result<()> {
     }
     peers.sort_by_key(|p| identifier_index(p.identifier()));
 
-    let signer = SignerSvc { node: node.clone(), peers };
+    let allowed_cns = cfg.signer_allowlist.as_ref().map(|v| {
+        Arc::new(v.iter().cloned().collect::<std::collections::HashSet<String>>())
+    });
+    match &allowed_cns {
+        Some(cns) => tracing::info!(?cns, "Signer API restricted to allowlisted client CNs"),
+        None => tracing::warn!(
+            "Signer API has no client allowlist — any cluster-CA cert may request signatures; \
+             set signer_allowlist (e.g. the driver cert CN) in production"
+        ),
+    }
+
+    let signer = SignerSvc { node: node.clone(), peers, allowed_cns };
     let peer = PeerSvc { node };
 
     let addr = cfg

@@ -4,7 +4,7 @@
 //! tonic service implementations: the client-facing [`Signer`] and the mesh-internal [`Peer`].
 //! Both are thin — they (de)serialize the wire bytes and delegate to [`Node`] / [`orchestrator`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
@@ -18,10 +18,42 @@ use crate::pb::signer_server::Signer;
 pub struct SignerSvc {
     pub node: Arc<Node>,
     pub peers: Peers,
+    /// When set, only these client-cert CNs may call the sensitive Signer RPCs. `None` = open
+    /// (mTLS still enforced by the transport). See `Config::signer_allowlist`.
+    pub allowed_cns: Option<Arc<HashSet<String>>>,
+}
+
+impl SignerSvc {
+    /// Enforce the client-cert allowlist (if configured) for a sensitive Signer call.
+    fn authorize<T>(&self, req: &Request<T>) -> Result<(), Status> {
+        let Some(allowed) = &self.allowed_cns else { return Ok(()) };
+        let certs = req
+            .peer_certs()
+            .ok_or_else(|| Status::unauthenticated("client certificate required for the Signer API"))?;
+        let cn = certs
+            .first()
+            .and_then(|leaf| cn_of(leaf.as_ref()))
+            .ok_or_else(|| Status::unauthenticated("client certificate has no usable Common Name"))?;
+        if allowed.contains(&cn) {
+            Ok(())
+        } else {
+            Err(Status::permission_denied(format!(
+                "client '{cn}' is not permitted to call the Signer API"
+            )))
+        }
+    }
+}
+
+/// Extract the subject Common Name from a DER-encoded X.509 certificate.
+pub fn cn_of(der: &[u8]) -> Option<String> {
+    let (_, cert) = x509_parser::parse_x509_certificate(der).ok()?;
+    let cn = cert.subject().iter_common_name().next()?.as_str().ok()?.to_string();
+    Some(cn)
 }
 
 #[tonic::async_trait]
 impl Signer for SignerSvc {
+    // Health is intentionally NOT allowlisted — it leaks nothing and is useful for liveness.
     async fn health(
         &self,
         _req: Request<pb::HealthRequest>,
@@ -33,17 +65,20 @@ impl Signer for SignerSvc {
         &self,
         req: Request<pb::GroupKeyRequest>,
     ) -> Result<Response<pb::GroupKeyReply>, Status> {
+        self.authorize(&req)?;
         let key = self.node.group_key(&req.into_inner().key_id).map_err(Status::from)?;
         Ok(Response::new(pb::GroupKeyReply { group_verifying_key: key.to_vec() }))
     }
 
     async fn dkg(&self, req: Request<pb::DkgRequest>) -> Result<Response<pb::DkgReply>, Status> {
+        self.authorize(&req)?;
         let key_id = req.into_inner().key_id;
         let key = orchestrator::run_dkg(&self.peers, &key_id).await.map_err(Status::from)?;
         Ok(Response::new(pb::DkgReply { group_verifying_key: key.to_vec() }))
     }
 
     async fn sign(&self, req: Request<pb::SignRequest>) -> Result<Response<pb::SignReply>, Status> {
+        self.authorize(&req)?;
         let r = req.into_inner();
         let sig = orchestrator::sign(&self.node, &self.peers, &r.key_id, &r.message)
             .await
@@ -55,11 +90,13 @@ impl Signer for SignerSvc {
         &self,
         req: Request<pb::RefreshRequest>,
     ) -> Result<Response<pb::RefreshReply>, Status> {
+        self.authorize(&req)?;
         let key_id = req.into_inner().key_id;
         let key = orchestrator::run_refresh(&self.peers, &key_id).await.map_err(Status::from)?;
         Ok(Response::new(pb::RefreshReply { group_verifying_key: key.to_vec() }))
     }
 }
+
 
 pub struct PeerSvc {
     pub node: Arc<Node>,
@@ -162,4 +199,22 @@ fn json<T: serde::Serialize>(v: &T) -> Result<Vec<u8>, Status> {
 
 fn de<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Status> {
     serde_json::from_slice(bytes).map_err(|e| Status::invalid_argument(format!("deserialize: {e}")))
+}
+#[cfg(test)]
+mod tests {
+    use super::cn_of;
+
+    #[test]
+    fn cn_of_extracts_common_name() {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(vec!["rutli-cosigner".to_string()]).unwrap();
+        params.distinguished_name.push(rcgen::DnType::CommonName, "driver");
+        let cert = params.self_signed(&key).unwrap();
+        assert_eq!(cn_of(cert.der()).as_deref(), Some("driver"));
+    }
+
+    #[test]
+    fn cn_of_rejects_garbage() {
+        assert_eq!(cn_of(b"not a certificate"), None);
+    }
 }

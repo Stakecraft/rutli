@@ -25,5 +25,8 @@
   },
   "share_seal": {
     "secret_env": "RUTLI_SEAL_SECRET"
-  }
+  },
+  "signer_allowlist": [
+    "driver"
+  ]
 }

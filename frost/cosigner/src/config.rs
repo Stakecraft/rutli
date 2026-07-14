@@ -26,6 +26,12 @@ pub struct Config {
     /// JSON (dev only).
     #[serde(default)]
     pub share_seal: Option<ShareSealConfig>,
+    /// Client-certificate Common Names allowed to call the Signer API (Dkg/Sign/Refresh/GroupKey) —
+    /// typically just the driver's cert CN. When absent, any cluster-CA-signed client may call it
+    /// (mTLS still required; the ceremony guard still applies). Set this in production so a cosigner
+    /// cert cannot request arbitrary signatures. The mesh Peer API is unaffected.
+    #[serde(default)]
+    pub signer_allowlist: Option<Vec<String>>,
 }
 
 /// Where the share-sealing master secret comes from. The secret must be injected at runtime (secret

@@ -24,7 +24,8 @@ data:
         { "identifier": 3, "endpoint": "https://cosigner-2.rutli-cosigner:9101" }
       ],
       "tls": { "ca_cert": "/certs/ca.crt", "cert": "/certs/cosigner1.crt", "key": "/certs/cosigner1.key", "domain": "rutli-cosigner" },
-      "share_seal": { "secret_env": "RUTLI_SEAL_SECRET" }
+      "share_seal": { "secret_env": "RUTLI_SEAL_SECRET" },
+      "signer_allowlist": ["driver"]
     }
   cosigner-2.json: |
     {
@@ -38,7 +39,8 @@ data:
         { "identifier": 3, "endpoint": "https://cosigner-2.rutli-cosigner:9101" }
       ],
       "tls": { "ca_cert": "/certs/ca.crt", "cert": "/certs/cosigner2.crt", "key": "/certs/cosigner2.key", "domain": "rutli-cosigner" },
-      "share_seal": { "secret_env": "RUTLI_SEAL_SECRET" }
+      "share_seal": { "secret_env": "RUTLI_SEAL_SECRET" },
+      "signer_allowlist": ["driver"]
     }
   cosigner-3.json: |
     {
@@ -52,5 +54,6 @@ data:
         { "identifier": 3, "endpoint": "https://cosigner-2.rutli-cosigner:9101" }
       ],
       "tls": { "ca_cert": "/certs/ca.crt", "cert": "/certs/cosigner3.crt", "key": "/certs/cosigner3.key", "domain": "rutli-cosigner" },
-      "share_seal": { "secret_env": "RUTLI_SEAL_SECRET" }
+      "share_seal": { "secret_env": "RUTLI_SEAL_SECRET" },
+      "signer_allowlist": ["driver"]
     }

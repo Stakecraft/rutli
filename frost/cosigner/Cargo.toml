@@ -30,6 +30,7 @@ aes-gcm = { workspace = true }
 hkdf = { workspace = true }
 sha2 = { workspace = true }
 zeroize = { workspace = true }
+x509-parser = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }
@@ -38,3 +39,4 @@ protoc-bin-vendored = { workspace = true }
 [dev-dependencies]
 ed25519-dalek = { workspace = true }
 tempfile = "3"
+rcgen = { workspace = true }
