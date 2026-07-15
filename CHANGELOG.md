@@ -5,6 +5,20 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Security & robustness (code-review hardening)
+- **Ceremony safety:** DKG/refresh for a key are serialized by a per-key guard (no split-brain
+  shares); DKG refuses to overwrite an existing key (can't destroy the non-rotatable namespace key);
+  out-of-order ceremony RPCs return errors instead of panicking (closes a remote DoS); the driver no
+  longer auto-retries DKG on timeout.
+- **Audit:** the hash-chained log is now genuinely fail-closed — a successful op that can't be logged
+  fails rather than returning an unlogged signature.
+- **Signing journal:** the per-key rate limit survives a restart (rebuilt from the persisted window).
+- **Signer API allowlist:** optional client-cert CN allowlist so only the driver (not a cosigner
+  cert) can request signatures.
+- **Durability/isolation:** keystore share writes fsync file + directory; blocking FROST/approval
+  work runs on a dedicated bounded pool (not Canton's EC); in-flight sign sessions are TTL-pruned.
+- **Docs:** corrected stale claims (mTLS/Raft/refresh/audit/seal-secret) to match the code.
+
 ### Added
 - **Deployment: Docker & Kubernetes.** A production-flavored compose
   (`deploy/frost/docker-compose.tls.yml`, mutual TLS + sealed shares) alongside the dev one, and a
