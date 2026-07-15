@@ -35,6 +35,9 @@ pub enum DaemonError {
     #[error("a {kind} ceremony (id {other}) is already in progress for key {key_id}")]
     CeremonyInProgress { key_id: String, kind: &'static str, other: String },
 
+    #[error("ceremony {owner} for key {key_id} was superseded by a newer ceremony — refusing to persist")]
+    CeremonySuperseded { key_id: String, owner: String },
+
     #[error("could not reach signing threshold: needed {needed}, got {got}")]
     ThresholdNotMet { needed: usize, got: usize },
 
@@ -56,6 +59,7 @@ impl From<DaemonError> for tonic::Status {
             DaemonError::KeyExists(_) => tonic::Status::already_exists(e.to_string()),
             // aborted: a concurrent ceremony is holding the key; the caller may retry later.
             DaemonError::CeremonyInProgress { .. } => tonic::Status::aborted(e.to_string()),
+            DaemonError::CeremonySuperseded { .. } => tonic::Status::aborted(e.to_string()),
             _ => tonic::Status::internal(e.to_string()),
         }
     }

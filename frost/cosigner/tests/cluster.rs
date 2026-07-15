@@ -270,3 +270,71 @@ async fn refresh_refuses_a_concurrent_ceremony_for_the_same_key() {
     let err = n.refresh_part1("refresh-B", KEY_ID).unwrap_err();
     assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "got {err:?}");
 }
+
+/// Build a cluster whose ceremony orphan-guard timeout is tiny, so a stalled ceremony can be
+/// preempted in a test without waiting the production 15 minutes.
+fn cluster_fast_orphan(tmp: &tempfile::TempDir) -> (Vec<Arc<Node>>, Peers) {
+    let mut nodes = Vec::new();
+    for i in 1..=N {
+        let ks = KeyStore::open(tmp.path().join(format!("node-{i}"))).unwrap();
+        let id = Identifier::try_from(i).unwrap();
+        nodes.push(Arc::new(Node::new_with_ceremony_timeout(
+            id, N, T, ks, std::time::Duration::from_millis(1),
+        )));
+    }
+    let peers: Peers =
+        nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    (nodes, peers)
+}
+
+#[tokio::test]
+async fn a_superseded_refresh_cannot_persist_after_orphan_preempt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = cluster_fast_orphan(&tmp);
+    let group_key = run_dkg(&peers, KEY_ID).await.unwrap();
+
+    // A stale refresh grabs the per-key guard on node 0, then stalls (the leader "died").
+    nodes[0].refresh_part1("stale-refresh", KEY_ID).unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await; // exceed the tiny orphan timeout
+
+    // A real cluster-wide refresh preempts the orphan and completes; group key unchanged.
+    assert_eq!(run_refresh(&peers, KEY_ID).await.unwrap(), group_key);
+
+    // The stale ceremony can no longer persist — its finish is refused (superseded / session gone).
+    let empty1: std::collections::BTreeMap<Identifier, frost_ed25519::keys::dkg::round1::Package> =
+        std::collections::BTreeMap::new();
+    let empty2: std::collections::BTreeMap<Identifier, frost_ed25519::keys::dkg::round2::Package> =
+        std::collections::BTreeMap::new();
+    assert!(nodes[0].refresh_part3("stale-refresh", &empty1, &empty2).is_err());
+
+    // The cluster is consistent and still signs under the unchanged group key.
+    for n in &nodes {
+        assert_eq!(n.group_key(KEY_ID).unwrap(), group_key);
+    }
+    let msg = canton_digest(b"after preempt");
+    let sig = sign(&nodes[0], &peers, KEY_ID, &msg).await.unwrap();
+    ed25519_dalek::VerifyingKey::from_bytes(&group_key)
+        .unwrap()
+        .verify_strict(&msg, &ed25519_dalek::Signature::from_bytes(&sig))
+        .unwrap();
+}
+
+#[tokio::test]
+async fn sign_is_refused_while_a_refresh_holds_the_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = cluster(&tmp);
+    let group_key = run_dkg(&peers, KEY_ID).await.unwrap();
+
+    // A refresh grabs the per-key guard (part1) but hasn't finished.
+    nodes[0].refresh_part1("refresh-1", KEY_ID).unwrap();
+
+    // A new sign on that node is refused while the refresh is in progress (no undefined interleave).
+    let err = nodes[0].sign_round1(KEY_ID, "sign-during-refresh").unwrap_err();
+    assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "got {err:?}");
+
+    // Signing on a node NOT mid-refresh still works (its guard is free).
+    assert!(nodes[1].sign_round1(KEY_ID, "elsewhere").is_ok());
+
+    // group_key still readable; the cluster is consistent.
+    assert_eq!(nodes[0].group_key(KEY_ID).unwrap(), group_key);
+}

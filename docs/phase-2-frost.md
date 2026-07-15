@@ -143,8 +143,18 @@ DKG and refresh rewrite a key's shares, so they must never overlap or clobber a 
   a connection-level `UNAVAILABLE`, never on `DEADLINE_EXCEEDED` — a slow-but-succeeding ceremony
   must not be run a second time against a different leader.
 
-Concurrent ceremonies therefore fail closed (refused, retry later), never corrupt. Signing is
-unaffected — each signature uses a fresh session id and is fully independent.
+- **A superseded ceremony cannot persist.** The guard has an orphan timeout (a leader that dies
+  mid-ceremony is preempted after it). To close the window between preempting the old guard and
+  clearing its session, every `part2`/`part3` re-checks that the calling ceremony still owns the
+  key's guard; a superseded one is refused (`CeremonySuperseded`) and never writes — this is the
+  load-bearing safety for refresh, which would otherwise split/clobber shares.
+- **Signing is fenced during a ceremony.** A new `sign` for a key is refused while a DKG/refresh
+  holds that key's guard (refresh rewrites the share and evicts the cached cosigner). A sign already
+  past round 1 when a refresh lands fails cleanly at round 2 (its nonces went with the old cosigner)
+  — never a silent bad signature. Operationally: don't refresh during a topology burst; drain first.
+
+Concurrent ceremonies therefore fail closed (refused, retry later), never corrupt. Ordinary
+signing is otherwise independent — each signature uses a fresh session id.
 
 ## The one dangerous failure mode: nonce reuse
 
