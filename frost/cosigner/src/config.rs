@@ -94,6 +94,65 @@ impl Config {
                 self.identifier
             )));
         }
+        // With TLS enabled the Signer API is reachable by any cluster-CA-signed client, so a
+        // signer_allowlist (the driver cert CN) is mandatory — otherwise a cosigner cert could
+        // request arbitrary signatures. Plaintext (dev) may omit it.
+        if self.tls.is_some()
+            && self.signer_allowlist.as_ref().map(|a| a.is_empty()).unwrap_or(true)
+        {
+            return Err(Config(
+                "signer_allowlist must be set (non-empty) when tls is enabled — list the driver \
+                 cert CN(s) permitted to call the Signer API"
+                    .into(),
+            ));
+        }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base(tls: Option<TlsConfig>, allow: Option<Vec<String>>) -> Config {
+        Config {
+            identifier: 1,
+            listen: "127.0.0.1:9101".into(),
+            threshold: 2,
+            data_dir: "/tmp/x".into(),
+            peers: vec![
+                PeerConfig { identifier: 1, endpoint: "https://a:9101".into() },
+                PeerConfig { identifier: 2, endpoint: "https://b:9101".into() },
+                PeerConfig { identifier: 3, endpoint: "https://c:9101".into() },
+            ],
+            tls,
+            share_seal: None,
+            signer_allowlist: allow,
+        }
+    }
+
+    fn tls() -> TlsConfig {
+        TlsConfig {
+            ca_cert: "/ca".into(),
+            cert: "/cert".into(),
+            key: "/key".into(),
+            domain: Some("rutli-cosigner".into()),
+        }
+    }
+
+    #[test]
+    fn tls_without_allowlist_is_rejected() {
+        assert!(base(Some(tls()), None).validate().is_err());
+        assert!(base(Some(tls()), Some(vec![])).validate().is_err());
+    }
+
+    #[test]
+    fn tls_with_allowlist_is_ok() {
+        base(Some(tls()), Some(vec!["driver".into()])).validate().unwrap();
+    }
+
+    #[test]
+    fn plaintext_without_allowlist_is_ok() {
+        base(None, None).validate().unwrap();
     }
 }
