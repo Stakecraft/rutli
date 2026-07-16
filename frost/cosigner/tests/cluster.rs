@@ -338,3 +338,128 @@ async fn sign_is_refused_while_a_refresh_holds_the_key() {
     // group_key still readable; the cluster is consistent.
     assert_eq!(nodes[0].group_key(KEY_ID).unwrap(), group_key);
 }
+
+// ── sign abort on failure (P1.3): a give-up frees in-flight nonces now, not at the pending TTL ──
+
+use std::collections::BTreeMap;
+use async_trait::async_trait;
+use frost_ed25519::keys::dkg::{round1, round2};
+use frost_ed25519::round1::SigningCommitments;
+use frost_ed25519::round2::SignatureShare;
+use rutli_cosigner::Result as DaemonResult;
+
+/// Wraps a real peer but fails `sign_round2`, so the leader's round 2 gives up. Every other call —
+/// including `abort_sign` — forwards to the inner peer, modelling a live cosigner that simply can't
+/// complete this signature.
+struct FailRound2 {
+    inner: LocalPeer,
+}
+
+#[async_trait]
+impl PeerApi for FailRound2 {
+    fn identifier(&self) -> Identifier {
+        self.inner.identifier()
+    }
+    async fn sign_round1(&self, key_id: &str, session_id: &str) -> DaemonResult<SigningCommitments> {
+        self.inner.sign_round1(key_id, session_id).await
+    }
+    async fn sign_round2(
+        &self,
+        _key_id: &str,
+        _session_id: &str,
+        _message: &[u8],
+        _commitments: &BTreeMap<Identifier, SigningCommitments>,
+    ) -> DaemonResult<SignatureShare> {
+        Err(DaemonError::Disagreement("forced round2 failure".into()))
+    }
+    async fn abort_sign(&self, key_id: &str, session_id: &str) -> DaemonResult<()> {
+        self.inner.abort_sign(key_id, session_id).await
+    }
+    async fn dkg_part1(&self, dkg_id: &str, key_id: &str) -> DaemonResult<round1::Package> {
+        self.inner.dkg_part1(dkg_id, key_id).await
+    }
+    async fn dkg_part2(
+        &self,
+        dkg_id: &str,
+        round1_map: &BTreeMap<Identifier, round1::Package>,
+    ) -> DaemonResult<BTreeMap<Identifier, round2::Package>> {
+        self.inner.dkg_part2(dkg_id, round1_map).await
+    }
+    async fn dkg_part3(
+        &self,
+        dkg_id: &str,
+        round1_map: &BTreeMap<Identifier, round1::Package>,
+        round2_for_me: &BTreeMap<Identifier, round2::Package>,
+    ) -> DaemonResult<[u8; 32]> {
+        self.inner.dkg_part3(dkg_id, round1_map, round2_for_me).await
+    }
+    async fn refresh_part1(&self, refresh_id: &str, key_id: &str) -> DaemonResult<round1::Package> {
+        self.inner.refresh_part1(refresh_id, key_id).await
+    }
+    async fn refresh_part2(
+        &self,
+        refresh_id: &str,
+        round1_map: &BTreeMap<Identifier, round1::Package>,
+    ) -> DaemonResult<BTreeMap<Identifier, round2::Package>> {
+        self.inner.refresh_part2(refresh_id, round1_map).await
+    }
+    async fn refresh_part3(
+        &self,
+        refresh_id: &str,
+        round1_map: &BTreeMap<Identifier, round1::Package>,
+        round2_for_me: &BTreeMap<Identifier, round2::Package>,
+    ) -> DaemonResult<[u8; 32]> {
+        self.inner.refresh_part3(refresh_id, round1_map, round2_for_me).await
+    }
+}
+
+#[tokio::test]
+async fn a_failed_sign_round2_aborts_the_in_flight_session_on_every_quorum_member() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, _local_peers) = cluster(&tmp);
+    let group_key = run_dkg(&nodes_peers(&nodes), KEY_ID).await.unwrap();
+
+    // Quorum = node 0 (leader, real) + node 1 (fails round 2). Node 2 is omitted so the quorum is
+    // exactly these two and round 2 must touch the failing peer.
+    let peers: Peers = vec![
+        Arc::new(LocalPeer::new(nodes[0].clone())) as Arc<dyn PeerApi>,
+        Arc::new(FailRound2 { inner: LocalPeer::new(nodes[1].clone()) }) as Arc<dyn PeerApi>,
+    ];
+
+    let message = canton_digest(b"round2 will fail");
+    let err = sign(&nodes[0], &peers, KEY_ID, &message).await.unwrap_err();
+    assert!(matches!(err, DaemonError::Disagreement(_)), "got {err:?}");
+
+    // The load-bearing assertion: node 1 held a round-1 nonce (it answered round 1) and the leader's
+    // abort freed it immediately — no waiting for the pending TTL. Node 0 burned its own in round 2.
+    assert_eq!(group_key.len(), 32);
+    assert_eq!(nodes[1].pending_sign_count(KEY_ID), 0, "failed sign must abort node 1's session");
+    assert_eq!(nodes[0].pending_sign_count(KEY_ID), 0, "leader's own session is consumed/aborted");
+
+    // The cluster is unharmed: a fresh, all-real quorum still signs and verifies.
+    let sig = sign(&nodes[0], &nodes_peers(&nodes), KEY_ID, &message).await.unwrap();
+    ed25519_dalek::VerifyingKey::from_bytes(&group_key)
+        .unwrap()
+        .verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig))
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_threshold_shortfall_after_round1_aborts_the_lone_commitment() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, _peers) = cluster(&tmp);
+    let group_key = run_dkg(&nodes_peers(&nodes), KEY_ID).await.unwrap();
+
+    // Only node 0 is offered to the leader — below the 2-of-3 threshold. It mints one commitment,
+    // then the sign gives up; that lone nonce must be aborted, not left for the TTL.
+    let only_leader: Peers = vec![Arc::new(LocalPeer::new(nodes[0].clone())) as Arc<dyn PeerApi>];
+    let err = sign(&nodes[0], &only_leader, KEY_ID, &canton_digest(b"lonely")).await.unwrap_err();
+    assert!(matches!(err, DaemonError::ThresholdNotMet { .. }), "got {err:?}");
+    assert_eq!(nodes[0].pending_sign_count(KEY_ID), 0, "shortfall must abort the lone commitment");
+    assert_eq!(group_key.len(), 32);
+}
+
+/// Fresh all-real peer set over the same nodes (each call makes new LocalPeers; nodes are shared).
+fn nodes_peers(nodes: &[Arc<Node>]) -> Peers {
+    nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect()
+}

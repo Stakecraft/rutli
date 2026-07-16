@@ -214,6 +214,27 @@ impl Node {
         Ok(self.cosigner(key_id)?.round2(session_id, message, commitments)?)
     }
 
+    /// Best-effort abort of an in-flight sign session: free the round-1 nonces held for
+    /// `session_id` instead of letting them linger until the pending-TTL sweep. No-op if this node
+    /// never held nonces for it (cosigner not cached, or round2 already burned the session).
+    pub fn abort_sign(&self, key_id: &str, session_id: &str) {
+        let cached = self.cosigners.lock().expect("cosigners lock").get(key_id).cloned();
+        if let Some(c) = cached {
+            c.abort(session_id);
+        }
+    }
+
+    /// In-flight (round-1, not yet round-2) sign sessions currently held for `key_id`; 0 if the
+    /// cosigner isn't cached. For observability and abort/TTL tests.
+    pub fn pending_sign_count(&self, key_id: &str) -> usize {
+        self.cosigners
+            .lock()
+            .expect("cosigners lock")
+            .get(key_id)
+            .map(|c| c.pending_count())
+            .unwrap_or(0)
+    }
+
     /// Leader-side aggregation using this node's copy of the group public key.
     pub fn aggregate(
         &self,

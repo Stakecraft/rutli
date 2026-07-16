@@ -32,6 +32,8 @@ pub trait PeerApi: Send + Sync {
         message: &[u8],
         commitments: &BTreeMap<Identifier, SigningCommitments>,
     ) -> Result<SignatureShare>;
+    /// Best-effort: drop an in-flight sign session so its nonces are freed now, not at TTL.
+    async fn abort_sign(&self, key_id: &str, session_id: &str) -> Result<()>;
     async fn dkg_part1(&self, dkg_id: &str, key_id: &str) -> Result<round1::Package>;
     async fn dkg_part2(
         &self,
@@ -86,6 +88,10 @@ impl PeerApi for LocalPeer {
         commitments: &BTreeMap<Identifier, SigningCommitments>,
     ) -> Result<SignatureShare> {
         self.node.sign_round2(key_id, session_id, message, commitments)
+    }
+    async fn abort_sign(&self, key_id: &str, session_id: &str) -> Result<()> {
+        self.node.abort_sign(key_id, session_id);
+        Ok(())
     }
     async fn dkg_part1(&self, dkg_id: &str, key_id: &str) -> Result<round1::Package> {
         self.node.dkg_part1(dkg_id, key_id)
@@ -185,6 +191,17 @@ impl PeerApi for GrpcPeer {
             .await?
             .into_inner();
         Ok(serde_json::from_slice(&reply.share)?)
+    }
+
+    async fn abort_sign(&self, key_id: &str, session_id: &str) -> Result<()> {
+        self.client
+            .clone()
+            .abort_sign(pb::AbortSignRequest {
+                key_id: key_id.into(),
+                session_id: session_id.into(),
+            })
+            .await?;
+        Ok(())
     }
 
     async fn dkg_part1(&self, dkg_id: &str, key_id: &str) -> Result<round1::Package> {

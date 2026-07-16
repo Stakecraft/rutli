@@ -51,6 +51,9 @@ pub enum CoreError {
     #[error("unknown signing session: {0}")]
     UnknownSession(String),
 
+    #[error("round1 called twice for in-flight session {0} — use a fresh session id")]
+    DuplicateSession(String),
+
     #[error("ceremony called out of order: {0}")]
     InvalidCeremonyState(&'static str),
 

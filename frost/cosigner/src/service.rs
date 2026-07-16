@@ -128,6 +128,15 @@ impl Peer for PeerSvc {
         Ok(Response::new(pb::SignRound2Reply { share: json(&share)? }))
     }
 
+    async fn abort_sign(
+        &self,
+        req: Request<pb::AbortSignRequest>,
+    ) -> Result<Response<pb::AbortSignReply>, Status> {
+        let r = req.into_inner();
+        self.node.abort_sign(&r.key_id, &r.session_id);
+        Ok(Response::new(pb::AbortSignReply {}))
+    }
+
     async fn dkg_part1(
         &self,
         req: Request<pb::DkgPart1Request>,

@@ -126,17 +126,40 @@ pub async fn sign(node: &Node, peers: &Peers, key_id: &str, message: &[u8]) -> R
         }
     }
     if commitments.len() < threshold {
+        // Not enough cosigners answered round 1 — free the nonces of those that did.
+        abort_sign(&chosen, key_id, &session_id).await;
         return Err(DaemonError::ThresholdNotMet { needed: threshold, got: commitments.len() });
     }
 
     // Round 2: the chosen quorum produces signature shares over the fixed commitment set.
     let mut shares: BTreeMap<Identifier, SignatureShare> = BTreeMap::new();
     for p in &chosen {
-        let share = p.sign_round2(key_id, &session_id, message, &commitments).await?;
-        shares.insert(p.identifier(), share);
+        match p.sign_round2(key_id, &session_id, message, &commitments).await {
+            Ok(share) => {
+                shares.insert(p.identifier(), share);
+            }
+            Err(e) => {
+                // A quorum member failed round 2. The peers that already produced a share have
+                // burned their nonce; those not yet reached still hold round-1 nonces — free them.
+                abort_sign(&chosen, key_id, &session_id).await;
+                return Err(e);
+            }
+        }
     }
 
     node.aggregate(key_id, message, &commitments, &shares)
+}
+
+/// Best-effort: tell each quorum member to drop the in-flight session so its round-1 nonces are
+/// freed now instead of at the pending-TTL sweep. Errors are swallowed — abort is a courtesy, and
+/// the per-session TTL is the correctness backstop. Aborting a session a peer already completed
+/// (round-2 done) is a harmless no-op.
+async fn abort_sign(chosen: &[&Arc<dyn PeerApi>], key_id: &str, session_id: &str) {
+    for p in chosen {
+        if let Err(e) = p.abort_sign(key_id, session_id).await {
+            tracing::debug!(peer = ?p.identifier(), error = %e, "sign abort failed; nonces will TTL-expire");
+        }
+    }
 }
 
 fn new_id(prefix: &str) -> String {

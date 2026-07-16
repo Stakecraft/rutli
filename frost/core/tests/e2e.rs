@@ -417,3 +417,16 @@ fn in_flight_sign_sessions_are_freed_on_completion_and_abort() {
     // (s1, s3 remain orphaned but are pruned by TTL on future round1s.)
     assert!(c.pending_count() <= 2);
 }
+
+#[test]
+fn duplicate_round1_for_same_session_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cosigners = dkg_cluster(&tmp);
+    let c = &cosigners[0];
+    c.round1("dup-session").unwrap();
+    // A second round1 with the SAME id must not overwrite the live nonces.
+    let err = c.round1("dup-session").unwrap_err();
+    assert!(matches!(err, CoreError::DuplicateSession(_)), "got {err:?}");
+    // A different session id still works.
+    assert!(c.round1("other-session").is_ok());
+}

@@ -101,6 +101,16 @@ public final class CosignerProto {
     com.google.protobuf.GeneratedMessage.FieldAccessorTable
       internal_static_rutli_cosigner_v1_SignRound2Reply_fieldAccessorTable;
   static final com.google.protobuf.Descriptors.Descriptor
+    internal_static_rutli_cosigner_v1_AbortSignRequest_descriptor;
+  static final 
+    com.google.protobuf.GeneratedMessage.FieldAccessorTable
+      internal_static_rutli_cosigner_v1_AbortSignRequest_fieldAccessorTable;
+  static final com.google.protobuf.Descriptors.Descriptor
+    internal_static_rutli_cosigner_v1_AbortSignReply_descriptor;
+  static final 
+    com.google.protobuf.GeneratedMessage.FieldAccessorTable
+      internal_static_rutli_cosigner_v1_AbortSignReply_fieldAccessorTable;
+  static final com.google.protobuf.Descriptors.Descriptor
     internal_static_rutli_cosigner_v1_DkgPart1Request_descriptor;
   static final 
     com.google.protobuf.GeneratedMessage.FieldAccessorTable
@@ -156,45 +166,48 @@ public final class CosignerProto {
       "(\014\"a\n\021SignRound2Request\022\016\n\006key_id\030\001 \001(\t\022" +
       "\022\n\nsession_id\030\002 \001(\t\022\017\n\007message\030\003 \001(\014\022\027\n\017" +
       "commitments_map\030\004 \001(\014\" \n\017SignRound2Reply" +
-      "\022\r\n\005share\030\001 \001(\014\"o\n\017DkgPart1Request\022\016\n\006dk" +
-      "g_id\030\001 \001(\t\022\016\n\006key_id\030\002 \001(\t\022\022\n\nidentifier" +
-      "\030\003 \001(\r\022\023\n\013max_signers\030\004 \001(\r\022\023\n\013min_signe" +
-      "rs\030\005 \001(\r\"\'\n\rDkgPart1Reply\022\026\n\016round1_pack" +
-      "age\030\001 \001(\014\"5\n\017DkgPart2Request\022\016\n\006dkg_id\030\001" +
-      " \001(\t\022\022\n\nround1_map\030\002 \001(\014\"#\n\rDkgPart2Repl" +
-      "y\022\022\n\nround2_map\030\001 \001(\014\"P\n\017DkgPart3Request" +
-      "\022\016\n\006dkg_id\030\001 \001(\t\022\022\n\nround1_map\030\002 \001(\014\022\031\n\021" +
-      "round2_map_for_me\030\003 \001(\014\",\n\rDkgPart3Reply" +
-      "\022\033\n\023group_verifying_key\030\001 \001(\0142\376\002\n\006Signer" +
-      "\022J\n\006Health\022 .rutli.cosigner.v1.HealthReq" +
-      "uest\032\036.rutli.cosigner.v1.HealthReply\022P\n\010" +
-      "GroupKey\022\".rutli.cosigner.v1.GroupKeyReq" +
-      "uest\032 .rutli.cosigner.v1.GroupKeyReply\022A" +
-      "\n\003Dkg\022\035.rutli.cosigner.v1.DkgRequest\032\033.r" +
-      "utli.cosigner.v1.DkgReply\022D\n\004Sign\022\036.rutl" +
-      "i.cosigner.v1.SignRequest\032\034.rutli.cosign" +
-      "er.v1.SignReply\022M\n\007Refresh\022!.rutli.cosig" +
-      "ner.v1.RefreshRequest\032\037.rutli.cosigner.v" +
-      "1.RefreshReply2\262\005\n\004Peer\022V\n\nSignRound1\022$." +
-      "rutli.cosigner.v1.SignRound1Request\032\".ru" +
-      "tli.cosigner.v1.SignRound1Reply\022V\n\nSignR" +
-      "ound2\022$.rutli.cosigner.v1.SignRound2Requ" +
-      "est\032\".rutli.cosigner.v1.SignRound2Reply\022" +
-      "P\n\010DkgPart1\022\".rutli.cosigner.v1.DkgPart1" +
-      "Request\032 .rutli.cosigner.v1.DkgPart1Repl" +
-      "y\022P\n\010DkgPart2\022\".rutli.cosigner.v1.DkgPar" +
-      "t2Request\032 .rutli.cosigner.v1.DkgPart2Re" +
-      "ply\022P\n\010DkgPart3\022\".rutli.cosigner.v1.DkgP" +
-      "art3Request\032 .rutli.cosigner.v1.DkgPart3" +
-      "Reply\022X\n\014RefreshPart1\022&.rutli.cosigner.v" +
-      "1.RefreshPart1Request\032 .rutli.cosigner.v" +
-      "1.DkgPart1Reply\022T\n\014RefreshPart2\022\".rutli." +
-      "cosigner.v1.DkgPart2Request\032 .rutli.cosi" +
-      "gner.v1.DkgPart2Reply\022T\n\014RefreshPart3\022\"." +
-      "rutli.cosigner.v1.DkgPart3Request\032 .rutl" +
-      "i.cosigner.v1.DkgPart3ReplyB,\n\031com.stake" +
-      "craft.rutli.grpcB\rCosignerProtoP\001b\006proto" +
-      "3"
+      "\022\r\n\005share\030\001 \001(\014\"6\n\020AbortSignRequest\022\016\n\006k" +
+      "ey_id\030\001 \001(\t\022\022\n\nsession_id\030\002 \001(\t\"\020\n\016Abort" +
+      "SignReply\"o\n\017DkgPart1Request\022\016\n\006dkg_id\030\001" +
+      " \001(\t\022\016\n\006key_id\030\002 \001(\t\022\022\n\nidentifier\030\003 \001(\r" +
+      "\022\023\n\013max_signers\030\004 \001(\r\022\023\n\013min_signers\030\005 \001" +
+      "(\r\"\'\n\rDkgPart1Reply\022\026\n\016round1_package\030\001 " +
+      "\001(\014\"5\n\017DkgPart2Request\022\016\n\006dkg_id\030\001 \001(\t\022\022" +
+      "\n\nround1_map\030\002 \001(\014\"#\n\rDkgPart2Reply\022\022\n\nr" +
+      "ound2_map\030\001 \001(\014\"P\n\017DkgPart3Request\022\016\n\006dk" +
+      "g_id\030\001 \001(\t\022\022\n\nround1_map\030\002 \001(\014\022\031\n\021round2" +
+      "_map_for_me\030\003 \001(\014\",\n\rDkgPart3Reply\022\033\n\023gr" +
+      "oup_verifying_key\030\001 \001(\0142\376\002\n\006Signer\022J\n\006He" +
+      "alth\022 .rutli.cosigner.v1.HealthRequest\032\036" +
+      ".rutli.cosigner.v1.HealthReply\022P\n\010GroupK" +
+      "ey\022\".rutli.cosigner.v1.GroupKeyRequest\032 " +
+      ".rutli.cosigner.v1.GroupKeyReply\022A\n\003Dkg\022" +
+      "\035.rutli.cosigner.v1.DkgRequest\032\033.rutli.c" +
+      "osigner.v1.DkgReply\022D\n\004Sign\022\036.rutli.cosi" +
+      "gner.v1.SignRequest\032\034.rutli.cosigner.v1." +
+      "SignReply\022M\n\007Refresh\022!.rutli.cosigner.v1" +
+      ".RefreshRequest\032\037.rutli.cosigner.v1.Refr" +
+      "eshReply2\207\006\n\004Peer\022V\n\nSignRound1\022$.rutli." +
+      "cosigner.v1.SignRound1Request\032\".rutli.co" +
+      "signer.v1.SignRound1Reply\022V\n\nSignRound2\022" +
+      "$.rutli.cosigner.v1.SignRound2Request\032\"." +
+      "rutli.cosigner.v1.SignRound2Reply\022P\n\010Dkg" +
+      "Part1\022\".rutli.cosigner.v1.DkgPart1Reques" +
+      "t\032 .rutli.cosigner.v1.DkgPart1Reply\022P\n\010D" +
+      "kgPart2\022\".rutli.cosigner.v1.DkgPart2Requ" +
+      "est\032 .rutli.cosigner.v1.DkgPart2Reply\022P\n" +
+      "\010DkgPart3\022\".rutli.cosigner.v1.DkgPart3Re" +
+      "quest\032 .rutli.cosigner.v1.DkgPart3Reply\022" +
+      "X\n\014RefreshPart1\022&.rutli.cosigner.v1.Refr" +
+      "eshPart1Request\032 .rutli.cosigner.v1.DkgP" +
+      "art1Reply\022T\n\014RefreshPart2\022\".rutli.cosign" +
+      "er.v1.DkgPart2Request\032 .rutli.cosigner.v" +
+      "1.DkgPart2Reply\022T\n\014RefreshPart3\022\".rutli." +
+      "cosigner.v1.DkgPart3Request\032 .rutli.cosi" +
+      "gner.v1.DkgPart3Reply\022S\n\tAbortSign\022#.rut" +
+      "li.cosigner.v1.AbortSignRequest\032!.rutli." +
+      "cosigner.v1.AbortSignReplyB,\n\031com.stakec" +
+      "raft.rutli.grpcB\rCosignerProtoP\001b\006proto3"
     };
     descriptor = com.google.protobuf.Descriptors.FileDescriptor
       .internalBuildGeneratedFileFrom(descriptorData,
@@ -290,38 +303,50 @@ public final class CosignerProto {
       com.google.protobuf.GeneratedMessage.FieldAccessorTable(
         internal_static_rutli_cosigner_v1_SignRound2Reply_descriptor,
         new java.lang.String[] { "Share", });
-    internal_static_rutli_cosigner_v1_DkgPart1Request_descriptor =
+    internal_static_rutli_cosigner_v1_AbortSignRequest_descriptor =
       getDescriptor().getMessageTypes().get(15);
+    internal_static_rutli_cosigner_v1_AbortSignRequest_fieldAccessorTable = new
+      com.google.protobuf.GeneratedMessage.FieldAccessorTable(
+        internal_static_rutli_cosigner_v1_AbortSignRequest_descriptor,
+        new java.lang.String[] { "KeyId", "SessionId", });
+    internal_static_rutli_cosigner_v1_AbortSignReply_descriptor =
+      getDescriptor().getMessageTypes().get(16);
+    internal_static_rutli_cosigner_v1_AbortSignReply_fieldAccessorTable = new
+      com.google.protobuf.GeneratedMessage.FieldAccessorTable(
+        internal_static_rutli_cosigner_v1_AbortSignReply_descriptor,
+        new java.lang.String[] { });
+    internal_static_rutli_cosigner_v1_DkgPart1Request_descriptor =
+      getDescriptor().getMessageTypes().get(17);
     internal_static_rutli_cosigner_v1_DkgPart1Request_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessage.FieldAccessorTable(
         internal_static_rutli_cosigner_v1_DkgPart1Request_descriptor,
         new java.lang.String[] { "DkgId", "KeyId", "Identifier", "MaxSigners", "MinSigners", });
     internal_static_rutli_cosigner_v1_DkgPart1Reply_descriptor =
-      getDescriptor().getMessageTypes().get(16);
+      getDescriptor().getMessageTypes().get(18);
     internal_static_rutli_cosigner_v1_DkgPart1Reply_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessage.FieldAccessorTable(
         internal_static_rutli_cosigner_v1_DkgPart1Reply_descriptor,
         new java.lang.String[] { "Round1Package", });
     internal_static_rutli_cosigner_v1_DkgPart2Request_descriptor =
-      getDescriptor().getMessageTypes().get(17);
+      getDescriptor().getMessageTypes().get(19);
     internal_static_rutli_cosigner_v1_DkgPart2Request_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessage.FieldAccessorTable(
         internal_static_rutli_cosigner_v1_DkgPart2Request_descriptor,
         new java.lang.String[] { "DkgId", "Round1Map", });
     internal_static_rutli_cosigner_v1_DkgPart2Reply_descriptor =
-      getDescriptor().getMessageTypes().get(18);
+      getDescriptor().getMessageTypes().get(20);
     internal_static_rutli_cosigner_v1_DkgPart2Reply_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessage.FieldAccessorTable(
         internal_static_rutli_cosigner_v1_DkgPart2Reply_descriptor,
         new java.lang.String[] { "Round2Map", });
     internal_static_rutli_cosigner_v1_DkgPart3Request_descriptor =
-      getDescriptor().getMessageTypes().get(19);
+      getDescriptor().getMessageTypes().get(21);
     internal_static_rutli_cosigner_v1_DkgPart3Request_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessage.FieldAccessorTable(
         internal_static_rutli_cosigner_v1_DkgPart3Request_descriptor,
         new java.lang.String[] { "DkgId", "Round1Map", "Round2MapForMe", });
     internal_static_rutli_cosigner_v1_DkgPart3Reply_descriptor =
-      getDescriptor().getMessageTypes().get(20);
+      getDescriptor().getMessageTypes().get(22);
     internal_static_rutli_cosigner_v1_DkgPart3Reply_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessage.FieldAccessorTable(
         internal_static_rutli_cosigner_v1_DkgPart3Reply_descriptor,

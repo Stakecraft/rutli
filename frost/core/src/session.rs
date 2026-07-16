@@ -86,11 +86,17 @@ impl Cosigner {
         if self.nonce_store.is_consumed(session_id)? {
             return Err(CoreError::NonceReuse(session_id.to_string()));
         }
-        let (nonces, commitments) =
-            frost::round1::commit(self.key_package.signing_share(), &mut OsRng);
         let mut pending = self.pending.lock().expect("pending lock");
         // Prune orphaned sessions so pending can't grow without bound.
         pending.retain(|_, (_, started)| started.elapsed() < PENDING_TTL);
+        // Refuse to overwrite live nonces for an in-flight session id — a duplicate round1 (replay
+        // or a confused/hostile caller) must not silently discard the pending nonces of a session
+        // that hasn't reached round2. The caller should use a fresh session id (or abort first).
+        if pending.contains_key(session_id) {
+            return Err(CoreError::DuplicateSession(session_id.to_string()));
+        }
+        let (nonces, commitments) =
+            frost::round1::commit(self.key_package.signing_share(), &mut OsRng);
         pending.insert(session_id.to_string(), (nonces, Instant::now()));
         Ok(commitments)
     }

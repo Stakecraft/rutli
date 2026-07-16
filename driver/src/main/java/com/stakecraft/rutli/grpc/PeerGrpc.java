@@ -264,6 +264,37 @@ public final class PeerGrpc {
     return getRefreshPart3Method;
   }
 
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.AbortSignRequest,
+      com.stakecraft.rutli.grpc.AbortSignReply> getAbortSignMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "AbortSign",
+      requestType = com.stakecraft.rutli.grpc.AbortSignRequest.class,
+      responseType = com.stakecraft.rutli.grpc.AbortSignReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.AbortSignRequest,
+      com.stakecraft.rutli.grpc.AbortSignReply> getAbortSignMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.AbortSignRequest, com.stakecraft.rutli.grpc.AbortSignReply> getAbortSignMethod;
+    if ((getAbortSignMethod = PeerGrpc.getAbortSignMethod) == null) {
+      synchronized (PeerGrpc.class) {
+        if ((getAbortSignMethod = PeerGrpc.getAbortSignMethod) == null) {
+          PeerGrpc.getAbortSignMethod = getAbortSignMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.AbortSignRequest, com.stakecraft.rutli.grpc.AbortSignReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "AbortSign"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.AbortSignRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.AbortSignReply.getDefaultInstance()))
+              .setSchemaDescriptor(new PeerMethodDescriptorSupplier("AbortSign"))
+              .build();
+        }
+      }
+    }
+    return getAbortSignMethod;
+  }
+
   /**
    * Creates a new async stub that supports all call types for the service
    */
@@ -386,6 +417,17 @@ public final class PeerGrpc {
         io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DkgPart3Reply> responseObserver) {
       io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getRefreshPart3Method(), responseObserver);
     }
+
+    /**
+     * <pre>
+     * Best-effort: drop an in-flight sign session so its round-1 nonces are freed immediately
+     * instead of lingering until the pending-TTL sweep. Sent by the leader when a sign gives up.
+     * </pre>
+     */
+    default void abortSign(com.stakecraft.rutli.grpc.AbortSignRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.AbortSignReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getAbortSignMethod(), responseObserver);
+    }
   }
 
   /**
@@ -486,6 +528,18 @@ public final class PeerGrpc {
       io.grpc.stub.ClientCalls.asyncUnaryCall(
           getChannel().newCall(getRefreshPart3Method(), getCallOptions()), request, responseObserver);
     }
+
+    /**
+     * <pre>
+     * Best-effort: drop an in-flight sign session so its round-1 nonces are freed immediately
+     * instead of lingering until the pending-TTL sweep. Sent by the leader when a sign gives up.
+     * </pre>
+     */
+    public void abortSign(com.stakecraft.rutli.grpc.AbortSignRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.AbortSignReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getAbortSignMethod(), getCallOptions()), request, responseObserver);
+    }
   }
 
   /**
@@ -563,6 +617,17 @@ public final class PeerGrpc {
       return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
           getChannel(), getRefreshPart3Method(), getCallOptions(), request);
     }
+
+    /**
+     * <pre>
+     * Best-effort: drop an in-flight sign session so its round-1 nonces are freed immediately
+     * instead of lingering until the pending-TTL sweep. Sent by the leader when a sign gives up.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.AbortSignReply abortSign(com.stakecraft.rutli.grpc.AbortSignRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getAbortSignMethod(), getCallOptions(), request);
+    }
   }
 
   /**
@@ -639,6 +704,17 @@ public final class PeerGrpc {
     public com.stakecraft.rutli.grpc.DkgPart3Reply refreshPart3(com.stakecraft.rutli.grpc.DkgPart3Request request) {
       return io.grpc.stub.ClientCalls.blockingUnaryCall(
           getChannel(), getRefreshPart3Method(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * Best-effort: drop an in-flight sign session so its round-1 nonces are freed immediately
+     * instead of lingering until the pending-TTL sweep. Sent by the leader when a sign gives up.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.AbortSignReply abortSign(com.stakecraft.rutli.grpc.AbortSignRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getAbortSignMethod(), getCallOptions(), request);
     }
   }
 
@@ -725,6 +801,18 @@ public final class PeerGrpc {
       return io.grpc.stub.ClientCalls.futureUnaryCall(
           getChannel().newCall(getRefreshPart3Method(), getCallOptions()), request);
     }
+
+    /**
+     * <pre>
+     * Best-effort: drop an in-flight sign session so its round-1 nonces are freed immediately
+     * instead of lingering until the pending-TTL sweep. Sent by the leader when a sign gives up.
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.AbortSignReply> abortSign(
+        com.stakecraft.rutli.grpc.AbortSignRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getAbortSignMethod(), getCallOptions()), request);
+    }
   }
 
   private static final int METHODID_SIGN_ROUND1 = 0;
@@ -735,6 +823,7 @@ public final class PeerGrpc {
   private static final int METHODID_REFRESH_PART1 = 5;
   private static final int METHODID_REFRESH_PART2 = 6;
   private static final int METHODID_REFRESH_PART3 = 7;
+  private static final int METHODID_ABORT_SIGN = 8;
 
   private static final class MethodHandlers<Req, Resp> implements
       io.grpc.stub.ServerCalls.UnaryMethod<Req, Resp>,
@@ -784,6 +873,10 @@ public final class PeerGrpc {
         case METHODID_REFRESH_PART3:
           serviceImpl.refreshPart3((com.stakecraft.rutli.grpc.DkgPart3Request) request,
               (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DkgPart3Reply>) responseObserver);
+          break;
+        case METHODID_ABORT_SIGN:
+          serviceImpl.abortSign((com.stakecraft.rutli.grpc.AbortSignRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.AbortSignReply>) responseObserver);
           break;
         default:
           throw new AssertionError();
@@ -859,6 +952,13 @@ public final class PeerGrpc {
               com.stakecraft.rutli.grpc.DkgPart3Request,
               com.stakecraft.rutli.grpc.DkgPart3Reply>(
                 service, METHODID_REFRESH_PART3)))
+        .addMethod(
+          getAbortSignMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.AbortSignRequest,
+              com.stakecraft.rutli.grpc.AbortSignReply>(
+                service, METHODID_ABORT_SIGN)))
         .build();
   }
 
@@ -915,6 +1015,7 @@ public final class PeerGrpc {
               .addMethod(getRefreshPart1Method())
               .addMethod(getRefreshPart2Method())
               .addMethod(getRefreshPart3Method())
+              .addMethod(getAbortSignMethod())
               .build();
         }
       }

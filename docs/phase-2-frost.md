@@ -163,6 +163,12 @@ is *the* FROST footgun. Mitigations, all mandatory:
 - Per-session fresh nonces from a CSPRNG; never derive deterministically from the key+message.
 - Persist a nonce-session record **before** releasing a signature share; refuse to reuse a
   committed nonce even across process restarts (crash-safe single-use).
+- Refuse a duplicate `round1` for a session id that is still in flight — overwriting live nonces
+  would strand the first set and invites replay confusion; the leader must use a fresh id per attempt.
+- Free in-flight nonces promptly: when a signature gives up (round-2 failure, or too few cosigners
+  answered round 1) the leader best-effort tells each quorum member to abort the session, so a
+  give-up doesn't pin round-1 nonces in RAM until the pending-TTL sweep. The per-session TTL remains
+  the backstop if the abort can't be delivered.
 - Enforce canonical encoding of the group public key and `R` at the boundary.
 - Lean on the audited ZF crate's nonce API rather than hand-rolling.
 
