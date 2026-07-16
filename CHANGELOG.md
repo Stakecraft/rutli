@@ -10,6 +10,16 @@ All notable changes to Rütli are documented here. Format loosely follows
   shares); DKG refuses to overwrite an existing key (can't destroy the non-rotatable namespace key);
   out-of-order ceremony RPCs return errors instead of panicking (closes a remote DoS); the driver no
   longer auto-retries DKG on timeout.
+- **Ceremony ownership (split-brain after a crash):** an orphaned ceremony guard is preempted only
+  after a timeout, and preemption now also drops the dead leader's leftover session state, so a
+  superseded DKG/refresh can no longer persist a share — `part2`/`part3` re-check ownership before
+  writing. A new sign is fenced out while a ceremony holds the key. Regression-tested.
+- **Sign session hygiene:** a duplicate `round1` for a still-in-flight session id is refused instead
+  of silently overwriting live nonces; and when a signature gives up (round-2 failure or a
+  threshold shortfall after round 1) the leader best-effort aborts the session on every quorum
+  member, freeing their round-1 nonces immediately rather than waiting out the pending-TTL sweep.
+- **Config redaction:** the confidential config writer (used when Canton echoes driver config back)
+  now also redacts the TLS private-key path, not just the HSM PIN.
 - **Audit:** the hash-chained log is now genuinely fail-closed — a successful op that can't be logged
   fails rather than returning an unlogged signature.
 - **Signing journal:** the per-key rate limit survives a restart (rebuilt from the persisted window).
