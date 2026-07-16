@@ -47,7 +47,12 @@ final class RutliDriverFactory extends KmsDriverFactory {
       val base = deriveWriter[HsmConfig]
       if (confidential) base.contramap[HsmConfig](_.copy(pin = None)) else base
     }
-    implicit val frostTlsWriter: ConfigWriter[FrostTlsConfig] = deriveWriter[FrostTlsConfig]
+    // Redact the TLS private-key path when `confidential` so a config echo (Canton logs / its config
+    // API) doesn't reveal where the driver's client private key lives on disk.
+    implicit val frostTlsWriter: ConfigWriter[FrostTlsConfig] = {
+      val base = deriveWriter[FrostTlsConfig]
+      if (confidential) base.contramap[FrostTlsConfig](_.copy(key = "<redacted>")) else base
+    }
     implicit val frostWriter: ConfigWriter[FrostConfig] = deriveWriter[FrostConfig]
     import com.stakecraft.rutli.policy.{Approver, ApprovalRule, ApprovalPolicy}
     implicit val ruleWriter: ConfigWriter[ApprovalRule] = deriveWriter[ApprovalRule]
