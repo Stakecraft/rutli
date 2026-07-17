@@ -50,7 +50,7 @@ spec:
       containers:
         - name: cosigner
           # Pin by digest in production: kustomize edit set image …@sha256:…
-          image: ghcr.io/stakecraft/rutli-cosigner:0.2.0 # build+push from frost/Dockerfile
+          image: ghcr.io/stakecraft/rutli-cosigner:0.2.1 # build+push from frost/Dockerfile
           imagePullPolicy: IfNotPresent
           # Pod cosigner-<ordinal> runs config cosigner-<ordinal+1>.json.
           command: ["/bin/sh", "-c"]

@@ -18,6 +18,6 @@ resources:
   # - cronjob-refresh.yaml
 images:
   - name: ghcr.io/stakecraft/rutli-cosigner
-    newTag: "0.2.0"
+    newTag: "0.2.1"
     # Prefer digest pins in prod:
     # digest: sha256:REPLACE_AFTER_PUSH

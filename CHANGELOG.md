@@ -5,6 +5,11 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-07-17
+
+Patch on 0.2.0: cluster-wide ceremony fencing, Signer digest enforcement, TLS CI smoke, sealing
+migration, k8s/ops hardening — plus the metrics and soak harness landed right after the 0.2.0 tag.
+
 ### Security & robustness
 - **Cluster-wide refresh/DKG fence:** before any ceremony crypto, the leader takes the per-key
   guard on every peer (`CeremonyFence`), so no node can start a new sign mid-ceremony. The reverse
@@ -20,7 +25,7 @@ All notable changes to Rütli are documented here. Format loosely follows
 - **CI TLS smoke:** PR CI brings up the mTLS + sealed compose cluster and runs Health / DKG /
   Sign through the driver cert (plaintext client must be refused).
 - **K8s hardening:** required pod anti-affinity, zone topology spread, PDB (`minAvailable: 2`),
-  image tag `0.2.0` (digest-pin guidance), narrower NetworkPolicy (namespace + pod labels),
+  image tag `0.2.1` (digest-pin guidance), narrower NetworkPolicy (namespace + pod labels),
   example backup/refresh CronJobs.
 - **ApproveCli** prints `digest` / `nonce` before signing an approval so humans can verify the
   bound operation. Audit engagement checklist in `docs/audit-prep.md`.

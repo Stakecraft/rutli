@@ -26,7 +26,7 @@ spec:
           # for cosigner-1 / cosigner-2 (or use a controller) in production.
           containers:
             - name: backup
-              image: ghcr.io/stakecraft/rutli-cosigner:0.2.0
+              image: ghcr.io/stakecraft/rutli-cosigner:0.2.1
               imagePullPolicy: IfNotPresent
               command:
                 - /bin/sh
