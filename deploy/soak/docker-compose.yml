@@ -1,0 +1,50 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Soak stack: the production-flavored 2-of-3 FROST cluster (mTLS + sealed shares, included from
+# deploy/frost) plus Prometheus and Grafana pre-provisioned with the Rütli dashboard and alert
+# rules. This is the KMS half of a testnet soak; the Splice validator half is wired to it via the
+# Canton driver (see docs/testnet-soak.md).
+#
+#   1. Certs + seal secret: as in deploy/frost/docker-compose.tls.yml (steps 1–2).
+#   2. RUTLI_SEAL_SECRET=… docker compose -f deploy/soak/docker-compose.yml up -d --build
+#   3. Grafana: http://localhost:3000 (anonymous read-only) — dashboard "Rütli FROST Cosigner".
+#      Prometheus: http://localhost:9090 (alerts under /alerts).
+#
+# Requires Docker Compose v2.20+ (`include:`).
+
+include:
+  - ../frost/docker-compose.tls.yml
+
+services:
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=45d # outlives the soak window
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../monitoring/prometheus-rules.yml:/etc/prometheus/rules/rutli.yml:ro
+      - prom-data:/prometheus
+    ports: ["9090:9090"]
+    depends_on: [cosigner1, cosigner2, cosigner3]
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    restart: unless-stopped
+    environment:
+      # Local soak dashboard — read-only anonymous access, no signup. Do NOT expose publicly.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../monitoring/grafana-dashboard.json:/var/lib/grafana/dashboards/rutli.json:ro
+      - grafana-data:/var/lib/grafana
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+
+volumes:
+  prom-data:
+  grafana-data:

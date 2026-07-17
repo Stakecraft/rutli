@@ -1,0 +1,62 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Splice compose OVERLAY: point the validator's Canton participant at the Rütli FROST cluster for
+# its Ed25519 namespace/identity keys. Apply on top of the stock Splice validator compose:
+#
+#   ./start.sh …usual flags… -n soak_default        # join the Rütli soak stack's docker network
+#   # then add this file to the generated compose invocation, or run compose manually:
+#   docker compose -f compose.yaml [stock overlays…] -f /path/to/compose-rutli-kms.yaml up -d
+#
+# Prerequisites:
+#   - The Rütli soak stack is up on the same host (deploy/soak/docker-compose.yml) and the DKG for
+#     the namespace key has NOT yet run — the participant must be FRESH (crypto.provider = kms must
+#     be set from first boot; an initialized participant cannot be switched in place).
+#   - rutli-canton-participant image built (see Dockerfile.participant in this directory).
+#   - Driver TLS material: ca.crt + driver.crt/driver.key from scripts/gen-frost-certs.sh, copied
+#     into ./certs next to this file. The driver cert CN ("driver") must be on every cosigner's
+#     signer_allowlist (deploy/frost/config-tls sets this already).
+#
+# NOTE the Canton node key ("participant" below) must match the node name in the base image's
+# app.conf. Verify once per Splice version:
+#   docker run --rm --entrypoint cat ${IMAGE_REPO}canton-participant:${IMAGE_TAG} /app/app.conf | grep participants
+
+services:
+  participant:
+    image: rutli-canton-participant:${IMAGE_TAG}
+    volumes:
+      - ./certs:/rutli-certs:ro
+      - rutli-driver-state:/rutli-state # audit log + signing journal survive restarts
+    environment:
+      # HOCON applied after app.conf (ADDITIONAL_CONFIG_* wins) — the whole KMS wiring, no rebuild.
+      ADDITIONAL_CONFIG_RUTLI_KMS: |
+        canton.participants.participant.crypto {
+          provider = kms
+          kms {
+            type = driver
+            name = "rutli"
+            config = {
+              backend        = "frost"
+              audit-logging  = true
+              audit-log-path = "/rutli-state/audit.jsonl"
+              signing-journal = { dir = "/rutli-state/journal" }
+              frost = {
+                # Full cosigner roster on the shared docker network — driver fails over across it.
+                endpoints = ["cosigner1:9101", "cosigner2:9102", "cosigner3:9103"]
+                delegate  = "software" # soak scope; "hsm" + hsm{...} for production delegates
+                tls = {
+                  ca-cert = "/rutli-certs/ca.crt"
+                  cert    = "/rutli-certs/driver.crt"
+                  key     = "/rutli-certs/driver.key"
+                  domain  = "rutli-cosigner"
+                }
+              }
+            }
+          }
+          # The namespace key FROST serves is Ed25519 — make it the participant default.
+          signing.keys.default       = ec-curve-25519
+          signing.algorithms.default = ed-25519
+        }
+
+volumes:
+  rutli-driver-state:

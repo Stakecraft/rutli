@@ -12,6 +12,17 @@ All notable changes to Rütli are documented here. Format loosely follows
   digests, or session ids. Wired into the TLS compose (host ports 9201–9203) and the k8s bundle
   (port `metrics`/9200, scrape annotations, NetworkPolicy ingress for `rutli.io/scraper` pods).
   Alert rules + Grafana dashboard in `deploy/monitoring/`; runbook in `docs/observability.md`.
+- **Testnet-soak harness** (`deploy/soak/`): one-command stack — the mTLS/sealed cosigner cluster
+  (compose `include:`) plus Prometheus (rules loaded, 45-day retention) and Grafana (dashboard
+  pre-provisioned) — a daily PASS/FAIL gate (`soak-check.sh`), and a Splice DevNet validator
+  overlay (`validator/`): thin derived canton-participant image injecting `rutli-driver.jar` via
+  `EXTRA_CLASSPATH` + an `ADDITIONAL_CONFIG_*` compose overlay wiring `crypto.provider = kms` to
+  the cluster — no Splice images forked. Runbook with drill calendar and exit criteria in
+  `docs/testnet-soak.md`. Whole KMS half verified live: DKG + threshold signs from every leader,
+  a sign with one cosigner down, and a mid-traffic refresh (group key unchanged) — all through
+  the mTLS + allowlist path, all visible in Prometheus/Grafana, soak gate green.
+- **frost/.dockerignore**: the cosigner image build no longer copies the multi-GB host `target/`
+  into its context.
 
 ## [0.2.0] — 2026-07-17
 

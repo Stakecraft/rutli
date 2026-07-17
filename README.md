@@ -134,6 +134,7 @@ Before protecting a real key, run the witnessed **[key ceremony](docs/key-ceremo
 | [docs/approval-quorum.md](docs/approval-quorum.md) | M-of-N signing approval |
 | [docs/disaster-recovery.md](docs/disaster-recovery.md) | Backup, restore, recovery |
 | [docs/observability.md](docs/observability.md) | Prometheus metrics, Grafana dashboard, alerts |
+| [docs/testnet-soak.md](docs/testnet-soak.md) | Splice DevNet validator soak: setup, drills, exit criteria |
 | [docs/wire-contract.md](docs/wire-contract.md) | Exactly what Canton sends the driver |
 
 ## Project layout

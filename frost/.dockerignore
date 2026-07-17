@@ -1,0 +1,5 @@
+# Keep the image build context lean: host build artifacts must never ship into the container
+# build (they're multi-GB and wrong-architecture anyway — the image builds from source).
+target/
+**/*.rs.bk
+.git/

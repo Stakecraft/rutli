@@ -1,0 +1,9 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: 1
+providers:
+  - name: rutli
+    folder: Rütli
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards

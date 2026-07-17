@@ -1,0 +1,23 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Thin derived image: the stock Splice canton-participant with the Rütli KMS driver jar on the
+# classpath. Mirrors Splice's own pattern for external Canton SPI drivers (their
+# canton-cometbft-sequencer image injects a sequencer-driver jar exactly this way: COPY the fat
+# jar + EXTRA_CLASSPATH — the Canton launcher picks it up).
+#
+# Build (from this directory, after `sbt driver/assembly` at the repo root):
+#   cp ../../../driver/target/scala-2.13/rutli-driver.jar .
+#   docker build -f Dockerfile.participant \
+#     --build-arg IMAGE_REPO=ghcr.io/digital-asset/decentralized-canton-sync/docker/ \
+#     --build-arg IMAGE_TAG=<splice version, e.g. 0.6.12> \
+#     -t rutli-canton-participant:<splice version> .
+#
+# IMAGE_REPO/IMAGE_TAG must match the ones in the Splice compose bundle's .env — the derived image
+# must layer on the exact participant the rest of the bundle expects.
+ARG IMAGE_REPO
+ARG IMAGE_TAG
+FROM ${IMAGE_REPO}canton-participant:${IMAGE_TAG}
+
+COPY rutli-driver.jar /app/rutli-driver.jar
+ENV EXTRA_CLASSPATH=/app/rutli-driver.jar
