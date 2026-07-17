@@ -3,7 +3,12 @@
 All notable changes to Rütli are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] — 2026-07-17
+
+Devnet-hardened release: encryption-at-rest for shares, proactive refresh, M-of-N signing
+approval, tamper-evident audit, disaster recovery, Docker/k8s deployment — plus two full
+code-review hardening passes (all findings fixed and regression-tested). Still pre-audit;
+see Status in the README.
 
 ### Security & robustness (code-review hardening)
 - **Ceremony safety:** DKG/refresh for a key are serialized by a per-key guard (no split-brain
@@ -23,8 +28,9 @@ All notable changes to Rütli are documented here. Format loosely follows
 - **Audit:** the hash-chained log is now genuinely fail-closed — a successful op that can't be logged
   fails rather than returning an unlogged signature.
 - **Signing journal:** the per-key rate limit survives a restart (rebuilt from the persisted window).
-- **Signer API allowlist:** optional client-cert CN allowlist so only the driver (not a cosigner
-  cert) can request signatures.
+- **Signer API allowlist:** client-cert CN allowlist so only the driver (not a cosigner cert) can
+  request signatures — **required whenever TLS is enabled** (startup fails without it); optional
+  only for plaintext dev setups.
 - **Durability/isolation:** keystore share writes fsync file + directory; blocking FROST/approval
   work runs on a dedicated bounded pool (not Canton's EC); in-flight sign sessions are TTL-pruned.
 - **Docs:** corrected stale claims (mTLS/Raft/refresh/audit/seal-secret) to match the code.
@@ -37,14 +43,6 @@ All notable changes to Rütli are documented here. Format loosely follows
   + the Canton driver, non-root/read-only-rootfs, anti-affinity) with a runbook covering image
   build, cert/secret creation, DKG, and wiring the Canton driver. The mTLS mesh (cosigner↔cosigner
   and driver↔cosigner) is now verified end-to-end.
-
-### Fixed
-- **mTLS cert model**: cosigner certs now carry a shared `rutli-cosigner` SAN, matched by the single
-  global `tls.domain` used for every peer dial — so the mutual-TLS mesh actually verifies across
-  Docker service names and k8s pod DNS alike (the previous per-node `domain` could not match all
-  peers). `gen-frost-certs.sh` and the TLS configs updated; TLS configs also enable share sealing.
-
-### Added
 - **Signing journal** (`signing-journal`): a persistent, per-key, append-only record of every
   digest signed (fsynced before the signature is released), so there is a complete history for
   equivocation *detection* and forensics; repeats of an already-signed digest are flagged and
@@ -88,6 +86,12 @@ All notable changes to Rütli are documented here. Format loosely follows
   single-leader availability gap without a consensus layer (FROST sessions are independent — no
   replicated log to keep consistent, so Raft would buy nothing here).
 
+### Fixed
+- **mTLS cert model**: cosigner certs now carry a shared `rutli-cosigner` SAN, matched by the single
+  global `tls.domain` used for every peer dial — so the mutual-TLS mesh actually verifies across
+  Docker service names and k8s pod DNS alike (the previous per-node `domain` could not match all
+  peers). `gen-frost-certs.sh` and the TLS configs updated; TLS configs also enable share sealing.
+
 ## [0.1.0] — 2026-07-03
 
 First tagged release. **Devnet-grade, pre-production** — verified end-to-end against a real Canton
@@ -127,4 +131,5 @@ not audited. Do not place production authority keys behind it.
 - HSM backend validated only against SoftHSM.
 - No third-party security audit.
 
+[0.2.0]: https://github.com/Stakecraft/rutli/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Stakecraft/rutli/releases/tag/v0.1.0
