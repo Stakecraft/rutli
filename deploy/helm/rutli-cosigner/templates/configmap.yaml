@@ -1,0 +1,47 @@
+{{/*
+Copyright 2026 StakeCraft
+SPDX-License-Identifier: Apache-2.0
+Per-pod cosigner JSON. Pod ordinal i runs cosigner-(i+1).json (identifier i+1).
+Peers: identifier k -> https://<fullname>-(k-1).<fullname>:grpcPort
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rutli-cosigner.fullname" . }}-config
+  labels:
+    {{- include "rutli-cosigner.labels" . | nindent 4 }}
+data:
+{{- $fullname := include "rutli-cosigner.fullname" . }}
+{{- $n := int .Values.replicaCount }}
+{{- $t := int .Values.threshold }}
+{{- $port := int .Values.service.grpcPort }}
+{{- $metricsPort := int .Values.service.metricsPort }}
+{{- $domain := .Values.tlsDomain }}
+{{- $allow := .Values.signerAllowlist }}
+{{- range $i := until $n }}
+{{- $id := add $i 1 }}
+  cosigner-{{ $id }}.json: |
+    {
+      "identifier": {{ $id }},
+      "listen": "0.0.0.0:{{ $port }}",
+      {{- if $.Values.metrics.enabled }}
+      "metrics_listen": "0.0.0.0:{{ $metricsPort }}",
+      {{- end }}
+      "threshold": {{ $t }},
+      "data_dir": "/data",
+      "peers": [
+        {{- range $j := until $n }}
+        {{- $jid := add $j 1 }}
+        { "identifier": {{ $jid }}, "endpoint": "https://{{ $fullname }}-{{ $j }}.{{ $fullname }}:{{ $port }}" }{{ if lt (add $j 1) $n }},{{ end }}
+        {{- end }}
+      ],
+      "tls": {
+        "ca_cert": "/certs/ca.crt",
+        "cert": "/certs/cosigner{{ $id }}.crt",
+        "key": "/certs/cosigner{{ $id }}.key",
+        "domain": {{ $domain | quote }}
+      },
+      "share_seal": { "secret_env": "RUTLI_SEAL_SECRET" },
+      "signer_allowlist": {{ $allow | toJson }}
+    }
+{{- end }}

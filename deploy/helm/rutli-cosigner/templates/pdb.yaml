@@ -1,0 +1,15 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "rutli-cosigner.fullname" . }}
+  labels:
+    {{- include "rutli-cosigner.labels" . | nindent 4 }}
+spec:
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  selector:
+    matchLabels:
+      {{- include "rutli-cosigner.selectorLabels" . | nindent 6 }}
+{{- end }}

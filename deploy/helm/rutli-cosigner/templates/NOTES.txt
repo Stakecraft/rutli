@@ -1,0 +1,30 @@
+Rütli FROST cosigner cluster ({{ .Chart.AppVersion }})
+
+Image: {{ include "rutli-cosigner.image" . }}
+Replicas: {{ .Values.replicaCount }}  threshold: {{ .Values.threshold }}
+
+BEFORE the pods can start you must create secrets in this namespace:
+
+  1) mTLS material (CA + cosigner1..N certs/keys):
+     kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.tlsSecretName }} \
+       --from-file=ca.crt=certs/ca.crt \
+       --from-file=cosigner1.crt=certs/cosigner1.crt --from-file=cosigner1.key=certs/cosigner1.key \
+       # … repeat for each cosigner …
+
+  2) Seal master secret (≥ 32 chars):
+     kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.sealSecretName }} \
+       --from-literal={{ .Values.sealSecretKey }}="$(openssl rand -hex 32)"
+
+Generate certs with:  scripts/gen-frost-certs.sh {{ .Values.replicaCount }} ./certs
+
+Canton driver endpoints (headless):
+{{- $fullname := include "rutli-cosigner.fullname" . }}
+{{- $port := .Values.service.grpcPort }}
+{{- range $i := until (int .Values.replicaCount) }}
+  - {{ $fullname }}-{{ $i }}.{{ $fullname }}.{{ $.Release.Namespace }}.svc.cluster.local:{{ $port }}
+{{- end }}
+
+Label the Canton namespace {{ .Values.networkPolicy.clientNamespaceLabel }}=true and the
+participant pod {{ .Values.networkPolicy.clientPodLabel }}=true so NetworkPolicy allows the driver.
+
+Docs: deploy/helm/rutli-cosigner/README.md · docs/key-ceremony.md · docs/disaster-recovery.md

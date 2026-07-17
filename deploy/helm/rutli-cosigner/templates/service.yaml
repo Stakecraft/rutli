@@ -1,0 +1,22 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "rutli-cosigner.fullname" . }}
+  labels:
+    {{- include "rutli-cosigner.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "rutli-cosigner.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: grpc
+      port: {{ .Values.service.grpcPort }}
+      targetPort: grpc
+    {{- if .Values.metrics.enabled }}
+    - name: metrics
+      port: {{ .Values.service.metricsPort }}
+      targetPort: metrics
+    {{- end }}

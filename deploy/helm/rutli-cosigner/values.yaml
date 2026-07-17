@@ -1,0 +1,95 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Default values for rutli-cosigner. Secrets (TLS + seal) are NOT created by this chart —
+# create them out-of-band (see README / secrets.example.yaml in deploy/k8s/).
+
+replicaCount: 3
+threshold: 2
+
+image:
+  repository: ghcr.io/stakecraft/rutli-cosigner
+  # Multi-arch index digest for v0.2.1 (amd64 + arm64). Retag/retarget carefully.
+  tag: "0.2.1@sha256:92e68eac64bcfea88147749719fa4c34fe91c3af368e2bce06f67ac686a05ef4"
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+# Stable headless service / StatefulSet name → peer DNS: rutli-cosigner-N.rutli-cosigner
+fullnameOverride: rutli-cosigner
+
+service:
+  grpcPort: 9101
+  metricsPort: 9200
+
+# Existing Secret with CA + per-cosigner cert/key (and optionally driver cert for operators).
+# Keys expected: ca.crt, cosigner1.crt, cosigner1.key, … cosignerN.crt/key
+tlsSecretName: rutli-cosigner-tls
+
+# Existing Secret with key RUTLI_SEAL_SECRET (≥ 32 chars; e.g. openssl rand -hex 32)
+sealSecretName: rutli-seal
+sealSecretKey: RUTLI_SEAL_SECRET
+
+# Client cert CNs allowed to call Signer (DKG / Sign / Refresh). Required when TLS is on.
+signerAllowlist:
+  - driver
+
+# mTLS domain / shared SAN on cosigner certs
+tlsDomain: rutli-cosigner
+
+persistence:
+  size: 1Gi
+  storageClassName: ""
+  accessModes:
+    - ReadWriteOnce
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+networkPolicy:
+  enabled: true
+  # Canton participant namespace must carry this label; pod must carry clientLabel.
+  clientNamespaceLabel: rutli.io/client-ns
+  clientPodLabel: rutli.io/client
+  scraperPodLabel: rutli.io/scraper
+
+podAntiAffinity: required # required | preferred | none
+
+topologySpreadConstraints:
+  enabled: true
+  maxSkew: 1
+  topologyKey: topology.kubernetes.io/zone
+  whenUnsatisfiable: ScheduleAnyway
+
+metrics:
+  enabled: true
+  annotations: true
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Extra env vars for every cosigner
+extraEnv: []

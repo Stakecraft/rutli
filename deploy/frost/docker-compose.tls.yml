@@ -1,26 +1,24 @@
 # Copyright 2026 StakeCraft
 # SPDX-License-Identifier: Apache-2.0
 #
-# Production-flavored 2-of-3 FROST cosigner cluster: mutual TLS between cosigners AND share sealing
-# (AES-256-GCM at rest). Still single-host (containers stand in for the separate hosts / accounts /
-# regions a real deployment MUST use) — but every other production control is on.
+# Production-flavored 2-of-3 FROST cosigner cluster: mutual TLS + share sealing.
+# Still single-host (containers stand in for separate hosts/accounts/regions).
 #
 # Prerequisites:
 #   1. Certs:   scripts/gen-frost-certs.sh 3 deploy/frost/certs
-#   2. Seal secret (shared cluster master; each node derives its own per-node key via HKDF):
-#        export RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"     # from your secret manager in prod
-#   3. Bring up:
-#        RUTLI_SEAL_SECRET=… docker compose -f deploy/frost/docker-compose.tls.yml up --build
-#   4. DKG once against any Signer endpoint (localhost:9101), then point the Canton driver at the
-#      cluster with frost.tls (ca.crt + driver.{crt,key}, domain = "rutli-cosigner").
+#   2. Seal:    export RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
+#   3. Bring up (pulls ghcr.io/stakecraft/rutli-cosigner:0.2.1 by default):
+#        RUTLI_SEAL_SECRET=… docker compose -f deploy/frost/docker-compose.tls.yml up -d
+#      Or build from source: add --build
 #
-# The RUTLI_SEAL_SECRET must be present in the environment at `up` time; it is passed to every
-# cosigner (same master secret — the per-node key is derived internally, so this is safe).
+# Override image: RUTLI_COSIGNER_IMAGE=ghcr.io/stakecraft/rutli-cosigner:latest
 
 x-cosigner: &cosigner
+  image: ${RUTLI_COSIGNER_IMAGE:-ghcr.io/stakecraft/rutli-cosigner:0.2.1}
   build:
     context: ../../frost
     dockerfile: Dockerfile
+  pull_policy: ${RUTLI_PULL_POLICY:-always}
   restart: unless-stopped
   environment:
     RUTLI_SEAL_SECRET: ${RUTLI_SEAL_SECRET:?set RUTLI_SEAL_SECRET (e.g. openssl rand -hex 32)}
@@ -29,7 +27,6 @@ x-cosigner: &cosigner
     - ./config-tls:/config:ro
     - ./certs:/certs:ro
 
-# gRPC is TLS-only; a plaintext TCP-open check on the node's own port is enough for liveness.
 x-healthcheck: &hc
   interval: 10s
   timeout: 3s
@@ -44,7 +41,7 @@ services:
       - ./config-tls:/config:ro
       - ./certs:/certs:ro
       - c1:/data
-    ports: ["9101:9101", "9201:9200"]  # gRPC, Prometheus /metrics
+    ports: ["9101:9101", "9201:9200"]
     healthcheck:
       <<: *hc
       test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9101' 2>/dev/null || exit 1"]
@@ -56,7 +53,7 @@ services:
       - ./config-tls:/config:ro
       - ./certs:/certs:ro
       - c2:/data
-    ports: ["9102:9102", "9202:9200"]  # gRPC, Prometheus /metrics
+    ports: ["9102:9102", "9202:9200"]
     healthcheck:
       <<: *hc
       test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9102' 2>/dev/null || exit 1"]
@@ -68,7 +65,7 @@ services:
       - ./config-tls:/config:ro
       - ./certs:/certs:ro
       - c3:/data
-    ports: ["9103:9103", "9203:9200"]  # gRPC, Prometheus /metrics
+    ports: ["9103:9103", "9203:9200"]
     healthcheck:
       <<: *hc
       test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9103' 2>/dev/null || exit 1"]

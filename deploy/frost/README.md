@@ -4,18 +4,20 @@ A 2-of-3 [`rutli-cosigner`](../../frost/cosigner) cluster. Each node holds one k
 ever holds the whole namespace key. The Canton KMS driver's `FrostBackend` connects to any node's
 `Signer` API to run DKG and to sign.
 
-Two compose files:
+Two compose files (default image `ghcr.io/stakecraft/rutli-cosigner:0.2.1`; override with
+`RUTLI_COSIGNER_IMAGE` or `--build` from `frost/`):
 - `docker-compose.yml` — **dev**: plaintext gRPC, unsealed shares. Fastest to try.
 - `docker-compose.tls.yml` — **production-flavored**: mutual TLS + AES-256-GCM sealed shares
   (verified end-to-end). Needs certs + a seal secret first (below).
 
-For **Kubernetes**, see [`../k8s`](../k8s) (StatefulSet, mTLS, sealed shares, durable per-pod PVCs,
-NetworkPolicy).
+For **Kubernetes**, prefer the Helm chart [`../helm/rutli-cosigner`](../helm/rutli-cosigner) or the
+raw manifests in [`../k8s`](../k8s).
 
 ## Run (dev)
 
 ```sh
-docker compose -f deploy/frost/docker-compose.yml up --build
+docker compose -f deploy/frost/docker-compose.yml up -d          # pulls published image
+# docker compose -f deploy/frost/docker-compose.yml up -d --build  # build from source
 ```
 
 ## Run (mTLS + sealed shares)
@@ -24,7 +26,7 @@ docker compose -f deploy/frost/docker-compose.yml up --build
 scripts/gen-frost-certs.sh 3 deploy/frost/certs                   # CA + per-node certs
 export RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"                # from a secret manager in prod
 RUTLI_SEAL_SECRET=$RUTLI_SEAL_SECRET \
-  docker compose -f deploy/frost/docker-compose.tls.yml up --build
+  docker compose -f deploy/frost/docker-compose.tls.yml up -d
 ```
 
 The driver connects with `frost.tls` (`ca.crt` + `driver.crt/key`, `domain = "rutli-cosigner"`).

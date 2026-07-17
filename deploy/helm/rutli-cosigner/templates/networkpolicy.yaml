@@ -1,0 +1,60 @@
+{{- if .Values.networkPolicy.enabled }}
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "rutli-cosigner.fullname" . }}-ingress
+  labels:
+    {{- include "rutli-cosigner.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "rutli-cosigner.selectorLabels" . | nindent 6 }}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "rutli-cosigner.selectorLabels" . | nindent 14 }}
+        - namespaceSelector:
+            matchLabels:
+              {{ .Values.networkPolicy.clientNamespaceLabel }}: "true"
+          podSelector:
+            matchLabels:
+              {{ .Values.networkPolicy.clientPodLabel }}: "true"
+      ports:
+        - { protocol: TCP, port: {{ .Values.service.grpcPort }} }
+    {{- if .Values.metrics.enabled }}
+    - from:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              {{ .Values.networkPolicy.scraperPodLabel }}: "true"
+      ports:
+        - { protocol: TCP, port: {{ .Values.service.metricsPort }} }
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "rutli-cosigner.fullname" . }}-egress
+  labels:
+    {{- include "rutli-cosigner.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "rutli-cosigner.selectorLabels" . | nindent 6 }}
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "rutli-cosigner.selectorLabels" . | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.service.grpcPort }} }
+    - to: []
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+{{- end }}

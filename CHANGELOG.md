@@ -5,6 +5,11 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+- **Published cosigner image** on GHCR: `ghcr.io/stakecraft/rutli-cosigner:0.2.1` (+ `latest`),
+  multi-arch (`linux/amd64`, `linux/arm64`). Docker Compose defaults to the published image;
+  Helm chart at `deploy/helm/rutli-cosigner`. CI workflow `publish-image.yml` pushes on `v*` tags.
+
 ## [0.2.1] — 2026-07-17
 
 Patch on 0.2.0: cluster-wide ceremony fencing, Signer digest enforcement, TLS CI smoke, sealing

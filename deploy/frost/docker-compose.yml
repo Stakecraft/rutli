@@ -1,18 +1,22 @@
 # Copyright 2026 StakeCraft
 # SPDX-License-Identifier: Apache-2.0
-# Local 2-of-3 FROST cosigner cluster. Each node runs on a separate container (stand-in for the
-# separate hosts / accounts / regions a real deployment uses). Bring up, then trigger DKG once.
 #
-#   docker compose -f deploy/frost/docker-compose.yml up --build
-#   # then run DKG (any Signer endpoint), e.g. with grpcurl against localhost:9101 — Signer.Dkg
+# Local 2-of-3 FROST cosigner cluster (dev: plaintext gRPC, unsealed shares).
 #
-# ⚠️ Dev topology: plaintext gRPC, shares stored unencrypted in the named volumes. Production adds
-# mTLS between nodes, HSM/enclave-sealed shares, and genuinely independent hosts/accounts.
+#   # pull published image (default):
+#   docker compose -f deploy/frost/docker-compose.yml up -d
+#
+#   # or build from source:
+#   docker compose -f deploy/frost/docker-compose.yml up -d --build
+#
+# ⚠️ Dev topology only. Production: docker-compose.tls.yml (+ mTLS + sealing).
 
 x-cosigner: &cosigner
+  image: ${RUTLI_COSIGNER_IMAGE:-ghcr.io/stakecraft/rutli-cosigner:0.2.1}
   build:
     context: ../../frost
     dockerfile: Dockerfile
+  pull_policy: ${RUTLI_PULL_POLICY:-always}
   restart: unless-stopped
 
 services:

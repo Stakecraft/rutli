@@ -49,8 +49,7 @@ spec:
               app.kubernetes.io/name: rutli-cosigner
       containers:
         - name: cosigner
-          # Pin by digest in production: kustomize edit set image …@sha256:…
-          image: ghcr.io/stakecraft/rutli-cosigner:0.2.1 # build+push from frost/Dockerfile
+          image: ghcr.io/stakecraft/rutli-cosigner:0.2.1@sha256:92e68eac64bcfea88147749719fa4c34fe91c3af368e2bce06f67ac686a05ef4
           imagePullPolicy: IfNotPresent
           # Pod cosigner-<ordinal> runs config cosigner-<ordinal+1>.json.
           command: ["/bin/sh", "-c"]
