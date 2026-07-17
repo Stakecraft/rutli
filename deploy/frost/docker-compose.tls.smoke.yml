@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# Overlay for CI smoke: no host port binds (RPCs go over the compose network).
+# Used as: docker compose -f docker-compose.tls.yml -f docker-compose.tls.smoke.yml ...
+
+services:
+  cosigner1:
+    ports: !override []
+  cosigner2:
+    ports: !override []
+  cosigner3:
+    ports: !override []

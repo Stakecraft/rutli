@@ -132,6 +132,19 @@ async fn a_lost_node_recovers_from_a_share_backup_and_the_cluster_signs() {
 }
 
 #[tokio::test]
+async fn sign_rejects_non_canton_digest_lengths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = cluster(&tmp);
+    run_dkg(&peers, KEY_ID).await.unwrap();
+
+    let err = sign(&nodes[0], &peers, KEY_ID, b"too-short").await.unwrap_err();
+    assert!(matches!(err, DaemonError::InvalidMessageLength { got: 9, expected: 34 }), "got {err:?}");
+
+    let err = sign(&nodes[0], &peers, KEY_ID, &[0u8; 64]).await.unwrap_err();
+    assert!(matches!(err, DaemonError::InvalidMessageLength { got: 64, expected: 34 }), "got {err:?}");
+}
+
+#[tokio::test]
 async fn signing_survives_one_downed_cosigner() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = cluster(&tmp);
@@ -144,6 +157,29 @@ async fn signing_survives_one_downed_cosigner() {
 
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
     vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig)).unwrap();
+}
+
+#[tokio::test]
+async fn reseal_plaintext_shares_migrates_legacy_files_at_startup() {
+    use rutli_cosigner::seal::Sealer;
+
+    let tmp = tempfile::tempdir().unwrap();
+    // Provision plaintext shares (no sealer).
+    let (_nodes, peers) = cluster(&tmp);
+    let group_key = run_dkg(&peers, KEY_ID).await.unwrap();
+    let share_path = tmp.path().join("node-1").join(format!("{KEY_ID}.json"));
+    assert!(!Sealer::is_sealed(&std::fs::read(&share_path).unwrap()));
+
+    // Re-open with sealing and migrate — plaintext must become a sealed envelope.
+    let sealer = Arc::new(Sealer::from_master_secret(b"cluster master secret!!", 1));
+    let ks = KeyStore::open_with_sealer(tmp.path().join("node-1"), Some(sealer)).unwrap();
+    assert_eq!(ks.reseal_plaintext_shares().unwrap(), 1);
+    assert!(Sealer::is_sealed(&std::fs::read(&share_path).unwrap()));
+    assert_eq!(ks.reseal_plaintext_shares().unwrap(), 0, "idempotent");
+
+    // Share still loads under the same group key.
+    let n = Node::new(Identifier::try_from(1u16).unwrap(), N, T, ks);
+    assert_eq!(n.group_key(KEY_ID).unwrap(), group_key);
 }
 
 #[tokio::test]
@@ -320,23 +356,57 @@ async fn a_superseded_refresh_cannot_persist_after_orphan_preempt() {
 }
 
 #[tokio::test]
-async fn sign_is_refused_while_a_refresh_holds_the_key() {
+async fn sign_is_refused_on_every_node_after_cluster_wide_refresh_fence() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = cluster(&tmp);
     let group_key = run_dkg(&peers, KEY_ID).await.unwrap();
 
-    // A refresh grabs the per-key guard (part1) but hasn't finished.
-    nodes[0].refresh_part1("refresh-1", KEY_ID).unwrap();
+    // Cluster-wide fence (what run_refresh does before crypto): every peer takes the guard.
+    for n in &nodes {
+        n.ceremony_fence("refresh-1", KEY_ID, "refresh").unwrap();
+    }
 
-    // A new sign on that node is refused while the refresh is in progress (no undefined interleave).
-    let err = nodes[0].sign_round1(KEY_ID, "sign-during-refresh").unwrap_err();
-    assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "got {err:?}");
-
-    // Signing on a node NOT mid-refresh still works (its guard is free).
-    assert!(nodes[1].sign_round1(KEY_ID, "elsewhere").is_ok());
+    // A new sign is refused on EVERY node — not just the leader that started the ceremony.
+    for (i, n) in nodes.iter().enumerate() {
+        let err = n.sign_round1(KEY_ID, &format!("sign-during-refresh-{i}")).unwrap_err();
+        assert!(
+            matches!(err, DaemonError::CeremonyInProgress { .. }),
+            "node {i}: got {err:?}"
+        );
+    }
 
     // group_key still readable; the cluster is consistent.
     assert_eq!(nodes[0].group_key(KEY_ID).unwrap(), group_key);
+    let _ = peers; // roster present for the cluster helper
+}
+
+#[tokio::test]
+async fn refresh_is_refused_while_a_sign_is_in_flight_on_any_node() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = cluster(&tmp);
+    let group_key = run_dkg(&peers, KEY_ID).await.unwrap();
+
+    // Node 1 has an in-flight sign (round1 done, round2 not yet).
+    nodes[1].sign_round1(KEY_ID, "in-flight").unwrap();
+    assert_eq!(nodes[1].pending_sign_count(KEY_ID), 1);
+
+    // Cluster refresh must fail at the fence (reverse fence), not mutate shares under the sign.
+    let err = run_refresh(&peers, KEY_ID).await.unwrap_err();
+    assert!(matches!(err, DaemonError::SignInProgress { .. }), "got {err:?}");
+
+    // Partial fence rolled back: a node with no pending signs accepts a new round1 (not stuck
+    // behind a leftover ceremony guard from the aborted refresh).
+    assert!(nodes[0].sign_round1(KEY_ID, "after-rollback").is_ok());
+    assert!(nodes[2].sign_round1(KEY_ID, "after-rollback-2").is_ok());
+
+    // Abort the in-flight session and confirm the cluster still signs under the same group key.
+    nodes[1].abort_sign(KEY_ID, "in-flight");
+    let msg = canton_digest(b"after reverse-fence");
+    let sig = sign(&nodes[0], &peers, KEY_ID, &msg).await.unwrap();
+    ed25519_dalek::VerifyingKey::from_bytes(&group_key)
+        .unwrap()
+        .verify_strict(&msg, &ed25519_dalek::Signature::from_bytes(&sig))
+        .unwrap();
 }
 
 // ── sign abort on failure (P1.3): a give-up frees in-flight nonces now, not at the pending TTL ──
@@ -374,6 +444,17 @@ impl PeerApi for FailRound2 {
     }
     async fn abort_sign(&self, key_id: &str, session_id: &str) -> DaemonResult<()> {
         self.inner.abort_sign(key_id, session_id).await
+    }
+    async fn ceremony_fence(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        kind: &'static str,
+    ) -> DaemonResult<()> {
+        self.inner.ceremony_fence(ceremony_id, key_id, kind).await
+    }
+    async fn ceremony_release(&self, ceremony_id: &str, key_id: &str) -> DaemonResult<()> {
+        self.inner.ceremony_release(ceremony_id, key_id).await
     }
     async fn dkg_part1(&self, dkg_id: &str, key_id: &str) -> DaemonResult<round1::Package> {
         self.inner.dkg_part1(dkg_id, key_id).await

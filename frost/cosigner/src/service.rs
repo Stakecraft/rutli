@@ -151,6 +151,33 @@ impl Peer for PeerSvc {
         Ok(Response::new(pb::AbortSignReply {}))
     }
 
+    async fn ceremony_fence(
+        &self,
+        req: Request<pb::CeremonyFenceRequest>,
+    ) -> Result<Response<pb::CeremonyFenceReply>, Status> {
+        let r = req.into_inner();
+        let kind = match r.kind.as_str() {
+            "dkg" => "dkg",
+            "refresh" => "refresh",
+            other => {
+                return Err(Status::invalid_argument(format!(
+                    "ceremony kind must be \"dkg\" or \"refresh\", got {other:?}"
+                )))
+            }
+        };
+        self.node.ceremony_fence(&r.ceremony_id, &r.key_id, kind).map_err(Status::from)?;
+        Ok(Response::new(pb::CeremonyFenceReply {}))
+    }
+
+    async fn ceremony_release(
+        &self,
+        req: Request<pb::CeremonyReleaseRequest>,
+    ) -> Result<Response<pb::CeremonyReleaseReply>, Status> {
+        let r = req.into_inner();
+        self.node.ceremony_release(&r.ceremony_id, &r.key_id);
+        Ok(Response::new(pb::CeremonyReleaseReply {}))
+    }
+
     async fn dkg_part1(
         &self,
         req: Request<pb::DkgPart1Request>,

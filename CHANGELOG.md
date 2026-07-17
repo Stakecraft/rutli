@@ -5,6 +5,26 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Security & robustness
+- **Cluster-wide refresh/DKG fence:** before any ceremony crypto, the leader takes the per-key
+  guard on every peer (`CeremonyFence`), so no node can start a new sign mid-ceremony. The reverse
+  fence also applies — if any peer still holds in-flight sign nonces for that key, the fence fails
+  (`SignInProgress`) and is rolled back cluster-wide. Closes the per-node fence gap left after the
+  second hardening pass.
+- **Canton digest length enforced at Sign:** the Signer API rejects messages that are not exactly
+  34 bytes (Canton's `0x1220 ‖ sha256(tx)` wire contract), so a miswired client cannot mint
+  signatures over arbitrary payloads through the cluster.
+- **Plaintext share migration at startup:** with sealing enabled, any leftover plaintext share
+  files are re-sealed immediately on cosigner start (not only on the next write). Seal-secret
+  minimum length raised to 32 chars.
+- **CI TLS smoke:** PR CI brings up the mTLS + sealed compose cluster and runs Health / DKG /
+  Sign through the driver cert (plaintext client must be refused).
+- **K8s hardening:** required pod anti-affinity, zone topology spread, PDB (`minAvailable: 2`),
+  image tag `0.2.0` (digest-pin guidance), narrower NetworkPolicy (namespace + pod labels),
+  example backup/refresh CronJobs.
+- **ApproveCli** prints `digest` / `nonce` before signing an approval so humans can verify the
+  bound operation. Audit engagement checklist in `docs/audit-prep.md`.
+
 ### Added
 - **Prometheus metrics** (`metrics_listen`): opt-in plaintext `/metrics` endpoint per cosigner —
   sign throughput/latency/outcomes, ceremony outcomes, round-1 peer skips (quorum-margin canary),

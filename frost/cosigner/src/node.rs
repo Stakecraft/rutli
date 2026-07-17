@@ -153,6 +153,26 @@ impl Node {
         self.ceremonies.lock().expect("ceremonies lock").get(key_id).map(|g| g.kind)
     }
 
+    /// Cluster-wide fence step: take the per-key guard *before* DKG/refresh crypto so every peer
+    /// refuses new signs while the ceremony is in flight. Refuses if this node still holds
+    /// in-flight sign nonces for the key (reverse fence — drain first).
+    pub fn ceremony_fence(&self, ceremony_id: &str, key_id: &str, kind: &'static str) -> Result<()> {
+        let pending = self.pending_sign_count(key_id);
+        if pending > 0 {
+            return Err(DaemonError::SignInProgress {
+                key_id: key_id.to_string(),
+                kind,
+                pending,
+            });
+        }
+        self.acquire_ceremony(key_id, ceremony_id, kind)
+    }
+
+    /// Roll back a fence taken by [`ceremony_fence`] (partial cluster fence / aborted ceremony).
+    pub fn ceremony_release(&self, ceremony_id: &str, key_id: &str) {
+        self.release_ceremony(key_id, ceremony_id);
+    }
+
     /// Load (and cache) this node's cosigner state for `key_id`.
     fn cosigner(&self, key_id: &str) -> Result<Arc<Cosigner>> {
         {
@@ -365,6 +385,15 @@ impl Node {
     pub fn refresh_part1(&self, refresh_id: &str, key_id: &str) -> Result<round1::Package> {
         if !self.keystore.exists(key_id) {
             return Err(DaemonError::UnknownKey(key_id.to_string()));
+        }
+        // Reverse fence + acquire (idempotent if the orchestrator already fenced with this id).
+        let pending = self.pending_sign_count(key_id);
+        if pending > 0 {
+            return Err(DaemonError::SignInProgress {
+                key_id: key_id.to_string(),
+                kind: "refresh",
+                pending,
+            });
         }
         // Serialize against any other DKG/refresh for this key (prevents split-brain shares).
         self.acquire_ceremony(key_id, refresh_id, "refresh")?;

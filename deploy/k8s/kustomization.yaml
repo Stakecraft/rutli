@@ -12,6 +12,12 @@ resources:
   - service.yaml
   - statefulset.yaml
   - networkpolicy.yaml
+  - pdb.yaml
+  # Day-2 CronJobs are examples — review KEY_ID / PVC claimName before enabling:
+  # - cronjob-backup.yaml
+  # - cronjob-refresh.yaml
 images:
   - name: ghcr.io/stakecraft/rutli-cosigner
-    newTag: latest
+    newTag: "0.2.0"
+    # Prefer digest pins in prod:
+    # digest: sha256:REPLACE_AFTER_PUSH

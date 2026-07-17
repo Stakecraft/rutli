@@ -31,20 +31,26 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
-      # Spread shares across nodes (and, with topology labels, across zones) — independence is the
-      # point of a threshold cluster. Make this `required...` in a multi-node/multi-zone cluster.
+      # Never co-locate two shares on the same node. Add zone topologySpreadConstraints (below) so
+      # shares also spread across failure domains when the cluster has zone labels.
       affinity:
         podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                labelSelector:
-                  matchLabels:
-                    app.kubernetes.io/name: rutli-cosigner
-                topologyKey: kubernetes.io/hostname
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app.kubernetes.io/name: rutli-cosigner
+              topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: ScheduleAnyway # set DoNotSchedule once you have ≥3 zones
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: rutli-cosigner
       containers:
         - name: cosigner
-          image: ghcr.io/stakecraft/rutli-cosigner:latest # build+push from frost/Dockerfile
+          # Pin by digest in production: kustomize edit set image …@sha256:…
+          image: ghcr.io/stakecraft/rutli-cosigner:0.2.0 # build+push from frost/Dockerfile
           imagePullPolicy: IfNotPresent
           # Pod cosigner-<ordinal> runs config cosigner-<ordinal+1>.json.
           command: ["/bin/sh", "-c"]

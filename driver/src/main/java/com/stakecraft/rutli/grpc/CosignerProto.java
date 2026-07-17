@@ -111,6 +111,26 @@ public final class CosignerProto {
     com.google.protobuf.GeneratedMessage.FieldAccessorTable
       internal_static_rutli_cosigner_v1_AbortSignReply_fieldAccessorTable;
   static final com.google.protobuf.Descriptors.Descriptor
+    internal_static_rutli_cosigner_v1_CeremonyFenceRequest_descriptor;
+  static final 
+    com.google.protobuf.GeneratedMessage.FieldAccessorTable
+      internal_static_rutli_cosigner_v1_CeremonyFenceRequest_fieldAccessorTable;
+  static final com.google.protobuf.Descriptors.Descriptor
+    internal_static_rutli_cosigner_v1_CeremonyFenceReply_descriptor;
+  static final 
+    com.google.protobuf.GeneratedMessage.FieldAccessorTable
+      internal_static_rutli_cosigner_v1_CeremonyFenceReply_fieldAccessorTable;
+  static final com.google.protobuf.Descriptors.Descriptor
+    internal_static_rutli_cosigner_v1_CeremonyReleaseRequest_descriptor;
+  static final 
+    com.google.protobuf.GeneratedMessage.FieldAccessorTable
+      internal_static_rutli_cosigner_v1_CeremonyReleaseRequest_fieldAccessorTable;
+  static final com.google.protobuf.Descriptors.Descriptor
+    internal_static_rutli_cosigner_v1_CeremonyReleaseReply_descriptor;
+  static final 
+    com.google.protobuf.GeneratedMessage.FieldAccessorTable
+      internal_static_rutli_cosigner_v1_CeremonyReleaseReply_fieldAccessorTable;
+  static final com.google.protobuf.Descriptors.Descriptor
     internal_static_rutli_cosigner_v1_DkgPart1Request_descriptor;
   static final 
     com.google.protobuf.GeneratedMessage.FieldAccessorTable
@@ -168,46 +188,56 @@ public final class CosignerProto {
       "commitments_map\030\004 \001(\014\" \n\017SignRound2Reply" +
       "\022\r\n\005share\030\001 \001(\014\"6\n\020AbortSignRequest\022\016\n\006k" +
       "ey_id\030\001 \001(\t\022\022\n\nsession_id\030\002 \001(\t\"\020\n\016Abort" +
-      "SignReply\"o\n\017DkgPart1Request\022\016\n\006dkg_id\030\001" +
-      " \001(\t\022\016\n\006key_id\030\002 \001(\t\022\022\n\nidentifier\030\003 \001(\r" +
-      "\022\023\n\013max_signers\030\004 \001(\r\022\023\n\013min_signers\030\005 \001" +
-      "(\r\"\'\n\rDkgPart1Reply\022\026\n\016round1_package\030\001 " +
-      "\001(\014\"5\n\017DkgPart2Request\022\016\n\006dkg_id\030\001 \001(\t\022\022" +
-      "\n\nround1_map\030\002 \001(\014\"#\n\rDkgPart2Reply\022\022\n\nr" +
-      "ound2_map\030\001 \001(\014\"P\n\017DkgPart3Request\022\016\n\006dk" +
-      "g_id\030\001 \001(\t\022\022\n\nround1_map\030\002 \001(\014\022\031\n\021round2" +
-      "_map_for_me\030\003 \001(\014\",\n\rDkgPart3Reply\022\033\n\023gr" +
-      "oup_verifying_key\030\001 \001(\0142\376\002\n\006Signer\022J\n\006He" +
-      "alth\022 .rutli.cosigner.v1.HealthRequest\032\036" +
-      ".rutli.cosigner.v1.HealthReply\022P\n\010GroupK" +
-      "ey\022\".rutli.cosigner.v1.GroupKeyRequest\032 " +
-      ".rutli.cosigner.v1.GroupKeyReply\022A\n\003Dkg\022" +
-      "\035.rutli.cosigner.v1.DkgRequest\032\033.rutli.c" +
-      "osigner.v1.DkgReply\022D\n\004Sign\022\036.rutli.cosi" +
-      "gner.v1.SignRequest\032\034.rutli.cosigner.v1." +
-      "SignReply\022M\n\007Refresh\022!.rutli.cosigner.v1" +
-      ".RefreshRequest\032\037.rutli.cosigner.v1.Refr" +
-      "eshReply2\207\006\n\004Peer\022V\n\nSignRound1\022$.rutli." +
-      "cosigner.v1.SignRound1Request\032\".rutli.co" +
-      "signer.v1.SignRound1Reply\022V\n\nSignRound2\022" +
-      "$.rutli.cosigner.v1.SignRound2Request\032\"." +
-      "rutli.cosigner.v1.SignRound2Reply\022P\n\010Dkg" +
-      "Part1\022\".rutli.cosigner.v1.DkgPart1Reques" +
-      "t\032 .rutli.cosigner.v1.DkgPart1Reply\022P\n\010D" +
-      "kgPart2\022\".rutli.cosigner.v1.DkgPart2Requ" +
-      "est\032 .rutli.cosigner.v1.DkgPart2Reply\022P\n" +
-      "\010DkgPart3\022\".rutli.cosigner.v1.DkgPart3Re" +
-      "quest\032 .rutli.cosigner.v1.DkgPart3Reply\022" +
-      "X\n\014RefreshPart1\022&.rutli.cosigner.v1.Refr" +
-      "eshPart1Request\032 .rutli.cosigner.v1.DkgP" +
-      "art1Reply\022T\n\014RefreshPart2\022\".rutli.cosign" +
-      "er.v1.DkgPart2Request\032 .rutli.cosigner.v" +
-      "1.DkgPart2Reply\022T\n\014RefreshPart3\022\".rutli." +
-      "cosigner.v1.DkgPart3Request\032 .rutli.cosi" +
-      "gner.v1.DkgPart3Reply\022S\n\tAbortSign\022#.rut" +
-      "li.cosigner.v1.AbortSignRequest\032!.rutli." +
-      "cosigner.v1.AbortSignReplyB,\n\031com.stakec" +
-      "raft.rutli.grpcB\rCosignerProtoP\001b\006proto3"
+      "SignReply\"I\n\024CeremonyFenceRequest\022\023\n\013cer" +
+      "emony_id\030\001 \001(\t\022\016\n\006key_id\030\002 \001(\t\022\014\n\004kind\030\003" +
+      " \001(\t\"\024\n\022CeremonyFenceReply\"=\n\026CeremonyRe" +
+      "leaseRequest\022\023\n\013ceremony_id\030\001 \001(\t\022\016\n\006key" +
+      "_id\030\002 \001(\t\"\026\n\024CeremonyReleaseReply\"o\n\017Dkg" +
+      "Part1Request\022\016\n\006dkg_id\030\001 \001(\t\022\016\n\006key_id\030\002" +
+      " \001(\t\022\022\n\nidentifier\030\003 \001(\r\022\023\n\013max_signers\030" +
+      "\004 \001(\r\022\023\n\013min_signers\030\005 \001(\r\"\'\n\rDkgPart1Re" +
+      "ply\022\026\n\016round1_package\030\001 \001(\014\"5\n\017DkgPart2R" +
+      "equest\022\016\n\006dkg_id\030\001 \001(\t\022\022\n\nround1_map\030\002 \001" +
+      "(\014\"#\n\rDkgPart2Reply\022\022\n\nround2_map\030\001 \001(\014\"" +
+      "P\n\017DkgPart3Request\022\016\n\006dkg_id\030\001 \001(\t\022\022\n\nro" +
+      "und1_map\030\002 \001(\014\022\031\n\021round2_map_for_me\030\003 \001(" +
+      "\014\",\n\rDkgPart3Reply\022\033\n\023group_verifying_ke" +
+      "y\030\001 \001(\0142\376\002\n\006Signer\022J\n\006Health\022 .rutli.cos" +
+      "igner.v1.HealthRequest\032\036.rutli.cosigner." +
+      "v1.HealthReply\022P\n\010GroupKey\022\".rutli.cosig" +
+      "ner.v1.GroupKeyRequest\032 .rutli.cosigner." +
+      "v1.GroupKeyReply\022A\n\003Dkg\022\035.rutli.cosigner" +
+      ".v1.DkgRequest\032\033.rutli.cosigner.v1.DkgRe" +
+      "ply\022D\n\004Sign\022\036.rutli.cosigner.v1.SignRequ" +
+      "est\032\034.rutli.cosigner.v1.SignReply\022M\n\007Ref" +
+      "resh\022!.rutli.cosigner.v1.RefreshRequest\032" +
+      "\037.rutli.cosigner.v1.RefreshReply2\317\007\n\004Pee" +
+      "r\022V\n\nSignRound1\022$.rutli.cosigner.v1.Sign" +
+      "Round1Request\032\".rutli.cosigner.v1.SignRo" +
+      "und1Reply\022V\n\nSignRound2\022$.rutli.cosigner" +
+      ".v1.SignRound2Request\032\".rutli.cosigner.v" +
+      "1.SignRound2Reply\022P\n\010DkgPart1\022\".rutli.co" +
+      "signer.v1.DkgPart1Request\032 .rutli.cosign" +
+      "er.v1.DkgPart1Reply\022P\n\010DkgPart2\022\".rutli." +
+      "cosigner.v1.DkgPart2Request\032 .rutli.cosi" +
+      "gner.v1.DkgPart2Reply\022P\n\010DkgPart3\022\".rutl" +
+      "i.cosigner.v1.DkgPart3Request\032 .rutli.co" +
+      "signer.v1.DkgPart3Reply\022X\n\014RefreshPart1\022" +
+      "&.rutli.cosigner.v1.RefreshPart1Request\032" +
+      " .rutli.cosigner.v1.DkgPart1Reply\022T\n\014Ref" +
+      "reshPart2\022\".rutli.cosigner.v1.DkgPart2Re" +
+      "quest\032 .rutli.cosigner.v1.DkgPart2Reply\022" +
+      "T\n\014RefreshPart3\022\".rutli.cosigner.v1.DkgP" +
+      "art3Request\032 .rutli.cosigner.v1.DkgPart3" +
+      "Reply\022S\n\tAbortSign\022#.rutli.cosigner.v1.A" +
+      "bortSignRequest\032!.rutli.cosigner.v1.Abor" +
+      "tSignReply\022_\n\rCeremonyFence\022\'.rutli.cosi" +
+      "gner.v1.CeremonyFenceRequest\032%.rutli.cos" +
+      "igner.v1.CeremonyFenceReply\022e\n\017CeremonyR" +
+      "elease\022).rutli.cosigner.v1.CeremonyRelea" +
+      "seRequest\032\'.rutli.cosigner.v1.CeremonyRe" +
+      "leaseReplyB,\n\031com.stakecraft.rutli.grpcB" +
+      "\rCosignerProtoP\001b\006proto3"
     };
     descriptor = com.google.protobuf.Descriptors.FileDescriptor
       .internalBuildGeneratedFileFrom(descriptorData,
@@ -315,38 +345,62 @@ public final class CosignerProto {
       com.google.protobuf.GeneratedMessage.FieldAccessorTable(
         internal_static_rutli_cosigner_v1_AbortSignReply_descriptor,
         new java.lang.String[] { });
-    internal_static_rutli_cosigner_v1_DkgPart1Request_descriptor =
+    internal_static_rutli_cosigner_v1_CeremonyFenceRequest_descriptor =
       getDescriptor().getMessageTypes().get(17);
+    internal_static_rutli_cosigner_v1_CeremonyFenceRequest_fieldAccessorTable = new
+      com.google.protobuf.GeneratedMessage.FieldAccessorTable(
+        internal_static_rutli_cosigner_v1_CeremonyFenceRequest_descriptor,
+        new java.lang.String[] { "CeremonyId", "KeyId", "Kind", });
+    internal_static_rutli_cosigner_v1_CeremonyFenceReply_descriptor =
+      getDescriptor().getMessageTypes().get(18);
+    internal_static_rutli_cosigner_v1_CeremonyFenceReply_fieldAccessorTable = new
+      com.google.protobuf.GeneratedMessage.FieldAccessorTable(
+        internal_static_rutli_cosigner_v1_CeremonyFenceReply_descriptor,
+        new java.lang.String[] { });
+    internal_static_rutli_cosigner_v1_CeremonyReleaseRequest_descriptor =
+      getDescriptor().getMessageTypes().get(19);
+    internal_static_rutli_cosigner_v1_CeremonyReleaseRequest_fieldAccessorTable = new
+      com.google.protobuf.GeneratedMessage.FieldAccessorTable(
+        internal_static_rutli_cosigner_v1_CeremonyReleaseRequest_descriptor,
+        new java.lang.String[] { "CeremonyId", "KeyId", });
+    internal_static_rutli_cosigner_v1_CeremonyReleaseReply_descriptor =
+      getDescriptor().getMessageTypes().get(20);
+    internal_static_rutli_cosigner_v1_CeremonyReleaseReply_fieldAccessorTable = new
+      com.google.protobuf.GeneratedMessage.FieldAccessorTable(
+        internal_static_rutli_cosigner_v1_CeremonyReleaseReply_descriptor,
+        new java.lang.String[] { });
+    internal_static_rutli_cosigner_v1_DkgPart1Request_descriptor =
+      getDescriptor().getMessageTypes().get(21);
     internal_static_rutli_cosigner_v1_DkgPart1Request_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessage.FieldAccessorTable(
         internal_static_rutli_cosigner_v1_DkgPart1Request_descriptor,
         new java.lang.String[] { "DkgId", "KeyId", "Identifier", "MaxSigners", "MinSigners", });
     internal_static_rutli_cosigner_v1_DkgPart1Reply_descriptor =
-      getDescriptor().getMessageTypes().get(18);
+      getDescriptor().getMessageTypes().get(22);
     internal_static_rutli_cosigner_v1_DkgPart1Reply_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessage.FieldAccessorTable(
         internal_static_rutli_cosigner_v1_DkgPart1Reply_descriptor,
         new java.lang.String[] { "Round1Package", });
     internal_static_rutli_cosigner_v1_DkgPart2Request_descriptor =
-      getDescriptor().getMessageTypes().get(19);
+      getDescriptor().getMessageTypes().get(23);
     internal_static_rutli_cosigner_v1_DkgPart2Request_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessage.FieldAccessorTable(
         internal_static_rutli_cosigner_v1_DkgPart2Request_descriptor,
         new java.lang.String[] { "DkgId", "Round1Map", });
     internal_static_rutli_cosigner_v1_DkgPart2Reply_descriptor =
-      getDescriptor().getMessageTypes().get(20);
+      getDescriptor().getMessageTypes().get(24);
     internal_static_rutli_cosigner_v1_DkgPart2Reply_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessage.FieldAccessorTable(
         internal_static_rutli_cosigner_v1_DkgPart2Reply_descriptor,
         new java.lang.String[] { "Round2Map", });
     internal_static_rutli_cosigner_v1_DkgPart3Request_descriptor =
-      getDescriptor().getMessageTypes().get(21);
+      getDescriptor().getMessageTypes().get(25);
     internal_static_rutli_cosigner_v1_DkgPart3Request_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessage.FieldAccessorTable(
         internal_static_rutli_cosigner_v1_DkgPart3Request_descriptor,
         new java.lang.String[] { "DkgId", "Round1Map", "Round2MapForMe", });
     internal_static_rutli_cosigner_v1_DkgPart3Reply_descriptor =
-      getDescriptor().getMessageTypes().get(22);
+      getDescriptor().getMessageTypes().get(26);
     internal_static_rutli_cosigner_v1_DkgPart3Reply_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessage.FieldAccessorTable(
         internal_static_rutli_cosigner_v1_DkgPart3Reply_descriptor,

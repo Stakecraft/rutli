@@ -1,0 +1,55 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Example: nightly sealed-share backup on each cosigner pod (one CronJob per ordinal).
+# Copies shares into /data/backup on the pod's PVC — then an external agent / Velero / CSI snapshot
+# should pull that directory into cold storage in the same trust domain.
+# See docs/disaster-recovery.md. Adjust the schedule and key paths for your environment.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cosigner-backup
+  namespace: rutli
+spec:
+  schedule: "17 3 * * *" # daily 03:17 UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      template:
+        spec:
+          restartPolicy: Never
+          # Run as a one-shot on each pod via the StatefulSet hostname pattern. Operators often
+          # prefer `kubectl exec` instead; this Job targets cosigner-0 as a template — duplicate
+          # for cosigner-1 / cosigner-2 (or use a controller) in production.
+          containers:
+            - name: backup
+              image: ghcr.io/stakecraft/rutli-cosigner:0.2.0
+              imagePullPolicy: IfNotPresent
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -euo pipefail
+                  # This example backs up pod 0's config; clone the CronJob for each ordinal.
+                  rutli-cosigner --config /config/cosigner-1.json backup --out /data/backup
+                  echo "backup written to /data/backup — copy off-cluster before the next run"
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                runAsUser: 10001
+                capabilities: { drop: ["ALL"] }
+              volumeMounts:
+                - { name: config, mountPath: /config, readOnly: true }
+                - { name: data, mountPath: /data }
+          volumes:
+            - name: config
+              configMap: { name: rutli-cosigner-config }
+            # Bind the same PVC as cosigner-0 — operators must set claimName to the real PVC
+            # (cosigner-data-cosigner-0) or replace this CronJob with per-pod exec automation.
+            - name: data
+              persistentVolumeClaim:
+                claimName: data-cosigner-0

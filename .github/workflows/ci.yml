@@ -61,10 +61,18 @@ jobs:
           workspaces: frost
       - name: Test
         working-directory: frost
-        run: cargo test --locked || cargo test
+        run: cargo test --locked
       - name: Clippy
         working-directory: frost
         run: cargo clippy --all-targets -- -D warnings
+
+  frost-tls-smoke:
+    name: FROST TLS cluster smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: mTLS + sealed-share compose smoke (Health / DKG / Sign)
+        run: scripts/ci-frost-tls-smoke.sh
 
   conformance:
     name: Canton conformance suite

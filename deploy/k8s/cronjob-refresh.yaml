@@ -1,0 +1,58 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Example: weekly proactive share refresh. Runs against one Signer endpoint; the leader fences the
+# key cluster-wide, so drain heavy topology traffic first (or accept SignInProgress retries).
+# Set KEY_ID to the FROST key (e.g. frost-participant1-namespace). Requires the driver client cert
+# (allowlisted CN) — mount rutli-cosigner-tls or a dedicated driver TLS secret.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: cosigner-refresh
+  namespace: rutli
+spec:
+  schedule: "0 4 * * 1" # Mondays 04:00 UTC
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            rutli.io/client: "true" # NetworkPolicy: may dial Signer
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: refresh
+              image: ghcr.io/stakecraft/rutli-cosigner:0.2.0
+              imagePullPolicy: IfNotPresent
+              env:
+                - name: KEY_ID
+                  value: frost-participant1-namespace # <-- set me
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -euo pipefail
+                  rutli-cosigner --config /config/cosigner-1.json \
+                    refresh --key-id "$KEY_ID" \
+                    --target https://cosigner-0.rutli-cosigner.rutli.svc.cluster.local:9101
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                runAsUser: 10001
+                capabilities: { drop: ["ALL"] }
+              volumeMounts:
+                - { name: config, mountPath: /config, readOnly: true }
+                - { name: certs, mountPath: /certs, readOnly: true }
+                - { name: tmp, mountPath: /tmp }
+          volumes:
+            - name: config
+              configMap: { name: rutli-cosigner-config }
+            - name: certs
+              secret: { secretName: rutli-cosigner-tls, defaultMode: 0440 }
+            - name: tmp
+              emptyDir: {}

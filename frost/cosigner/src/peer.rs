@@ -34,6 +34,10 @@ pub trait PeerApi: Send + Sync {
     ) -> Result<SignatureShare>;
     /// Best-effort: drop an in-flight sign session so its nonces are freed now, not at TTL.
     async fn abort_sign(&self, key_id: &str, session_id: &str) -> Result<()>;
+    /// Take the per-key ceremony guard before DKG/refresh crypto (cluster-wide sign fence).
+    async fn ceremony_fence(&self, ceremony_id: &str, key_id: &str, kind: &'static str) -> Result<()>;
+    /// Release a fence taken by [`ceremony_fence`].
+    async fn ceremony_release(&self, ceremony_id: &str, key_id: &str) -> Result<()>;
     async fn dkg_part1(&self, dkg_id: &str, key_id: &str) -> Result<round1::Package>;
     async fn dkg_part2(
         &self,
@@ -91,6 +95,13 @@ impl PeerApi for LocalPeer {
     }
     async fn abort_sign(&self, key_id: &str, session_id: &str) -> Result<()> {
         self.node.abort_sign(key_id, session_id);
+        Ok(())
+    }
+    async fn ceremony_fence(&self, ceremony_id: &str, key_id: &str, kind: &'static str) -> Result<()> {
+        self.node.ceremony_fence(ceremony_id, key_id, kind)
+    }
+    async fn ceremony_release(&self, ceremony_id: &str, key_id: &str) -> Result<()> {
+        self.node.ceremony_release(ceremony_id, key_id);
         Ok(())
     }
     async fn dkg_part1(&self, dkg_id: &str, key_id: &str) -> Result<round1::Package> {
@@ -199,6 +210,29 @@ impl PeerApi for GrpcPeer {
             .abort_sign(pb::AbortSignRequest {
                 key_id: key_id.into(),
                 session_id: session_id.into(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn ceremony_fence(&self, ceremony_id: &str, key_id: &str, kind: &'static str) -> Result<()> {
+        self.client
+            .clone()
+            .ceremony_fence(pb::CeremonyFenceRequest {
+                ceremony_id: ceremony_id.into(),
+                key_id: key_id.into(),
+                kind: kind.into(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn ceremony_release(&self, ceremony_id: &str, key_id: &str) -> Result<()> {
+        self.client
+            .clone()
+            .ceremony_release(pb::CeremonyReleaseRequest {
+                ceremony_id: ceremony_id.into(),
+                key_id: key_id.into(),
             })
             .await?;
         Ok(())

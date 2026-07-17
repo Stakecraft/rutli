@@ -7,8 +7,9 @@
 //! [`frost::keys::PublicKeyPackage`], serialized as JSON, one file per `key_id`. The KeyPackage
 //! contains only this node's secret share — never the whole private key, which is never assembled.
 //!
-//! ⚠️ v0 stores the share as plaintext JSON. Production must wrap it (an HSM/enclave-sealed share,
-//! the "MPC-of-HSM" model in the architecture) — tracked as a follow-up.
+//! With a [`Sealer`], shares are AES-256-GCM envelopes on disk. Legacy plaintext files are
+//! re-sealed at startup via [`KeyStore::reseal_plaintext_shares`]. Without a sealer (dev only),
+//! shares remain plaintext JSON.
 
 use frost_ed25519 as frost;
 use serde::{Deserialize, Serialize};
@@ -36,13 +37,40 @@ impl KeyStore {
     }
 
     /// Open the store with optional share sealing. With a sealer, every write is encrypted
-    /// (AES-256-GCM envelope); reads accept both sealed envelopes and legacy plaintext shares
-    /// (which get re-sealed on their next save). Without a sealer, reading a sealed share fails
-    /// loudly rather than pretending the data is available.
+    /// (AES-256-GCM envelope). Call [`reseal_plaintext_shares`] after open to migrate any legacy
+    /// plaintext files immediately. Without a sealer, reading a sealed share fails loudly.
     pub fn open_with_sealer(dir: impl Into<PathBuf>, sealer: Option<Arc<Sealer>>) -> Result<Self> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
         Ok(Self { dir, sealer })
+    }
+
+    /// When sealing is enabled, rewrite any leftover plaintext share files as sealed envelopes.
+    /// Idempotent: already-sealed files are left alone. Returns how many files were re-sealed.
+    pub fn reseal_plaintext_shares(&self) -> Result<usize> {
+        let Some(_) = &self.sealer else {
+            return Ok(0);
+        };
+        let mut migrated = 0usize;
+        for entry in std::fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if !name.ends_with(".json") {
+                continue;
+            }
+            let key_id = name.trim_end_matches(".json");
+            let bytes = std::fs::read(entry.path())?;
+            if Sealer::is_sealed(&bytes) {
+                continue;
+            }
+            // load() accepts plaintext under a sealer; save() always writes sealed.
+            let share = self.load(key_id)?;
+            self.save(key_id, &share)?;
+            migrated += 1;
+            tracing::info!(key_id, "re-sealed legacy plaintext share at rest");
+        }
+        Ok(migrated)
     }
 
     fn path(&self, key_id: &str) -> Result<PathBuf> {

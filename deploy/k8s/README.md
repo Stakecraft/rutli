@@ -95,20 +95,26 @@ distributed — do this as the witnessed **key ceremony** (`docs/key-ceremony.md
 
 ## Day-2 operations
 
-- **Backup** each share (CronJob or manual), to storage in that pod's trust domain:
+- **Backup** each share to storage in that pod's trust domain:
   `kubectl -n rutli exec cosigner-0 -- rutli-cosigner --config /config/cosigner-1.json backup --out /data/backup`
-  then copy `/data/backup` off-cluster. See `docs/disaster-recovery.md`.
-- **Proactive refresh** (CronJob): `rutli-cosigner --config /config/cosigner-1.json refresh --key-id frost-<participant>-namespace`
-  against any pod — same key, rotated shares.
+  then copy `/data/backup` off-cluster. Example CronJob: `cronjob-backup.yaml` (set the PVC
+  `claimName` per ordinal). See `docs/disaster-recovery.md`.
+- **Proactive refresh**: `rutli-cosigner --config /config/cosigner-1.json refresh --key-id frost-<participant>-namespace`
+  against any pod — same key, rotated shares. Example CronJob: `cronjob-refresh.yaml` (set `KEY_ID`).
+  Refresh fences signing cluster-wide; avoid topology bursts mid-refresh.
 - **Restore** a replaced pod: its PVC is empty → restore its share with `rutli-cosigner … restore --from <backup> --force`, or (once shipped) repair from `t` survivors.
 - **Monitoring**: pods expose Prometheus `/metrics` on port 9200 (`prometheus.io/*` annotations set;
   label your scraper pod `rutli.io/scraper: "true"` for the NetworkPolicy). Alert rules + Grafana
   dashboard in `deploy/monitoring/`; metric reference in `docs/observability.md`.
+- **PDB**: `pdb.yaml` keeps `minAvailable: 2` so voluntary drains cannot drop below threshold.
 
 ## Notes / hardening
 
-- Make the `podAntiAffinity` **required** and add zone `topologySpreadConstraints` so no two shares
-  share a node/zone — independence is the point of a threshold cluster.
+- Image tag defaults to `0.2.0`. After you push, pin by digest:
+  `kustomize edit set image ghcr.io/stakecraft/rutli-cosigner@sha256:…`
+- Required pod anti-affinity + zone topology spread are in the StatefulSet.
+- Label the Canton **namespace** `rutli.io/client-ns=true` and the participant pod
+  `rutli.io/client=true` (NetworkPolicy requires both).
 - For genuinely separate trust domains, run each cosigner in a **separate cluster/account/region**,
   not just separate nodes; then this manifest is the per-domain unit and the peer endpoints are
   cross-cluster addresses.

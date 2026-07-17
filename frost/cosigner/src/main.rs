@@ -103,6 +103,10 @@ async fn main() -> Result<()> {
     };
 
     let keystore = KeyStore::open_with_sealer(cfg.data_dir.join("keys"), sealer)?;
+    match keystore.reseal_plaintext_shares()? {
+        0 => {}
+        n => tracing::info!(count = n, "migrated legacy plaintext shares to sealed envelopes"),
+    }
     let node = Arc::new(Node::new(identifier, cfg.max_signers(), cfg.threshold, keystore));
 
     // Load mTLS material once (if configured). Plaintext otherwise (dev only).

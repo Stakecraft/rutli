@@ -38,6 +38,18 @@ pub enum DaemonError {
     #[error("ceremony {owner} for key {key_id} was superseded by a newer ceremony — refusing to persist")]
     CeremonySuperseded { key_id: String, owner: String },
 
+    #[error(
+        "refusing {kind} for key {key_id}: {pending} in-flight sign session(s) on this node — \
+         drain / wait for round-2, then retry"
+    )]
+    SignInProgress { key_id: String, kind: &'static str, pending: usize },
+
+    #[error(
+        "invalid sign message length: got {got} bytes, expected {expected} \
+         (Canton's multihash-prefixed SHA-256 digest — see docs/wire-contract.md)"
+    )]
+    InvalidMessageLength { got: usize, expected: usize },
+
     #[error("could not reach signing threshold: needed {needed}, got {got}")]
     ThresholdNotMet { needed: usize, got: usize },
 
@@ -60,6 +72,10 @@ impl From<DaemonError> for tonic::Status {
             // aborted: a concurrent ceremony is holding the key; the caller may retry later.
             DaemonError::CeremonyInProgress { .. } => tonic::Status::aborted(e.to_string()),
             DaemonError::CeremonySuperseded { .. } => tonic::Status::aborted(e.to_string()),
+            DaemonError::SignInProgress { .. } => tonic::Status::aborted(e.to_string()),
+            DaemonError::InvalidMessageLength { .. } => {
+                tonic::Status::invalid_argument(e.to_string())
+            }
             _ => tonic::Status::internal(e.to_string()),
         }
     }

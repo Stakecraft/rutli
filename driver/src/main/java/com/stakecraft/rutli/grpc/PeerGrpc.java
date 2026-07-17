@@ -295,6 +295,68 @@ public final class PeerGrpc {
     return getAbortSignMethod;
   }
 
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyFenceRequest,
+      com.stakecraft.rutli.grpc.CeremonyFenceReply> getCeremonyFenceMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "CeremonyFence",
+      requestType = com.stakecraft.rutli.grpc.CeremonyFenceRequest.class,
+      responseType = com.stakecraft.rutli.grpc.CeremonyFenceReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyFenceRequest,
+      com.stakecraft.rutli.grpc.CeremonyFenceReply> getCeremonyFenceMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyFenceRequest, com.stakecraft.rutli.grpc.CeremonyFenceReply> getCeremonyFenceMethod;
+    if ((getCeremonyFenceMethod = PeerGrpc.getCeremonyFenceMethod) == null) {
+      synchronized (PeerGrpc.class) {
+        if ((getCeremonyFenceMethod = PeerGrpc.getCeremonyFenceMethod) == null) {
+          PeerGrpc.getCeremonyFenceMethod = getCeremonyFenceMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.CeremonyFenceRequest, com.stakecraft.rutli.grpc.CeremonyFenceReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "CeremonyFence"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.CeremonyFenceRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.CeremonyFenceReply.getDefaultInstance()))
+              .setSchemaDescriptor(new PeerMethodDescriptorSupplier("CeremonyFence"))
+              .build();
+        }
+      }
+    }
+    return getCeremonyFenceMethod;
+  }
+
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyReleaseRequest,
+      com.stakecraft.rutli.grpc.CeremonyReleaseReply> getCeremonyReleaseMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "CeremonyRelease",
+      requestType = com.stakecraft.rutli.grpc.CeremonyReleaseRequest.class,
+      responseType = com.stakecraft.rutli.grpc.CeremonyReleaseReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyReleaseRequest,
+      com.stakecraft.rutli.grpc.CeremonyReleaseReply> getCeremonyReleaseMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyReleaseRequest, com.stakecraft.rutli.grpc.CeremonyReleaseReply> getCeremonyReleaseMethod;
+    if ((getCeremonyReleaseMethod = PeerGrpc.getCeremonyReleaseMethod) == null) {
+      synchronized (PeerGrpc.class) {
+        if ((getCeremonyReleaseMethod = PeerGrpc.getCeremonyReleaseMethod) == null) {
+          PeerGrpc.getCeremonyReleaseMethod = getCeremonyReleaseMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.CeremonyReleaseRequest, com.stakecraft.rutli.grpc.CeremonyReleaseReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "CeremonyRelease"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.CeremonyReleaseRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.CeremonyReleaseReply.getDefaultInstance()))
+              .setSchemaDescriptor(new PeerMethodDescriptorSupplier("CeremonyRelease"))
+              .build();
+        }
+      }
+    }
+    return getCeremonyReleaseMethod;
+  }
+
   /**
    * Creates a new async stub that supports all call types for the service
    */
@@ -428,6 +490,25 @@ public final class PeerGrpc {
         io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.AbortSignReply> responseObserver) {
       io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getAbortSignMethod(), responseObserver);
     }
+
+    /**
+     * <pre>
+     * Cluster-wide ceremony fence: take the per-key guard on every peer BEFORE DKG/refresh crypto,
+     * so no node can start a new sign while the ceremony is in flight. Release rolls back a partial
+     * fence if a later peer refuses (e.g. has in-flight signs).
+     * </pre>
+     */
+    default void ceremonyFence(com.stakecraft.rutli.grpc.CeremonyFenceRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyFenceReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getCeremonyFenceMethod(), responseObserver);
+    }
+
+    /**
+     */
+    default void ceremonyRelease(com.stakecraft.rutli.grpc.CeremonyReleaseRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyReleaseReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getCeremonyReleaseMethod(), responseObserver);
+    }
   }
 
   /**
@@ -540,6 +621,27 @@ public final class PeerGrpc {
       io.grpc.stub.ClientCalls.asyncUnaryCall(
           getChannel().newCall(getAbortSignMethod(), getCallOptions()), request, responseObserver);
     }
+
+    /**
+     * <pre>
+     * Cluster-wide ceremony fence: take the per-key guard on every peer BEFORE DKG/refresh crypto,
+     * so no node can start a new sign while the ceremony is in flight. Release rolls back a partial
+     * fence if a later peer refuses (e.g. has in-flight signs).
+     * </pre>
+     */
+    public void ceremonyFence(com.stakecraft.rutli.grpc.CeremonyFenceRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyFenceReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getCeremonyFenceMethod(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     */
+    public void ceremonyRelease(com.stakecraft.rutli.grpc.CeremonyReleaseRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyReleaseReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getCeremonyReleaseMethod(), getCallOptions()), request, responseObserver);
+    }
   }
 
   /**
@@ -628,6 +730,25 @@ public final class PeerGrpc {
       return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
           getChannel(), getAbortSignMethod(), getCallOptions(), request);
     }
+
+    /**
+     * <pre>
+     * Cluster-wide ceremony fence: take the per-key guard on every peer BEFORE DKG/refresh crypto,
+     * so no node can start a new sign while the ceremony is in flight. Release rolls back a partial
+     * fence if a later peer refuses (e.g. has in-flight signs).
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.CeremonyFenceReply ceremonyFence(com.stakecraft.rutli.grpc.CeremonyFenceRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getCeremonyFenceMethod(), getCallOptions(), request);
+    }
+
+    /**
+     */
+    public com.stakecraft.rutli.grpc.CeremonyReleaseReply ceremonyRelease(com.stakecraft.rutli.grpc.CeremonyReleaseRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getCeremonyReleaseMethod(), getCallOptions(), request);
+    }
   }
 
   /**
@@ -715,6 +836,25 @@ public final class PeerGrpc {
     public com.stakecraft.rutli.grpc.AbortSignReply abortSign(com.stakecraft.rutli.grpc.AbortSignRequest request) {
       return io.grpc.stub.ClientCalls.blockingUnaryCall(
           getChannel(), getAbortSignMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * Cluster-wide ceremony fence: take the per-key guard on every peer BEFORE DKG/refresh crypto,
+     * so no node can start a new sign while the ceremony is in flight. Release rolls back a partial
+     * fence if a later peer refuses (e.g. has in-flight signs).
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.CeremonyFenceReply ceremonyFence(com.stakecraft.rutli.grpc.CeremonyFenceRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getCeremonyFenceMethod(), getCallOptions(), request);
+    }
+
+    /**
+     */
+    public com.stakecraft.rutli.grpc.CeremonyReleaseReply ceremonyRelease(com.stakecraft.rutli.grpc.CeremonyReleaseRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getCeremonyReleaseMethod(), getCallOptions(), request);
     }
   }
 
@@ -813,6 +953,27 @@ public final class PeerGrpc {
       return io.grpc.stub.ClientCalls.futureUnaryCall(
           getChannel().newCall(getAbortSignMethod(), getCallOptions()), request);
     }
+
+    /**
+     * <pre>
+     * Cluster-wide ceremony fence: take the per-key guard on every peer BEFORE DKG/refresh crypto,
+     * so no node can start a new sign while the ceremony is in flight. Release rolls back a partial
+     * fence if a later peer refuses (e.g. has in-flight signs).
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.CeremonyFenceReply> ceremonyFence(
+        com.stakecraft.rutli.grpc.CeremonyFenceRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getCeremonyFenceMethod(), getCallOptions()), request);
+    }
+
+    /**
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.CeremonyReleaseReply> ceremonyRelease(
+        com.stakecraft.rutli.grpc.CeremonyReleaseRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getCeremonyReleaseMethod(), getCallOptions()), request);
+    }
   }
 
   private static final int METHODID_SIGN_ROUND1 = 0;
@@ -824,6 +985,8 @@ public final class PeerGrpc {
   private static final int METHODID_REFRESH_PART2 = 6;
   private static final int METHODID_REFRESH_PART3 = 7;
   private static final int METHODID_ABORT_SIGN = 8;
+  private static final int METHODID_CEREMONY_FENCE = 9;
+  private static final int METHODID_CEREMONY_RELEASE = 10;
 
   private static final class MethodHandlers<Req, Resp> implements
       io.grpc.stub.ServerCalls.UnaryMethod<Req, Resp>,
@@ -877,6 +1040,14 @@ public final class PeerGrpc {
         case METHODID_ABORT_SIGN:
           serviceImpl.abortSign((com.stakecraft.rutli.grpc.AbortSignRequest) request,
               (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.AbortSignReply>) responseObserver);
+          break;
+        case METHODID_CEREMONY_FENCE:
+          serviceImpl.ceremonyFence((com.stakecraft.rutli.grpc.CeremonyFenceRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyFenceReply>) responseObserver);
+          break;
+        case METHODID_CEREMONY_RELEASE:
+          serviceImpl.ceremonyRelease((com.stakecraft.rutli.grpc.CeremonyReleaseRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyReleaseReply>) responseObserver);
           break;
         default:
           throw new AssertionError();
@@ -959,6 +1130,20 @@ public final class PeerGrpc {
               com.stakecraft.rutli.grpc.AbortSignRequest,
               com.stakecraft.rutli.grpc.AbortSignReply>(
                 service, METHODID_ABORT_SIGN)))
+        .addMethod(
+          getCeremonyFenceMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.CeremonyFenceRequest,
+              com.stakecraft.rutli.grpc.CeremonyFenceReply>(
+                service, METHODID_CEREMONY_FENCE)))
+        .addMethod(
+          getCeremonyReleaseMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.CeremonyReleaseRequest,
+              com.stakecraft.rutli.grpc.CeremonyReleaseReply>(
+                service, METHODID_CEREMONY_RELEASE)))
         .build();
   }
 
@@ -1016,6 +1201,8 @@ public final class PeerGrpc {
               .addMethod(getRefreshPart2Method())
               .addMethod(getRefreshPart3Method())
               .addMethod(getAbortSignMethod())
+              .addMethod(getCeremonyFenceMethod())
+              .addMethod(getCeremonyReleaseMethod())
               .build();
         }
       }

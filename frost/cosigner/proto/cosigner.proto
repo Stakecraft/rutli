@@ -34,6 +34,11 @@ service Peer {
   // Best-effort: drop an in-flight sign session so its round-1 nonces are freed immediately
   // instead of lingering until the pending-TTL sweep. Sent by the leader when a sign gives up.
   rpc AbortSign(AbortSignRequest) returns (AbortSignReply);
+  // Cluster-wide ceremony fence: take the per-key guard on every peer BEFORE DKG/refresh crypto,
+  // so no node can start a new sign while the ceremony is in flight. Release rolls back a partial
+  // fence if a later peer refuses (e.g. has in-flight signs).
+  rpc CeremonyFence(CeremonyFenceRequest) returns (CeremonyFenceReply);
+  rpc CeremonyRelease(CeremonyReleaseRequest) returns (CeremonyReleaseReply);
 }
 
 message HealthRequest {}
@@ -83,6 +88,20 @@ message AbortSignRequest {
   string session_id = 2;
 }
 message AbortSignReply {}
+
+message CeremonyFenceRequest {
+  string ceremony_id = 1;
+  string key_id = 2;
+  // "dkg" or "refresh"
+  string kind = 3;
+}
+message CeremonyFenceReply {}
+
+message CeremonyReleaseRequest {
+  string ceremony_id = 1;
+  string key_id = 2;
+}
+message CeremonyReleaseReply {}
 
 message DkgPart1Request {
   string dkg_id = 1;

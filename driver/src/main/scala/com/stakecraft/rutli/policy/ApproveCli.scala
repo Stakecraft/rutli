@@ -76,6 +76,18 @@ object ApproveCli {
     requests.foreach { reqFile =>
       val json = Files.readString(reqFile)
       val requestId = field(json, "requestId")
+      val keyId = field(json, "keyId")
+      val digest = field(json, "digest")
+      val nonce = field(json, "nonce")
+      val ts = field(json, "ts")
+      // Surface the bound digest before the approver signs — SoD is cryptographic only if humans
+      // verify they are approving the intended operation, not a swapped request id.
+      println(s"pending request:")
+      println(s"  requestId = $requestId")
+      println(s"  keyId     = $keyId")
+      println(s"  digest    = $digest   (SHA-256 of the bytes Canton asked to sign)")
+      println(s"  nonce     = $nonce")
+      println(s"  ts        = $ts")
       val sig = Signature.getInstance("Ed25519")
       sig.initSign(key)
       sig.update(requestId.getBytes(UTF_8))
@@ -84,7 +96,7 @@ object ApproveCli {
         s"""{"approverId":"$id","requestId":"$requestId","signature":"$sigB64"}"""
       val out = approvalsDir.resolve(s"$requestId.$id.sig")
       Files.write(out, approval.getBytes(UTF_8))
-      println(s"approved $requestId (key=${field(json, "keyId")}) -> $out")
+      println(s"approved $requestId (key=$keyId digest=${digest.take(16)}…) -> $out")
     }
   }
 

@@ -61,9 +61,11 @@ impl Sealer {
                 "share sealing enabled but env var {env_var} is not set"
             ))
         })?);
-        if master.len() < 16 {
+        // Prefer ≥ 32 bytes of entropy (`openssl rand -hex 32` → 64 hex chars). Reject short
+        // operator secrets so a typo / weak password cannot silently become the cluster DEK root.
+        if master.len() < 32 {
             return Err(DaemonError::Config(format!(
-                "share-seal secret in {env_var} is too short ({} chars); use at least 16, e.g. `openssl rand -hex 32`",
+                "share-seal secret in {env_var} is too short ({} chars); use at least 32, e.g. `openssl rand -hex 32`",
                 master.len()
             )));
         }

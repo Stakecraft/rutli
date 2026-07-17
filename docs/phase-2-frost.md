@@ -148,10 +148,12 @@ DKG and refresh rewrite a key's shares, so they must never overlap or clobber a 
   clearing its session, every `part2`/`part3` re-checks that the calling ceremony still owns the
   key's guard; a superseded one is refused (`CeremonySuperseded`) and never writes — this is the
   load-bearing safety for refresh, which would otherwise split/clobber shares.
-- **Signing is fenced during a ceremony.** A new `sign` for a key is refused while a DKG/refresh
-  holds that key's guard (refresh rewrites the share and evicts the cached cosigner). A sign already
-  past round 1 when a refresh lands fails cleanly at round 2 (its nonces went with the old cosigner)
-  — never a silent bad signature. Operationally: don't refresh during a topology burst; drain first.
+- **Signing is fenced cluster-wide during a ceremony.** Before any DKG/refresh crypto, the leader
+  takes the per-key guard on **every** peer (`CeremonyFence`), so no node can start a new `sign`
+  mid-ceremony — not just the leader. The reverse fence also applies: if any peer still holds
+  in-flight sign nonces for that key, the fence fails (`SignInProgress`) and is rolled back
+  cluster-wide. A sign already past round 1 when a refresh somehow lands still fails cleanly at
+  round 2 (its nonces went with the old cosigner) — never a silent bad signature.
 
 Concurrent ceremonies therefore fail closed (refused, retry later), never corrupt. Ordinary
 signing is otherwise independent — each signature uses a fresh session id.

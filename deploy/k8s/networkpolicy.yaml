@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Lock the cosigner signing port down to the mesh + the Canton driver. Requires a NetworkPolicy-
-# enforcing CNI (Calico, Cilium, …). Label the Canton participant pod `rutli.io/client: "true"` (in
-# any namespace) to let it reach the cluster; adjust the namespace selector to your Canton namespace.
+# enforcing CNI (Calico, Cilium, …). Label BOTH the Canton namespace (`rutli.io/client-ns: "true"`)
+# and the participant pod (`rutli.io/client: "true"`) — a pod label alone in an arbitrary namespace
+# is not enough.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -20,8 +21,10 @@ spec:
         - podSelector:
             matchLabels:
               app.kubernetes.io/name: rutli-cosigner
-        # the Canton driver (participant pod), labelled rutli.io/client=true
-        - namespaceSelector: {}
+        # the Canton driver: namespace + pod must both be labelled
+        - namespaceSelector:
+            matchLabels:
+              rutli.io/client-ns: "true"
           podSelector:
             matchLabels:
               rutli.io/client: "true"
