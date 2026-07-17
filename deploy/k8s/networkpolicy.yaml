@@ -27,6 +27,15 @@ spec:
               rutli.io/client: "true"
       ports:
         - { protocol: TCP, port: 9101 }
+    - from:
+        # Prometheus (any namespace): label the scraper pod `rutli.io/scraper: "true"`, mirroring
+        # the driver's rutli.io/client label. Metrics are plaintext counts/latencies only.
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              rutli.io/scraper: "true"
+      ports:
+        - { protocol: TCP, port: 9200 }
 ---
 # DNS + peer egress for the cosigners themselves.
 apiVersion: networking.k8s.io/v1

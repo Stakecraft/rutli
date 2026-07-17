@@ -3,6 +3,16 @@
 All notable changes to Rütli are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- **Prometheus metrics** (`metrics_listen`): opt-in plaintext `/metrics` endpoint per cosigner —
+  sign throughput/latency/outcomes, ceremony outcomes, round-1 peer skips (quorum-margin canary),
+  sign aborts, and an in-flight-sessions gauge. Counts and latencies only; never key material,
+  digests, or session ids. Wired into the TLS compose (host ports 9201–9203) and the k8s bundle
+  (port `metrics`/9200, scrape annotations, NetworkPolicy ingress for `rutli.io/scraper` pods).
+  Alert rules + Grafana dashboard in `deploy/monitoring/`; runbook in `docs/observability.md`.
+
 ## [0.2.0] — 2026-07-17
 
 Devnet-hardened release: encryption-at-rest for shares, proactive refresh, M-of-N signing

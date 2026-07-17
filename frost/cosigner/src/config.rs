@@ -32,6 +32,12 @@ pub struct Config {
     /// cert cannot request arbitrary signatures. The mesh Peer API is unaffected.
     #[serde(default)]
     pub signer_allowlist: Option<Vec<String>>,
+    /// Address for the plaintext Prometheus /metrics endpoint (e.g. "0.0.0.0:9200"). When absent,
+    /// no metrics endpoint is served. Metrics carry operation counts/latencies only — never key
+    /// material, digests, or session ids — so plaintext HTTP is acceptable on a trusted network;
+    /// still, do not expose this port publicly.
+    #[serde(default)]
+    pub metrics_listen: Option<String>,
 }
 
 /// Where the share-sealing master secret comes from. The secret must be injected at runtime (secret
@@ -128,6 +134,7 @@ mod tests {
             tls,
             share_seal: None,
             signer_allowlist: allow,
+            metrics_listen: None,
         }
     }
 

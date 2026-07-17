@@ -79,6 +79,12 @@ async fn main() -> Result<()> {
     }
     tracing::info!(identifier = cfg.identifier, listen = %cfg.listen, "starting cosigner");
 
+    // Prometheus /metrics endpoint (opt-in). Operation counts/latencies only — no key material.
+    if let Some(metrics_listen) = &cfg.metrics_listen {
+        rutli_cosigner::metrics::install(metrics_listen)?;
+        tracing::info!(listen = %metrics_listen, "Prometheus metrics endpoint serving /metrics");
+    }
+
     let identifier = ident(cfg.identifier)?;
 
     // Share sealing: encryption-at-rest for key shares, keyed from an operator-injected secret.

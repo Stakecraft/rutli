@@ -201,7 +201,9 @@ impl Node {
                 other: "in progress".to_string(),
             });
         }
-        Ok(self.cosigner(key_id)?.round1(session_id)?)
+        let result = self.cosigner(key_id)?.round1(session_id);
+        self.update_pending_gauge();
+        Ok(result?)
     }
 
     pub fn sign_round2(
@@ -211,7 +213,9 @@ impl Node {
         message: &[u8],
         commitments: &BTreeMap<Identifier, SigningCommitments>,
     ) -> Result<SignatureShare> {
-        Ok(self.cosigner(key_id)?.round2(session_id, message, commitments)?)
+        let result = self.cosigner(key_id)?.round2(session_id, message, commitments);
+        self.update_pending_gauge();
+        Ok(result?)
     }
 
     /// Best-effort abort of an in-flight sign session: free the round-1 nonces held for
@@ -222,6 +226,7 @@ impl Node {
         if let Some(c) = cached {
             c.abort(session_id);
         }
+        self.update_pending_gauge();
     }
 
     /// In-flight (round-1, not yet round-2) sign sessions currently held for `key_id`; 0 if the
@@ -233,6 +238,17 @@ impl Node {
             .get(key_id)
             .map(|c| c.pending_count())
             .unwrap_or(0)
+    }
+
+    /// In-flight sign sessions across all cached keys on this node.
+    pub fn pending_sign_total(&self) -> usize {
+        self.cosigners.lock().expect("cosigners lock").values().map(|c| c.pending_count()).sum()
+    }
+
+    /// Keep the pending-sessions gauge in step after any round1/round2/abort. No-op without an
+    /// installed metrics recorder (tests, metrics disabled).
+    fn update_pending_gauge(&self) {
+        metrics::gauge!(crate::metrics::PENDING_SIGN_SESSIONS).set(self.pending_sign_total() as f64);
     }
 
     /// Leader-side aggregation using this node's copy of the group public key.

@@ -101,6 +101,9 @@ distributed — do this as the witnessed **key ceremony** (`docs/key-ceremony.md
 - **Proactive refresh** (CronJob): `rutli-cosigner --config /config/cosigner-1.json refresh --key-id frost-<participant>-namespace`
   against any pod — same key, rotated shares.
 - **Restore** a replaced pod: its PVC is empty → restore its share with `rutli-cosigner … restore --from <backup> --force`, or (once shipped) repair from `t` survivors.
+- **Monitoring**: pods expose Prometheus `/metrics` on port 9200 (`prometheus.io/*` annotations set;
+  label your scraper pod `rutli.io/scraper: "true"` for the NetworkPolicy). Alert rules + Grafana
+  dashboard in `deploy/monitoring/`; metric reference in `docs/observability.md`.
 
 ## Notes / hardening
 

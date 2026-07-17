@@ -44,6 +44,12 @@ impl SignerSvc {
     }
 }
 
+fn record_ceremony(kind: &'static str, ok: bool) {
+    let result = if ok { "ok" } else { "error" };
+    metrics::counter!(crate::metrics::CEREMONY_REQUESTS, "kind" => kind, "result" => result)
+        .increment(1);
+}
+
 /// Extract the subject Common Name from a DER-encoded X.509 certificate.
 pub fn cn_of(der: &[u8]) -> Option<String> {
     let (_, cert) = x509_parser::parse_x509_certificate(der).ok()?;
@@ -73,16 +79,22 @@ impl Signer for SignerSvc {
     async fn dkg(&self, req: Request<pb::DkgRequest>) -> Result<Response<pb::DkgReply>, Status> {
         self.authorize(&req)?;
         let key_id = req.into_inner().key_id;
-        let key = orchestrator::run_dkg(&self.peers, &key_id).await.map_err(Status::from)?;
+        let result = orchestrator::run_dkg(&self.peers, &key_id).await;
+        record_ceremony("dkg", result.is_ok());
+        let key = result.map_err(Status::from)?;
         Ok(Response::new(pb::DkgReply { group_verifying_key: key.to_vec() }))
     }
 
     async fn sign(&self, req: Request<pb::SignRequest>) -> Result<Response<pb::SignReply>, Status> {
         self.authorize(&req)?;
         let r = req.into_inner();
-        let sig = orchestrator::sign(&self.node, &self.peers, &r.key_id, &r.message)
-            .await
-            .map_err(Status::from)?;
+        let started = std::time::Instant::now();
+        let result = orchestrator::sign(&self.node, &self.peers, &r.key_id, &r.message).await;
+        let outcome = if result.is_ok() { "ok" } else { "error" };
+        metrics::counter!(crate::metrics::SIGN_REQUESTS, "result" => outcome).increment(1);
+        metrics::histogram!(crate::metrics::SIGN_DURATION, "result" => outcome)
+            .record(started.elapsed().as_secs_f64());
+        let sig = result.map_err(Status::from)?;
         Ok(Response::new(pb::SignReply { signature: sig.to_vec() }))
     }
 
@@ -92,7 +104,9 @@ impl Signer for SignerSvc {
     ) -> Result<Response<pb::RefreshReply>, Status> {
         self.authorize(&req)?;
         let key_id = req.into_inner().key_id;
-        let key = orchestrator::run_refresh(&self.peers, &key_id).await.map_err(Status::from)?;
+        let result = orchestrator::run_refresh(&self.peers, &key_id).await;
+        record_ceremony("refresh", result.is_ok());
+        let key = result.map_err(Status::from)?;
         Ok(Response::new(pb::RefreshReply { group_verifying_key: key.to_vec() }))
     }
 }

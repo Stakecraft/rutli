@@ -44,7 +44,7 @@ services:
       - ./config-tls:/config:ro
       - ./certs:/certs:ro
       - c1:/data
-    ports: ["9101:9101"]
+    ports: ["9101:9101", "9201:9200"]  # gRPC, Prometheus /metrics
     healthcheck:
       <<: *hc
       test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9101' 2>/dev/null || exit 1"]
@@ -56,7 +56,7 @@ services:
       - ./config-tls:/config:ro
       - ./certs:/certs:ro
       - c2:/data
-    ports: ["9102:9102"]
+    ports: ["9102:9102", "9202:9200"]  # gRPC, Prometheus /metrics
     healthcheck:
       <<: *hc
       test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9102' 2>/dev/null || exit 1"]
@@ -68,7 +68,7 @@ services:
       - ./config-tls:/config:ro
       - ./certs:/certs:ro
       - c3:/data
-    ports: ["9103:9103"]
+    ports: ["9103:9103", "9203:9200"]  # gRPC, Prometheus /metrics
     healthcheck:
       <<: *hc
       test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9103' 2>/dev/null || exit 1"]

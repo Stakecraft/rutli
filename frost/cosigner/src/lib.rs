@@ -17,6 +17,7 @@
 pub mod config;
 pub mod error;
 pub mod keystore;
+pub mod metrics;
 pub mod node;
 pub mod orchestrator;
 pub mod peer;

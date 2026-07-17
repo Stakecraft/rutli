@@ -31,6 +31,8 @@ hkdf = { workspace = true }
 sha2 = { workspace = true }
 zeroize = { workspace = true }
 x509-parser = { workspace = true }
+metrics = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }

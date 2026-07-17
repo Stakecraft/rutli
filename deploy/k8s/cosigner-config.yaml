@@ -16,6 +16,7 @@ data:
     {
       "identifier": 1,
       "listen": "0.0.0.0:9101",
+      "metrics_listen": "0.0.0.0:9200",
       "threshold": 2,
       "data_dir": "/data",
       "peers": [
@@ -31,6 +32,7 @@ data:
     {
       "identifier": 2,
       "listen": "0.0.0.0:9101",
+      "metrics_listen": "0.0.0.0:9200",
       "threshold": 2,
       "data_dir": "/data",
       "peers": [
@@ -46,6 +48,7 @@ data:
     {
       "identifier": 3,
       "listen": "0.0.0.0:9101",
+      "metrics_listen": "0.0.0.0:9200",
       "threshold": 2,
       "data_dir": "/data",
       "peers": [

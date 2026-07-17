@@ -28,5 +28,6 @@
   },
   "signer_allowlist": [
     "driver"
-  ]
+  ],
+  "metrics_listen": "0.0.0.0:9200"
 }

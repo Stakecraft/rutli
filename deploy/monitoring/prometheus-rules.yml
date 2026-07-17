@@ -1,0 +1,85 @@
+# Prometheus alerting rules for the Rütli FROST cosigner cluster.
+#
+# Rütli is a threshold-signing daemon: N cosigner instances (e.g. 3) jointly
+# hold a FROST-ed25519 key and sign under a 2-of-3 quorum. Each cosigner
+# exposes a Prometheus text endpoint at /metrics on port 9200 with the
+# following metrics (all labels listed exhaustively; Prometheus also adds
+# the standard `instance`/`job` labels per scrape target):
+#
+#   rutli_sign_requests_total{result="ok"|"error"}                    counter
+#   rutli_sign_duration_seconds{result="ok"|"error"}                  histogram
+#   rutli_ceremony_requests_total{kind="dkg"|"refresh", result=...}   counter
+#   rutli_sign_round1_skips_total                                    counter
+#   rutli_sign_aborts_total                                          counter
+#   rutli_pending_sign_sessions                                      gauge
+#
+# NOTE: every `up{job="rutli-cosigner"}` and job-label selector below
+# assumes the scrape job is named "rutli-cosigner". Operators must match
+# this to the actual `job_name` used in their prometheus.yml scrape config
+# (or update these rules) or the RutliCosignerDown rule will never fire.
+
+groups:
+  - name: rutli-cosigner
+    rules:
+      - alert: RutliCosignerDown
+        expr: up{job="rutli-cosigner"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} is down"
+          description: "Cosigner instance {{ $labels.instance }} (job rutli-cosigner) has had up == 0 for more than 2 minutes. With a 2-of-3 quorum, one lost cosigner leaves zero margin — a second failure will halt signing entirely."
+
+      - alert: RutliSignErrors
+        expr: rate(rutli_sign_requests_total{result="error"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} is returning sign errors"
+          description: "{{ $labels.instance }} has had a non-zero rate of Sign RPC errors (result=\"error\") over the last 5m, sustained for 5m. Check leader logs for the failing peer(s)."
+
+      - alert: RutliSignLatencyHigh
+        expr: histogram_quantile(0.99, sum by (le, instance) (rate(rutli_sign_duration_seconds_bucket[5m]))) > 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli sign latency is high on {{ $labels.instance }}"
+          description: "p99 Sign RPC latency on {{ $labels.instance }} has exceeded 5s (5m window) for 10 minutes. Signing may be timing out, or a quorum peer may be slow or unreachable."
+
+      - alert: RutliPeerSkips
+        expr: increase(rutli_sign_round1_skips_total[10m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli peer round-1 skips detected on {{ $labels.instance }}"
+          description: "{{ $labels.instance }} recorded sign round-1 skips in the last 10 minutes, meaning a quorum peer failed or was unreachable during round 1. With a 2-of-3 quorum the safety margin is shrinking — investigate the skipped peer before another one goes down."
+
+      - alert: RutliPendingSessionsGrowing
+        expr: rutli_pending_sign_sessions > 50
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli pending sign sessions growing on {{ $labels.instance }}"
+          description: "{{ $labels.instance }} has held more than 50 in-flight round-1 sign sessions for over 10 minutes. This gauge should hover near 0; a sustained high value suggests sessions are leaking rather than being cleaned up."
+
+      - alert: RutliCeremonyFailure
+        expr: increase(rutli_ceremony_requests_total{result="error"}[1h]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Rütli key ceremony failed on {{ $labels.instance }}"
+          description: "{{ $labels.instance }} recorded a failed {{ $labels.kind }} ceremony (DKG or refresh) in the last hour. Ceremonies are rare and safety-critical — do NOT retry automatically; an operator must investigate the cause before attempting another ceremony."
+
+      - alert: RutliSignAborts
+        expr: increase(rutli_sign_aborts_total[15m]) > 3
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli repeated sign aborts on {{ $labels.instance }}"
+          description: "{{ $labels.instance }} issued more than 3 leader-side sign aborts in the last 15 minutes. This indicates repeated give-ups on in-flight sign sessions — peers may be flapping or the cluster may be degraded."

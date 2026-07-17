@@ -122,7 +122,10 @@ pub async fn sign(node: &Node, peers: &Peers, key_id: &str, message: &[u8]) -> R
                 commitments.insert(p.identifier(), c);
                 chosen.push(p);
             }
-            Err(e) => tracing::warn!(peer = ?p.identifier(), error = %e, "sign_round1 failed; trying next"),
+            Err(e) => {
+                metrics::counter!(crate::metrics::SIGN_ROUND1_SKIPS).increment(1);
+                tracing::warn!(peer = ?p.identifier(), error = %e, "sign_round1 failed; trying next");
+            }
         }
     }
     if commitments.len() < threshold {
@@ -155,6 +158,7 @@ pub async fn sign(node: &Node, peers: &Peers, key_id: &str, message: &[u8]) -> R
 /// the per-session TTL is the correctness backstop. Aborting a session a peer already completed
 /// (round-2 done) is a harmless no-op.
 async fn abort_sign(chosen: &[&Arc<dyn PeerApi>], key_id: &str, session_id: &str) {
+    metrics::counter!(crate::metrics::SIGN_ABORTS).increment(1);
     for p in chosen {
         if let Err(e) = p.abort_sign(key_id, session_id).await {
             tracing::debug!(peer = ?p.identifier(), error = %e, "sign abort failed; nonces will TTL-expire");

@@ -18,6 +18,12 @@ spec:
     metadata:
       labels:
         app.kubernetes.io/name: rutli-cosigner
+      annotations:
+        # Prometheus discovery (annotation-based scraping; for the Operator, use a PodMonitor on
+        # port "metrics" instead). Metrics are counts/latencies only — no key material.
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9200"
+        prometheus.io/path: /metrics
     spec:
       securityContext:
         runAsNonRoot: true
@@ -55,6 +61,8 @@ spec:
           ports:
             - name: grpc
               containerPort: 9101
+            - name: metrics
+              containerPort: 9200
           readinessProbe:
             tcpSocket: { port: grpc }
             initialDelaySeconds: 3
