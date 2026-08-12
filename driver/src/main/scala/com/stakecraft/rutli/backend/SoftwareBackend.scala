@@ -17,9 +17,12 @@ import scala.util.Try
 
 /** Phase 0 backend: in-process software crypto via BouncyCastle.
   *
-  * ⚠️ NOT FOR PRODUCTION. Private keys live in this JVM's heap. Its sole purpose is to prove the
-  * Canton KMS Driver integration end-to-end and to pass the upstream conformance suite. Production
-  * uses an HSM/enclave (Phase 1) or the FROST MPC cluster (Phase 2).
+  * ⚠️ Software-grade custody. Private keys are handled by this JVM. Without a [[SoftKeyStore]]
+  * they exist ONLY in heap — every key dies with the process, which on a real node is fatal and
+  * unrecoverable (a restarted participant cannot decrypt anything addressed to its old encryption
+  * key; see the `software { dir, seal-secret-env }` config). With persistence, keys are sealed
+  * AES-256-GCM on disk and reloaded at startup — durable, but still one machine holding whole
+  * keys: production should prefer an HSM (Phase 1) or the FROST cluster (Phase 2) where possible.
   *
   * Output formats are chosen to match Canton's verifier exactly:
   *   - Ed25519 signatures are raw 64-byte R‖S (`concat`) — BouncyCastle's Ed25519 `Signature`
@@ -32,11 +35,21 @@ import scala.util.Try
   * default). The Canton-specific ECIES construction is deferred, so `EcP256` encryption keys are
   * intentionally NOT advertised in [[supportedEncryptionKeySpecs]].
   */
-final class SoftwareBackend extends KmsBackend {
+final class SoftwareBackend(persistence: Option[SoftKeyStore] = None) extends KmsBackend {
 
   import SoftwareBackend._
 
   private val store = new ConcurrentHashMap[String, Stored]()
+
+  // Reload persisted keys before serving anything. Fails loudly (constructor throws) on a wrong
+  // seal secret or corrupt file — starting "fresh" while ciphertext addressed to the old key is
+  // in flight is exactly the unrecoverable state persistence exists to prevent.
+  persistence.foreach { p =>
+    p.loadAll().foreach { case (id, payload) => store.put(id, deserialize(payload)) }
+  }
+
+  private def persist(id: String, s: Stored): Unit =
+    persistence.foreach(_.put(id, serialize(s)))
 
   override val supportedSigningKeySpecs: Set[SigningKeySpec] =
     Set(
@@ -66,7 +79,9 @@ final class SoftwareBackend extends KmsBackend {
       case SigningKeySpec.EcSecp256k1  => ecKeyPair("secp256k1")
     }
     val id = keyId("sig", keyName)
-    store.put(id, StoredSigning(kp, spec))
+    val stored = StoredSigning(kp, spec)
+    persist(id, stored) // durable BEFORE the id is returned — a crash must not orphan the id
+    store.put(id, stored)
     id
   })
 
@@ -82,7 +97,9 @@ final class SoftwareBackend extends KmsBackend {
         )
     }
     val id = keyId("enc", keyName)
-    store.put(id, StoredEncryption(kp, spec))
+    val stored = StoredEncryption(kp, spec)
+    persist(id, stored)
+    store.put(id, stored)
     id
   })
 
@@ -91,7 +108,9 @@ final class SoftwareBackend extends KmsBackend {
       val gen = KeyGenerator.getInstance("AES")
       gen.init(128) // AES-128-GCM, matching Canton's only symmetric spec.
       val id = keyId("sym", keyName)
-      store.put(id, StoredSymmetric(gen.generateKey()))
+      val stored = StoredSymmetric(gen.generateKey())
+      persist(id, stored)
+      store.put(id, stored)
       id
     })
 
@@ -174,7 +193,7 @@ final class SoftwareBackend extends KmsBackend {
 
   override def deleteKey(keyId: String): Future[Unit] = Future.fromTry(Try {
     store.remove(keyId)
-    ()
+    persistence.foreach(_.delete(keyId))
   })
 
   override def health: Future[KmsDriverHealth] = Future.successful(KmsDriverHealth.Ok)
@@ -250,4 +269,74 @@ object SoftwareBackend {
     new NoSuchElementException(s"key is not an encryption key: $id")
   private def notASymmetricKey(id: String) =
     new NoSuchElementException(s"key is not a symmetric key: $id")
+
+  // -- persistence codec (payload is sealed by SoftKeyStore; format is 4 lines:
+  //    kind \n spec \n base64(private: PKCS#8 | raw AES) \n base64(public: X.509 | empty) ) --
+
+  private val B64 = java.util.Base64.getEncoder
+  private val B64d = java.util.Base64.getDecoder
+
+  private def serialize(s: Stored): Array[Byte] = {
+    val (kind, spec, priv, pub) = s match {
+      case StoredSigning(kp, sp)    => ("signing", signingSpecName(sp), kp.getPrivate.getEncoded, kp.getPublic.getEncoded)
+      case StoredEncryption(kp, sp) => ("encryption", encryptionSpecName(sp), kp.getPrivate.getEncoded, kp.getPublic.getEncoded)
+      case StoredSymmetric(key)     => ("symmetric", "AES", key.getEncoded, Array.emptyByteArray)
+    }
+    s"$kind\n$spec\n${B64.encodeToString(priv)}\n${B64.encodeToString(pub)}"
+      .getBytes(java.nio.charset.StandardCharsets.UTF_8)
+  }
+
+  private def deserialize(payload: Array[Byte]): Stored = {
+    val lines = new String(payload, java.nio.charset.StandardCharsets.UTF_8).split("\n", -1)
+    require(lines.length == 4, s"corrupt key record: expected 4 lines, got ${lines.length}")
+    val (kind, spec, priv, pub) = (lines(0), lines(1), B64d.decode(lines(2)), B64d.decode(lines(3)))
+    kind match {
+      case "signing" =>
+        val sp = signingSpecOf(spec)
+        StoredSigning(keyPairFrom(jcaKeyAlgo(sp), priv, pub), sp)
+      case "encryption" =>
+        val sp = encryptionSpecOf(spec)
+        val algo = sp match { case EncryptionKeySpec.Rsa2048 => "RSA"; case EncryptionKeySpec.EcP256 => "EC" }
+        StoredEncryption(keyPairFrom(algo, priv, pub), sp)
+      case "symmetric" =>
+        StoredSymmetric(new javax.crypto.spec.SecretKeySpec(priv, "AES"))
+      case other => throw new IllegalArgumentException(s"corrupt key record: unknown kind '$other'")
+    }
+  }
+
+  private def keyPairFrom(jcaAlgo: String, pkcs8: Array[Byte], x509: Array[Byte]): KeyPair = {
+    val kf = java.security.KeyFactory.getInstance(jcaAlgo, Bc)
+    new KeyPair(
+      kf.generatePublic(new java.security.spec.X509EncodedKeySpec(x509)),
+      kf.generatePrivate(new java.security.spec.PKCS8EncodedKeySpec(pkcs8)),
+    )
+  }
+
+  private def jcaKeyAlgo(sp: SigningKeySpec): String = sp match {
+    case SigningKeySpec.EcCurve25519 => "Ed25519"
+    case _                            => "EC"
+  }
+
+  private def signingSpecName(sp: SigningKeySpec): String = sp match {
+    case SigningKeySpec.EcCurve25519 => "EcCurve25519"
+    case SigningKeySpec.EcP256       => "EcP256"
+    case SigningKeySpec.EcP384       => "EcP384"
+    case SigningKeySpec.EcSecp256k1  => "EcSecp256k1"
+  }
+  private def signingSpecOf(name: String): SigningKeySpec = name match {
+    case "EcCurve25519" => SigningKeySpec.EcCurve25519
+    case "EcP256"       => SigningKeySpec.EcP256
+    case "EcP384"       => SigningKeySpec.EcP384
+    case "EcSecp256k1"  => SigningKeySpec.EcSecp256k1
+    case other          => throw new IllegalArgumentException(s"unknown signing key spec: $other")
+  }
+  private def encryptionSpecName(sp: EncryptionKeySpec): String = sp match {
+    case EncryptionKeySpec.Rsa2048 => "Rsa2048"
+    case EncryptionKeySpec.EcP256  => "EcP256"
+  }
+  private def encryptionSpecOf(name: String): EncryptionKeySpec = name match {
+    case "Rsa2048" => EncryptionKeySpec.Rsa2048
+    case "EcP256"  => EncryptionKeySpec.EcP256
+    case other     => throw new IllegalArgumentException(s"unknown encryption key spec: $other")
+  }
 }

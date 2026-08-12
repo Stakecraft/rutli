@@ -37,6 +37,7 @@ final class RutliDriverFactory extends KmsDriverFactory {
     implicit val approverReader: ConfigReader[Approver] = deriveReader[Approver]
     implicit val policyReader: ConfigReader[ApprovalPolicy] = deriveReader[ApprovalPolicy]
     implicit val journalReader: ConfigReader[SigningJournalConfig] = deriveReader[SigningJournalConfig]
+    implicit val softwareReader: ConfigReader[SoftwareConfig] = deriveReader[SoftwareConfig]
     deriveReader[RutliConfig]
   }
 
@@ -59,6 +60,7 @@ final class RutliDriverFactory extends KmsDriverFactory {
     implicit val approverWriter: ConfigWriter[Approver] = deriveWriter[Approver]
     implicit val policyWriter: ConfigWriter[ApprovalPolicy] = deriveWriter[ApprovalPolicy]
     implicit val journalWriter: ConfigWriter[SigningJournalConfig] = deriveWriter[SigningJournalConfig]
+    implicit val softwareWriter: ConfigWriter[SoftwareConfig] = deriveWriter[SoftwareConfig]
     deriveWriter[RutliConfig]
   }
 
@@ -81,7 +83,35 @@ final class RutliDriverFactory extends KmsDriverFactory {
       blockingPool.map(ExecutionContext.fromExecutor).getOrElse(executionContext)
 
     def buildBackend(kind: String): KmsBackend = kind match {
-      case "software" => new SoftwareBackend()
+      case "software" =>
+        val persistence = config.software.flatMap { sc =>
+          sc.dir.map { dir =>
+            val envName = sc.sealSecretEnv.getOrElse(
+              throw new IllegalArgumentException(
+                "software.dir is set but software.seal-secret-env is not — refusing to persist " +
+                  "private keys in plaintext; set the env var name holding the seal master secret"
+              )
+            )
+            val secret = sys.env.getOrElse(
+              envName,
+              throw new IllegalArgumentException(
+                s"software key persistence: env var $envName is not set"
+              ),
+            )
+            logger.info(s"Software backend: sealed key persistence at $dir")
+            new com.stakecraft.rutli.backend.SoftKeyStore(
+              java.nio.file.Paths.get(dir),
+              secret.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+            )
+          }
+        }
+        if (persistence.isEmpty)
+          logger.warn(
+            "Software backend is HEAP-ONLY: keys will not survive a restart. Set " +
+              "software { dir, seal-secret-env } for sealed persistence — a lost encryption key " +
+              "is unrecoverable."
+          )
+        new SoftwareBackend(persistence)
       case "hsm" =>
         val hsm = config.hsm.getOrElse(
           throw new IllegalArgumentException("hsm backend requires an `hsm { ... }` config block")

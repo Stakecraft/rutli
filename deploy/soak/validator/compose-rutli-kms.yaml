@@ -28,6 +28,10 @@ services:
       - ./certs:/rutli-certs:ro
       - rutli-driver-state:/rutli-state # audit log + signing journal survive restarts
     environment:
+      # Seal secret for the software-delegate key files (RSA encryption + AES keys). REQUIRED:
+      # without persistence those keys live in JVM heap and die on every restart — unrecoverable,
+      # because peers keep encrypting to the published old key. From your secret manager.
+      RUTLI_SOFT_SEAL_SECRET: ${RUTLI_SOFT_SEAL_SECRET:?set RUTLI_SOFT_SEAL_SECRET (openssl rand -hex 32)}
       # HOCON applied after app.conf (ADDITIONAL_CONFIG_* wins) — the whole KMS wiring, no rebuild.
       ADDITIONAL_CONFIG_RUTLI_KMS: |
         canton.participants.participant.crypto {
@@ -40,6 +44,11 @@ services:
               audit-logging  = true
               audit-log-path = "/rutli-state/audit.jsonl"
               signing-journal = { dir = "/rutli-state/journal" }
+              # Sealed disk persistence for the software delegate's keys (survives restarts).
+              software = {
+                dir             = "/rutli-state/softkeys"
+                seal-secret-env = "RUTLI_SOFT_SEAL_SECRET"
+              }
               frost = {
                 # Full cosigner roster on the shared docker network — driver fails over across it.
                 endpoints = ["cosigner1:9101", "cosigner2:9102", "cosigner3:9103"]

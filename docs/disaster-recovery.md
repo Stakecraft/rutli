@@ -57,6 +57,48 @@ threshold) but the key is **not** lost as long as you hold **≥ `t` share backu
 4. Rebuild the remaining cosigners (§1 restore, or re-add and repair once §2 ships) to return to full
    `n`, then **proactively refresh** so the temporarily-assembled quorum's shares are rotated.
 
+## §3b Lost delegate encryption key (software backend without persistence)
+
+**Symptom:** after a participant restart, fatal crash on catch-up:
+`KmsDecryptError: key not found: enc-encryption-…` → `SYNC_SERVICE_SYNCHRONIZER_DISCONNECTED` →
+`FATAL UnrecoverableError`. FROST signing keys are fine (they live in the cluster); the RSA/ECIES
+encryption key served by a heap-only software delegate died with the old JVM.
+
+**Why this is unrecoverable in place:** Canton publishes the encryption *public* key in topology;
+peers encrypt views to it, and the catch-up stream already contains ciphertext under it. A freshly
+generated key cannot decrypt that history, and rotation only changes *future* traffic. The private
+key was never persisted — no backup contains it.
+
+**Recovery (accept a bounded data gap):**
+1. Do not reconnect yet. Enable repair commands on the participant and use
+   `participant.repair.ignore_events` over the poison sequencer range (the `first/last sequencing
+   timestamp` values in the fatal log). Those events' effects are lost for this participant.
+2. Reconnect. If the node hits further decrypt misses for the same key id, repeat step 1 for the
+   new range — iterate until clean. (Traffic addressed to the dead key keeps arriving until
+   rotation propagates.)
+3. Rotate the encryption key via Canton topology (console: generate a new encryption key and
+   register it; the transaction is signed by the namespace key, which the FROST cluster still
+   holds — node identity is untouched). New traffic becomes decryptable.
+4. **Before the next restart**, make the replacement key durable — see prevention below.
+
+**Prevention:** never run a real node with a heap-only software delegate. Either configure sealed
+disk persistence for the software backend:
+
+```hocon
+config {
+  backend = "frost"
+  software = {
+    dir             = "/rutli-state/softkeys"   # durable volume (PVC on k8s)
+    seal-secret-env = "RUTLI_SOFT_SEAL_SECRET"  # openssl rand -hex 32, from a secret manager
+  }
+  frost = { delegate = "software", … }
+}
+```
+
+(the driver refuses `dir` without a seal secret, and fails loudly on a wrong secret rather than
+starting keyless), or use an HSM delegate. Include the `softkeys/` directory and its secret in the
+same backup discipline as cosigner shares.
+
 ## §4 What you MUST have in place before go-live
 
 - **≥ `t` cosigner share backups**, encrypted (sealed) and stored in ≥ 2 separated locations. This is

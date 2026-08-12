@@ -6,9 +6,21 @@ All notable changes to Rütli are documented here. Format loosely follows
 ## [Unreleased]
 
 ### Added
+- **Software-backend sealed key persistence** (`software { dir, seal-secret-env }`): the software
+  delegate's keys (RSA-OAEP encryption, AES symmetric, EC signing) are now persisted as
+  AES-256-GCM-sealed files (HKDF-keyed from an operator-injected secret, atomic + fsynced writes,
+  ciphertext bound to its key id) and reloaded at startup — so a participant restart no longer
+  destroys its encryption keys. Field incident on a DevNet validator: heap-only delegate + node
+  upgrade → `KmsDecryptError: key not found` → fatal disconnect loop, key unrecoverable (peers keep
+  encrypting to the published old key; rotation only fixes future traffic). The driver refuses
+  `dir` without a seal secret (no plaintext persistence) and fails loudly on a wrong secret instead
+  of starting keyless; heap-only remains for tests, with a startup warning. Recovery runbook for
+  the incident (repair.ignore_events + topology rotation) in `docs/disaster-recovery.md` §3b.
 - **Published cosigner image** on GHCR: `ghcr.io/stakecraft/rutli-cosigner:0.2.1` (+ `latest`),
   multi-arch (`linux/amd64`, `linux/arm64`). Docker Compose defaults to the published image;
   Helm chart at `deploy/helm/rutli-cosigner`. CI workflow `publish-image.yml` pushes on `v*` tags.
+- **`docs/performance.md`** — DevNet multi-region sign latency evidence (~100 ms mean / ~70 ms
+  summary p50 over 9k+ OK FROST signs) plus a checklist of benchmarks worth publishing next.
 
 ## [0.2.1] — 2026-07-17
 

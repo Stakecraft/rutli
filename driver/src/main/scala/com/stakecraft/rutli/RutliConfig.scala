@@ -30,8 +30,26 @@ final case class RutliConfig(
     auditLogPath: Option[String] = None,
     hsm: Option[HsmConfig] = None,
     frost: Option[FrostConfig] = None,
+    software: Option[SoftwareConfig] = None,
     approval: Option[com.stakecraft.rutli.policy.ApprovalPolicy] = None,
     signingJournal: Option[SigningJournalConfig] = None,
+)
+
+/** Software-backend config (applies when `backend = "software"` OR `frost.delegate = "software"`).
+  *
+  * Without this block the software backend is heap-only: every key dies with the JVM — acceptable
+  * for conformance tests, fatal on a real node (a restarted participant cannot decrypt anything
+  * addressed to its old encryption key, and that key is unrecoverable). With `dir` set, every
+  * generated key is persisted as an AES-256-GCM-sealed file and reloaded on startup.
+  *
+  * @param dir            Directory for sealed key files (must be durable — on k8s, a PVC).
+  * @param sealSecretEnv  Name of the env var holding the seal master secret (e.g.
+  *                       `openssl rand -hex 32`, injected from a secret manager). Required when
+  *                       `dir` is set — the driver refuses to persist private keys in plaintext.
+  */
+final case class SoftwareConfig(
+    dir: Option[String] = None,
+    sealSecretEnv: Option[String] = None,
 )
 
 /** Signing-journal config.
