@@ -34,6 +34,12 @@ sealSecretKey: RUTLI_SEAL_SECRET
 signerAllowlist:
   - driver
 
+# Cert CNs allowed on the mesh Peer API — the cosigners themselves. Required when TLS is on.
+# Empty = derived as cosigner1..cosigner<replicaCount> (what scripts/gen-frost-certs.sh issues).
+# The driver's CN must NOT appear here: the Peer API is the raw FROST protocol, so anything that
+# can call it on `threshold` nodes can aggregate a signature over an arbitrary message.
+peerAllowlist: []
+
 # mTLS domain / shared SAN on cosigner certs
 tlsDomain: rutli-cosigner
 

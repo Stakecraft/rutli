@@ -233,6 +233,17 @@ impl Node {
         message: &[u8],
         commitments: &BTreeMap<Identifier, SigningCommitments>,
     ) -> Result<SignatureShare> {
+        // Defense in depth: the leader already rejects non-Canton payloads in `orchestrator::sign`,
+        // but THIS is the function the mesh Peer RPC reaches directly. A caller that got onto the
+        // Peer API could otherwise collect `threshold` shares over an arbitrary message and
+        // aggregate a namespace signature offline, bypassing the leader entirely. The digest guard
+        // belongs on both paths; the peer allowlist is the other half of that fix.
+        if message.len() != crate::orchestrator::CANTON_DIGEST_LEN {
+            return Err(DaemonError::InvalidMessageLength {
+                got: message.len(),
+                expected: crate::orchestrator::CANTON_DIGEST_LEN,
+            });
+        }
         let result = self.cosigner(key_id)?.round2(session_id, message, commitments);
         self.update_pending_gauge();
         Ok(result?)

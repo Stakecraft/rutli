@@ -26,21 +26,33 @@ pub struct SignerSvc {
 impl SignerSvc {
     /// Enforce the client-cert allowlist (if configured) for a sensitive Signer call.
     fn authorize<T>(&self, req: &Request<T>) -> Result<(), Status> {
-        let Some(allowed) = &self.allowed_cns else { return Ok(()) };
-        let certs = req
-            .peer_certs()
-            .ok_or_else(|| Status::unauthenticated("client certificate required for the Signer API"))?;
-        let cn = certs
-            .first()
-            .and_then(|leaf| cn_of(leaf.as_ref()))
-            .ok_or_else(|| Status::unauthenticated("client certificate has no usable Common Name"))?;
-        if allowed.contains(&cn) {
-            Ok(())
-        } else {
-            Err(Status::permission_denied(format!(
-                "client '{cn}' is not permitted to call the Signer API"
-            )))
-        }
+        authorize_cn(self.allowed_cns.as_deref(), req, "Signer")
+    }
+}
+
+/// Check the caller's mTLS client-cert Common Name against `allowed` (None = open, dev only).
+///
+/// This is the ONLY thing separating the two APIs: every cosigner cert and the driver cert are
+/// signed by the same cluster CA, so transport mTLS proves cluster membership, not role.
+fn authorize_cn<T>(
+    allowed: Option<&HashSet<String>>,
+    req: &Request<T>,
+    api: &str,
+) -> Result<(), Status> {
+    let Some(allowed) = allowed else { return Ok(()) };
+    let certs = req
+        .peer_certs()
+        .ok_or_else(|| Status::unauthenticated(format!("client certificate required for the {api} API")))?;
+    let cn = certs
+        .first()
+        .and_then(|leaf| cn_of(leaf.as_ref()))
+        .ok_or_else(|| Status::unauthenticated("client certificate has no usable Common Name"))?;
+    if allowed.contains(&cn) {
+        Ok(())
+    } else {
+        Err(Status::permission_denied(format!(
+            "client '{cn}' is not permitted to call the {api} API"
+        )))
     }
 }
 
@@ -114,6 +126,17 @@ impl Signer for SignerSvc {
 
 pub struct PeerSvc {
     pub node: Arc<Node>,
+    /// Client-cert CNs allowed on the mesh Peer API — the other cosigners. `None` = open (dev
+    /// only). Required under TLS: the Peer API is the raw FROST protocol, so a caller that reaches
+    /// it on `threshold` nodes can aggregate a signature over an arbitrary message, bypassing the
+    /// Signer API's Canton-digest guard and the ceremony fence.
+    pub allowed_cns: Option<Arc<HashSet<String>>>,
+}
+
+impl PeerSvc {
+    fn authorize<T>(&self, req: &Request<T>) -> Result<(), Status> {
+        authorize_cn(self.allowed_cns.as_deref(), req, "Peer")
+    }
 }
 
 #[tonic::async_trait]
@@ -122,6 +145,7 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::SignRound1Request>,
     ) -> Result<Response<pb::SignRound1Reply>, Status> {
+        self.authorize(&req)?;
         let r = req.into_inner();
         let commitments = self.node.sign_round1(&r.key_id, &r.session_id).map_err(Status::from)?;
         Ok(Response::new(pb::SignRound1Reply {
@@ -133,6 +157,7 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::SignRound2Request>,
     ) -> Result<Response<pb::SignRound2Reply>, Status> {
+        self.authorize(&req)?;
         let r = req.into_inner();
         let commitments: BTreeMap<_, _> = de(&r.commitments_map)?;
         let share = self
@@ -146,6 +171,7 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::AbortSignRequest>,
     ) -> Result<Response<pb::AbortSignReply>, Status> {
+        self.authorize(&req)?;
         let r = req.into_inner();
         self.node.abort_sign(&r.key_id, &r.session_id);
         Ok(Response::new(pb::AbortSignReply {}))
@@ -155,6 +181,7 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::CeremonyFenceRequest>,
     ) -> Result<Response<pb::CeremonyFenceReply>, Status> {
+        self.authorize(&req)?;
         let r = req.into_inner();
         let kind = match r.kind.as_str() {
             "dkg" => "dkg",
@@ -173,6 +200,7 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::CeremonyReleaseRequest>,
     ) -> Result<Response<pb::CeremonyReleaseReply>, Status> {
+        self.authorize(&req)?;
         let r = req.into_inner();
         self.node.ceremony_release(&r.ceremony_id, &r.key_id);
         Ok(Response::new(pb::CeremonyReleaseReply {}))
@@ -182,6 +210,7 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::DkgPart1Request>,
     ) -> Result<Response<pb::DkgPart1Reply>, Status> {
+        self.authorize(&req)?;
         let r = req.into_inner();
         let package = self.node.dkg_part1(&r.dkg_id, &r.key_id).map_err(Status::from)?;
         Ok(Response::new(pb::DkgPart1Reply { round1_package: json(&package)? }))
@@ -191,6 +220,7 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::DkgPart2Request>,
     ) -> Result<Response<pb::DkgPart2Reply>, Status> {
+        self.authorize(&req)?;
         let r = req.into_inner();
         let round1_map = de(&r.round1_map)?;
         let round2_map = self.node.dkg_part2(&r.dkg_id, &round1_map).map_err(Status::from)?;
@@ -201,6 +231,7 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::DkgPart3Request>,
     ) -> Result<Response<pb::DkgPart3Reply>, Status> {
+        self.authorize(&req)?;
         let r = req.into_inner();
         let round1_map = de(&r.round1_map)?;
         let round2_for_me = de(&r.round2_map_for_me)?;
@@ -215,6 +246,7 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::RefreshPart1Request>,
     ) -> Result<Response<pb::DkgPart1Reply>, Status> {
+        self.authorize(&req)?;
         let r = req.into_inner();
         let package = self.node.refresh_part1(&r.refresh_id, &r.key_id).map_err(Status::from)?;
         Ok(Response::new(pb::DkgPart1Reply { round1_package: json(&package)? }))
@@ -224,6 +256,7 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::DkgPart2Request>,
     ) -> Result<Response<pb::DkgPart2Reply>, Status> {
+        self.authorize(&req)?;
         let r = req.into_inner();
         let round1_map = de(&r.round1_map)?;
         let round2_map = self.node.refresh_part2(&r.dkg_id, &round1_map).map_err(Status::from)?;
@@ -234,6 +267,7 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::DkgPart3Request>,
     ) -> Result<Response<pb::DkgPart3Reply>, Status> {
+        self.authorize(&req)?;
         let r = req.into_inner();
         let round1_map = de(&r.round1_map)?;
         let round2_for_me = de(&r.round2_map_for_me)?;
@@ -266,5 +300,20 @@ mod tests {
     #[test]
     fn cn_of_rejects_garbage() {
         assert_eq!(cn_of(b"not a certificate"), None);
+    }
+
+    #[test]
+    fn an_allowlist_without_a_client_cert_fails_closed() {
+        use std::collections::HashSet;
+        // A configured allowlist must REFUSE a caller whose cert we cannot see, never fall through
+        // to "allow". (In production the transport enforces mTLS, but the check must not depend on
+        // that to be safe.)
+        let allowed: HashSet<String> = ["cosigner1".to_string()].into_iter().collect();
+        let req = tonic::Request::new(());
+        let err = super::authorize_cn(Some(&allowed), &req, "Peer").unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated, "got {err:?}");
+
+        // No allowlist configured = open (plaintext dev mode only).
+        assert!(super::authorize_cn(None, &req, "Peer").is_ok());
     }
 }

@@ -5,6 +5,20 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Security
+- **The mesh Peer API was unauthenticated (critical; affects ≤ 0.2.0).** Only the Signer API
+  enforced the client-cert CN allowlist; every `Peer` RPC — the raw FROST rounds — was reachable by
+  **any** cluster-CA-signed certificate, and the driver's cert is signed by that same CA. The
+  34-byte Canton-digest guard also lived only in the leader (`orchestrator::sign`), not in
+  `Node::sign_round2` behind the Peer RPC. Combined, a holder of the driver cert (or any cosigner
+  cert) could call `SignRound1`/`SignRound2` directly on `threshold` cosigners with an arbitrary
+  message and aggregate a valid namespace signature offline — bypassing the leader, the digest
+  guard, the ceremony fence and the signing journal. Fixed by adding a mandatory-under-TLS
+  `peer_allowlist` (cosigner CNs) enforced on **every** Peer RPC, and by enforcing the digest
+  length in `Node::sign_round2` as well, so the Peer path fails closed even if the allowlist is
+  misconfigured. Operators must add `peer_allowlist` to each cosigner config (the shipped
+  compose/k8s/Helm configs now set it; Helm derives `cosigner1..N` by default).
+
 ### Added
 - **Software-backend sealed key persistence** (`software { dir, seal-secret-env }`): the software
   delegate's keys (RSA-OAEP encryption, AES symmetric, EC signing) are now persisted as

@@ -29,5 +29,10 @@
   "signer_allowlist": [
     "driver"
   ],
-  "metrics_listen": "0.0.0.0:9200"
+  "metrics_listen": "0.0.0.0:9200",
+  "peer_allowlist": [
+    "cosigner1",
+    "cosigner2",
+    "cosigner3"
+  ]
 }

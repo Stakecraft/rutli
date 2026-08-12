@@ -18,6 +18,14 @@ data:
 {{- $metricsPort := int .Values.service.metricsPort }}
 {{- $domain := .Values.tlsDomain }}
 {{- $allow := .Values.signerAllowlist }}
+{{/* Peer (mesh) API allowlist: the cosigner cert CNs. Defaults to cosigner1..N, matching
+     scripts/gen-frost-certs.sh. Without it any cluster-CA cert — including the driver's — could
+     drive the raw FROST rounds directly and forge a signature over an arbitrary message. */}}
+{{- $peerAllow := .Values.peerAllowlist }}
+{{- if not $peerAllow }}
+  {{- $peerAllow = list }}
+  {{- range $k := until $n }}{{ $peerAllow = append $peerAllow (printf "cosigner%d" (add $k 1)) }}{{ end }}
+{{- end }}
 {{- range $i := until $n }}
 {{- $id := add $i 1 }}
   cosigner-{{ $id }}.json: |
@@ -42,6 +50,7 @@ data:
         "domain": {{ $domain | quote }}
       },
       "share_seal": { "secret_env": "RUTLI_SEAL_SECRET" },
-      "signer_allowlist": {{ $allow | toJson }}
+      "signer_allowlist": {{ $allow | toJson }},
+      "peer_allowlist": {{ $peerAllow | toJson }}
     }
 {{- end }}

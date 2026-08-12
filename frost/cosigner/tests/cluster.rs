@@ -544,3 +544,32 @@ async fn a_threshold_shortfall_after_round1_aborts_the_lone_commitment() {
 fn nodes_peers(nodes: &[Arc<Node>]) -> Peers {
     nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect()
 }
+
+// ── mesh-API hardening: the Peer path must not be a forgery oracle ──
+
+#[tokio::test]
+async fn peer_round2_refuses_a_non_canton_payload() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = cluster(&tmp);
+    run_dkg(&peers, KEY_ID).await.unwrap();
+
+    // The mesh Peer RPC lands directly on Node::sign_round2, bypassing the leader. Without a
+    // digest guard here, a caller on the Peer API could gather `threshold` shares over an
+    // arbitrary message and aggregate a valid namespace signature offline.
+    let forged = b"arbitrary attacker-chosen message, not a 34-byte Canton digest".to_vec();
+    let commitments: BTreeMap<Identifier, SigningCommitments> = BTreeMap::new();
+    let err = nodes[0].sign_round2(KEY_ID, "forge-session", &forged, &commitments).unwrap_err();
+    assert!(
+        matches!(err, DaemonError::InvalidMessageLength { expected: 34, .. }),
+        "peer-path round2 must refuse non-digest payloads, got {err:?}"
+    );
+
+    // A well-formed 34-byte digest is still accepted through the same path (round1 first).
+    let msg = canton_digest(b"legit");
+    let c0 = nodes[0].sign_round1(KEY_ID, "ok-session").unwrap();
+    let mut cs = BTreeMap::new();
+    cs.insert(nodes[0].identifier, c0);
+    let c1 = nodes[1].sign_round1(KEY_ID, "ok-session").unwrap();
+    cs.insert(nodes[1].identifier, c1);
+    assert!(nodes[0].sign_round2(KEY_ID, "ok-session", &msg, &cs).is_ok());
+}

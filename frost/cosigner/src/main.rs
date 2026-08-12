@@ -140,8 +140,20 @@ async fn main() -> Result<()> {
         ),
     }
 
+    let peer_cns = cfg.peer_allowlist.as_ref().map(|v| {
+        Arc::new(v.iter().cloned().collect::<std::collections::HashSet<String>>())
+    });
+    match &peer_cns {
+        Some(cns) => tracing::info!(?cns, "mesh Peer API restricted to allowlisted cosigner CNs"),
+        None => tracing::warn!(
+            "Peer API has no client allowlist — any cluster-CA cert (including the driver's) may \
+             drive the raw FROST rounds and could aggregate a signature over an arbitrary message; \
+             set peer_allowlist (the cosigner cert CNs) in production"
+        ),
+    }
+
     let signer = SignerSvc { node: node.clone(), peers, allowed_cns };
-    let peer = PeerSvc { node };
+    let peer = PeerSvc { node, allowed_cns: peer_cns };
 
     let addr = cfg
         .listen

@@ -32,6 +32,15 @@ pub struct Config {
     /// cert cannot request arbitrary signatures. The mesh Peer API is unaffected.
     #[serde(default)]
     pub signer_allowlist: Option<Vec<String>>,
+    /// Client-certificate Common Names allowed to call the mesh-internal Peer API (the raw FROST
+    /// round RPCs) — i.e. the OTHER cosigners, and only them. The Peer API is the unmediated
+    /// protocol layer: a caller that reaches `SignRound1`/`SignRound2` on `threshold` nodes can
+    /// aggregate a signature over ANY message, bypassing the Signer API's Canton-digest guard and
+    /// the ceremony fence. The driver's cert is signed by the same cluster CA, so transport mTLS
+    /// alone does NOT separate these roles — this allowlist is what keeps a Signer-API client
+    /// (or any other cluster-CA holder) off the mesh. Required when TLS is enabled.
+    #[serde(default)]
+    pub peer_allowlist: Option<Vec<String>>,
     /// Address for the plaintext Prometheus /metrics endpoint (e.g. "0.0.0.0:9200"). When absent,
     /// no metrics endpoint is served. Metrics carry operation counts/latencies only — never key
     /// material, digests, or session ids — so plaintext HTTP is acceptable on a trusted network;
@@ -112,6 +121,19 @@ impl Config {
                     .into(),
             ));
         }
+        // The Peer (mesh) API is the raw FROST protocol with no Canton-digest guard; without an
+        // allowlist any cluster-CA cert (including the driver's) could drive it directly and forge
+        // a namespace signature over an arbitrary message. Require the cosigner CN allowlist under
+        // TLS. Plaintext (dev) may omit it.
+        if self.tls.is_some()
+            && self.peer_allowlist.as_ref().map(|a| a.is_empty()).unwrap_or(true)
+        {
+            return Err(Config(
+                "peer_allowlist must be set (non-empty) when tls is enabled — list the cosigner \
+                 cert CNs permitted to call the mesh Peer API (typically every cosigner)"
+                    .into(),
+            ));
+        }
         Ok(())
     }
 }
@@ -133,7 +155,8 @@ mod tests {
             ],
             tls,
             share_seal: None,
-            signer_allowlist: allow,
+            signer_allowlist: allow.clone(),
+            peer_allowlist: allow,
             metrics_listen: None,
         }
     }
@@ -161,5 +184,17 @@ mod tests {
     #[test]
     fn plaintext_without_allowlist_is_ok() {
         base(None, None).validate().unwrap();
+    }
+
+    #[test]
+    fn tls_requires_peer_allowlist_too() {
+        // signer_allowlist present but peer_allowlist missing/empty is rejected under TLS.
+        let mut c = base(Some(tls()), Some(vec!["driver".into()]));
+        c.peer_allowlist = None;
+        assert!(c.validate().is_err(), "missing peer_allowlist under TLS must fail");
+        c.peer_allowlist = Some(vec![]);
+        assert!(c.validate().is_err(), "empty peer_allowlist under TLS must fail");
+        c.peer_allowlist = Some(vec!["cosigner1".into(), "cosigner2".into(), "cosigner3".into()]);
+        c.validate().unwrap();
     }
 }

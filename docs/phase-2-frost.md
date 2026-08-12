@@ -117,15 +117,27 @@ Why cluster-side, not a driver-side coordinator:
   can stall signing, never forge.
 - The cluster is independently testable and deployable, exactly like Horcrux's cosigner set.
 
-## Who can call the Signer API
+## Who can call which API
 
-mTLS restricts the cluster to holders of cluster-CA-signed certs, but a *cosigner* cert should not
-be able to request arbitrary signatures. Set `signer_allowlist` (a list of client-cert Common Names,
-typically just the driver's — `"driver"` from `gen-frost-certs.sh`) so only the driver may call the
-sensitive Signer RPCs (`Dkg`/`Sign`/`Refresh`/`GroupKey`); `Health` stays open for liveness. The
-mesh Peer API is unaffected. **When `tls` is enabled, `signer_allowlist` is required — the daemon
-refuses to start without it** (a non-empty list). Plaintext dev may omit it (any local caller). The
-TLS example configs and the k8s ConfigMap set `"signer_allowlist": ["driver"]`.
+mTLS proves *cluster membership*, not *role*: every cosigner cert **and the driver cert** are signed
+by the same cluster CA. Two separate allowlists carry the role separation, and **both are required
+when `tls` is enabled** — the daemon refuses to start without them (non-empty lists). Plaintext dev
+may omit both.
+
+- **`signer_allowlist`** — who may call the client-facing Signer RPCs (`Dkg`/`Sign`/`Refresh`/
+  `GroupKey`). Typically just the driver's CN (`"driver"` from `gen-frost-certs.sh`). `Health` stays
+  open for liveness.
+- **`peer_allowlist`** — who may call the mesh Peer RPCs. The **cosigner CNs only**; the driver must
+  *not* be listed.
+
+Why the second one is load-bearing: the Peer API is the raw FROST protocol, below every policy check.
+A caller that reaches `SignRound1`/`SignRound2` on `threshold` cosigners can assemble a signature
+over **any** message, bypassing the leader, the 34-byte Canton-digest guard, the ceremony fence and
+the driver's signing journal. Transport mTLS alone does not stop that, because the driver's cert
+satisfies it. As defense in depth the digest-length check is also enforced in `Node::sign_round2`
+(the function behind the Peer RPC), so the mesh path fails closed even with a misconfigured
+allowlist. The TLS example configs, the k8s ConfigMap and the Helm chart set both lists (Helm derives
+`peer_allowlist` as `cosigner1..N` when unset).
 
 ## Ceremony safety (DKG / refresh)
 
