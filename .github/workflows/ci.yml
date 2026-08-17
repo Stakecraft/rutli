@@ -46,9 +46,13 @@ jobs:
         run: sbt -batch driver/assembly
 
       - uses: actions/upload-artifact@v4
+        # Convenience only — the tests above are the gate. An upload failure (e.g. the org's
+        # artifact storage quota) must not turn a green test run red.
+        continue-on-error: true
         with:
           name: rutli-driver
           path: driver/target/scala-2.13/rutli-driver.jar
+          retention-days: 7
 
   frost:
     name: FROST core (Rust)

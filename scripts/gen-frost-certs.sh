@@ -46,6 +46,20 @@ gen_cert "driver" "subjectAltName=DNS:rutli-cosigner,DNS:driver,DNS:localhost,IP
 
 rm -f ca.srl
 chmod 600 ./*.key
+
+# The container images run the cosigner as uid 10001. On Linux, a bind-mounted cert directory
+# keeps its host ownership, so these 0600 files — owned by whoever ran this script — are
+# unreadable inside the container. (Docker Desktop on macOS masks host ownership, which is why
+# this only bites on Linux.) Set RUTLI_CERT_UID to hand the keys to the container user; needs
+# root, so run the script under sudo, or chown afterwards.
+if [ -n "${RUTLI_CERT_UID:-}" ]; then
+  if chown "$RUTLI_CERT_UID" ./*.key ./*.crt 2>/dev/null; then
+    echo "Chowned certs to uid $RUTLI_CERT_UID (container user)"
+  else
+    echo "WARNING: could not chown certs to uid $RUTLI_CERT_UID — run as root, or the cosigner" >&2
+    echo "         containers will fail to read their key with Permission denied." >&2
+  fi
+fi
 echo
 echo "Wrote CA + $N cosigner certs + driver cert to $OUT"
 echo "Point each cosigner config's tls { ca_cert, cert, key } at ca.crt / cosignerN.{crt,key},"

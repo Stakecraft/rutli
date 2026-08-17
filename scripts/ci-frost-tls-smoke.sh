@@ -45,6 +45,13 @@ echo "==> Generating mTLS certs"
 rm -rf "$CERTS"
 scripts/gen-frost-certs.sh 3 "$CERTS"
 
+# The cosigner containers run as uid 10001. On Linux the bind-mounted certs keep the runner's
+# ownership, so the 0600 keys are unreadable in-container (macOS Docker masks this, which is why
+# the smoke passes locally and failed only in CI). These certs are throwaway — hand them over.
+if [ "$(uname -s)" = "Linux" ]; then
+  sudo chown -R 10001:10001 "$CERTS" 2>/dev/null || chmod -R a+rX "$CERTS"
+fi
+
 # Drop any leftover cluster on the same compose project / default frost ports.
 docker compose -f deploy/frost/docker-compose.yml down -v --remove-orphans >/dev/null 2>&1 || true
 docker compose -f deploy/frost/docker-compose.tls.yml down -v --remove-orphans >/dev/null 2>&1 || true

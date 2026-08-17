@@ -68,6 +68,21 @@ Example TLS configs are in `config-tls/` (mount `certs/` at `/certs`). The drive
 `frost.tls { ca-cert, cert, key, domain }` in its Canton config, pointing at the CA + `driver.{crt,key}`.
 With TLS on, a plaintext client is refused at the handshake.
 
+### On Linux: cert ownership
+
+The cosigner containers run as **uid 10001**, and a bind-mounted directory keeps its host
+ownership. The generated `*.key` files are mode `0600` owned by whoever ran the script, so on Linux
+the cosigner cannot read them and exits with `cannot read TLS material … Permission denied`.
+(Docker Desktop on macOS masks host ownership, so this does not appear there.) Hand the certs to
+the container user:
+
+```sh
+sudo RUTLI_CERT_UID=10001 scripts/gen-frost-certs.sh 3 deploy/frost/certs
+```
+
+or `sudo chown -R 10001:10001 deploy/frost/certs` after generating. On Kubernetes this is handled
+for you — certs come from a Secret with `defaultMode: 0440` and the pod's `fsGroup`.
+
 ## ⚠️ Not fully production yet
 
 Even with mTLS and share sealing available, this dev topology runs all nodes on one host. A production
