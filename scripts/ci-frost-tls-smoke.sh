@@ -17,9 +17,27 @@ COMPOSE=(docker compose -p rutli-tls-smoke
   -f deploy/frost/docker-compose.tls.smoke.yml)
 CERTS=deploy/frost/certs
 export RUTLI_SEAL_SECRET="${RUTLI_SEAL_SECRET:-$(openssl rand -hex 32)}"
+# The compose file defaults to the published GHCR image with pull_policy=always — right for
+# operators, wrong for CI: a smoke test must exercise the working tree, or a broken (or fixed)
+# commit gets "verified" against a released image. Force a local tag and never pull.
+export RUTLI_COSIGNER_IMAGE="rutli-cosigner:ci-smoke"
+export RUTLI_PULL_POLICY="never"
 
+# On failure, dump what the cluster actually did BEFORE tearing it down — otherwise a startup
+# crash in CI is invisible and the logs die with the stack.
+diagnose() {
+  echo "==> FAILED — container state:"
+  "${COMPOSE[@]}" ps -a || true
+  for svc in cosigner1 cosigner2 cosigner3; do
+    echo "--- $svc logs ---"
+    "${COMPOSE[@]}" logs --no-color --tail=60 "$svc" 2>&1 || true
+  done
+}
 cleanup() {
+  rc=$?
+  [ "$rc" -ne 0 ] && diagnose
   "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+  return $rc
 }
 trap cleanup EXIT
 
