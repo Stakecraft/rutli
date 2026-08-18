@@ -14,6 +14,11 @@ pub enum DaemonError {
     #[error("serde: {0}")]
     Serde(#[from] serde_json::Error),
 
+    /// Deliberately opaque: a decryption failure must not say *why* (bad padding vs bad key vs
+    /// wrong length). A distinguishable failure is a padding oracle.
+    #[error("decryption failed")]
+    DecryptFailed,
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
@@ -68,6 +73,8 @@ impl From<DaemonError> for tonic::Status {
             }
             DaemonError::ThresholdNotMet { .. } => tonic::Status::unavailable(e.to_string()),
             DaemonError::Config(_) => tonic::Status::failed_precondition(e.to_string()),
+            // invalid_argument, and nothing more: same code and message for every cause.
+            DaemonError::DecryptFailed => tonic::Status::invalid_argument(e.to_string()),
             DaemonError::KeyExists(_) => tonic::Status::already_exists(e.to_string()),
             // aborted: a concurrent ceremony is holding the key; the caller may retry later.
             DaemonError::CeremonyInProgress { .. } => tonic::Status::aborted(e.to_string()),

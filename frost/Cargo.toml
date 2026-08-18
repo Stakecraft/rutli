@@ -35,4 +35,8 @@ zeroize = "1"
 x509-parser = "0.16"
 rcgen = "0.13"
 metrics = "0.24"
+# RSA-OAEP for cluster-hosted keys. Deliberately NOT the pure-Rust `rsa` crate: RUSTSEC-2023-0071
+# (Marvin timing side-channel, key recovery by a network attacker) is still unpatched, and this is
+# a network-facing decryption service. aws-lc-rs is FIPS-validated and constant-time.
+aws-lc-rs = "1.18"
 metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
