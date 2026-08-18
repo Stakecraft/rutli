@@ -18,6 +18,25 @@ service Signer {
   rpc Sign(SignRequest) returns (SignReply);
   // Proactively refresh the shares for a key. Same group key out; shares re-randomized cluster-wide.
   rpc Refresh(RefreshRequest) returns (RefreshReply);
+
+  // --- cluster-hosted (non-FROST) keys: RSA-2048 encryption, AES-256-GCM symmetric ---
+  // These are replicated whole keys, not threshold shares (docs/hosted-keys-design.md). They let a
+  // participant run with no HSM and no local key state.
+
+  // What this cluster supports. The driver queries it at startup instead of hardcoding specs, so
+  // adding a key type later needs no driver release.
+  rpc Capabilities(CapabilitiesRequest) returns (CapabilitiesReply);
+  // Generate a hosted key. key_id is caller-supplied, making retries idempotent.
+  rpc GenerateKey(GenerateKeyRequest) returns (GenerateKeyReply);
+  // X.509 SubjectPublicKeyInfo DER for an asymmetric hosted key.
+  rpc PublicKey(PublicKeyRequest) returns (PublicKeyReply);
+  rpc KeyInfo(KeyInfoRequest) returns (KeyInfoReply);
+  rpc DeleteKey(DeleteKeyRequest) returns (DeleteKeyReply);
+  // RSAES-OAEP-SHA256. The full unpad happens server-side — returning raw c^d mod N would be a
+  // padding oracle.
+  rpc Decrypt(DecryptRequest) returns (DecryptReply);
+  rpc SymmetricEncrypt(SymmetricRequest) returns (SymmetricReply);
+  rpc SymmetricDecrypt(SymmetricRequest) returns (SymmetricReply);
 }
 
 // Mesh-internal API: cosigner-to-cosigner. All FROST packages are carried as opaque bytes
@@ -39,6 +58,24 @@ service Peer {
   // fence if a later peer refuses (e.g. has in-flight signs).
   rpc CeremonyFence(CeremonyFenceRequest) returns (CeremonyFenceReply);
   rpc CeremonyRelease(CeremonyReleaseRequest) returns (CeremonyReleaseReply);
+
+  // --- hosted-key replication ---
+  // Key material moves between cosigners ONLY over these RPCs, and only ever wrapped to the
+  // recipient node (never plaintext-inside-TLS). The Peer API is restricted to cosigner certs by
+  // peer_allowlist — the driver must never be able to call it.
+
+  // Push a wrapped hosted key to this node (leader -> peer during generation).
+  rpc ReplicateKey(ReplicateKeyRequest) returns (ReplicateKeyReply);
+  // Pull a hosted key this node is missing (anti-entropy / read-repair). The responder wraps to
+  // the *caller's* node identity, derived from its client certificate.
+  rpc FetchKey(FetchKeyRequest) returns (FetchKeyReply);
+  // Hosted-key inventory for anti-entropy. FROST shares are never listed or transferred — copying
+  // a share would give two nodes the same share and silently break the threshold scheme.
+  rpc ListKeys(ListKeysRequest) returns (ListKeysReply);
+  // Replicated delete.
+  rpc PurgeKey(PurgeKeyRequest) returns (PurgeKeyReply);
+  // This node's identifier and X25519 distribution public key (for wrapping hosted keys to it).
+  rpc NodeInfo(NodeInfoRequest) returns (NodeInfoReply);
 }
 
 message HealthRequest {}
@@ -124,3 +161,104 @@ message DkgPart3Request {
   bytes round2_map_for_me = 3; // json BTreeMap<Identifier, round2::Package> addressed to this node
 }
 message DkgPart3Reply { bytes group_verifying_key = 1; }
+
+// ── cluster-hosted keys ────────────────────────────────────────────────────────────────────────
+
+message CapabilitiesRequest {}
+message CapabilitiesReply {
+  // Spec identifiers this cluster can generate/serve, e.g. "rsa-2048-oaep-sha256", "aes-256-gcm".
+  repeated string hosted_key_specs = 1;
+  bool hosted_keys_enabled = 2;
+}
+
+message GenerateKeyRequest {
+  string key_id = 1;  // caller-supplied; regenerating the same id is a no-op, not an error
+  string spec = 2;    // e.g. "rsa-2048-oaep-sha256"
+}
+message GenerateKeyReply {
+  string key_id = 1;
+  string spec = 2;
+  bytes public_key_der = 3;  // X.509 SPKI; empty for symmetric keys
+  bool created = 4;          // false = already existed (idempotent retry)
+  uint32 replicas = 5;       // how many cosigners hold it, including this one
+}
+
+message PublicKeyRequest { string key_id = 1; }
+message PublicKeyReply {
+  string spec = 1;
+  bytes public_key_der = 2;
+}
+
+message KeyInfoRequest { string key_id = 1; }
+message KeyInfoReply {
+  bool exists = 1;
+  string spec = 2;
+  uint64 created_at = 3;
+  uint32 replicas = 4;
+}
+
+message DeleteKeyRequest { string key_id = 1; }
+message DeleteKeyReply { bool deleted = 1; }
+
+message DecryptRequest {
+  string key_id = 1;
+  bytes ciphertext = 2;
+}
+message DecryptReply { bytes plaintext = 1; }
+
+message SymmetricRequest {
+  string key_id = 1;
+  bytes data = 2;
+}
+message SymmetricReply { bytes data = 1; }
+
+// ── hosted-key replication (mesh only) ─────────────────────────────────────────────────────────
+
+// A hosted key sealed to one specific recipient node with HPKE (DHKEM-X25519, HKDF-SHA256,
+// AES-256-GCM). The AAD binds cluster, key id, spec and recipient, so an envelope cannot be
+// replayed to a different node or key.
+message WrappedKey {
+  uint32 recipient = 1;
+  bytes encapsulated_key = 2;  // HPKE enc
+  bytes ciphertext = 3;
+  uint32 wrap_version = 4;
+}
+
+message ReplicateKeyRequest {
+  string ceremony_id = 1;
+  string key_id = 2;
+  string spec = 3;
+  bytes public_key_der = 4;
+  WrappedKey wrapped = 5;
+}
+message ReplicateKeyReply { bytes commitment = 1; }
+
+message FetchKeyRequest { string key_id = 1; }
+message FetchKeyReply {
+  string spec = 1;
+  bytes public_key_der = 2;
+  WrappedKey wrapped = 3;
+}
+
+message ListKeysRequest {}
+message KeyManifest {
+  string key_id = 1;
+  string spec = 2;
+  uint64 created_at = 3;
+  // Keyed digest of the key material: lets two nodes agree they hold the SAME key without
+  // revealing anything about it off-cluster.
+  bytes commitment = 4;
+}
+message ListKeysReply { repeated KeyManifest keys = 1; }
+
+message PurgeKeyRequest {
+  string ceremony_id = 1;
+  string key_id = 2;
+}
+message PurgeKeyReply { bool deleted = 1; }
+
+message NodeInfoRequest {}
+message NodeInfoReply {
+  uint32 identifier = 1;
+  bytes dist_public_key = 2;  // X25519, for wrapping hosted keys to this node
+}

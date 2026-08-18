@@ -107,7 +107,26 @@ async fn main() -> Result<()> {
         0 => {}
         n => tracing::info!(count = n, "migrated legacy plaintext shares to sealed envelopes"),
     }
-    let node = Arc::new(Node::new(identifier, cfg.max_signers(), cfg.threshold, keystore));
+    let mut node = Node::new(identifier, cfg.max_signers(), cfg.threshold, keystore);
+
+    // Cluster-hosted (non-FROST) keys. The wrapping key and the at-rest seal key both come from the
+    // same operator master secret, so hosted keys require share_seal (enforced by config
+    // validation) — a hosted key is a whole private key and must never sit unsealed on disk.
+    if cfg.hosted_keys.as_ref().map(|h| h.enabled).unwrap_or(false) {
+        let seal_cfg = cfg.share_seal.as_ref().expect("validate() requires share_seal");
+        let master = std::env::var(&seal_cfg.secret_env).map_err(|_| {
+            DaemonError::Config(format!("hosted keys enabled but {} is not set", seal_cfg.secret_env))
+        })?;
+        // Bind envelopes to this trust domain: derived from the CA cert, so it changes if the
+        // cluster does and an envelope can never be replayed into a different deployment.
+        let cluster_id = match &cfg.tls {
+            Some(t) => rutli_cosigner::wrap::cluster_id_from_ca(&std::fs::read(&t.ca_cert)?),
+            None => "plaintext-dev".to_string(),
+        };
+        node = node.with_hosted_keys(master.as_bytes(), cluster_id);
+        tracing::info!("cluster-hosted keys enabled (RSA-2048 encryption + AES-256-GCM symmetric)");
+    }
+    let node = Arc::new(node);
 
     // Load mTLS material once (if configured). Plaintext otherwise (dev only).
     let tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose()?;
@@ -150,6 +169,26 @@ async fn main() -> Result<()> {
              drive the raw FROST rounds and could aggregate a signature over an arbitrary message; \
              set peer_allowlist (the cosigner cert CNs) in production"
         ),
+    }
+
+    // Anti-entropy: pull hosted keys this node lacks and push ones a peer lacks. This is what
+    // heals an under-quorum write and a node restored from a stale backup, so the 2-of-3 write
+    // quorum is only safe with it running.
+    if let Some(h) = cfg.hosted_keys.as_ref().filter(|h| h.enabled) {
+        let (sweep_node, sweep_peers) = (node.clone(), peers.clone());
+        let interval = std::time::Duration::from_secs(h.anti_entropy_interval_secs.max(10));
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                match rutli_cosigner::orchestrator::anti_entropy_sweep(&sweep_node, &sweep_peers).await {
+                    Ok((0, 0)) => {}
+                    Ok((pulled, pushed)) => {
+                        tracing::info!(pulled, pushed, "anti-entropy reconciled hosted keys")
+                    }
+                    Err(e) => tracing::warn!(error = %e, "anti-entropy sweep failed"),
+                }
+            }
+        });
     }
 
     let signer = SignerSvc { node: node.clone(), peers, allowed_cns };

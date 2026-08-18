@@ -25,6 +25,7 @@ pub mod peer;
 pub mod seal;
 pub mod service;
 pub mod tls;
+pub mod wrap;
 
 /// Generated protobuf/tonic types.
 pub mod pb {

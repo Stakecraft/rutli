@@ -26,7 +26,7 @@ pub struct SignerSvc {
 impl SignerSvc {
     /// Enforce the client-cert allowlist (if configured) for a sensitive Signer call.
     fn authorize<T>(&self, req: &Request<T>) -> Result<(), Status> {
-        authorize_cn(self.allowed_cns.as_deref(), req, "Signer")
+        authorize_cn(self.allowed_cns.as_deref(), req, "Signer").map(|_| ())
     }
 }
 
@@ -38,8 +38,8 @@ fn authorize_cn<T>(
     allowed: Option<&HashSet<String>>,
     req: &Request<T>,
     api: &str,
-) -> Result<(), Status> {
-    let Some(allowed) = allowed else { return Ok(()) };
+) -> Result<Option<String>, Status> {
+    let Some(allowed) = allowed else { return Ok(None) };
     let certs = req
         .peer_certs()
         .ok_or_else(|| Status::unauthenticated(format!("client certificate required for the {api} API")))?;
@@ -48,7 +48,7 @@ fn authorize_cn<T>(
         .and_then(|leaf| cn_of(leaf.as_ref()))
         .ok_or_else(|| Status::unauthenticated("client certificate has no usable Common Name"))?;
     if allowed.contains(&cn) {
-        Ok(())
+        Ok(Some(cn))
     } else {
         Err(Status::permission_denied(format!(
             "client '{cn}' is not permitted to call the {api} API"
@@ -121,7 +121,172 @@ impl Signer for SignerSvc {
         let key = result.map_err(Status::from)?;
         Ok(Response::new(pb::RefreshReply { group_verifying_key: key.to_vec() }))
     }
+
+    // -- cluster-hosted (non-FROST) keys --
+
+    async fn capabilities(
+        &self,
+        _req: Request<pb::CapabilitiesRequest>,
+    ) -> Result<Response<pb::CapabilitiesReply>, Status> {
+        // Deliberately not allowlisted: it reveals only which algorithms the cluster supports, and
+        // the driver needs it before it can do anything else.
+        let enabled = self.node.hosted_enabled();
+        let specs = if enabled {
+            vec![
+                crate::hosted::HostedSpec::Rsa2048.as_str().to_string(),
+                crate::hosted::HostedSpec::Aes256Gcm.as_str().to_string(),
+            ]
+        } else {
+            Vec::new()
+        };
+        Ok(Response::new(pb::CapabilitiesReply {
+            hosted_key_specs: specs,
+            hosted_keys_enabled: enabled,
+        }))
+    }
+
+    async fn generate_key(
+        &self,
+        req: Request<pb::GenerateKeyRequest>,
+    ) -> Result<Response<pb::GenerateKeyReply>, Status> {
+        self.authorize(&req)?;
+        let r = req.into_inner();
+        let spec = crate::hosted::HostedSpec::parse(&r.spec).map_err(Status::from)?;
+        let result = orchestrator::generate_hosted_key(
+            &self.node,
+            &self.peers,
+            &r.key_id,
+            spec,
+            orchestrator::DEFAULT_WRITE_QUORUM,
+        )
+        .await;
+        record_hosted_op("generate", result.is_ok());
+        let (key, created, replicas) = result.map_err(Status::from)?;
+        let public_key_der = if spec.is_asymmetric() {
+            key.public_key_der().map_err(Status::from)?
+        } else {
+            Vec::new()
+        };
+        Ok(Response::new(pb::GenerateKeyReply {
+            key_id: r.key_id,
+            spec: r.spec,
+            public_key_der,
+            created,
+            replicas: replicas as u32,
+        }))
+    }
+
+    async fn public_key(
+        &self,
+        req: Request<pb::PublicKeyRequest>,
+    ) -> Result<Response<pb::PublicKeyReply>, Status> {
+        self.authorize(&req)?;
+        let key_id = req.into_inner().key_id;
+        let key = self.load_hosted_repairing(&key_id).await?;
+        Ok(Response::new(pb::PublicKeyReply {
+            spec: key.spec.as_str().to_string(),
+            public_key_der: key.public_key_der().map_err(Status::from)?,
+        }))
+    }
+
+    async fn key_info(
+        &self,
+        req: Request<pb::KeyInfoRequest>,
+    ) -> Result<Response<pb::KeyInfoReply>, Status> {
+        self.authorize(&req)?;
+        let key_id = req.into_inner().key_id;
+        match self.load_hosted_repairing(&key_id).await {
+            Ok(key) => {
+                let replicas = orchestrator::hosted_replica_count(&self.peers, &key_id).await;
+                Ok(Response::new(pb::KeyInfoReply {
+                    exists: true,
+                    spec: key.spec.as_str().to_string(),
+                    created_at: key.created_at,
+                    replicas: replicas as u32,
+                }))
+            }
+            Err(e) if e.code() == tonic::Code::NotFound => {
+                Ok(Response::new(pb::KeyInfoReply::default()))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn delete_key(
+        &self,
+        req: Request<pb::DeleteKeyRequest>,
+    ) -> Result<Response<pb::DeleteKeyReply>, Status> {
+        self.authorize(&req)?;
+        let key_id = req.into_inner().key_id;
+        let result = orchestrator::delete_hosted_key(&self.peers, &key_id).await;
+        record_hosted_op("delete", result.is_ok());
+        Ok(Response::new(pb::DeleteKeyReply { deleted: result.map_err(Status::from)? }))
+    }
+
+    async fn decrypt(
+        &self,
+        req: Request<pb::DecryptRequest>,
+    ) -> Result<Response<pb::DecryptReply>, Status> {
+        self.authorize(&req)?;
+        let r = req.into_inner();
+        self.load_hosted_repairing(&r.key_id).await?;
+        let result = self.node.hosted_decrypt(&r.key_id, &r.ciphertext);
+        record_hosted_op("decrypt", result.is_ok());
+        Ok(Response::new(pb::DecryptReply { plaintext: result.map_err(Status::from)? }))
+    }
+
+    async fn symmetric_encrypt(
+        &self,
+        req: Request<pb::SymmetricRequest>,
+    ) -> Result<Response<pb::SymmetricReply>, Status> {
+        self.authorize(&req)?;
+        let r = req.into_inner();
+        self.load_hosted_repairing(&r.key_id).await?;
+        let result = self.node.hosted_encrypt_symmetric(&r.key_id, &r.data);
+        record_hosted_op("symmetric_encrypt", result.is_ok());
+        Ok(Response::new(pb::SymmetricReply { data: result.map_err(Status::from)? }))
+    }
+
+    async fn symmetric_decrypt(
+        &self,
+        req: Request<pb::SymmetricRequest>,
+    ) -> Result<Response<pb::SymmetricReply>, Status> {
+        self.authorize(&req)?;
+        let r = req.into_inner();
+        self.load_hosted_repairing(&r.key_id).await?;
+        let result = self.node.hosted_decrypt_symmetric(&r.key_id, &r.data);
+        record_hosted_op("symmetric_decrypt", result.is_ok());
+        Ok(Response::new(pb::SymmetricReply { data: result.map_err(Status::from)? }))
+    }
 }
+
+impl SignerSvc {
+    /// Load a hosted key, pulling it from a peer first if this node is missing it (read-repair).
+    ///
+    /// Without this, a request that lands on a lagging replica returns NOT_FOUND — and the driver
+    /// deliberately does not fail over on NOT_FOUND, because it is normally authoritative.
+    /// Repairing on demand is what makes that assumption safe.
+    async fn load_hosted_repairing(
+        &self,
+        key_id: &str,
+    ) -> Result<crate::hosted::HostedKey, Status> {
+        if !self.node.hosted_exists(key_id) {
+            orchestrator::repair_hosted_key(&self.node, &self.peers, key_id)
+                .await
+                .map_err(Status::from)?;
+        }
+        self.node.hosted_load(key_id).map_err(|e| match e {
+            crate::DaemonError::UnknownKey(k) => Status::not_found(format!("no such key: {k}")),
+            other => Status::from(other),
+        })
+    }
+}
+
+fn record_hosted_op(op: &'static str, ok: bool) {
+    let result = if ok { "ok" } else { "error" };
+    metrics::counter!(crate::metrics::HOSTED_KEY_OPS, "op" => op, "result" => result).increment(1);
+}
+
 
 
 pub struct PeerSvc {
@@ -134,8 +299,29 @@ pub struct PeerSvc {
 }
 
 impl PeerSvc {
-    fn authorize<T>(&self, req: &Request<T>) -> Result<(), Status> {
+    fn authorize<T>(&self, req: &Request<T>) -> Result<Option<String>, Status> {
         authorize_cn(self.allowed_cns.as_deref(), req, "Peer")
+    }
+
+    /// The node identifier of the authenticated caller, taken from its client-cert CN
+    /// (`cosigner<N>`, as issued by scripts/gen-frost-certs.sh).
+    ///
+    /// Read from the certificate, never from the request body: otherwise any allowlisted peer
+    /// could ask for key material wrapped to a node of its choosing.
+    fn authenticated_peer<T>(&self, req: &Request<T>) -> Result<u16, Status> {
+        let cn = self.authorize(req)?.ok_or_else(|| {
+            Status::failed_precondition(
+                "hosted-key replication requires peer_allowlist (and therefore TLS) — the caller \
+                 must be identified by its certificate",
+            )
+        })?;
+        cn.trim_start_matches(|c: char| !c.is_ascii_digit())
+            .parse::<u16>()
+            .map_err(|_| {
+                Status::permission_denied(format!(
+                    "peer certificate CN '{cn}' does not name a cosigner (expected e.g. cosigner2)"
+                ))
+            })
     }
 }
 
@@ -274,6 +460,92 @@ impl Peer for PeerSvc {
         let key =
             self.node.refresh_part3(&r.dkg_id, &round1_map, &round2_for_me).map_err(Status::from)?;
         Ok(Response::new(pb::DkgPart3Reply { group_verifying_key: key.to_vec() }))
+    }
+
+    // -- hosted-key replication (mesh only; peer_allowlist gates every one of these) --
+
+    async fn replicate_key(
+        &self,
+        req: Request<pb::ReplicateKeyRequest>,
+    ) -> Result<Response<pb::ReplicateKeyReply>, Status> {
+        self.authorize(&req)?;
+        let r = req.into_inner();
+        let spec = crate::hosted::HostedSpec::parse(&r.spec).map_err(Status::from)?;
+        let wrapped = crate::peer::from_pb_wrapped(r.wrapped).map_err(Status::from)?;
+        let key = self.node.hosted_unwrap(&r.key_id, spec, &wrapped).map_err(Status::from)?;
+        self.node.hosted_store(&r.key_id, &key).map_err(Status::from)?;
+        let commitment = self.node.hosted_commitment(&key).map_err(Status::from)?;
+        Ok(Response::new(pb::ReplicateKeyReply { commitment }))
+    }
+
+    async fn fetch_key(
+        &self,
+        req: Request<pb::FetchKeyRequest>,
+    ) -> Result<Response<pb::FetchKeyReply>, Status> {
+        // Wrap to the *authenticated* caller, identified by its client certificate — never to a
+        // recipient named in the request, which any allowlisted peer could forge.
+        let recipient = self.authenticated_peer(&req)?;
+        let r = req.into_inner();
+        let key = self.node.hosted_load(&r.key_id).map_err(|e| match e {
+            crate::DaemonError::UnknownKey(k) => Status::not_found(format!("no such key: {k}")),
+            other => Status::from(other),
+        })?;
+        let recipient_pub = self.node.dist_public_key_for(recipient).map_err(Status::from)?;
+        let wrapped = self
+            .node
+            .hosted_wrap_for(&r.key_id, &key, recipient, &recipient_pub)
+            .map_err(Status::from)?;
+        let public_key_der = if key.spec.is_asymmetric() {
+            key.public_key_der().map_err(Status::from)?
+        } else {
+            Vec::new()
+        };
+        Ok(Response::new(pb::FetchKeyReply {
+            spec: key.spec.as_str().to_string(),
+            public_key_der,
+            wrapped: Some(crate::peer::to_pb_wrapped(&wrapped)),
+        }))
+    }
+
+    async fn list_keys(
+        &self,
+        req: Request<pb::ListKeysRequest>,
+    ) -> Result<Response<pb::ListKeysReply>, Status> {
+        self.authorize(&req)?;
+        let mut keys = Vec::new();
+        for key_id in self.node.hosted_list().map_err(Status::from)? {
+            let key = self.node.hosted_load(&key_id).map_err(Status::from)?;
+            let commitment = self.node.hosted_commitment(&key).map_err(Status::from)?;
+            keys.push(pb::KeyManifest {
+                key_id,
+                spec: key.spec.as_str().to_string(),
+                created_at: key.created_at,
+                commitment,
+            });
+        }
+        metrics::gauge!(crate::metrics::HOSTED_KEYS).set(keys.len() as f64);
+        Ok(Response::new(pb::ListKeysReply { keys }))
+    }
+
+    async fn purge_key(
+        &self,
+        req: Request<pb::PurgeKeyRequest>,
+    ) -> Result<Response<pb::PurgeKeyReply>, Status> {
+        self.authorize(&req)?;
+        let r = req.into_inner();
+        let deleted = self.node.hosted_delete(&r.key_id).map_err(Status::from)?;
+        Ok(Response::new(pb::PurgeKeyReply { deleted }))
+    }
+
+    async fn node_info(
+        &self,
+        req: Request<pb::NodeInfoRequest>,
+    ) -> Result<Response<pb::NodeInfoReply>, Status> {
+        self.authorize(&req)?;
+        Ok(Response::new(pb::NodeInfoReply {
+            identifier: crate::hosted::identifier_index(self.node.identifier) as u32,
+            dist_public_key: self.node.dist_public_key().map_err(Status::from)?.to_vec(),
+        }))
     }
 }
 

@@ -47,6 +47,34 @@ pub struct Config {
     /// still, do not expose this port publicly.
     #[serde(default)]
     pub metrics_listen: Option<String>,
+    /// Cluster-hosted (non-FROST) keys: RSA-2048 encryption and AES-256-GCM symmetric keys held by
+    /// the cluster so a participant needs no HSM and no local key state. Off by default.
+    #[serde(default)]
+    pub hosted_keys: Option<HostedKeysConfig>,
+}
+
+/// Cluster-hosted key settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostedKeysConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// How many cosigners must hold a new key before it is reported created. Defaults to 2 — the
+    /// cluster's own fault model. Requiring all nodes would block key rotation whenever any node
+    /// is down, which is worse than the single copy an HSM provides.
+    #[serde(default = "default_write_quorum")]
+    pub write_quorum: usize,
+    /// How often to reconcile hosted keys with peers (pull what we lack, push what they lack).
+    /// This is what heals an under-quorum write, so it is not optional in practice.
+    #[serde(default = "default_anti_entropy_secs")]
+    pub anti_entropy_interval_secs: u64,
+}
+
+fn default_write_quorum() -> usize {
+    2
+}
+
+fn default_anti_entropy_secs() -> u64 {
+    300
 }
 
 /// Where the share-sealing master secret comes from. The secret must be injected at runtime (secret
@@ -134,6 +162,25 @@ impl Config {
                     .into(),
             ));
         }
+        // Hosted keys are whole private keys at rest on every node. Refusing to hold them
+        // unsealed is the whole point of the feature — an unsealed replica would be strictly worse
+        // than the HSM delegate it replaces.
+        if self.hosted_keys.as_ref().map(|h| h.enabled).unwrap_or(false) {
+            if self.share_seal.is_none() {
+                return Err(Config(
+                    "hosted_keys.enabled requires share_seal — cluster-hosted private keys are \
+                     never stored unsealed"
+                        .into(),
+                ));
+            }
+            let q = self.hosted_keys.as_ref().map(|h| h.write_quorum).unwrap_or(2);
+            if q < 1 || q > self.max_signers() as usize {
+                return Err(Config(format!(
+                    "hosted_keys.write_quorum {q} out of range 1..={}",
+                    self.max_signers()
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -156,6 +203,7 @@ mod tests {
             tls,
             share_seal: None,
             signer_allowlist: allow.clone(),
+            hosted_keys: None,
             peer_allowlist: allow,
             metrics_listen: None,
         }
@@ -195,6 +243,68 @@ mod tests {
         c.peer_allowlist = Some(vec![]);
         assert!(c.validate().is_err(), "empty peer_allowlist under TLS must fail");
         c.peer_allowlist = Some(vec!["cosigner1".into(), "cosigner2".into(), "cosigner3".into()]);
+        c.validate().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod hosted_config_tests {
+    use super::*;
+
+    fn cfg(hosted: Option<HostedKeysConfig>, seal: bool) -> Config {
+        Config {
+            identifier: 1,
+            listen: "127.0.0.1:9101".into(),
+            threshold: 2,
+            data_dir: "/tmp/x".into(),
+            peers: vec![
+                PeerConfig { identifier: 1, endpoint: "http://a:9101".into() },
+                PeerConfig { identifier: 2, endpoint: "http://b:9101".into() },
+                PeerConfig { identifier: 3, endpoint: "http://c:9101".into() },
+            ],
+            tls: None,
+            share_seal: seal.then(|| ShareSealConfig { secret_env: "RUTLI_SEAL_SECRET".into() }),
+            signer_allowlist: None,
+            peer_allowlist: None,
+            metrics_listen: None,
+            hosted_keys: hosted,
+        }
+    }
+
+    fn hosted(enabled: bool, quorum: usize) -> HostedKeysConfig {
+        HostedKeysConfig { enabled, write_quorum: quorum, anti_entropy_interval_secs: 300 }
+    }
+
+    #[test]
+    fn hosted_keys_require_sealing() {
+        // A hosted key is a whole private key; storing one unsealed would be strictly worse than
+        // the HSM delegate it replaces.
+        assert!(cfg(Some(hosted(true, 2)), false).validate().is_err());
+        cfg(Some(hosted(true, 2)), true).validate().unwrap();
+        // Disabled hosted keys don't force sealing on a dev cluster.
+        cfg(Some(hosted(false, 2)), false).validate().unwrap();
+    }
+
+    #[test]
+    fn write_quorum_must_be_reachable() {
+        assert!(cfg(Some(hosted(true, 0)), true).validate().is_err(), "quorum 0 is meaningless");
+        assert!(cfg(Some(hosted(true, 4)), true).validate().is_err(), "quorum > cluster size");
+        cfg(Some(hosted(true, 3)), true).validate().unwrap();
+    }
+
+    #[test]
+    fn defaults_are_applied_when_the_block_is_partial() {
+        let c: Config = serde_json::from_str(
+            r#"{"identifier":1,"listen":"127.0.0.1:9101","threshold":2,"data_dir":"/tmp/x",
+                "peers":[{"identifier":1,"endpoint":"http://a:9101"},
+                         {"identifier":2,"endpoint":"http://b:9101"}],
+                "share_seal":{"secret_env":"S"},
+                "hosted_keys":{"enabled":true}}"#,
+        )
+        .unwrap();
+        let h = c.hosted_keys.as_ref().unwrap();
+        assert_eq!(h.write_quorum, 2, "quorum defaults to the cluster fault model, not all-nodes");
+        assert_eq!(h.anti_entropy_interval_secs, 300);
         c.validate().unwrap();
     }
 }

@@ -28,6 +28,15 @@ pub const SIGN_ROUND1_SKIPS: &str = "rutli_sign_round1_skips_total";
 pub const SIGN_ABORTS: &str = "rutli_sign_aborts_total";
 /// In-flight (round-1, not yet round-2) sign sessions currently held on this node.
 pub const PENDING_SIGN_SESSIONS: &str = "rutli_pending_sign_sessions";
+/// Hosted keys repaired by anti-entropy (pulled here or pushed to a peer).
+pub const ANTI_ENTROPY_REPAIRS: &str = "rutli_anti_entropy_repairs_total";
+/// Hosted keys found with *different* material on two nodes under one id. Any increase is a
+/// page-worthy invariant violation, not a transient.
+pub const ANTI_ENTROPY_CONFLICTS: &str = "rutli_anti_entropy_conflicts_total";
+/// Hosted keys held by this node.
+pub const HOSTED_KEYS: &str = "rutli_hosted_keys";
+/// Hosted-key operations by op and result (generate/decrypt/symmetric/delete).
+pub const HOSTED_KEY_OPS: &str = "rutli_hosted_key_ops_total";
 
 /// Install the process-global Prometheus recorder and serve `/metrics` on `listen`.
 /// Call at most once, before serving traffic.
@@ -54,6 +63,9 @@ fn prime() {
         }
     }
     metrics::counter!(SIGN_ROUND1_SKIPS).absolute(0);
+    metrics::counter!(ANTI_ENTROPY_REPAIRS).absolute(0);
+    metrics::counter!(ANTI_ENTROPY_CONFLICTS).absolute(0);
+    metrics::gauge!(HOSTED_KEYS).set(0.0);
     metrics::counter!(SIGN_ABORTS).absolute(0);
     metrics::gauge!(PENDING_SIGN_SESSIONS).set(0.0);
 }
@@ -66,4 +78,8 @@ pub fn describe() {
     describe_counter!(SIGN_ROUND1_SKIPS, "Peers skipped during sign round 1 (quorum-margin canary)");
     describe_counter!(SIGN_ABORTS, "Aborted in-flight sign sessions (one per given-up signature)");
     describe_gauge!(PENDING_SIGN_SESSIONS, "In-flight round-1 sign sessions held on this node");
+    describe_counter!(ANTI_ENTROPY_REPAIRS, "Hosted keys repaired by anti-entropy");
+    describe_counter!(ANTI_ENTROPY_CONFLICTS, "Hosted keys with divergent material across nodes");
+    describe_gauge!(HOSTED_KEYS, "Cluster-hosted keys held by this node");
+    describe_counter!(HOSTED_KEY_OPS, "Hosted-key operations, by op and result");
 }

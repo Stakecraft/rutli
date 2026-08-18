@@ -492,6 +492,32 @@ impl PeerApi for FailRound2 {
     ) -> DaemonResult<[u8; 32]> {
         self.inner.refresh_part3(refresh_id, round1_map, round2_for_me).await
     }
+    // Hosted-key methods just forward: this wrapper only sabotages sign round 2.
+    async fn node_info(&self) -> DaemonResult<(u16, [u8; 32])> {
+        self.inner.node_info().await
+    }
+    async fn replicate_key(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        spec: &str,
+        public_key_der: &[u8],
+        wrapped: &rutli_cosigner::wrap::Wrapped,
+    ) -> DaemonResult<Vec<u8>> {
+        self.inner.replicate_key(ceremony_id, key_id, spec, public_key_der, wrapped).await
+    }
+    async fn fetch_key(
+        &self,
+        key_id: &str,
+    ) -> DaemonResult<(String, Vec<u8>, rutli_cosigner::wrap::Wrapped)> {
+        self.inner.fetch_key(key_id).await
+    }
+    async fn list_keys(&self) -> DaemonResult<Vec<(String, String, Vec<u8>)>> {
+        self.inner.list_keys().await
+    }
+    async fn purge_key(&self, ceremony_id: &str, key_id: &str) -> DaemonResult<bool> {
+        self.inner.purge_key(ceremony_id, key_id).await
+    }
 }
 
 #[tokio::test]
@@ -572,4 +598,219 @@ async fn peer_round2_refuses_a_non_canton_payload() {
     let c1 = nodes[1].sign_round1(KEY_ID, "ok-session").unwrap();
     cs.insert(nodes[1].identifier, c1);
     assert!(nodes[0].sign_round2(KEY_ID, "ok-session", &msg, &cs).is_ok());
+}
+
+// ── cluster-hosted (non-FROST) keys: RSA encryption + AES symmetric held by the cluster ──
+
+use rutli_cosigner::hosted::HostedSpec;
+use rutli_cosigner::orchestrator::{
+    anti_entropy_sweep, delete_hosted_key, generate_hosted_key, repair_hosted_key,
+    DEFAULT_WRITE_QUORUM,
+};
+
+const HOSTED_MASTER: &[u8] = b"hosted key cluster master secret for tests";
+const CLUSTER: &str = "testcluster00000";
+
+/// A cluster with hosted keys enabled on every node (sealed keystores, shared master secret).
+fn hosted_cluster(tmp: &tempfile::TempDir) -> (Vec<Arc<Node>>, Peers) {
+    use rutli_cosigner::seal::Sealer;
+    let mut nodes = Vec::new();
+    for i in 1..=N {
+        let sealer = Arc::new(Sealer::from_master_secret(HOSTED_MASTER, i));
+        let ks =
+            KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}")), Some(sealer)).unwrap();
+        let node = Node::new(Identifier::try_from(i).unwrap(), N, T, ks)
+            .with_hosted_keys(HOSTED_MASTER, CLUSTER.to_string());
+        nodes.push(Arc::new(node));
+    }
+    let peers: Peers =
+        nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    (nodes, peers)
+}
+
+#[tokio::test]
+async fn a_hosted_rsa_key_is_replicated_and_every_node_can_decrypt() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = hosted_cluster(&tmp);
+
+    let (key, created, replicas) =
+        generate_hosted_key(&nodes[0], &peers, "rutli-enc-1", HostedSpec::Rsa2048, DEFAULT_WRITE_QUORUM)
+            .await
+            .unwrap();
+    assert!(created);
+    assert_eq!(replicas, N as usize, "every cosigner should hold the key");
+
+    // Encrypt to the published public key, exactly as a Canton peer would.
+    let ciphertext = key.encrypt_oaep(b"canton view session key").unwrap();
+
+    // ANY node can serve the decrypt — that is the availability property hosted keys buy.
+    for n in &nodes {
+        let plain = n.hosted_decrypt("rutli-enc-1", &ciphertext).unwrap();
+        assert_eq!(plain, b"canton view session key");
+    }
+
+    // The material on disk is sealed, not readable.
+    let raw = std::fs::read(tmp.path().join("node-2").join("rutli-enc-1.json")).unwrap();
+    assert!(rutli_cosigner::seal::Sealer::is_sealed(&raw));
+    assert!(!String::from_utf8_lossy(&raw).contains("private_der"));
+}
+
+#[tokio::test]
+async fn a_hosted_symmetric_key_round_trips_across_nodes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = hosted_cluster(&tmp);
+    generate_hosted_key(&nodes[0], &peers, "rutli-sym-1", HostedSpec::Aes256Gcm, DEFAULT_WRITE_QUORUM)
+        .await
+        .unwrap();
+
+    // Encrypt on one node, decrypt on another: the replicas are genuinely the same key.
+    let blob = nodes[0].hosted_encrypt_symmetric("rutli-sym-1", b"wrapped private key store").unwrap();
+    assert_eq!(
+        nodes[2].hosted_decrypt_symmetric("rutli-sym-1", &blob).unwrap(),
+        b"wrapped private key store"
+    );
+}
+
+#[tokio::test]
+async fn generate_is_idempotent_so_a_retry_cannot_mint_a_second_key() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = hosted_cluster(&tmp);
+
+    let (first, created1, _) =
+        generate_hosted_key(&nodes[0], &peers, "rutli-enc-2", HostedSpec::Rsa2048, DEFAULT_WRITE_QUORUM)
+            .await
+            .unwrap();
+    // A client retry / driver failover repeats the request with the same id.
+    let (second, created2, _) =
+        generate_hosted_key(&nodes[0], &peers, "rutli-enc-2", HostedSpec::Rsa2048, DEFAULT_WRITE_QUORUM)
+            .await
+            .unwrap();
+
+    assert!(created1 && !created2, "the second call must not create a new key");
+    assert_eq!(first.public_der, second.public_der, "the key must be unchanged");
+    // Ciphertext from before the retry still decrypts — the key was not silently replaced.
+    let ct = first.encrypt_oaep(b"still valid").unwrap();
+    assert_eq!(nodes[1].hosted_decrypt("rutli-enc-2", &ct).unwrap(), b"still valid");
+}
+
+#[tokio::test]
+async fn a_node_that_missed_a_write_is_repaired_and_then_serves_decrypts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = hosted_cluster(&tmp);
+
+    // Simulate an under-quorum write: only nodes 0 and 1 receive the key (node 2 was down).
+    let partial: Peers = peers.iter().take(2).cloned().collect();
+    let (key, _, replicas) =
+        generate_hosted_key(&nodes[0], &partial, "rutli-enc-3", HostedSpec::Rsa2048, DEFAULT_WRITE_QUORUM)
+            .await
+            .unwrap();
+    assert_eq!(replicas, 2);
+    assert!(!nodes[2].hosted_exists("rutli-enc-3"), "node 3 should be missing it");
+
+    // Read-repair: node 2 pulls the key on demand rather than returning NOT_FOUND.
+    assert!(repair_hosted_key(&nodes[2], &peers, "rutli-enc-3").await.unwrap());
+    let ct = key.encrypt_oaep(b"after repair").unwrap();
+    assert_eq!(nodes[2].hosted_decrypt("rutli-enc-3", &ct).unwrap(), b"after repair");
+}
+
+#[tokio::test]
+async fn anti_entropy_pushes_a_key_to_a_node_that_missed_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = hosted_cluster(&tmp);
+    let partial: Peers = peers.iter().take(2).cloned().collect();
+    generate_hosted_key(&nodes[0], &partial, "rutli-sym-3", HostedSpec::Aes256Gcm, DEFAULT_WRITE_QUORUM)
+        .await
+        .unwrap();
+    assert!(!nodes[2].hosted_exists("rutli-sym-3"));
+
+    // The sweep on the holder pushes what the peer lacks — this is what heals a 2-of-3 write.
+    let (_pulled, pushed) = anti_entropy_sweep(&nodes[0], &peers).await.unwrap();
+    assert!(pushed >= 1, "sweep should push the missing key");
+    assert!(nodes[2].hosted_exists("rutli-sym-3"));
+
+    // Converged: a second sweep has nothing to do.
+    assert_eq!(anti_entropy_sweep(&nodes[0], &peers).await.unwrap(), (0, 0));
+}
+
+#[tokio::test]
+async fn a_failed_write_quorum_rolls_back_instead_of_leaving_one_lonely_copy() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = hosted_cluster(&tmp);
+
+    // Only the leader is available — below the write quorum of 2.
+    let alone: Peers = peers.iter().take(1).cloned().collect();
+    let err = generate_hosted_key(&nodes[0], &alone, "rutli-enc-4", HostedSpec::Rsa2048, 2)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DaemonError::ThresholdNotMet { .. }), "got {err:?}");
+
+    // A single surviving copy is exactly what hosted keys exist to prevent, so the id must be free
+    // for a clean retry rather than half-created.
+    assert!(!nodes[0].hosted_exists("rutli-enc-4"), "under-quorum write must roll back");
+}
+
+#[tokio::test]
+async fn hosted_keys_and_frost_shares_do_not_interfere() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = hosted_cluster(&tmp);
+
+    // A FROST namespace key and a hosted encryption key, side by side in the same keystore.
+    let group_key = run_dkg(&peers, KEY_ID).await.unwrap();
+    generate_hosted_key(&nodes[0], &peers, "rutli-enc-5", HostedSpec::Rsa2048, DEFAULT_WRITE_QUORUM)
+        .await
+        .unwrap();
+
+    // Threshold signing still works...
+    let msg = canton_digest(b"topology tx");
+    let sig = sign(&nodes[0], &peers, KEY_ID, &msg).await.unwrap();
+    ed25519_dalek::VerifyingKey::from_bytes(&group_key)
+        .unwrap()
+        .verify_strict(&msg, &ed25519_dalek::Signature::from_bytes(&sig))
+        .unwrap();
+
+    // ...and the hosted inventory lists ONLY the hosted key. A FROST share must never be treated
+    // as replicable: copying one would give two nodes the same share and break the threshold.
+    assert_eq!(nodes[0].hosted_list().unwrap(), vec!["rutli-enc-5".to_string()]);
+    assert!(nodes[0].hosted_load(KEY_ID).is_err(), "a FROST share must not load as a hosted key");
+    assert!(nodes[0].hosted_delete(KEY_ID).is_err(), "the namespace key must not be deletable");
+}
+
+#[tokio::test]
+async fn deleting_a_hosted_key_removes_it_cluster_wide() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = hosted_cluster(&tmp);
+    generate_hosted_key(&nodes[0], &peers, "rutli-enc-6", HostedSpec::Rsa2048, DEFAULT_WRITE_QUORUM)
+        .await
+        .unwrap();
+
+    assert!(delete_hosted_key(&peers, "rutli-enc-6").await.unwrap());
+    for n in &nodes {
+        assert!(!n.hosted_exists("rutli-enc-6"));
+    }
+    // Idempotent: deleting again is a no-op, not an error.
+    assert!(!delete_hosted_key(&peers, "rutli-enc-6").await.unwrap());
+}
+
+#[tokio::test]
+async fn hosted_keys_survive_a_restart() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ciphertext = {
+        let (nodes, peers) = hosted_cluster(&tmp);
+        let (key, _, _) = generate_hosted_key(
+            &nodes[0],
+            &peers,
+            "rutli-enc-7",
+            HostedSpec::Rsa2048,
+            DEFAULT_WRITE_QUORUM,
+        )
+        .await
+        .unwrap();
+        key.encrypt_oaep(b"before restart").unwrap()
+    }; // cluster dropped — as if every process exited
+
+    // The whole point of the feature: rebuild from the same data dirs and still decrypt.
+    let (reloaded, _) = hosted_cluster(&tmp);
+    for n in &reloaded {
+        assert_eq!(n.hosted_decrypt("rutli-enc-7", &ciphertext).unwrap(), b"before restart");
+    }
 }

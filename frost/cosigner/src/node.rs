@@ -58,6 +58,18 @@ pub struct Node {
     // key_id -> the ceremony currently allowed to (re)write that key's share.
     ceremonies: Mutex<std::collections::HashMap<String, CeremonyGuard>>,
     ceremony_orphan_timeout: Duration,
+    /// Set when hosted (non-FROST) keys are enabled: this node's derived wrapping key plus the
+    /// cluster identity envelopes are bound to. `None` disables every hosted-key operation.
+    hosted: Option<HostedCtx>,
+}
+
+struct HostedCtx {
+    dist_key: crate::wrap::DistKey,
+    cluster_id: String,
+    /// Needed to derive a *peer's* distribution public key when serving FetchKey. Under today's
+    /// shared master secret every node can already derive every peer's key; with per-node secrets
+    /// this becomes a pinned config value instead.
+    master: zeroize::Zeroizing<Vec<u8>>,
 }
 
 impl Node {
@@ -90,6 +102,7 @@ impl Node {
             refresh_sessions: Mutex::new(Default::default()),
             ceremonies: Mutex::new(Default::default()),
             ceremony_orphan_timeout,
+            hosted: None,
         }
     }
 
@@ -513,4 +526,184 @@ fn without_self(
     me: Identifier,
 ) -> BTreeMap<Identifier, round1::Package> {
     map.iter().filter(|(&id, _)| id != me).map(|(&id, p)| (id, p.clone())).collect()
+}
+
+// ── cluster-hosted (non-FROST) keys ────────────────────────────────────────────────────────────
+
+impl Node {
+    /// Enable hosted keys on this node: derive its wrapping key from the cluster master secret and
+    /// bind envelopes to `cluster_id`. Without this, every hosted-key op returns an error.
+    pub fn with_hosted_keys(mut self, master_secret: &[u8], cluster_id: String) -> Self {
+        let id = crate::hosted::identifier_index(self.identifier);
+        self.hosted = Some(HostedCtx {
+            dist_key: crate::wrap::DistKey::derive(master_secret, id),
+            cluster_id,
+            master: zeroize::Zeroizing::new(master_secret.to_vec()),
+        });
+        self
+    }
+
+    pub fn hosted_enabled(&self) -> bool {
+        self.hosted.is_some()
+    }
+
+    fn hosted_ctx(&self) -> Result<&HostedCtx> {
+        self.hosted.as_ref().ok_or_else(|| {
+            DaemonError::Config(
+                "cluster-hosted keys are not enabled on this node (set hosted_keys.enabled and \
+                 configure share_seal — hosted keys are never stored unsealed)"
+                    .into(),
+            )
+        })
+    }
+
+    /// This node's X25519 distribution public key, for peers wrapping material to it.
+    pub fn dist_public_key(&self) -> Result<[u8; 32]> {
+        Ok(self.hosted_ctx()?.dist_key.public_bytes())
+    }
+
+    pub fn cluster_id(&self) -> Result<&str> {
+        Ok(&self.hosted_ctx()?.cluster_id)
+    }
+
+    /// The distribution public key of peer `node_identifier`, for wrapping material to it.
+    pub fn dist_public_key_for(&self, node_identifier: u16) -> Result<[u8; 32]> {
+        let ctx = self.hosted_ctx()?;
+        Ok(crate::wrap::DistKey::derive(&ctx.master, node_identifier).public_bytes())
+    }
+
+    /// Generate a hosted key locally. Does **not** replicate — the orchestrator drives that.
+    /// Idempotent: an existing key with the same id is returned untouched, so a retried request
+    /// (driver failover, client retry) never silently mints a second key under the same name.
+    pub fn hosted_generate(
+        &self,
+        key_id: &str,
+        spec: crate::hosted::HostedSpec,
+    ) -> Result<(crate::hosted::HostedKey, bool)> {
+        self.hosted_ctx()?;
+        if self.keystore.exists(key_id) {
+            let existing = self.keystore.load_hosted(key_id)?;
+            if existing.spec != spec {
+                return Err(DaemonError::KeyExists(format!(
+                    "{key_id} already exists with spec {} (requested {})",
+                    existing.spec.as_str(),
+                    spec.as_str()
+                )));
+            }
+            return Ok((existing, false));
+        }
+        let key = crate::hosted::HostedKey::generate(spec, crate::hosted::now_secs())?;
+        self.keystore.save_hosted(key_id, &key)?;
+        Ok((key, true))
+    }
+
+    /// Store a hosted key received from a peer (already unwrapped and verified).
+    pub fn hosted_store(&self, key_id: &str, key: &crate::hosted::HostedKey) -> Result<()> {
+        self.hosted_ctx()?;
+        // Create-once-immutable: a key id maps to one key forever. Canton rotates by minting a new
+        // id plus a topology transaction, so a differing replica is a genuine conflict — never a
+        // merge. Overwriting here could silently destroy the material peers already committed to.
+        if self.keystore.exists(key_id) {
+            let existing = self.keystore.load_hosted(key_id)?;
+            if self.hosted_commitment(&existing)? != self.hosted_commitment(key)? {
+                return Err(DaemonError::KeyExists(format!(
+                    "{key_id} already exists here with different material — refusing to overwrite"
+                )));
+            }
+            return Ok(()); // identical replica: idempotent no-op
+        }
+        self.keystore.save_hosted(key_id, key)
+    }
+
+    pub fn hosted_load(&self, key_id: &str) -> Result<crate::hosted::HostedKey> {
+        self.hosted_ctx()?;
+        self.keystore.load_hosted(key_id)
+    }
+
+    pub fn hosted_exists(&self, key_id: &str) -> bool {
+        self.keystore.exists(key_id) && self.keystore.load_hosted(key_id).is_ok()
+    }
+
+    pub fn hosted_list(&self) -> Result<Vec<String>> {
+        self.hosted_ctx()?;
+        self.keystore.list_hosted()
+    }
+
+    pub fn hosted_delete(&self, key_id: &str) -> Result<bool> {
+        self.hosted_ctx()?;
+        if !self.keystore.exists(key_id) {
+            return Ok(false);
+        }
+        // Refuse to route a FROST share through the hosted delete path: namespace keys are
+        // non-rotatable and deleting one destroys the node's identity.
+        self.keystore.load_hosted(key_id)?;
+        self.keystore.delete(key_id)?;
+        Ok(true)
+    }
+
+    /// Keyed digest of a key's material: lets two nodes agree they hold the *same* key without
+    /// revealing anything about it. Keyed by the cluster master (via the dist key), so a
+    /// commitment is meaningless off-cluster.
+    pub fn hosted_commitment(&self, key: &crate::hosted::HostedKey) -> Result<Vec<u8>> {
+        let ctx = self.hosted_ctx()?;
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(b"rutli-keycommit-v1");
+        h.update(ctx.dist_key.public_bytes()); // cluster-scoped, not a bare hash of the key
+        h.update(key.spec.as_str().as_bytes());
+        h.update(key.private_der.as_bytes());
+        Ok(h.finalize().to_vec())
+    }
+
+    /// Wrap a hosted key for `recipient` (its identifier + distribution public key).
+    pub fn hosted_wrap_for(
+        &self,
+        key_id: &str,
+        key: &crate::hosted::HostedKey,
+        recipient: u16,
+        recipient_pub: &[u8; 32],
+    ) -> Result<crate::wrap::Wrapped> {
+        let ctx = self.hosted_ctx()?;
+        let material = serde_json::to_vec(key)?;
+        crate::wrap::wrap_for(
+            recipient,
+            recipient_pub,
+            &material,
+            &ctx.cluster_id,
+            key_id,
+            key.spec.as_str(),
+        )
+    }
+
+    /// Unwrap an envelope addressed to this node and parse the key.
+    pub fn hosted_unwrap(
+        &self,
+        key_id: &str,
+        spec: crate::hosted::HostedSpec,
+        w: &crate::wrap::Wrapped,
+    ) -> Result<crate::hosted::HostedKey> {
+        let ctx = self.hosted_ctx()?;
+        let plain = ctx.dist_key.unwrap_key(w, &ctx.cluster_id, key_id, spec.as_str())?;
+        let key: crate::hosted::HostedKey = serde_json::from_slice(&plain)?;
+        if key.spec != spec {
+            return Err(DaemonError::Config(
+                "wrapped key spec does not match the declared spec".into(),
+            ));
+        }
+        Ok(key)
+    }
+
+    // -- crypto operations served to the driver --
+
+    pub fn hosted_decrypt(&self, key_id: &str, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        Ok(self.hosted_load(key_id)?.decrypt_oaep(ciphertext)?.to_vec())
+    }
+
+    pub fn hosted_encrypt_symmetric(&self, key_id: &str, data: &[u8]) -> Result<Vec<u8>> {
+        self.hosted_load(key_id)?.encrypt_symmetric(data)
+    }
+
+    pub fn hosted_decrypt_symmetric(&self, key_id: &str, data: &[u8]) -> Result<Vec<u8>> {
+        Ok(self.hosted_load(key_id)?.decrypt_symmetric(data)?.to_vec())
+    }
 }

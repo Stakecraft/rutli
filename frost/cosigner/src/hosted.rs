@@ -251,6 +251,16 @@ impl HostedKey {
     }
 }
 
+/// A FROST [`Identifier`] as the small integer the config uses (1..=n).
+///
+/// Identifiers serialize to 32 big-endian bytes; cosigner ids are small, so the last two carry the
+/// value. Used to key per-node wrapping material off the same numbering as the config roster.
+pub fn identifier_index(id: frost_ed25519::Identifier) -> u16 {
+    let bytes = id.serialize();
+    let n = bytes.len();
+    u16::from_be_bytes([bytes[n - 2], bytes[n - 1]])
+}
+
 /// Seconds since the Unix epoch, for `created_at`.
 pub fn now_secs() -> u64 {
     std::time::SystemTime::now()

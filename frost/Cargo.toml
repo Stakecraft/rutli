@@ -39,4 +39,6 @@ metrics = "0.24"
 # (Marvin timing side-channel, key recovery by a network attacker) is still unpatched, and this is
 # a network-facing decryption service. aws-lc-rs is FIPS-validated and constant-time.
 aws-lc-rs = "1.18"
+# X25519 for wrapping hosted key material to a specific peer node (see cosigner/src/wrap.rs).
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
