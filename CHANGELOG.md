@@ -5,6 +5,51 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+- **Cluster-hosted keys** (`hosted_keys` on the cosigners, `frost.hosted-keys` on the driver): the
+  cluster now holds Canton's non-FROST key material too — RSA-2048-OAEP-SHA256 encryption keypairs
+  and AES-256-GCM symmetric keys — so a participant can run with **no HSM and no local key state**
+  (`frost.delegate = "none"`). Motivated by a DevNet incident where a participant restart destroyed
+  a heap-only RSA key that peers were still encrypting to.
+
+  These are **replicated whole keys, not threshold shares**, and the docs say so everywhere: keys
+  are generated on one cosigner, wrapped per recipient, replicated to the others and sealed at rest
+  on each. The Ed25519 namespace key is untouched and remains genuine 2-of-3 FROST. The security
+  tier matches the recoverability tier — the key Canton *cannot* rotate stays in MPC; the keys that
+  get only replication are the ones Canton *can* rotate. The cost is stated rather than buried: an
+  attacker who extracts one encryption key gains *retrospective* read access to recorded traffic
+  encrypted to it.
+
+  - RSA-OAEP runs on `aws-lc-rs`, deliberately **not** the pure-Rust `rsa` crate: RUSTSEC-2023-0071
+    (Marvin timing side-channel, key recovery by a network attacker) is still unpatched. The full
+    OAEP unpad happens server-side and all decryption failures collapse to one opaque error, so
+    there is no padding oracle.
+  - Key material never crosses the mesh in the clear even inside mTLS (a service-mesh sidecar
+    terminating TLS would otherwise see plaintext keys): each replica is sealed to one recipient
+    with ephemeral X25519 → HKDF-SHA256 → AES-256-GCM, AAD-bound to cluster, key id, spec and
+    recipient.
+  - Write quorum defaults to 2 of 3 — matching the cluster's own fault model, since requiring all
+    three would block key rotation whenever a node is down — with cluster-wide rollback below
+    quorum, anti-entropy, read-repair, and a `rutli_key_replicas` alert for a shortfall that does
+    not heal.
+  - Hosted keys are create-once-immutable, so divergence between replicas is a hard error
+    (`rutli_anti_entropy_conflicts_total`, page-worthy), never auto-reconciled. Replication applies
+    to hosted keys **only** — copying a FROST share would give two nodes the same share and
+    silently break the threshold scheme.
+  - Stored beside FROST shares in `data_dir/keys/`, so the existing `backup`/`restore` already
+    cover them; a rebuilt cosigner re-acquires hosted keys automatically via anti-entropy.
+  - Operator guide: `docs/hosted-keys.md`. Design record and the reasoning for permanently ruling
+    out threshold RSA (plus the thresholdable ECIES roadmap): `docs/hosted-keys-design.md`.
+
+### Fixed
+- **CI had been red for eight runs before this work started**, for three unrelated reasons, all now
+  fixed: cert files are mode 0600 owned by the host user while the cosigner container runs as uid
+  10001 (Docker Desktop on macOS masks host ownership, Linux does not), the GitHub artifact-storage
+  quota was failing an otherwise-green test job, and — most consequentially — the TLS smoke test
+  pulled the published image instead of building the working tree, so it could have "verified" a
+  commit against a released binary. The smoke now also dumps container state and logs on failure;
+  without that, a startup crash appeared only as `container ... is unhealthy`.
+
 ### Security
 - **The mesh Peer API was unauthenticated (critical; affects ≤ 0.2.0).** Only the Signer API
   enforced the client-cert CN allowlist; every `Peer` RPC — the raw FROST rounds — was reachable by
