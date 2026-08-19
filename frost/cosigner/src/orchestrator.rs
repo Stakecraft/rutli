@@ -247,10 +247,19 @@ pub const DEFAULT_WRITE_QUORUM: usize = 2;
 fn is_unreachable(e: &DaemonError) -> bool {
     match e {
         DaemonError::Transport(_) => true,
-        DaemonError::Status(s) => matches!(
-            s.code(),
-            tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
-        ),
+        DaemonError::Status(s) => match s.code() {
+            tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => true,
+            // tonic reports a connection that failed below the RPC layer as Unknown with the
+            // message "transport error" — which is what a stopped cosigner actually produces, as
+            // opposed to the Unavailable one might expect. Match it narrowly: a genuine refusal
+            // from our own code always carries a specific code (Aborted, FailedPrecondition, …),
+            // never Unknown, so this cannot swallow a real conflict.
+            tonic::Code::Unknown => {
+                let m = s.message();
+                m.contains("transport error") || m.contains("connection")
+            }
+            _ => false,
+        },
         _ => false,
     }
 }

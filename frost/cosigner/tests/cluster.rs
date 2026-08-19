@@ -820,6 +820,13 @@ struct UnreachablePeer {
     id: Identifier,
 }
 
+/// A peer that always fails with one specific error — used to assert how the orchestrator
+/// classifies "absent" versus "refusing".
+struct FixedErrorPeer {
+    id: Identifier,
+    error: DaemonError,
+}
+
 #[async_trait]
 impl PeerApi for UnreachablePeer {
     fn identifier(&self) -> Identifier {
@@ -909,8 +916,123 @@ impl PeerApi for UnreachablePeer {
     }
 }
 
+fn clone_err(e: &DaemonError) -> DaemonError {
+    match e {
+        DaemonError::Status(s) => DaemonError::Status(tonic::Status::new(s.code(), s.message())),
+        DaemonError::CeremonyInProgress { key_id, kind, other } => DaemonError::CeremonyInProgress {
+            key_id: key_id.clone(),
+            kind,
+            other: other.clone(),
+        },
+        _ => DaemonError::Config("unexpected".into()),
+    }
+}
+
+#[async_trait]
+impl PeerApi for FixedErrorPeer {
+    fn identifier(&self) -> Identifier {
+        self.id
+    }
+    async fn sign_round1(&self, _: &str, _: &str) -> DaemonResult<SigningCommitments> {
+        Err(clone_err(&self.error))
+    }
+    async fn sign_round2(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[u8],
+        _: &BTreeMap<Identifier, SigningCommitments>,
+    ) -> DaemonResult<SignatureShare> {
+        Err(clone_err(&self.error))
+    }
+    async fn abort_sign(&self, _: &str, _: &str) -> DaemonResult<()> {
+        Err(clone_err(&self.error))
+    }
+    async fn ceremony_fence(&self, _: &str, _: &str, _: &'static str) -> DaemonResult<()> {
+        Err(clone_err(&self.error))
+    }
+    async fn ceremony_release(&self, _: &str, _: &str) -> DaemonResult<()> {
+        Err(clone_err(&self.error))
+    }
+    async fn dkg_part1(&self, _: &str, _: &str) -> DaemonResult<round1::Package> {
+        Err(clone_err(&self.error))
+    }
+    async fn dkg_part2(
+        &self,
+        _: &str,
+        _: &BTreeMap<Identifier, round1::Package>,
+    ) -> DaemonResult<BTreeMap<Identifier, round2::Package>> {
+        Err(clone_err(&self.error))
+    }
+    async fn dkg_part3(
+        &self,
+        _: &str,
+        _: &BTreeMap<Identifier, round1::Package>,
+        _: &BTreeMap<Identifier, round2::Package>,
+    ) -> DaemonResult<[u8; 32]> {
+        Err(clone_err(&self.error))
+    }
+    async fn refresh_part1(&self, _: &str, _: &str) -> DaemonResult<round1::Package> {
+        Err(clone_err(&self.error))
+    }
+    async fn refresh_part2(
+        &self,
+        _: &str,
+        _: &BTreeMap<Identifier, round1::Package>,
+    ) -> DaemonResult<BTreeMap<Identifier, round2::Package>> {
+        Err(clone_err(&self.error))
+    }
+    async fn refresh_part3(
+        &self,
+        _: &str,
+        _: &BTreeMap<Identifier, round1::Package>,
+        _: &BTreeMap<Identifier, round2::Package>,
+    ) -> DaemonResult<[u8; 32]> {
+        Err(clone_err(&self.error))
+    }
+    async fn node_info(&self) -> DaemonResult<(u16, [u8; 32])> {
+        Err(clone_err(&self.error))
+    }
+    async fn replicate_key(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &[u8],
+        _: &rutli_cosigner::wrap::Wrapped,
+    ) -> DaemonResult<Vec<u8>> {
+        Err(clone_err(&self.error))
+    }
+    async fn fetch_key(
+        &self,
+        _: &str,
+    ) -> DaemonResult<(String, Vec<u8>, rutli_cosigner::wrap::Wrapped)> {
+        Err(clone_err(&self.error))
+    }
+    async fn list_keys(&self) -> DaemonResult<Vec<(String, String, Vec<u8>)>> {
+        Err(clone_err(&self.error))
+    }
+    async fn purge_key(&self, _: &str, _: &str) -> DaemonResult<bool> {
+        Err(clone_err(&self.error))
+    }
+}
+
+/// What a stopped cosigner ACTUALLY produces over a real gRPC channel.
+///
+/// Not `Unavailable`, as one would assume (and as an earlier version of this test asserted, which
+/// is why the live cluster still failed): tonic surfaces a connection that died below the RPC layer
+/// as `Unknown` with the message "transport error".
 fn down() -> DaemonError {
-    DaemonError::Status(tonic::Status::unavailable("dns error"))
+    DaemonError::Status(tonic::Status::unknown("transport error"))
+}
+
+/// The other shapes an unreachable peer can take, all of which must classify the same way.
+fn down_variants() -> Vec<DaemonError> {
+    vec![
+        DaemonError::Status(tonic::Status::unknown("transport error")),
+        DaemonError::Status(tonic::Status::unavailable("dns error")),
+        DaemonError::Status(tonic::Status::deadline_exceeded("timed out")),
+    ]
 }
 
 #[tokio::test]
@@ -989,4 +1111,58 @@ async fn anti_entropy_publishes_the_replica_shortfall() {
     for n in &nodes {
         assert!(n.hosted_exists("rutli-enc-count"));
     }
+}
+
+#[tokio::test]
+async fn every_shape_of_unreachable_peer_is_tolerated_by_a_hosted_write() {
+    // Regression: the first fix only recognised Unavailable/DeadlineExceeded, but a stopped
+    // cosigner reports Unknown("transport error"), so the live cluster still refused to write with
+    // a node down. Assert every shape, not just the one that was assumed.
+    for (i, variant) in down_variants().into_iter().enumerate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (nodes, _peers) = hosted_cluster(&tmp);
+        let degraded: Peers = vec![
+            Arc::new(LocalPeer::new(nodes[0].clone())) as Arc<dyn PeerApi>,
+            Arc::new(LocalPeer::new(nodes[1].clone())) as Arc<dyn PeerApi>,
+            Arc::new(FixedErrorPeer { id: nodes[2].identifier, error: variant }) as Arc<dyn PeerApi>,
+        ];
+        let key_id = format!("rutli-enc-shape-{i}");
+        let (_key, created, replicas) =
+            generate_hosted_key(&nodes[0], &degraded, &key_id, HostedSpec::Rsa2048, DEFAULT_WRITE_QUORUM)
+                .await
+                .unwrap_or_else(|e| panic!("variant {i} must be tolerated, got {e:?}"));
+        assert!(created);
+        assert_eq!(replicas, 2);
+    }
+}
+
+#[tokio::test]
+async fn a_peer_that_refuses_still_aborts_a_hosted_write() {
+    // The other side of the same coin: tolerating *absence* must never tolerate a genuine conflict,
+    // or two leaders could write the same key id concurrently.
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, _peers) = hosted_cluster(&tmp);
+    let conflicted: Peers = vec![
+        Arc::new(LocalPeer::new(nodes[0].clone())) as Arc<dyn PeerApi>,
+        Arc::new(LocalPeer::new(nodes[1].clone())) as Arc<dyn PeerApi>,
+        Arc::new(FixedErrorPeer {
+            id: nodes[2].identifier,
+            error: DaemonError::CeremonyInProgress {
+                key_id: "rutli-enc-conflict".into(),
+                kind: "refresh",
+                other: "someone-else".into(),
+            },
+        }) as Arc<dyn PeerApi>,
+    ];
+    let err = generate_hosted_key(
+        &nodes[0],
+        &conflicted,
+        "rutli-enc-conflict",
+        HostedSpec::Rsa2048,
+        DEFAULT_WRITE_QUORUM,
+    )
+    .await
+    .unwrap_err();
+    assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "got {err:?}");
+    assert!(!nodes[0].hosted_exists("rutli-enc-conflict"));
 }
