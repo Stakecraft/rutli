@@ -814,3 +814,179 @@ async fn hosted_keys_survive_a_restart() {
         assert_eq!(n.hosted_decrypt("rutli-enc-7", &ciphertext).unwrap(), b"before restart");
     }
 }
+
+/// A peer that is *unreachable* (transport-level), as opposed to one that refuses.
+struct UnreachablePeer {
+    id: Identifier,
+}
+
+#[async_trait]
+impl PeerApi for UnreachablePeer {
+    fn identifier(&self) -> Identifier {
+        self.id
+    }
+    async fn sign_round1(&self, _: &str, _: &str) -> DaemonResult<SigningCommitments> {
+        Err(down())
+    }
+    async fn sign_round2(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[u8],
+        _: &BTreeMap<Identifier, SigningCommitments>,
+    ) -> DaemonResult<SignatureShare> {
+        Err(down())
+    }
+    async fn abort_sign(&self, _: &str, _: &str) -> DaemonResult<()> {
+        Err(down())
+    }
+    async fn ceremony_fence(&self, _: &str, _: &str, _: &'static str) -> DaemonResult<()> {
+        Err(down())
+    }
+    async fn ceremony_release(&self, _: &str, _: &str) -> DaemonResult<()> {
+        Err(down())
+    }
+    async fn dkg_part1(&self, _: &str, _: &str) -> DaemonResult<round1::Package> {
+        Err(down())
+    }
+    async fn dkg_part2(
+        &self,
+        _: &str,
+        _: &BTreeMap<Identifier, round1::Package>,
+    ) -> DaemonResult<BTreeMap<Identifier, round2::Package>> {
+        Err(down())
+    }
+    async fn dkg_part3(
+        &self,
+        _: &str,
+        _: &BTreeMap<Identifier, round1::Package>,
+        _: &BTreeMap<Identifier, round2::Package>,
+    ) -> DaemonResult<[u8; 32]> {
+        Err(down())
+    }
+    async fn refresh_part1(&self, _: &str, _: &str) -> DaemonResult<round1::Package> {
+        Err(down())
+    }
+    async fn refresh_part2(
+        &self,
+        _: &str,
+        _: &BTreeMap<Identifier, round1::Package>,
+    ) -> DaemonResult<BTreeMap<Identifier, round2::Package>> {
+        Err(down())
+    }
+    async fn refresh_part3(
+        &self,
+        _: &str,
+        _: &BTreeMap<Identifier, round1::Package>,
+        _: &BTreeMap<Identifier, round2::Package>,
+    ) -> DaemonResult<[u8; 32]> {
+        Err(down())
+    }
+    async fn node_info(&self) -> DaemonResult<(u16, [u8; 32])> {
+        Err(down())
+    }
+    async fn replicate_key(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &[u8],
+        _: &rutli_cosigner::wrap::Wrapped,
+    ) -> DaemonResult<Vec<u8>> {
+        Err(down())
+    }
+    async fn fetch_key(
+        &self,
+        _: &str,
+    ) -> DaemonResult<(String, Vec<u8>, rutli_cosigner::wrap::Wrapped)> {
+        Err(down())
+    }
+    async fn list_keys(&self) -> DaemonResult<Vec<(String, String, Vec<u8>)>> {
+        Err(down())
+    }
+    async fn purge_key(&self, _: &str, _: &str) -> DaemonResult<bool> {
+        Err(down())
+    }
+}
+
+fn down() -> DaemonError {
+    DaemonError::Status(tonic::Status::unavailable("dns error"))
+}
+
+#[tokio::test]
+async fn a_hosted_key_can_be_generated_with_one_cosigner_unreachable() {
+    // Regression (found only in a live cluster, not by the in-process tests): the cluster-wide
+    // ceremony fence aborted on the FIRST unreachable peer, so a write could never complete with a
+    // node down — which is exactly what write_quorum = 2 of 3 exists to allow. A node that is down
+    // cannot start a racing operation, so it must be skipped, not treated as a conflict.
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = hosted_cluster(&tmp);
+
+    let degraded: Peers = vec![
+        peers[0].clone(),
+        peers[1].clone(),
+        Arc::new(UnreachablePeer { id: nodes[2].identifier }) as Arc<dyn PeerApi>,
+    ];
+
+    let (key, created, replicas) = generate_hosted_key(
+        &nodes[0],
+        &degraded,
+        "rutli-enc-degraded",
+        HostedSpec::Rsa2048,
+        DEFAULT_WRITE_QUORUM,
+    )
+    .await
+    .expect("a 2-of-3 write must succeed with one node unreachable");
+    assert!(created);
+    assert_eq!(replicas, 2, "two live nodes hold it; the third is down");
+
+    // The key works on both live nodes...
+    let ct = key.encrypt_oaep(b"written while degraded").unwrap();
+    assert_eq!(nodes[1].hosted_decrypt("rutli-enc-degraded", &ct).unwrap(), b"written while degraded");
+
+    // ...and the node that was down is healed once it is back, without operator action.
+    let (_pulled, pushed) = anti_entropy_sweep(&nodes[0], &peers).await.unwrap();
+    assert!(pushed >= 1);
+    assert_eq!(nodes[2].hosted_decrypt("rutli-enc-degraded", &ct).unwrap(), b"written while degraded");
+}
+
+#[tokio::test]
+async fn a_hosted_write_still_fails_when_too_few_cosigners_are_reachable() {
+    // The flip side: tolerating unreachable peers must not silently drop below the write quorum.
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, _peers) = hosted_cluster(&tmp);
+    let mostly_down: Peers = vec![
+        Arc::new(LocalPeer::new(nodes[0].clone())) as Arc<dyn PeerApi>,
+        Arc::new(UnreachablePeer { id: nodes[1].identifier }) as Arc<dyn PeerApi>,
+        Arc::new(UnreachablePeer { id: nodes[2].identifier }) as Arc<dyn PeerApi>,
+    ];
+    let err =
+        generate_hosted_key(&nodes[0], &mostly_down, "rutli-enc-lonely", HostedSpec::Rsa2048, 2)
+            .await
+            .unwrap_err();
+    assert!(matches!(err, DaemonError::ThresholdNotMet { .. }), "got {err:?}");
+    assert!(!nodes[0].hosted_exists("rutli-enc-lonely"));
+}
+
+#[tokio::test]
+async fn anti_entropy_publishes_the_replica_shortfall() {
+    // The rutli_key_replicas gauge is what makes a write quorum below n safe to default to: a
+    // transiently under-replicated key is fine, one that STAYS under-replicated must page. The
+    // sweep is what measures it, so it must count correctly both before and after healing.
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = hosted_cluster(&tmp);
+    let partial: Peers = peers.iter().take(2).cloned().collect();
+    generate_hosted_key(&nodes[0], &partial, "rutli-enc-count", HostedSpec::Rsa2048, DEFAULT_WRITE_QUORUM)
+        .await
+        .unwrap();
+
+    // Before healing: node 3 lacks the key, so the sweep both repairs it and reports the count.
+    let (_pulled, pushed) = anti_entropy_sweep(&nodes[0], &peers).await.unwrap();
+    assert!(pushed >= 1, "the sweep should have pushed the missing replica");
+
+    // After healing every node holds it, and a second sweep is a no-op.
+    assert_eq!(anti_entropy_sweep(&nodes[0], &peers).await.unwrap(), (0, 0));
+    for n in &nodes {
+        assert!(n.hosted_exists("rutli-enc-count"));
+    }
+}

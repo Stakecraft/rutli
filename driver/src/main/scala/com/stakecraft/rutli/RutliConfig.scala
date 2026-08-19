@@ -72,7 +72,15 @@ final case class SigningJournalConfig(
   *                   common one-target config; merged with `endpoints`.
   * @param endpoints  The full cosigner roster for failover (any live node leads a request). Prefer
   *                   this in production so a downed cosigner doesn't block signing.
-  * @param delegate   Backend for non-FROST keys: "hsm" | "software". Defaults to "hsm".
+  * @param delegate   Backend for non-FROST keys: "hsm" | "software" | "none". Defaults to "hsm".
+  *                   Use "none" together with `hosted-keys = true` for a deployment with no HSM
+  *                   and no local key state at all.
+  * @param hostedKeys Route non-FROST keys (RSA-2048 encryption, AES-256-GCM symmetric) to the
+  *                   cosigner cluster, which holds them as replicated sealed keys rather than
+  *                   threshold shares. Requires `hosted_keys.enabled` on the cosigners. Key ids
+  *                   the cluster hosts are prefixed `rutli-`; anything else still goes to the
+  *                   delegate. There is deliberately no automatic fallback to the delegate when
+  *                   the cluster reports a key missing — that would silently split custody.
   * @param tls        Mutual-TLS material for the driver→cluster channel. When absent the channel is
   *                   plaintext (dev only); production must set this.
   */
@@ -81,6 +89,7 @@ final case class FrostConfig(
     endpoints: List[String] = Nil,
     delegate: String = "hsm",
     tls: Option[FrostTlsConfig] = None,
+    hostedKeys: Boolean = false,
 ) {
 
   /** All configured endpoints, `endpoints` first then the single `endpoint`, de-duplicated. */

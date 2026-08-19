@@ -67,7 +67,19 @@ Behind the driver, a swappable backend routes each key to the right protection:
 |---|---|---|
 | **Namespace / identity** (Ed25519) | **FROST MPC cluster** | `t`-of-`n`, one share per host/account/region |
 | Protocol / sequencer (ECDSA) | HSM (or threshold ECDSA) | PKCS#11 hardware |
-| Encryption (ECIES / RSA-OAEP) | HSM / enclave | hardware, never threshold |
+| Encryption (RSA-OAEP) · symmetric (AES) | **cluster-hosted** (or HSM) | sealed whole key per node — *not* threshold |
+
+**What "cluster-hosted" means, precisely.** Canton's encryption and symmetric keys can now live in
+the cluster too, so a participant needs **no HSM and no local key state**. But these are *replicated
+whole keys*, not threshold shares: generated on one cosigner, sealed at rest per node, copied to the
+others, and any node can serve a decrypt. The win is **relocation** — key material leaves the busy,
+internet-adjacent Canton host for three hardened, single-purpose nodes — not a threshold property.
+The security tier matches the recoverability tier: the one key Canton *cannot* rotate (the namespace
+key) stays in real 2-of-3 MPC; the keys that get only replication are exactly the ones Canton *can*
+rotate under it. And the cost, stated plainly: an attacker who extracts one encryption key gains
+**retrospective** read access to any recorded traffic encrypted to it — rotation fixes the future,
+not the past. Threshold RSA is permanently out of scope; the reasoning, and the ECIES roadmap that
+*is* thresholdable, are in [docs/hosted-keys.md](docs/hosted-keys.md).
 
 ## Features
 
@@ -76,9 +88,15 @@ Behind the driver, a swappable backend routes each key to the right protection:
 - **Threshold signing (FROST-ed25519)** — DKG, two-round signing, standard RFC 8032 output,
   crash-safe single-use nonce guard.
 - **Backends** — `software` (testing), `hsm` (PKCS#11, verified on SoftHSM), `frost` (the MPC cluster).
+- **Cluster-hosted keys** — RSA-2048-OAEP encryption and AES-256-GCM symmetric keys held by the
+  cosigners themselves: 2-of-3 write quorum, wrapped per recipient node so key material never
+  crosses the mesh in the clear (not even inside mTLS), healed by anti-entropy and read-repair, and
+  covered by the existing `backup`/`restore`. Replicated, not threshold — see above — but it takes
+  both the HSM and the last private key off the Canton host.
 - **Mutual TLS** across the mesh and from the driver, with **driver-side failover** (any live
   cosigner leads — a downed node never blocks signing).
-- **Encryption at rest** — key shares sealed with AES-256-GCM (per-node keys from an operator secret).
+- **Encryption at rest** — key shares and hosted keys sealed with AES-256-GCM (per-node keys from an
+  operator secret); hosted keys are refused outright if sealing is not configured.
 - **Proactive refresh** — rotate all shares on a schedule; same key, so an attacker's stolen share
   expires.
 - **M-of-N human approval** — high-value signing held until a quorum of named approvers
@@ -129,11 +147,13 @@ Before protecting a real key, run the witnessed **[key ceremony](docs/key-ceremo
 | [QUICKSTART.md](QUICKSTART.md) | Get running in minutes |
 | [docs/architecture.md](docs/architecture.md) | How it's built, and why |
 | [docs/phase-2-frost.md](docs/phase-2-frost.md) | The FROST cluster in depth |
+| [docs/hosted-keys.md](docs/hosted-keys.md) | Cluster-hosted RSA/AES keys: what they are, what they are not |
 | [docs/key-ceremony.md](docs/key-ceremony.md) | Witnessed namespace-key generation |
 | [docs/key-rotation.md](docs/key-rotation.md) | Which keys rotate, how, and why the root can't |
 | [docs/approval-quorum.md](docs/approval-quorum.md) | M-of-N signing approval |
 | [docs/disaster-recovery.md](docs/disaster-recovery.md) | Backup, restore, recovery |
 | [docs/observability.md](docs/observability.md) | Prometheus metrics, Grafana dashboard, alerts |
+| [docs/performance.md](docs/performance.md) | Sign/DKG latency evidence (DevNet multi-region numbers) |
 | [docs/testnet-soak.md](docs/testnet-soak.md) | Splice DevNet validator soak: setup, drills, exit criteria |
 | [docs/wire-contract.md](docs/wire-contract.md) | Exactly what Canton sends the driver |
 
@@ -153,8 +173,13 @@ scripts/   Canton dep publishing, cert generation, SoftHSM setup
 
 Pre-production and **not yet audited** — do not put a production authority key behind it until a
 third-party security review is complete. The full stack above is implemented, CI-green, and verified
-end-to-end on a real Canton node. What remains for a 1.0 is external: a **security audit** and a
-**Splice testnet validator run**. See [CHANGELOG.md](CHANGELOG.md).
+end-to-end on a real Canton node. An **HSM is no longer required**: with cluster-hosted keys the
+driver can run `delegate = "none"` — no PKCS#11 module and no key material on the participant host.
+That is the newest surface in the codebase, so exercise it on DevNet before it holds anything you
+care about, and read [docs/hosted-keys.md](docs/hosted-keys.md) first — replicated keys are a
+different security property from the threshold namespace key, not the same one applied wider. What
+remains for a 1.0 is external: a **security audit** and a **Splice testnet validator run**. See
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Security
 

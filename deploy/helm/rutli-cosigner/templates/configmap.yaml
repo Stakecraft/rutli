@@ -26,6 +26,17 @@ data:
   {{- $peerAllow = list }}
   {{- range $k := until $n }}{{ $peerAllow = append $peerAllow (printf "cosigner%d" (add $k 1)) }}{{ end }}
 {{- end }}
+{{/* Cluster-hosted keys (replicated whole RSA/AES keys, not threshold shares — docs/hosted-keys.md).
+     The cosigner refuses to start on an unreachable write quorum; fail at template time instead so
+     the operator sees it here rather than as a CrashLoopBackOff. Sealing is always configured
+     below, which is the other precondition. */}}
+{{- $hosted := .Values.hostedKeys }}
+{{- if $hosted.enabled }}
+  {{- $q := int $hosted.writeQuorum }}
+  {{- if or (lt $q 1) (gt $q $n) }}
+    {{- fail (printf "hostedKeys.writeQuorum %d out of range 1..%d (replicaCount)" $q $n) }}
+  {{- end }}
+{{- end }}
 {{- range $i := until $n }}
 {{- $id := add $i 1 }}
   cosigner-{{ $id }}.json: |
@@ -50,6 +61,9 @@ data:
         "domain": {{ $domain | quote }}
       },
       "share_seal": { "secret_env": "RUTLI_SEAL_SECRET" },
+      {{- if $hosted.enabled }}
+      "hosted_keys": { "enabled": true, "write_quorum": {{ int $hosted.writeQuorum }}, "anti_entropy_interval_secs": {{ int $hosted.antiEntropyIntervalSecs }} },
+      {{- end }}
       "signer_allowlist": {{ $allow | toJson }},
       "peer_allowlist": {{ $peerAllow | toJson }}
     }

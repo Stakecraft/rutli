@@ -117,8 +117,11 @@ final class RutliDriverFactory extends KmsDriverFactory {
           throw new IllegalArgumentException("hsm backend requires an `hsm { ... }` config block")
         )
         new HsmBackend(hsm)
+      case "none" => new com.stakecraft.rutli.backend.NoDelegateBackend
       case other =>
-        throw new IllegalArgumentException(s"unsupported backend '$other'; supported: software, hsm")
+        throw new IllegalArgumentException(
+          s"unsupported backend '$other'; supported: software, hsm, none"
+        )
     }
 
     val backend: KmsBackend = config.backend match {
@@ -131,7 +134,18 @@ final class RutliDriverFactory extends KmsDriverFactory {
         if (eps.isEmpty)
           throw new IllegalArgumentException("frost backend requires `endpoint` or `endpoints`")
         // Non-namespace keys go to the delegate backend (the HSM in production).
-        new FrostBackend(eps, buildBackend(frost.delegate), logger, frost.tls)(blockingEc)
+        if (frost.delegate == "none" && !frost.hostedKeys)
+          throw new IllegalArgumentException(
+            "frost.delegate = \"none\" requires frost.hosted-keys = true — otherwise nothing " +
+              "would serve the participant's encryption and symmetric keys"
+          )
+        new FrostBackend(
+          eps,
+          buildBackend(frost.delegate),
+          logger,
+          frost.tls,
+          hostedKeys = frost.hostedKeys,
+        )(blockingEc)
       case other =>
         throw new IllegalArgumentException(
           s"unsupported backend '$other'; supported: software, hsm, frost"

@@ -43,6 +43,30 @@ peerAllowlist: []
 # mTLS domain / shared SAN on cosigner certs
 tlsDomain: rutli-cosigner
 
+# Cluster-hosted (non-FROST) keys: the RSA-2048-OAEP encryption keypair and the AES-256-GCM
+# symmetric key Canton needs, held by the cluster so the participant needs no HSM and no local key
+# state. Off by default — turning it on is a custody decision, not a tuning knob.
+#
+# These are REPLICATED WHOLE KEYS, not threshold shares: generated on one cosigner, copied to the
+# others (wrapped per recipient), sealed at rest on each, and any node can serve a decrypt. One
+# compromised cosigner yields those keys, and because they protect Canton's per-view session keys,
+# an attacker who extracts one can read *previously recorded* traffic encrypted to it — rotation
+# fixes the future, not the past. The Ed25519 namespace key is unaffected: it stays true 2-of-3
+# threshold and is never replicated. The win is relocation — key material moves off the busy,
+# internet-adjacent participant host onto three hardened single-purpose nodes.
+# See docs/hosted-keys.md before enabling.
+hostedKeys:
+  enabled: false
+  # How many cosigners must hold a new key before it counts as created. 2 matches the cluster's own
+  # fault model; requiring all `replicaCount` would block key rotation whenever any node is down,
+  # which is worse than the single copy an HSM gives. Must be 1..=replicaCount. Below quorum the
+  # write rolls back rather than leaving one lonely copy.
+  writeQuorum: 2
+  # Anti-entropy sweep: pull keys this node lacks, push keys a peer lacks. This is what heals an
+  # under-quorum write or a node restored from a stale backup, so a writeQuorum below replicaCount
+  # is only safe with it running. Floor of 10s is enforced by the cosigner.
+  antiEntropyIntervalSecs: 300
+
 persistence:
   size: 1Gi
   storageClassName: ""

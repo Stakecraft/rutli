@@ -37,6 +37,12 @@ pub const ANTI_ENTROPY_CONFLICTS: &str = "rutli_anti_entropy_conflicts_total";
 pub const HOSTED_KEYS: &str = "rutli_hosted_keys";
 /// Hosted-key operations by op and result (generate/decrypt/symmetric/delete).
 pub const HOSTED_KEY_OPS: &str = "rutli_hosted_key_ops_total";
+/// The *fewest* cosigners holding any one hosted key, as last observed by anti-entropy.
+///
+/// This is the alert that makes a write quorum below `n` safe: a key written to only a quorum is
+/// fine transiently, but must not stay that way. Alert below `n` (warning) and below the write
+/// quorum (critical).
+pub const KEY_REPLICAS: &str = "rutli_key_replicas";
 
 /// Install the process-global Prometheus recorder and serve `/metrics` on `listen`.
 /// Call at most once, before serving traffic.
@@ -66,6 +72,8 @@ fn prime() {
     metrics::counter!(ANTI_ENTROPY_REPAIRS).absolute(0);
     metrics::counter!(ANTI_ENTROPY_CONFLICTS).absolute(0);
     metrics::gauge!(HOSTED_KEYS).set(0.0);
+    // No hosted keys yet means no shortfall — not a shortfall of zero, which would page instantly.
+    metrics::gauge!(KEY_REPLICAS).set(f64::NAN);
     metrics::counter!(SIGN_ABORTS).absolute(0);
     metrics::gauge!(PENDING_SIGN_SESSIONS).set(0.0);
 }
@@ -82,4 +90,5 @@ pub fn describe() {
     describe_counter!(ANTI_ENTROPY_CONFLICTS, "Hosted keys with divergent material across nodes");
     describe_gauge!(HOSTED_KEYS, "Cluster-hosted keys held by this node");
     describe_counter!(HOSTED_KEY_OPS, "Hosted-key operations, by op and result");
+    describe_gauge!(KEY_REPLICAS, "Fewest cosigners holding any one hosted key");
 }

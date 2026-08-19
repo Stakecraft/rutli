@@ -83,6 +83,37 @@ sudo RUTLI_CERT_UID=10001 scripts/gen-frost-certs.sh 3 deploy/frost/certs
 or `sudo chown -R 10001:10001 deploy/frost/certs` after generating. On Kubernetes this is handled
 for you — certs come from a Secret with `defaultMode: 0440` and the pod's `fsGroup`.
 
+## Cluster-hosted keys
+
+The `config-tls/` configs also enable **cluster-hosted keys**: the RSA-2048-OAEP encryption keypair
+and the AES-256-GCM symmetric key Canton needs are held by the cosigners themselves, instead of by
+an HSM or the driver's software backend.
+
+```json
+"hosted_keys": { "enabled": true, "write_quorum": 2, "anti_entropy_interval_secs": 300 }
+```
+
+The block requires `share_seal`: with sealing off the node refuses to start, because a whole private
+key must never sit unsealed on disk. That is why the plaintext dev configs in `config/` omit it —
+add it there only alongside a `share_seal` block.
+
+Be clear about what this is. These are **replicated whole keys, not threshold shares**: generated on
+one node, wrapped to each recipient and copied to the others, sealed at rest per node, and any node
+can serve a decrypt. The Ed25519 namespace key is unchanged — still 2-of-3 FROST, never replicated.
+One compromised cosigner yields the hosted keys, and because those keys protect Canton's per-view
+session keys, an attacker who extracts one gains *retrospective* read access to any recorded traffic
+encrypted to it; rotation fixes the future, not the past. What you buy is relocation: key material
+leaves the busy, internet-adjacent participant host for three hardened single-purpose nodes.
+
+`write_quorum: 2` means a new key is reported created once two of three nodes hold it; below quorum
+the write rolls back rather than leaving a single copy. The anti-entropy sweep (every 300s, plus
+read-repair on demand) is what heals the third node, so it is not optional at a quorum below `n`.
+
+Driver side: `frost.hosted-keys = true` routes `rutli-`-prefixed key ids to the cluster alongside
+`frost-`; with it on, `delegate = "none"` becomes possible — no HSM, no local key state.
+
+See [`docs/hosted-keys.md`](../../docs/hosted-keys.md).
+
 ## ⚠️ Not fully production yet
 
 Even with mTLS and share sealing available, this dev topology runs all nodes on one host. A production

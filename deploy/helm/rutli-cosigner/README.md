@@ -49,6 +49,7 @@ Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org A
 | `fullnameOverride` | `rutli-cosigner` | Peer DNS base |
 | `tlsSecretName` / `sealSecretName` | `rutli-cosigner-tls` / `rutli-seal` | Pre-created |
 | `signerAllowlist` | `[driver]` | Required under TLS |
+| `hostedKeys.enabled` | `false` | Cluster-hosted RSA/AES keys — replicated whole keys, not threshold shares |
 
 See [`values.yaml`](values.yaml) for the full set.
 

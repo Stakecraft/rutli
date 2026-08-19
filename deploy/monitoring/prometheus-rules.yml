@@ -12,6 +12,18 @@
 #   rutli_sign_round1_skips_total                                    counter
 #   rutli_sign_aborts_total                                          counter
 #   rutli_pending_sign_sessions                                      gauge
+#   rutli_hosted_keys                                                gauge
+#   rutli_hosted_key_ops_total{op=..., result="ok"|"error"}          counter
+#   rutli_anti_entropy_repairs_total                                 counter
+#   rutli_anti_entropy_conflicts_total                               counter
+#   rutli_key_replicas                                               gauge
+#
+# The last four cover cluster-hosted keys (RSA/AES key material replicated
+# whole to every node, unlike the FROST share, which is never copied between
+# nodes). `op` is one of generate | decrypt | symmetric_encrypt |
+# symmetric_decrypt | delete. Unlike every other metric above, the hosted-key
+# op series are not pre-primed at zero — an (op, result) pair first appears on
+# use — so the hosted-key rules below alert on rates, never on absence.
 #
 # NOTE: every `up{job="rutli-cosigner"}` and job-label selector below
 # assumes the scrape job is named "rutli-cosigner". Operators must match
@@ -83,3 +95,50 @@ groups:
         annotations:
           summary: "Rütli repeated sign aborts on {{ $labels.instance }}"
           description: "{{ $labels.instance }} issued more than 3 leader-side sign aborts in the last 15 minutes. This indicates repeated give-ups on in-flight sign sessions — peers may be flapping or the cluster may be degraded."
+
+      - alert: RutliHostedKeyConflict
+        expr: increase(rutli_anti_entropy_conflicts_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Rütli hosted key conflict detected on {{ $labels.instance }}"
+          description: "{{ $labels.instance }} found a peer holding DIFFERENT material under a key id it also holds. Hosted keys are create-once-immutable, so this is an invariant violation — not replication lag — and anti-entropy deliberately refuses to reconcile it: picking a side automatically could destroy the only copy that can decrypt already-recorded traffic. Find the conflicting key id in the cosigner logs (logged at error level), stop rotating that key, and resolve by hand."
+
+      - alert: RutliHostedKeyUnderReplicated
+        # A write quorum below the cluster size is only safe because anti-entropy heals the
+        # shortfall; this alert is what proves it did. NaN (no hosted keys yet) never fires.
+        expr: rutli_key_replicas < 3
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli hosted key under-replicated on {{ $labels.instance }}"
+          description: "At least one cluster-hosted key is held by fewer than 3 cosigners and has not healed within 30 minutes. A key written at the 2-of-3 write quorum is expected to be repaired by the next anti-entropy sweep (default 300s), so a sustained shortfall means a cosigner is down or sweeps are failing. Check that every cosigner is up and reachable on the mesh."
+
+      - alert: RutliHostedKeyCriticallyUnderReplicated
+        expr: rutli_key_replicas < 2
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Rütli hosted key has a single copy on {{ $labels.instance }}"
+          description: "At least one cluster-hosted key is held by only ONE cosigner. Losing that node loses the key, and because Canton peers encrypt to the published public key, the loss is unrecoverable for already-recorded traffic (see docs/disaster-recovery.md 3b). Restore the missing cosigners immediately; do not rotate or delete keys until replication recovers."
+
+      - alert: RutliHostedKeyErrors
+        expr: rate(rutli_hosted_key_ops_total{result="error"}[5m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli hosted-key {{ $labels.op }} errors on {{ $labels.instance }}"
+          description: "{{ $labels.instance }} has had a non-zero rate of failed hosted-key \"{{ $labels.op }}\" operations over the last 5m, sustained for 5m. Canton has no software fallback for a KMS decrypt: sustained op=\"decrypt\" errors surface as KmsDecryptError and can disconnect the participant from the synchronizer. Check whether this node actually holds the key (a lagging replica repairs on demand) before suspecting the sealing or crypto backend."
+
+      - alert: RutliHostedKeyReplicaShortfall
+        expr: max by (job) (rutli_hosted_keys) - min by (job) (rutli_hosted_keys) > 0
+        for: 20m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli hosted keys are unevenly replicated across job {{ $labels.job }}"
+          description: "Cosigners in job {{ $labels.job }} report different hosted-key counts, meaning at least one key exists on fewer nodes than the cluster has. Writes commit at write_quorum (default 2 of 3), so a node that was down during a GenerateKey lags legitimately until the anti-entropy sweep heals it (default every 300s; the gauge itself only refreshes when a peer lists this node's keys). Divergence sustained for 20 minutes means healing is failing — check rutli_anti_entropy_repairs_total and the sweep logs. Two replicas survive one node loss; one survives none."

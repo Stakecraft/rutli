@@ -48,8 +48,15 @@ scripts/gen-frost-certs.sh 3 "$CERTS"
 # The cosigner containers run as uid 10001. On Linux the bind-mounted certs keep the runner's
 # ownership, so the 0600 keys are unreadable in-container (macOS Docker masks this, which is why
 # the smoke passes locally and failed only in CI). These certs are throwaway — hand them over.
+# Everything that reads these certs — cosigners and the grpcurl client alike — must run as the
+# uid that owns them.
+CERT_UID="$(id -u)"
 if [ "$(uname -s)" = "Linux" ]; then
-  sudo chown -R 10001:10001 "$CERTS" 2>/dev/null || chmod -R a+rX "$CERTS"
+  if sudo chown -R 10001:10001 "$CERTS" 2>/dev/null; then
+    CERT_UID=10001
+  else
+    chmod -R a+rX "$CERTS"
+  fi
 fi
 
 # Drop any leftover cluster on the same compose project / default frost ports.
@@ -67,6 +74,7 @@ CERTS_ABS="$(cd "$CERTS" && pwd)"
 PROTO_ABS="$(cd frost/cosigner/proto && pwd)"
 grpc() {
   docker run --rm --network "$NETWORK" \
+    --user "$CERT_UID" \
     -v "$CERTS_ABS:/certs:ro" \
     -v "$PROTO_ABS:/proto:ro" \
     "$GRPC_IMG" \

@@ -7,11 +7,18 @@ import com.digitalasset.canton.crypto.kms.driver.api.v1._
 import com.google.protobuf.ByteString
 import com.stakecraft.rutli.FrostTlsConfig
 import com.stakecraft.rutli.grpc.{
+  CapabilitiesRequest,
+  DecryptRequest,
+  DeleteKeyRequest,
   DkgRequest,
+  GenerateKeyRequest,
   GroupKeyRequest,
   HealthRequest,
+  KeyInfoRequest,
+  PublicKeyRequest,
   SignRequest,
   SignerGrpc,
+  SymmetricRequest,
 }
 import io.grpc.netty.shaded.io.grpc.netty.{GrpcSslContexts, NettyChannelBuilder}
 import io.grpc.{ManagedChannel, ManagedChannelBuilder, Status, StatusRuntimeException}
@@ -21,6 +28,7 @@ import java.io.File
 import java.security.KeyFactory
 import java.security.spec.X509EncodedKeySpec
 import java.util.concurrent.TimeUnit
+import scala.jdk.CollectionConverters._
 import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContext, Future, blocking}
 
@@ -44,12 +52,13 @@ import scala.concurrent.{ExecutionContext, Future, blocking}
   * availability gap without any cross-node consensus — FROST sessions are independent, so no Raft
   * log is needed.
   */
-final class FrostBackend(
+class FrostBackend(
     endpoints: Seq[String],
     delegate: KmsBackend,
     logger: Logger,
     tls: Option[FrostTlsConfig] = None,
     requestTimeout: FiniteDuration = 60.seconds,
+    hostedKeys: Boolean = false,
 )(implicit ec: ExecutionContext)
     extends KmsBackend {
 
@@ -59,7 +68,9 @@ final class FrostBackend(
 
   private val channels: Vector[ManagedChannel] = endpoints.toVector.map(buildChannel)
 
-  private def buildChannel(endpoint: String): ManagedChannel = tls match {
+  /** Build the gRPC channel for one endpoint. Overridable so tests can substitute an in-process
+    * channel without standing up a TLS listener. */
+  protected def buildChannel(endpoint: String): ManagedChannel = tls match {
     case Some(t) =>
       val ssl = GrpcSslContexts
         .forClient()
@@ -100,15 +111,54 @@ final class FrostBackend(
     throw lastError
   }
 
-  // Advertise Ed25519 (served by the cluster) plus whatever the delegate backend supports.
+  /** Which hosted-key specs the cluster actually serves, asked once at startup.
+    *
+    * Queried rather than hardcoded so a cluster can add a key type without a driver release. An
+    * older cluster answers UNIMPLEMENTED, and a cluster that is simply unreachable at startup must
+    * not permanently disable the feature either — both fall back to the configured expectation and
+    * are logged, because silently advertising fewer specs to Canton would look like a config bug.
+    */
+  private lazy val clusterSpecs: Set[String] =
+    if (!hostedKeys) Set.empty
+    else
+      try {
+        val reply =
+          blocking(withFailover("capabilities")(_.capabilities(CapabilitiesRequest.newBuilder().build())))
+        if (!reply.getHostedKeysEnabled) {
+          logger.warn(
+            "FROST: driver has hosted-keys enabled but the cluster reports them disabled — " +
+              "non-FROST keys will fall back to the delegate. Set hosted_keys.enabled on the cosigners."
+          )
+          Set.empty[String]
+        } else {
+          val specs = reply.getHostedKeySpecsList.asScala.toSet
+          logger.info(s"FROST: cluster hosts non-FROST keys (${specs.mkString(", ")})")
+          specs
+        }
+      } catch {
+        case e: StatusRuntimeException =>
+          logger.warn(
+            s"FROST: could not read cluster capabilities (${e.getStatus.getCode}); assuming the " +
+              "configured hosted-key specs. Upgrade the cosigners if this persists."
+          )
+          DefaultHostedSpecs
+      }
+
+  private def hostsRsa: Boolean = clusterSpecs.contains(RsaSpec)
+  private def hostsAes: Boolean = clusterSpecs.contains(AesSpec)
+
+  // Advertise Ed25519 (threshold-signed by the cluster) plus, when hosted keys are on, the
+  // encryption specs the cluster serves — and whatever the delegate still supports on top.
   override def supportedSigningKeySpecs: Set[SigningKeySpec] =
     delegate.supportedSigningKeySpecs + SigningKeySpec.EcCurve25519
   override def supportedSigningAlgoSpecs: Set[SigningAlgoSpec] =
     delegate.supportedSigningAlgoSpecs + SigningAlgoSpec.Ed25519
   override def supportedEncryptionKeySpecs: Set[EncryptionKeySpec] =
-    delegate.supportedEncryptionKeySpecs
+    delegate.supportedEncryptionKeySpecs ++
+      (if (hostsRsa) Set(EncryptionKeySpec.Rsa2048) else Set.empty)
   override def supportedEncryptionAlgoSpecs: Set[EncryptionAlgoSpec] =
-    delegate.supportedEncryptionAlgoSpecs
+    delegate.supportedEncryptionAlgoSpecs ++
+      (if (hostsRsa) Set(EncryptionAlgoSpec.RsaEsOaepSha256) else Set.empty)
 
   override def generateSigningKeyPair(
       spec: SigningKeySpec,
@@ -130,10 +180,40 @@ final class FrostBackend(
   override def generateEncryptionKeyPair(
       spec: EncryptionKeySpec,
       keyName: Option[String],
-  ): Future[String] = delegate.generateEncryptionKeyPair(spec, keyName)
+  ): Future[String] = spec match {
+    case EncryptionKeySpec.Rsa2048 if hostsRsa =>
+      val keyId = hostedKeyId("enc", keyName)
+      Future {
+        logger.info(s"FROST: generating cluster-hosted $RsaSpec key $keyId")
+        blocking(generateHosted(keyId, RsaSpec))
+        keyId
+      }
+    case other => delegate.generateEncryptionKeyPair(other, keyName)
+  }
 
   override def generateSymmetricKey(keyName: Option[String]): Future[String] =
-    delegate.generateSymmetricKey(keyName)
+    if (hostsAes) {
+      val keyId = hostedKeyId("sym", keyName)
+      Future {
+        logger.info(s"FROST: generating cluster-hosted $AesSpec key $keyId")
+        blocking(generateHosted(keyId, AesSpec))
+        keyId
+      }
+    } else delegate.generateSymmetricKey(keyName)
+
+  /** Generate a hosted key on the cluster.
+    *
+    * `key_id` is caller-supplied and the cluster treats a repeat as a no-op, so this is idempotent
+    * and may fail over on a timeout as well as a refused connection — unlike DKG, where a retry
+    * could run a second ceremony.
+    */
+  private def generateHosted(keyId: String, spec: String): Unit = {
+    val req = GenerateKeyRequest.newBuilder().setKeyId(keyId).setSpec(spec).build()
+    val reply = withFailover("generateKey")(_.generateKey(req))
+    logger.info(
+      s"FROST: hosted key $keyId ready (created=${reply.getCreated}, replicas=${reply.getReplicas})"
+    )
+  }
 
   override def sign(data: Array[Byte], keyId: String, algo: SigningAlgoSpec): Future[Array[Byte]] =
     if (isFrostKey(keyId)) Future {
@@ -149,13 +229,39 @@ final class FrostBackend(
       ciphertext: Array[Byte],
       keyId: String,
       algo: EncryptionAlgoSpec,
-  ): Future[Array[Byte]] = delegate.decryptAsymmetric(ciphertext, keyId, algo)
+  ): Future[Array[Byte]] =
+    if (isHostedKey(keyId)) Future {
+      require(
+        algo == EncryptionAlgoSpec.RsaEsOaepSha256,
+        s"cluster-hosted encryption keys decrypt RSAES-OAEP-SHA256 only, got $algo",
+      )
+      val req = DecryptRequest
+        .newBuilder()
+        .setKeyId(keyId)
+        .setCiphertext(ByteString.copyFrom(ciphertext))
+        .build()
+      blocking(withFailover("decrypt")(_.decrypt(req))).getPlaintext.toByteArray
+    }
+    else delegate.decryptAsymmetric(ciphertext, keyId, algo)
 
   override def encryptSymmetric(data: Array[Byte], keyId: String): Future[Array[Byte]] =
-    delegate.encryptSymmetric(data, keyId)
+    if (isHostedKey(keyId)) Future {
+      val req =
+        SymmetricRequest.newBuilder().setKeyId(keyId).setData(ByteString.copyFrom(data)).build()
+      blocking(withFailover("symmetricEncrypt")(_.symmetricEncrypt(req))).getData.toByteArray
+    }
+    else delegate.encryptSymmetric(data, keyId)
 
   override def decryptSymmetric(ciphertext: Array[Byte], keyId: String): Future[Array[Byte]] =
-    delegate.decryptSymmetric(ciphertext, keyId)
+    if (isHostedKey(keyId)) Future {
+      val req = SymmetricRequest
+        .newBuilder()
+        .setKeyId(keyId)
+        .setData(ByteString.copyFrom(ciphertext))
+        .build()
+      blocking(withFailover("symmetricDecrypt")(_.symmetricDecrypt(req))).getData.toByteArray
+    }
+    else delegate.decryptSymmetric(ciphertext, keyId)
 
   override def getPublicKey(keyId: String): Future[PublicKey] =
     if (isFrostKey(keyId)) Future {
@@ -163,6 +269,12 @@ final class FrostBackend(
       val raw = blocking(withFailover("groupKey")(_.groupKey(req))).getGroupVerifyingKey.toByteArray
       require(raw.length == 32, s"expected 32-byte Ed25519 group key, got ${raw.length}")
       PublicKey(ed25519Spki(raw), SigningKeySpec.EcCurve25519)
+    }
+    else if (isHostedKey(keyId)) Future {
+      val req = PublicKeyRequest.newBuilder().setKeyId(keyId).build()
+      val reply = blocking(withFailover("publicKey")(_.publicKey(req)))
+      // The cluster returns X.509 SubjectPublicKeyInfo DER — exactly what Canton's PublicKey wants.
+      PublicKey(reply.getPublicKeyDer.toByteArray, EncryptionKeySpec.Rsa2048)
     }
     else delegate.getPublicKey(keyId)
 
@@ -172,6 +284,12 @@ final class FrostBackend(
       blocking(withFailover("groupKey")(_.groupKey(GroupKeyRequest.newBuilder().setKeyId(keyId).build())))
       ()
     }
+    else if (isHostedKey(keyId)) Future {
+      val reply =
+        blocking(withFailover("keyInfo")(_.keyInfo(KeyInfoRequest.newBuilder().setKeyId(keyId).build())))
+      if (!reply.getExists) throw new NoSuchElementException(s"key not found or inactive: $keyId")
+      ()
+    }
     else delegate.keyExistsAndIsActive(keyId)
 
   override def deleteKey(keyId: String): Future[Unit] =
@@ -179,6 +297,11 @@ final class FrostBackend(
       // The cluster intentionally has no delete — the namespace key is non-rotatable and deleting
       // it would be catastrophic. Deletion is an operator ceremony, not an API call.
       Future.failed(new UnsupportedOperationException("FROST namespace keys cannot be deleted via the API"))
+    else if (isHostedKey(keyId)) Future {
+      // Unlike the namespace key, Canton CAN rotate encryption keys, so hosted keys are deletable.
+      blocking(withFailover("deleteKey")(_.deleteKey(DeleteKeyRequest.newBuilder().setKeyId(keyId).build())))
+      ()
+    }
     else delegate.deleteKey(keyId)
 
   override def health: Future[KmsDriverHealth] = {
@@ -214,6 +337,24 @@ object FrostBackend {
   private val FrostPrefix = "frost-"
 
   private def isFrostKey(keyId: String): Boolean = keyId.startsWith(FrostPrefix)
+
+  /** Key ids the cluster hosts as whole (replicated, sealed) keys, as opposed to FROST shares. */
+  private val HostedPrefix = "rutli-"
+  private def isHostedKey(keyId: String): Boolean = keyId.startsWith(HostedPrefix)
+
+  private val RsaSpec = "rsa-2048-oaep-sha256"
+  private val AesSpec = "aes-256-gcm"
+
+  /** Assumed cluster capability when the Capabilities RPC is unavailable (older cosigner, or the
+    * cluster was unreachable at startup) but the operator configured hosted keys. */
+  private val DefaultHostedSpecs = Set(RsaSpec, AesSpec)
+
+  private def hostedKeyId(kind: String, keyName: Option[String]): String = {
+    // The cosigner keystore accepts [A-Za-z0-9_-] only, and a UUID keeps retries of *different*
+    // logical keys from colliding while GenerateKey stays idempotent for the same id.
+    val name = keyName.map(n => s"-${n.replaceAll("[^A-Za-z0-9_-]", "_")}").getOrElse("")
+    s"$HostedPrefix$kind$name-${java.util.UUID.randomUUID()}".take(300)
+  }
 
   /** True when the status means "this contact node isn't serving" (so we should try the next),
     * as opposed to a real application answer we must surface. */

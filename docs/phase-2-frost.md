@@ -12,7 +12,9 @@
 >
 > - `driver` `FrostBackend` (Scala): composite backend routing the Ed25519 namespace key to the
 >   cluster over gRPC (checked-in grpc-java stubs from the shared proto) and delegating every other
->   key to the HSM/software backend. **Live e2e verified** (`FrostBackendIT`, gated on
+>   key to the HSM/software backend — the hosted-key routing that lets `rutli-`-prefixed ids go to
+>   the cluster too, and the delegate be dropped entirely, is landing alongside (*Cluster-hosted
+>   keys*, below). **Live e2e verified** (`FrostBackendIT`, gated on
 >   `RUTLI_FROST_ENDPOINT`): against a real 3-node cluster it runs DKG for the namespace key,
 >   threshold-signs a Canton 34-byte payload, and the **stock JDK Ed25519 verifier accepts** the
 >   64-byte signature; non-Ed25519 keys fall through to the delegate. Config: `backend = "frost"`
@@ -53,6 +55,14 @@
 >   every node before persisting. Limits an attacker to one refresh epoch; pre-refresh shares are
 >   dead afterwards (old+new shares cannot combine — tested).
 >
+> - **Cluster-hosted keys, v1 (cosigner side done):** the cluster also holds the **non-FROST**
+>   material Canton needs — RSA-2048-OAEP-SHA256 encryption keypairs and AES-256-GCM symmetric
+>   keys — the prerequisite for a participant with no HSM and no local key state (the driver-side
+>   routing lands alongside). These are **replicated whole keys, not
+>   threshold shares**; the namespace key remains true 2-of-3 FROST and is untouched. 9 cluster
+>   tests: replicate-and-decrypt on every node, read-repair, anti-entropy push, under-quorum
+>   rollback, restart survival, and FROST/hosted non-interference. See *Cluster-hosted keys* below.
+>
 > Remaining for Phase 2 hardening: enclave/HSM sealing ("MPC-of-HSM") and DR runbook per the
 > production-readiness list.
 
@@ -61,8 +71,10 @@ catastrophic and irreversible — is never held whole by any machine. A `t`-of-`
 standard Ed25519 signatures via FROST (RFC 9591). This is the "Horcrux for Canton" core.
 
 > Prereq: Phase 1 `HsmBackend` ships first (HSM-first sequencing). Phase 2 slots a `FrostBackend`
-> in behind the same `KmsBackend` seam — no change to the Canton-facing driver. Encryption keys stay
-> on the HSM (threshold decryption is out of scope; see architecture.md).
+> in behind the same `KmsBackend` seam — no change to the Canton-facing driver. Threshold
+> *decryption* remains out of scope (see architecture.md); encryption keys either stay on the HSM or,
+> since cluster-hosted keys v1, live in the cluster as replicated whole keys — which is a
+> durability and relocation property, not a threshold one. See *Cluster-hosted keys* below.
 
 ## What the wire contract fixes for us
 
@@ -93,11 +105,17 @@ RutliDriver (JVM)  ──FrostBackend──►  gRPC/mTLS  ──►  Cosigner c
                                                           ├─ cosigner 1  (share 1)   region/acct A
                                                           ├─ cosigner 2  (share 2)   region/acct B
                                                           └─ cosigner 3  (share 3)   region/acct C
+                                                             share i : distinct, never copied
+                                                             hosted  : full replica on every node
 ```
 
 - `n` cosigners, threshold `t` (e.g. 2-of-3). Each holds one FROST share, each on a separate
   host / cloud account / region — all operated by the single node operator (self-custody).
 - Each share ideally sealed in an enclave/HSM ("MPC-of-HSM"): breach needs `t` enclaves.
+- A node's keystore may also hold **cluster-hosted keys** (RSA encryption, AES symmetric), which are
+  whole keys replicated to *every* node rather than split across them. The two kinds of material
+  share a directory and a sealing key but nothing else — see *Cluster-hosted keys* below, and in
+  particular the rule that replication never touches a FROST share.
 
 ## Coordination — cluster-side leader election (Horcrux-style)
 
@@ -186,6 +204,217 @@ is *the* FROST footgun. Mitigations, all mandatory:
 - Enforce canonical encoding of the group public key and `R` at the boundary.
 - Lean on the audited ZF crate's nonce API rather than hand-rolling.
 
+## Cluster-hosted keys (non-FROST material in the same cluster)
+
+The cluster also holds the key material FROST cannot produce: **RSA-2048-OAEP-SHA256** encryption
+keypairs and **AES-256-GCM** symmetric keys. Before this, those keys were delegated to an HSM
+(PKCS#11) or to the software backend, which kept them in JVM heap on the participant host — the
+arrangement behind the 2026-08-12 DevNet incident, where a Splice 0.6.11→0.7.0 upgrade restarted the
+participant, the heap-only RSA encryption key was gone, peers kept encrypting to the still-published
+public key, and the resulting `KmsDecryptError` disconnected the node from the synchronizer. The key
+was unrecoverable. Full rationale and the crate survey behind it:
+[hosted-keys-design.md](hosted-keys-design.md).
+
+**These are replicated whole keys, not threshold shares.** One cosigner generates the key, it is
+replicated to the others, sealed at rest on each, and any node can serve a decrypt. There is no MPC
+in that path and nothing here should be read as claiming otherwise. Threshold RSA is not a later
+phase but permanently out of scope: no Rust implementation of threshold RSA decryption exists, and
+[RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html) (Marvin timing
+side-channel, private-key recovery by a *network* attacker) is still unpatched in the pure-Rust
+`rsa` crate — which is why the OAEP decrypt runs on `aws-lc-rs` instead.
+
+So one cluster now holds two classes of material with deliberately different properties:
+
+| | FROST namespace key | cluster-hosted keys |
+|---|---|---|
+| Scheme | 2-of-3 threshold Ed25519 (RFC 9591) | whole key, one replica per node |
+| Whole key exists | **never, anywhere** | on every node, sealed |
+| One cosigner compromised yields | nothing usable | that key |
+| Canton can rotate it | **no** | yes, under the namespace key |
+| Replicated / anti-entropy | **never** | yes |
+
+**The security tier matches the recoverability tier.** The one key Canton *cannot* rotate stays in
+real threshold MPC; the keys that get only replication are exactly the ones Canton *can* rotate
+under that namespace key. The win is **relocation, not a threshold property** — key material moves
+off the busy, internet-adjacent participant host onto three hardened, single-purpose, allowlisted
+nodes. The cost, which must not be buried: Canton's encryption keys protect per-view session keys,
+so an attacker who extracts one gains **retrospective** read access to any recorded traffic
+encrypted to it. Rotation fixes the future, not the past; there is no forward secrecy here.
+
+### The invariant: replication covers hosted keys only
+
+**A FROST share is never listed, fetched, pushed or copied between nodes.** This is the
+load-bearing rule of the whole feature, and it is enforced in code rather than by convention
+because violating it fails *silently*. Two nodes holding the same share means the cluster no longer
+has `n` distinct points on the sharing polynomial: a "2-of-3" quorum drawn from those two nodes is
+really 1-of-3, one compromised host is enough to sign, and nothing about the resulting signature
+looks wrong. Threshold security would be gone with no error and no alert — which is why this
+invariant gets a hard boundary rather than a code comment.
+
+Where it is enforced:
+
+- `KeyStore::list_hosted` walks the key directory and returns hosted records only; FROST files are
+  skipped. Every replication path — `Peer.ListKeys`, the anti-entropy sweep, read-repair — is built
+  on that inventory, so a share has no way to enter one.
+- The typed loads refuse the wrong kind in both directions: `load_hosted` on a share errors, and
+  the FROST `load` on a hosted key errors. `Peer.FetchKey` and `Peer.ReplicateKey` go exclusively
+  through the hosted path.
+- `hosted_delete` re-reads the record before removing anything, so a `DeleteKey` naming the
+  namespace key is refused rather than destroying a non-rotatable identity.
+- An unreadable key file makes `list_hosted` **fail** rather than quietly return a shorter list: a
+  corrupt or wrongly-sealed key must not look like a *deleted* one to anti-entropy. Failing loudly
+  turns a sealing misconfiguration into an alert instead of a silent inventory gap.
+
+Covered end-to-end by `hosted_keys_and_frost_shares_do_not_interfere`: DKG and hosted generation run
+side by side in one keystore, threshold signing still verifies against the group key, the hosted
+inventory contains only the hosted key, and the namespace key is neither loadable nor deletable
+through the hosted API.
+
+### One keystore, two record kinds
+
+Hosted keys live in the **same** `data_dir/keys/` directory as FROST shares, one sealed file per
+key, written through the same atomic path (tmp → fsync → rename → fsync dir). The sealed envelope's
+plaintext is a tagged union: hosted records carry `"kind": "hosted"`, FROST shares carry no tag, so
+files written before this feature existed parse unchanged.
+
+Sharing the directory is deliberate, not incidental: `rutli-cosigner backup` / `restore` already
+operate on it, so hosted keys are covered by the existing DR tooling for free. A sibling directory
+would have been silently skipped by backup — the exact failure class the incident was about.
+
+One honest limit: **delete does not claim secure erasure.** On copy-on-write filesystems,
+wear-levelled SSDs and snapshotted volumes, removing a file does not destroy the bytes. Deleting
+removes the only *referenced* copy; real destruction means rotating the seal master secret so every
+old sealed blob — including the ones sitting in backups — becomes undecryptable.
+
+### Replication wrapping, and why mTLS alone was judged insufficient
+
+Replicating a hosted key means moving a *whole private key* across the mesh, a materially different
+exposure from the FROST round packages that normally travel there. Transport mTLS does not cover it:
+
+- A service-mesh sidecar (Istio, Linkerd) terminating TLS on the pod's behalf would see the
+  plaintext private key. That is an ordinary, unremarkable Kubernetes deployment, not an exotic
+  attack.
+- The cluster CA also signs the **driver's** certificate, and every cosigner certificate carries the
+  same shared `rutli-cosigner` SAN. As *Who can call which API* above puts it, the transport proves
+  cluster membership, not identity — it cannot tell peer 2 from peer 3.
+
+Key material is therefore sealed to **one specific recipient node** underneath the TLS, HPKE-style:
+
+```text
+esk, epk  ← ephemeral X25519 keypair, fresh per envelope
+cek       = HKDF-SHA256(ikm  = X25519(esk, dist_pk_j),
+                        info = "rutli-keywrap-v1" ‖ epk ‖ dist_pk_j)
+envelope  = AES-256-GCM(cek, nonce, material,
+                        aad = "rutli-kw-v1" ‖ j ‖ len-prefixed(cluster_id, key_id, spec))
+```
+
+The AAD binding is what makes an envelope non-transplantable: it cannot be replayed to a different
+node, presented under a different key id, or relabelled as a different spec. Each of those is a
+decryption failure, reported opaquely — wrong recipient, tampered AAD and corrupt ciphertext are all
+just "this envelope is not for you or not intact". The `cluster_id` is derived from the CA
+certificate (`sha256(ca_pem)[..8]`), so envelopes cannot cross trust domains and no new config field
+was needed.
+
+The recipient's static X25519 key is **derived, never generated or stored**:
+
+```text
+dist_sk_j = HKDF-SHA256(ikm  = cluster master secret,
+                        salt = "rutli-dist/node-{j}",
+                        info = "x25519-v1")
+```
+
+That is the same master secret as share sealing (`share_seal`). Deriving avoids a first-boot
+ordering problem — there is no keypair to distribute before the cluster can talk — and it lets a
+node check at startup that its derived public key is the one its peers were configured with,
+catching a wrong secret or a wrong mount *before* any key is generated. That is precisely the class
+of failure the incident belonged to. Under today's shared master secret any node can derive any
+peer's distribution key, which is no worse than the status quo for share sealing; moving to per-node
+seal secrets makes the binding real with no code change.
+
+Two details that carry more weight than they look:
+
+- On `FetchKey` — the pull side, where a node asks a peer for material — the recipient is taken
+  from the **caller's client-certificate CN**, never from the request body. Otherwise any
+  allowlisted peer could ask for key material wrapped to a node of its own choosing.
+- A node's **commitment** to a key is a keyed digest: SHA-256 over a domain tag, that node's
+  distribution public key, the spec and the private material. Two nodes can confirm they hold the
+  same key without revealing anything about it, and the value is meaningless outside the cluster.
+
+### Write quorum, anti-entropy and conflicts
+
+A generate is fenced cluster-wide first, reusing the per-key ceremony guard from *Ceremony safety*
+above (`kind = "genkey"`), so a concurrent generate for the same id on another leader serializes
+behind it instead of racing. The leader then wraps and pushes the key to every peer.
+
+- **Write quorum defaults to 2 of 3**, matching the cluster's own fault model. Requiring all three
+  would mean you cannot mint or rotate an encryption key while any node is down — strictly worse
+  than the single copy an HSM gives you. Below quorum the write **rolls back** (`PurgeKey` to every
+  peer) instead of leaving one lonely copy, so the id stays free for a clean retry: one node holding
+  the only copy is exactly the failure this feature exists to prevent. Validated range is `1..=n`.
+- 2-of-3 is only safe *with* the two repair paths, which is why they shipped together. The
+  **anti-entropy sweep** (`anti_entropy_interval_secs`, default 300) pulls keys this node is missing
+  and pushes keys a peer is missing — pulling heals a node restored from a stale backup, pushing
+  heals an under-quorum write. **Read-repair** pulls on demand when a request lands on a lagging
+  replica; without it a decrypt there would return `NOT_FOUND`, and the driver deliberately does not
+  fail over on `NOT_FOUND` because it is otherwise authoritative. Read-repair is what earns that
+  assumption.
+- **Generate is idempotent by `key_id`.** A client retry or driver failover repairs the replicas of
+  the existing key rather than minting a second key under the same name; the same id requested with
+  a *different* spec is refused outright.
+- Hosted keys are **create-once-immutable** — a `key_id` maps to one key forever, and Canton rotates
+  by minting a new id plus a topology transaction. That removes conflict *resolution* from
+  anti-entropy entirely: a key either exists or it does not. Two nodes holding **different**
+  material under one id is therefore a hard error — logged at `error`, counted in
+  `rutli_anti_entropy_conflicts_total`, and never auto-reconciled, because reconciling would mean
+  silently destroying material some node has already committed to. Any increase in that counter is
+  page-worthy.
+
+### Configuration
+
+```json
+"hosted_keys": { "enabled": true, "write_quorum": 2, "anti_entropy_interval_secs": 300 }
+```
+
+`share_seal` is a hard prerequisite: config validation refuses `hosted_keys.enabled` without it,
+because a whole private key must never sit unsealed on disk — an unsealed replica would be strictly
+worse than the HSM delegate it replaces — and the seal master secret is also what the distribution
+keys derive from. The Peer RPCs that carry key material additionally require `peer_allowlist`: with
+no allowlist there is no authenticated CN to identify the recipient, and the daemon refuses rather
+than guessing.
+
+### API surface and metrics
+
+- **Signer** (client-facing, `signer_allowlist`): `Capabilities`, `GenerateKey`, `PublicKey`,
+  `KeyInfo`, `DeleteKey`, `Decrypt`, `SymmetricEncrypt`, `SymmetricDecrypt`. `Capabilities` lets the
+  driver learn the cluster's supported specs at startup instead of hardcoding them.
+- **Peer** (mesh only, `peer_allowlist`): `ReplicateKey`, `FetchKey`, `ListKeys`, `PurgeKey`,
+  `NodeInfo`. The reasoning in *Who can call which API* applies unchanged and with more force here:
+  these RPCs move private key material, so the driver must not be on that list.
+- **Metrics:** `rutli_hosted_keys` (gauge), `rutli_hosted_key_ops_total{op,result}`,
+  `rutli_anti_entropy_repairs_total`, and `rutli_anti_entropy_conflicts_total` — the last one alerts
+  on *any* increase, since it signals a broken invariant rather than a transient.
+
+### Driver routing
+
+On the Scala side (landing alongside the cosigner work), `FrostBackend` routes by key-id prefix:
+`frost-` to the FROST path, `rutli-` to the cluster-hosted path, anything else to the delegate.
+With `frost.hosted-keys = true` the driver can run `delegate = "none"` — no HSM and no local key
+state on the participant at all. There is deliberately **no automatic fallback to the delegate on
+`NOT_FOUND`**: quietly serving a key from a second
+custodian is how split custody starts, and it could reproduce the incident class. Endpoint failover
+stays restricted to `UNAVAILABLE` / `DEADLINE_EXCEEDED`.
+
+### Where this goes next
+
+**v1.5** adds `EcdhDerive` and hosted **EC-P256** keys — still whole keys — with the driver
+completing ECIES (KDF2 → AES-128-CBC → HMAC) via BouncyCastle's own `IESEngine`, so the byte-exact
+reference implementation stays in the JVM next to Canton's encryptor. **v2** makes that path
+genuinely *threshold* via `frost-p256`: with Shamir shares `dᵢ` of `d`, each node returns `λᵢ·dᵢ·R`
+and the leader sums the points — one stateless round, **no nonce state**, and therefore none of the
+footgun documented above. The wire contract is identical for v1.5 and v2, so promoting a key class
+from replicated to threshold is a server-side change plus a config flag, not an API migration.
+**Threshold RSA: never** — see the top of this section.
+
 ## Lifecycle
 
 - **DKG** at namespace-key creation (`generateSigningKeyPair` for the namespace key routes to the
@@ -195,15 +424,23 @@ is *the* FROST footgun. Mitigations, all mandatory:
 - **DR:** encrypted per-share backups (fast node replacement) + a cold Shamir backup held by
   custodians (last resort). Recovery = re-share from surviving shares; the full key is never
   reconstructed on a live host. This matters because the namespace key is non-rotatable and its
-  loss is total.
+  loss is total. Hosted keys sit in the same directory, so the same `backup`/`restore` covers them;
+  a restored-from-stale-backup node is additionally healed by anti-entropy.
+- **Hosted keys** are created on demand by the driver (`GenerateKey` with a caller-supplied
+  `rutli-` id), never refreshed in place, and never re-shared: rotation means a new key id plus a
+  Canton topology transaction, which is available precisely because these keys sit *under* the
+  namespace key.
 
 ## Interfaces to define (next steps)
 
 1. gRPC service: `Dkg(keyName) -> {keyId, groupPublicKey}`, `Sign(keyId, digest) -> signature64`,
-   `Refresh(keyId)`, `Health`. mTLS with cert pinning between driver↔cluster and cosigner↔cosigner.
+   `Refresh(keyId)`, `Health` — plus the cluster-hosted key RPCs listed above. mTLS with cert
+   pinning between driver↔cluster and cosigner↔cosigner.
 2. `FrostBackend` (Scala) implementing `KmsBackend` — maps `generateSigningKeyPair`(Ed25519) and
    `sign` to the gRPC calls; every other op (encryption, symmetric, non-Ed25519 signing) delegates
-   to the co-located `HsmBackend` (composite backend, routing by key type).
+   to the co-located `HsmBackend` (composite backend, routing by key type). With cluster-hosted keys
+   enabled the encryption and symmetric ops route to the cluster instead and the delegate becomes
+   optional (`delegate = "none"`); see *Cluster-hosted keys* above.
 3. Rust cosigner: `frost-ed25519` + tonic (gRPC) + a crash-safe nonce store, packaged as a small
    static binary + container. (No Raft — static leader + driver-side failover; see the note above.)
 4. `deploy/frost/` — docker-compose bringing up `n=3, t=2` cosigners + the devnet participant, for
@@ -216,3 +453,9 @@ is *the* FROST footgun. Mitigations, all mandatory:
   its identity topology; Canton's verifier accepts the FROST-produced 64-byte signatures.
 - Kill any single cosigner (with `t=2, n=3`): signing still succeeds.
 - Nonce-reuse guard: a forced replay of a committed nonce is refused, verified by test.
+- Cluster-hosted keys: an RSA key generated on one cosigner decrypts on every other; the cluster
+  survives a full restart and still decrypts; a write that cannot reach quorum rolls back rather
+  than leaving one copy.
+- The hosted/FROST boundary holds: with both kinds of key in one keystore, the hosted inventory
+  lists only hosted keys, and the namespace key can be neither read nor deleted through the hosted
+  API.

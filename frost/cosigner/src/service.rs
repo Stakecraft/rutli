@@ -369,12 +369,18 @@ impl Peer for PeerSvc {
     ) -> Result<Response<pb::CeremonyFenceReply>, Status> {
         self.authorize(&req)?;
         let r = req.into_inner();
+        // The guard stores a &'static str, so the wire value is mapped to a known one rather than
+        // leaked through — an unknown kind is a protocol error, not something to fence on.
         let kind = match r.kind.as_str() {
             "dkg" => "dkg",
             "refresh" => "refresh",
+            // Hosted-key ceremonies take the same per-key guard: generating or deleting a hosted
+            // key must not interleave with a DKG/refresh for that id.
+            "genkey" => "genkey",
+            "delkey" => "delkey",
             other => {
                 return Err(Status::invalid_argument(format!(
-                    "ceremony kind must be \"dkg\" or \"refresh\", got {other:?}"
+                    "ceremony kind must be one of \"dkg\", \"refresh\", \"genkey\", \"delkey\"; got {other:?}"
                 )))
             }
         };

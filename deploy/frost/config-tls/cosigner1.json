@@ -26,6 +26,11 @@
   "share_seal": {
     "secret_env": "RUTLI_SEAL_SECRET"
   },
+  "hosted_keys": {
+    "enabled": true,
+    "write_quorum": 2,
+    "anti_entropy_interval_secs": 300
+  },
   "signer_allowlist": [
     "driver"
   ],

@@ -73,6 +73,8 @@ lazy val driver = (project in file("driver"))
       "io.grpc"             % "grpc-netty-shaded" % grpcVersion,
       "io.grpc"             % "grpc-protobuf"     % grpcVersion,
       "io.grpc"             % "grpc-stub"         % grpcVersion,
+      // In-process transport: lets the driver tests drive a fake cosigner without a TLS listener.
+      "io.grpc"             % "grpc-inprocess"    % grpcVersion % Test,
       "com.google.protobuf" % "protobuf-java"     % protobufVersion,
       // javax.annotation.Generated referenced by the generated grpc stubs (compile-time only).
       "org.apache.tomcat"   % "annotations-api"   % "6.0.53" % Provided,

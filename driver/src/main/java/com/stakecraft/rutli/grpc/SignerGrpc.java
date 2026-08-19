@@ -171,6 +171,254 @@ public final class SignerGrpc {
     return getRefreshMethod;
   }
 
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CapabilitiesRequest,
+      com.stakecraft.rutli.grpc.CapabilitiesReply> getCapabilitiesMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "Capabilities",
+      requestType = com.stakecraft.rutli.grpc.CapabilitiesRequest.class,
+      responseType = com.stakecraft.rutli.grpc.CapabilitiesReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CapabilitiesRequest,
+      com.stakecraft.rutli.grpc.CapabilitiesReply> getCapabilitiesMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CapabilitiesRequest, com.stakecraft.rutli.grpc.CapabilitiesReply> getCapabilitiesMethod;
+    if ((getCapabilitiesMethod = SignerGrpc.getCapabilitiesMethod) == null) {
+      synchronized (SignerGrpc.class) {
+        if ((getCapabilitiesMethod = SignerGrpc.getCapabilitiesMethod) == null) {
+          SignerGrpc.getCapabilitiesMethod = getCapabilitiesMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.CapabilitiesRequest, com.stakecraft.rutli.grpc.CapabilitiesReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "Capabilities"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.CapabilitiesRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.CapabilitiesReply.getDefaultInstance()))
+              .setSchemaDescriptor(new SignerMethodDescriptorSupplier("Capabilities"))
+              .build();
+        }
+      }
+    }
+    return getCapabilitiesMethod;
+  }
+
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.GenerateKeyRequest,
+      com.stakecraft.rutli.grpc.GenerateKeyReply> getGenerateKeyMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "GenerateKey",
+      requestType = com.stakecraft.rutli.grpc.GenerateKeyRequest.class,
+      responseType = com.stakecraft.rutli.grpc.GenerateKeyReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.GenerateKeyRequest,
+      com.stakecraft.rutli.grpc.GenerateKeyReply> getGenerateKeyMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.GenerateKeyRequest, com.stakecraft.rutli.grpc.GenerateKeyReply> getGenerateKeyMethod;
+    if ((getGenerateKeyMethod = SignerGrpc.getGenerateKeyMethod) == null) {
+      synchronized (SignerGrpc.class) {
+        if ((getGenerateKeyMethod = SignerGrpc.getGenerateKeyMethod) == null) {
+          SignerGrpc.getGenerateKeyMethod = getGenerateKeyMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.GenerateKeyRequest, com.stakecraft.rutli.grpc.GenerateKeyReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "GenerateKey"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.GenerateKeyRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.GenerateKeyReply.getDefaultInstance()))
+              .setSchemaDescriptor(new SignerMethodDescriptorSupplier("GenerateKey"))
+              .build();
+        }
+      }
+    }
+    return getGenerateKeyMethod;
+  }
+
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.PublicKeyRequest,
+      com.stakecraft.rutli.grpc.PublicKeyReply> getPublicKeyMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "PublicKey",
+      requestType = com.stakecraft.rutli.grpc.PublicKeyRequest.class,
+      responseType = com.stakecraft.rutli.grpc.PublicKeyReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.PublicKeyRequest,
+      com.stakecraft.rutli.grpc.PublicKeyReply> getPublicKeyMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.PublicKeyRequest, com.stakecraft.rutli.grpc.PublicKeyReply> getPublicKeyMethod;
+    if ((getPublicKeyMethod = SignerGrpc.getPublicKeyMethod) == null) {
+      synchronized (SignerGrpc.class) {
+        if ((getPublicKeyMethod = SignerGrpc.getPublicKeyMethod) == null) {
+          SignerGrpc.getPublicKeyMethod = getPublicKeyMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.PublicKeyRequest, com.stakecraft.rutli.grpc.PublicKeyReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "PublicKey"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.PublicKeyRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.PublicKeyReply.getDefaultInstance()))
+              .setSchemaDescriptor(new SignerMethodDescriptorSupplier("PublicKey"))
+              .build();
+        }
+      }
+    }
+    return getPublicKeyMethod;
+  }
+
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.KeyInfoRequest,
+      com.stakecraft.rutli.grpc.KeyInfoReply> getKeyInfoMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "KeyInfo",
+      requestType = com.stakecraft.rutli.grpc.KeyInfoRequest.class,
+      responseType = com.stakecraft.rutli.grpc.KeyInfoReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.KeyInfoRequest,
+      com.stakecraft.rutli.grpc.KeyInfoReply> getKeyInfoMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.KeyInfoRequest, com.stakecraft.rutli.grpc.KeyInfoReply> getKeyInfoMethod;
+    if ((getKeyInfoMethod = SignerGrpc.getKeyInfoMethod) == null) {
+      synchronized (SignerGrpc.class) {
+        if ((getKeyInfoMethod = SignerGrpc.getKeyInfoMethod) == null) {
+          SignerGrpc.getKeyInfoMethod = getKeyInfoMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.KeyInfoRequest, com.stakecraft.rutli.grpc.KeyInfoReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "KeyInfo"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.KeyInfoRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.KeyInfoReply.getDefaultInstance()))
+              .setSchemaDescriptor(new SignerMethodDescriptorSupplier("KeyInfo"))
+              .build();
+        }
+      }
+    }
+    return getKeyInfoMethod;
+  }
+
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.DeleteKeyRequest,
+      com.stakecraft.rutli.grpc.DeleteKeyReply> getDeleteKeyMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "DeleteKey",
+      requestType = com.stakecraft.rutli.grpc.DeleteKeyRequest.class,
+      responseType = com.stakecraft.rutli.grpc.DeleteKeyReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.DeleteKeyRequest,
+      com.stakecraft.rutli.grpc.DeleteKeyReply> getDeleteKeyMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.DeleteKeyRequest, com.stakecraft.rutli.grpc.DeleteKeyReply> getDeleteKeyMethod;
+    if ((getDeleteKeyMethod = SignerGrpc.getDeleteKeyMethod) == null) {
+      synchronized (SignerGrpc.class) {
+        if ((getDeleteKeyMethod = SignerGrpc.getDeleteKeyMethod) == null) {
+          SignerGrpc.getDeleteKeyMethod = getDeleteKeyMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.DeleteKeyRequest, com.stakecraft.rutli.grpc.DeleteKeyReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "DeleteKey"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.DeleteKeyRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.DeleteKeyReply.getDefaultInstance()))
+              .setSchemaDescriptor(new SignerMethodDescriptorSupplier("DeleteKey"))
+              .build();
+        }
+      }
+    }
+    return getDeleteKeyMethod;
+  }
+
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.DecryptRequest,
+      com.stakecraft.rutli.grpc.DecryptReply> getDecryptMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "Decrypt",
+      requestType = com.stakecraft.rutli.grpc.DecryptRequest.class,
+      responseType = com.stakecraft.rutli.grpc.DecryptReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.DecryptRequest,
+      com.stakecraft.rutli.grpc.DecryptReply> getDecryptMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.DecryptRequest, com.stakecraft.rutli.grpc.DecryptReply> getDecryptMethod;
+    if ((getDecryptMethod = SignerGrpc.getDecryptMethod) == null) {
+      synchronized (SignerGrpc.class) {
+        if ((getDecryptMethod = SignerGrpc.getDecryptMethod) == null) {
+          SignerGrpc.getDecryptMethod = getDecryptMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.DecryptRequest, com.stakecraft.rutli.grpc.DecryptReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "Decrypt"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.DecryptRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.DecryptReply.getDefaultInstance()))
+              .setSchemaDescriptor(new SignerMethodDescriptorSupplier("Decrypt"))
+              .build();
+        }
+      }
+    }
+    return getDecryptMethod;
+  }
+
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.SymmetricRequest,
+      com.stakecraft.rutli.grpc.SymmetricReply> getSymmetricEncryptMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "SymmetricEncrypt",
+      requestType = com.stakecraft.rutli.grpc.SymmetricRequest.class,
+      responseType = com.stakecraft.rutli.grpc.SymmetricReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.SymmetricRequest,
+      com.stakecraft.rutli.grpc.SymmetricReply> getSymmetricEncryptMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.SymmetricRequest, com.stakecraft.rutli.grpc.SymmetricReply> getSymmetricEncryptMethod;
+    if ((getSymmetricEncryptMethod = SignerGrpc.getSymmetricEncryptMethod) == null) {
+      synchronized (SignerGrpc.class) {
+        if ((getSymmetricEncryptMethod = SignerGrpc.getSymmetricEncryptMethod) == null) {
+          SignerGrpc.getSymmetricEncryptMethod = getSymmetricEncryptMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.SymmetricRequest, com.stakecraft.rutli.grpc.SymmetricReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "SymmetricEncrypt"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.SymmetricRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.SymmetricReply.getDefaultInstance()))
+              .setSchemaDescriptor(new SignerMethodDescriptorSupplier("SymmetricEncrypt"))
+              .build();
+        }
+      }
+    }
+    return getSymmetricEncryptMethod;
+  }
+
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.SymmetricRequest,
+      com.stakecraft.rutli.grpc.SymmetricReply> getSymmetricDecryptMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "SymmetricDecrypt",
+      requestType = com.stakecraft.rutli.grpc.SymmetricRequest.class,
+      responseType = com.stakecraft.rutli.grpc.SymmetricReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.SymmetricRequest,
+      com.stakecraft.rutli.grpc.SymmetricReply> getSymmetricDecryptMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.SymmetricRequest, com.stakecraft.rutli.grpc.SymmetricReply> getSymmetricDecryptMethod;
+    if ((getSymmetricDecryptMethod = SignerGrpc.getSymmetricDecryptMethod) == null) {
+      synchronized (SignerGrpc.class) {
+        if ((getSymmetricDecryptMethod = SignerGrpc.getSymmetricDecryptMethod) == null) {
+          SignerGrpc.getSymmetricDecryptMethod = getSymmetricDecryptMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.SymmetricRequest, com.stakecraft.rutli.grpc.SymmetricReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "SymmetricDecrypt"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.SymmetricRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.SymmetricReply.getDefaultInstance()))
+              .setSchemaDescriptor(new SignerMethodDescriptorSupplier("SymmetricDecrypt"))
+              .build();
+        }
+      }
+    }
+    return getSymmetricDecryptMethod;
+  }
+
   /**
    * Creates a new async stub that supports all call types for the service
    */
@@ -275,6 +523,76 @@ public final class SignerGrpc {
         io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.RefreshReply> responseObserver) {
       io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getRefreshMethod(), responseObserver);
     }
+
+    /**
+     * <pre>
+     * What this cluster supports. The driver queries it at startup instead of hardcoding specs, so
+     * adding a key type later needs no driver release.
+     * </pre>
+     */
+    default void capabilities(com.stakecraft.rutli.grpc.CapabilitiesRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CapabilitiesReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getCapabilitiesMethod(), responseObserver);
+    }
+
+    /**
+     * <pre>
+     * Generate a hosted key. key_id is caller-supplied, making retries idempotent.
+     * </pre>
+     */
+    default void generateKey(com.stakecraft.rutli.grpc.GenerateKeyRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.GenerateKeyReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getGenerateKeyMethod(), responseObserver);
+    }
+
+    /**
+     * <pre>
+     * X.509 SubjectPublicKeyInfo DER for an asymmetric hosted key.
+     * </pre>
+     */
+    default void publicKey(com.stakecraft.rutli.grpc.PublicKeyRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.PublicKeyReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getPublicKeyMethod(), responseObserver);
+    }
+
+    /**
+     */
+    default void keyInfo(com.stakecraft.rutli.grpc.KeyInfoRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.KeyInfoReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getKeyInfoMethod(), responseObserver);
+    }
+
+    /**
+     */
+    default void deleteKey(com.stakecraft.rutli.grpc.DeleteKeyRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DeleteKeyReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getDeleteKeyMethod(), responseObserver);
+    }
+
+    /**
+     * <pre>
+     * RSAES-OAEP-SHA256. The full unpad happens server-side — returning raw c^d mod N would be a
+     * padding oracle.
+     * </pre>
+     */
+    default void decrypt(com.stakecraft.rutli.grpc.DecryptRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DecryptReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getDecryptMethod(), responseObserver);
+    }
+
+    /**
+     */
+    default void symmetricEncrypt(com.stakecraft.rutli.grpc.SymmetricRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.SymmetricReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getSymmetricEncryptMethod(), responseObserver);
+    }
+
+    /**
+     */
+    default void symmetricDecrypt(com.stakecraft.rutli.grpc.SymmetricRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.SymmetricReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getSymmetricDecryptMethod(), responseObserver);
+    }
   }
 
   /**
@@ -354,6 +672,84 @@ public final class SignerGrpc {
       io.grpc.stub.ClientCalls.asyncUnaryCall(
           getChannel().newCall(getRefreshMethod(), getCallOptions()), request, responseObserver);
     }
+
+    /**
+     * <pre>
+     * What this cluster supports. The driver queries it at startup instead of hardcoding specs, so
+     * adding a key type later needs no driver release.
+     * </pre>
+     */
+    public void capabilities(com.stakecraft.rutli.grpc.CapabilitiesRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CapabilitiesReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getCapabilitiesMethod(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     * <pre>
+     * Generate a hosted key. key_id is caller-supplied, making retries idempotent.
+     * </pre>
+     */
+    public void generateKey(com.stakecraft.rutli.grpc.GenerateKeyRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.GenerateKeyReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getGenerateKeyMethod(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     * <pre>
+     * X.509 SubjectPublicKeyInfo DER for an asymmetric hosted key.
+     * </pre>
+     */
+    public void publicKey(com.stakecraft.rutli.grpc.PublicKeyRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.PublicKeyReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getPublicKeyMethod(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     */
+    public void keyInfo(com.stakecraft.rutli.grpc.KeyInfoRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.KeyInfoReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getKeyInfoMethod(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     */
+    public void deleteKey(com.stakecraft.rutli.grpc.DeleteKeyRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DeleteKeyReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getDeleteKeyMethod(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     * <pre>
+     * RSAES-OAEP-SHA256. The full unpad happens server-side — returning raw c^d mod N would be a
+     * padding oracle.
+     * </pre>
+     */
+    public void decrypt(com.stakecraft.rutli.grpc.DecryptRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DecryptReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getDecryptMethod(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     */
+    public void symmetricEncrypt(com.stakecraft.rutli.grpc.SymmetricRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.SymmetricReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getSymmetricEncryptMethod(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     */
+    public void symmetricDecrypt(com.stakecraft.rutli.grpc.SymmetricRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.SymmetricReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getSymmetricDecryptMethod(), getCallOptions()), request, responseObserver);
+    }
   }
 
   /**
@@ -413,6 +809,76 @@ public final class SignerGrpc {
       return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
           getChannel(), getRefreshMethod(), getCallOptions(), request);
     }
+
+    /**
+     * <pre>
+     * What this cluster supports. The driver queries it at startup instead of hardcoding specs, so
+     * adding a key type later needs no driver release.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.CapabilitiesReply capabilities(com.stakecraft.rutli.grpc.CapabilitiesRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getCapabilitiesMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * Generate a hosted key. key_id is caller-supplied, making retries idempotent.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.GenerateKeyReply generateKey(com.stakecraft.rutli.grpc.GenerateKeyRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getGenerateKeyMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * X.509 SubjectPublicKeyInfo DER for an asymmetric hosted key.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.PublicKeyReply publicKey(com.stakecraft.rutli.grpc.PublicKeyRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getPublicKeyMethod(), getCallOptions(), request);
+    }
+
+    /**
+     */
+    public com.stakecraft.rutli.grpc.KeyInfoReply keyInfo(com.stakecraft.rutli.grpc.KeyInfoRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getKeyInfoMethod(), getCallOptions(), request);
+    }
+
+    /**
+     */
+    public com.stakecraft.rutli.grpc.DeleteKeyReply deleteKey(com.stakecraft.rutli.grpc.DeleteKeyRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getDeleteKeyMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * RSAES-OAEP-SHA256. The full unpad happens server-side — returning raw c^d mod N would be a
+     * padding oracle.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.DecryptReply decrypt(com.stakecraft.rutli.grpc.DecryptRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getDecryptMethod(), getCallOptions(), request);
+    }
+
+    /**
+     */
+    public com.stakecraft.rutli.grpc.SymmetricReply symmetricEncrypt(com.stakecraft.rutli.grpc.SymmetricRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getSymmetricEncryptMethod(), getCallOptions(), request);
+    }
+
+    /**
+     */
+    public com.stakecraft.rutli.grpc.SymmetricReply symmetricDecrypt(com.stakecraft.rutli.grpc.SymmetricRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getSymmetricDecryptMethod(), getCallOptions(), request);
+    }
   }
 
   /**
@@ -471,6 +937,76 @@ public final class SignerGrpc {
     public com.stakecraft.rutli.grpc.RefreshReply refresh(com.stakecraft.rutli.grpc.RefreshRequest request) {
       return io.grpc.stub.ClientCalls.blockingUnaryCall(
           getChannel(), getRefreshMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * What this cluster supports. The driver queries it at startup instead of hardcoding specs, so
+     * adding a key type later needs no driver release.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.CapabilitiesReply capabilities(com.stakecraft.rutli.grpc.CapabilitiesRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getCapabilitiesMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * Generate a hosted key. key_id is caller-supplied, making retries idempotent.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.GenerateKeyReply generateKey(com.stakecraft.rutli.grpc.GenerateKeyRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getGenerateKeyMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * X.509 SubjectPublicKeyInfo DER for an asymmetric hosted key.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.PublicKeyReply publicKey(com.stakecraft.rutli.grpc.PublicKeyRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getPublicKeyMethod(), getCallOptions(), request);
+    }
+
+    /**
+     */
+    public com.stakecraft.rutli.grpc.KeyInfoReply keyInfo(com.stakecraft.rutli.grpc.KeyInfoRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getKeyInfoMethod(), getCallOptions(), request);
+    }
+
+    /**
+     */
+    public com.stakecraft.rutli.grpc.DeleteKeyReply deleteKey(com.stakecraft.rutli.grpc.DeleteKeyRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getDeleteKeyMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * RSAES-OAEP-SHA256. The full unpad happens server-side — returning raw c^d mod N would be a
+     * padding oracle.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.DecryptReply decrypt(com.stakecraft.rutli.grpc.DecryptRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getDecryptMethod(), getCallOptions(), request);
+    }
+
+    /**
+     */
+    public com.stakecraft.rutli.grpc.SymmetricReply symmetricEncrypt(com.stakecraft.rutli.grpc.SymmetricRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getSymmetricEncryptMethod(), getCallOptions(), request);
+    }
+
+    /**
+     */
+    public com.stakecraft.rutli.grpc.SymmetricReply symmetricDecrypt(com.stakecraft.rutli.grpc.SymmetricRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getSymmetricDecryptMethod(), getCallOptions(), request);
     }
   }
 
@@ -536,6 +1072,84 @@ public final class SignerGrpc {
       return io.grpc.stub.ClientCalls.futureUnaryCall(
           getChannel().newCall(getRefreshMethod(), getCallOptions()), request);
     }
+
+    /**
+     * <pre>
+     * What this cluster supports. The driver queries it at startup instead of hardcoding specs, so
+     * adding a key type later needs no driver release.
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.CapabilitiesReply> capabilities(
+        com.stakecraft.rutli.grpc.CapabilitiesRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getCapabilitiesMethod(), getCallOptions()), request);
+    }
+
+    /**
+     * <pre>
+     * Generate a hosted key. key_id is caller-supplied, making retries idempotent.
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.GenerateKeyReply> generateKey(
+        com.stakecraft.rutli.grpc.GenerateKeyRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getGenerateKeyMethod(), getCallOptions()), request);
+    }
+
+    /**
+     * <pre>
+     * X.509 SubjectPublicKeyInfo DER for an asymmetric hosted key.
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.PublicKeyReply> publicKey(
+        com.stakecraft.rutli.grpc.PublicKeyRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getPublicKeyMethod(), getCallOptions()), request);
+    }
+
+    /**
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.KeyInfoReply> keyInfo(
+        com.stakecraft.rutli.grpc.KeyInfoRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getKeyInfoMethod(), getCallOptions()), request);
+    }
+
+    /**
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.DeleteKeyReply> deleteKey(
+        com.stakecraft.rutli.grpc.DeleteKeyRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getDeleteKeyMethod(), getCallOptions()), request);
+    }
+
+    /**
+     * <pre>
+     * RSAES-OAEP-SHA256. The full unpad happens server-side — returning raw c^d mod N would be a
+     * padding oracle.
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.DecryptReply> decrypt(
+        com.stakecraft.rutli.grpc.DecryptRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getDecryptMethod(), getCallOptions()), request);
+    }
+
+    /**
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.SymmetricReply> symmetricEncrypt(
+        com.stakecraft.rutli.grpc.SymmetricRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getSymmetricEncryptMethod(), getCallOptions()), request);
+    }
+
+    /**
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.SymmetricReply> symmetricDecrypt(
+        com.stakecraft.rutli.grpc.SymmetricRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getSymmetricDecryptMethod(), getCallOptions()), request);
+    }
   }
 
   private static final int METHODID_HEALTH = 0;
@@ -543,6 +1157,14 @@ public final class SignerGrpc {
   private static final int METHODID_DKG = 2;
   private static final int METHODID_SIGN = 3;
   private static final int METHODID_REFRESH = 4;
+  private static final int METHODID_CAPABILITIES = 5;
+  private static final int METHODID_GENERATE_KEY = 6;
+  private static final int METHODID_PUBLIC_KEY = 7;
+  private static final int METHODID_KEY_INFO = 8;
+  private static final int METHODID_DELETE_KEY = 9;
+  private static final int METHODID_DECRYPT = 10;
+  private static final int METHODID_SYMMETRIC_ENCRYPT = 11;
+  private static final int METHODID_SYMMETRIC_DECRYPT = 12;
 
   private static final class MethodHandlers<Req, Resp> implements
       io.grpc.stub.ServerCalls.UnaryMethod<Req, Resp>,
@@ -580,6 +1202,38 @@ public final class SignerGrpc {
         case METHODID_REFRESH:
           serviceImpl.refresh((com.stakecraft.rutli.grpc.RefreshRequest) request,
               (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.RefreshReply>) responseObserver);
+          break;
+        case METHODID_CAPABILITIES:
+          serviceImpl.capabilities((com.stakecraft.rutli.grpc.CapabilitiesRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CapabilitiesReply>) responseObserver);
+          break;
+        case METHODID_GENERATE_KEY:
+          serviceImpl.generateKey((com.stakecraft.rutli.grpc.GenerateKeyRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.GenerateKeyReply>) responseObserver);
+          break;
+        case METHODID_PUBLIC_KEY:
+          serviceImpl.publicKey((com.stakecraft.rutli.grpc.PublicKeyRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.PublicKeyReply>) responseObserver);
+          break;
+        case METHODID_KEY_INFO:
+          serviceImpl.keyInfo((com.stakecraft.rutli.grpc.KeyInfoRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.KeyInfoReply>) responseObserver);
+          break;
+        case METHODID_DELETE_KEY:
+          serviceImpl.deleteKey((com.stakecraft.rutli.grpc.DeleteKeyRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DeleteKeyReply>) responseObserver);
+          break;
+        case METHODID_DECRYPT:
+          serviceImpl.decrypt((com.stakecraft.rutli.grpc.DecryptRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DecryptReply>) responseObserver);
+          break;
+        case METHODID_SYMMETRIC_ENCRYPT:
+          serviceImpl.symmetricEncrypt((com.stakecraft.rutli.grpc.SymmetricRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.SymmetricReply>) responseObserver);
+          break;
+        case METHODID_SYMMETRIC_DECRYPT:
+          serviceImpl.symmetricDecrypt((com.stakecraft.rutli.grpc.SymmetricRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.SymmetricReply>) responseObserver);
           break;
         default:
           throw new AssertionError();
@@ -634,6 +1288,62 @@ public final class SignerGrpc {
               com.stakecraft.rutli.grpc.RefreshRequest,
               com.stakecraft.rutli.grpc.RefreshReply>(
                 service, METHODID_REFRESH)))
+        .addMethod(
+          getCapabilitiesMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.CapabilitiesRequest,
+              com.stakecraft.rutli.grpc.CapabilitiesReply>(
+                service, METHODID_CAPABILITIES)))
+        .addMethod(
+          getGenerateKeyMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.GenerateKeyRequest,
+              com.stakecraft.rutli.grpc.GenerateKeyReply>(
+                service, METHODID_GENERATE_KEY)))
+        .addMethod(
+          getPublicKeyMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.PublicKeyRequest,
+              com.stakecraft.rutli.grpc.PublicKeyReply>(
+                service, METHODID_PUBLIC_KEY)))
+        .addMethod(
+          getKeyInfoMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.KeyInfoRequest,
+              com.stakecraft.rutli.grpc.KeyInfoReply>(
+                service, METHODID_KEY_INFO)))
+        .addMethod(
+          getDeleteKeyMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.DeleteKeyRequest,
+              com.stakecraft.rutli.grpc.DeleteKeyReply>(
+                service, METHODID_DELETE_KEY)))
+        .addMethod(
+          getDecryptMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.DecryptRequest,
+              com.stakecraft.rutli.grpc.DecryptReply>(
+                service, METHODID_DECRYPT)))
+        .addMethod(
+          getSymmetricEncryptMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.SymmetricRequest,
+              com.stakecraft.rutli.grpc.SymmetricReply>(
+                service, METHODID_SYMMETRIC_ENCRYPT)))
+        .addMethod(
+          getSymmetricDecryptMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.SymmetricRequest,
+              com.stakecraft.rutli.grpc.SymmetricReply>(
+                service, METHODID_SYMMETRIC_DECRYPT)))
         .build();
   }
 
@@ -687,6 +1397,14 @@ public final class SignerGrpc {
               .addMethod(getDkgMethod())
               .addMethod(getSignMethod())
               .addMethod(getRefreshMethod())
+              .addMethod(getCapabilitiesMethod())
+              .addMethod(getGenerateKeyMethod())
+              .addMethod(getPublicKeyMethod())
+              .addMethod(getKeyInfoMethod())
+              .addMethod(getDeleteKeyMethod())
+              .addMethod(getDecryptMethod())
+              .addMethod(getSymmetricEncryptMethod())
+              .addMethod(getSymmetricDecryptMethod())
               .build();
         }
       }

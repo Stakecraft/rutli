@@ -240,6 +240,21 @@ fn new_id(prefix: &str) -> String {
 /// transient state rather than a permanent one.
 pub const DEFAULT_WRITE_QUORUM: usize = 2;
 
+/// Whether an error means "this cosigner is not answering" as opposed to a real refusal.
+///
+/// Only transport-level failures count: a peer that answers with a conflict must never be treated
+/// as absent, or two leaders could write the same key id concurrently.
+fn is_unreachable(e: &DaemonError) -> bool {
+    match e {
+        DaemonError::Transport(_) => true,
+        DaemonError::Status(s) => matches!(
+            s.code(),
+            tonic::Code::Unavailable | tonic::Code::DeadlineExceeded
+        ),
+        _ => false,
+    }
+}
+
 /// Generate a hosted key on the leader and replicate it to the cluster.
 ///
 /// Idempotent by `key_id`: if the key already exists anywhere, this repairs replicas instead of
@@ -254,17 +269,35 @@ pub async fn generate_hosted_key(
 ) -> Result<(crate::hosted::HostedKey, bool, usize)> {
     let ceremony_id = new_id("genkey");
 
-    // Fence the key cluster-wide first: the guard is per-key, so this also serializes against a
+    // Fence the key cluster-wide: the guard is per-key, so this also serializes against a
     // concurrent generate for the same id on another leader.
+    //
+    // Unlike DKG/refresh — all-party ceremonies where a missing peer means the ceremony cannot
+    // proceed — a hosted-key write only needs `write_quorum` nodes. So an UNREACHABLE peer is
+    // skipped rather than fatal: a node that is down cannot start a racing operation on this key
+    // anyway. A peer that is reachable and *refuses* (something else holds the guard) still aborts,
+    // because that is a genuine conflict. Without this distinction the 2-of-3 write quorum could
+    // never actually be used with a node down, which is the entire point of it.
     let mut fenced: Vec<&Arc<dyn PeerApi>> = Vec::new();
+    let mut reachable: Vec<&Arc<dyn PeerApi>> = Vec::new();
     for p in peers {
         match p.ceremony_fence(&ceremony_id, key_id, "genkey").await {
-            Ok(()) => fenced.push(p),
+            Ok(()) => {
+                fenced.push(p);
+                reachable.push(p);
+            }
+            Err(e) if is_unreachable(&e) => {
+                tracing::warn!(peer = ?p.identifier(), key_id, error = %e, "cosigner unreachable while fencing a hosted-key write; continuing without it");
+            }
             Err(e) => {
                 release_fences(&fenced, &ceremony_id, key_id).await;
                 return Err(e);
             }
         }
+    }
+    if reachable.len() < write_quorum {
+        release_fences(&fenced, &ceremony_id, key_id).await;
+        return Err(DaemonError::ThresholdNotMet { needed: write_quorum, got: reachable.len() });
     }
 
     let outcome =
@@ -357,6 +390,9 @@ pub async fn delete_hosted_key(peers: &Peers, key_id: &str) -> Result<bool> {
         match p.purge_key(&ceremony_id, key_id).await {
             Ok(d) => deleted_anywhere |= d,
             Err(e) => {
+                // Best effort by design: a node that is down keeps its copy until anti-entropy
+                // reconciles the tombstone, which is why delete is documented as "the key stops
+                // being served", not "the bytes are gone".
                 tracing::warn!(peer = ?p.identifier(), key_id, error = %e, "hosted key delete failed on peer");
             }
         }
@@ -417,6 +453,11 @@ pub async fn anti_entropy_sweep(node: &Node, peers: &Peers) -> Result<(usize, us
     }
     let mine: std::collections::HashSet<String> = node.hosted_list()?.into_iter().collect();
     let (mut pulled, mut pushed) = (0usize, 0usize);
+    // key_id -> how many cosigners hold it. Seeded with this node's own inventory; each reachable
+    // peer adds its own. Published as the min at the end — the signal that a below-`n` write
+    // quorum has not healed.
+    let mut replicas: std::collections::HashMap<String, usize> =
+        mine.iter().map(|k| (k.clone(), 1usize)).collect();
 
     for p in peers {
         if p.identifier() == node.identifier {
@@ -425,6 +466,9 @@ pub async fn anti_entropy_sweep(node: &Node, peers: &Peers) -> Result<(usize, us
         let Ok(theirs) = p.list_keys().await else { continue };
         let their_ids: std::collections::HashSet<String> =
             theirs.iter().map(|(id, _, _)| id.clone()).collect();
+        for id in &their_ids {
+            *replicas.entry(id.clone()).or_insert(0) += 1;
+        }
 
         // Divergence on a shared key is a hard error, never a merge: hosted keys are
         // create-once-immutable, so two different materials under one id means something is wrong
@@ -467,5 +511,13 @@ pub async fn anti_entropy_sweep(node: &Node, peers: &Peers) -> Result<(usize, us
     if pulled + pushed > 0 {
         metrics::counter!(crate::metrics::ANTI_ENTROPY_REPAIRS).increment((pulled + pushed) as u64);
     }
+    // Recount after repair so the gauge reflects the healed state, not the state that triggered it.
+    let healed: std::collections::HashSet<String> = node.hosted_list()?.into_iter().collect();
+    for id in &healed {
+        replicas.entry(id.clone()).or_insert(1);
+    }
+    metrics::gauge!(crate::metrics::HOSTED_KEYS).set(healed.len() as f64);
+    metrics::gauge!(crate::metrics::KEY_REPLICAS)
+        .set(replicas.values().copied().min().map(|m| m as f64).unwrap_or(f64::NAN));
     Ok((pulled, pushed))
 }

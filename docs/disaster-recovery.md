@@ -9,6 +9,14 @@ Rütli holds that key as a `t`-of-`n` FROST sharing: no machine ever holds the w
 survives the loss of up to `n − t` cosigners with no action at all. This runbook covers the cases
 beyond that.
 
+The cluster can also hold **non-FROST key material** — the RSA-2048 encryption keypair and AES-256-GCM
+symmetric keys ("cluster-hosted keys"). Those are **replicated whole keys, not threshold shares**:
+generated on one cosigner, replicated to all, sealed at rest per node, and any node can serve a
+decrypt on its own. That difference runs through this runbook in both directions — hosted keys are
+much easier to recover than a share (§3c), and a single compromised cosigner yields one of them
+outright (`docs/hosted-keys-design.md`). Losing them is also not existential: unlike the namespace
+key, Canton can rotate them.
+
 ## Threat/loss matrix
 
 | Event | Recoverable? | Procedure |
@@ -18,6 +26,9 @@ beyond that.
 | A cosigner's disk lost, no backup | Yes, if ≥ `t` others survive | **Repair the share** from survivors (§2). |
 | More than `n − t` cosigners lost simultaneously | Only from backups | **Restore ≥ `t` shares** from cold backups (§3). Without backups this is unrecoverable — which is why §4 is mandatory. |
 | Suspected key compromise (≥ `t` shares may be exposed) | Mitigate, not undo | The key cannot be rotated. **Proactively refresh** (invalidates pre-refresh shares) and escalate to a governance decision on the node's future. See `docs/phase-2-frost.md`. |
+| A cosigner rebuilt, its **cluster-hosted** keys gone with it | Yes, automatically | It pulls them back from a peer — read-repair on demand, anti-entropy within one sweep (§3c). No backup needed while ≥ 1 cosigner still holds the key. |
+| Every copy of a **cluster-hosted** key lost (whole cluster, no backup) | Only from backups | Restore **one** node's own backup onto that node (§3); the cluster re-replicates from it. With no backup the key is gone — rotate in Canton and accept §3b's bounded data gap. |
+| A **cluster-hosted** encryption key exposed | Mitigate, not undo | Rotate the key in Canton topology (the namespace key signs it; node identity is untouched). Rotation protects future traffic only — recorded traffic encrypted to the old key stays readable to whoever holds it. |
 
 ## §1 Restore a single cosigner from backup
 
@@ -35,6 +46,13 @@ rutli-cosigner restore --config /etc/rutli/cosigner-2.json --from /secure/backup
 Store backups **off the node's host** and, ideally, geographically separated. Because the shares are
 sealed, the backup is only usable together with the node's seal secret (which lives in your secret
 manager, not on disk) — keep the two recovery inputs in separate trust domains.
+
+Cluster-hosted keys live in the same `data_dir/keys/` directory (one sealed file per key id), so
+these two commands already cover them — there is no second backup procedure and no sibling directory
+to forget. Two properties follow from the sealing: a node's backup restores onto **that node**
+(the sealing DEK is derived from the master secret, salted by node id), and hosted keys minted after
+the backup was taken are re-acquired from the peers on their own, so a stale backup is not a stale
+key set. See §3c for what that self-healing does and does not cover.
 
 ## §2 Repair a lost share from survivors (no backup)
 
@@ -56,6 +74,10 @@ threshold) but the key is **not** lost as long as you hold **≥ `t` share backu
 3. Start the daemons; the cluster reaches threshold and signs again (verified group key unchanged).
 4. Rebuild the remaining cosigners (§1 restore, or re-add and repair once §2 ships) to return to full
    `n`, then **proactively refresh** so the temporarily-assembled quorum's shares are rotated.
+
+Cluster-hosted keys have a lower bar here: every node holds the whole key, so **one** restored
+backup is enough (from the node it was taken on), and anti-entropy pushes each key to the rebuilt
+nodes within one sweep. Shares are the part that needs `≥ t` distinct backups.
 
 ## §3b Lost delegate encryption key (software backend without persistence)
 
@@ -81,8 +103,40 @@ key was never persisted — no backup contains it.
    holds — node identity is untouched). New traffic becomes decryptable.
 4. **Before the next restart**, make the replacement key durable — see prevention below.
 
-**Prevention:** never run a real node with a heap-only software delegate. Either configure sealed
-disk persistence for the software backend:
+**Prevention:** never run a real node with a heap-only software delegate. Three durable options,
+best first for a deployment without an HSM.
+
+**(a) Host the encryption key in the cluster.** The cosigners hold the RSA-2048 encryption keypair
+and the AES-256-GCM symmetric key themselves, so no key material sits on the participant host at all:
+
+```json
+{
+  "share_seal": { "secret_env": "RUTLI_SEAL_SECRET" },
+  "hosted_keys": { "enabled": true, "write_quorum": 2, "anti_entropy_interval_secs": 300 }
+}
+```
+
+on every cosigner (config validation refuses `hosted_keys` without `share_seal` — a whole private key
+must never sit unsealed on disk), and on the driver side `frost.hosted-keys = true`, which routes key
+ids prefixed `rutli-` to the cluster alongside `frost-`. With that, `delegate = "none"` becomes
+possible: no HSM, no local key state, nothing on the participant to lose across a restart.
+
+What this is and is not: these are **replicated whole keys, not threshold shares** — three sealed
+copies, any one of which decrypts alone. So one compromised cosigner yields that key, and because
+Canton's encryption keys protect per-view session keys, an attacker who extracts one gains
+**retrospective** read access to any recorded traffic encrypted to it; rotating afterwards fixes the
+future, not the past. The security tier matches the recoverability tier: the key Canton *cannot*
+rotate (the namespace key) stays real 2-of-3 threshold, and the keys that get only replication are
+exactly the ones Canton *can* rotate under it. The win over a heap-only or single-disk delegate is
+relocation plus redundancy — key material moves off the busy, internet-adjacent participant host onto
+three hardened single-purpose nodes, and the loss of any one of them costs nothing (§3c).
+
+Note for this failure mode specifically: the driver does **not** fall back to the delegate on
+`NOT_FOUND`. That is deliberate — a silent fallback would split custody between cluster and delegate
+and could reproduce exactly this incident. A missing key is reported, not worked around.
+
+**(b) Sealed disk persistence for the software delegate** — when the keys must stay on the
+participant:
 
 ```hocon
 config {
@@ -96,8 +150,70 @@ config {
 ```
 
 (the driver refuses `dir` without a seal secret, and fails loudly on a wrong secret rather than
-starting keyless), or use an HSM delegate. Include the `softkeys/` directory and its secret in the
-same backup discipline as cosigner shares.
+starting keyless). Include the `softkeys/` directory and its secret in the same backup discipline as
+cosigner shares — this is one copy on one host, so the backup is the whole safety net.
+
+**(c) An HSM delegate** — durable and non-exportable, but still one copy on one appliance next to the
+participant, and one more thing to run and back up per the vendor's procedure.
+
+## §3c Cluster-hosted keys: what recovers itself, what does not
+
+Hosted keys are stored in `data_dir/keys/` alongside FROST shares — one sealed file per key id — so
+`rutli-cosigner backup`/`restore` cover them with no new procedure (§1). The more important
+operational fact is that for a single-node loss you usually will not need the backup at all.
+
+**Automatic.** A rebuilt cosigner re-acquires hosted keys from its peers by two mechanisms:
+
+- **read-repair** — a request for a key this node lacks pulls it from a peer before answering, so a
+  lagging replica does not return `NOT_FOUND` to Canton. (The driver deliberately does not fail over
+  on `NOT_FOUND`, so that answer has to be trustworthy.)
+- **anti-entropy** — every `anti_entropy_interval_secs` (default 300) each node pulls keys it lacks
+  and pushes keys a peer lacks. The first sweep runs one interval *after* startup, not at boot.
+
+A node that comes back with an empty `keys/` directory is therefore serving hosted-key traffic again
+within one sweep — or immediately, on the first request that needs a key. This is also why
+`write_quorum` defaults to 2 of 3: a write that reaches only two nodes is a transient the sweep
+heals, whereas requiring all three would block key rotation whenever any node is down. Below quorum
+the write is **rolled back** (a best-effort purge on every node) rather than left as one lonely copy,
+and the key id stays free for a clean retry — generation is idempotent by key id, so a retry repairs
+replicas instead of minting a second key under the same name.
+
+**Preconditions.** A rebuilt node that misses one of these repairs nothing — it logs the failure
+rather than silently continuing with a wrong or empty key set:
+
+- the **same node identifier** and the **same master seal secret**: the X25519 key peers wrap
+  material to is derived from that secret (HKDF, salted by node id), and every envelope is addressed
+  to one recipient — a wrong secret means peers wrap to a key this node cannot open;
+- the **same cluster CA**: envelopes are AAD-bound to a cluster id derived from the CA certificate,
+  so material cannot cross trust domains;
+- the rebuilt node's certificate CN present in every peer's `peer_allowlist` — replication runs over
+  the mesh Peer API, which is allowlisted;
+- **at least one live cosigner that still holds the key.**
+
+**Not automatic, by design.**
+
+- **FROST shares are never listed, fetched or copied between nodes.** Replication, `FetchKey` and
+  anti-entropy cover hosted keys *only*; two nodes holding the same share would silently break the
+  threshold scheme, so this is enforced in code rather than left to configuration. A rebuilt node's
+  share still comes from §1 (backup) or §2 (the repair ceremony).
+- **Nothing reconstructs a hosted key once every copy is gone.** Hosted keys are
+  create-once-immutable — a key id maps to one key forever, and Canton rotates by minting a new id.
+  If the whole cluster is lost, recovery is restoring one node's own backup (§3). With no backup at
+  all you are back in §3b: rotate in Canton and accept the bounded data gap.
+- **Divergence is never merged.** If two nodes hold different material under one key id, the sweep
+  logs an error and increments `rutli_anti_entropy_conflicts_total` instead of picking a winner. Any
+  increase is page-worthy — it means something wrote outside the create-once discipline.
+
+**Two hazards to write into your runbook.**
+
+- **A stale backup can resurrect a deleted key.** The sweep treats "a peer does not have this key" as
+  something to fix, and cannot distinguish it from "this key was deleted cluster-wide while this node
+  was down". Restoring an old backup will therefore push a since-deleted hosted key back to every
+  node. After a cluster-wide delete, prune the key from the backups — or simply re-issue the delete
+  once the restored node has rejoined.
+- **Delete is not erasure.** Deleting a hosted key removes the only referenced copy; it does not
+  destroy bytes on a COW filesystem, a wear-levelled SSD, a volume snapshot, or an existing backup.
+  True destruction requires rotating the master secret and re-sealing every live key.
 
 ## §4 What you MUST have in place before go-live
 
@@ -110,6 +226,13 @@ same backup discipline as cosigner shares.
 - A **proactive-refresh schedule** so a share exposed at any point has a bounded useful lifetime.
 - A **key-ceremony record**: who ran DKG, the `t`/`n` chosen, cosigner host/account/region for each
   share, and where each backup + seal secret lives. Keep it with your BCP documentation.
+- **If hosted keys are enabled:** the same backup discipline covers them for free, but the input that
+  actually decides recoverability is the **master seal secret** — without it a rebuilt node can
+  neither open its own backup nor accept a replica from a peer. Rehearse a rebuild with an empty
+  `keys/` directory and confirm the node re-acquires its hosted keys (the cluster tests
+  `a_node_that_missed_a_write_is_repaired_and_then_serves_decrypts` and
+  `anti_entropy_pushes_a_key_to_a_node_that_missed_it` are the automated analogues), and confirm the
+  same drill does *not* hand it a FROST share — that one still needs §1 or §2.
 
 ## Verifying a recovery
 
@@ -120,3 +243,14 @@ After any restore/repair, confirm the node identity did not change:
 rutli-cosigner refresh --config … --key-id frost-<node>-namespace   # prints the group key; compare
 # and confirm the participant still reports the same PAR::…::<fingerprint> identity in the Canton console.
 ```
+
+With hosted keys enabled, also confirm the rebuilt node caught up rather than quietly serving a
+short key set:
+
+- `rutli_hosted_keys` (gauge) reports the same count on every cosigner. It is refreshed when a peer
+  lists that node, so give it one sweep interval before reading it; a node stuck below the others is
+  not repairing — usually a wrong seal secret or a missing `peer_allowlist` entry;
+- `rutli_anti_entropy_conflicts_total` is **0** everywhere. It is not a lagging-replica signal; a
+  non-zero value means two nodes disagree about the material behind one key id, which no sweep will
+  resolve for you;
+- `rutli_hosted_key_ops_total{result="error"}` is flat after the node rejoins.

@@ -93,6 +93,39 @@ Mount the driver client cert (`driver.crt/key` from step 2's `gen-frost-certs.sh
 pod. On the participant's first init it runs the DKG across the cluster and the namespace key is born
 distributed — do this as the witnessed **key ceremony** (`docs/key-ceremony.md`).
 
+## 5. Cluster-hosted keys (optional)
+
+`cosigner-config.yaml` enables **cluster-hosted keys** on each node, so the RSA-2048-OAEP encryption
+keypair and the AES-256-GCM symmetric key Canton needs live in the cluster rather than on an HSM or
+in the driver's software backend:
+
+```json
+"hosted_keys": { "enabled": true, "write_quorum": 2, "anti_entropy_interval_secs": 300 }
+```
+
+It requires `share_seal` (already set here) — a node with hosted keys enabled and sealing off
+refuses to start, because a whole private key must never sit unsealed on a PV. Delete the block to
+keep those keys on an HSM. With the Helm chart the same switch is `hostedKeys.enabled=true`.
+
+These are **replicated whole keys, not threshold shares**: generated on one cosigner, wrapped per
+recipient and copied to the others, sealed at rest on each PV, and any node can serve a decrypt. The
+Ed25519 namespace key is unchanged — still 2-of-3 FROST, never replicated between pods. One
+compromised cosigner yields the hosted keys, and because they protect Canton's per-view session
+keys, an attacker who extracts one gains *retrospective* read access to recorded traffic encrypted
+to it; rotation fixes the future, not the past. The gain is relocation — key material leaves the
+participant pod for three hardened single-purpose pods.
+
+Then in the driver config from §4, add `hosted-keys = true` to the `frost` block; once no local key
+state is wanted at all, `delegate = "none"` replaces `delegate = "hsm"`. There is deliberately no
+fallback to the delegate on `NOT_FOUND` — that would silently split custody.
+
+Ops notes: hosted keys land in the same `/data/keys` directory as the shares, so the existing
+`backup`/`restore` CronJobs already cover them. Alert on `rutli_anti_entropy_conflicts_total` — any
+increase means two pods disagree about the same key id, which is never auto-reconciled and always
+needs a human.
+
+See [`docs/hosted-keys.md`](../../docs/hosted-keys.md).
+
 ## Day-2 operations
 
 - **Backup** each share to storage in that pod's trust domain:

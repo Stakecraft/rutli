@@ -1,9 +1,48 @@
 # Cluster-hosted keys (non-FROST key material) — design
 
-**Status: design accepted, not yet implemented.** Written after the 2026-08-12 DevNet incident in
-which a participant restart destroyed a heap-only RSA encryption key. Two independent design passes
-plus a Rust threshold-crypto crate survey fed this document; where they disagreed, the resolution is
-called out.
+**Status: v1 implemented on the cluster side; driver side landing in parallel.** Written after the
+2026-08-12 DevNet incident in which a participant restart destroyed a heap-only RSA encryption key.
+Two independent design passes plus a Rust threshold-crypto crate survey fed this document; where
+they disagreed, the resolution is called out.
+
+The rationale below is left as written — it is the record of *why* each choice was made, not a
+description of the running system. Sections now carry a status note: **Shipped**, **Changed in
+implementation** (the design said one thing, the code does another, and why), or **Not shipped**.
+Where the design left something open and the implementation settled it, the answer is stated in
+place.
+
+## What v1 is, concretely
+
+Cluster side (Rust cosigner), implemented and covered by tests:
+
+- `HostedKey` — RSA-2048-OAEP-SHA256 and AES-256-GCM — sealed on disk in `data_dir/keys/` beside
+  FROST shares: [`hosted.rs`](../frost/cosigner/src/hosted.rs),
+  [`keystore.rs`](../frost/cosigner/src/keystore.rs).
+- Per-recipient wrapping for anything that crosses the mesh:
+  [`wrap.rs`](../frost/cosigner/src/wrap.rs).
+- Leader-driven generation under the existing per-key ceremony fence, write quorum with cluster-wide
+  rollback, anti-entropy sweep, read-repair:
+  [`orchestrator.rs`](../frost/cosigner/src/orchestrator.rs).
+- Signer RPCs `Capabilities`, `GenerateKey`, `PublicKey`, `KeyInfo`, `DeleteKey`, `Decrypt`,
+  `SymmetricEncrypt`, `SymmetricDecrypt`; Peer RPCs `ReplicateKey`, `FetchKey`, `ListKeys`,
+  `PurgeKey`, `NodeInfo`: [`cosigner.proto`](../frost/cosigner/proto/cosigner.proto).
+- Config block `hosted_keys { enabled, write_quorum, anti_entropy_interval_secs }`, rejected at load
+  time unless `share_seal` is configured. Metrics `rutli_hosted_keys`,
+  `rutli_hosted_key_ops_total{op,result}`, `rutli_anti_entropy_repairs_total`,
+  `rutli_anti_entropy_conflicts_total`.
+
+Driver side (Scala `FrostBackend`) lands in the same release: `rutli-` routing, `frost.hosted-keys`,
+and `delegate = "none"`.
+
+Gaps that are deliberate deferrals rather than oversights are marked in place below. The four worth
+knowing before running this in production, in the order they should be closed:
+
+1. No replica-count metric or alert, which was this design's stated condition for defaulting the
+   write quorum to 2-of-3 (**Replication**).
+2. `hosted_keys.write_quorum` is not threaded through to the service — the compiled-in default wins
+   (**Replication**).
+3. No cosigner-side rate limit on decrypt (**Rate limiting and auditing for decrypt**).
+4. No pinned peer distribution keys, so no startup self-check on the seal secret (**Replication**).
 
 ## The problem
 
@@ -42,6 +81,16 @@ would mean one machine held the whole key at birth, contradicting Rütli's core 
 Use `aws-lc-rs` (FIPS-validated, constant-time) or OpenSSL bindings. Keygen via `rsa` is acceptable
 but must run on `spawn_blocking`. This is a blocking implementation decision, not a preference.
 
+> **Shipped, and stricter than the design allowed for.** The `rsa` crate is not in the dependency
+> tree at all: `aws-lc-rs` does keygen *and* OAEP decryption, so the "keygen via `rsa` is
+> acceptable" fallback was never taken. Decryption failures return one opaque error for every
+> cause — a distinguishable padding failure is itself an oracle.
+>
+> **Not shipped:** the `spawn_blocking` half. `HostedKey::generate` is called directly from the
+> async generation path, so RSA-2048 keygen (tens to hundreds of ms of CPU) occupies a runtime
+> worker. It is one call per key rather than a hot path, but it should move onto a blocking thread
+> before a cluster carries production key ceremonies alongside signing traffic.
+
 ## Decision 2 — v1 is replicated, sealed, whole keys
 
 Generate on the leader, replicate to every cosigner, seal per node at rest, any node serves decrypt.
@@ -72,7 +121,16 @@ On MPCH Stronghold's "MPC for all key types": for RSA that is trusted-dealer sha
 HSM/enclave, or marketing. Rütli's differentiator should be precision — state exactly what each key
 class gets.
 
+> **Shipped, with the gate the table depends on.** `hosted_keys.enabled` is refused at config load
+> unless `share_seal` is configured, and a hosted key is written through the same sealed envelope
+> and atomic-write path as a FROST share. Without that gate the "3 sealed replicas" column would be
+> "3 plaintext replicas", which is strictly worse than the HSM delegate this replaces.
+
 ## Decision 3 — the ECIES lever (why the roadmap inverts)
+
+> **Not shipped — this is the v1.5/v2 plan, unchanged.** v1 advertises exactly two specs through
+> `Capabilities` (`rsa-2048-oaep-sha256`, `aes-256-gcm`); there is no EC-P256 key type and no
+> `EcdhDerive`. The constraint at the end of this section is still unverified.
 
 The scheme Canton's KMS mode uses by default (RSA) is the one that cannot be thresholded; the scheme
 that thresholds beautifully (ECIES over P-256) is one Canton supports but AWS/GCP KMS cannot serve —
@@ -118,6 +176,12 @@ README, *never independently audited*. The NCC Group 2023 review covered `crypto
   Mandatory: strict point validation (on-curve, not infinity, correct encoding) and refusing
   `EcdhDerive` on keys whose recorded usage is signing.
 
+> **RSA: shipped as described.** `Decrypt` performs the full RSAES-OAEP-SHA256 operation server-side
+> and returns plaintext; raw `c^d mod N` is never exposed. The ciphertext length is checked against
+> the 256-byte RSA-2048 bound before the key is touched, and every failure — wrong length, wrong
+> key, bad padding — returns the same opaque error.
+> **ECIES: not shipped**, still v1.5.
+
 ### Replication
 
 Wrap key material to a **per-node distribution key derived from that node's seal secret**:
@@ -132,6 +196,23 @@ different recipient or key. Use the `hpke` crate (rozbb, 0.14.0 — zero advisor
 `p256`/`aes-gcm`/`hkdf` tree). **Avoid `hpke-rs`** (RUSTSEC-2026-0071, CVSS 9.3 nonce reuse, and the
 vulnerable releases were never yanked).
 
+> **Changed in implementation, in three places.**
+>
+> 1. The envelope is HPKE-*shaped* but hand-rolled on `x25519-dalek` + `hkdf` + `aes-gcm`, not the
+>    `hpke` crate: ephemeral X25519 → HKDF-SHA256 (the `info` string binds both the ephemeral and
+>    the recipient public key) → AES-256-GCM. Call it that, not "HPKE" — it is not RFC 9180 and does
+>    not interoperate with an RFC 9180 implementation. The envelope carries its own `wrap_version`
+>    on the wire, so swapping in real HPKE later is a version bump, not a migration. `hpke-rs`
+>    remains excluded for the reason given above.
+> 2. The AAD binds `(cluster_id, key_id, spec, recipient_id)` — **no `usage`**. v1 has no usage
+>    dimension at all: `GenerateKey` takes only `key_id` and `spec`, because with RSA-decrypt and
+>    AES-symmetric there is nothing to disambiguate. `usage` comes back in v1.5, where refusing
+>    `EcdhDerive` on a signing key needs it.
+> 3. `cluster_id` needed no new config field: it is the first 8 bytes of SHA-256 over the cluster CA
+>    certificate, so it changes exactly when the trust domain changes and an envelope can never be
+>    replayed into another deployment. (Without TLS it is the literal `plaintext-dev`, which is dev
+>    only by construction.)
+
 Why derived rather than freshly generated: no first-boot ordering problem, and each node can
 self-check at startup that its derived `dist_pubkey` matches the one pinned in config — catching a
 wrong-secret/wrong-mount *before* any key is generated, which is exactly the class of failure that
@@ -143,11 +224,42 @@ Note a fact worth stating plainly in the threat model: `Sealer::from_master_secr
 only as an HKDF *salt* over a **shared** master secret, so any node can already derive any peer's
 DEK. Moving to per-node seal secrets upgrades this design's property with no code change.
 
+> **Derivation shipped; the pinning and the startup self-check did not.** `peers[]` still carries
+> only `identifier` and `endpoint`. On the pull path (`FetchKey`) the responder derives the
+> caller's distribution key locally from the node id in its client certificate, never from a
+> recipient named in the request — so a peer cannot ask for material addressed elsewhere. On the
+> push path (`ReplicateKey`) the leader takes the recipient's key from that peer's `NodeInfo`
+> reply, which an allowlisted-but-hostile cosigner could answer with a key of its choosing; the
+> leader could derive the same value locally instead, which is exactly what pinning would make
+> unconditional.
+>
+> The consequence worth naming: without the pinned value there is no startup check that this node's
+> derived `dist_pubkey` matches what the cluster expects, so a wrong-secret or wrong-mount is still
+> only discovered when an operation fails — and that discovery-too-late is the incident class this
+> feature exists to close. Smallest useful next step, ahead of per-node seal secrets.
+
 **Write quorum: 2-of-3 by default, with anti-entropy mandatory.** The two passes split here (3/3 vs
 2/3). Resolution: 3/3 would mean you cannot rotate an encryption key while any node is down, which
 contradicts the cluster's own 2-of-3 fault model — but 2/3 is only safe with (a) a periodic
 anti-entropy sweep that pushes *and* pulls, (b) on-demand read-repair before returning `NOT_FOUND`,
 and (c) a `rutli_key_replicas < 3` alert. If any of those three is not shipped, default to 3/3.
+
+> **Shipped at 2-of-3 — but only two of the three preconditions are met.** (a) the sweep runs every
+> `anti_entropy_interval_secs` (default 300), pulling what this node lacks and pushing what a peer
+> lacks; (b) every serving path (`Decrypt`, `PublicKey`, `KeyInfo`, both symmetric ops) read-repairs
+> before it can return `NOT_FOUND`. A write that lands below quorum is purged cluster-wide and the
+> id left free for a clean retry, rather than leaving one lonely copy.
+>
+> (c) has **not** shipped. The replica count is returned in `GenerateKeyReply` and `KeyInfoReply`
+> and an under-replicated write logs a warning, but no metric carries it, so nothing pages. By this
+> document's own rule that is the trigger for defaulting to 3/3; the honest reading is that the
+> 2-of-3 default is provisional until a replica gauge and its alert land. Whoever picks that up
+> should also fix the plumbing gap below.
+>
+> **Config gap:** `hosted_keys.write_quorum` is parsed and range-validated at load, but the Signer
+> service passes the compiled-in `DEFAULT_WRITE_QUORUM` (2) to the orchestrator instead. An operator
+> who sets `write_quorum: 3` today still gets 2 — silently, which is the wrong direction for a knob
+> whose whole purpose is to be more conservative than the default.
 
 **Hard rule, enforced in code: anti-entropy and `FetchKey` cover hosted keys ONLY, never FROST
 shares.** Copying node 1's FROST share to node 3 would give two nodes the same share and silently
@@ -156,6 +268,14 @@ break the threshold scheme.
 Hosted keys are **create-once-immutable**: a `key_id` maps to one key forever; Canton rotates by
 minting a new id plus a topology transaction. That removes all conflict resolution from
 anti-entropy — a key either exists or does not, and divergence is a hard error, not a merge.
+
+> **Both shipped.** The separation is enforced at the store, not just at the caller: `list_hosted`
+> skips FROST records so a share is never even named to a peer, the typed loads refuse the wrong
+> kind in both directions, and the hosted delete path refuses a FROST share outright. Immutability
+> is enforced in `hosted_store`, which refuses to overwrite an existing id whose material commits
+> differently; the anti-entropy sweep logs the conflict and increments
+> `rutli_anti_entropy_conflicts_total` rather than reconciling. Nodes compare a keyed commitment
+> (scoped to the cluster master, so it means nothing off-cluster) rather than the material itself.
 
 ### Storage
 
@@ -171,6 +291,20 @@ PVs, removing a file does not destroy bytes. Honest statement: delete removes th
 copy; true destruction requires master-secret rotation (a `rewrap` ceremony that re-seals every live
 key under a new master, rendering old sealed blobs — including in backups — undecryptable).
 
+> **Shipped, with the tagged union simplified to one tag.** One directory, one file per key, one
+> sealed envelope, the same tmp → fsync → rename → fsync-dir write path. Only hosted keys carry
+> `"kind": "hosted"`; anything untagged is a FROST share, which is the same backward compatibility
+> the `frost-ed25519` tag would have bought without writing a tag no reader needs. `backup` and
+> `restore` therefore cover hosted keys with no change. `reseal_plaintext_shares` became
+> record-aware, as required — it re-seals a hosted key through the hosted path instead of parsing
+> it as a share. `list_hosted` fails loudly on an unreadable key file rather than omitting it: a
+> key that cannot be opened must not look like a deleted one to anti-entropy. The delete caveat
+> above is repeated in the code, and no API claims erasure.
+>
+> **Not shipped:** the `rewrap` ceremony that would make destruction real. Until it exists, "delete"
+> means "unreferenced", and the disaster-recovery answer to a suspected master-secret compromise is
+> still a full re-key, not a rewrap.
+
 ### API and driver routing
 
 New Signer RPCs: `GenerateKey`, `PublicKey`, `KeyInfo`, `DeleteKey`, `Decrypt`, `SymmetricEncrypt`,
@@ -182,11 +316,34 @@ existing key rather than failing).
 `Capabilities` lets the driver learn the cluster's supported specs at startup instead of hardcoding
 them, which is what allows v1.5 to add `EcP256` without a driver release.
 
+> **Shipped, minus `EcdhDerive` (v1.5) and minus `usage`.** `GenerateKey(key_id, spec)` is
+> idempotent as designed: a repeat for an existing id returns the existing key with `created: false`
+> and repairs replicas, and a repeat under a *different* spec is an error rather than a silent
+> replacement. Every hosted-key Signer RPC is behind `signer_allowlist` except `Capabilities`,
+> which joins `Health` as deliberately open: it reveals only which algorithm names this cluster
+> supports, and the driver needs it before it can do anything else. Every Peer RPC is behind
+> `peer_allowlist`, and `FetchKey` additionally derives the recipient from the client certificate
+> rather than from the request body.
+
 Driver: key-id prefixes `frost-` (threshold Ed25519) and `rutli-` (cluster-hosted) both route to the
 cluster; anything else goes to the delegate. `delegate = "none"` becomes reachable. **No automatic
 fallback to the delegate on `NOT_FOUND`** — that would silently re-create split custody and could
 reproduce the incident class. Failover across endpoints stays restricted to `UNAVAILABLE` /
 `DEADLINE_EXCEEDED`; read-repair is what makes `NOT_FOUND` authoritative.
+
+> **Driver side lands alongside the cluster side.** `FrostBackend` routes both prefixes,
+> `frost.hosted-keys` gates it, and `delegate = "none"` is served by a `NoDelegateBackend` that
+> fails loudly and names the key id — a key that is neither `frost-` nor `rutli-` is a routing bug,
+> not something to paper over. `frost.delegate = "none"` without `hosted-keys = true` is refused at
+> startup, since nothing would then serve the encryption keys. Failover stays restricted to
+> `UNAVAILABLE`/`DEADLINE_EXCEEDED`, and there is no fallback to the delegate on `NOT_FOUND`.
+>
+> Two adaptations worth recording. Canton's SPI does not let a caller name a key, so the driver
+> mints the `rutli-` id itself (kind, sanitized key name, UUID) — `GenerateKey` idempotency then
+> covers a *retry of the same call*, not two independent calls, which is the property that matters.
+> And `Capabilities` failing (older cluster, or the cluster unreachable at startup) falls back to
+> the configured expectation rather than to "no hosted specs": silently advertising fewer specs to
+> Canton would present as a config bug and could steer keys to the delegate unnoticed.
 
 Relevant SPI facts (verified in Canton source): there is **no `encryptAsymmetric`** — Canton encrypts
 in software with the public key, so only `decryptAsymmetric` is required. Asymmetric ciphertext in is
@@ -205,12 +362,22 @@ bound a compromised cert's bulk-decryption throughput and to generate an alert s
 Pre-existing hazard to measure first: `RutliDriver.audited` already wraps `decryptAsymmetric`, so
 with `audit-log-path` set, every decrypt takes a synchronous hash-chain fsync today.
 
+> **The two omissions shipped; the one addition did not.** Decrypt has no approval gating
+> (`ApprovalGate` remains sign-only) and no per-op journaling, as designed. The cosigner-side
+> per-key token bucket does **not** exist yet, so a stolen Signer certificate is currently bounded
+> only by the driver-side limiter — which is precisely the limiter the design notes is bypassable
+> by anyone holding that certificate. `rutli_hosted_key_ops_total{op,result}` gives the alerting
+> signal, but nothing throttles. Highest-value security follow-up in this section.
+>
+> The `audited` fsync hazard is still unmeasured: no decrypt-path numbers in
+> [`performance.md`](performance.md) yet.
+
 ## Roadmap
 
 | Phase | Content | New crypto risk |
 |---|---|---|
-| **P0** | Peer-API allowlist ✅ (shipped), peer-channel deadlines, type-aware reseal | none |
-| **v1** | Hosted RSA-2048 + AES-256-GCM, replicated + sealed; `delegate = "none"` possible. RSA decrypt via `aws-lc-rs`/OpenSSL, **not** the `rsa` crate | none — standard primitives |
+| **P0** | Peer-API allowlist ✅, type-aware reseal ✅, peer-channel deadlines (still open) | none |
+| **v1** ✅ | Hosted RSA-2048 + AES-256-GCM, replicated + sealed; `delegate = "none"` possible. RSA decrypt via `aws-lc-rs`/OpenSSL, **not** the `rsa` crate | none — standard primitives |
 | **v1.5** | `EcdhDerive` + hosted EC-P256 keys (still whole-key); driver-side DEM via BouncyCastle `IESEngine`. Advertise `EcP256`/ECIES to steer Canton off RSA | low — no new crypto in Rust |
 | **v2** | **Threshold ECIES**: `frost-p256` DKG + Lagrange partial-point ECDH + DLEQ proofs. **Wire contract unchanged from v1.5** — server-side only | moderate, well-understood, no nonce state |
 | **v3** | Threshold ECDSA (`cggmp21`, LFDT, Kudelski-audited) only if a synchronizer requires EC signing | per crate maturity |
@@ -219,13 +386,34 @@ with `audit-log-path` set, every decrypt takes a synchronous hash-chain fsync to
 The load-bearing property: **v1.5 and v2 share a wire contract**, so "replicated today, threshold
 tomorrow" is a server upgrade and a config flag, not an API migration.
 
-## Open questions before implementation
+## Open questions
+
+None of these blocked v1 and none is answered by it — they are all on the v1.5/v2 path or the
+recovery path, and they stay open.
 
 - Live Global Synchronizer `requiredEncryptionSpecs` — does it admit `EcP256`/ECIES? Decides whether
-  the v1.5/v2 lever is usable on mainnet at all.
+  the v1.5/v2 lever is usable on mainnet at all. **Still open**; v1 ships RSA precisely because this
+  is unknown.
 - Byte-exact BouncyCastle `ECIESwithSHA256andAES-CBC` framing — components are confirmed
   (`ECDHBasicAgreement` + KDF2-SHA256 + HMAC-SHA256, IV prepended by Canton itself), but interop
-  needs a JVM-encrypt → driver-decrypt differential test, not documentation.
+  needs a JVM-encrypt → driver-decrypt differential test, not documentation. **Still open** — v1 has
+  no ECIES path, so nothing has exercised it.
 - Whether `owner_to_key_mappings.rotate_key` succeeds when the outgoing encryption key's private
   half is **missing** — the incident-recovery path depends on it. Test on a scratch participant.
-- `vsss-rs` audit claims (LIT/Turnkey-funded per its README) have no public report.
+  **Still open**, and now the *only* untested step in that path: sealed disk persistence and cluster
+  hosting both reduce how often a key goes missing, neither answers what recovery looks like once it
+  has.
+- `vsss-rs` audit claims (LIT/Turnkey-funded per its README) have no public report. **Still open**,
+  but unblocking: v1 uses no secret sharing outside `frost-ed25519`, and the v2 sketch takes its
+  Shamir shares from `frost-p256` rather than `vsss-rs`.
+
+### Settled by the implementation
+
+- **Write quorum default:** 2-of-3, with rollback below quorum — but see the unshipped replica
+  alert, which was the design's condition for that default.
+- **Wrapping construction:** hand-rolled ephemeral X25519 → HKDF-SHA256 → AES-256-GCM rather than
+  the `hpke` crate; versioned on the wire so it can be replaced.
+- **Cluster identity for the AAD:** derived from the CA certificate, not a new config field.
+- **Key usage:** dropped from the v1 API and AAD entirely; it returns in v1.5 with `EcdhDerive`.
+- **Where hosted keys live:** the same `data_dir/keys/` as FROST shares, tagged by `kind`, so
+  `backup`/`restore` cover them and untagged legacy files still parse as shares.

@@ -357,6 +357,161 @@ public final class PeerGrpc {
     return getCeremonyReleaseMethod;
   }
 
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.ReplicateKeyRequest,
+      com.stakecraft.rutli.grpc.ReplicateKeyReply> getReplicateKeyMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "ReplicateKey",
+      requestType = com.stakecraft.rutli.grpc.ReplicateKeyRequest.class,
+      responseType = com.stakecraft.rutli.grpc.ReplicateKeyReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.ReplicateKeyRequest,
+      com.stakecraft.rutli.grpc.ReplicateKeyReply> getReplicateKeyMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.ReplicateKeyRequest, com.stakecraft.rutli.grpc.ReplicateKeyReply> getReplicateKeyMethod;
+    if ((getReplicateKeyMethod = PeerGrpc.getReplicateKeyMethod) == null) {
+      synchronized (PeerGrpc.class) {
+        if ((getReplicateKeyMethod = PeerGrpc.getReplicateKeyMethod) == null) {
+          PeerGrpc.getReplicateKeyMethod = getReplicateKeyMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.ReplicateKeyRequest, com.stakecraft.rutli.grpc.ReplicateKeyReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "ReplicateKey"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.ReplicateKeyRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.ReplicateKeyReply.getDefaultInstance()))
+              .setSchemaDescriptor(new PeerMethodDescriptorSupplier("ReplicateKey"))
+              .build();
+        }
+      }
+    }
+    return getReplicateKeyMethod;
+  }
+
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.FetchKeyRequest,
+      com.stakecraft.rutli.grpc.FetchKeyReply> getFetchKeyMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "FetchKey",
+      requestType = com.stakecraft.rutli.grpc.FetchKeyRequest.class,
+      responseType = com.stakecraft.rutli.grpc.FetchKeyReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.FetchKeyRequest,
+      com.stakecraft.rutli.grpc.FetchKeyReply> getFetchKeyMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.FetchKeyRequest, com.stakecraft.rutli.grpc.FetchKeyReply> getFetchKeyMethod;
+    if ((getFetchKeyMethod = PeerGrpc.getFetchKeyMethod) == null) {
+      synchronized (PeerGrpc.class) {
+        if ((getFetchKeyMethod = PeerGrpc.getFetchKeyMethod) == null) {
+          PeerGrpc.getFetchKeyMethod = getFetchKeyMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.FetchKeyRequest, com.stakecraft.rutli.grpc.FetchKeyReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "FetchKey"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.FetchKeyRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.FetchKeyReply.getDefaultInstance()))
+              .setSchemaDescriptor(new PeerMethodDescriptorSupplier("FetchKey"))
+              .build();
+        }
+      }
+    }
+    return getFetchKeyMethod;
+  }
+
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.ListKeysRequest,
+      com.stakecraft.rutli.grpc.ListKeysReply> getListKeysMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "ListKeys",
+      requestType = com.stakecraft.rutli.grpc.ListKeysRequest.class,
+      responseType = com.stakecraft.rutli.grpc.ListKeysReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.ListKeysRequest,
+      com.stakecraft.rutli.grpc.ListKeysReply> getListKeysMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.ListKeysRequest, com.stakecraft.rutli.grpc.ListKeysReply> getListKeysMethod;
+    if ((getListKeysMethod = PeerGrpc.getListKeysMethod) == null) {
+      synchronized (PeerGrpc.class) {
+        if ((getListKeysMethod = PeerGrpc.getListKeysMethod) == null) {
+          PeerGrpc.getListKeysMethod = getListKeysMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.ListKeysRequest, com.stakecraft.rutli.grpc.ListKeysReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "ListKeys"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.ListKeysRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.ListKeysReply.getDefaultInstance()))
+              .setSchemaDescriptor(new PeerMethodDescriptorSupplier("ListKeys"))
+              .build();
+        }
+      }
+    }
+    return getListKeysMethod;
+  }
+
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.PurgeKeyRequest,
+      com.stakecraft.rutli.grpc.PurgeKeyReply> getPurgeKeyMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "PurgeKey",
+      requestType = com.stakecraft.rutli.grpc.PurgeKeyRequest.class,
+      responseType = com.stakecraft.rutli.grpc.PurgeKeyReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.PurgeKeyRequest,
+      com.stakecraft.rutli.grpc.PurgeKeyReply> getPurgeKeyMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.PurgeKeyRequest, com.stakecraft.rutli.grpc.PurgeKeyReply> getPurgeKeyMethod;
+    if ((getPurgeKeyMethod = PeerGrpc.getPurgeKeyMethod) == null) {
+      synchronized (PeerGrpc.class) {
+        if ((getPurgeKeyMethod = PeerGrpc.getPurgeKeyMethod) == null) {
+          PeerGrpc.getPurgeKeyMethod = getPurgeKeyMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.PurgeKeyRequest, com.stakecraft.rutli.grpc.PurgeKeyReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "PurgeKey"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.PurgeKeyRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.PurgeKeyReply.getDefaultInstance()))
+              .setSchemaDescriptor(new PeerMethodDescriptorSupplier("PurgeKey"))
+              .build();
+        }
+      }
+    }
+    return getPurgeKeyMethod;
+  }
+
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.NodeInfoRequest,
+      com.stakecraft.rutli.grpc.NodeInfoReply> getNodeInfoMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "NodeInfo",
+      requestType = com.stakecraft.rutli.grpc.NodeInfoRequest.class,
+      responseType = com.stakecraft.rutli.grpc.NodeInfoReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.NodeInfoRequest,
+      com.stakecraft.rutli.grpc.NodeInfoReply> getNodeInfoMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.NodeInfoRequest, com.stakecraft.rutli.grpc.NodeInfoReply> getNodeInfoMethod;
+    if ((getNodeInfoMethod = PeerGrpc.getNodeInfoMethod) == null) {
+      synchronized (PeerGrpc.class) {
+        if ((getNodeInfoMethod = PeerGrpc.getNodeInfoMethod) == null) {
+          PeerGrpc.getNodeInfoMethod = getNodeInfoMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.NodeInfoRequest, com.stakecraft.rutli.grpc.NodeInfoReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "NodeInfo"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.NodeInfoRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.NodeInfoReply.getDefaultInstance()))
+              .setSchemaDescriptor(new PeerMethodDescriptorSupplier("NodeInfo"))
+              .build();
+        }
+      }
+    }
+    return getNodeInfoMethod;
+  }
+
   /**
    * Creates a new async stub that supports all call types for the service
    */
@@ -509,6 +664,58 @@ public final class PeerGrpc {
         io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyReleaseReply> responseObserver) {
       io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getCeremonyReleaseMethod(), responseObserver);
     }
+
+    /**
+     * <pre>
+     * Push a wrapped hosted key to this node (leader -&gt; peer during generation).
+     * </pre>
+     */
+    default void replicateKey(com.stakecraft.rutli.grpc.ReplicateKeyRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.ReplicateKeyReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getReplicateKeyMethod(), responseObserver);
+    }
+
+    /**
+     * <pre>
+     * Pull a hosted key this node is missing (anti-entropy / read-repair). The responder wraps to
+     * the *caller's* node identity, derived from its client certificate.
+     * </pre>
+     */
+    default void fetchKey(com.stakecraft.rutli.grpc.FetchKeyRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.FetchKeyReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getFetchKeyMethod(), responseObserver);
+    }
+
+    /**
+     * <pre>
+     * Hosted-key inventory for anti-entropy. FROST shares are never listed or transferred — copying
+     * a share would give two nodes the same share and silently break the threshold scheme.
+     * </pre>
+     */
+    default void listKeys(com.stakecraft.rutli.grpc.ListKeysRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.ListKeysReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getListKeysMethod(), responseObserver);
+    }
+
+    /**
+     * <pre>
+     * Replicated delete.
+     * </pre>
+     */
+    default void purgeKey(com.stakecraft.rutli.grpc.PurgeKeyRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.PurgeKeyReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getPurgeKeyMethod(), responseObserver);
+    }
+
+    /**
+     * <pre>
+     * This node's identifier and X25519 distribution public key (for wrapping hosted keys to it).
+     * </pre>
+     */
+    default void nodeInfo(com.stakecraft.rutli.grpc.NodeInfoRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.NodeInfoReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getNodeInfoMethod(), responseObserver);
+    }
   }
 
   /**
@@ -642,6 +849,63 @@ public final class PeerGrpc {
       io.grpc.stub.ClientCalls.asyncUnaryCall(
           getChannel().newCall(getCeremonyReleaseMethod(), getCallOptions()), request, responseObserver);
     }
+
+    /**
+     * <pre>
+     * Push a wrapped hosted key to this node (leader -&gt; peer during generation).
+     * </pre>
+     */
+    public void replicateKey(com.stakecraft.rutli.grpc.ReplicateKeyRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.ReplicateKeyReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getReplicateKeyMethod(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     * <pre>
+     * Pull a hosted key this node is missing (anti-entropy / read-repair). The responder wraps to
+     * the *caller's* node identity, derived from its client certificate.
+     * </pre>
+     */
+    public void fetchKey(com.stakecraft.rutli.grpc.FetchKeyRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.FetchKeyReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getFetchKeyMethod(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     * <pre>
+     * Hosted-key inventory for anti-entropy. FROST shares are never listed or transferred — copying
+     * a share would give two nodes the same share and silently break the threshold scheme.
+     * </pre>
+     */
+    public void listKeys(com.stakecraft.rutli.grpc.ListKeysRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.ListKeysReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getListKeysMethod(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     * <pre>
+     * Replicated delete.
+     * </pre>
+     */
+    public void purgeKey(com.stakecraft.rutli.grpc.PurgeKeyRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.PurgeKeyReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getPurgeKeyMethod(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     * <pre>
+     * This node's identifier and X25519 distribution public key (for wrapping hosted keys to it).
+     * </pre>
+     */
+    public void nodeInfo(com.stakecraft.rutli.grpc.NodeInfoRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.NodeInfoReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getNodeInfoMethod(), getCallOptions()), request, responseObserver);
+    }
   }
 
   /**
@@ -749,6 +1013,58 @@ public final class PeerGrpc {
       return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
           getChannel(), getCeremonyReleaseMethod(), getCallOptions(), request);
     }
+
+    /**
+     * <pre>
+     * Push a wrapped hosted key to this node (leader -&gt; peer during generation).
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.ReplicateKeyReply replicateKey(com.stakecraft.rutli.grpc.ReplicateKeyRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getReplicateKeyMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * Pull a hosted key this node is missing (anti-entropy / read-repair). The responder wraps to
+     * the *caller's* node identity, derived from its client certificate.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.FetchKeyReply fetchKey(com.stakecraft.rutli.grpc.FetchKeyRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getFetchKeyMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * Hosted-key inventory for anti-entropy. FROST shares are never listed or transferred — copying
+     * a share would give two nodes the same share and silently break the threshold scheme.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.ListKeysReply listKeys(com.stakecraft.rutli.grpc.ListKeysRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getListKeysMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * Replicated delete.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.PurgeKeyReply purgeKey(com.stakecraft.rutli.grpc.PurgeKeyRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getPurgeKeyMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * This node's identifier and X25519 distribution public key (for wrapping hosted keys to it).
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.NodeInfoReply nodeInfo(com.stakecraft.rutli.grpc.NodeInfoRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getNodeInfoMethod(), getCallOptions(), request);
+    }
   }
 
   /**
@@ -855,6 +1171,58 @@ public final class PeerGrpc {
     public com.stakecraft.rutli.grpc.CeremonyReleaseReply ceremonyRelease(com.stakecraft.rutli.grpc.CeremonyReleaseRequest request) {
       return io.grpc.stub.ClientCalls.blockingUnaryCall(
           getChannel(), getCeremonyReleaseMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * Push a wrapped hosted key to this node (leader -&gt; peer during generation).
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.ReplicateKeyReply replicateKey(com.stakecraft.rutli.grpc.ReplicateKeyRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getReplicateKeyMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * Pull a hosted key this node is missing (anti-entropy / read-repair). The responder wraps to
+     * the *caller's* node identity, derived from its client certificate.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.FetchKeyReply fetchKey(com.stakecraft.rutli.grpc.FetchKeyRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getFetchKeyMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * Hosted-key inventory for anti-entropy. FROST shares are never listed or transferred — copying
+     * a share would give two nodes the same share and silently break the threshold scheme.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.ListKeysReply listKeys(com.stakecraft.rutli.grpc.ListKeysRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getListKeysMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * Replicated delete.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.PurgeKeyReply purgeKey(com.stakecraft.rutli.grpc.PurgeKeyRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getPurgeKeyMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * This node's identifier and X25519 distribution public key (for wrapping hosted keys to it).
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.NodeInfoReply nodeInfo(com.stakecraft.rutli.grpc.NodeInfoRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getNodeInfoMethod(), getCallOptions(), request);
     }
   }
 
@@ -974,6 +1342,63 @@ public final class PeerGrpc {
       return io.grpc.stub.ClientCalls.futureUnaryCall(
           getChannel().newCall(getCeremonyReleaseMethod(), getCallOptions()), request);
     }
+
+    /**
+     * <pre>
+     * Push a wrapped hosted key to this node (leader -&gt; peer during generation).
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.ReplicateKeyReply> replicateKey(
+        com.stakecraft.rutli.grpc.ReplicateKeyRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getReplicateKeyMethod(), getCallOptions()), request);
+    }
+
+    /**
+     * <pre>
+     * Pull a hosted key this node is missing (anti-entropy / read-repair). The responder wraps to
+     * the *caller's* node identity, derived from its client certificate.
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.FetchKeyReply> fetchKey(
+        com.stakecraft.rutli.grpc.FetchKeyRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getFetchKeyMethod(), getCallOptions()), request);
+    }
+
+    /**
+     * <pre>
+     * Hosted-key inventory for anti-entropy. FROST shares are never listed or transferred — copying
+     * a share would give two nodes the same share and silently break the threshold scheme.
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.ListKeysReply> listKeys(
+        com.stakecraft.rutli.grpc.ListKeysRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getListKeysMethod(), getCallOptions()), request);
+    }
+
+    /**
+     * <pre>
+     * Replicated delete.
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.PurgeKeyReply> purgeKey(
+        com.stakecraft.rutli.grpc.PurgeKeyRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getPurgeKeyMethod(), getCallOptions()), request);
+    }
+
+    /**
+     * <pre>
+     * This node's identifier and X25519 distribution public key (for wrapping hosted keys to it).
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.NodeInfoReply> nodeInfo(
+        com.stakecraft.rutli.grpc.NodeInfoRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getNodeInfoMethod(), getCallOptions()), request);
+    }
   }
 
   private static final int METHODID_SIGN_ROUND1 = 0;
@@ -987,6 +1412,11 @@ public final class PeerGrpc {
   private static final int METHODID_ABORT_SIGN = 8;
   private static final int METHODID_CEREMONY_FENCE = 9;
   private static final int METHODID_CEREMONY_RELEASE = 10;
+  private static final int METHODID_REPLICATE_KEY = 11;
+  private static final int METHODID_FETCH_KEY = 12;
+  private static final int METHODID_LIST_KEYS = 13;
+  private static final int METHODID_PURGE_KEY = 14;
+  private static final int METHODID_NODE_INFO = 15;
 
   private static final class MethodHandlers<Req, Resp> implements
       io.grpc.stub.ServerCalls.UnaryMethod<Req, Resp>,
@@ -1048,6 +1478,26 @@ public final class PeerGrpc {
         case METHODID_CEREMONY_RELEASE:
           serviceImpl.ceremonyRelease((com.stakecraft.rutli.grpc.CeremonyReleaseRequest) request,
               (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyReleaseReply>) responseObserver);
+          break;
+        case METHODID_REPLICATE_KEY:
+          serviceImpl.replicateKey((com.stakecraft.rutli.grpc.ReplicateKeyRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.ReplicateKeyReply>) responseObserver);
+          break;
+        case METHODID_FETCH_KEY:
+          serviceImpl.fetchKey((com.stakecraft.rutli.grpc.FetchKeyRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.FetchKeyReply>) responseObserver);
+          break;
+        case METHODID_LIST_KEYS:
+          serviceImpl.listKeys((com.stakecraft.rutli.grpc.ListKeysRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.ListKeysReply>) responseObserver);
+          break;
+        case METHODID_PURGE_KEY:
+          serviceImpl.purgeKey((com.stakecraft.rutli.grpc.PurgeKeyRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.PurgeKeyReply>) responseObserver);
+          break;
+        case METHODID_NODE_INFO:
+          serviceImpl.nodeInfo((com.stakecraft.rutli.grpc.NodeInfoRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.NodeInfoReply>) responseObserver);
           break;
         default:
           throw new AssertionError();
@@ -1144,6 +1594,41 @@ public final class PeerGrpc {
               com.stakecraft.rutli.grpc.CeremonyReleaseRequest,
               com.stakecraft.rutli.grpc.CeremonyReleaseReply>(
                 service, METHODID_CEREMONY_RELEASE)))
+        .addMethod(
+          getReplicateKeyMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.ReplicateKeyRequest,
+              com.stakecraft.rutli.grpc.ReplicateKeyReply>(
+                service, METHODID_REPLICATE_KEY)))
+        .addMethod(
+          getFetchKeyMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.FetchKeyRequest,
+              com.stakecraft.rutli.grpc.FetchKeyReply>(
+                service, METHODID_FETCH_KEY)))
+        .addMethod(
+          getListKeysMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.ListKeysRequest,
+              com.stakecraft.rutli.grpc.ListKeysReply>(
+                service, METHODID_LIST_KEYS)))
+        .addMethod(
+          getPurgeKeyMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.PurgeKeyRequest,
+              com.stakecraft.rutli.grpc.PurgeKeyReply>(
+                service, METHODID_PURGE_KEY)))
+        .addMethod(
+          getNodeInfoMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.NodeInfoRequest,
+              com.stakecraft.rutli.grpc.NodeInfoReply>(
+                service, METHODID_NODE_INFO)))
         .build();
   }
 
@@ -1203,6 +1688,11 @@ public final class PeerGrpc {
               .addMethod(getAbortSignMethod())
               .addMethod(getCeremonyFenceMethod())
               .addMethod(getCeremonyReleaseMethod())
+              .addMethod(getReplicateKeyMethod())
+              .addMethod(getFetchKeyMethod())
+              .addMethod(getListKeysMethod())
+              .addMethod(getPurgeKeyMethod())
+              .addMethod(getNodeInfoMethod())
               .build();
         }
       }
