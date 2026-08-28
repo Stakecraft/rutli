@@ -35,6 +35,10 @@ pub const ANTI_ENTROPY_REPAIRS: &str = "rutli_anti_entropy_repairs_total";
 pub const ANTI_ENTROPY_CONFLICTS: &str = "rutli_anti_entropy_conflicts_total";
 /// Hosted keys held by this node.
 pub const HOSTED_KEYS: &str = "rutli_hosted_keys";
+/// Key files present on disk that could not be opened (wrong seal secret, corruption). Skipped
+/// from the hosted-key inventory, so any non-zero value means a key is silently not being
+/// replicated or repaired — alert on it.
+pub const UNREADABLE_KEY_FILES: &str = "rutli_unreadable_key_files_total";
 /// Hosted-key operations by op and result (generate/decrypt/symmetric/delete).
 pub const HOSTED_KEY_OPS: &str = "rutli_hosted_key_ops_total";
 /// The *fewest* cosigners holding any one hosted key, as last observed by anti-entropy.
@@ -72,6 +76,7 @@ fn prime() {
     metrics::counter!(ANTI_ENTROPY_REPAIRS).absolute(0);
     metrics::counter!(ANTI_ENTROPY_CONFLICTS).absolute(0);
     metrics::gauge!(HOSTED_KEYS).set(0.0);
+    metrics::counter!(UNREADABLE_KEY_FILES).absolute(0);
     // No hosted keys yet means no shortfall — not a shortfall of zero, which would page instantly.
     metrics::gauge!(KEY_REPLICAS).set(f64::NAN);
     metrics::counter!(SIGN_ABORTS).absolute(0);
@@ -90,5 +95,6 @@ pub fn describe() {
     describe_counter!(ANTI_ENTROPY_CONFLICTS, "Hosted keys with divergent material across nodes");
     describe_gauge!(HOSTED_KEYS, "Cluster-hosted keys held by this node");
     describe_counter!(HOSTED_KEY_OPS, "Hosted-key operations, by op and result");
+    describe_counter!(UNREADABLE_KEY_FILES, "Key files that could not be opened and were skipped");
     describe_gauge!(KEY_REPLICAS, "Fewest cosigners holding any one hosted key");
 }

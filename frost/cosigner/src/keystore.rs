@@ -206,14 +206,25 @@ impl KeyStore {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             let Some(key_id) = name.strip_suffix(".json") else { continue };
-            // A key that fails to open must not silently vanish from the inventory — that would
-            // make a corrupt or wrongly-sealed key look like a deleted one to anti-entropy.
+            // An unreadable file (wrong seal secret after a rotation, a partial restore, disk
+            // corruption) is reported loudly and skipped — NOT fatal to the whole listing.
+            //
+            // Failing the inventory would stop anti-entropy for every *healthy* key too, turning
+            // one damaged file into a cluster-wide halt of self-healing. Skipping is safe because
+            // absence from a listing never causes a delete: peers only push keys the listing lacks,
+            // and a push onto an unreadable local file still fails closed in `hosted_store` rather
+            // than overwriting it.
             match self.load_record(key_id) {
                 Ok(Record::Hosted(_)) => out.push(key_id.to_string()),
                 Ok(Record::Frost(_)) => {}
                 Err(e) => {
-                    tracing::error!(key_id = %key_id, error = %e, "unreadable key file in keystore");
-                    return Err(e);
+                    metrics::counter!(crate::metrics::UNREADABLE_KEY_FILES).increment(1);
+                    tracing::error!(
+                        key_id = %key_id,
+                        error = %e,
+                        "unreadable key file in keystore — skipped from the hosted-key inventory; \
+                         it will not be replicated or repaired until an operator resolves it"
+                    );
                 }
             }
         }
@@ -342,5 +353,30 @@ mod tests {
         let raw = std::fs::read(tmp.path().join("keys").join("rutli-sym-9.json")).unwrap();
         assert!(crate::seal::Sealer::is_sealed(&raw), "hosted key must be sealed after migration");
         assert_eq!(sealed.load_hosted("rutli-sym-9").unwrap().created_at, 7);
+    }
+
+    #[test]
+    fn an_unreadable_key_file_is_skipped_not_fatal_to_the_inventory() {
+        // Found on a live cluster: a key sealed under a rotated secret made list_hosted fail, which
+        // would stop anti-entropy for every *healthy* key too — one damaged file halting all
+        // self-healing. It must be reported and skipped instead.
+        let tmp = tempfile::tempdir().unwrap();
+        let good = store(&tmp, true);
+        good.save_hosted("rutli-good", &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap())
+            .unwrap();
+
+        // A key written under a DIFFERENT master secret, as after a seal-secret rotation.
+        let other = Arc::new(crate::seal::Sealer::from_master_secret(b"a rotated master secret", 1));
+        KeyStore::open_with_sealer(tmp.path().join("keys"), Some(other))
+            .unwrap()
+            .save_hosted("rutli-stale", &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap())
+            .unwrap();
+
+        // The healthy key is still listed and usable; the unreadable one is simply absent.
+        let listed = good.list_hosted().expect("one bad file must not fail the whole listing");
+        assert_eq!(listed, vec!["rutli-good".to_string()]);
+        assert!(good.load_hosted("rutli-good").is_ok());
+        // Reading the bad one directly still fails loudly — it is skipped, not treated as absent.
+        assert!(good.load_hosted("rutli-stale").is_err());
     }
 }
