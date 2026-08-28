@@ -87,11 +87,13 @@ Backends, added over the phases:
   and from the driver, and driver-side failover. See [phase-2-frost.md](phase-2-frost.md).
   With `frost.hosted-keys = true` it routes **both** id prefixes to the cluster: `frost-` (threshold
   Ed25519) and `rutli-` (cluster-hosted encryption and symmetric keys); everything else goes to
-  `frost.delegate` (`hsm` | `software` | `none`). That routing lands alongside the cosigner-side v1
-  below; the cluster serves the RPCs today. There is deliberately **no automatic fallback to
-  the delegate on `NOT_FOUND`** — that would silently create split custody and could reproduce the
-  incident class. Endpoint failover stays restricted to `UNAVAILABLE` / `DEADLINE_EXCEEDED`;
-  read-repair is what makes `NOT_FOUND` authoritative.
+  `frost.delegate` (`hsm` | `software` | `none`). ✅ shipped with the cosigner-side v1 below and
+  verified end to end on a Canton 3.5.6 participant with no local key state
+  ([`deploy/devnet/canton-hosted.conf`](../deploy/devnet/canton-hosted.conf)). The driver asks the
+  cluster for its `Capabilities` at startup rather than hardcoding the spec list. There is
+  deliberately **no automatic fallback to the delegate on `NOT_FOUND`** — that would silently create
+  split custody and could reproduce the incident class. Endpoint failover stays restricted to
+  `UNAVAILABLE` / `DEADLINE_EXCEEDED`; read-repair is what makes `NOT_FOUND` authoritative.
 - `DklsBackend` — Phase 4. Threshold ECDSA P-256/P-384 for protocol/sequencer keys.
 
 Routing by key type lets each key sit on the right backend simultaneously (e.g. namespace key on
@@ -151,8 +153,10 @@ rationale in [hosted-keys-design.md](hosted-keys-design.md)):
   otherwise see plaintext private keys. Each replica is sealed to one recipient node: ephemeral
   X25519 → HKDF-SHA256 → AES-256-GCM, AAD-bound to cluster id, key id, spec and recipient. The
   recipient's static key is *derived* from the cluster master secret (the same secret used for share
-  sealing), never generated or stored — so a wrong-secret or wrong-mount is caught at startup,
-  before any key exists.
+  sealing), never generated or stored, which avoids a first-boot ordering problem. The startup
+  self-check that derivation makes possible — pinning each peer's `dist_pubkey` in config so a
+  wrong secret or wrong mount is caught *before* any key exists — is **not shipped**; today a wrong
+  secret surfaces when an operation fails.
 - **Anti-entropy and read-repair.** A sweep every 300 s pulls keys this node lacks and pushes keys a
   peer lacks; a request landing on a lagging replica pulls on demand. Hosted keys are
   create-once-immutable (Canton rotates by minting a new id plus a topology transaction), so a
@@ -168,8 +172,13 @@ rationale in [hosted-keys-design.md](hosted-keys-design.md)):
 New Signer RPCs: `Capabilities`, `GenerateKey`, `PublicKey`, `KeyInfo`, `DeleteKey`, `Decrypt`,
 `SymmetricEncrypt`, `SymmetricDecrypt`. New Peer RPCs (mesh only, gated by `peer_allowlist`):
 `ReplicateKey`, `FetchKey`, `ListKeys`, `PurgeKey`, `NodeInfo`. New metrics: `rutli_hosted_keys`,
-`rutli_hosted_key_ops_total{op,result}`, `rutli_anti_entropy_repairs_total` and
+`rutli_hosted_key_ops_total{op,result}`, `rutli_anti_entropy_repairs_total`,
+`rutli_key_replicas` (fewest cosigners holding any one key — the alert that makes a write quorum
+below `n` safe), `rutli_unreadable_key_files_total` (a key file that could not be opened and was
+skipped from the inventory, so it is neither replicated nor repaired) and
 `rutli_anti_entropy_conflicts_total` — any increase in the last one is page-worthy.
+
+Operator guide, including export/import of a hosted key: [hosted-keys.md](hosted-keys.md).
 
 The honest framing, to be used wherever this tradeoff comes up:
 
@@ -214,8 +223,9 @@ The honest framing, to be used wherever this tradeoff comes up:
 - **Cluster-hosted keys** — a track of its own, off the phase numbering because it cuts across the
   backends; design and rationale in [hosted-keys-design.md](hosted-keys-design.md). ✅ **v1** in the
   cosigner cluster: hosted RSA-2048-OAEP-SHA256 + AES-256-GCM, replicated and sealed, with write
-  quorum, anti-entropy and read-repair — the matching driver-side `rutli-` routing (and
-  `delegate = "none"`) lands alongside it. **v1.5**: `EcdhDerive` + hosted EC-P256 keys (still whole
+  quorum, anti-entropy, read-repair and offline `export-key`/`import-key`, plus the matching
+  driver-side `rutli-` routing and `delegate = "none"` — both halves shipped and verified end to end
+  on a real Canton participant. **v1.5**: `EcdhDerive` + hosted EC-P256 keys (still whole
   keys) with driver-side ECIES via BouncyCastle's `IESEngine`, advertising `EcP256` to steer
   deployments off RSA. **v2**:
   threshold ECIES via `frost-p256` — one stateless round, no nonce hazard — on the **same wire

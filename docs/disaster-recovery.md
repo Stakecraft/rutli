@@ -37,10 +37,10 @@ Shares are encrypted at rest (see share sealing), so backups carry no plaintext 
 
 ```sh
 # routine, per cosigner, on a schedule — with the node stopped or the share dir quiesced:
-rutli-cosigner backup  --config /etc/rutli/cosigner-2.json --out /secure/backups/cosigner-2/$(date +%F)
+rutli-cosigner --config /etc/rutli/cosigner-2.json backup  --out /secure/backups/cosigner-2/$(date +%F)
 
 # recover a wiped node:
-rutli-cosigner restore --config /etc/rutli/cosigner-2.json --from /secure/backups/cosigner-2/2026-07-01 --force
+rutli-cosigner --config /etc/rutli/cosigner-2.json restore --from /secure/backups/cosigner-2/2026-07-01 --force
 # then start the daemon; it rejoins with its old share (same group key).
 ```
 
@@ -269,16 +269,23 @@ After any restore/repair, confirm the node identity did not change:
 
 ```sh
 # the group verifying key (and therefore the Canton namespace) must be identical to before
-rutli-cosigner refresh --config … --key-id frost-<node>-namespace   # prints the group key; compare
+rutli-cosigner --config … refresh --key-id frost-<node>-namespace   # prints the group key; compare
 # and confirm the participant still reports the same PAR::…::<fingerprint> identity in the Canton console.
 ```
 
 With hosted keys enabled, also confirm the rebuilt node caught up rather than quietly serving a
 short key set:
 
-- `rutli_hosted_keys` (gauge) reports the same count on every cosigner. It is refreshed when a peer
-  lists that node, so give it one sweep interval before reading it; a node stuck below the others is
-  not repairing — usually a wrong seal secret or a missing `peer_allowlist` entry;
+- `rutli_key_replicas` (gauge) — the fewest cosigners holding any one hosted key — is back at the
+  cluster size. It is recounted at the end of each sweep, so give it one sweep interval before
+  reading it;
+- `rutli_hosted_keys` (gauge) reports the same count on every cosigner. It is refreshed at the end
+  of that node's own sweep and whenever a peer lists it, so the same one-interval wait applies; a
+  node stuck below the others is not repairing — usually a wrong seal secret or a missing
+  `peer_allowlist` entry;
+- `rutli_unreadable_key_files_total` is **flat**. A rising counter means a key file on that node
+  cannot be opened and is being skipped from the inventory, so it is neither replicated nor repaired
+  — a restore that looks complete but is not;
 - `rutli_anti_entropy_conflicts_total` is **0** everywhere. It is not a lagging-replica signal; a
   non-zero value means two nodes disagree about the material behind one key id, which no sweep will
   resolve for you;

@@ -83,10 +83,9 @@ to open and the affected operation fails closed rather than the node serving a w
 or rotate an encryption key while any cosigner is down — worse availability than the single copy an
 HSM gives you, and a contradiction of the cluster's own 2-of-3 fault model. 2-of-3 is only safe
 because anti-entropy and read-repair ship with it (section 4); do not disable the sweep. Below
-quorum a write **rolls back** rather than leaving one lonely copy (section 3).
-
-> v1 applies the default quorum of 2 on the `GenerateKey` path. The field is parsed and validated
-> against the roster size, but a non-default value is not yet plumbed through to the Signer service.
+quorum a write **rolls back** rather than leaving one lonely copy (section 3). A configured
+`write_quorum` is honoured on the `GenerateKey` path — set it to `3` if you would rather a write
+fail than commit while a cosigner is down.
 
 **Run hosted keys only on a TLS cluster.** Replication rides the mesh Peer API, which is gated by
 `peer_allowlist` (see [`phase-2-frost.md`](phase-2-frost.md) — the driver must never be on that
@@ -219,6 +218,13 @@ enforced in code, not by convention; it is the single most important invariant o
 In steady state repairs sit at zero. A continuous trickle means writes are routinely failing to
 reach a node: fix the mesh rather than relying on the sweep to cover for it.
 
+One blind spot to know about: a key file the node cannot open (wrong seal secret after a rotation,
+a partial restore, corruption) is logged, counted in `rutli_unreadable_key_files_total`, and
+**skipped** from the inventory rather than failing the whole listing — failing it would stop the
+sweep for every healthy key too. The cost is that the damaged key is invisible to replication in
+both directions, so any non-zero value on that counter means some key is silently not being
+replicated or repaired. Handling: [`observability.md`](observability.md).
+
 ### Read-repair
 
 A hosted-key request that lands on a node missing that key pulls it from a peer *before* answering,
@@ -227,11 +233,15 @@ and refuse to fall back to a delegate.
 
 ### Replica count
 
-Expect every hosted key on every cosigner. `KeyInfo` reports the live replica count for one key.
-There is no per-key replica gauge; `rutli_hosted_keys` is per node, and it refreshes when a peer
-lists this node's inventory — i.e. about once per sweep — so it lags by up to one interval. The
-shipped alert `RutliHostedKeyReplicaShortfall` watches for the counts diverging across the job for
-20 minutes, which means healing is failing rather than lagging. Metrics and dashboards:
+Expect every hosted key on every cosigner. `KeyInfo` and `GenerateKey` both report the live replica
+count for one key. For monitoring, `rutli_key_replicas` is the direct signal: the **fewest**
+cosigners holding any one hosted key, recounted after each sweep repairs what it can. The shipped
+rules alert below the cluster size (`RutliHostedKeyUnderReplicated`, warning, 30 min) and below the
+write quorum (`RutliHostedKeyCriticallyUnderReplicated`, critical, 10 min — one node holds the only
+copy). There is no *per-key* gauge; take the key id from the sweep logs. `rutli_hosted_keys` is a
+per-node count, refreshed at the end of that node's own sweep and whenever a peer lists its
+inventory, so it lags by up to one interval; `RutliHostedKeyReplicaShortfall` watches those counts
+diverging across the job for 20 minutes. Metrics and dashboards:
 [`observability.md`](observability.md).
 
 Two replicas survive one node loss. One survives none.
@@ -242,8 +252,8 @@ Hosted keys live in `data_dir/keys/` alongside the FROST shares, in the same sea
 so the existing commands already cover them:
 
 ```sh
-rutli-cosigner backup  --config /etc/rutli/cosigner-2.json --out /secure/backups/cosigner-2/$(date +%F)
-rutli-cosigner restore --config /etc/rutli/cosigner-2.json --from /secure/backups/cosigner-2/2026-08-17 --force
+rutli-cosigner --config /etc/rutli/cosigner-2.json backup  --out /secure/backups/cosigner-2/$(date +%F)
+rutli-cosigner --config /etc/rutli/cosigner-2.json restore --from /secure/backups/cosigner-2/2026-08-17 --force
 ```
 
 That shared directory is intentional — a sibling directory would be silently skipped by every
@@ -362,6 +372,25 @@ What hosted keys are, stated without varnish:
   side-channel — private-key recovery by a *network* attacker, which is precisely this deployment.
   RSA decryption therefore runs on `aws-lc-rs` (FIPS-validated, constant-time), never that crate.
   Full reasoning: [`hosted-keys-design.md`](hosted-keys-design.md).
+
+### Known gaps in this release
+
+Two limits are worth knowing before you rely on hosted keys in production. Neither is a defect in
+what shipped; both are follow-ups the design record already names.
+
+- **`Decrypt` has no cosigner-side rate limit.** The only throttle today is the driver's signing
+  journal, which lives on the Canton host and is therefore bypassable by anyone holding the driver
+  certificate — the same certificate that authorizes `Decrypt`. So a stolen driver cert is bounded
+  only by how fast the cluster answers: an attacker can bulk-decrypt historical traffic at line rate
+  without tripping anything. [`hosted-keys-design.md`](hosted-keys-design.md) calls a per-key token
+  bucket on the cosigner the highest-value security follow-up, and it is not yet implemented. Until
+  it is, compensate with what you do have: keep `signer_allowlist` tight, alert on
+  `rutli_hosted_key_ops_total{op="decrypt"}` rate rather than assuming a limit exists, and treat
+  driver-certificate rotation as a security control rather than hygiene.
+- **No approval gating on decrypt, deliberately.** M-of-N approval covers `sign`, not `Decrypt`:
+  decryption is on Canton's per-transaction hot path, so a human gate there would stall the node.
+  That is a design choice, not an oversight — but it does mean the audit trail, not an approval
+  quorum, is what stands behind a decrypt.
 
 Operational consequences worth writing into your runbook:
 

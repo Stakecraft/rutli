@@ -23,12 +23,16 @@
 //! dist_sk_j = HKDF-SHA256(ikm = master secret, salt = "rutli-dist/node-{j}", info = "x25519-v1")
 //! ```
 //!
-//! Deriving rather than generating avoids a first-boot ordering problem (no key to distribute
-//! before the cluster can talk) and lets every node verify at startup that its derived public key
-//! matches what its peers were configured with — catching a wrong-secret or wrong-mount *before*
-//! any key is generated. Under today's shared master secret any node can derive any peer's key,
-//! which is no worse than the status quo for share sealing; moving to per-node seal secrets makes
-//! the binding real with no code change.
+//! Deriving rather than generating avoids a first-boot ordering problem: there is no key to
+//! distribute before the cluster can talk.
+//!
+//! Two honest limits on what this buys today. Under the current *shared* master secret any node can
+//! derive any peer's key, so this binds material to a node identity only as strongly as the shared
+//! secret is held — no worse than share sealing already is, and it becomes a real binding with no
+//! code change once operators move to per-node seal secrets. And `PeerConfig` does **not** yet pin
+//! each peer's expected `dist_pubkey`, so a wrong secret or a wrong mount is caught when an
+//! envelope fails to open, not at startup before any key exists. Pinning it is the follow-up that
+//! would make the failure loud and early.
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng, Payload};
 use aes_gcm::{AeadCore, Aes256Gcm, Key, Nonce};

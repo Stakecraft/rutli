@@ -572,9 +572,38 @@ impl Node {
         Ok(crate::wrap::DistKey::derive(&ctx.master, node_identifier).public_bytes())
     }
 
+    /// The existing hosted key for `key_id`, if this node already has one.
+    ///
+    /// Split out from generation so the caller can do the (CPU-heavy) keygen off the async runtime
+    /// while keeping the idempotency check here: a retried request must return the existing key
+    /// rather than silently minting a second one under the same name.
+    pub fn hosted_existing(
+        &self,
+        key_id: &str,
+        spec: crate::hosted::HostedSpec,
+    ) -> Result<Option<crate::hosted::HostedKey>> {
+        self.hosted_ctx()?;
+        if !self.keystore.exists(key_id) {
+            return Ok(None);
+        }
+        let existing = self.keystore.load_hosted(key_id)?;
+        if existing.spec != spec {
+            return Err(DaemonError::KeyExists(format!(
+                "{key_id} already exists with spec {} (requested {})",
+                existing.spec.as_str(),
+                spec.as_str()
+            )));
+        }
+        Ok(Some(existing))
+    }
+
     /// Generate a hosted key locally. Does **not** replicate — the orchestrator drives that.
     /// Idempotent: an existing key with the same id is returned untouched, so a retried request
     /// (driver failover, client retry) never silently mints a second key under the same name.
+    ///
+    /// Blocking: RSA keygen is hundreds of milliseconds of CPU. Async callers should use
+    /// [`Node::hosted_existing`] plus a `spawn_blocking` keygen instead (see
+    /// `orchestrator::generate_hosted_key`); this stays for the sync/offline paths.
     pub fn hosted_generate(
         &self,
         key_id: &str,

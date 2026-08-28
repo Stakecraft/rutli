@@ -38,10 +38,66 @@ All notable changes to Rütli are documented here. Format loosely follows
     silently break the threshold scheme.
   - Stored beside FROST shares in `data_dir/keys/`, so the existing `backup`/`restore` already
     cover them; a rebuilt cosigner re-acquires hosted keys automatically via anti-entropy.
+  - **Driver side, completing v1:** `FrostBackend` routes `rutli-`-prefixed key ids to the cluster
+    alongside `frost-` (generate, decrypt, symmetric encrypt/decrypt, public key, key info, delete
+    — hosted keys *are* deletable, unlike the namespace key, because Canton can rotate them), and
+    asks the cluster for its `Capabilities` at startup instead of hardcoding a spec list, so adding
+    a key type needs no driver release (an unreachable or older cluster falls back to the
+    configured expectation and says so). `frost.delegate = "none"` (`NoDelegateBackend`) leaves no
+    local backend at all: every call reaching it is a routing bug, so it fails loudly and names the
+    key. There is deliberately **no** fallback to the delegate when the cluster reports a key
+    missing — that would silently re-create split custody, which is the failure this feature exists
+    to prevent; read-repair is what makes `NOT_FOUND` authoritative.
+  - **Export/import of hosted keys** — `rutli-cosigner export-key --key-id … --out FILE
+    --passphrase-env VAR` / `import-key --in FILE --passphrase-env VAR`: an offline, portable,
+    passphrase-protected copy of one hosted key (Argon2id 64 MiB/t=3 → AES-256-GCM, header bound in
+    as AAD so an artifact cannot be relabelled, 12-character minimum passphrase, file created 0600,
+    both commands log at WARN). The distinction that matters: `backup` is sealed ciphertext that
+    only reopens on the node and cluster it came from and covers routine durability, while `export`
+    is portable and covers the two cases backup cannot — a lost seal master secret, and moving a
+    key to a different cluster or KMS. Hosted keys only: a FROST share cannot be exported, since no
+    node holds a whole namespace key. Import never overwrites differing material
+    (create-once-immutable). Deliberately **not** an RPC — an export RPC would turn a stolen driver
+    cert from an online, rate-limited decrypt *oracle* into permanent silent possession of the key.
+    `docs/hosted-keys.md` §4; recovery procedure and the go-live decision in
+    `docs/disaster-recovery.md` §3d.
+  - **`rutli_unreadable_key_files_total`** (counter): a key file that cannot be opened — wrong seal
+    secret after a rotation, a partial restore, corruption — is now logged, counted and **skipped**
+    from the hosted-key inventory instead of failing the whole listing, which would stop
+    anti-entropy for every healthy key too and turn one damaged file into a cluster-wide halt of
+    self-healing. Skipping is safe (absence from a listing never causes a delete, and a push onto
+    an unreadable local file still fails closed). Any non-zero value means some key is silently not
+    being replicated or repaired: alert on it.
   - Operator guide: `docs/hosted-keys.md`. Design record and the reasoning for permanently ruling
     out threshold RSA (plus the thresholdable ECIES roadmap): `docs/hosted-keys-design.md`.
 
+  **Verified end-to-end on a real Canton 3.5.6 participant** with `deploy/devnet/canton-hosted.conf`
+  (`backend = "frost"`, `hosted-keys = true`, `delegate = "none"`): the node initialises with **no
+  local key state and no HSM** — namespace, signing and sequencer-auth Ed25519 keys all born via
+  cluster DKG and threshold-signed, plus an RSA-2048 encryption key generated as a cluster-hosted
+  key and confirmed replicated to all three cosigners on disk. This is the configuration that would
+  have made the DevNet incident a non-event: the participant never holds a private key, so a restart
+  cannot lose one. Config gotcha worth knowing: Canton's HOCON name for the algorithm is
+  `rsa-oaep-sha-256` (pureconfig kebab-cases `RsaOaepSha256`, splitting the digits), **not** the
+  driver SPI's `RsaEsOaepSha256` spelling.
+
 ### Fixed
+- **`hosted_keys.write_quorum` was inert.** The field was validated against the roster size at load
+  and documented, but the service passed the hardcoded default of 2 to every generate, so a
+  configured value did nothing. It is now carried on the signer service and honoured — as a required
+  struct field, so it cannot be dropped again.
+- **Three hosted-key bugs that only live testing caught.** The in-process tests bypass the gRPC
+  service layer, so none of these could have failed a unit test. (1) The gRPC ceremony fence
+  accepted only `dkg`/`refresh`, so *every* hosted-key generate failed with `InvalidArgument`;
+  `genkey`/`delkey` are now recognised. (2) The cluster-wide fence aborted on the first unreachable
+  peer, so a write could never complete with a node down — defeating the entire purpose of the
+  2-of-3 write quorum. An unreachable peer is now skipped (a node that is down cannot start a racing
+  operation) and the quorum re-checked against the reachable peers, while a peer that *answers* with
+  a conflict still aborts the write. (3) That fix at first classified only `UNAVAILABLE` /
+  `DEADLINE_EXCEEDED` as absence, which is what the unit test asserted — but a genuinely stopped
+  cosigner surfaces as `UNKNOWN("transport error")`, so the case that motivated the fix still
+  failed. Now matched narrowly on that shape: our own refusals always carry a specific code
+  (`ABORTED`, `FAILED_PRECONDITION`, …), never `UNKNOWN`, so a real conflict cannot be swallowed.
 - **CI had been red for eight runs before this work started**, for three unrelated reasons, all now
   fixed: cert files are mode 0600 owned by the host user while the cosigner container runs as uid
   10001 (Docker Desktop on macOS masks host ownership, Linux does not), the GitHub artifact-storage

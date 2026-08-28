@@ -1,9 +1,9 @@
 # Cluster-hosted keys (non-FROST key material) — design
 
-**Status: v1 implemented on the cluster side; driver side landing in parallel.** Written after the
-2026-08-12 DevNet incident in which a participant restart destroyed a heap-only RSA encryption key.
-Two independent design passes plus a Rust threshold-crypto crate survey fed this document; where
-they disagreed, the resolution is called out.
+**Status: v1 shipped — cluster side and driver side — and verified end to end on a real Canton 3.5.6
+participant (2026-08-28).** Written after the 2026-08-12 DevNet incident in which a participant
+restart destroyed a heap-only RSA encryption key. Two independent design passes plus a Rust
+threshold-crypto crate survey fed this document; where they disagreed, the resolution is called out.
 
 The rationale below is left as written — it is the record of *why* each choice was made, not a
 description of the running system. Sections now carry a status note: **Shipped**, **Changed in
@@ -26,23 +26,77 @@ Cluster side (Rust cosigner), implemented and covered by tests:
 - Signer RPCs `Capabilities`, `GenerateKey`, `PublicKey`, `KeyInfo`, `DeleteKey`, `Decrypt`,
   `SymmetricEncrypt`, `SymmetricDecrypt`; Peer RPCs `ReplicateKey`, `FetchKey`, `ListKeys`,
   `PurgeKey`, `NodeInfo`: [`cosigner.proto`](../frost/cosigner/proto/cosigner.proto).
+- Offline CLI subcommands `export-key` / `import-key` for a portable, passphrase-protected copy of a
+  hosted key: [`export.rs`](../frost/cosigner/src/export.rs). Not in this design — see *Export and
+  import* below.
 - Config block `hosted_keys { enabled, write_quorum, anti_entropy_interval_secs }`, rejected at load
-  time unless `share_seal` is configured. Metrics `rutli_hosted_keys`,
-  `rutli_hosted_key_ops_total{op,result}`, `rutli_anti_entropy_repairs_total`,
-  `rutli_anti_entropy_conflicts_total`.
+  time unless `share_seal` is configured, with `write_quorum` carried through to the orchestrator.
+  Metrics `rutli_hosted_keys`, `rutli_hosted_key_ops_total{op,result}`,
+  `rutli_anti_entropy_repairs_total`, `rutli_anti_entropy_conflicts_total`, `rutli_key_replicas`
+  (fewest cosigners holding any one key, as of the last sweep) and
+  `rutli_unreadable_key_files_total` (key files that could not be opened and were skipped from the
+  inventory — any non-zero value means a key is silently not being replicated or repaired, so alert
+  on it).
 
-Driver side (Scala `FrostBackend`) lands in the same release: `rutli-` routing, `frost.hosted-keys`,
-and `delegate = "none"`.
+Driver side (Scala), shipped in the same release:
 
-Gaps that are deliberate deferrals rather than oversights are marked in place below. The four worth
-knowing before running this in production, in the order they should be closed:
+- Routing by key-id prefix in
+  [`FrostBackend`](../driver/src/main/scala/com/stakecraft/rutli/backend/FrostBackend.scala):
+  `frost-` → threshold Ed25519 in the cluster, `rutli-` → cluster-hosted, anything else → the
+  delegate. Gated by `frost.hosted-keys = true`.
+- `frost.delegate = "none"` is served by a
+  [`NoDelegateBackend`](../driver/src/main/scala/com/stakecraft/rutli/backend/NoDelegateBackend.scala)
+  that refuses every operation and names the key id, and is refused at startup unless
+  `hosted-keys = true` — otherwise nothing would serve the encryption keys.
+- Supported specs come from the cluster's `Capabilities` at startup rather than a hardcoded list, so
+  a cluster can add a key type without a driver release. An older or unreachable cluster falls back
+  to the configured expectation and logs it.
+- **No automatic fallback to the delegate on `NOT_FOUND`**, and endpoint failover stays restricted
+  to `UNAVAILABLE` / `DEADLINE_EXCEEDED`. A fallback would silently split custody — the shape of
+  the August incident.
+- The driver mints the `rutli-` key id itself, since Canton's SPI does not let a caller name a key.
 
-1. No replica-count metric or alert, which was this design's stated condition for defaulting the
-   write quorum to 2-of-3 (**Replication**).
-2. `hosted_keys.write_quorum` is not threaded through to the service — the compiled-in default wins
-   (**Replication**).
-3. No cosigner-side rate limit on decrypt (**Rate limiting and auditing for decrypt**).
-4. No pinned peer distribution keys, so no startup self-check on the seal secret (**Replication**).
+**Verified end to end (2026-08-28).**
+[`deploy/devnet/canton-hosted.conf`](../deploy/devnet/canton-hosted.conf) boots a real Canton 3.5.6
+participant with **no local key state and no HSM**: all three Ed25519 keys (namespace, signing,
+sequencer-auth) are born via cluster DKG and threshold-signed, and the RSA-2048 encryption key is
+generated as a cluster-hosted key and confirmed replicated to all three cosigners on disk, beside
+the FROST shares. One config gotcha worth recording: Canton's HOCON name for the algorithm is
+`rsa-oaep-sha-256` — pureconfig kebab-cases `RsaOaepSha256`, splitting the digits — not the driver
+SPI's `RsaEsOaepSha256` spelling.
+
+### Export and import — not in this design, added on operator request
+
+The design assumed `backup`/`restore` were enough because hosted keys live in `data_dir/keys/`
+(**Storage**). They are not: a backup is *sealed ciphertext*, openable only with the cluster's seal
+master secret and only on the node it came from. That covers routine node and cluster loss and
+nothing else. Operators asked for the two cases it structurally cannot cover — recovering after the
+seal master secret is lost, and moving a key to a different cluster or KMS — so `export-key` /
+`import-key` were added: Argon2id → AES-256-GCM under an operator passphrase, portable, node- and
+cluster-independent.
+
+**Offline CLI, never an RPC**, and that is the load-bearing decision. An export RPC would turn a
+stolen driver certificate from an online, rate-limited, journalled decrypt *oracle* into permanent
+silent possession of the key. That is the same posture as keeping the full OAEP unpad server-side
+(**Where the trust boundary sits**): expose the weakest capability that does the job, never the key
+itself. As a CLI command the operation needs host access **and** the seal secret, two inputs already
+kept in separate trust domains. Hosted keys only: a FROST share is not a whole key, so `export-key`
+refuses one, and the namespace key still cannot leave the cluster.
+
+Mechanics, properties and the security tradeoff of keeping an export at all are in
+[`hosted-keys.md`](hosted-keys.md) §4 (*Export and import*); the recovery procedure is
+[`disaster-recovery.md`](disaster-recovery.md) §3d. Not repeated here.
+
+### What is still missing
+
+Gaps that are deliberate deferrals rather than oversights are marked in place below. Two of the four
+listed here previously have since closed: `rutli_key_replicas` and its alerts shipped, which was
+this design's condition for the 2-of-3 write-quorum default, and `hosted_keys.write_quorum` is now
+honoured instead of being overridden by the compiled-in default (both under **Replication**). What
+remains, worth knowing before running this in production:
+
+1. No cosigner-side rate limit on decrypt (**Rate limiting and auditing for decrypt**).
+2. No pinned peer distribution keys, so no startup self-check on the seal secret (**Replication**).
 
 ## The problem
 
@@ -244,22 +298,24 @@ contradicts the cluster's own 2-of-3 fault model — but 2/3 is only safe with (
 anti-entropy sweep that pushes *and* pulls, (b) on-demand read-repair before returning `NOT_FOUND`,
 and (c) a `rutli_key_replicas < 3` alert. If any of those three is not shipped, default to 3/3.
 
-> **Shipped at 2-of-3 — but only two of the three preconditions are met.** (a) the sweep runs every
+> **Shipped at 2-of-3, with all three preconditions now met.** (a) the sweep runs every
 > `anti_entropy_interval_secs` (default 300), pulling what this node lacks and pushing what a peer
 > lacks; (b) every serving path (`Decrypt`, `PublicKey`, `KeyInfo`, both symmetric ops) read-repairs
 > before it can return `NOT_FOUND`. A write that lands below quorum is purged cluster-wide and the
 > id left free for a clean retry, rather than leaving one lonely copy.
 >
-> (c) has **not** shipped. The replica count is returned in `GenerateKeyReply` and `KeyInfoReply`
-> and an under-replicated write logs a warning, but no metric carries it, so nothing pages. By this
-> document's own rule that is the trigger for defaulting to 3/3; the honest reading is that the
-> 2-of-3 default is provisional until a replica gauge and its alert land. Whoever picks that up
-> should also fix the plumbing gap below.
+> (c) shipped after the fact: the sweep publishes `rutli_key_replicas` — the fewest cosigners
+> holding any one hosted key, recounted *after* repair so the gauge reflects the healed state — and
+> the shipped rules alert below the cluster size (warning) and below the write quorum (critical).
+> The count is also returned in `GenerateKeyReply` and `KeyInfoReply`. With that in place the 2-of-3
+> default is no longer provisional by this document's own rule. The gauge is absent, not zero, until
+> the first sweep sees a hosted key; zero would page an idle cluster instantly.
 >
-> **Config gap:** `hosted_keys.write_quorum` is parsed and range-validated at load, but the Signer
-> service passes the compiled-in `DEFAULT_WRITE_QUORUM` (2) to the orchestrator instead. An operator
-> who sets `write_quorum: 3` today still gets 2 — silently, which is the wrong direction for a knob
-> whose whole purpose is to be more conservative than the default.
+> **Config plumbing, fixed after the fact:** `hosted_keys.write_quorum` was parsed and
+> range-validated at load while the Signer service passed the compiled-in default (2) to the
+> orchestrator, so an operator who set `write_quorum: 3` silently got 2 — the wrong direction for a
+> knob whose whole purpose is to be more conservative than the default. The configured value is now
+> carried on `SignerSvc` as a required field, so it cannot be dropped again without a compile error.
 
 **Hard rule, enforced in code: anti-entropy and `FetchKey` cover hosted keys ONLY, never FROST
 shares.** Copying node 1's FROST share to node 3 would give two nodes the same share and silently
@@ -297,9 +353,17 @@ key under a new master, rendering old sealed blobs — including in backups — 
 > the `frost-ed25519` tag would have bought without writing a tag no reader needs. `backup` and
 > `restore` therefore cover hosted keys with no change. `reseal_plaintext_shares` became
 > record-aware, as required — it re-seals a hosted key through the hosted path instead of parsing
-> it as a share. `list_hosted` fails loudly on an unreadable key file rather than omitting it: a
-> key that cannot be opened must not look like a deleted one to anti-entropy. The delete caveat
-> above is repeated in the code, and no API claims erasure.
+> it as a share. The delete caveat above is repeated in the code, and no API claims erasure.
+>
+> **Changed after the end-to-end run:** `list_hosted` first failed the whole listing on an
+> unreadable key file (one left sealed under a rotated master secret), on the reasoning that a key
+> which cannot be opened must not look like a deleted one to anti-entropy. That is worse, not safer
+> — it stops anti-entropy for every *healthy* key too, so one damaged file halts self-healing
+> cluster-wide. Such a file is now logged, counted by `rutli_unreadable_key_files_total`, and
+> skipped. Skipping is safe because absence from a listing never causes a delete (peers only push
+> keys a listing lacks) and a push onto an unreadable local file still fails closed in
+> `hosted_store` rather than overwriting it. The counter is the thing to alert on: a non-zero value
+> means some key is not being replicated or repaired, and nothing else will say so.
 >
 > **Not shipped:** the `rewrap` ceremony that would make destruction real. Until it exists, "delete"
 > means "unreferenced", and the disaster-recovery answer to a suspected master-secret compromise is
@@ -331,12 +395,13 @@ fallback to the delegate on `NOT_FOUND`** — that would silently re-create spli
 reproduce the incident class. Failover across endpoints stays restricted to `UNAVAILABLE` /
 `DEADLINE_EXCEEDED`; read-repair is what makes `NOT_FOUND` authoritative.
 
-> **Driver side lands alongside the cluster side.** `FrostBackend` routes both prefixes,
-> `frost.hosted-keys` gates it, and `delegate = "none"` is served by a `NoDelegateBackend` that
-> fails loudly and names the key id — a key that is neither `frost-` nor `rutli-` is a routing bug,
-> not something to paper over. `frost.delegate = "none"` without `hosted-keys = true` is refused at
-> startup, since nothing would then serve the encryption keys. Failover stays restricted to
-> `UNAVAILABLE`/`DEADLINE_EXCEEDED`, and there is no fallback to the delegate on `NOT_FOUND`.
+> **Shipped, and exercised against a real participant** (see *What v1 is, concretely*).
+> `FrostBackend` routes both prefixes, `frost.hosted-keys` gates it, and `delegate = "none"` is
+> served by a `NoDelegateBackend` that fails loudly and names the key id — a key that is neither
+> `frost-` nor `rutli-` is a routing bug, not something to paper over. `frost.delegate = "none"`
+> without `hosted-keys = true` is refused at startup, since nothing would then serve the encryption
+> keys. Failover stays restricted to `UNAVAILABLE`/`DEADLINE_EXCEEDED`, and there is no fallback to
+> the delegate on `NOT_FOUND`.
 >
 > Two adaptations worth recording. Canton's SPI does not let a caller name a key, so the driver
 > mints the `rutli-` id itself (kind, sanitized key name, UUID) — `GenerateKey` idempotency then
@@ -388,8 +453,8 @@ tomorrow" is a server upgrade and a config flag, not an API migration.
 
 ## Open questions
 
-None of these blocked v1 and none is answered by it — they are all on the v1.5/v2 path or the
-recovery path, and they stay open.
+None of these blocked v1, and shipping v1 — driver side and the end-to-end run included — answered
+none of them. They are all on the v1.5/v2 path or the recovery path, and they stay open.
 
 - Live Global Synchronizer `requiredEncryptionSpecs` — does it admit `EcP256`/ECIES? Decides whether
   the v1.5/v2 lever is usable on mainnet at all. **Still open**; v1 ships RSA precisely because this
@@ -400,20 +465,26 @@ recovery path, and they stay open.
   no ECIES path, so nothing has exercised it.
 - Whether `owner_to_key_mappings.rotate_key` succeeds when the outgoing encryption key's private
   half is **missing** — the incident-recovery path depends on it. Test on a scratch participant.
-  **Still open**, and now the *only* untested step in that path: sealed disk persistence and cluster
-  hosting both reduce how often a key goes missing, neither answers what recovery looks like once it
-  has.
+  **Still open**, and now the *only* untested step in that path: sealed disk persistence, cluster
+  hosting and the export artifact all reduce how often a key goes missing, none answers what
+  recovery looks like once it has.
 - `vsss-rs` audit claims (LIT/Turnkey-funded per its README) have no public report. **Still open**,
   but unblocking: v1 uses no secret sharing outside `frost-ed25519`, and the v2 sketch takes its
   Shamir shares from `frost-p256` rather than `vsss-rs`.
 
 ### Settled by the implementation
 
-- **Write quorum default:** 2-of-3, with rollback below quorum — but see the unshipped replica
-  alert, which was the design's condition for that default.
+- **Write quorum default:** 2-of-3, with rollback below quorum, and the `rutli_key_replicas` alert
+  the design made a condition of that default now shipped. The configured `write_quorum` is
+  honoured.
 - **Wrapping construction:** hand-rolled ephemeral X25519 → HKDF-SHA256 → AES-256-GCM rather than
   the `hpke` crate; versioned on the wire so it can be replaced.
 - **Cluster identity for the AAD:** derived from the CA certificate, not a new config field.
 - **Key usage:** dropped from the v1 API and AAD entirely; it returns in v1.5 with `EcdhDerive`.
 - **Where hosted keys live:** the same `data_dir/keys/` as FROST shares, tagged by `kind`, so
   `backup`/`restore` cover them and untagged legacy files still parse as shares.
+- **Portability, which this design did not cover:** offline, passphrase-protected `export-key` /
+  `import-key`, deliberately not an RPC — the two failures `backup` cannot cover are a lost seal
+  master secret and a move to another cluster or KMS.
+- **An unreadable key file:** logged, counted, skipped from the inventory — never fatal to the
+  listing, because that would stop anti-entropy for every healthy key too.

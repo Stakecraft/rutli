@@ -323,7 +323,22 @@ async fn generate_hosted_fenced(
     write_quorum: usize,
     ceremony_id: &str,
 ) -> Result<(crate::hosted::HostedKey, bool, usize)> {
-    let (key, created) = node.hosted_generate(key_id, spec)?;
+    // RSA-2048 keygen is hundreds of milliseconds of pure CPU. Running it inline would park a
+    // tokio worker for that whole time — with a small worker pool, a burst of key generations could
+    // starve health checks and in-flight signing on the same node. Do the idempotency check here
+    // (cheap, needs the keystore) and the keygen off-runtime.
+    let (key, created) = match node.hosted_existing(key_id, spec)? {
+        Some(existing) => (existing, false),
+        None => {
+            let key = tokio::task::spawn_blocking(move || {
+                crate::hosted::HostedKey::generate(spec, crate::hosted::now_secs())
+            })
+            .await
+            .map_err(|e| DaemonError::Config(format!("key generation task failed: {e}")))??;
+            node.hosted_store(key_id, &key)?;
+            (key, true)
+        }
+    };
     let public_der = if spec.is_asymmetric() { key.public_key_der()? } else { Vec::new() };
 
     // The leader already holds it; replicate to every other peer, wrapping per recipient.

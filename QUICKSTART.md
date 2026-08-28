@@ -104,6 +104,30 @@ For **mutual TLS + sealed shares**, use `docker-compose.tls.yml` (see
 [`deploy/frost/README.md`](deploy/frost/README.md)); for **Kubernetes**, see
 [`deploy/k8s`](deploy/k8s).
 
+### Next step, once C works — no HSM, no local key state
+
+Path C moves the namespace key off the participant, but its **encryption** and **symmetric** keys
+still live behind a local delegate. The cosigners can hold those too, which leaves the participant
+with no private key material at all. That needs the mTLS cluster — the `config-tls/` configs are the
+ones that enable `hosted_keys`, and hosted keys are refused on a plaintext cluster — and a build
+from the working tree, since the published `0.2.1` image predates them:
+
+```sh
+scripts/gen-frost-certs.sh 3 deploy/frost/certs
+export RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
+docker compose -f deploy/frost/docker-compose.tls.yml up -d --build
+
+CANTON_HOME=/path/to/canton-open-source-3.5.6 \
+  CANTON_CONF=canton-hosted.conf \
+  deploy/devnet/up.sh          # driver: hosted-keys = true, delegate = "none"
+```
+
+The participant then boots with three cluster-born Ed25519 keys and an RSA-2048 encryption key
+generated in the cluster and replicated to all three cosigners. Read
+[`docs/hosted-keys.md`](docs/hosted-keys.md) before relying on it: hosted keys are **replicated
+whole keys, not threshold shares** — one cosigner holds a usable copy. Only the namespace key is
+genuine 2-of-3 FROST.
+
 ---
 
 ## Where to go next
@@ -129,3 +153,7 @@ For **mutual TLS + sealed shares**, use `docker-compose.tls.yml` (see
   everything here. `--full` (for the upstream conformance suite) also needs the `dpm` toolchain.
 - **Canton config rejects a key** — the node config schema tracks Canton 3.5.x; diff against the
   `reference.conf` in your `$CANTON_HOME`.
+- **`encryption.algorithms.default` rejected as unknown** — Canton's HOCON name for RSA-OAEP is
+  **`rsa-oaep-sha-256`**, not the driver SPI's `RsaEsOaepSha256` spelling: pureconfig kebab-cases
+  `RsaOaepSha256` and splits the digits apart. `deploy/devnet/canton-hosted.conf` has the working
+  form.

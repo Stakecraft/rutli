@@ -13,12 +13,13 @@
 #   rutli_sign_aborts_total                                          counter
 #   rutli_pending_sign_sessions                                      gauge
 #   rutli_hosted_keys                                                gauge
+#   rutli_unreadable_key_files_total                                 counter
 #   rutli_hosted_key_ops_total{op=..., result="ok"|"error"}          counter
 #   rutli_anti_entropy_repairs_total                                 counter
 #   rutli_anti_entropy_conflicts_total                               counter
 #   rutli_key_replicas                                               gauge
 #
-# The last four cover cluster-hosted keys (RSA/AES key material replicated
+# The last six cover cluster-hosted keys (RSA/AES key material replicated
 # whole to every node, unlike the FROST share, which is never copied between
 # nodes). `op` is one of generate | decrypt | symmetric_encrypt |
 # symmetric_decrypt | delete. Unlike every other metric above, the hosted-key
@@ -141,4 +142,17 @@ groups:
           severity: warning
         annotations:
           summary: "Rütli hosted keys are unevenly replicated across job {{ $labels.job }}"
-          description: "Cosigners in job {{ $labels.job }} report different hosted-key counts, meaning at least one key exists on fewer nodes than the cluster has. Writes commit at write_quorum (default 2 of 3), so a node that was down during a GenerateKey lags legitimately until the anti-entropy sweep heals it (default every 300s; the gauge itself only refreshes when a peer lists this node's keys). Divergence sustained for 20 minutes means healing is failing — check rutli_anti_entropy_repairs_total and the sweep logs. Two replicas survive one node loss; one survives none."
+          description: "Cosigners in job {{ $labels.job }} report different hosted-key counts, meaning at least one key exists on fewer nodes than the cluster has. Writes commit at write_quorum (default 2 of 3), so a node that was down during a GenerateKey lags legitimately until the anti-entropy sweep heals it (default every 300s; the gauge itself only refreshes at the end of a node's own sweep or when a peer lists its keys). Divergence sustained for 20 minutes means healing is failing — check rutli_anti_entropy_repairs_total and the sweep logs. Two replicas survive one node loss; one survives none."
+
+      - alert: RutliUnreadableKeyFiles
+        # The counter is bumped once per inventory listing that hits a bad file (this node's own
+        # sweep, plus every peer ListKeys), so it keeps climbing while the file sits there and
+        # stops the moment an operator resolves it. Alerting on the increase rather than on the
+        # raw value is what lets this clear without restarting the cosigner.
+        expr: increase(rutli_unreadable_key_files_total[30m]) > 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli key file on {{ $labels.instance }} cannot be read"
+          description: "{{ $labels.instance }} has a key file on disk it cannot open, and has been unable to open it for at least 15 minutes. Such a file is logged, counted and SKIPPED from the hosted-key inventory — failing the whole listing would stop anti-entropy for every healthy key too — so the damaged key is invisible to replication: it is neither pushed to peers nor pulled back from them, while rutli_hosted_keys can still look even across the cluster. Usual causes are a seal master secret rotated without re-sealing the existing files, a partial or foreign restore, or disk corruption. It does not self-heal. Take the key id from the cosigner's error log, then restore the seal secret that file was written under, restore a good copy (rutli-cosigner restore, or import-key from an export — see docs/disaster-recovery.md 3d), or, after confirming a readable copy on another cosigner, delete the file so anti-entropy can replace it."

@@ -87,12 +87,17 @@ not the past. Threshold RSA is permanently out of scope; the reasoning, and the 
   conformance suite. Verified end-to-end on a real Canton 3.5.6 node.
 - **Threshold signing (FROST-ed25519)** — DKG, two-round signing, standard RFC 8032 output,
   crash-safe single-use nonce guard.
-- **Backends** — `software` (testing), `hsm` (PKCS#11, verified on SoftHSM), `frost` (the MPC cluster).
+- **Backends** — `software` (testing), `hsm` (PKCS#11, verified on SoftHSM) and `frost` (the MPC
+  cluster), which routes non-FROST keys to a delegate: `hsm`, `software`, or `none` — no delegate at
+  all, which requires cluster-hosted keys (below).
 - **Cluster-hosted keys** — RSA-2048-OAEP encryption and AES-256-GCM symmetric keys held by the
-  cosigners themselves: 2-of-3 write quorum, wrapped per recipient node so key material never
-  crosses the mesh in the clear (not even inside mTLS), healed by anti-entropy and read-repair, and
-  covered by the existing `backup`/`restore`. Replicated, not threshold — see above — but it takes
-  both the HSM and the last private key off the Canton host.
+  cosigners themselves: configurable write quorum (2-of-3 by default), wrapped per recipient node so
+  key material never crosses the mesh in the clear (not even inside mTLS), healed by anti-entropy
+  and read-repair, and covered by the existing `backup`/`restore`. Replicated, not threshold — see
+  above — but it takes both the HSM and the last private key off the Canton host.
+- **Export/import** — an offline CLI writes a hosted key as a portable, passphrase-encrypted file,
+  covering the two cases `backup` cannot: a lost seal secret, and moving to another cluster or KMS.
+  Hosted keys only, and deliberately never an RPC — [docs/hosted-keys.md](docs/hosted-keys.md).
 - **Mutual TLS** across the mesh and from the driver, with **driver-side failover** (any live
   cosigner leads — a downed node never blocks signing).
 - **Encryption at rest** — key shares and hosted keys sealed with AES-256-GCM (per-node keys from an
@@ -148,6 +153,7 @@ Before protecting a real key, run the witnessed **[key ceremony](docs/key-ceremo
 | [docs/architecture.md](docs/architecture.md) | How it's built, and why |
 | [docs/phase-2-frost.md](docs/phase-2-frost.md) | The FROST cluster in depth |
 | [docs/hosted-keys.md](docs/hosted-keys.md) | Cluster-hosted RSA/AES keys: what they are, what they are not |
+| [docs/hosted-keys-design.md](docs/hosted-keys-design.md) | Why they are replicated and not threshold — the design record, with what did and did not ship |
 | [docs/key-ceremony.md](docs/key-ceremony.md) | Witnessed namespace-key generation |
 | [docs/key-rotation.md](docs/key-rotation.md) | Which keys rotate, how, and why the root can't |
 | [docs/approval-quorum.md](docs/approval-quorum.md) | M-of-N signing approval |
@@ -156,6 +162,7 @@ Before protecting a real key, run the witnessed **[key ceremony](docs/key-ceremo
 | [docs/performance.md](docs/performance.md) | Sign/DKG latency evidence (DevNet multi-region numbers) |
 | [docs/testnet-soak.md](docs/testnet-soak.md) | Splice DevNet validator soak: setup, drills, exit criteria |
 | [docs/wire-contract.md](docs/wire-contract.md) | Exactly what Canton sends the driver |
+| [docs/audit-prep.md](docs/audit-prep.md) | Engagement brief and evidence index for a third-party review |
 
 ## Project layout
 
@@ -173,12 +180,17 @@ scripts/   Canton dep publishing, cert generation, SoftHSM setup
 
 Pre-production and **not yet audited** — do not put a production authority key behind it until a
 third-party security review is complete. The full stack above is implemented, CI-green, and verified
-end-to-end on a real Canton node. An **HSM is no longer required**: with cluster-hosted keys the
-driver can run `delegate = "none"` — no PKCS#11 module and no key material on the participant host.
-That is the newest surface in the codebase, so exercise it on DevNet before it holds anything you
-care about, and read [docs/hosted-keys.md](docs/hosted-keys.md) first — replicated keys are a
-different security property from the threshold namespace key, not the same one applied wider. What
-remains for a 1.0 is external: a **security audit** and a **Splice testnet validator run**. See
+end-to-end on a real Canton node. An **HSM is no longer required**: both halves of cluster-hosted
+keys — cluster and driver — are done, so `delegate = "none"` is a deployment you can run today, with
+no PKCS#11 module and no key material on the participant host. It has been exercised on a Canton
+3.5.6 participant with no local key state
+([`deploy/devnet/canton-hosted.conf`](deploy/devnet/canton-hosted.conf)): three Ed25519 keys born by
+cluster DKG and threshold-signed, plus an RSA-2048 encryption key generated in the cluster and
+replicated to all three cosigners. It is still the newest surface in the codebase, so run it on
+DevNet before it holds anything you care about, and read
+[docs/hosted-keys.md](docs/hosted-keys.md) first — replicated keys are a different security property
+from the threshold namespace key, not the same one applied wider. What remains for a 1.0 is
+external: a **security audit** and a **Splice testnet validator run**. See
 [CHANGELOG.md](CHANGELOG.md).
 
 ## Security

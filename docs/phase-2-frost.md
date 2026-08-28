@@ -12,11 +12,11 @@
 >
 > - `driver` `FrostBackend` (Scala): composite backend routing the Ed25519 namespace key to the
 >   cluster over gRPC (checked-in grpc-java stubs from the shared proto) and delegating every other
->   key to the HSM/software backend — the hosted-key routing that lets `rutli-`-prefixed ids go to
->   the cluster too, and the delegate be dropped entirely, is landing alongside (*Cluster-hosted
->   keys*, below). **Live e2e verified** (`FrostBackendIT`, gated on
->   `RUTLI_FROST_ENDPOINT`): against a real 3-node cluster it runs DKG for the namespace key,
->   threshold-signs a Canton 34-byte payload, and the **stock JDK Ed25519 verifier accepts** the
+>   key to the HSM/software backend — and, with `frost.hosted-keys = true`, routing
+>   `rutli-`-prefixed ids to the cluster too so the delegate can be dropped entirely
+>   (`delegate = "none"`; *Cluster-hosted keys*, below). **Live e2e verified** (`FrostBackendIT`,
+>   gated on `RUTLI_FROST_ENDPOINT`): against a real 3-node cluster it runs DKG for the namespace
+>   key, threshold-signs a Canton 34-byte payload, and the **stock JDK Ed25519 verifier accepts** the
 >   64-byte signature; non-Ed25519 keys fall through to the delegate. Config: `backend = "frost"`
 >   + `frost { endpoints, delegate }` (plural — the full roster, for failover; see
 >   `deploy/devnet/canton-frost.conf`).
@@ -55,16 +55,20 @@
 >   every node before persisting. Limits an attacker to one refresh epoch; pre-refresh shares are
 >   dead afterwards (old+new shares cannot combine — tested).
 >
-> - **Cluster-hosted keys, v1 (cosigner side done):** the cluster also holds the **non-FROST**
+> - **Cluster-hosted keys, v1 (done, both sides):** the cluster also holds the **non-FROST**
 >   material Canton needs — RSA-2048-OAEP-SHA256 encryption keypairs and AES-256-GCM symmetric
->   keys — the prerequisite for a participant with no HSM and no local key state (the driver-side
->   routing lands alongside). These are **replicated whole keys, not
->   threshold shares**; the namespace key remains true 2-of-3 FROST and is untouched. 9 cluster
+>   keys — so a participant can run with no HSM and no local key state; the driver-side `rutli-`
+>   routing and `delegate = "none"` shipped in the same release. These are **replicated whole keys,
+>   not threshold shares**; the namespace key remains true 2-of-3 FROST and is untouched. 9 cluster
 >   tests: replicate-and-decrypt on every node, read-repair, anti-entropy push, under-quorum
->   rollback, restart survival, and FROST/hosted non-interference. See *Cluster-hosted keys* below.
+>   rollback, restart survival, and FROST/hosted non-interference. **Verified end to end
+>   (2026-08-28)** on a Canton 3.5.6 participant with no local key state
+>   (`deploy/devnet/canton-hosted.conf`): three Ed25519 keys born by cluster DKG and
+>   threshold-signed, plus an RSA-2048 encryption key generated in the cluster and replicated to all
+>   three cosigners on disk. See *Cluster-hosted keys* below.
 >
-> Remaining for Phase 2 hardening: enclave/HSM sealing ("MPC-of-HSM") and DR runbook per the
-> production-readiness list.
+> Remaining for Phase 2 hardening: enclave/HSM sealing ("MPC-of-HSM") per the production-readiness
+> list. The DR runbook shipped — [`disaster-recovery.md`](disaster-recovery.md).
 
 The differentiator: the Canton **namespace / identity key** — the one whose compromise is
 catastrophic and irreversible — is never held whole by any machine. A `t`-of-`n` cluster produces
@@ -261,9 +265,13 @@ Where it is enforced:
   through the hosted path.
 - `hosted_delete` re-reads the record before removing anything, so a `DeleteKey` naming the
   namespace key is refused rather than destroying a non-rotatable identity.
-- An unreadable key file makes `list_hosted` **fail** rather than quietly return a shorter list: a
-  corrupt or wrongly-sealed key must not look like a *deleted* one to anti-entropy. Failing loudly
-  turns a sealing misconfiguration into an alert instead of a silent inventory gap.
+- An unreadable key file is logged at `error`, counted in `rutli_unreadable_key_files_total`, and
+  **skipped** from the listing — not fatal to it. Failing the whole inventory (the first
+  implementation) would stop anti-entropy for every *healthy* key too, turning one damaged file into
+  a cluster-wide halt of self-healing. Skipping is safe because absence from a listing never causes
+  a delete — peers only push keys a listing lacks — and a push onto an unreadable local file still
+  fails closed in `hosted_store` rather than overwriting it. The counter is the compensating signal:
+  a non-zero value means that key is neither pushed nor pulled until an operator resolves it.
 
 Covered end-to-end by `hosted_keys_and_frost_shares_do_not_interfere`: DKG and hosted generation run
 side by side in one keystore, threshold signing still verifies against the group key, the hosted
@@ -324,12 +332,15 @@ dist_sk_j = HKDF-SHA256(ikm  = cluster master secret,
 ```
 
 That is the same master secret as share sealing (`share_seal`). Deriving avoids a first-boot
-ordering problem — there is no keypair to distribute before the cluster can talk — and it lets a
-node check at startup that its derived public key is the one its peers were configured with,
-catching a wrong secret or a wrong mount *before* any key is generated. That is precisely the class
-of failure the incident belonged to. Under today's shared master secret any node can derive any
-peer's distribution key, which is no worse than the status quo for share sealing; moving to per-node
-seal secrets makes the binding real with no code change.
+ordering problem — there is no keypair to distribute before the cluster can talk — and it makes a
+startup self-check *possible*: with each peer's `dist_pubkey` pinned in config, a node could confirm
+its derived public key is the one its peers expect and catch a wrong secret or a wrong mount
+*before* any key is generated, which is precisely the class of failure the incident belonged to.
+**That pinning and the check are not shipped** — `peers[]` still carries only `identifier` and
+`endpoint`, so a wrong secret is still discovered when an operation fails. It is the smallest useful
+next step here. Under today's shared master secret any node can derive any peer's distribution key,
+which is no worse than the status quo for share sealing; moving to per-node seal secrets makes the
+binding real with no code change.
 
 Two details that carry more weight than they look:
 
@@ -391,18 +402,24 @@ than guessing.
   `NodeInfo`. The reasoning in *Who can call which API* applies unchanged and with more force here:
   these RPCs move private key material, so the driver must not be on that list.
 - **Metrics:** `rutli_hosted_keys` (gauge), `rutli_hosted_key_ops_total{op,result}`,
-  `rutli_anti_entropy_repairs_total`, and `rutli_anti_entropy_conflicts_total` — the last one alerts
-  on *any* increase, since it signals a broken invariant rather than a transient.
+  `rutli_anti_entropy_repairs_total`, `rutli_key_replicas` (gauge — the fewest cosigners holding any
+  one hosted key, recounted after each sweep repairs what it can; this is the alert that makes a
+  write quorum below `n` safe), `rutli_unreadable_key_files_total`, and
+  `rutli_anti_entropy_conflicts_total` — the last one alerts on *any* increase, since it signals a
+  broken invariant rather than a transient. Runbook: [`observability.md`](observability.md).
 
 ### Driver routing
 
-On the Scala side (landing alongside the cosigner work), `FrostBackend` routes by key-id prefix:
-`frost-` to the FROST path, `rutli-` to the cluster-hosted path, anything else to the delegate.
-With `frost.hosted-keys = true` the driver can run `delegate = "none"` — no HSM and no local key
-state on the participant at all. There is deliberately **no automatic fallback to the delegate on
-`NOT_FOUND`**: quietly serving a key from a second
-custodian is how split custody starts, and it could reproduce the incident class. Endpoint failover
-stays restricted to `UNAVAILABLE` / `DEADLINE_EXCEEDED`.
+On the Scala side — shipped in the same release, and exercised against a real participant —
+`FrostBackend` routes by key-id prefix: `frost-` to the FROST path, `rutli-` to the cluster-hosted
+path, anything else to the delegate. With `frost.hosted-keys = true` the driver can run
+`delegate = "none"` — a `NoDelegateBackend` that refuses every operation and names the key id, so a
+key matching neither prefix is a loud routing bug rather than silent local crypto; the driver
+rejects `delegate = "none"` without `hosted-keys = true` at startup. Supported specs come from the
+cluster's `Capabilities` at startup instead of a hardcoded list. There is deliberately **no
+automatic fallback to the delegate on `NOT_FOUND`**: quietly serving a key from a second custodian
+is how split custody starts, and it could reproduce the incident class. Endpoint failover stays
+restricted to `UNAVAILABLE` / `DEADLINE_EXCEEDED`.
 
 ### Where this goes next
 
