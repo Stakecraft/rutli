@@ -81,6 +81,17 @@ All notable changes to Rütli are documented here. Format loosely follows
   `rsa-oaep-sha-256` (pureconfig kebab-cases `RsaOaepSha256`, splitting the digits), **not** the
   driver SPI's `RsaEsOaepSha256` spelling.
 
+- **Per-key decryption rate limit** (`hosted_keys.decrypt_rate_limit_per_min`, default 6000 —
+  100/s sustained on one key, `0` disables). Closes the gap the design record named as the
+  highest-value security follow-up: the driver certificate authorizes `Decrypt`, and because
+  Canton's encryption keys protect per-view session keys, a stolen one reads *retrospectively* —
+  everything ever encrypted to that key. The driver's signing journal cannot bound that (it runs on
+  the Canton host and can simply be bypassed), so the ceiling is enforced on the cosigner. Not a
+  load shaper: the default is far above real traffic, the cosigner warns with the key id well
+  before it starts refusing, and a refusal is `RESOURCE_EXHAUSTED` — which the driver deliberately
+  does **not** fail over on, since every node enforces the same limit and retrying elsewhere would
+  spread an attacker's load. New `rutli_decrypt_rate_limited_total` and `RutliDecryptRateLimited`.
+
 ### Fixed
 - **`hosted_keys.write_quorum` was inert.** The field was validated against the roster size at load
   and documented, but the service passed the hardcoded default of 2 to every generate, so a

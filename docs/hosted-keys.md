@@ -373,20 +373,22 @@ What hosted keys are, stated without varnish:
   RSA decryption therefore runs on `aws-lc-rs` (FIPS-validated, constant-time), never that crate.
   Full reasoning: [`hosted-keys-design.md`](hosted-keys-design.md).
 
-### Known gaps in this release
+### Limits worth knowing
 
-Two limits are worth knowing before you rely on hosted keys in production. Neither is a defect in
-what shipped; both are follow-ups the design record already names.
+Two properties to understand before you rely on hosted keys in production.
 
-- **`Decrypt` has no cosigner-side rate limit.** The only throttle today is the driver's signing
-  journal, which lives on the Canton host and is therefore bypassable by anyone holding the driver
-  certificate — the same certificate that authorizes `Decrypt`. So a stolen driver cert is bounded
-  only by how fast the cluster answers: an attacker can bulk-decrypt historical traffic at line rate
-  without tripping anything. [`hosted-keys-design.md`](hosted-keys-design.md) calls a per-key token
-  bucket on the cosigner the highest-value security follow-up, and it is not yet implemented. Until
-  it is, compensate with what you do have: keep `signer_allowlist` tight, alert on
-  `rutli_hosted_key_ops_total{op="decrypt"}` rate rather than assuming a limit exists, and treat
-  driver-certificate rotation as a security control rather than hygiene.
+- **`Decrypt` is rate-limited per key, on the cosigner** (`hosted_keys.decrypt_rate_limit_per_min`,
+  default 6000 — 100/s sustained on a single key). This is the bound on a stolen driver
+  certificate: that certificate authorizes `Decrypt`, and retrospective decryption means whoever
+  holds it can read everything ever encrypted to that key, so without a ceiling the only limit is
+  how fast the cluster answers. The limiter has to live here rather than in the driver's signing
+  journal, which runs on the Canton host and can simply be bypassed by not using the driver.
+  It is not a load shaper: the default sits far above real traffic, the cosigner warns
+  ("approaching its rate limit", with the key id) well before it starts refusing, and a refusal is
+  `RESOURCE_EXHAUSTED` — which the driver deliberately does **not** fail over on, since every node
+  enforces the same ceiling and retrying elsewhere would just spread an attacker's load. Alert on
+  `rutli_decrypt_rate_limited_total` (`RutliDecryptRateLimited`); in normal operation it never
+  moves. Set `0` to disable, and the daemon says so loudly at startup.
 - **No approval gating on decrypt, deliberately.** M-of-N approval covers `sign`, not `Decrypt`:
   decryption is on Canton's per-transaction hot path, so a human gate there would stall the node.
   That is a design choice, not an oversight — but it does mean the audit trail, not an approval

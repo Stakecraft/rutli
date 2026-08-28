@@ -29,7 +29,8 @@
   "hosted_keys": {
     "enabled": true,
     "write_quorum": 2,
-    "anti_entropy_interval_secs": 300
+    "anti_entropy_interval_secs": 300,
+    "decrypt_rate_limit_per_min": 6000
   },
   "signer_allowlist": [
     "driver"

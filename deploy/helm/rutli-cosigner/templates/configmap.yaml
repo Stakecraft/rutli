@@ -62,7 +62,7 @@ data:
       },
       "share_seal": { "secret_env": "RUTLI_SEAL_SECRET" },
       {{- if $hosted.enabled }}
-      "hosted_keys": { "enabled": true, "write_quorum": {{ int $hosted.writeQuorum }}, "anti_entropy_interval_secs": {{ int $hosted.antiEntropyIntervalSecs }} },
+      "hosted_keys": { "enabled": true, "write_quorum": {{ int $hosted.writeQuorum }}, "anti_entropy_interval_secs": {{ int $hosted.antiEntropyIntervalSecs }}, "decrypt_rate_limit_per_min": {{ int (default 6000 $hosted.decryptRateLimitPerMin) }} },
       {{- end }}
       "signer_allowlist": {{ $allow | toJson }},
       "peer_allowlist": {{ $peerAllow | toJson }}

@@ -25,6 +25,9 @@ pub struct SignerSvc {
     /// `hosted_keys.write_quorum`. Carried here rather than read from a constant so the configured
     /// value is actually honoured.
     pub hosted_write_quorum: usize,
+    /// Per-key ceiling on decryptions. The bound on a stolen driver certificate — see
+    /// [`crate::ratelimit`].
+    pub decrypt_limiter: Arc<crate::ratelimit::DecryptRateLimiter>,
 }
 
 impl SignerSvc {
@@ -233,6 +236,9 @@ impl Signer for SignerSvc {
     ) -> Result<Response<pb::DecryptReply>, Status> {
         self.authorize(&req)?;
         let r = req.into_inner();
+        // Charge the budget BEFORE any work, including the read-repair fetch: an attacker must not
+        // be able to drive cluster traffic at line rate just because the key is not local yet.
+        self.charge_decrypt(&r.key_id)?;
         self.load_hosted_repairing(&r.key_id).await?;
         let result = self.node.hosted_decrypt(&r.key_id, &r.ciphertext);
         record_hosted_op("decrypt", result.is_ok());
@@ -257,6 +263,7 @@ impl Signer for SignerSvc {
     ) -> Result<Response<pb::SymmetricReply>, Status> {
         self.authorize(&req)?;
         let r = req.into_inner();
+        self.charge_decrypt(&r.key_id)?;
         self.load_hosted_repairing(&r.key_id).await?;
         let result = self.node.hosted_decrypt_symmetric(&r.key_id, &r.data);
         record_hosted_op("symmetric_decrypt", result.is_ok());
@@ -282,6 +289,19 @@ impl SignerSvc {
         self.node.hosted_load(key_id).map_err(|e| match e {
             crate::DaemonError::UnknownKey(k) => Status::not_found(format!("no such key: {k}")),
             other => Status::from(other),
+        })
+    }
+}
+
+impl SignerSvc {
+    /// Charge one decryption against `key_id`'s budget, or refuse.
+    ///
+    /// Applies to both decrypt paths and not to encryption: encrypting is not an exfiltration
+    /// route, and throttling it would break legitimate writes for no security gain.
+    fn charge_decrypt(&self, key_id: &str) -> Result<(), Status> {
+        self.decrypt_limiter.check(key_id).map_err(|limited| {
+            metrics::counter!(crate::metrics::DECRYPT_RATE_LIMITED).increment(1);
+            Status::from(crate::DaemonError::RateLimited(limited.to_string()))
         })
     }
 }

@@ -358,6 +358,10 @@ object FrostBackend {
 
   /** True when the status means "this contact node isn't serving" (so we should try the next),
     * as opposed to a real application answer we must surface. */
+  /// Note what is deliberately absent: RESOURCE_EXHAUSTED (the cluster's per-key decryption rate
+  /// limit) is NOT retried elsewhere. Every cosigner enforces the same ceiling, so failing over
+  /// would merely spread the load an attacker is generating across the cluster. It surfaces to
+  /// Canton, which backs off.
   private def isNodeDown(status: Status): Boolean =
     status.getCode == Status.Code.UNAVAILABLE || status.getCode == Status.Code.DEADLINE_EXCEEDED
 

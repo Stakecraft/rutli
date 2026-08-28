@@ -228,6 +228,24 @@ class FrostHostedKeysSpec extends AnyWordSpec with Matchers {
       }
     }
 
+    "surface a cluster rate limit rather than failing over to another cosigner" in {
+      // Every cosigner enforces the same per-key ceiling, so retrying elsewhere would only spread
+      // the load an attacker is generating. RESOURCE_EXHAUSTED must reach the caller.
+      val fake = new FakeCluster() {
+        override def decrypt(req: DecryptRequest, obs: StreamObserver[DecryptReply]): Unit = {
+          calls += "decrypt"
+          obs.onError(Status.RESOURCE_EXHAUSTED.withDescription("rate limit").asRuntimeException())
+        }
+      }
+      withCluster(fake) { backend =>
+        val err = intercept[Exception] {
+          await(backend.decryptAsymmetric(Array[Byte](1), "rutli-enc-limited", EncryptionAlgoSpec.RsaEsOaepSha256))
+        }
+        err.getMessage should include("RESOURCE_EXHAUSTED")
+        fake.calls.count(_ == "decrypt") shouldBe 1
+      }
+    }
+
     "leave non-rutli keys to the delegate" in {
       val fake = new FakeCluster()
       val delegate = new SoftwareBackendProbe

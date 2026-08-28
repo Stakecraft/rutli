@@ -66,6 +66,10 @@ hostedKeys:
   # under-quorum write or a node restored from a stale backup, so a writeQuorum below replicaCount
   # is only safe with it running. Floor of 10s is enforced by the cosigner.
   antiEntropyIntervalSecs: 300
+  # Ceiling on decryptions per key per minute, enforced by the cosigner (0 disables). This is the
+  # bound on a stolen driver certificate, which can otherwise bulk-decrypt recorded traffic at line
+  # rate. The default is ~100/s sustained on one key — far above real Canton traffic.
+  decryptRateLimitPerMin: 6000
 
 persistence:
   size: 1Gi

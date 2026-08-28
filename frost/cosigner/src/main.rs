@@ -237,7 +237,28 @@ async fn main() -> Result<()> {
         .as_ref()
         .map(|h| h.write_quorum)
         .unwrap_or(rutli_cosigner::orchestrator::DEFAULT_WRITE_QUORUM);
-    let signer = SignerSvc { node: node.clone(), peers, allowed_cns, hosted_write_quorum };
+    let decrypt_limit = cfg
+        .hosted_keys
+        .as_ref()
+        .map(|h| h.decrypt_rate_limit_per_min)
+        .unwrap_or(rutli_cosigner::config::DEFAULT_DECRYPT_RATE_LIMIT_PER_MIN);
+    if decrypt_limit == 0 {
+        tracing::warn!(
+            "hosted-key decryption rate limiting is DISABLED — a stolen driver certificate can \
+             bulk-decrypt recorded traffic at line rate; set hosted_keys.decrypt_rate_limit_per_min"
+        );
+    } else {
+        tracing::info!(per_key_per_min = decrypt_limit, "hosted-key decryption rate limit active");
+    }
+    let decrypt_limiter = Arc::new(rutli_cosigner::ratelimit::DecryptRateLimiter::new(decrypt_limit));
+
+    let signer = SignerSvc {
+        node: node.clone(),
+        peers,
+        allowed_cns,
+        hosted_write_quorum,
+        decrypt_limiter,
+    };
     let peer = PeerSvc { node, allowed_cns: peer_cns };
 
     let addr = cfg

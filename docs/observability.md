@@ -27,6 +27,7 @@ annotations, NetworkPolicy ingress for pods labelled `rutli.io/scraper: "true"`)
 | `rutli_sign_aborts_total` | counter | — | Given-up signatures (leader aborted the in-flight session on the quorum) |
 | `rutli_pending_sign_sessions` | gauge | — | In-flight round-1 sessions held on this node; hovers near 0 in a healthy cluster |
 | `rutli_hosted_keys` | gauge | — | Cluster-hosted keys held by this node |
+| `rutli_decrypt_rate_limited_total` | counter | — | Hosted-key decryptions refused by the per-key rate limit. Never moves in normal operation: either a node outgrew its ceiling, or someone with the driver certificate is bulk-decrypting |
 | `rutli_unreadable_key_files_total` | counter | — | Key files present on disk that could not be opened (wrong seal secret, partial restore, corruption) and were therefore skipped from the hosted-key inventory |
 | `rutli_hosted_key_ops_total` | counter | `op`=generate\|decrypt\|symmetric_encrypt\|symmetric_decrypt\|delete, `result`=ok\|error | Signer-side hosted-key operation outcomes |
 | `rutli_anti_entropy_repairs_total` | counter | — | Hosted keys a sweep pulled to this node or pushed to a peer that lacked them |

@@ -19,6 +19,9 @@ pub enum DaemonError {
     #[error("decryption failed")]
     DecryptFailed,
 
+    #[error("{0}")]
+    RateLimited(String),
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
@@ -75,6 +78,11 @@ impl From<DaemonError> for tonic::Status {
             DaemonError::Config(_) => tonic::Status::failed_precondition(e.to_string()),
             // invalid_argument, and nothing more: same code and message for every cause.
             DaemonError::DecryptFailed => tonic::Status::invalid_argument(e.to_string()),
+            // Retryable: a legitimate caller should back off and try again, not treat the key as
+            // broken. The driver must NOT fail over to another cosigner on this — every node
+            // enforces the same limit, so retrying elsewhere would just spread the load an
+            // attacker is generating.
+            DaemonError::RateLimited(_) => tonic::Status::resource_exhausted(e.to_string()),
             DaemonError::KeyExists(_) => tonic::Status::already_exists(e.to_string()),
             // aborted: a concurrent ceremony is holding the key; the caller may retry later.
             DaemonError::CeremonyInProgress { .. } => tonic::Status::aborted(e.to_string()),

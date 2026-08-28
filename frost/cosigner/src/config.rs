@@ -67,6 +67,18 @@ pub struct HostedKeysConfig {
     /// This is what heals an under-quorum write, so it is not optional in practice.
     #[serde(default = "default_anti_entropy_secs")]
     pub anti_entropy_interval_secs: u64,
+    /// Ceiling on decryptions per key per minute, enforced by the cosigner. `0` disables it.
+    ///
+    /// This bounds a stolen driver certificate: that certificate authorizes `Decrypt`, and because
+    /// Canton's encryption keys protect per-view session keys, it can read *retrospectively* —
+    /// every recorded message ever encrypted to that key. The driver's own signing journal cannot
+    /// help, since whoever stole the certificate need not use the driver at all.
+    ///
+    /// The default is deliberately far above real traffic (100/s sustained on a single key), so it
+    /// caps bulk exfiltration without shaping normal load. Raise it if a legitimate node warns that
+    /// it is approaching the ceiling; the warning fires well before requests start failing.
+    #[serde(default = "default_decrypt_rate_limit")]
+    pub decrypt_rate_limit_per_min: u32,
 }
 
 fn default_write_quorum() -> usize {
@@ -75,6 +87,14 @@ fn default_write_quorum() -> usize {
 
 fn default_anti_entropy_secs() -> u64 {
     300
+}
+
+/// 6000/min = 100 decryptions per second, sustained, on ONE key. Far above what a Canton
+/// participant does; low enough to matter against bulk exfiltration.
+pub const DEFAULT_DECRYPT_RATE_LIMIT_PER_MIN: u32 = 6000;
+
+fn default_decrypt_rate_limit() -> u32 {
+    DEFAULT_DECRYPT_RATE_LIMIT_PER_MIN
 }
 
 /// Where the share-sealing master secret comes from. The secret must be injected at runtime (secret
@@ -272,7 +292,12 @@ mod hosted_config_tests {
     }
 
     fn hosted(enabled: bool, quorum: usize) -> HostedKeysConfig {
-        HostedKeysConfig { enabled, write_quorum: quorum, anti_entropy_interval_secs: 300 }
+        HostedKeysConfig {
+            enabled,
+            write_quorum: quorum,
+            anti_entropy_interval_secs: 300,
+            decrypt_rate_limit_per_min: DEFAULT_DECRYPT_RATE_LIMIT_PER_MIN,
+        }
     }
 
     #[test]
@@ -293,6 +318,22 @@ mod hosted_config_tests {
     }
 
     #[test]
+    fn the_decrypt_rate_limit_defaults_on_and_can_be_disabled() {
+        // Secure by default: an operator who writes only `enabled: true` still gets a ceiling.
+        let c = cfg(Some(hosted(true, 2)), true);
+        assert_eq!(
+            c.hosted_keys.as_ref().unwrap().decrypt_rate_limit_per_min,
+            DEFAULT_DECRYPT_RATE_LIMIT_PER_MIN
+        );
+
+        // 0 is a valid explicit opt-out, not a validation error — some operators will have their
+        // own throttle in front.
+        let mut off = hosted(true, 2);
+        off.decrypt_rate_limit_per_min = 0;
+        cfg(Some(off), true).validate().unwrap();
+    }
+
+    #[test]
     fn defaults_are_applied_when_the_block_is_partial() {
         let c: Config = serde_json::from_str(
             r#"{"identifier":1,"listen":"127.0.0.1:9101","threshold":2,"data_dir":"/tmp/x",
@@ -305,6 +346,7 @@ mod hosted_config_tests {
         let h = c.hosted_keys.as_ref().unwrap();
         assert_eq!(h.write_quorum, 2, "quorum defaults to the cluster fault model, not all-nodes");
         assert_eq!(h.anti_entropy_interval_secs, 300);
+        assert_eq!(h.decrypt_rate_limit_per_min, DEFAULT_DECRYPT_RATE_LIMIT_PER_MIN);
         c.validate().unwrap();
     }
 }

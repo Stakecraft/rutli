@@ -156,3 +156,16 @@ groups:
         annotations:
           summary: "Rütli key file on {{ $labels.instance }} cannot be read"
           description: "{{ $labels.instance }} has a key file on disk it cannot open, and has been unable to open it for at least 15 minutes. Such a file is logged, counted and SKIPPED from the hosted-key inventory — failing the whole listing would stop anti-entropy for every healthy key too — so the damaged key is invisible to replication: it is neither pushed to peers nor pulled back from them, while rutli_hosted_keys can still look even across the cluster. Usual causes are a seal master secret rotated without re-sealing the existing files, a partial or foreign restore, or disk corruption. It does not self-heal. Take the key id from the cosigner's error log, then restore the seal secret that file was written under, restore a good copy (rutli-cosigner restore, or import-key from an export — see docs/disaster-recovery.md 3d), or, after confirming a readable copy on another cosigner, delete the file so anti-entropy can replace it."
+
+      - alert: RutliDecryptRateLimited
+        # Refusals mean one of two things, and both need a human: a node that has outgrown its
+        # ceiling (raise it — the cosigner logs a warning well before it starts refusing), or
+        # someone with the driver certificate bulk-decrypting recorded traffic. Alert on any
+        # sustained refusal rather than a threshold: in normal operation this counter never moves.
+        expr: increase(rutli_decrypt_rate_limited_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli is refusing hosted-key decryptions on {{ $labels.instance }} (rate limit)"
+          description: "{{ $labels.instance }} has refused hosted-key decryptions for at least 5 minutes because a key hit hosted_keys.decrypt_rate_limit_per_min (default 6000/min per key). In normal operation this counter never moves: the default is ~100 decryptions per second sustained on a SINGLE key, far above what a Canton participant does. Two readings. (1) Legitimate growth — the cosigner logs 'approaching its rate limit' with the key id before it starts refusing, so check for that warning and raise the limit. Canton sees RESOURCE_EXHAUSTED and backs off; the driver deliberately does NOT fail over to another cosigner, since every node enforces the same ceiling. (2) Abuse — this is what a stolen driver certificate looks like, and because Canton's encryption keys protect per-view session keys, whoever holds it can read retrospectively. If the traffic is not yours, treat it as a live confidentiality incident: check the driver certificate's provenance and signer_allowlist, then rotate the encryption key through Canton topology and the driver cert. See docs/hosted-keys.md section 5."
