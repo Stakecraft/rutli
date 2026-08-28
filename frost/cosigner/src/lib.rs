@@ -16,6 +16,7 @@
 
 pub mod config;
 pub mod error;
+pub mod export;
 pub mod hosted;
 pub mod keystore;
 pub mod metrics;

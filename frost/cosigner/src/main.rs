@@ -49,6 +49,41 @@ enum Command {
         #[arg(long)]
         out: std::path::PathBuf,
     },
+    /// Export ONE cluster-hosted key as a portable artifact. Run with the node stopped.
+    ///
+    /// Unlike `backup` (sealed with this cluster's master secret, restorable only onto this node),
+    /// an export is portable: it can be imported into a different cluster, and it survives the loss
+    /// of the seal master secret. That also makes it as dangerous as the key itself, so it is
+    /// passphrase-protected unless you explicitly ask otherwise.
+    ///
+    /// FROST shares cannot be exported — no single node holds a whole namespace key.
+    ExportKey {
+        /// The hosted key to export (a `rutli-…` key id).
+        #[arg(long)]
+        key_id: String,
+        /// File to write the export artifact to.
+        #[arg(long)]
+        out: std::path::PathBuf,
+        /// Env var holding the passphrase that protects the artifact (Argon2id + AES-256-GCM).
+        #[arg(long, conflicts_with = "unsafe_plaintext")]
+        passphrase_env: Option<String>,
+        /// Write the private key UNENCRYPTED. Only for piping straight into another KMS/HSM import
+        /// tool on a trusted host — the file is the key.
+        #[arg(long)]
+        unsafe_plaintext: bool,
+    },
+    /// Import a cluster-hosted key from an export artifact. Run with the node stopped.
+    ///
+    /// The key is written to this node only; once the daemon starts, anti-entropy replicates it to
+    /// the rest of the cluster.
+    ImportKey {
+        /// The export artifact to read.
+        #[arg(long, value_name = "FILE")]
+        r#in: std::path::PathBuf,
+        /// Env var holding the passphrase, for an encrypted artifact.
+        #[arg(long)]
+        passphrase_env: Option<String>,
+    },
     /// Restore this node's key shares from a backup directory. Run with the node stopped.
     Restore {
         #[arg(long)]
@@ -74,6 +109,12 @@ async fn main() -> Result<()> {
     match args.command {
         Some(Command::Refresh { key_id, target }) => return refresh_command(&cfg, &key_id, target).await,
         Some(Command::Backup { out }) => return backup_command(&cfg, &out),
+        Some(Command::ExportKey { key_id, out, passphrase_env, unsafe_plaintext }) => {
+            return export_key_command(&cfg, &key_id, &out, passphrase_env.as_deref(), unsafe_plaintext)
+        }
+        Some(Command::ImportKey { r#in, passphrase_env }) => {
+            return import_key_command(&cfg, &r#in, passphrase_env.as_deref())
+        }
         Some(Command::Restore { from, force }) => return restore_command(&cfg, &from, force),
         _ => {}
     }
@@ -191,7 +232,12 @@ async fn main() -> Result<()> {
         });
     }
 
-    let signer = SignerSvc { node: node.clone(), peers, allowed_cns };
+    let hosted_write_quorum = cfg
+        .hosted_keys
+        .as_ref()
+        .map(|h| h.write_quorum)
+        .unwrap_or(rutli_cosigner::orchestrator::DEFAULT_WRITE_QUORUM);
+    let signer = SignerSvc { node: node.clone(), peers, allowed_cns, hosted_write_quorum };
     let peer = PeerSvc { node, allowed_cns: peer_cns };
 
     let addr = cfg
@@ -253,6 +299,142 @@ fn restore_command(cfg: &Config, from: &std::path::Path, force: bool) -> Result<
     std::fs::create_dir_all(&dst)?;
     let n = copy_dir_files(from, &dst, force)?;
     println!("restored {n} share file(s) from {} to {}", from.display(), dst.display());
+    Ok(())
+}
+
+/// Open this node's keystore for an offline command (export/import), with sealing configured.
+///
+/// Hosted keys are always sealed at rest, so the seal secret is required — which is exactly the
+/// second factor that makes these commands safe as CLI operations: host access alone is not enough.
+fn offline_keystore(cfg: &Config) -> Result<KeyStore> {
+    let seal_cfg = cfg.share_seal.as_ref().ok_or_else(|| {
+        DaemonError::Config(
+            "share_seal is not configured — cluster-hosted keys are always sealed, so there is \
+             nothing for this command to open"
+                .into(),
+        )
+    })?;
+    let sealer =
+        Arc::new(rutli_cosigner::seal::Sealer::from_env(&seal_cfg.secret_env, cfg.identifier)?);
+    KeyStore::open_with_sealer(cfg.data_dir.join("keys"), Some(sealer))
+}
+
+/// Operator command: write one hosted key out as a portable artifact.
+fn export_key_command(
+    cfg: &Config,
+    key_id: &str,
+    out: &std::path::Path,
+    passphrase_env: Option<&str>,
+    unsafe_plaintext: bool,
+) -> Result<()> {
+    let keystore = offline_keystore(cfg)?;
+    // load_hosted refuses a FROST share, so this is also the guard against exporting one.
+    let key = keystore.load_hosted(key_id).map_err(|e| match e {
+        DaemonError::UnknownKey(k) => DaemonError::Config(format!(
+            "no such hosted key on this node: {k} (FROST shares cannot be exported — no single \
+             node holds a whole namespace key)"
+        )),
+        other => other,
+    })?;
+
+    let envelope = if unsafe_plaintext {
+        tracing::warn!(
+            key_id,
+            path = %out.display(),
+            "writing an UNENCRYPTED private key — this file IS the key; move it to an HSM or \
+             offline media and shred the copy"
+        );
+        rutli_cosigner::export::export_plaintext(key_id, &key)?
+    } else {
+        let env_name = passphrase_env.ok_or_else(|| {
+            DaemonError::Config(
+                "pass --passphrase-env NAME (the env var holding the export passphrase), or \
+                 --unsafe-plaintext if you really want the key in the clear"
+                    .into(),
+            )
+        })?;
+        let passphrase = std::env::var(env_name).map_err(|_| {
+            DaemonError::Config(format!("export passphrase: env var {env_name} is not set"))
+        })?;
+        rutli_cosigner::export::export_encrypted(key_id, &key, &passphrase)?
+    };
+
+    // 0600 before any bytes land: an export must never be briefly world-readable.
+    write_private_file(out, &serde_json::to_vec_pretty(&envelope)?)?;
+    // Deliberately audible in the node's log: an export is a privileged, rare event, and the log is
+    // often the only record that a portable copy of a key now exists.
+    tracing::warn!(
+        key_id,
+        path = %out.display(),
+        encrypted = !unsafe_plaintext,
+        "EXPORTED a cluster-hosted key — a portable copy of this private key now exists outside \
+         the cluster; treat the artifact as the key itself"
+    );
+    println!(
+        "exported {key_id} -> {} ({})",
+        out.display(),
+        if unsafe_plaintext { "UNENCRYPTED" } else { "passphrase-protected" }
+    );
+    Ok(())
+}
+
+/// Operator command: read a portable artifact back into this node's keystore.
+fn import_key_command(
+    cfg: &Config,
+    input: &std::path::Path,
+    passphrase_env: Option<&str>,
+) -> Result<()> {
+    let keystore = offline_keystore(cfg)?;
+    let envelope: rutli_cosigner::export::ExportEnvelope =
+        serde_json::from_slice(&std::fs::read(input)?)?;
+
+    let passphrase = match passphrase_env {
+        Some(name) => Some(std::env::var(name).map_err(|_| {
+            DaemonError::Config(format!("import passphrase: env var {name} is not set"))
+        })?),
+        None => None,
+    };
+    let key = rutli_cosigner::export::import(&envelope, passphrase.as_deref())?;
+    let key_id = envelope.key_id.clone();
+
+    // Hosted keys are create-once-immutable: a key id maps to one key forever, because Canton
+    // rotates by minting a new id. Overwriting could destroy material the cluster already
+    // committed to, so refuse unless it is byte-identical.
+    if keystore.exists(&key_id) {
+        let existing = keystore.load_hosted(&key_id)?;
+        if existing.private_der != key.private_der {
+            return Err(DaemonError::KeyExists(format!(
+                "{key_id} already exists on this node with different material — refusing to \
+                 overwrite. Rotate to a new key id instead."
+            )));
+        }
+        println!("{key_id} is already present here and identical — nothing to do");
+        return Ok(());
+    }
+
+    keystore.save_hosted(&key_id, &key)?;
+    tracing::warn!(key_id = %key_id, path = %input.display(), "IMPORTED a cluster-hosted key");
+    println!(
+        "imported {key_id} ({}) — start the daemon; anti-entropy will replicate it to the cluster",
+        key.spec.as_str()
+    );
+    Ok(())
+}
+
+/// Create `path` with owner-only permissions BEFORE writing, so the contents are never briefly
+/// readable by other users on the host.
+fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut f = opts.open(path)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
     Ok(())
 }
 

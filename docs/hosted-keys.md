@@ -259,6 +259,57 @@ Two node-specific rules:
   hosted keys come back on their own: the next sweep pulls them, or the first request read-repairs
   them.
 
+### Export and import (portable copies)
+
+`backup` and `export` are different tools for different failures, and the distinction matters:
+
+| | `backup` | `export` |
+|---|---|---|
+| Artifact | sealed ciphertext, as stored on disk | the private key, passphrase-encrypted (or plaintext) |
+| Opens with | the cluster seal secret + the *same node id* | the export passphrase alone |
+| Restores into | that node, in that cluster | any node, **any cluster**, or another KMS |
+| Covers | routine node/cluster loss | loss of the seal secret; migration off this cluster |
+| If the artifact leaks | nothing — it is ciphertext keyed elsewhere | total: the file *is* the key |
+
+Use `backup` for everything routine. Reach for `export` only for the two cases `backup` genuinely
+cannot cover: **recovering after the seal master secret is lost**, and **moving a key to a different
+cluster or KMS**.
+
+```sh
+# Export (node stopped). The passphrase comes from the environment, never the command line.
+read -rs EXPORT_PASS && export EXPORT_PASS
+rutli-cosigner --config /etc/rutli/cosigner-1.json export-key \
+  --key-id rutli-enc-participant1-encryption-… \
+  --out /media/offline/rutli-enc.export --passphrase-env EXPORT_PASS
+
+# Import into a different cluster (node stopped). Start the daemon afterwards; anti-entropy
+# replicates the key to the rest of that cluster on its own.
+rutli-cosigner --config /etc/rutli/cosigner-1.json import-key \
+  --in /media/offline/rutli-enc.export --passphrase-env EXPORT_PASS
+```
+
+Properties worth knowing before you rely on them:
+
+- **Offline only, by design.** There is no export or import RPC and there must never be one. An
+  export RPC would turn a stolen driver certificate from an online, rate-limited, journalled decrypt
+  *oracle* into permanent silent possession of the key. As a CLI command it needs host access **and**
+  the seal secret — two inputs you already keep in separate trust domains.
+- **Encrypted by default.** Argon2id (64 MiB, t=3) → AES-256-GCM, with the header bound in as AAD so
+  an artifact cannot be relabelled to another key id or spec. Passphrases under 12 characters are
+  refused: this is the *only* protection on a portable private key. `--unsafe-plaintext` exists for
+  piping into another KMS's import tool on a trusted host, and logs a warning saying the file is the
+  key.
+- **Hosted keys only.** A FROST share is not a whole key — `export-key` refuses one. The namespace
+  key cannot leave the cluster, which is the entire point of it.
+- **Import never overwrites.** Hosted keys are create-once-immutable, so importing over an existing
+  id with *different* material is refused; an identical re-import is a no-op. Rotate to a new key id
+  instead.
+- **The export file is written `0600` before any bytes land**, so it is never briefly world-readable.
+  After the ceremony, treat it like key material: offline media, an HSM, or Shamir-split the
+  passphrase — an export sitting on a laptop is a private key sitting on a laptop.
+- **Both operations log at WARN** with the key id. That log line is often the only record that a
+  portable copy exists; ship it somewhere you will notice.
+
 ### When `rutli_anti_entropy_conflicts_total` increases
 
 **This is a page, not a warning** (`RutliHostedKeyConflict`, severity critical). It means two nodes

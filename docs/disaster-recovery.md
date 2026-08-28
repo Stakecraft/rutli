@@ -28,6 +28,7 @@ key, Canton can rotate them.
 | Suspected key compromise (≥ `t` shares may be exposed) | Mitigate, not undo | The key cannot be rotated. **Proactively refresh** (invalidates pre-refresh shares) and escalate to a governance decision on the node's future. See `docs/phase-2-frost.md`. |
 | A cosigner rebuilt, its **cluster-hosted** keys gone with it | Yes, automatically | It pulls them back from a peer — read-repair on demand, anti-entropy within one sweep (§3c). No backup needed while ≥ 1 cosigner still holds the key. |
 | Every copy of a **cluster-hosted** key lost (whole cluster, no backup) | Only from backups | Restore **one** node's own backup onto that node (§3); the cluster re-replicates from it. With no backup the key is gone — rotate in Canton and accept §3b's bounded data gap. |
+| Seal **master secret** lost (backups intact but unopenable) | Only from an export | A sealed backup is useless without the master secret. An `export-key` artifact taken beforehand is the only recovery — see §3d. Without either, the key is gone: rotate in Canton and accept §3b's bounded gap. |
 | A **cluster-hosted** encryption key exposed | Mitigate, not undo | Rotate the key in Canton topology (the namespace key signs it; node identity is untouched). Rotation protects future traffic only — recorded traffic encrypted to the old key stays readable to whoever holds it. |
 
 ## §1 Restore a single cosigner from backup
@@ -215,6 +216,31 @@ rather than silently continuing with a wrong or empty key set:
   destroy bytes on a COW filesystem, a wear-levelled SSD, a volume snapshot, or an existing backup.
   True destruction requires rotating the master secret and re-sealing every live key.
 
+## §3d Recovering with an exported key (seal secret lost, or moving clusters)
+
+`backup` cannot help in two cases: the seal master secret is gone (every sealed file is ciphertext
+you can no longer open), or you need the key in a *different* cluster. An export artifact covers
+both, because it is protected by its own passphrase rather than by the cluster's seal secret.
+
+This only works if the export was taken **in advance**. Decide during the key ceremony whether you
+want one; there is no way to produce it after the seal secret is lost.
+
+```sh
+# On any node of the target cluster, stopped:
+read -rs EXPORT_PASS && export EXPORT_PASS
+rutli-cosigner --config /etc/rutli/cosigner-1.json import-key \
+  --in /media/offline/rutli-enc.export --passphrase-env EXPORT_PASS
+# Start the daemon; anti-entropy replicates the key to the rest of the cluster.
+```
+
+Verify before declaring recovery: the participant's published encryption public key in Canton
+topology must match `PublicKey` for that key id on the cluster. If it does not, the node is
+advertising a key the cluster cannot serve, and you are in §3b instead.
+
+Applies to hosted keys only. A FROST share cannot be exported, so the namespace key's recovery path
+remains §1/§2/§3 — backups or repair from survivors. Full mechanics and the security tradeoff:
+[`hosted-keys.md`](hosted-keys.md) §4.
+
 ## §4 What you MUST have in place before go-live
 
 - **≥ `t` cosigner share backups**, encrypted (sealed) and stored in ≥ 2 separated locations. This is
@@ -224,6 +250,9 @@ rather than silently continuing with a wrong or empty key set:
   cluster test `a_lost_node_recovers_from_a_share_backup_and_the_cluster_signs` is the automated
   analogue).
 - A **proactive-refresh schedule** so a share exposed at any point has a bounded useful lifetime.
+- A decision, recorded, on whether to take an **`export-key` artifact** for each hosted key. It is
+  the only recovery from a lost seal master secret, and it cannot be produced retroactively — but it
+  is also a portable copy of a private key, so storing one is a deliberate tradeoff, not a default.
 - A **key-ceremony record**: who ran DKG, the `t`/`n` chosen, cosigner host/account/region for each
   share, and where each backup + seal secret lives. Keep it with your BCP documentation.
 - **If hosted keys are enabled:** the same backup discipline covers them for free, but the input that

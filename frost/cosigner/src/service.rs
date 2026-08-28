@@ -21,6 +21,10 @@ pub struct SignerSvc {
     /// When set, only these client-cert CNs may call the sensitive Signer RPCs. `None` = open
     /// (mTLS still enforced by the transport). See `Config::signer_allowlist`.
     pub allowed_cns: Option<Arc<HashSet<String>>>,
+    /// How many cosigners must hold a new hosted key before it is reported created, from
+    /// `hosted_keys.write_quorum`. Carried here rather than read from a constant so the configured
+    /// value is actually honoured.
+    pub hosted_write_quorum: usize,
 }
 
 impl SignerSvc {
@@ -157,7 +161,7 @@ impl Signer for SignerSvc {
             &self.peers,
             &r.key_id,
             spec,
-            orchestrator::DEFAULT_WRITE_QUORUM,
+            self.hosted_write_quorum,
         )
         .await;
         record_hosted_op("generate", result.is_ok());

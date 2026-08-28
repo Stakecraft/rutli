@@ -30,6 +30,8 @@ aes-gcm = { workspace = true }
 hkdf = { workspace = true }
 sha2 = { workspace = true }
 zeroize = { workspace = true }
+argon2 = { workspace = true }
+rand = { workspace = true }
 x509-parser = { workspace = true }
 metrics = { workspace = true }
 aws-lc-rs = { workspace = true }
