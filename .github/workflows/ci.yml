@@ -114,4 +114,9 @@ jobs:
         run: scripts/publish-canton-deps.sh --full "$CANTON_TAG"
 
       - name: Conformance tests
+        # Canton >= 3.6 refuses to pick a protocol version implicitly when CI=true (which GitHub
+        # Actions always sets) — CANTON_AUTOMATIC_PROTOCOL_VERSION restores the local behaviour of
+        # using ProtocolVersion.latest.
+        env:
+          CANTON_AUTOMATIC_PROTOCOL_VERSION: "1"
         run: CONFORMANCE=1 sbt -batch driver/test
