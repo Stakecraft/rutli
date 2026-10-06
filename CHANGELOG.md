@@ -5,6 +5,10 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.3.0] — 2026-10-06
+
 ### Added
 - **Cluster-hosted keys** (`hosted_keys` on the cosigners, `frost.hosted-keys` on the driver): the
   cluster now holds Canton's non-FROST key material too — RSA-2048-OAEP-SHA256 encryption keypairs
@@ -116,6 +120,17 @@ All notable changes to Rütli are documented here. Format loosely follows
   pulled the published image instead of building the working tree, so it could have "verified" a
   commit against a released binary. The smoke now also dumps container state and logs on failure;
   without that, a startup crash appeared only as `container ... is unhealthy`.
+- **Weekly conformance CI rotted twice over while the tree was untouched.** (1) Digital Asset
+  prunes old snapshots from the `public-unstable` dpm registry, so the daml-components version
+  pinned *inside* the Canton `v3.5.6` tag stopped existing and `damlInstall` died with "not found"
+  whenever the ivy cache had to be rebuilt; `scripts/publish-canton-deps.sh` now overrides the pin
+  with a still-published version (bump it when the weekly run reports the next pruning;
+  `DAML_COMPONENTS_VERSION=upstream` restores Canton's own pin). (2) Rust 1.99's clippy grew
+  `double_must_use`, which fires inside prost/tonic-generated code; the generated `pb` module is
+  now lint-exempt (`#[allow(clippy::all)]`) — it is codegen we cannot fix, and `-D warnings` stays
+  on for all hand-written code. Also fixed en route: the module-closure walk in
+  `publish-canton-deps.sh` silently died under `set -e`/`pipefail` when an ivy.xml had no
+  `com.daml` dependencies at all (e.g. `wartremover-annotations`).
 
 ### Security
 - **The mesh Peer API was unauthenticated (critical; affects ≤ 0.2.0).** Only the Signer API
@@ -320,5 +335,6 @@ not audited. Do not place production authority keys behind it.
 - HSM backend validated only against SoftHSM.
 - No third-party security audit.
 
+[0.3.0]: https://github.com/Stakecraft/rutli/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Stakecraft/rutli/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Stakecraft/rutli/releases/tag/v0.1.0
