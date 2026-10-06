@@ -41,10 +41,28 @@ if [[ ! -d "$WORK/.git" ]]; then
 else
   echo "Reusing checkout at $WORK; fetching tag $TAG ..."
   git -C "$WORK" fetch --depth 1 origin "refs/tags/$TAG:refs/tags/$TAG" || true
+  git -C "$WORK" reset --hard  # drop a previous run's daml-components override before switching
   git -C "$WORK" checkout "$TAG"
 fi
 
 cd "$WORK"
+
+# Digital Asset prunes old snapshots from the public-unstable dpm registry, so the daml components
+# version pinned inside a Canton tag (project/project/DamlVersions.scala) eventually stops
+# existing and `damlInstall` dies with "not found" — the Canton tag itself never changes, the
+# registry rots underneath it. Override the pin with a version that is still published. Bump the
+# default below when the weekly conformance job reports the current one pruned; set
+# DAML_COMPONENTS_VERSION=upstream to keep Canton's own pin.
+DAML_COMPONENTS_VERSION="${DAML_COMPONENTS_VERSION:-3.6.0-snapshot.20260915.14804.0.v53478765}"
+if $FULL && [[ "$DAML_COMPONENTS_VERSION" != "upstream" ]]; then
+  DV="project/project/DamlVersions.scala"
+  upstream_pin=$(grep -oE 'val version: String = "[^"]+"' "$DV" | sed -E 's/.*"([^"]+)".*/\1/')
+  if [[ "$upstream_pin" != "$DAML_COMPONENTS_VERSION" ]]; then
+    echo "Overriding Canton's daml components pin: $upstream_pin -> $DAML_COMPONENTS_VERSION"
+    sed -E -i.bak 's/(val version: String = ")[^"]+(")/\1'"$DAML_COMPONENTS_VERSION"'\2/' "$DV"
+    rm -f "$DV.bak"
+  fi
+fi
 
 # NOTE: the in-repo fallback version is used for local publishing (e.g. 3.6.0-SNAPSHOT at tag
 # v3.5.6); Digital Asset injects real release versions only in CI. Keep build.sbt's cantonVersion
@@ -62,9 +80,11 @@ sbt -batch "kms-driver-testing/publishLocal"
 # automatically. Walk the local ivy dependency graph and publish missing com.daml modules until the
 # closure is complete. Artifact names match sbt project ids in the Canton build.
 for i in 1 2 3 4 5 6 7 8; do
+  # `|| true`: an ivy.xml with no com.daml deps at all (e.g. wartremover-annotations) makes grep
+  # exit 1, which under set -e/pipefail would silently kill the whole script mid-walk.
   missing=$(for f in ~/.ivy2/local/com.daml/*/*/ivys/ivy.xml; do
     grep -oE 'org="com\.daml" name="[a-zA-Z0-9._-]+"' "$f" |
-      sed -E 's/.*name="([a-zA-Z0-9._-]+)"/\1/'
+      sed -E 's/.*name="([a-zA-Z0-9._-]+)"/\1/' || true
   done | sort -u | while read -r m; do
     [ -d ~/.ivy2/local/com.daml/"$m" ] || echo "${m%_2.13}"
   done | sort -u)

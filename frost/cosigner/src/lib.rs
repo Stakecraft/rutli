@@ -30,6 +30,10 @@ pub mod tls;
 pub mod wrap;
 
 /// Generated protobuf/tonic types.
+// Lint-exempt: this module is entirely prost/tonic codegen we cannot change, and new clippy
+// releases keep adding lints that fire inside it (e.g. double_must_use on async_trait methods
+// under Rust 1.99).
+#[allow(clippy::all)]
 pub mod pb {
     tonic::include_proto!("rutli.cosigner.v1");
 }
