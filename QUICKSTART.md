@@ -109,13 +109,14 @@ For **mutual TLS + sealed shares**, use `docker-compose.tls.yml` (see
 Path C moves the namespace key off the participant, but its **encryption** and **symmetric** keys
 still live behind a local delegate. The cosigners can hold those too, which leaves the participant
 with no private key material at all. That needs the mTLS cluster — the `config-tls/` configs are the
-ones that enable `hosted_keys`, and hosted keys are refused on a plaintext cluster — and a build
-from the working tree, since the published `0.2.1` image predates them:
+ones that enable `hosted_keys`, and hosted keys are refused on a plaintext cluster — and the
+published `ghcr.io/stakecraft/rutli-cosigner:0.3.0` image, which the compose file pulls by default
+(add `--build` to build from the working tree instead):
 
 ```sh
 scripts/gen-frost-certs.sh 3 deploy/frost/certs
 export RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
-docker compose -f deploy/frost/docker-compose.tls.yml up -d --build
+docker compose -f deploy/frost/docker-compose.tls.yml up -d
 
 CANTON_HOME=/path/to/canton-open-source-3.5.6 \
   CANTON_CONF=canton-hosted.conf \

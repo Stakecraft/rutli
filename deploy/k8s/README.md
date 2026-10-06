@@ -143,7 +143,7 @@ See [`docs/hosted-keys.md`](../../docs/hosted-keys.md).
 
 ## Notes / hardening
 
-- Image tag defaults to `0.2.1`. After you push, pin by digest:
+- Image tag defaults to `0.3.0`. After you push, pin by digest:
   `kustomize edit set image ghcr.io/stakecraft/rutli-cosigner@sha256:…`
 - Required pod anti-affinity + zone topology spread are in the StatefulSet.
 - Label the Canton **namespace** `rutli.io/client-ns=true` and the participant pod

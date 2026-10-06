@@ -9,8 +9,8 @@ threshold: 2
 
 image:
   repository: ghcr.io/stakecraft/rutli-cosigner
-  # Multi-arch index digest for v0.2.1 (amd64 + arm64). Retag/retarget carefully.
-  tag: "0.2.1@sha256:92e68eac64bcfea88147749719fa4c34fe91c3af368e2bce06f67ac686a05ef4"
+  # Multi-arch index digest for v0.3.0 (amd64 + arm64). Retag/retarget carefully.
+  tag: "0.3.0@sha256:bf35937ada817ec7f898b3d793a4fc3b0fa87536092ee09637988d7f287815bd"
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []

@@ -1,8 +1,8 @@
 # Helm chart: rutli-cosigner
 
 Deploys a `t`-of-`n` FROST cosigner StatefulSet with mTLS, sealed shares, PDB, and NetworkPolicy.
-Default image: `ghcr.io/stakecraft/rutli-cosigner:0.2.1` pinned by multi-arch digest
-(`sha256:92e68eac64bcfea88147749719fa4c34fe91c3af368e2bce06f67ac686a05ef4`). Also tagged `latest` on GHCR.
+Default image: `ghcr.io/stakecraft/rutli-cosigner:0.3.0` pinned by multi-arch digest
+(`sha256:bf35937ada817ec7f898b3d793a4fc3b0fa87536092ee09637988d7f287815bd`). Also tagged `latest` on GHCR.
 
 ## Prerequisites
 
@@ -31,7 +31,7 @@ kubectl -n rutli create secret generic rutli-cosigner-tls \
 kubectl -n rutli create secret generic rutli-seal \
   --from-literal=RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
 
-# 3. Install (values already pin the v0.2.1 digest)
+# 3. Install (values already pin the v0.3.0 digest)
 helm upgrade --install rutli deploy/helm/rutli-cosigner -n rutli
 ```
 
@@ -44,7 +44,7 @@ Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org A
 | Key | Default | Notes |
 |---|---|---|
 | `image.repository` | `ghcr.io/stakecraft/rutli-cosigner` | |
-| `image.tag` | `0.2.1@sha256:92e68e…a05ef4` | Digest-pinned |
+| `image.tag` | `0.3.0@sha256:bf3593…7815bd` | Digest-pinned |
 | `replicaCount` / `threshold` | `3` / `2` | Must match cert count |
 | `fullnameOverride` | `rutli-cosigner` | Peer DNS base |
 | `tlsSecretName` / `sealSecretName` | `rutli-cosigner-tls` / `rutli-seal` | Pre-created |

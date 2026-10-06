@@ -136,7 +136,7 @@ At startup the driver reports what the cluster actually serves — it asks via t
 rather than hardcoding a spec list, so adding a key type later needs no driver release:
 
 ```
-Loaded driver rutli (API v1) build 0.2.1
+Loaded driver rutli (API v1) build 0.3.0
 FROST: mutual TLS channel to localhost:9101
 FROST: mutual TLS channel to localhost:9102
 FROST: mutual TLS channel to localhost:9103
