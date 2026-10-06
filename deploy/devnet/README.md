@@ -21,15 +21,15 @@ remaining keys off the participant host entirely.
 
 ## Prerequisites
 
-1. **Canton 3.5.x community release.** Download the `v3.5.6` release, extract it, and point
+1. **Canton 3.6.x community release.** Download the `v3.6.1` release, extract it, and point
    `CANTON_HOME` at the extracted directory:
-   - https://github.com/digital-asset/canton/releases/tag/v3.5.6
+   - https://github.com/digital-asset/canton/releases/tag/v3.6.1
    ```sh
-   export CANTON_HOME=/path/to/canton-open-source-3.5.6
+   export CANTON_HOME=/path/to/canton-open-source-3.6.1
    ```
 2. **The driver fat jar.** From the repo root:
    ```sh
-   scripts/publish-canton-deps.sh v3.5.6   # first time only: resolve the Canton API artifacts
+   scripts/publish-canton-deps.sh v3.6.1   # first time only: resolve the Canton API artifacts
    sbt driver/assembly                     # -> driver/target/scala-2.13/rutli-driver.jar
    ```
 3. **A cosigner cluster**, for `canton-frost.conf` and `canton-hosted.conf` only — see each section

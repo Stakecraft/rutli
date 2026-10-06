@@ -10,7 +10,7 @@ on:
     - cron: "0 6 * * 1"
 
 env:
-  CANTON_TAG: v3.5.6
+  CANTON_TAG: v3.6.1
   SBT_OPTS: "-Xmx4g -Xss8m"
 
 jobs:

@@ -13,11 +13,11 @@
 #             The daml-lf modules need the `dpm` binary on PATH:
 #             https://github.com/digital-asset/dpm/releases (single static binary).
 #
-# Usage:  scripts/publish-canton-deps.sh [--full] [CANTON_TAG]     (default tag: v3.5.6)
+# Usage:  scripts/publish-canton-deps.sh [--full] [CANTON_TAG]     (default tag: v3.6.1)
 set -euo pipefail
 
 FULL=false
-TAG="v3.5.6"
+TAG="v3.6.1"
 for arg in "$@"; do
   case "$arg" in
     --full) FULL=true ;;
@@ -53,7 +53,7 @@ cd "$WORK"
 # registry rots underneath it. Override the pin with a version that is still published. Bump the
 # default below when the weekly conformance job reports the current one pruned; set
 # DAML_COMPONENTS_VERSION=upstream to keep Canton's own pin.
-DAML_COMPONENTS_VERSION="${DAML_COMPONENTS_VERSION:-3.6.0-snapshot.20260915.14804.0.v53478765}"
+DAML_COMPONENTS_VERSION="${DAML_COMPONENTS_VERSION:-3.7.0-snapshot.20260929.14837.0.v5b67d18b}"
 if $FULL && [[ "$DAML_COMPONENTS_VERSION" != "upstream" ]]; then
   DV="project/project/DamlVersions.scala"
   upstream_pin=$(grep -oE 'val version: String = "[^"]+"' "$DV" | sed -E 's/.*"([^"]+)".*/\1/')
@@ -64,8 +64,8 @@ if $FULL && [[ "$DAML_COMPONENTS_VERSION" != "upstream" ]]; then
   fi
 fi
 
-# NOTE: the in-repo fallback version is used for local publishing (e.g. 3.6.0-SNAPSHOT at tag
-# v3.5.6); Digital Asset injects real release versions only in CI. Keep build.sbt's cantonVersion
+# NOTE: the in-repo fallback version is used for local publishing (e.g. 3.7.0-SNAPSHOT at tag
+# v3.6.1); Digital Asset injects real release versions only in CI. Keep build.sbt's cantonVersion
 # aligned with what lands in ~/.ivy2/local/com.daml/.
 sbt -batch "kms-driver-api/publishLocal"
 
@@ -79,20 +79,30 @@ sbt -batch "kms-driver-testing/publishLocal"
 # kms-driver-testing's POM references sibling Canton modules that publishLocal does NOT publish
 # automatically. Walk the local ivy dependency graph and publish missing com.daml modules until the
 # closure is complete. Artifact names match sbt project ids in the Canton build.
+#
+# The walk is VERSION-scoped: a module published for an older Canton line (say 3.6.0-SNAPSHOT from
+# tag v3.5.6) must not satisfy the check when the current tag publishes 3.7.0-SNAPSHOT, so both the
+# ivy.xml scan and the existence test pin the version this checkout publishes as.
+PUBLISH_VER=$(sed -nE 's/.*getOrElse\("RELEASE_SUFFIX", *"([^"]+)"\).*/\1/p' version.sbt)
+if [[ -z "$PUBLISH_VER" ]]; then
+  echo "ERROR: could not read the publish version from $WORK/version.sbt" >&2
+  exit 1
+fi
+echo "Walking the module closure at version $PUBLISH_VER"
 for i in 1 2 3 4 5 6 7 8; do
   # `|| true`: an ivy.xml with no com.daml deps at all (e.g. wartremover-annotations) makes grep
   # exit 1, which under set -e/pipefail would silently kill the whole script mid-walk.
-  missing=$(for f in ~/.ivy2/local/com.daml/*/*/ivys/ivy.xml; do
+  missing=$(for f in ~/.ivy2/local/com.daml/*/"$PUBLISH_VER"/ivys/ivy.xml; do
+    [ -e "$f" ] || continue
     grep -oE 'org="com\.daml" name="[a-zA-Z0-9._-]+"' "$f" |
       sed -E 's/.*name="([a-zA-Z0-9._-]+)"/\1/' || true
   done | sort -u | while read -r m; do
-    [ -d ~/.ivy2/local/com.daml/"$m" ] || echo "${m%_2.13}"
+    [ -d ~/.ivy2/local/com.daml/"$m"/"$PUBLISH_VER" ] || echo "${m%_2.13}"
   done | sort -u)
 
-  # scalatest-utils has publish/skip upstream and only ever appears test-scoped in the POMs;
-  # coursier does not resolve test-scoped transitive deps, so it is safe to ignore.
-  missing=$(echo "$missing" | grep -v '^scalatest-utils$' || true)
-
+  # (Historical note: at tag v3.5.6 scalatest-utils had publish/skip upstream and was excluded
+  # here; since v3.6.1 it is publishable AND a compile-scoped dep of community-testing, so the
+  # exclusion had to go.)
   if [[ -z "$missing" ]]; then
     echo "Module closure complete."
     break

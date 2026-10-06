@@ -5,7 +5,21 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+- **Conformance target bumped to Canton v3.6.1** — the version Splice DevNet now bundles for
+  validators (the previous target, v3.5.6, is 13 patches behind its own line and superseded by the
+  3.6 releases). The driver SPI (`kms-driver-api`) is byte-identical between v3.5.6 and v3.6.1, so
+  the driver jar is unchanged and works on both lines; local conformance is 65/65 green against
+  the v3.6.1 module closure. The bump surfaced three upstream drifts, all absorbed here:
+  - Canton 3.6.1 builds on **Scala 2.13.18**, and SIP-51 forbids compiling against its artifacts
+    with an older 2.13 compiler — `scalaVersion` bumped from 2.13.16.
+  - `scalatest-utils` lost its upstream `publish/skip` and became a *compile*-scoped dependency of
+    `community-testing`, so the closure walk's hardcoded exclusion of it had to go.
+  - The module-closure walk in `publish-canton-deps.sh` is now **version-scoped**: modules
+    published from an older Canton line (3.6.0-SNAPSHOT) no longer mask missing ones for the
+    current line (3.7.0-SNAPSHOT) on machines that have built both.
+  Docs now point at `canton-open-source-3.6.1`; the daml-components override default moved to a
+  snapshot that v3.6.1 itself pins (`3.7.0-snapshot.20260929.14837.0.v5b67d18b`).
 
 ## [0.3.0] — 2026-10-06
 

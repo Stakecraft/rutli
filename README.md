@@ -116,7 +116,7 @@ not the past. Threshold RSA is permanently out of scope; the reasoning, and the 
 Full walkthrough in **[QUICKSTART.md](QUICKSTART.md)**. The short version:
 
 **Prerequisites:** JDK 17, [sbt](https://www.scala-sbt.org/), Docker, [Rust](https://rustup.rs/), and
-a [Canton 3.5.6](https://github.com/digital-asset/canton/releases/tag/v3.5.6) release.
+a [Canton 3.6.1](https://github.com/digital-asset/canton/releases/tag/v3.6.1) release.
 
 ```sh
 git clone https://github.com/Stakecraft/rutli.git && cd rutli
@@ -125,9 +125,9 @@ git clone https://github.com/Stakecraft/rutli.git && cd rutli
 ( cd frost && cargo test )
 
 # 2. Build the driver and run a Canton node on it:
-scripts/publish-canton-deps.sh v3.5.6      # fetch the Canton KMS API (not on Maven Central), once
+scripts/publish-canton-deps.sh v3.6.1      # fetch the Canton KMS API (not on Maven Central), once
 sbt driver/assembly                        # -> driver/target/scala-2.13/rutli-driver.jar
-export CANTON_HOME=/path/to/canton-open-source-3.5.6
+export CANTON_HOME=/path/to/canton-open-source-3.6.1
 deploy/devnet/up.sh                        # boots a participant whose keys live in the driver
 
 # 3. Put the namespace key in a real 3-node MPC cluster:

@@ -7,7 +7,9 @@
 //   (b) Digital Asset's JFrog Artifactory, if you have access — set CANTON_ARTIFACTORY to the
 //       exact repo URL from the KMS Driver guide.
 
-ThisBuild / scalaVersion := "2.13.16"
+// Must be >= the scala-library Canton's artifacts were built with (SIP-51, backwards-only binary
+// compatibility). Canton v3.6.1 builds on 2.13.18.
+ThisBuild / scalaVersion := "2.13.18"
 ThisBuild / organization := "com.stakecraft"
 ThisBuild / version      := "0.3.0"
 
@@ -16,14 +18,16 @@ ThisBuild / version      := "0.3.0"
 ThisBuild / javacOptions  ++= Seq("--release", "17")
 ThisBuild / scalacOptions ++= Seq("-release", "17")
 
-// Pin to the Canton release the target nodes run. Latest stable at time of writing: tag v3.5.6.
-// NOTE on coordinates: building the v3.5.6 tag locally publishes the artifacts as
-//   com.daml %% kms-driver-api % 3.6.0-SNAPSHOT
+// Pin to the Canton release the target nodes run. Splice DevNet bundles Canton 3.6.1 for
+// validators (2026-10), so the conformance target is tag v3.6.1. The driver SPI (kms-driver-api)
+// is byte-identical between v3.5.6 and v3.6.1, so the driver itself works on both lines.
+// NOTE on coordinates: building the v3.6.1 tag locally publishes the artifacts as
+//   com.daml %% kms-driver-api % 3.7.0-SNAPSHOT
 // (the in-repo fallback version string; Digital Asset injects real release versions only in CI via
-// RELEASE_SUFFIX). The artifacts ARE from the v3.5.6 tag. DA's Artifactory publishes the same
+// RELEASE_SUFFIX). The artifacts ARE from the v3.6.1 tag. DA's Artifactory publishes the same
 // modules under release versions — adjust cantonOrg/cantonVersion if resolving from there.
 val cantonOrg       = "com.daml"
-val cantonVersion   = "3.6.0-SNAPSHOT"
+val cantonVersion   = "3.7.0-SNAPSHOT"
 val bouncyCastleVer = "1.78.1"
 val grpcVersion     = "1.82.1"
 val protobufVersion = "4.29.3"
@@ -40,7 +44,7 @@ lazy val driver = (project in file("driver"))
       .toSeq,
     libraryDependencies ++= Seq(
       cantonOrg %% "kms-driver-api" % cantonVersion,
-      // Versions aligned to what kms-driver-api (v3.5.6) was built against — see its ivy.xml:
+      // Versions aligned to what kms-driver-api (v3.6.1) was built against — see its ivy.xml:
       // pureconfig-core 0.14.0, opentelemetry-api 1.60.1. The umbrella pureconfig artifact adds
       // pureconfig-generic, needed for the semiauto config derivation in the factory.
       "io.opentelemetry"       % "opentelemetry-api" % "1.60.1",

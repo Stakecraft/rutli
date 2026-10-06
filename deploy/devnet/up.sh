@@ -3,15 +3,15 @@
 # then runs the smoke-test bootstrap script.
 #
 # Prereqs:
-#   - A Canton 3.5.x community release extracted somewhere, with CANTON_HOME pointing at it.
-#     Download: https://github.com/digital-asset/canton/releases  (tag v3.5.6)
+#   - A Canton 3.6.x community release extracted somewhere, with CANTON_HOME pointing at it.
+#     Download: https://github.com/digital-asset/canton/releases  (tag v3.6.1)
 #   - The driver fat jar built:  sbt driver/assembly
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
 
-: "${CANTON_HOME:?Set CANTON_HOME to an extracted Canton 3.5.x release directory}"
+: "${CANTON_HOME:?Set CANTON_HOME to an extracted Canton 3.6.x release directory}"
 
 DRIVER_JAR="$REPO_ROOT/driver/target/scala-2.13/rutli-driver.jar"
 if [[ ! -f "$DRIVER_JAR" ]]; then

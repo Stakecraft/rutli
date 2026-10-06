@@ -14,12 +14,12 @@ Three paths, fastest first. Each is copy-pasteable and ends in something you can
 - **sbt** (`brew install sbt`) — paths B, C.
 - **Rust** (`rustup`) — path A, or building the cluster from source in C.
 - **Docker** — path C (running the cluster).
-- **Canton 3.5.6** community release for paths B, C:
+- **Canton 3.6.1** community release for paths B, C:
   ```sh
   # download + extract, then:
-  export CANTON_HOME=/path/to/canton-open-source-3.5.6
+  export CANTON_HOME=/path/to/canton-open-source-3.6.1
   ```
-  https://github.com/digital-asset/canton/releases/tag/v3.5.6
+  https://github.com/digital-asset/canton/releases/tag/v3.6.1
 
 ---
 
@@ -47,13 +47,13 @@ is the in-process software one (testing only — no cluster needed).
 
 ```sh
 # 1. Resolve the Canton KMS driver API (not on Maven Central) into your local ivy repo — once.
-scripts/publish-canton-deps.sh v3.5.6
+scripts/publish-canton-deps.sh v3.6.1
 
 # 2. Build the driver jar.
 sbt driver/assembly            # -> driver/target/scala-2.13/rutli-driver.jar
 
 # 3. Boot a devnet participant on the driver and run the smoke test.
-CANTON_HOME=/path/to/canton-open-source-3.5.6 deploy/devnet/up.sh
+CANTON_HOME=/path/to/canton-open-source-3.6.1 deploy/devnet/up.sh
 ```
 
 You'll see the participant reach `initialized` and print its identity + the keys the driver made:
@@ -82,10 +82,10 @@ whole key.
 docker compose -f deploy/frost/docker-compose.yml up --build -d
 
 # 2. Build the driver jar (skip if you did Path B).
-scripts/publish-canton-deps.sh v3.5.6 && sbt driver/assembly
+scripts/publish-canton-deps.sh v3.6.1 && sbt driver/assembly
 
 # 3. Boot the participant pointed at the cluster (backend = frost). DKG runs on first init.
-CANTON_HOME=/path/to/canton-open-source-3.5.6 \
+CANTON_HOME=/path/to/canton-open-source-3.6.1 \
   CANTON_CONF=canton-frost.conf \
   deploy/devnet/up.sh
 ```
@@ -118,7 +118,7 @@ scripts/gen-frost-certs.sh 3 deploy/frost/certs
 export RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
 docker compose -f deploy/frost/docker-compose.tls.yml up -d
 
-CANTON_HOME=/path/to/canton-open-source-3.5.6 \
+CANTON_HOME=/path/to/canton-open-source-3.6.1 \
   CANTON_CONF=canton-hosted.conf \
   deploy/devnet/up.sh          # driver: hosted-keys = true, delegate = "none"
 ```
