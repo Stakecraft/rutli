@@ -21,6 +21,9 @@ use crate::pb::peer_client::PeerClient;
 use crate::pb;
 use crate::Result;
 
+// async_trait rewrites every method to return a `#[must_use]` boxed future while our `Result` is
+// already `#[must_use]`, which trips clippy 1.99's `double_must_use` inside the macro expansion.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait PeerApi: Send + Sync {
     fn identifier(&self) -> Identifier;
