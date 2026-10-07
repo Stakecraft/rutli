@@ -40,8 +40,13 @@ if [[ -z "$errs" ]] || awk "BEGIN{exit !($errs == 0)}"; then pass "sign errors i
 cerr="$(q 'sum(increase(rutli_ceremony_requests_total{result="error"}[24h]))')"
 if [[ -z "$cerr" ]] || awk "BEGIN{exit !($cerr == 0)}"; then pass "ceremony failures in last 24h" "0"; else fail "ceremony failures in last 24h" "$cerr"; fi
 
-# 5. p99 sign latency under 1s.
+# 5. p99 sign latency under 1s. Histogram buckets when the exporter emits them; otherwise the
+#    per-node summary quantile (worst node) — 0.3.x cosigners export a summary, not a histogram.
 p99="$(q 'histogram_quantile(0.99, sum by (le) (rate(rutli_sign_duration_seconds_bucket[24h])))')"
+if [[ -z "$p99" ]]; then
+  p99="$(curl -sf --get "$PROM/api/v1/query" --data-urlencode 'query=max(rutli_sign_duration_seconds{result="ok",quantile="0.99"})' \
+    | jq -r '.data.result[0].value[1] // empty' 2>/dev/null || true)"
+fi
 if [[ -z "$p99" ]]; then pass "sign p99 latency" "no data yet"; elif awk "BEGIN{exit !($p99 < 1)}"; then pass "sign p99 latency" "${p99}s"; else fail "sign p99 latency" "${p99}s >= 1s"; fi
 
 # 6. No stuck sessions.
