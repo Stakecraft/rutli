@@ -106,3 +106,35 @@ Signing outage = incident even on DevNet (practice like production). A failed ce
 (`result="error"`) is never retried blind: collect all three cosigner logs first — the guard
 fails closed, so state is safe, but the cause must be understood. Escalation, key-loss and
 compromise procedures: `docs/disaster-recovery.md`.
+
+### 2026-10-07 — one unreadable key store, total signing outage
+
+**What happened.** A backup job remounted cosigner-0's RWO data volume and `/data/keys` became
+unreadable to the daemon (`Permission denied (os error 13)`). The pod stayed `READY 1/1` — the
+probes were TCP-only and `Signer.Health` always answered ok — and every `Sign`/`Dkg` it led failed
+with `INTERNAL`. The driver only failed over on UNAVAILABLE / DEADLINE_EXCEEDED and cosigner-0 was
+first in `frost.endpoints`, so all 54 signs in the window failed while cosigners 1 and 2 were
+healthy. No key material was at risk; the outage was pure availability.
+
+**What the investigation added.** Driver failover alone would not have restored signing. A
+cosigner that has signed since start-up keeps its share cached, so after its volume broke it still
+passed round 1 (`NonceStore::is_consumed` read EACCES as "not burnt") and failed in round 2 on the
+nonce-marker write — and with peers tried in identifier order it sat in *every* leader's quorum.
+Any leader, not just cosigner-0, would have failed.
+
+**What changed.** Driver: a leader-side `INTERNAL`/`UNKNOWN` is "this leader is sick" for
+operations that are safe to re-issue through another leader (sign, public-key and key-exists
+reads, hosted-key decrypt/symmetric reads) — never for DKG, hosted key generation or delete; each
+hop is logged at WARN and recorded as `failover=<from>→<to> reason=<CODE>` in the operation's
+audit entry; the driver keeps leading from the last node that answered. Cosigner: the nonce lookup
+fails closed, and a node whose key-store probe last failed refuses round 1 and declines to lead
+`Sign`/`Dkg`/`Refresh` with `UNAVAILABLE`, so leaders sign around it with the other two. Its
+`Health` and the new `rutli-cosigner health` readiness probe fail when the key store cannot be
+listed, opened or written; `rutli_keystore_unreadable` / `RutliKeystoreUnreadable` (critical)
+page on it, and `rutli_sign_round1_skips_total` climbs on the healthy leaders.
+
+**If it fires again.** `kubectl -n rutli get pods` (the sick node shows `READY 0/1`), then
+`kubectl exec … -- ls -la /data/keys` and `mount | grep /data` on that pod; find what touched the
+PVC (CronJobs, operators). Signing continues on the other two nodes but the margin is zero: fix
+the volume before anything else, and do not run a ceremony until all three are ready. Grep the
+audit log for `failover=` to see exactly which operations were re-issued and where.

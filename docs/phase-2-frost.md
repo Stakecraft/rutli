@@ -35,9 +35,18 @@
 >   `scripts/gen-frost-certs.sh`; configs in `deploy/frost/config-tls`.
 >
 > - **Availability: driver-side failover (done).** The driver is configured with the full cosigner
->   roster (`frost.endpoints`) and fails over across them — any live cosigner leads a request; a
->   node is skipped only when unreachable (UNAVAILABLE/DEADLINE_EXCEEDED), never masking a real
->   application error. Verified: signing succeeds with a dead endpoint prepended to the roster.
+>   roster (`frost.endpoints`) and fails over across them — any live cosigner leads a request.
+>   Operations safe to re-issue through another leader (sign, group/public key, key info, decrypt,
+>   symmetric crypto) skip a node that is unreachable (`UNAVAILABLE`/`DEADLINE_EXCEEDED`) **or**
+>   that answers but cannot do its job (`INTERNAL`/`UNKNOWN`, e.g. an unreadable key store);
+>   writes (hosted `GenerateKey`, `DeleteKey`) fail over only when the node is down, and DKG only
+>   on a refused connection. Any other status is a real application answer and is never masked.
+>   Each hop is logged at WARN and recorded in the operation's own audit entry
+>   (`failover=<from>→<to> reason=<CODE>`), and the last cosigner that served leads the next
+>   request, so a sick node costs one failed attempt, not one per call. Verified: signing succeeds
+>   with a dead endpoint prepended to the roster. (Leader-side `INTERNAL` was added after the
+>   2026-10-07 DevNet soak, where cosigner-0's unreadable key store turned every sign into
+>   `INTERNAL` while cosigners 1 and 2 were healthy — one sick node was a total signing outage.)
 >
 > **On Raft:** we deliberately did **not** add a Raft/consensus layer. FROST signing sessions are
 > independent (keyed by session id), shares are write-once at DKG then read-only, and the nonce
@@ -127,7 +136,9 @@ The `FrostBackend` is a **dumb client**: it submits `{keyId, digest}` and awaits
 signature. Round orchestration lives *inside* the cluster:
 
 1. The node the driver contacts is the leader for that request (static leader; the driver fails over
-   to another cosigner if it's unreachable — no Raft, see the note above). The leader drives the session.
+   to another cosigner if it's unreachable or answers `INTERNAL`/`UNKNOWN` — a fresh session there
+   with fresh nonces, the abandoned one's nonces burnt by `AbortSign`/TTL — no Raft, see the note
+   above). The leader drives the session.
 2. **Round 1 (commit):** leader collects nonce commitments `(Dᵢ, Eᵢ)` from ≥ `t` cosigners.
 3. **Round 2 (sign):** leader sends the digest + commitment set; each cosigner returns a signature
    share `zᵢ`.
@@ -148,7 +159,10 @@ may omit both.
 
 - **`signer_allowlist`** — who may call the client-facing Signer RPCs (`Dkg`/`Sign`/`Refresh`/
   `GroupKey`). Typically just the driver's CN (`"driver"` from `gen-frost-certs.sh`). `Health` stays
-  open for liveness.
+  open (no allowlist) for liveness/readiness checks; it answers `ok=false` (`NOT_SERVING: …`) while
+  this node's key store fails its readability probe, and such a node also answers `UNAVAILABLE` to
+  the store-touching Signer RPCs and refuses to join other leaders' quorums and ceremonies, so the
+  driver and the other leaders work around it.
 - **`peer_allowlist`** — who may call the mesh Peer RPCs. The **cosigner CNs only**; the driver must
   *not* be listed.
 
@@ -175,7 +189,8 @@ DKG and refresh rewrite a key's shares, so they must never overlap or clobber a 
   *different* sharing polynomials — which share the group key but cannot sign together (split-brain).
 - **The driver never auto-retries DKG.** `FrostBackend` fails a DKG over to another endpoint only on
   a connection-level `UNAVAILABLE`, never on `DEADLINE_EXCEEDED` — a slow-but-succeeding ceremony
-  must not be run a second time against a different leader.
+  must not be run a second time against a different leader — and never on a leader-side
+  `INTERNAL`/`UNKNOWN`, which may have struck mid-ceremony (signing does fail over on those).
 
 - **A superseded ceremony cannot persist.** The guard has an orphan timeout (a leader that dies
   mid-ceremony is preempted after it). To close the window between preempting the old guard and
@@ -418,8 +433,10 @@ key matching neither prefix is a loud routing bug rather than silent local crypt
 rejects `delegate = "none"` without `hosted-keys = true` at startup. Supported specs come from the
 cluster's `Capabilities` at startup instead of a hardcoded list. There is deliberately **no
 automatic fallback to the delegate on `NOT_FOUND`**: quietly serving a key from a second custodian
-is how split custody starts, and it could reproduce the incident class. Endpoint failover stays
-restricted to `UNAVAILABLE` / `DEADLINE_EXCEEDED`.
+is how split custody starts, and it could reproduce the incident class. Endpoint failover never
+triggers on `NOT_FOUND` either: reads, decrypt and symmetric crypto fail over on a node that is down
+(`UNAVAILABLE` / `DEADLINE_EXCEEDED`) or a leader that answers `INTERNAL` / `UNKNOWN`; the writes
+(`GenerateKey`, `DeleteKey`) only on a node that is down.
 
 ### Where this goes next
 
