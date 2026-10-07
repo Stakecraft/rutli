@@ -1,0 +1,60 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Daily soak gate on Kubernetes: runs deploy/soak/soak-check.sh (from the ConfigMap the
+# kustomization generates) against the cluster's kube-prometheus-stack. Metrics checks only — the
+# optional audit-chain check needs the driver's audit.jsonl, which lives on the participant's RWO
+# volume and cannot be mounted a second time (hcloud CSI: "Resource busy"); verify it by hand
+# instead, e.g. weekly:
+#   kubectl cp <ns>/<participant-pod>:/rutli-state/audit.jsonl ./audit.jsonl && \
+#     RUTLI_AUDIT_LOG=./audit.jsonl PROM=… deploy/soak/soak-check.sh
+# Read the daily verdict with:
+#   kubectl logs -n <ns> -l app=rutli-soak-check --tail=20
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: rutli-soak-check
+  labels:
+    app: rutli-soak-check
+spec:
+  schedule: "0 8 * * *" # daily 08:00 UTC, as in docs/testnet-soak.md
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 14 # one verdict per soak day stays readable
+  failedJobsHistoryLimit: 14
+  jobTemplate:
+    spec:
+      backoffLimit: 0 # a FAIL is a verdict, not a retryable error
+      template:
+        metadata:
+          labels:
+            app: rutli-soak-check
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: false # apk add needs root in the stock alpine image
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: soak-check
+              image: alpine:3.20
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -eu
+                  apk add --no-cache bash curl jq >/dev/null
+                  exec bash /soak/soak-check.sh
+              env:
+                - name: PROM
+                  value: http://prometheus-kube-prometheus-prometheus.monitoring.svc:9090
+                - name: SOAK_ALERT_FILTER
+                  value: "^Rutli"
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: ["ALL"] }
+              volumeMounts:
+                - { name: script, mountPath: /soak, readOnly: true }
+          volumes:
+            - name: script
+              configMap:
+                name: rutli-soak-check
+                defaultMode: 0555

@@ -30,6 +30,19 @@ All notable changes to Rütli are documented here. Format loosely follows
   admits pods labelled `rutli.io/scraper=true`, and a stack-managed Prometheus pod does not carry
   that label), and the Grafana dashboard as a sidecar-discovered ConfigMap. First used for the
   DevNet soak validator on 2026-10-07.
+- **`deploy/soak/kustomization.yaml`** — the daily soak gate as a Kubernetes CronJob
+  (`kubectl apply -k deploy/soak -n monitoring`): runs the unchanged `soak-check.sh` from a
+  generated ConfigMap against the stack's Prometheus. `soak-check.sh` gained
+  `SOAK_ALERT_FILTER` (regex, default everything) so that on a shared Prometheus only the Rütli
+  alerts count. Metrics checks only on k8s — the audit-chain check needs the participant's RWO
+  volume, which cannot be mounted twice. **Lesson that shaped this (DevNet soak, 2026-10-07, see
+  `docs/soak-2026-10-devnet.md` incident #1):** a first attempt mounted a cosigner's data PVC
+  into a backup CronJob pod on the same node; the second mount left `data_dir/keys` unreadable
+  to the running cosigner, which kept passing its gRPC health check and answered every sign with
+  `INTERNAL` — and because the driver deliberately does not fail over on INTERNAL and that node
+  was first in `frost.endpoints`, signing stopped for the participant until the pod was restarted
+  (5 minutes, 54 failed signs). Never share a cosigner's volume with another pod; back up via
+  `kubectl exec` into the running cosigner instead.
 
 ## [0.3.0] — 2026-10-06
 

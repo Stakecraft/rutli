@@ -52,8 +52,11 @@ if [[ -z "$pend" ]] || awk "BEGIN{exit !($pend < 10)}"; then pass "pending sign 
 skips="$(q 'sum(increase(rutli_sign_round1_skips_total[24h]))')"
 if [[ -n "$skips" ]] && awk "BEGIN{exit !($skips > 0)}"; then say "peer round-1 skips in last 24h" "WARN ($skips — a cosigner was skipped; check it)"; else pass "peer round-1 skips in last 24h" "0"; fi
 
-# 8. Firing alerts (anything beyond the built-in Watchdog pattern is a red flag).
-alerts="$(curl -sf "$PROM/api/v1/alerts" | jq -r '[.data.alerts[] | select(.state=="firing") | .labels.alertname] | join(",")' 2>/dev/null || true)"
+# 8. Firing alerts (anything beyond the built-in Watchdog pattern is a red flag). On a shared
+#    Prometheus (kube-prometheus-stack) the cluster's own alerts would drown this out — set
+#    SOAK_ALERT_FILTER='^Rutli' to judge only the Rütli rules there.
+alert_filter="${SOAK_ALERT_FILTER:-.}"
+alerts="$(curl -sf "$PROM/api/v1/alerts" | jq -r --arg re "$alert_filter" '[.data.alerts[] | select(.state=="firing") | .labels.alertname | select(test($re))] | join(",")' 2>/dev/null || true)"
 if [[ -z "$alerts" ]]; then pass "firing alerts" "none"; else fail "firing alerts" "$alerts"; fi
 
 # 9. Optional: audit-chain integrity on the driver host.

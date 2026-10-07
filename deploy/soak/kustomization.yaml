@@ -1,0 +1,17 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Soak automation for a Kubernetes deployment (Helm chart cosigners + kube-prometheus-stack):
+#   kubectl apply -k deploy/soak -n monitoring   (the kube-prometheus-stack namespace: reachable Prometheus, no egress policy in the way)
+# - rutli-soak-check: the daily PASS/FAIL gate, running soak-check.sh (shipped as a ConfigMap from
+#   the file next to this kustomization, so compose and k8s run the identical script).
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - k8s/soak-check-cronjob.yaml
+configMapGenerator:
+  - name: rutli-soak-check
+    files:
+      - soak-check.sh
+    options:
+      disableNameSuffixHash: true
