@@ -145,6 +145,7 @@ final class RutliDriverFactory extends KmsDriverFactory {
           logger,
           frost.tls,
           hostedKeys = frost.hostedKeys,
+          keyPrefix = frost.keyPrefix,
         )(blockingEc)
       case other =>
         throw new IllegalArgumentException(

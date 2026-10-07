@@ -5,7 +5,20 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **`frost.key-prefix`** — an optional per-participant prefix prepended to every key id the driver
+  mints or looks up on the cluster, FROST and hosted alike. Default `""`, so an existing deployment's
+  ids (`frost-namespace`, `frost-signing`, `rutli-enc-…`) are unchanged byte for byte and no config
+  edit is needed. Motivation: the 2026-10-07 DevNet soak bring-up pointed a second participant at an
+  already-populated cluster. FROST ids derive deterministically from Canton's key name, so the second
+  participant asked for the same `frost-namespace` and the cosigner's create-once guard refused its
+  DKG with `ALREADY_EXISTS` — correct behaviour, since that guard is what protects a live namespace
+  key, but the only workaround was retiring the old shares by hand on every cosigner. With
+  `key-prefix = "soak1-"` / `"soak2-"` the two participants birth `soak1-frost-namespace` and
+  `soak2-frost-namespace` instead. Every path that builds or recognises an id now goes through one
+  helper (`FrostKeyIds`), routing is strict on the full prefix, the prefix is validated against the
+  cosigner keystore alphabet at startup, and the cosigners are untouched (ids are opaque to them).
+  Docs: `docs/architecture.md` → *One cluster, several participants*.
 
 ## [0.3.1] — 2026-10-07
 

@@ -196,6 +196,46 @@ The honest framing, to be used wherever this tradeoff comes up:
   attacker who extracts one gains **retrospective** read access to any recorded traffic encrypted to
   it. Rotation fixes the future, not the past. There is no forward secrecy here.
 
+## One cluster, several participants — `frost.key-prefix`
+
+The driver derives FROST key ids **deterministically from Canton's key name** (`namespace` →
+`frost-namespace`, `signing` → `frost-signing`), and hosted ids as `rutli-<kind>-<name>-<uuid>`. The
+determinism is deliberate — a retry or a failover must ask for the *same* namespace key, never mint
+a second one — but it means two participants pointed at the same cosigner cluster both ask for
+`frost-namespace`. The cluster's create-once guard then refuses the second participant's DKG with
+`ALREADY_EXISTS`. **That refusal is correct and stays:** the guard is what protects a live namespace
+key from being overwritten, and it must never be relaxed to make sharing a cluster convenient. (The
+2026-10-07 DevNet soak bring-up hit exactly this with a second validator; the only way out at the
+time was retiring the old shares by hand on every cosigner.)
+
+The fix is on the driver side. `frost.key-prefix` (default `""`) is prepended to **every** id the
+driver mints or looks up — FROST and hosted alike — and every path that builds or recognises an id
+goes through one helper, `FrostKeyIds`, so there is no second place a prefix can be forgotten:
+
+```hocon
+frost = {
+  endpoints  = ["cosigner1:9101", "cosigner2:9102", "cosigner3:9103"]
+  key-prefix = "soak1-"      # a different value on each participant sharing this cluster
+}
+```
+
+With it, participant one births `soak1-frost-namespace` and participant two `soak2-frost-namespace`:
+two keys, two DKGs, no collision. Rules:
+
+- **Set a distinct prefix per participant** on a shared cluster. Without one, the second
+  participant's DKG is refused by design — do not work around that by deleting shares.
+- **Choose it before the participant's first bootstrap and never change it.** Canton stores the ids
+  it was handed, and routing is strict on the full prefix: a driver started with `soak1-` does not
+  recognise a bare `frost-namespace` (or `soak2-…`) as its own key and sends it to the delegate.
+- **Leave it unset on existing deployments.** The empty default yields the ids earlier releases
+  minted, byte for byte, so a cluster already holding `frost-namespace` keeps working unchanged.
+- **Approval rules match the full id.** With a prefix, a rule's `key-id-prefix` must include it
+  (`"soak1-frost-"`, not `"frost-"`); see [approval-quorum.md](approval-quorum.md).
+- The alphabet is the cosigner keystore's, `[A-Za-z0-9_-]`; anything else fails at driver startup.
+- The cosigners are untouched: ids are opaque strings to them. A prefix is a namespace, not an
+  authorization boundary — any driver with a valid client certificate can address any id on the
+  cluster, so participants sharing a cluster share a trust domain.
+
 ## Hard constraints (design around these)
 
 - **Namespace root key is NOT rotatable.** Migrating an existing node from DB-keys → KMS is

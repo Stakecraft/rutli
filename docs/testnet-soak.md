@@ -60,6 +60,12 @@ cosigner per host/account/region (see `deploy/k8s/README.md`).
    ```
    Your host needs a network-allowlisted egress IP (give it to the sponsor SV) — the validator is
    outbound-only, no public ingress.
+
+   **A second participant on the same cluster** needs its own `frost.key-prefix` in the overlay
+   (e.g. `"soak2-"`), set *before* its first bootstrap. Without it, its DKG asks the cluster for the
+   first participant's `frost-namespace` and is refused with `ALREADY_EXISTS` — the create-once guard
+   doing its job, not a cluster fault (2026-10-07 bring-up). See
+   `docs/architecture.md` → *One cluster, several participants*.
 5. **Acceptance:** participant boots, driver health OK in its log, namespace key born via cluster
    DKG (`rutli_ceremony_requests_total{kind="dkg",result="ok"} == 1`), validator visible on Scan,
    `soak-check.sh` fully green within 24 h.

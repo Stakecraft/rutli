@@ -53,6 +53,11 @@ services:
                 # Full cosigner roster on the shared docker network — driver fails over across it.
                 endpoints = ["cosigner1:9101", "cosigner2:9102", "cosigner3:9103"]
                 delegate  = "software" # soak scope; "hsm" + hsm{...} for production delegates
+                # Several participants on this one cluster? Give each its own prefix BEFORE first
+                # bootstrap (never change it after): without one the second participant's DKG
+                # collides on frost-namespace and is refused. docs/architecture.md, "One cluster,
+                # several participants".
+                # key-prefix = "soak1-"
                 tls = {
                   ca-cert = "/rutli-certs/ca.crt"
                   cert    = "/rutli-certs/driver.crt"

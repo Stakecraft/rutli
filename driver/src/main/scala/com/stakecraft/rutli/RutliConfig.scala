@@ -83,6 +83,14 @@ final case class SigningJournalConfig(
   *                   the cluster reports a key missing — that would silently split custody.
   * @param tls        Mutual-TLS material for the driver→cluster channel. When absent the channel is
   *                   plaintext (dev only); production must set this.
+  * @param keyPrefix  Prepended to every key id this driver mints on or looks up in the cluster
+  *                   (FROST and hosted alike). Default `""` keeps the ids earlier releases minted
+  *                   (`frost-namespace`, `rutli-enc-…`). Set a distinct value per participant when
+  *                   several participants share one cosigner cluster: FROST ids derive from
+  *                   Canton's key name, so a second participant would otherwise request the same
+  *                   `frost-namespace` id and the cluster's create-once guard would refuse its DKG
+  *                   with `ALREADY_EXISTS`. Alphabet `[A-Za-z0-9_-]`. Choose it before the
+  *                   participant's first bootstrap and never change it — Canton stores the ids.
   */
 final case class FrostConfig(
     endpoint: Option[String] = None,
@@ -90,6 +98,7 @@ final case class FrostConfig(
     delegate: String = "hsm",
     tls: Option[FrostTlsConfig] = None,
     hostedKeys: Boolean = false,
+    keyPrefix: String = "",
 ) {
 
   /** All configured endpoints, `endpoints` first then the single `endpoint`, de-duplicated. */
