@@ -147,7 +147,7 @@ All notable changes to Rütli are documented here. Format loosely follows
   `com.daml` dependencies at all (e.g. `wartremover-annotations`).
 
 ### Security
-- **The mesh Peer API was unauthenticated (critical; affects ≤ 0.2.0).** Only the Signer API
+- **The mesh Peer API was unauthenticated (critical; affects ≤ 0.2.1).** Only the Signer API
   enforced the client-cert CN allowlist; every `Peer` RPC — the raw FROST rounds — was reachable by
   **any** cluster-CA-signed certificate, and the driver's cert is signed by that same CA. The
   34-byte Canton-digest guard also lived only in the leader (`orchestrator::sign`), not in
@@ -350,5 +350,6 @@ not audited. Do not place production authority keys behind it.
 - No third-party security audit.
 
 [0.3.0]: https://github.com/Stakecraft/rutli/releases/tag/v0.3.0
+[0.2.1]: https://github.com/Stakecraft/rutli/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Stakecraft/rutli/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Stakecraft/rutli/releases/tag/v0.1.0
