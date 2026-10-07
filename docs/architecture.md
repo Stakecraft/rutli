@@ -92,8 +92,10 @@ Backends, added over the phases:
   ([`deploy/devnet/canton-hosted.conf`](../deploy/devnet/canton-hosted.conf)). The driver asks the
   cluster for its `Capabilities` at startup rather than hardcoding the spec list. There is
   deliberately **no automatic fallback to the delegate on `NOT_FOUND`** — that would silently create
-  split custody and could reproduce the incident class. Endpoint failover stays restricted to
-  `UNAVAILABLE` / `DEADLINE_EXCEEDED`; read-repair is what makes `NOT_FOUND` authoritative.
+  split custody and could reproduce the incident class. Endpoint failover never triggers on
+  `NOT_FOUND` either: it covers a node that is down (`UNAVAILABLE` / `DEADLINE_EXCEEDED`) and, for
+  operations safe to re-issue (sign, reads, decrypt, symmetric crypto), a leader that answers
+  `INTERNAL` / `UNKNOWN`; read-repair is what makes `NOT_FOUND` authoritative.
 - `DklsBackend` — Phase 4. Threshold ECDSA P-256/P-384 for protocol/sequencer keys.
 
 Routing by key type lets each key sit on the right backend simultaneously (e.g. namespace key on
@@ -111,7 +113,8 @@ moment at creation. Strictly stronger than sharding, and the only option Canton 
 **2. Cluster-side coordination, not a driver-side coordinator.** Horcrux's cosigners coordinate
 signing among themselves and the validator-facing side is a dumb client. We adopt the same shape,
 but deliberately **without** a Raft/consensus layer: the node the driver contacts leads that request
-(static leader), the driver fails over to another cosigner if it's unreachable, and the share nodes
+(static leader), the driver fails over to another cosigner if it's unreachable or cannot serve the
+request (`INTERNAL` / `UNKNOWN` — never for a DKG ceremony), and the share nodes
 coordinate the FROST rounds internally. FROST sessions are independent, so no replicated log is
 needed (see phase-2-frost.md). The `FrostBackend` just submits `sign(hash, keyId)` and awaits the
 aggregated signature. This keeps round orchestration and nonce-session state out of the

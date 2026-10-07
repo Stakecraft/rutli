@@ -99,7 +99,8 @@ not the past. Threshold RSA is permanently out of scope; the reasoning, and the 
   covering the two cases `backup` cannot: a lost seal secret, and moving to another cluster or KMS.
   Hosted keys only, and deliberately never an RPC — [docs/hosted-keys.md](docs/hosted-keys.md).
 - **Mutual TLS** across the mesh and from the driver, with **driver-side failover** (any live
-  cosigner leads — a downed node never blocks signing).
+  cosigner leads — a downed node, or one that answers but cannot sign, never blocks signing; each
+  failover is recorded in the operation's audit entry).
 - **Encryption at rest** — key shares and hosted keys sealed with AES-256-GCM (per-node keys from an
   operator secret); hosted keys are refused outright if sealing is not configured.
 - **Proactive refresh** — rotate all shares on a schedule; same key, so an attacker's stolen share

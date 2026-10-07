@@ -37,6 +37,72 @@ All notable changes to Rütli are documented here. Format loosely follows
   many words, with the incident: **never mount a cosigner volume into another pod.** The soak
   cluster's applied copy gets the same Role tightening and image digest pin, behaviour unchanged.
 
+### Fixed
+- **A single sick cosigner could take down all signing** (DevNet soak incident, 2026-10-07).
+  cosigner-0's `/data/keys` became unreadable after an external backup job remounted its RWO
+  volume. The node stayed "ready" — its gRPC `Health` always said ok and the Kubernetes probes were
+  TCP-only — and answered every `Sign`/`Dkg` with `INTERNAL: io: Permission denied (os error 13)`.
+  The driver only failed over on UNAVAILABLE / DEADLINE_EXCEEDED (deliberately, so a real answer
+  such as NOT_FOUND is never masked), and cosigner-0 was first in `frost.endpoints`, so every sign
+  led from it and failed: 54 consecutive `sign … outcome=failed` audit entries while cosigners 1
+  and 2 were healthy. Fixed on both sides:
+  - **Driver — leader-side INTERNAL/UNKNOWN now fails over**, but only for operations that are
+    safe to re-issue through another leader: `sign` (a fresh session on another leader is safe —
+    the abandoned session's nonces are burnt by the cosigner's own abort/TTL logic),
+    `getPublicKey`, `keyExistsAndIsActive`, and the hosted-key decrypt/symmetric/key-info reads.
+    DKG, hosted `GenerateKey` and `DeleteKey` keep their stricter predicates (ceremonies are
+    never retried blind — `docs/testnet-soak.md` → Incidents); NOT_FOUND, INVALID_ARGUMENT,
+    ALREADY_EXISTS, FAILED_PRECONDITION, RESOURCE_EXHAUSTED and PERMISSION_DENIED still surface
+    immediately from the first node that answers.
+  - **Every failover is visible, not silently routed around**: a WARN log line with the endpoint
+    and status, and `failover=<from>→<to> reason=<CODE>` recorded in that operation's own
+    hash-chained audit entry (new `AuditNotes` plumbing; `KmsBackend.withAuditNotes`).
+  - **Sticky preferred leader**: the driver leads from the last endpoint that gave a real answer,
+    so one bad node at position 0 no longer adds a failed attempt to every call.
+  - **Driver failover alone would not have ended this outage — the cosigner side needed two
+    signing-path fixes too.** A cosigner that has signed since start-up keeps its share cached,
+    so after its volume broke it still passed sign round 1 (`NonceStore::is_consumed` used
+    `Path::exists`, which reads EACCES as "not burnt") and only failed in round 2 on the
+    nonce-marker write — and because peers are tried in identifier order, the sick node landed
+    in *every* leader's quorum, sinking every signature cluster-wide (reproduced in
+    `frost/cosigner/tests/health.rs`). Now: `is_consumed` fails closed on a lookup error (an
+    unreadable store is refused in round 1, so leaders skip it like a down peer), and a node
+    whose key-store readiness probe last failed refuses `sign_round1`, refuses the DKG/refresh
+    ceremony fence (so a ceremony rolls back before any share is rewritten instead of failing
+    half-applied at that node's `save`), and answers `NOT_SERVING` → gRPC `UNAVAILABLE` at the
+    entry of every store-touching Signer RPC (`Sign`, `Dkg`, `Refresh`, `GroupKey`, `PublicKey`,
+    `KeyInfo`, `Decrypt`, `SymmetricEncrypt/Decrypt`, `GenerateKey`, `DeleteKey`) — a status
+    every driver version already fails over on, so upgrading the cosigners first is enough.
+    Leaders sign around the sick node with the remaining two. Burn-before-sign is unchanged:
+    nothing here reuses a nonce; every change only refuses. Related hardening from the same
+    review: `KeyStore::read_plaintext`/`delete` use `try_exists`, so an unreadable store is an
+    IO error (`INTERNAL`), never `NOT_FOUND` (which Canton's `keyExistsAndIsActive` would have
+    believed); peer RPCs (`GrpcPeer`) now carry a 10 s request + connect timeout, so a hung peer
+    becomes a round-1 skip instead of a 60 s hang; a timed-out peer counts as unreachable for
+    hosted-key writes.
+  - **Cosigner readiness reflects key-store readability**: `Signer.Health` now probes
+    `data_dir/keys` (list, open+read each key file, create+remove a uniquely named probe
+    dotfile — a read-only remount is the same incident; 3 s timeout counts as unresponsive) and
+    reports `ok=false, NOT_SERVING: keystore … unreadable: …` when it fails. The node is down
+    only when the directory cannot be listed or written or *every* key file fails to open; a
+    single unopenable file is counted in `rutli_unreadable_key_files_total` and logged, and the
+    node keeps signing its other keys. Probes are single-flight with a 5 s cache (a Health flood
+    cannot stack blocking threads; a late result never overwrites a newer verdict); a background
+    loop re-probes every 15 s, logs transitions only, and prunes expired pending sign sessions
+    while the node is refusing. New `rutli-cosigner health` subcommand (same probe plus a TCP
+    check of the gRPC port, no seal secret needed) backs the Kubernetes readiness probe and the
+    compose healthchecks, replacing the TCP-only checks; liveness stays TCP so a broken volume
+    does not trigger restarts that destroy the evidence. `backup`/`restore` skip dotfiles so a
+    live backup can never catch a probe file. New gauge `rutli_keystore_unreadable` and critical
+    alert `RutliKeystoreUnreadable` (`deploy/monitoring/prometheus-rules.yml`, PrometheusRule
+    regenerated). Note the headless Service publishes not-ready addresses (the mesh needs them
+    during DKG), so readiness makes the sick node visible (`READY 0/1`, rollouts, PDB) while the
+    driver's failover does the routing. **Upgrade note:** the manifests still pin the 0.3.0
+    image, which lacks the subcommand, so the readiness command is `… health || [ $? -eq 2 ]`:
+    clap's usage-error exit on an old binary degrades the probe to "process running" (liveness
+    still checks the port) instead of leaving pods never Ready. Bump the image pin at the next
+    release and drop the fallback.
+
 ### Added
 - **`deploy/monitoring/kustomization.yaml`** — Rütli observability for a kube-prometheus-stack
   cluster in one `kubectl apply -k deploy/monitoring`: a ServiceMonitor for the cosigner metrics
