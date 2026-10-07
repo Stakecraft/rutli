@@ -63,6 +63,20 @@ is visible` — onboarded. Validator visible on sv-1 Scan.
 failures 0, pending sessions 0, peer skips 0; FAIL on sign errors (54, incident #1) and the
 `RutliSignAborts` alert — both expected to clear from the 24 h window on day 1.
 
+**Planned event — rollout to 0.3.1, 21:14:56 → 21:16:10 (participant down 75 s).**
+Release [v0.3.1](https://github.com/Stakecraft/rutli/releases/tag/v0.3.1) carries the fixes for
+incident #1 (driver failover on a sick leader, cosigner key-store readiness + `health`
+subcommand, hung-volume hardening). Cosigners first: `helm upgrade` to the 0.3.1 digest, rolling
+one pod at a time, readiness now `rutli-cosigner health` (answered `ready`, exit 0, on every
+node); signing continued on 2-of-3 throughout. Then the participant: scaled to 0, driver jar
+0.3.1 swapped on the bundle volume through a temporary pod (only ever while the participant is
+down — never a second mount beside a running consumer, incident #1's lesson), scaled back;
+`Loaded driver rutli (API v1) build 0.3.1`, mTLS channels and capabilities re-established within
+a second of start. Old jars kept on the volume as `rutli-driver-0.2.1.jar` /
+`rutli-driver-0.3.0.jar`. Monitoring re-applied earlier the same evening (15 rules incl.
+`RutliKeystoreUnreadable`, readiness panel on the dashboard). This is the first planned restart
+of the soak; the week-3 "participant restart" drill will repeat it under observation.
+
 ## Drill calendar
 
 | Week | Drill | Status |
