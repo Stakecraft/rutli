@@ -20,6 +20,7 @@ import com.stakecraft.rutli.grpc.{
   SignerGrpc,
   SymmetricRequest,
 }
+import com.stakecraft.rutli.audit.AuditNotes
 import io.grpc.netty.shaded.io.grpc.netty.{GrpcSslContexts, NettyChannelBuilder}
 import io.grpc.{ManagedChannel, ManagedChannelBuilder, Status, StatusRuntimeException}
 import org.slf4j.Logger
@@ -28,6 +29,8 @@ import java.io.File
 import java.security.KeyFactory
 import java.security.spec.X509EncodedKeySpec
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import scala.annotation.tailrec
 import scala.jdk.CollectionConverters._
 import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContext, Future, blocking}
@@ -45,12 +48,23 @@ import scala.concurrent.{ExecutionContext, Future, blocking}
   * returns the cluster key id; `sign` with that id calls the cluster's threshold Sign.
   *
   * '''Availability:''' the backend is configured with the full cosigner roster and fails over
-  * across endpoints — any live cosigner can lead a request (the cluster orchestrates the rest). A
-  * request is retried on the next endpoint only when the contacted node is unreachable
-  * (UNAVAILABLE / DEADLINE_EXCEEDED); a real application error (e.g. NOT_FOUND) from a live node is
-  * returned immediately, never masked by trying another node. This removes the single-leader
-  * availability gap without any cross-node consensus — FROST sessions are independent, so no Raft
-  * log is needed.
+  * across endpoints — any live cosigner can lead a request (the cluster orchestrates the rest).
+  * Which statuses move a request to the next endpoint depends on whether the operation is safe to
+  * re-issue through another leader (the predicates on the companion say why):
+  *   - Re-issuable operations — sign, group/public key, key info, decrypt, symmetric crypto,
+  *     capabilities — fail over on transport failures (UNAVAILABLE / DEADLINE_EXCEEDED) AND on a
+  *     leader that answered but could not do its job (INTERNAL / UNKNOWN, e.g. its key store became
+  *     unreadable). One sick node must not be a signing outage while a quorum is healthy.
+  *   - Writes (hosted GenerateKey, DeleteKey) fail over only when the node is down, and a DKG
+  *     ceremony only on a refused connection (UNAVAILABLE): a ceremony is never blindly re-run
+  *     against another leader.
+  *   - Any other status (NOT_FOUND, RESOURCE_EXHAUSTED, ...) is a real answer from a live node and
+  *     is returned immediately, never masked by trying another node.
+  * Every hop is logged at WARN and recorded in the operation's own audit entry
+  * (`failover=<from>→<to> reason=<CODE>`, see [[withAuditNotes]]). The leader is sticky: whichever
+  * endpoint last served a request leads the next one, so once a node is found sick later calls do
+  * not each pay a failed attempt against it. This removes the single-leader availability gap
+  * without any cross-node consensus — FROST sessions are independent, so no Raft log is needed.
   */
 class FrostBackend(
     endpoints: Seq[String],
@@ -89,27 +103,94 @@ class FrostBackend(
   private def stubFor(ch: ManagedChannel): SignerGrpc.SignerBlockingStub =
     SignerGrpc.newBlockingStub(ch).withDeadlineAfter(requestTimeout.toMillis, TimeUnit.MILLISECONDS)
 
-  /** Run `op` against cosigner endpoints in order, moving to the next only when the current node is
-    * unreachable. Any non-transport gRPC status is a real answer and is rethrown immediately.
+  /** Index into `endpoints` of the preferred leader: the cosigner that last served a request. */
+  private val preferred = new AtomicInteger(0)
+
+  /** Run `op` against the cosigners in ring order, starting from the preferred leader, moving to
+    * the next only when `retryOn` says the contacted node could not serve it (see the predicates on
+    * the companion — each call site picks the one its operation is safe under). Any other gRPC
+    * status is a real answer and is rethrown immediately; when every endpoint fails over, the last
+    * error is thrown. Each hop is logged at WARN and noted in `notes` for the operation's audit
+    * entry.
     *
-    * `retryOn` decides which statuses count as "unreachable, try the next node". The default retries
-    * on UNAVAILABLE + DEADLINE_EXCEEDED (safe for idempotent ops: sign, groupKey). A DKG must NOT
-    * retry on DEADLINE_EXCEEDED — a slow-but-succeeding ceremony would otherwise be run a second time
-    * against another leader — so it passes the connection-only predicate. */
-  private def withFailover[A](what: String, retryOn: Status => Boolean = isNodeDown)(
+    * Sticky leader ("last healthy first"): when endpoint i gives a real answer — success, or an
+    * application error such as NOT_FOUND, since the node is serving either way — it becomes the
+    * preferred leader. Once a node is found sick, later calls lead from the healthy one directly
+    * instead of each paying a failed attempt (and a WARN) against the sick node, and a recovered
+    * node is simply reached again when the ring next wraps to it. A leader-sick or transport status
+    * never makes its node preferred, even when this op does not fail over on it (a DKG that hits
+    * INTERNAL), so one ceremony error cannot steer every later sign back to the sick node.
+    * Deterministic: no probing, no randomness; concurrent calls race benignly, since every write is
+    * the index of a node that just served. */
+  private def withFailover[A](what: String, retryOn: Status => Boolean, notes: AuditNotes)(
       op: SignerGrpc.SignerBlockingStub => A
   ): A = {
-    var lastError: RuntimeException = new IllegalStateException(s"no FROST endpoints for $what")
-    channels.iterator.zipWithIndex.foreach { case (ch, i) =>
-      try return op(stubFor(ch))
-      catch {
-        case e: StatusRuntimeException if retryOn(e.getStatus) =>
-          logger.warn(s"FROST: $what via ${endpoints(i)} unreachable (${e.getStatus.getCode}); failing over")
-          lastError = e
+    val n = channels.size
+    val start = preferred.get
+    @tailrec def attempt(k: Int): A = {
+      val i = (start + k) % n
+      val outcome =
+        try Right(op(stubFor(channels(i))))
+        catch { case e: StatusRuntimeException => Left(e) }
+      outcome match {
+        case Right(answer) =>
+          preferred.set(i)
+          answer
+        case Left(e) =>
+          val status = e.getStatus
+          if (!isLeaderSick(status)) preferred.set(i)
+          if (!retryOn(status)) throw e
+          val reason = Option(status.getDescription).fold(status.getCode.toString)(d => s"${status.getCode}: $d")
+          if (k + 1 < n) {
+            val next = endpoints((i + 1) % n)
+            logger.warn(s"FROST: $what via ${endpoints(i)} failed ($reason); failing over to $next")
+            notes.add(s"failover=${endpoints(i)}→$next reason=${status.getCode}")
+            attempt(k + 1)
+          } else {
+            logger.warn(s"FROST: $what via ${endpoints(i)} failed ($reason); no cosigner left to try")
+            throw e
+          }
       }
     }
-    throw lastError
+    attempt(0)
   }
+
+  /** The audit notes of the operation being issued on this thread: bound by [[withAuditNotes]],
+    * [[AuditNotes.discard]] outside it.
+    *
+    * A plain `ThreadLocal`, deliberately not `scala.util.DynamicVariable`: that one is an
+    * `InheritableThreadLocal`, so a pool thread spawned while an operation's notes are bound would
+    * inherit them as its permanent default — and could pin a later, unrelated call's failover onto
+    * that operation's audit entry. */
+  private val currentNotes: ThreadLocal[AuditNotes] = ThreadLocal.withInitial(() => AuditNotes.discard)
+
+  override def withAuditNotes[A](notes: AuditNotes)(op: => Future[A]): Future[A] = {
+    val outer = currentNotes.get
+    currentNotes.set(notes)
+    try op
+    finally currentNotes.set(outer)
+  }
+
+  /** Issue one cluster RPC, with failover, on the (blocking) execution context.
+    *
+    * The audit notes are captured HERE, synchronously on the calling thread, before `Future.apply`.
+    * The binding is thread-local and does not follow a `Future` onto an ExecutionContext thread:
+    * read inside the Future body it would yield the default (discard) and the failover would
+    * silently vanish from the audit entry. So every cluster call goes through this helper from the
+    * synchronous part of the public method, and reply post-processing (signature length, SPKI
+    * wrapping, existence checks) is chained with `.map`. */
+  private def clusterCall[A](what: String, retryOn: Status => Boolean)(
+      op: SignerGrpc.SignerBlockingStub => A
+  ): Future[A] = {
+    val notes = currentNotes.get
+    Future(blocking(withFailover(what, retryOn, notes)(op)))
+  }
+
+  /** Fail the returned Future — rather than throw — when a caller-side precondition does not hold,
+    * keeping the backend's "failures arrive in the Future" contract while the cluster call itself is
+    * still issued synchronously (see [[clusterCall]]). Same exception as `require`. */
+  private def precondition[A](ok: Boolean, msg: => String)(call: => Future[A]): Future[A] =
+    if (ok) call else Future.failed(new IllegalArgumentException(s"requirement failed: $msg"))
 
   /** Which hosted-key specs the cluster actually serves, asked once at startup.
     *
@@ -122,8 +203,13 @@ class FrostBackend(
     if (!hostedKeys) Set.empty
     else
       try {
-        val reply =
-          blocking(withFailover("capabilities")(_.capabilities(CapabilitiesRequest.newBuilder().build())))
+        // A one-off startup probe, not part of any operation: failovers here are logged only, even
+        // if it happens to be forced from inside an audited call.
+        val reply = blocking(
+          withFailover("capabilities", isLeaderSick, AuditNotes.discard)(
+            _.capabilities(CapabilitiesRequest.newBuilder().build())
+          )
+        )
         if (!reply.getHostedKeysEnabled) {
           logger.warn(
             "FROST: driver has hosted-keys enabled but the cluster reports them disabled — " +
@@ -166,14 +252,13 @@ class FrostBackend(
   ): Future[String] = spec match {
     case SigningKeySpec.EcCurve25519 =>
       val keyId = frostKeyId(keyName)
-      Future {
-        logger.info(s"FROST: initiating distributed key generation for $keyId")
-        // DKG is a one-shot ceremony: only fail over if the endpoint is unreachable at the
-        // connection level (no ceremony started). Never retry on DEADLINE_EXCEEDED — a slow but
-        // in-flight DKG must not be run a second time against another leader.
-        blocking(withFailover("dkg", connectionRefused)(_.dkg(DkgRequest.newBuilder().setKeyId(keyId).build())))
-        keyId
-      }
+      logger.info(s"FROST: initiating distributed key generation for $keyId")
+      // DKG is a one-shot ceremony: only fail over if the endpoint is unreachable at the
+      // connection level (no ceremony started). Never retry on DEADLINE_EXCEEDED — a slow but
+      // in-flight DKG must not be run a second time against another leader — nor on a leader-side
+      // INTERNAL, which may have failed part-way through the ceremony.
+      clusterCall("dkg", connectionRefused)(_.dkg(DkgRequest.newBuilder().setKeyId(keyId).build()))
+        .map(_ => keyId)
     case other => delegate.generateSigningKeyPair(other, keyName)
   }
 
@@ -183,46 +268,48 @@ class FrostBackend(
   ): Future[String] = spec match {
     case EncryptionKeySpec.Rsa2048 if hostsRsa =>
       val keyId = hostedKeyId("enc", keyName)
-      Future {
-        logger.info(s"FROST: generating cluster-hosted $RsaSpec key $keyId")
-        blocking(generateHosted(keyId, RsaSpec))
-        keyId
-      }
+      logger.info(s"FROST: generating cluster-hosted $RsaSpec key $keyId")
+      generateHosted(keyId, RsaSpec)
     case other => delegate.generateEncryptionKeyPair(other, keyName)
   }
 
   override def generateSymmetricKey(keyName: Option[String]): Future[String] =
     if (hostsAes) {
       val keyId = hostedKeyId("sym", keyName)
-      Future {
-        logger.info(s"FROST: generating cluster-hosted $AesSpec key $keyId")
-        blocking(generateHosted(keyId, AesSpec))
-        keyId
-      }
+      logger.info(s"FROST: generating cluster-hosted $AesSpec key $keyId")
+      generateHosted(keyId, AesSpec)
     } else delegate.generateSymmetricKey(keyName)
 
-  /** Generate a hosted key on the cluster.
+  /** Generate a hosted key on the cluster; completes with `keyId`.
     *
     * `key_id` is caller-supplied and the cluster treats a repeat as a no-op, so this is idempotent
     * and may fail over on a timeout as well as a refused connection — unlike DKG, where a retry
-    * could run a second ceremony.
+    * could run a second ceremony. It is still a write, so a leader-side INTERNAL is surfaced, not
+    * routed around (see [[FrostBackend.isNodeDown]]).
     */
-  private def generateHosted(keyId: String, spec: String): Unit = {
+  private def generateHosted(keyId: String, spec: String): Future[String] = {
     val req = GenerateKeyRequest.newBuilder().setKeyId(keyId).setSpec(spec).build()
-    val reply = withFailover("generateKey")(_.generateKey(req))
-    logger.info(
-      s"FROST: hosted key $keyId ready (created=${reply.getCreated}, replicas=${reply.getReplicas})"
-    )
+    clusterCall("generateKey", isNodeDown)(_.generateKey(req)).map { reply =>
+      logger.info(
+        s"FROST: hosted key $keyId ready (created=${reply.getCreated}, replicas=${reply.getReplicas})"
+      )
+      keyId
+    }
   }
 
   override def sign(data: Array[Byte], keyId: String, algo: SigningAlgoSpec): Future[Array[Byte]] =
-    if (isFrostKey(keyId)) Future {
-      require(algo == SigningAlgoSpec.Ed25519, s"FROST keys sign Ed25519 only, got $algo")
-      val req = SignRequest.newBuilder().setKeyId(keyId).setMessage(ByteString.copyFrom(data)).build()
-      val sig = blocking(withFailover("sign")(_.sign(req))).getSignature.toByteArray
-      require(sig.length == 64, s"expected 64-byte Ed25519 signature, got ${sig.length}")
-      sig
-    }
+    if (isFrostKey(keyId))
+      precondition(algo == SigningAlgoSpec.Ed25519, s"FROST keys sign Ed25519 only, got $algo") {
+        val req = SignRequest.newBuilder().setKeyId(keyId).setMessage(ByteString.copyFrom(data)).build()
+        // Re-issuing through another leader opens a fresh session with fresh nonces; the sick
+        // leader's session is abandoned and its nonces are burnt by the cosigners (AbortSign, or the
+        // pending-session TTL), never reused — see isLeaderSick.
+        clusterCall("sign", isLeaderSick)(_.sign(req)).map { reply =>
+          val sig = reply.getSignature.toByteArray
+          require(sig.length == 64, s"expected 64-byte Ed25519 signature, got ${sig.length}")
+          sig
+        }
+      }
     else delegate.sign(data, keyId, algo)
 
   override def decryptAsymmetric(
@@ -230,66 +317,62 @@ class FrostBackend(
       keyId: String,
       algo: EncryptionAlgoSpec,
   ): Future[Array[Byte]] =
-    if (isHostedKey(keyId)) Future {
-      require(
+    if (isHostedKey(keyId))
+      precondition(
         algo == EncryptionAlgoSpec.RsaEsOaepSha256,
         s"cluster-hosted encryption keys decrypt RSAES-OAEP-SHA256 only, got $algo",
-      )
-      val req = DecryptRequest
-        .newBuilder()
-        .setKeyId(keyId)
-        .setCiphertext(ByteString.copyFrom(ciphertext))
-        .build()
-      blocking(withFailover("decrypt")(_.decrypt(req))).getPlaintext.toByteArray
-    }
+      ) {
+        val req = DecryptRequest
+          .newBuilder()
+          .setKeyId(keyId)
+          .setCiphertext(ByteString.copyFrom(ciphertext))
+          .build()
+        clusterCall("decrypt", isLeaderSick)(_.decrypt(req)).map(_.getPlaintext.toByteArray)
+      }
     else delegate.decryptAsymmetric(ciphertext, keyId, algo)
 
   override def encryptSymmetric(data: Array[Byte], keyId: String): Future[Array[Byte]] =
-    if (isHostedKey(keyId)) Future {
+    if (isHostedKey(keyId)) {
       val req =
         SymmetricRequest.newBuilder().setKeyId(keyId).setData(ByteString.copyFrom(data)).build()
-      blocking(withFailover("symmetricEncrypt")(_.symmetricEncrypt(req))).getData.toByteArray
-    }
-    else delegate.encryptSymmetric(data, keyId)
+      clusterCall("symmetricEncrypt", isLeaderSick)(_.symmetricEncrypt(req)).map(_.getData.toByteArray)
+    } else delegate.encryptSymmetric(data, keyId)
 
   override def decryptSymmetric(ciphertext: Array[Byte], keyId: String): Future[Array[Byte]] =
-    if (isHostedKey(keyId)) Future {
+    if (isHostedKey(keyId)) {
       val req = SymmetricRequest
         .newBuilder()
         .setKeyId(keyId)
         .setData(ByteString.copyFrom(ciphertext))
         .build()
-      blocking(withFailover("symmetricDecrypt")(_.symmetricDecrypt(req))).getData.toByteArray
-    }
-    else delegate.decryptSymmetric(ciphertext, keyId)
+      clusterCall("symmetricDecrypt", isLeaderSick)(_.symmetricDecrypt(req)).map(_.getData.toByteArray)
+    } else delegate.decryptSymmetric(ciphertext, keyId)
 
   override def getPublicKey(keyId: String): Future[PublicKey] =
-    if (isFrostKey(keyId)) Future {
+    if (isFrostKey(keyId)) {
       val req = GroupKeyRequest.newBuilder().setKeyId(keyId).build()
-      val raw = blocking(withFailover("groupKey")(_.groupKey(req))).getGroupVerifyingKey.toByteArray
-      require(raw.length == 32, s"expected 32-byte Ed25519 group key, got ${raw.length}")
-      PublicKey(ed25519Spki(raw), SigningKeySpec.EcCurve25519)
-    }
-    else if (isHostedKey(keyId)) Future {
+      clusterCall("groupKey", isLeaderSick)(_.groupKey(req)).map { reply =>
+        val raw = reply.getGroupVerifyingKey.toByteArray
+        require(raw.length == 32, s"expected 32-byte Ed25519 group key, got ${raw.length}")
+        PublicKey(ed25519Spki(raw), SigningKeySpec.EcCurve25519)
+      }
+    } else if (isHostedKey(keyId)) {
       val req = PublicKeyRequest.newBuilder().setKeyId(keyId).build()
-      val reply = blocking(withFailover("publicKey")(_.publicKey(req)))
       // The cluster returns X.509 SubjectPublicKeyInfo DER — exactly what Canton's PublicKey wants.
-      PublicKey(reply.getPublicKeyDer.toByteArray, EncryptionKeySpec.Rsa2048)
-    }
-    else delegate.getPublicKey(keyId)
+      clusterCall("publicKey", isLeaderSick)(_.publicKey(req))
+        .map(reply => PublicKey(reply.getPublicKeyDer.toByteArray, EncryptionKeySpec.Rsa2048))
+    } else delegate.getPublicKey(keyId)
 
   override def keyExistsAndIsActive(keyId: String): Future[Unit] =
-    if (isFrostKey(keyId)) Future {
+    if (isFrostKey(keyId))
       // groupKey returns NOT_FOUND if the cluster has no such key.
-      blocking(withFailover("groupKey")(_.groupKey(GroupKeyRequest.newBuilder().setKeyId(keyId).build())))
-      ()
-    }
-    else if (isHostedKey(keyId)) Future {
-      val reply =
-        blocking(withFailover("keyInfo")(_.keyInfo(KeyInfoRequest.newBuilder().setKeyId(keyId).build())))
-      if (!reply.getExists) throw new NoSuchElementException(s"key not found or inactive: $keyId")
-      ()
-    }
+      clusterCall("groupKey", isLeaderSick)(_.groupKey(GroupKeyRequest.newBuilder().setKeyId(keyId).build()))
+        .map(_ => ())
+    else if (isHostedKey(keyId))
+      clusterCall("keyInfo", isLeaderSick)(_.keyInfo(KeyInfoRequest.newBuilder().setKeyId(keyId).build()))
+        .map { reply =>
+          if (!reply.getExists) throw new NoSuchElementException(s"key not found or inactive: $keyId")
+        }
     else delegate.keyExistsAndIsActive(keyId)
 
   override def deleteKey(keyId: String): Future[Unit] =
@@ -297,11 +380,11 @@ class FrostBackend(
       // The cluster intentionally has no delete — the namespace key is non-rotatable and deleting
       // it would be catastrophic. Deletion is an operator ceremony, not an API call.
       Future.failed(new UnsupportedOperationException("FROST namespace keys cannot be deleted via the API"))
-    else if (isHostedKey(keyId)) Future {
+    else if (isHostedKey(keyId))
       // Unlike the namespace key, Canton CAN rotate encryption keys, so hosted keys are deletable.
-      blocking(withFailover("deleteKey")(_.deleteKey(DeleteKeyRequest.newBuilder().setKeyId(keyId).build())))
-      ()
-    }
+      // A write: fail over only when the node is down, never on a leader-side error.
+      clusterCall("deleteKey", isNodeDown)(_.deleteKey(DeleteKeyRequest.newBuilder().setKeyId(keyId).build()))
+        .map(_ => ())
     else delegate.deleteKey(keyId)
 
   override def health: Future[KmsDriverHealth] = {
@@ -356,17 +439,47 @@ object FrostBackend {
     s"$HostedPrefix$kind$name-${java.util.UUID.randomUUID()}".take(300)
   }
 
-  /** True when the status means "this contact node isn't serving" (so we should try the next),
-    * as opposed to a real application answer we must surface. */
-  /// Note what is deliberately absent: RESOURCE_EXHAUSTED (the cluster's per-key decryption rate
-  /// limit) is NOT retried elsewhere. Every cosigner enforces the same ceiling, so failing over
-  /// would merely spread the load an attacker is generating across the cluster. It surfaces to
-  /// Canton, which backs off.
+  // -- Failover predicates: which statuses move a request to the next cosigner. --
+  //
+  // Each call site picks the widest predicate its operation is safe under. Every status none of
+  // them names — NOT_FOUND, INVALID_ARGUMENT, ALREADY_EXISTS, FAILED_PRECONDITION,
+  // RESOURCE_EXHAUSTED, PERMISSION_DENIED, UNAUTHENTICATED, UNIMPLEMENTED, ... — is a real answer
+  // from a live node and is surfaced immediately: trying another node would only mask it.
+  //
+  // Note in particular that RESOURCE_EXHAUSTED (the cluster's per-key decryption rate limit) is
+  // NOT retried elsewhere. Every cosigner enforces the same ceiling, so failing over would merely
+  // spread the load an attacker is generating across the cluster. It surfaces to Canton, which
+  // backs off.
+
+  /** The contacted node isn't serving at all: unreachable (UNAVAILABLE) or too slow to answer
+    * (DEADLINE_EXCEEDED).
+    *
+    * For writes that are idempotent by key — hosted GenerateKey (a repeated `key_id` is a no-op)
+    * and DeleteKey — so re-sending one after a timeout is harmless. They deliberately do NOT fail
+    * over on a leader-side INTERNAL: that leader may have half-applied the write (e.g. replicated
+    * to some peers before failing), and an operator should see that error rather than have it
+    * papered over by a second leader. */
   private def isNodeDown(status: Status): Boolean =
     status.getCode == Status.Code.UNAVAILABLE || status.getCode == Status.Code.DEADLINE_EXCEEDED
 
-  /** Stricter predicate for non-idempotent ops (DKG): only the endpoint being unreachable at the
-    * connection level — never a timeout, which may mean the op is still running. */
+  /** [[isNodeDown]], or the node answered but could not do its job — INTERNAL / UNKNOWN, e.g. its
+    * key store is unreadable (the 2026-10-07 DevNet incident: a remounted volume left cosigner-0
+    * "ready" but answering every request with `INTERNAL: io: Permission denied`; with cosigner-0
+    * first in the roster, one sick node was a total signing outage while a quorum was healthy).
+    *
+    * Only for operations safe to re-issue through another leader: reads (group/public key, key
+    * info, capabilities), decryption, symmetric crypto — and sign. A sign re-issued elsewhere
+    * opens a FRESH FROST session with fresh nonces; the first leader's session is abandoned and its
+    * round-1 nonces are burnt by the cosigners' own abort/TTL logic (AbortSign, the pending-session
+    * TTL), never reused. At worst two valid signatures over the same message exist, which leaks
+    * nothing. */
+  private def isLeaderSick(status: Status): Boolean =
+    isNodeDown(status) || status.getCode == Status.Code.INTERNAL || status.getCode == Status.Code.UNKNOWN
+
+  /** Strictest predicate, for the non-idempotent DKG ceremony: only the endpoint being unreachable
+    * at the connection level (no ceremony started) — never a timeout, which may mean the ceremony is
+    * still running, and never a leader-side error, which may have struck mid-ceremony. A blind
+    * re-run against another leader is exactly what the ceremony guard exists to refuse. */
   private def connectionRefused(status: Status): Boolean =
     status.getCode == Status.Code.UNAVAILABLE
 
