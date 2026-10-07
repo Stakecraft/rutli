@@ -94,7 +94,9 @@ impl Node {
         keystore: KeyStore,
         ceremony_orphan_timeout: Duration,
     ) -> Self {
-        let keystore_health = Arc::new(crate::health::KeystoreHealth::new(keystore.dir()));
+        let mut keystore_health = crate::health::KeystoreHealth::new(keystore.dir());
+        keystore_health.set_io_hook(keystore.io_hook());
+        let keystore_health = Arc::new(keystore_health);
         Self {
             identifier,
             max_signers,
@@ -240,10 +242,51 @@ impl Node {
     /// Serve Health's key-store verdict from cache for `fresh` instead of
     /// [`crate::health::FRESH`]. Tests pass zero so every Health call probes.
     pub fn with_keystore_probe_freshness(mut self, fresh: Duration) -> Self {
-        self.keystore_health = Arc::new(
-            crate::health::KeystoreHealth::new(self.keystore.dir()).with_freshness(fresh),
-        );
+        self.keystore_health_mut().set_freshness(fresh);
         self
+    }
+
+    /// Publish a hung readiness probe as unresponsive after `after` instead of
+    /// [`crate::health::UNRESPONSIVE_AFTER`] (it still takes at least one
+    /// [`crate::health::PROBE_TIMEOUT`] to notice). Tests use it to skip the grace.
+    pub fn with_keystore_unresponsive_after(mut self, after: Duration) -> Self {
+        self.keystore_health_mut().set_unresponsive_after(after);
+        self
+    }
+
+    fn keystore_health_mut(&mut self) -> &mut crate::health::KeystoreHealth {
+        Arc::get_mut(&mut self.keystore_health)
+            .expect("configure the key-store probe before the node is shared")
+    }
+
+    /// Run `op` against this node on tokio's blocking pool and await it.
+    ///
+    /// For every node operation an RPC handler (or the in-process [`crate::peer::LocalPeer`])
+    /// reaches that may touch the key store: share and hosted-key reads and writes, nonce-marker
+    /// lookups and creates. On a hung volume — a dead NFS/CSI mount, a snapshot hook's fsfreeze —
+    /// that call parks its thread for as long as the kernel says. On an async worker that would
+    /// stall every task the worker serves, and with the shipped 500m CPU limit the cgroup-aware
+    /// runtime has exactly one worker: Health, `/metrics` and every peer RPC would freeze together,
+    /// before the readiness verdict could turn later calls away. Parked here, it costs one blocking
+    /// thread and nothing else.
+    ///
+    /// `op` runs to completion even if the caller stops waiting (a client deadline, a dropped
+    /// request), so a sign round is never cut in half: round 2 still burns its nonce marker before
+    /// computing the share, all inside `op`.
+    pub async fn blocking<T, F>(self: &Arc<Self>, op: F) -> Result<T>
+    where
+        F: FnOnce(&Node) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let node = Arc::clone(self);
+        match tokio::task::spawn_blocking(move || op(&node)).await {
+            Ok(result) => result,
+            // A panic stays a panic, exactly as if `op` had run inline.
+            Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+            Err(e) => Err(DaemonError::Io(std::io::Error::other(format!(
+                "key-store operation did not run: {e}"
+            )))),
+        }
     }
 
     /// `Err(NotServing)` — gRPC UNAVAILABLE — while this node's key store fails its readiness probe

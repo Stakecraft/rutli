@@ -102,6 +102,37 @@ All notable changes to Rütli are documented here. Format loosely follows
     clap's usage-error exit on an old binary degrades the probe to "process running" (liveness
     still checks the port) instead of leaving pods never Ready. Bump the image pin at the next
     release and drop the fallback.
+- **A *hung* data volume froze the whole cosigner, not just its key store.** The readiness probe
+  above catches a volume that *fails*; one that stops answering — a dead NFS/CSI hard mount, a
+  snapshot hook's `fsfreeze` — parks every thread that touches it. Peer and Signer handlers ran
+  their key-store IO (`sign_round1`'s nonce-marker lookup, share loads, hosted-key reads and
+  writes) on tokio's async workers, and the shipped 500m CPU limit gives the cgroup-aware runtime
+  exactly **one** worker: a single stalled `stat` froze Health, `/metrics`, every peer RPC and the
+  probe's own timer, before the verdict could flip to "down". Now:
+  - Every `Node` call from an RPC handler, the in-process `LocalPeer` and the orchestrator that may
+    touch the store runs on the blocking pool (`Node::blocking`); memory-only and crypto-only calls
+    stay inline. Ordering is unchanged: each round 2 is one blocking call that burns its nonce
+    marker before computing the share, and runs to completion even if the leader stops waiting;
+    ceremony fences are still taken in order before any ceremony IO.
+  - The readiness monitor is a dedicated OS thread (`rutli-keystore-watchdog`) and each probe runs
+    on a plain thread of its own; `Signer.Health` only awaits a notification. Neither needs the
+    async runtime or its blocking pool to be responsive. Single-flight and the 5 s cache are kept;
+    at most one probe thread is ever parked on a dead volume.
+  - **Debounced "unresponsive"**: a probe that *returns* an error (EACCES, EROFS, ENOSPC, EIO,
+    ESTALE…) still refuses round 1 at once, but a probe that merely hangs counts as unresponsive
+    only after 6 s — two 3 s probe timeouts, a warning logged after the first — so a short fsfreeze
+    that hits all three PVCs together no longer fails every sign cluster-wide. Health still answers
+    within 3 s either way. (Previously a single 3 s timeout counted.)
+  - The hosted-key mesh RPCs (`ReplicateKey`, `FetchKey`, `ListKeys`, `PurgeKey`) and the local
+    anti-entropy sweep now refuse with UNAVAILABLE while the store is down — callers already treat
+    that as a missing replica — so peers' anti-entropy cannot park a thread per pass on a dead
+    mount.
+  - Tests: `frost/cosigner/tests/hung_volume.rs` parks key-store calls through a fault-injection
+    seam (`KeyStore::with_io_hook`) on a one-worker runtime and asserts that Health, a peer sign
+    round on another key, and a full signature led by the affected node still answer; then that a
+    hung probe turns the node away (UNAVAILABLE at once) while another leader signs around it, and
+    that the watchdog flips the verdict with no async runtime at all. Verified to fail, not hang,
+    with the store calls moved back inline.
 
 ### Added
 - **`deploy/monitoring/kustomization.yaml`** — Rütli observability for a kube-prometheus-stack

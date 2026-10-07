@@ -133,14 +133,21 @@ pub async fn run_refresh(peers: &Peers, key_id: &str) -> Result<[u8; 32]> {
 
 /// Coordinate one signature. Selects a threshold-sized quorum, tolerating peers that fail round 1
 /// (a downed cosigner), and aggregates the shares into a 64-byte Ed25519 signature.
-pub async fn sign(node: &Node, peers: &Peers, key_id: &str, message: &[u8]) -> Result<[u8; 64]> {
+///
+/// Every step that may read this node's key store runs on the blocking pool ([`Node::blocking`];
+/// the [`PeerApi`] calls do the same on their side), so a stalled volume parks a blocking thread,
+/// never an async worker.
+pub async fn sign(node: &Arc<Node>, peers: &Peers, key_id: &str, message: &[u8]) -> Result<[u8; 64]> {
     if message.len() != CANTON_DIGEST_LEN {
         return Err(DaemonError::InvalidMessageLength {
             got: message.len(),
             expected: CANTON_DIGEST_LEN,
         });
     }
-    let threshold = node.threshold_for(key_id)? as usize;
+    let threshold = {
+        let key_id = key_id.to_owned();
+        node.blocking(move |n| n.threshold_for(&key_id)).await? as usize
+    };
     let session_id = new_id("sign");
 
     // Round 1: gather commitments until we reach the threshold; skip peers that error.
@@ -183,7 +190,8 @@ pub async fn sign(node: &Node, peers: &Peers, key_id: &str, message: &[u8]) -> R
         }
     }
 
-    node.aggregate(key_id, message, &commitments, &shares)
+    let (key_id, message) = (key_id.to_owned(), message.to_vec());
+    node.blocking(move |n| n.aggregate(&key_id, &message, &commitments, &shares)).await
 }
 
 /// Best-effort: tell each quorum member to drop the in-flight session so its round-1 nonces are
@@ -273,7 +281,7 @@ fn is_unreachable(e: &DaemonError) -> bool {
 /// minting a second key, so a client retry or driver failover can never produce two different keys
 /// under one name.
 pub async fn generate_hosted_key(
-    node: &Node,
+    node: &Arc<Node>,
     peers: &Peers,
     key_id: &str,
     spec: crate::hosted::HostedSpec,
@@ -319,7 +327,7 @@ pub async fn generate_hosted_key(
 }
 
 async fn generate_hosted_fenced(
-    node: &Node,
+    node: &Arc<Node>,
     peers: &Peers,
     key_id: &str,
     spec: crate::hosted::HostedSpec,
@@ -330,7 +338,11 @@ async fn generate_hosted_fenced(
     // tokio worker for that whole time — with a small worker pool, a burst of key generations could
     // starve health checks and in-flight signing on the same node. Do the idempotency check here
     // (cheap, needs the keystore) and the keygen off-runtime.
-    let (key, created) = match node.hosted_existing(key_id, spec)? {
+    let existing = {
+        let key_id = key_id.to_owned();
+        node.blocking(move |n| n.hosted_existing(&key_id, spec)).await?
+    };
+    let (key, created) = match existing {
         Some(existing) => (existing, false),
         None => {
             let key = tokio::task::spawn_blocking(move || {
@@ -338,7 +350,8 @@ async fn generate_hosted_fenced(
             })
             .await
             .map_err(|e| DaemonError::Config(format!("key generation task failed: {e}")))??;
-            node.hosted_store(key_id, &key)?;
+            let (id, stored) = (key_id.to_owned(), key.clone());
+            node.blocking(move |n| n.hosted_store(&id, &stored)).await?;
             (key, true)
         }
     };
@@ -445,8 +458,8 @@ pub async fn hosted_replica_count(peers: &Peers, key_id: &str) -> usize {
 /// Without this, a decrypt that lands on a lagging replica would return NOT_FOUND to Canton — and
 /// the driver correctly does not fail over on NOT_FOUND, since that is normally authoritative.
 /// Repairing on demand is what makes NOT_FOUND trustworthy.
-pub async fn repair_hosted_key(node: &Node, peers: &Peers, key_id: &str) -> Result<bool> {
-    if node.hosted_exists(key_id) {
+pub async fn repair_hosted_key(node: &Arc<Node>, peers: &Peers, key_id: &str) -> Result<bool> {
+    if hosted_exists(node, key_id).await? {
         return Ok(true);
     }
     for p in peers {
@@ -457,7 +470,8 @@ pub async fn repair_hosted_key(node: &Node, peers: &Peers, key_id: &str) -> Resu
         let Ok(spec) = crate::hosted::HostedSpec::parse(&spec) else { continue };
         match node.hosted_unwrap(key_id, spec, &wrapped) {
             Ok(key) => {
-                node.hosted_store(key_id, &key)?;
+                let id = key_id.to_owned();
+                node.blocking(move |n| n.hosted_store(&id, &key)).await?;
                 tracing::info!(key_id, from = ?p.identifier(), "repaired missing hosted key from peer");
                 return Ok(true);
             }
@@ -474,11 +488,15 @@ pub async fn repair_hosted_key(node: &Node, peers: &Peers, key_id: &str) -> Resu
 /// Pushing is what heals an under-quorum write; pulling is what heals a node restored from a stale
 /// backup. Applies to hosted keys ONLY — a FROST share must never be copied between nodes, since
 /// two nodes holding the same share silently breaks the threshold.
-pub async fn anti_entropy_sweep(node: &Node, peers: &Peers) -> Result<(usize, usize)> {
+pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<(usize, usize)> {
     if !node.hosted_enabled() {
         return Ok((0, 0));
     }
-    let mine: std::collections::HashSet<String> = node.hosted_list()?.into_iter().collect();
+    // A store that failed its readiness probe is not reconciled against: nothing could be pulled
+    // into it, and its listing is not to be trusted.
+    node.refuse_if_keystore_down()?;
+    let mine: std::collections::HashSet<String> =
+        node.blocking(|n| n.hosted_list()).await?.into_iter().collect();
     let (mut pulled, mut pushed) = (0usize, 0usize);
     // key_id -> how many cosigners hold it. Seeded with this node's own inventory; each reachable
     // peer adds its own. Published as the min at the end — the signal that a below-`n` write
@@ -501,7 +519,7 @@ pub async fn anti_entropy_sweep(node: &Node, peers: &Peers) -> Result<(usize, us
         // create-once-immutable, so two different materials under one id means something is wrong
         // that a sweep must not paper over.
         for (key_id, _spec, commitment) in &theirs {
-            if let Ok(local) = node.hosted_load(key_id) {
+            if let Ok(local) = hosted_load(node, key_id).await {
                 if node.hosted_commitment(&local)? != *commitment {
                     metrics::counter!(crate::metrics::ANTI_ENTROPY_CONFLICTS).increment(1);
                     tracing::error!(
@@ -523,7 +541,7 @@ pub async fn anti_entropy_sweep(node: &Node, peers: &Peers) -> Result<(usize, us
             if their_ids.contains(key_id) {
                 continue;
             }
-            let Ok(key) = node.hosted_load(key_id) else { continue };
+            let Ok(key) = hosted_load(node, key_id).await else { continue };
             let public_der =
                 if key.spec.is_asymmetric() { key.public_key_der().unwrap_or_default() } else { Vec::new() };
             match replicate_to(node, p.as_ref(), &new_id("repair"), key_id, &key, &public_der).await {
@@ -539,7 +557,8 @@ pub async fn anti_entropy_sweep(node: &Node, peers: &Peers) -> Result<(usize, us
         metrics::counter!(crate::metrics::ANTI_ENTROPY_REPAIRS).increment((pulled + pushed) as u64);
     }
     // Recount after repair so the gauge reflects the healed state, not the state that triggered it.
-    let healed: std::collections::HashSet<String> = node.hosted_list()?.into_iter().collect();
+    let healed: std::collections::HashSet<String> =
+        node.blocking(|n| n.hosted_list()).await?.into_iter().collect();
     for id in &healed {
         replicas.entry(id.clone()).or_insert(1);
     }
@@ -547,6 +566,18 @@ pub async fn anti_entropy_sweep(node: &Node, peers: &Peers) -> Result<(usize, us
     metrics::gauge!(crate::metrics::KEY_REPLICAS)
         .set(replicas.values().copied().min().map(|m| m as f64).unwrap_or(f64::NAN));
     Ok((pulled, pushed))
+}
+
+/// [`Node::hosted_load`] off the async workers.
+async fn hosted_load(node: &Arc<Node>, key_id: &str) -> Result<crate::hosted::HostedKey> {
+    let key_id = key_id.to_owned();
+    node.blocking(move |n| n.hosted_load(&key_id)).await
+}
+
+/// [`Node::hosted_exists`] off the async workers.
+pub(crate) async fn hosted_exists(node: &Arc<Node>, key_id: &str) -> Result<bool> {
+    let key_id = key_id.to_owned();
+    node.blocking(move |n| Ok(n.hosted_exists(&key_id))).await
 }
 
 #[cfg(test)]

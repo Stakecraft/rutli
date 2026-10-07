@@ -3,6 +3,11 @@
 
 //! tonic service implementations: the client-facing [`Signer`] and the mesh-internal [`Peer`].
 //! Both are thin — they (de)serialize the wire bytes and delegate to [`Node`] / [`orchestrator`].
+//!
+//! Every [`Node`] call that may touch the key store goes through [`Node::blocking`]: on a stalled
+//! volume a filesystem call parks its thread, and a handler parked on an async worker would freeze
+//! every other RPC, Health and `/metrics` with it (with the shipped 500m CPU limit the runtime has
+//! a single worker). Calls that only touch memory or do a little crypto stay inline.
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
@@ -112,7 +117,8 @@ impl Signer for SignerSvc {
     ) -> Result<Response<pb::GroupKeyReply>, Status> {
         self.authorize(&req)?;
         self.refuse_if_keystore_down()?;
-        let key = self.node.group_key(&req.into_inner().key_id).map_err(Status::from)?;
+        let key_id = req.into_inner().key_id;
+        let key = self.node.blocking(move |n| n.group_key(&key_id)).await.map_err(Status::from)?;
         Ok(Response::new(pb::GroupKeyReply { group_verifying_key: key.to_vec() }))
     }
 
@@ -288,7 +294,7 @@ impl Signer for SignerSvc {
         // be able to drive cluster traffic at line rate just because the key is not local yet.
         self.charge_decrypt(&r.key_id)?;
         self.load_hosted_repairing(&r.key_id).await?;
-        let result = self.node.hosted_decrypt(&r.key_id, &r.ciphertext);
+        let result = self.node.blocking(move |n| n.hosted_decrypt(&r.key_id, &r.ciphertext)).await;
         record_hosted_op("decrypt", result.is_ok());
         Ok(Response::new(pb::DecryptReply { plaintext: result.map_err(Status::from)? }))
     }
@@ -301,7 +307,7 @@ impl Signer for SignerSvc {
         self.refuse_if_keystore_down()?;
         let r = req.into_inner();
         self.load_hosted_repairing(&r.key_id).await?;
-        let result = self.node.hosted_encrypt_symmetric(&r.key_id, &r.data);
+        let result = self.node.blocking(move |n| n.hosted_encrypt_symmetric(&r.key_id, &r.data)).await;
         record_hosted_op("symmetric_encrypt", result.is_ok());
         Ok(Response::new(pb::SymmetricReply { data: result.map_err(Status::from)? }))
     }
@@ -315,7 +321,7 @@ impl Signer for SignerSvc {
         let r = req.into_inner();
         self.charge_decrypt(&r.key_id)?;
         self.load_hosted_repairing(&r.key_id).await?;
-        let result = self.node.hosted_decrypt_symmetric(&r.key_id, &r.data);
+        let result = self.node.blocking(move |n| n.hosted_decrypt_symmetric(&r.key_id, &r.data)).await;
         record_hosted_op("symmetric_decrypt", result.is_ok());
         Ok(Response::new(pb::SymmetricReply { data: result.map_err(Status::from)? }))
     }
@@ -331,12 +337,13 @@ impl SignerSvc {
         &self,
         key_id: &str,
     ) -> Result<crate::hosted::HostedKey, Status> {
-        if !self.node.hosted_exists(key_id) {
+        if !orchestrator::hosted_exists(&self.node, key_id).await.map_err(Status::from)? {
             orchestrator::repair_hosted_key(&self.node, &self.peers, key_id)
                 .await
                 .map_err(Status::from)?;
         }
-        self.node.hosted_load(key_id).map_err(|e| match e {
+        let id = key_id.to_owned();
+        self.node.blocking(move |n| n.hosted_load(&id)).await.map_err(|e| match e {
             crate::DaemonError::UnknownKey(k) => Status::not_found(format!("no such key: {k}")),
             other => Status::from(other),
         })
@@ -407,7 +414,11 @@ impl Peer for PeerSvc {
     ) -> Result<Response<pb::SignRound1Reply>, Status> {
         self.authorize(&req)?;
         let r = req.into_inner();
-        let commitments = self.node.sign_round1(&r.key_id, &r.session_id).map_err(Status::from)?;
+        let commitments = self
+            .node
+            .blocking(move |n| n.sign_round1(&r.key_id, &r.session_id))
+            .await
+            .map_err(Status::from)?;
         Ok(Response::new(pb::SignRound1Reply {
             commitments: json(&commitments)?,
         }))
@@ -420,9 +431,13 @@ impl Peer for PeerSvc {
         self.authorize(&req)?;
         let r = req.into_inner();
         let commitments: BTreeMap<_, _> = de(&r.commitments_map)?;
+        // One blocking call, so burn-before-sign stays exactly as it is inline: round 2 creates
+        // and fsyncs the nonce marker, then computes the share — and finishes even if the leader
+        // stops waiting, so a burnt session is never half-done.
         let share = self
             .node
-            .sign_round2(&r.key_id, &r.session_id, &r.message, &commitments)
+            .blocking(move |n| n.sign_round2(&r.key_id, &r.session_id, &r.message, &commitments))
+            .await
             .map_err(Status::from)?;
         Ok(Response::new(pb::SignRound2Reply { share: json(&share)? }))
     }
@@ -478,7 +493,11 @@ impl Peer for PeerSvc {
     ) -> Result<Response<pb::DkgPart1Reply>, Status> {
         self.authorize(&req)?;
         let r = req.into_inner();
-        let package = self.node.dkg_part1(&r.dkg_id, &r.key_id).map_err(Status::from)?;
+        let package = self
+            .node
+            .blocking(move |n| n.dkg_part1(&r.dkg_id, &r.key_id))
+            .await
+            .map_err(Status::from)?;
         Ok(Response::new(pb::DkgPart1Reply { round1_package: json(&package)? }))
     }
 
@@ -503,7 +522,8 @@ impl Peer for PeerSvc {
         let round2_for_me = de(&r.round2_map_for_me)?;
         let key = self
             .node
-            .dkg_part3(&r.dkg_id, &round1_map, &round2_for_me)
+            .blocking(move |n| n.dkg_part3(&r.dkg_id, &round1_map, &round2_for_me))
+            .await
             .map_err(Status::from)?;
         Ok(Response::new(pb::DkgPart3Reply { group_verifying_key: key.to_vec() }))
     }
@@ -514,7 +534,11 @@ impl Peer for PeerSvc {
     ) -> Result<Response<pb::DkgPart1Reply>, Status> {
         self.authorize(&req)?;
         let r = req.into_inner();
-        let package = self.node.refresh_part1(&r.refresh_id, &r.key_id).map_err(Status::from)?;
+        let package = self
+            .node
+            .blocking(move |n| n.refresh_part1(&r.refresh_id, &r.key_id))
+            .await
+            .map_err(Status::from)?;
         Ok(Response::new(pb::DkgPart1Reply { round1_package: json(&package)? }))
     }
 
@@ -537,12 +561,20 @@ impl Peer for PeerSvc {
         let r = req.into_inner();
         let round1_map = de(&r.round1_map)?;
         let round2_for_me = de(&r.round2_map_for_me)?;
-        let key =
-            self.node.refresh_part3(&r.dkg_id, &round1_map, &round2_for_me).map_err(Status::from)?;
+        let key = self
+            .node
+            .blocking(move |n| n.refresh_part3(&r.dkg_id, &round1_map, &round2_for_me))
+            .await
+            .map_err(Status::from)?;
         Ok(Response::new(pb::DkgPart3Reply { group_verifying_key: key.to_vec() }))
     }
 
     // -- hosted-key replication (mesh only; peer_allowlist gates every one of these) --
+    //
+    // Each refuses with UNAVAILABLE while this node's key store fails its readiness probe. The
+    // callers already treat that as an unreachable replica (write quorum, best-effort purge,
+    // read-repair and anti-entropy skip it), and on a hung volume it is what stops every peer's
+    // anti-entropy sweep from parking another thread here on each pass.
 
     async fn replicate_key(
         &self,
@@ -550,11 +582,18 @@ impl Peer for PeerSvc {
     ) -> Result<Response<pb::ReplicateKeyReply>, Status> {
         self.authorize(&req)?;
         let r = req.into_inner();
+        self.node.refuse_if_keystore_down().map_err(Status::from)?;
         let spec = crate::hosted::HostedSpec::parse(&r.spec).map_err(Status::from)?;
         let wrapped = crate::peer::from_pb_wrapped(r.wrapped).map_err(Status::from)?;
         let key = self.node.hosted_unwrap(&r.key_id, spec, &wrapped).map_err(Status::from)?;
-        self.node.hosted_store(&r.key_id, &key).map_err(Status::from)?;
-        let commitment = self.node.hosted_commitment(&key).map_err(Status::from)?;
+        let commitment = self
+            .node
+            .blocking(move |n| {
+                n.hosted_store(&r.key_id, &key)?;
+                n.hosted_commitment(&key)
+            })
+            .await
+            .map_err(Status::from)?;
         Ok(Response::new(pb::ReplicateKeyReply { commitment }))
     }
 
@@ -565,8 +604,10 @@ impl Peer for PeerSvc {
         // Wrap to the *authenticated* caller, identified by its client certificate — never to a
         // recipient named in the request, which any allowlisted peer could forge.
         let recipient = self.authenticated_peer(&req)?;
+        self.node.refuse_if_keystore_down().map_err(Status::from)?;
         let r = req.into_inner();
-        let key = self.node.hosted_load(&r.key_id).map_err(|e| match e {
+        let key_id = r.key_id.clone();
+        let key = self.node.blocking(move |n| n.hosted_load(&key_id)).await.map_err(|e| match e {
             crate::DaemonError::UnknownKey(k) => Status::not_found(format!("no such key: {k}")),
             other => Status::from(other),
         })?;
@@ -592,17 +633,25 @@ impl Peer for PeerSvc {
         req: Request<pb::ListKeysRequest>,
     ) -> Result<Response<pb::ListKeysReply>, Status> {
         self.authorize(&req)?;
-        let mut keys = Vec::new();
-        for key_id in self.node.hosted_list().map_err(Status::from)? {
-            let key = self.node.hosted_load(&key_id).map_err(Status::from)?;
-            let commitment = self.node.hosted_commitment(&key).map_err(Status::from)?;
-            keys.push(pb::KeyManifest {
-                key_id,
-                spec: key.spec.as_str().to_string(),
-                created_at: key.created_at,
-                commitment,
-            });
-        }
+        self.node.refuse_if_keystore_down().map_err(Status::from)?;
+        let keys = self
+            .node
+            .blocking(|n| {
+                let mut keys = Vec::new();
+                for key_id in n.hosted_list()? {
+                    let key = n.hosted_load(&key_id)?;
+                    let commitment = n.hosted_commitment(&key)?;
+                    keys.push(pb::KeyManifest {
+                        key_id,
+                        spec: key.spec.as_str().to_string(),
+                        created_at: key.created_at,
+                        commitment,
+                    });
+                }
+                Ok(keys)
+            })
+            .await
+            .map_err(Status::from)?;
         metrics::gauge!(crate::metrics::HOSTED_KEYS).set(keys.len() as f64);
         Ok(Response::new(pb::ListKeysReply { keys }))
     }
@@ -612,8 +661,10 @@ impl Peer for PeerSvc {
         req: Request<pb::PurgeKeyRequest>,
     ) -> Result<Response<pb::PurgeKeyReply>, Status> {
         self.authorize(&req)?;
+        self.node.refuse_if_keystore_down().map_err(Status::from)?;
         let r = req.into_inner();
-        let deleted = self.node.hosted_delete(&r.key_id).map_err(Status::from)?;
+        let deleted =
+            self.node.blocking(move |n| n.hosted_delete(&r.key_id)).await.map_err(Status::from)?;
         Ok(Response::new(pb::PurgeKeyReply { deleted }))
     }
 

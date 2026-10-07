@@ -45,9 +45,16 @@ pub enum Record {
 /// The `kind` tag written into hosted-key files. FROST files carry no tag (backward compatible).
 const KIND_HOSTED: &str = "hosted";
 
+/// Fault-injection seam: called with the path a key-store operation is about to touch, before it
+/// touches it — every key-file read, write and delete, the hosted-key listing, and the readiness
+/// probe. Lets a test make the store *hang* (a dead NFS/CSI mount, a frozen volume), which file
+/// permissions cannot simulate. Not reachable from config; unset in the daemon.
+pub type IoHook = Arc<dyn Fn(&Path) + Send + Sync>;
+
 pub struct KeyStore {
     dir: PathBuf,
     sealer: Option<Arc<Sealer>>,
+    io_hook: Option<IoHook>,
 }
 
 impl KeyStore {
@@ -61,7 +68,25 @@ impl KeyStore {
     pub fn open_with_sealer(dir: impl Into<PathBuf>, sealer: Option<Arc<Sealer>>) -> Result<Self> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
-        Ok(Self { dir, sealer })
+        Ok(Self { dir, sealer, io_hook: None })
+    }
+
+    /// Install a fault-injection [`IoHook`]. Tests only — see its docs. Must be set before the
+    /// store is handed to a [`crate::node::Node`], which passes it on to the readiness probe.
+    #[doc(hidden)]
+    pub fn with_io_hook(mut self, hook: IoHook) -> Self {
+        self.io_hook = Some(hook);
+        self
+    }
+
+    pub(crate) fn io_hook(&self) -> Option<IoHook> {
+        self.io_hook.clone()
+    }
+
+    fn touch(&self, path: &Path) {
+        if let Some(hook) = &self.io_hook {
+            hook(path);
+        }
     }
 
     /// When sealing is enabled, rewrite any leftover plaintext share files as sealed envelopes.
@@ -111,7 +136,12 @@ impl KeyStore {
     /// create and rename also need), and a node whose store fails its readiness probe refuses
     /// DKG/refresh at the fence and every key operation at the RPC entry ([`crate::health`]).
     pub fn exists(&self, key_id: &str) -> bool {
-        self.path(key_id).map(|p| p.exists()).unwrap_or(false)
+        self.path(key_id)
+            .map(|p| {
+                self.touch(&p);
+                p.exists()
+            })
+            .unwrap_or(false)
     }
 
     pub fn save(&self, key_id: &str, share: &Share) -> Result<()> {
@@ -122,6 +152,7 @@ impl KeyStore {
     /// so a key survives power loss. Shared by FROST shares and hosted keys.
     fn write_sealed(&self, key_id: &str, plain: &[u8]) -> Result<()> {
         let path = self.path(key_id)?;
+        self.touch(&path);
         let tmp = path.with_extension("json.tmp");
         let bytes = match &self.sealer {
             Some(s) => s.seal(plain)?,
@@ -152,6 +183,7 @@ impl KeyStore {
     /// Read a key file and unseal it, without interpreting the contents.
     fn read_plaintext(&self, key_id: &str) -> Result<Vec<u8>> {
         let path = self.path(key_id)?;
+        self.touch(&path);
         // try_exists, not exists: an unreadable store must surface as an IO error (INTERNAL), never
         // as UnknownKey (NOT_FOUND) — Canton would take NOT_FOUND to mean the key is gone.
         if !path.try_exists()? {
@@ -207,6 +239,7 @@ impl KeyStore {
 
     /// Key ids of every hosted key on this node (FROST shares excluded).
     pub fn list_hosted(&self) -> Result<Vec<String>> {
+        self.touch(&self.dir);
         let mut out = Vec::new();
         for entry in std::fs::read_dir(&self.dir)? {
             let entry = entry?;
@@ -244,6 +277,7 @@ impl KeyStore {
     /// rotating the seal master secret.
     pub fn delete(&self, key_id: &str) -> Result<()> {
         let path = self.path(key_id)?;
+        self.touch(&path);
         if path.try_exists()? {
             std::fs::remove_file(&path)?;
             std::fs::File::open(&self.dir)?.sync_all()?;

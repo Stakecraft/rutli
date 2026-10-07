@@ -26,7 +26,7 @@ annotations, NetworkPolicy ingress for pods labelled `rutli.io/scraper: "true"`)
 | `rutli_sign_round1_skips_total` | counter | — | Peers skipped in sign round 1 — the quorum-margin canary: skips mean you are signing with less headroom than you deployed |
 | `rutli_sign_aborts_total` | counter | — | Given-up signatures (leader aborted the in-flight session on the quorum) |
 | `rutli_pending_sign_sessions` | gauge | — | In-flight round-1 sessions held on this node; hovers near 0 in a healthy cluster |
-| `rutli_keystore_unreadable` | gauge | — | `1` while this node's key store (`data_dir/keys`) fails its readiness probe — cannot be listed or written, or not one key file in it opens — else `0`. Re-probed every 15s and on `Signer.Health` (cached 5s, one probe at a time); primed to `0` |
+| `rutli_keystore_unreadable` | gauge | — | `1` while this node's key store (`data_dir/keys`) fails its readiness probe — cannot be listed or written, or not one key file in it opens, or the probe has hung for 6s (a stalled mount) — else `0`. Re-probed every 15s by a watchdog thread and on `Signer.Health` (cached 5s, one probe at a time); primed to `0` |
 | `rutli_hosted_keys` | gauge | — | Cluster-hosted keys held by this node |
 | `rutli_decrypt_rate_limited_total` | counter | — | Hosted-key decryptions refused by the per-key rate limit. Never moves in normal operation: either a node outgrew its ceiling, or someone with the driver certificate is bulk-decrypting |
 | `rutli_unreadable_key_files_total` | counter | — | Key files present on disk that could not be unsealed (wrong seal secret, partial restore, corruption) and were therefore skipped from the hosted-key inventory, or could not even be opened (ownership/permissions) by the key-store probe while the rest of the store could |
@@ -141,3 +141,14 @@ Published latency snapshots and how to reproduce them: [`performance.md`](perfor
    pod — a restart does not repair it and throws away the evidence. The gauge clears by itself
    within ~15s of the store becoming readable again. A full data disk does *not* trip it (a sign
    only needs to create an empty nonce marker) — watch volume usage separately.
+
+   **The other shape: `NOT_SERVING: keystore … unresponsive`** — the probe did not fail, it never
+   returned: a dead NFS/CSI mount, or a volume frozen by a snapshot hook (`fsfreeze`). A probe that
+   errors (EACCES, EROFS, EIO, ESTALE…) trips the gauge at once; a hung one only after 6s (two
+   probe timeouts, logged at warn after the first), so a short freeze that hits all three PVCs at
+   once does not stop signing cluster-wide. The node stays responsive throughout — Health answers
+   within 3s, the gRPC server and `/metrics` keep serving — because every key-store access runs
+   off the async workers and the probe loop is its own thread; threads stuck on the dead mount
+   are parked, not lost work. Check `cat /proc/mounts` and `dmesg` on the node for
+   `nfs: server … not responding` / CSI errors, and whatever runs snapshots on the volume. It
+   clears by itself when the stuck probe returns.
