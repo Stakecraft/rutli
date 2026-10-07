@@ -68,10 +68,30 @@ spec:
               containerPort: 9101
             - name: metrics
               containerPort: 9200
+          # Readiness = "this node can actually sign": its key store under /data/keys can be listed,
+          # opened and written, and the gRPC port accepts connections (`rutli-cosigner health`). An
+          # exec, not a `grpc:` probe — the port is mTLS and kubelet's gRPC probe is plaintext-only.
+          # A node whose volume goes unreadable (2026-10-07 incident) now shows READY 0/1, holds a
+          # rollout and counts against the PDB. It is NOT removed from the driver's endpoints: the
+          # headless Service publishes not-ready addresses (the mesh needs them during DKG), so
+          # routing around a sick node is the driver's failover plus the node refusing to lead or
+          # join quorums.
+          # `|| [ $? -eq 2 ]`: exit 2 = clap usage error = image predates the `health` subcommand
+          # → fall back to "process running" (liveness still checks the port); drop this once the
+          # image pin is ≥ the next release. `health` itself exits only 0 or 1. No `exec` here — it
+          # would replace the shell and the fallback would never run.
           readinessProbe:
-            tcpSocket: { port: grpc }
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - 'rutli-cosigner --config /config/cosigner-$(( ${HOSTNAME##*-} + 1 )).json health || [ $? -eq 2 ]'
             initialDelaySeconds: 3
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Liveness stays a bare TCP check on purpose: restarting the pod does not fix a broken
+          # volume, and it would destroy the evidence (logs, the mount as it is) mid-incident.
           livenessProbe:
             tcpSocket: { port: grpc }
             initialDelaySeconds: 10

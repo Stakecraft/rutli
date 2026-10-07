@@ -12,7 +12,10 @@ metadata:
     app.kubernetes.io/name: rutli-cosigner
 spec:
   clusterIP: None
-  publishNotReadyAddresses: true # peers must resolve each other during DKG before all are "ready"
+  # Peers must resolve each other during DKG before all are "ready". Consequence: a pod failing its
+  # readiness probe (e.g. an unreadable key store) stays in DNS for the driver too — readiness makes
+  # it visible (READY 0/1, PDB, rollouts); the driver's failover does the routing.
+  publishNotReadyAddresses: true
   selector:
     app.kubernetes.io/name: rutli-cosigner
   ports:
