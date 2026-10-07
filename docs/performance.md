@@ -35,9 +35,11 @@ shares; Splice DevNet participant in HEL driving the cluster (`stakecraft-devnet
 | Summary quantiles (exporter) | p50–p99 ≈ **70 ms**, max ≈ **73 ms**\* |
 | Pending sign sessions | **0** (steady state) |
 
-\*The Prometheus exporter exposes a **summary** for `rutli_sign_duration_seconds`. Quantiles are
-approximate sliding estimates; prefer `sum/count` for mean and a Prometheus histogram quantile over
-a scrape window for p99 alerting (see `deploy/monitoring/prometheus-rules.yml`, threshold 5s).
+\*Captured on 0.2.1, whose exporter rendered `rutli_sign_duration_seconds` as a **summary**
+(as every release through 0.3.1 does). Its quantiles are approximate sliding-window
+estimates, which is why the mean from `sum/count` is the headline number here. Later cosigners
+export a true histogram (buckets in [`observability.md`](observability.md#sign-latency-histogram)),
+so re-captures should report p50/p95/p99 from `histogram_quantile()` over the run window.
 
 **How to read this:** ~100 ms mean for a **cross-region** 2-of-3 FROST sign (HEL leader ↔ NBG/FSN
 peers) is the realistic multi-DC figure. Same-rack / single-AZ lab clusters will be faster; do not
@@ -53,6 +55,9 @@ curl -s localhost:9200/metrics | grep -E '^rutli_sign_|^rutli_ceremony_'
 # Mean latency (seconds → ms)
 # mean_ms = 1000 * rutli_sign_duration_seconds_sum{result="ok"}
 #              / rutli_sign_duration_seconds_count{result="ok"}
+
+# p99 over the run (cosigners after 0.3.1; PromQL)
+# histogram_quantile(0.99, sum by (le) (increase(rutli_sign_duration_seconds_bucket{result="ok"}[24h])))
 ```
 
 Participant-side confirmation:

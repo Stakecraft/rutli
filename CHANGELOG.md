@@ -20,6 +20,29 @@ All notable changes to Rütli are documented here. Format loosely follows
   cosigner keystore alphabet at startup, and the cosigners are untouched (ids are opaque to them).
   Docs: `docs/architecture.md` → *One cluster, several participants*.
 
+### Fixed
+- **The sign-latency alert and dashboard panel were blind: the cosigner exported a summary, not a
+  histogram.** Found on the 2026-10-07 DevNet soak. `metrics-exporter-prometheus` renders any
+  `histogram!` with no configured buckets as a Prometheus *summary*, so `/metrics` carried
+  `rutli_sign_duration_seconds{quantile="…"}` and no `_bucket` series. Everything that reads the
+  metric uses `histogram_quantile()` over `_bucket`. That covers `RutliSignLatencyHigh`, the
+  Grafana *Sign Latency* panel and the soak gate's p99, so the alert could never fire and the
+  panel never had data on any release up to and including 0.3.1. The cosigner now configures
+  explicit buckets for `rutli_sign_duration_seconds`, its only histogram: 0.01, 0.025, 0.05,
+  0.075, 0.1, 0.15, 0.25, 0.5, 1, 2.5, 5 and 10 s. Metric names and labels are unchanged. The
+  bounds resolve a 50–150 ms FROST round trip and make the soak gate's 1 s an exact bound. The 10 s
+  bound is required for the alert. `histogram_quantile()` reports a quantile that lands in `+Inf`
+  as the highest finite bound, so with 5 s on top the `> 5` rule could still never fire; promtool
+  confirms that case. Unit and HTTP-scrape tests pin the wire format: a histogram with every
+  bucket line present and no `quantile=` series.
+  - **Soak gate (`deploy/soak/soak-check.sh`).** The p99 branch now gets data. The summary
+    fallback stays for clusters with no upgraded leader yet. Mid-rollout, the gate reports how many
+    summary-only leaders the p99 leaves out. A `NaN` result now counts as "no data". Buckets with no
+    samples in the window used to reach awk as `null` and pass.
+  - The rules, dashboard and `docs/observability.md` already assumed a histogram, so they need no
+    query changes. The rules header, `docs/observability.md` and `docs/performance.md` now
+    document the buckets and the summary on 0.3.1 and earlier.
+
 ## [0.3.1] — 2026-10-07
 
 ### Changed

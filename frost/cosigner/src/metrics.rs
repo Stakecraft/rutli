@@ -12,7 +12,7 @@
 //! so the instrumented paths cost nothing to callers that don't opt in.
 
 use metrics::{describe_counter, describe_gauge, describe_histogram, Unit};
-use metrics_exporter_prometheus::PrometheusBuilder;
+use metrics_exporter_prometheus::{BuildError, Matcher, PrometheusBuilder};
 
 use crate::{DaemonError, Result};
 
@@ -57,15 +57,35 @@ pub const KEY_REPLICAS: &str = "rutli_key_replicas";
 /// `Signer.Health` call; not the same as [`UNREADABLE_KEY_FILES`] (one file failing to unseal).
 pub const KEYSTORE_UNREADABLE: &str = "rutli_keystore_unreadable";
 
+/// Upper bounds (seconds) of the `rutli_sign_duration_seconds` histogram buckets.
+///
+/// Without explicit buckets `metrics-exporter-prometheus` renders a `histogram!` as a Prometheus
+/// *summary* (`{quantile="…"}` series, no `_bucket`), which is what the 2026-10-07 DevNet soak
+/// found on the live endpoint: `histogram_quantile()` in the latency alert, the dashboard and the
+/// soak gate had nothing to read. The bounds bracket the observed 50–150 ms FROST round trip (two
+/// mTLS hops to a quorum) with ~25 ms resolution, then widen past the 1 s soak gate and the 5 s
+/// `RutliSignLatencyHigh` threshold. The 10 s bound is load-bearing: `histogram_quantile()` can
+/// only report an estimate *above* a threshold when a finite bucket lies above it (a quantile that
+/// lands in `+Inf` is reported as the highest finite bound), so without it a `> 5` rule could
+/// never fire.
+pub const SIGN_DURATION_BUCKETS: &[f64] =
+    &[0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0];
+
+/// The exporter configuration shared by [`install`] and the exposition-format test below, so the
+/// test pins exactly what the daemon serves.
+fn builder() -> std::result::Result<PrometheusBuilder, BuildError> {
+    PrometheusBuilder::new()
+        .set_buckets_for_metric(Matcher::Full(SIGN_DURATION.to_owned()), SIGN_DURATION_BUCKETS)
+}
+
 /// Install the process-global Prometheus recorder and serve `/metrics` on `listen`.
 /// Call at most once, before serving traffic.
 pub fn install(listen: &str) -> Result<()> {
     let addr: std::net::SocketAddr = listen
         .parse()
         .map_err(|e| DaemonError::Config(format!("bad metrics_listen addr {listen}: {e}")))?;
-    PrometheusBuilder::new()
-        .with_http_listener(addr)
-        .install()
+    builder()
+        .and_then(|b| b.with_http_listener(addr).install())
         .map_err(|e| DaemonError::Config(format!("metrics exporter on {listen}: {e}")))?;
     describe();
     prime();
@@ -113,4 +133,50 @@ pub fn describe() {
         KEYSTORE_UNREADABLE,
         "1 while this node's key store cannot be listed, opened or written (readiness probe), else 0"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Render the daemon's exporter configuration in-process (a local recorder, so no global state
+    /// and no port) and check `rutli_sign_duration_seconds` comes out as a real histogram. Without
+    /// explicit buckets the exporter renders a *summary* (`quantile=` series, no `_bucket`), which
+    /// every consumer's `histogram_quantile()` silently reads as "no data" — the 2026-10-07 soak
+    /// finding.
+    #[test]
+    fn sign_duration_renders_as_histogram_with_buckets() {
+        let recorder = builder().expect("valid buckets").build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            describe();
+            prime();
+            metrics::histogram!(SIGN_DURATION, "result" => "ok").record(0.083);
+            metrics::histogram!(SIGN_DURATION, "result" => "ok").record(1.7);
+        });
+        let out = handle.render();
+
+        assert!(out.contains("# TYPE rutli_sign_duration_seconds histogram"), "{out}");
+        assert!(!out.contains("quantile="), "summary quantiles must not be rendered:\n{out}");
+        for le in SIGN_DURATION_BUCKETS {
+            let line = format!(r#"{SIGN_DURATION}_bucket{{result="ok",le="{le}"}} "#);
+            assert!(out.contains(&line), "missing {line:?}:\n{out}");
+        }
+        // Cumulative: the 83 ms sample is under the 1 s soak-gate bound, the 1.7 s one is not.
+        for (le, count) in [("1", 1), ("2.5", 2), ("+Inf", 2)] {
+            let line = format!(r#"{SIGN_DURATION}_bucket{{result="ok",le="{le}"}} {count}"#);
+            assert!(out.lines().any(|l| l == line), "missing {line:?}:\n{out}");
+        }
+        assert!(out.contains(r#"rutli_sign_duration_seconds_count{result="ok"} 2"#), "{out}");
+    }
+
+    #[test]
+    fn buckets_are_strictly_increasing_and_span_the_alert_threshold() {
+        assert!(SIGN_DURATION_BUCKETS.windows(2).all(|w| w[0] < w[1]));
+        // RutliSignLatencyHigh fires on p99 > 5 s; histogram_quantile() can only estimate above
+        // 5 when a finite bucket bound lies above it.
+        assert!(SIGN_DURATION_BUCKETS.iter().any(|&b| b > 5.0));
+        // The soak gate's 1 s threshold should be a bucket bound, so "p99 < 1" is exact.
+        assert!(SIGN_DURATION_BUCKETS.contains(&1.0));
+    }
 }

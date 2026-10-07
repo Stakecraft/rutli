@@ -8,6 +8,9 @@
 #
 #   rutli_sign_requests_total{result="ok"|"error"}                    counter
 #   rutli_sign_duration_seconds{result="ok"|"error"}                  histogram
+#     (buckets 0.01 … 5, 10 s + Inf; cosigners up to and including 0.3.1 export a
+#     summary instead — no _bucket series, so RutliSignLatencyHigh sees no data
+#     from them)
 #   rutli_ceremony_requests_total{kind="dkg"|"refresh", result=...}   counter
 #   rutli_sign_round1_skips_total                                    counter
 #   rutli_sign_aborts_total                                          counter
@@ -66,6 +69,9 @@ groups:
           description: "{{ $labels.instance }} has had a non-zero rate of Sign RPC errors (result=\"error\") over the last 5m, sustained for 5m. Check leader logs for the failing peer(s)."
 
       - alert: RutliSignLatencyHigh
+        # Needs a finite bucket above the 5s threshold (the cosigner's top bound is 10s): a p99 in
+        # the +Inf bucket is reported as the highest finite bound, so with 5s on top this could
+        # never exceed 5. Change both together.
         expr: histogram_quantile(0.99, sum by (le, instance) (rate(rutli_sign_duration_seconds_bucket[5m]))) > 5
         for: 10m
         labels:

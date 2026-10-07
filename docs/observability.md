@@ -21,7 +21,7 @@ annotations, NetworkPolicy ingress for pods labelled `rutli.io/scraper: "true"`)
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
 | `rutli_sign_requests_total` | counter | `result`=ok\|error | Leader-side `Signer.Sign` outcomes |
-| `rutli_sign_duration_seconds` | histogram | `result` | Leader-side `Signer.Sign` latency |
+| `rutli_sign_duration_seconds` | histogram | `result` | Leader-side `Signer.Sign` latency. Buckets (s): 0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.25, 0.5, 1, 2.5, 5, 10 — see [Sign latency histogram](#sign-latency-histogram) |
 | `rutli_ceremony_requests_total` | counter | `kind`=dkg\|refresh, `result` | Key-ceremony outcomes (rare; any `error` needs investigation before retrying) |
 | `rutli_sign_round1_skips_total` | counter | — | Peers skipped in sign round 1 — the quorum-margin canary: skips mean you are signing with less headroom than you deployed |
 | `rutli_sign_aborts_total` | counter | — | Given-up signatures (leader aborted the in-flight session on the quorum) |
@@ -64,6 +64,29 @@ rate, never on its absence.
 
 Published latency snapshots and how to reproduce them: [`performance.md`](performance.md).
 
+### Sign latency histogram
+
+`rutli_sign_duration_seconds` is a true Prometheus histogram: `_bucket{le="…"}` series plus
+`_sum` and `_count`, so `histogram_quantile()` works over any window and aggregates across
+instances. The bounds bracket a 50–150 ms cross-region FROST round trip at ~25 ms resolution,
+and include the soak gate's 1 s threshold as an exact bound. They extend to 10 s, past the 5 s
+`RutliSignLatencyHigh` threshold. That last bound matters: when a quantile lands in the `+Inf`
+bucket, `histogram_quantile()` returns the highest finite bound. With 5 s as the top bound,
+a `> 5` rule could never fire.
+
+**Cosigners up to and including 0.3.1 export a *summary* instead** (`{quantile="…"}` series, no
+`_bucket`). The exporter does that for any histogram without configured buckets, so on those
+versions the latency alert and the dashboard's latency panel have no data. Upgrade every
+cosigner. Mid-rollout, `histogram_quantile()` covers only the upgraded leaders; the soak gate
+(`deploy/soak/soak-check.sh`) says how many summary-only leaders it left out, and falls back to
+the 24 h mean from `_sum`/`_count` when no leader exports buckets yet. For an ad-hoc mean on any
+version:
+
+```promql
+sum(rate(rutli_sign_duration_seconds_sum{result="ok"}[1h]))
+  / sum(rate(rutli_sign_duration_seconds_count{result="ok"}[1h]))
+```
+
 ## Prometheus + Grafana
 
 - Scrape config: any job name works, but the shipped alert rules assume `job: rutli-cosigner`.
@@ -80,7 +103,8 @@ Published latency snapshots and how to reproduce them: [`performance.md`](perfor
   `rutli_keystore_unreadable` per instance: green readable, red unreadable, grey not scraped),
   round-1 skips as `increase(…[5m])` per leader (the counter climbs on the healthy nodes, so the
   instance that stays flat while a readiness row is red is the one being skipped around),
-  throughput, latency quantiles, pending sessions, aborts, ceremonies.
+  throughput, p50/p95/p99 latency (`histogram_quantile` over the buckets — empty for cosigners
+  up to 0.3.1, see above), pending sessions, aborts, ceremonies.
 
 ## What to watch (2-of-3 cluster)
 

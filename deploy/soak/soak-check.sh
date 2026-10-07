@@ -19,9 +19,11 @@ fail() { say "$1" "FAIL${2:+ ($2)}"; FAIL=1; }
 pass() { say "$1" "ok${2:+ ($2)}"; }
 
 # Instant-query helper: returns the summed value of a PromQL expression ("" if no data).
+# NaN samples count as no data: histogram_quantile() over buckets that saw no samples in the window
+# (and any 0/0 ratio) returns NaN, which jq 1.6 prints as "null" and awk then reads as 0 — a pass.
 q() {
   curl -sf --get "$PROM/api/v1/query" --data-urlencode "query=$1" \
-    | jq -r '[.data.result[].value[1] | tonumber] | add // empty' 2>/dev/null || true
+    | jq -r '[.data.result[].value[1] | select(. != "NaN") | tonumber] | add // empty' 2>/dev/null || true
 }
 
 # 1. Every cosigner up (as Prometheus sees it).
@@ -40,15 +42,23 @@ if [[ -z "$errs" ]] || awk "BEGIN{exit !($errs == 0)}"; then pass "sign errors i
 cerr="$(q 'sum(increase(rutli_ceremony_requests_total{result="error"}[24h]))')"
 if [[ -z "$cerr" ]] || awk "BEGIN{exit !($cerr == 0)}"; then pass "ceremony failures in last 24h" "0"; else fail "ceremony failures in last 24h" "$cerr"; fi
 
-# 5. Sign latency under 1s. p99 from histogram buckets when the exporter emits them. 0.3.x
-#    cosigners export a summary instead, whose quantiles decay to 0 once its sliding window has no
-#    fresh samples, so the fallback is the 24h mean from _sum/_count — honest, but a mean, not a
-#    tail; the gate says which it used.
+# 5. Sign latency under 1s. p99 from histogram buckets (cosigners after 0.3.1). 1s is a bucket
+#    bound, so the verdict is exact: it passes iff fewer than 1% of signs took longer than 1s,
+#    whatever the interpolation inside a bucket. Cosigners up to and including 0.3.1 export a summary
+#    instead, whose quantiles decay to 0 once its sliding window has no fresh samples, so with no
+#    buckets at all the fallback is the 24h mean from _sum/_count — honest, but a mean, not a tail.
+#    Mid-rollout, the p99 covers only the upgraded leaders; the gate says which it used and how
+#    many summary-only leaders it left out.
 p99="$(q 'histogram_quantile(0.99, sum by (le) (rate(rutli_sign_duration_seconds_bucket[24h])))')"
 lat_kind="p99"
 if [[ -z "$p99" ]]; then
   lat_kind="mean (no histogram buckets — summary exporter)"
   p99="$(q 'sum(increase(rutli_sign_duration_seconds_sum{result="ok"}[24h])) / sum(increase(rutli_sign_duration_seconds_count{result="ok"}[24h]))')"
+else
+  legacy="$(q 'count(count by (instance) (rutli_sign_duration_seconds_count) unless on (instance) count by (instance) (rutli_sign_duration_seconds_bucket))')"
+  if [[ -n "$legacy" ]] && awk "BEGIN{exit !($legacy > 0)}"; then
+    lat_kind="p99 of histogram leaders; $legacy summary-only leader(s) not included"
+  fi
 fi
 if [[ -z "$p99" ]]; then pass "sign latency" "no data yet"; elif awk "BEGIN{exit !($p99 < 1)}"; then pass "sign latency" "${p99}s $lat_kind"; else fail "sign latency" "${p99}s $lat_kind >= 1s"; fi
 
