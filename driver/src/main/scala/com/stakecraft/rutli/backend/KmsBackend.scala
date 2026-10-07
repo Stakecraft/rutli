@@ -4,6 +4,7 @@
 package com.stakecraft.rutli.backend
 
 import com.digitalasset.canton.crypto.kms.driver.api.v1._
+import com.stakecraft.rutli.audit.AuditNotes
 
 import scala.concurrent.Future
 
@@ -48,6 +49,14 @@ trait KmsBackend extends AutoCloseable {
   def deleteKey(keyId: String): Future[Unit]
 
   def health: Future[KmsDriverHealth]
+
+  /** Run `op` so that any annotation the backend wants on the calling operation's audit entry
+    * (e.g. a FROST leader failover) lands in `notes`. Default: no annotations.
+    *
+    * `op` must be the direct backend call (`backend.withAuditNotes(n)(backend.sign(...))`):
+    * implementations may bind `notes` to the calling thread only for the synchronous part of `op`.
+    */
+  def withAuditNotes[A](notes: AuditNotes)(op: => Future[A]): Future[A] = op
 
   override def close(): Unit = ()
 }

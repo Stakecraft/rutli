@@ -4,7 +4,7 @@
 package com.stakecraft.rutli
 
 import com.digitalasset.canton.crypto.kms.driver.api.v1._
-import com.stakecraft.rutli.audit.AuditSink
+import com.stakecraft.rutli.audit.{AuditNotes, AuditSink}
 import com.stakecraft.rutli.backend.KmsBackend
 import io.opentelemetry.context.Context
 import org.slf4j.Logger
@@ -51,36 +51,40 @@ final class RutliDriver(
       signingKeySpec: SigningKeySpec,
       keyName: Option[String],
   )(traceContext: Context): Future[String] =
-    audited(s"generateSigningKeyPair spec=$signingKeySpec name=${keyName.getOrElse("-")}")(
-      backend.generateSigningKeyPair(signingKeySpec, keyName)
+    audited(s"generateSigningKeyPair spec=$signingKeySpec name=${keyName.getOrElse("-")}")(notes =>
+      backend.withAuditNotes(notes)(backend.generateSigningKeyPair(signingKeySpec, keyName))
     )(keyId => s"keyId=$keyId")
 
   override def generateEncryptionKeyPair(
       encryptionKeySpec: EncryptionKeySpec,
       keyName: Option[String],
   )(traceContext: Context): Future[String] =
-    audited(s"generateEncryptionKeyPair spec=$encryptionKeySpec name=${keyName.getOrElse("-")}")(
-      backend.generateEncryptionKeyPair(encryptionKeySpec, keyName)
+    audited(s"generateEncryptionKeyPair spec=$encryptionKeySpec name=${keyName.getOrElse("-")}")(notes =>
+      backend.withAuditNotes(notes)(backend.generateEncryptionKeyPair(encryptionKeySpec, keyName))
     )(keyId => s"keyId=$keyId")
 
   override def generateSymmetricKey(keyName: Option[String])(
       traceContext: Context
   ): Future[String] =
-    audited(s"generateSymmetricKey name=${keyName.getOrElse("-")}")(
-      backend.generateSymmetricKey(keyName)
+    audited(s"generateSymmetricKey name=${keyName.getOrElse("-")}")(notes =>
+      backend.withAuditNotes(notes)(backend.generateSymmetricKey(keyName))
     )(keyId => s"keyId=$keyId")
 
   override def sign(data: Array[Byte], keyId: String, algoSpec: SigningAlgoSpec)(
       traceContext: Context
   ): Future[Array[Byte]] =
-    audited(s"sign keyId=$keyId algo=$algoSpec inBytes=${data.length}")(
+    audited(s"sign keyId=$keyId algo=$algoSpec inBytes=${data.length}")(notes =>
       // Human M-of-N approval (for keys the policy gates) runs BEFORE the backend signs, so quorum
       // approval precedes even the threshold signature. Then the signing journal durably records the
       // (key, digest) — and enforces any rate limit — before the signature is produced. Auto-
       // approved, un-journalled keys pass straight through.
       approvalGate.authorize(keyId, data).flatMap { _ =>
         signingJournal.foreach(_.record(keyId, data)) // throws (fails the sign) if rate-limited
-        backend.sign(data, keyId, algoSpec)
+        // `withAuditNotes` must wrap the backend call itself, here inside the flatMap: a backend may
+        // bind the notes to the calling thread (FrostBackend does), and this callback runs on an
+        // ExecutionContext thread — wrapping the whole `authorize(...).flatMap` would bind them on
+        // the wrong thread and lose a failover from the sign's audit entry.
+        backend.withAuditNotes(notes)(backend.sign(data, keyId, algoSpec))
       }
     )(sig => s"sigBytes=${sig.length}")
 
@@ -89,34 +93,38 @@ final class RutliDriver(
       keyId: String,
       algoSpec: EncryptionAlgoSpec,
   )(traceContext: Context): Future[Array[Byte]] =
-    audited(s"decryptAsymmetric keyId=$keyId algo=$algoSpec ctBytes=${ciphertext.length}")(
-      backend.decryptAsymmetric(ciphertext, keyId, algoSpec)
+    audited(s"decryptAsymmetric keyId=$keyId algo=$algoSpec ctBytes=${ciphertext.length}")(notes =>
+      backend.withAuditNotes(notes)(backend.decryptAsymmetric(ciphertext, keyId, algoSpec))
     )(pt => s"ptBytes=${pt.length}")
 
   override def encryptSymmetric(data: Array[Byte], keyId: String)(
       traceContext: Context
   ): Future[Array[Byte]] =
-    audited(s"encryptSymmetric keyId=$keyId ptBytes=${data.length}")(
-      backend.encryptSymmetric(data, keyId)
+    audited(s"encryptSymmetric keyId=$keyId ptBytes=${data.length}")(notes =>
+      backend.withAuditNotes(notes)(backend.encryptSymmetric(data, keyId))
     )(ct => s"ctBytes=${ct.length}")
 
   override def decryptSymmetric(ciphertext: Array[Byte], keyId: String)(
       traceContext: Context
   ): Future[Array[Byte]] =
-    audited(s"decryptSymmetric keyId=$keyId ctBytes=${ciphertext.length}")(
-      backend.decryptSymmetric(ciphertext, keyId)
+    audited(s"decryptSymmetric keyId=$keyId ctBytes=${ciphertext.length}")(notes =>
+      backend.withAuditNotes(notes)(backend.decryptSymmetric(ciphertext, keyId))
     )(pt => s"ptBytes=${pt.length}")
 
   override def getPublicKey(keyId: String)(traceContext: Context): Future[PublicKey] =
-    audited(s"getPublicKey keyId=$keyId")(
-      backend.getPublicKey(keyId)
+    audited(s"getPublicKey keyId=$keyId")(notes =>
+      backend.withAuditNotes(notes)(backend.getPublicKey(keyId))
     )(pk => s"spec=${pk.spec} spkiBytes=${pk.key.length}")
 
   override def keyExistsAndIsActive(keyId: String)(traceContext: Context): Future[Unit] =
-    audited(s"keyExistsAndIsActive keyId=$keyId")(backend.keyExistsAndIsActive(keyId))(_ => "")
+    audited(s"keyExistsAndIsActive keyId=$keyId")(notes =>
+      backend.withAuditNotes(notes)(backend.keyExistsAndIsActive(keyId))
+    )(_ => "")
 
   override def deleteKey(keyId: String)(traceContext: Context): Future[Unit] =
-    audited(s"deleteKey keyId=$keyId")(backend.deleteKey(keyId))(_ => "")
+    audited(s"deleteKey keyId=$keyId")(notes =>
+      backend.withAuditNotes(notes)(backend.deleteKey(keyId))
+    )(_ => "")
 
   override def close(): Unit =
     try backend.close()
@@ -130,22 +138,28 @@ final class RutliDriver(
     * backend-thrown exception's retryable flag, wrapping anything else as non-retryable), and emit
     * audit records when enabled — a plain log line (`auditLogging`) and/or a tamper-evident entry
     * in the hash-chained audit log (`auditLog`).
+    *
+    * `f` gets this operation's [[AuditNotes]] to hand to the backend (`backend.withAuditNotes`);
+    * whatever the backend notes — e.g. a FROST leader failover — is rendered into this operation's
+    * own audit entry, on success and on failure alike.
     */
-  private def audited[A](op: => String)(f: => Future[A])(result: A => String): Future[A] = {
+  private def audited[A](op: => String)(f: AuditNotes => Future[A])(result: A => String): Future[A] = {
+    val auditing = auditLogging || auditLog.isDefined
+    val notes = if (auditing) new AuditNotes else AuditNotes.discard
     val base =
-      (try f
+      (try f(notes)
        catch { case NonFatal(e) => Future.failed(e) }).recoverWith {
         case e: KmsDriverException => Future.failed(e)
         case NonFatal(e)           => Future.failed(KmsDriverException(e, retryable = false))
       }
-    if (!auditLogging && auditLog.isEmpty) base
+    if (!auditing) base
     else
       // Write-ahead + fail-closed: the operation's result is observable only AFTER the (fsynced)
       // hash-chained audit entry is durable. If a SUCCESSFUL op cannot be logged, the operation
       // fails rather than returning an unlogged signature. (The plain `auditLogging` logger line
       // stays best-effort; a failed op is logged best-effort and its original error is preserved.)
       base.transform { outcome =>
-        val appendError = emitAudit(op, outcome.map(result))
+        val appendError = emitAudit(op, notes, outcome.map(result))
         (outcome, appendError) match {
           case (Success(_), Some(err)) => Failure(KmsDriverException(err, retryable = false))
           case _                       => outcome
@@ -154,15 +168,19 @@ final class RutliDriver(
   }
 
   /** Emit the audit records. Returns `Some(error)` iff the DURABLE (hash-chained) append failed —
-    * the caller uses that to fail a successful operation closed. The logger line is best-effort. */
-  private def emitAudit(op: String, rendered: scala.util.Try[String]): Option[Throwable] = {
+    * the caller uses that to fail a successful operation closed. The logger line is best-effort.
+    *
+    * Backend notes go after the operation's own detail and before its result, so `outcome=` stays
+    * the last field; with no notes the line is byte-identical to the note-less format. */
+  private def emitAudit(op: String, notes: AuditNotes, rendered: scala.util.Try[String]): Option[Throwable] = {
     val (opName, detail) = {
       val space = op.indexOf(' ')
       if (space < 0) (op, "") else (op.substring(0, space), op.substring(space + 1))
     }
+    val annotations = if (notes.isEmpty) "" else s" ${notes.render}"
     val line = rendered match {
-      case Success(r) => s"$detail $r outcome=ok"
-      case Failure(e) => s"$detail outcome=failed error=${e.getMessage}"
+      case Success(r) => s"$detail$annotations $r outcome=ok"
+      case Failure(e) => s"$detail$annotations outcome=failed error=${e.getMessage}"
     }
     if (auditLogging) logger.info(s"AUDIT $opName $line")
     auditLog match {
