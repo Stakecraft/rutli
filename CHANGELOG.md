@@ -5,6 +5,10 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.3.1] — 2026-10-07
+
 ### Changed
 - **Conformance target bumped to Canton v3.6.1** — the version Splice DevNet now bundles for
   validators (the previous target, v3.5.6, is 13 patches behind its own line and superseded by the
@@ -488,6 +492,7 @@ not audited. Do not place production authority keys behind it.
 - HSM backend validated only against SoftHSM.
 - No third-party security audit.
 
+[0.3.1]: https://github.com/Stakecraft/rutli/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Stakecraft/rutli/releases/tag/v0.3.0
 [0.2.1]: https://github.com/Stakecraft/rutli/releases/tag/v0.2.1
 [0.2.0]: https://github.com/Stakecraft/rutli/releases/tag/v0.2.0

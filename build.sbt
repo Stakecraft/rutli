@@ -11,7 +11,7 @@
 // compatibility). Canton v3.6.1 builds on 2.13.18.
 ThisBuild / scalaVersion := "2.13.18"
 ThisBuild / organization := "com.stakecraft"
-ThisBuild / version      := "0.3.0"
+ThisBuild / version      := "0.3.1"
 
 // Canton nodes run on Java 17. Pin the bytecode target so the driver jar loads there even when the
 // build machine's default JDK is newer (class-file version skew otherwise breaks at runtime).
