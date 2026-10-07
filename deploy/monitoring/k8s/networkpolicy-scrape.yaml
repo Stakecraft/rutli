@@ -1,0 +1,27 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# The chart's NetworkPolicy admits the metrics port only from pods labelled rutli.io/scraper=true.
+# A kube-prometheus-stack Prometheus pod does not carry that label, and patching its Prometheus CR
+# would be undone by the stack's next helm upgrade — so add an additive policy of our own that
+# admits the monitoring namespace instead. NetworkPolicies are unioned, nothing else changes.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rutli-cosigner-allow-monitoring-scrape
+  namespace: rutli
+  labels:
+    app.kubernetes.io/name: rutli-cosigner
+    app.kubernetes.io/part-of: rutli
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: rutli-cosigner
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+      ports:
+        - { protocol: TCP, port: 9200 }

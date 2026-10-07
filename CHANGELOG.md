@@ -21,6 +21,16 @@ All notable changes to Rütli are documented here. Format loosely follows
   Docs now point at `canton-open-source-3.6.1`; the daml-components override default moved to a
   snapshot that v3.6.1 itself pins (`3.7.0-snapshot.20260929.14837.0.v5b67d18b`).
 
+### Added
+- **`deploy/monitoring/kustomization.yaml`** — Rütli observability for a kube-prometheus-stack
+  cluster in one `kubectl apply -k deploy/monitoring`: a ServiceMonitor for the cosigner metrics
+  port, the alert rules as a PrometheusRule (`k8s/render-prometheusrule.py` wraps the plain
+  `prometheus-rules.yml`, which stays the single source of truth for the compose stacks), a
+  NetworkPolicy admitting the `monitoring` namespace to port 9200 (the chart's own policy only
+  admits pods labelled `rutli.io/scraper=true`, and a stack-managed Prometheus pod does not carry
+  that label), and the Grafana dashboard as a sidecar-discovered ConfigMap. First used for the
+  DevNet soak validator on 2026-10-07.
+
 ## [0.3.0] — 2026-10-06
 
 ### Added

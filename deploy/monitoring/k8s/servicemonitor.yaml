@@ -1,0 +1,27 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Scrape the cosigner cluster with a Prometheus Operator (kube-prometheus-stack) instance.
+# The `release: prometheus` label matches kube-prometheus-stack's default serviceMonitorSelector;
+# change it if your Prometheus CR selects differently.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: rutli-cosigner
+  namespace: rutli
+  labels:
+    release: prometheus
+    app.kubernetes.io/name: rutli-cosigner
+    app.kubernetes.io/part-of: rutli
+spec:
+  namespaceSelector:
+    matchNames: [rutli]
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rutli-cosigner
+      app.kubernetes.io/instance: rutli
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s

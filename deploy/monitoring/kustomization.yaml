@@ -1,0 +1,25 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Rütli observability on a kube-prometheus-stack cluster:
+#   kubectl apply -k deploy/monitoring
+# Ships the cosigner ServiceMonitor, the alert rules as a PrometheusRule (regenerate
+# k8s/prometheusrule.yaml with k8s/render-prometheusrule.py when prometheus-rules.yml changes), a
+# NetworkPolicy admitting the monitoring namespace to the metrics port, and the Grafana dashboard
+# as a sidecar-discovered ConfigMap (label grafana_dashboard=1). The plain files next to this
+# (prometheus-rules.yml, grafana-dashboard.json) stay the source of truth for the compose stacks.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: rutli
+resources:
+  - k8s/servicemonitor.yaml
+  - k8s/prometheusrule.yaml
+  - k8s/networkpolicy-scrape.yaml
+configMapGenerator:
+  - name: rutli-grafana-dashboard
+    files:
+      - rutli-frost-cosigner.json=grafana-dashboard.json
+    options:
+      disableNameSuffixHash: true
+      labels:
+        grafana_dashboard: "1"
