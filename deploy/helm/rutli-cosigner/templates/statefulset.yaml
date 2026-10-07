@@ -103,16 +103,14 @@ spec:
           # headless Service publishes not-ready addresses (the mesh needs them during DKG), so
           # routing around a sick node is the driver's failover plus the node refusing to lead or
           # join quorums.
-          # `|| [ $? -eq 2 ]`: exit 2 = clap usage error = image predates the `health` subcommand
-          # → fall back to "process running" (liveness still checks the port); drop this once the
-          # image pin is ≥ the next release. `health` itself exits only 0 or 1. No `exec` here — it
-          # would replace the shell and the fallback would never run.
+          # `health` exits 0 (ready) or 1 (not ready); it exists since 0.3.1, so the image pin
+          # must be ≥ 0.3.1.
           readinessProbe:
             exec:
               command:
                 - /bin/sh
                 - -c
-                - 'rutli-cosigner --config /config/cosigner-$(( ${HOSTNAME##*-} + 1 )).json health || [ $? -eq 2 ]'
+                - 'exec rutli-cosigner --config /config/cosigner-$(( ${HOSTNAME##*-} + 1 )).json health'
             initialDelaySeconds: 3
             periodSeconds: 10
             timeoutSeconds: 5

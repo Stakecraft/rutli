@@ -1,8 +1,8 @@
 # Helm chart: rutli-cosigner
 
 Deploys a `t`-of-`n` FROST cosigner StatefulSet with mTLS, sealed shares, PDB, and NetworkPolicy.
-Default image: `ghcr.io/stakecraft/rutli-cosigner:0.3.0` pinned by multi-arch digest
-(`sha256:bf35937ada817ec7f898b3d793a4fc3b0fa87536092ee09637988d7f287815bd`). Also tagged `latest` on GHCR.
+Default image: `ghcr.io/stakecraft/rutli-cosigner:0.3.1` pinned by multi-arch digest
+(`sha256:21fd2730fc47e57e59ec320063517c0cecc2784afa4e0fae3827b14a979f97a7`). Also tagged `latest` on GHCR.
 
 ## Prerequisites
 
@@ -31,7 +31,7 @@ kubectl -n rutli create secret generic rutli-cosigner-tls \
 kubectl -n rutli create secret generic rutli-seal \
   --from-literal=RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
 
-# 3. Install (values already pin the v0.3.0 digest)
+# 3. Install (values already pin the v0.3.1 digest)
 helm upgrade --install rutli deploy/helm/rutli-cosigner -n rutli
 ```
 
@@ -44,7 +44,7 @@ Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org A
 | Key | Default | Notes |
 |---|---|---|
 | `image.repository` | `ghcr.io/stakecraft/rutli-cosigner` | |
-| `image.tag` | `0.3.0@sha256:bf3593…7815bd` | Digest-pinned |
+| `image.tag` | `0.3.1@sha256:21fd27…9f97a7` | Digest-pinned |
 | `replicaCount` / `threshold` | `3` / `2` | Must match cert count |
 | `fullnameOverride` | `rutli-cosigner` | Peer DNS base |
 | `tlsSecretName` / `sealSecretName` | `rutli-cosigner-tls` / `rutli-seal` | Pre-created |
@@ -64,9 +64,8 @@ headless Service still publishes not-ready addresses (the mesh needs them during
 driver keeps resolving the pod; its own failover — the sick node answers `UNAVAILABLE` to anything
 that needs its key store — and the node refusing to join other leaders' quorums route around it.
 Liveness stays `tcpSocket` deliberately — restarting does not fix a volume and discards the
-evidence. With an image that predates the `health` subcommand (the 0.3.0 default) the probe sees
-clap's usage-error exit 2 and falls back to "process running": installs and upgrades still become
-ready, just without the key-store check until the pin moves past 0.3.0.
+evidence. `health` exists since 0.3.1 and the probe calls it without a fallback, so the image
+pin must be ≥ 0.3.1.
 
 ## Backups
 

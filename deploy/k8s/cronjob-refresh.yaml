@@ -26,7 +26,7 @@ spec:
           restartPolicy: Never
           containers:
             - name: refresh
-              image: ghcr.io/stakecraft/rutli-cosigner:0.3.0@sha256:bf35937ada817ec7f898b3d793a4fc3b0fa87536092ee09637988d7f287815bd
+              image: ghcr.io/stakecraft/rutli-cosigner:0.3.1@sha256:21fd2730fc47e57e59ec320063517c0cecc2784afa4e0fae3827b14a979f97a7
               imagePullPolicy: IfNotPresent
               env:
                 - name: KEY_ID

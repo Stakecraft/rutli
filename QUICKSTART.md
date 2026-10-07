@@ -110,7 +110,7 @@ Path C moves the namespace key off the participant, but its **encryption** and *
 still live behind a local delegate. The cosigners can hold those too, which leaves the participant
 with no private key material at all. That needs the mTLS cluster — the `config-tls/` configs are the
 ones that enable `hosted_keys`, and hosted keys are refused on a plaintext cluster — and the
-published `ghcr.io/stakecraft/rutli-cosigner:0.3.0` image, which the compose file pulls by default
+published `ghcr.io/stakecraft/rutli-cosigner:0.3.1` image, which the compose file pulls by default
 (add `--build` to build from the working tree instead):
 
 ```sh

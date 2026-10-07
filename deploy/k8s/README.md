@@ -175,13 +175,12 @@ volume snapshot is fine (storage layer, no second mount); a second mount is not.
   around a sick node is the driver's failover plus the node itself answering `UNAVAILABLE` to
   anything that needs its key store and refusing to join other leaders' quorums. Liveness stays a
   TCP check on purpose — a restart does not fix a volume and discards the evidence. Alert:
-  `RutliKeystoreUnreadable`. On an image that predates the `health` subcommand (0.3.0) the probe
-  sees clap's usage-error exit 2 and falls back to "process running", so pinning 0.3.0 still rolls
-  out — just without the key-store check; the fallback goes once the pin moves past 0.3.0.
+  `RutliKeystoreUnreadable`. `health` exists since 0.3.1; the probe calls it without a fallback,
+  so the image pin must be ≥ 0.3.1.
 
 ## Notes / hardening
 
-- Image tag defaults to `0.3.0`. After you push, pin by digest:
+- Image tag defaults to `0.3.1`. After you push, pin by digest:
   `kustomize edit set image ghcr.io/stakecraft/rutli-cosigner@sha256:…`
 - Required pod anti-affinity + zone topology spread are in the StatefulSet.
 - Label the Canton **namespace** `rutli.io/client-ns=true` and the participant pod

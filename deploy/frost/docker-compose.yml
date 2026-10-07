@@ -12,7 +12,7 @@
 # ⚠️ Dev topology only. Production: docker-compose.tls.yml (+ mTLS + sealing).
 
 x-cosigner: &cosigner
-  image: ${RUTLI_COSIGNER_IMAGE:-ghcr.io/stakecraft/rutli-cosigner:0.3.0}
+  image: ${RUTLI_COSIGNER_IMAGE:-ghcr.io/stakecraft/rutli-cosigner:0.3.1}
   build:
     context: ../../frost
     dockerfile: Dockerfile

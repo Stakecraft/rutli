@@ -7,14 +7,14 @@
 # Prerequisites:
 #   1. Certs:   scripts/gen-frost-certs.sh 3 deploy/frost/certs
 #   2. Seal:    export RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
-#   3. Bring up (pulls ghcr.io/stakecraft/rutli-cosigner:0.3.0 by default):
+#   3. Bring up (pulls ghcr.io/stakecraft/rutli-cosigner:0.3.1 by default):
 #        RUTLI_SEAL_SECRET=… docker compose -f deploy/frost/docker-compose.tls.yml up -d
 #      Or build from source: add --build
 #
 # Override image: RUTLI_COSIGNER_IMAGE=ghcr.io/stakecraft/rutli-cosigner:latest
 
 x-cosigner: &cosigner
-  image: ${RUTLI_COSIGNER_IMAGE:-ghcr.io/stakecraft/rutli-cosigner:0.3.0}
+  image: ${RUTLI_COSIGNER_IMAGE:-ghcr.io/stakecraft/rutli-cosigner:0.3.1}
   build:
     context: ../../frost
     dockerfile: Dockerfile
@@ -29,9 +29,8 @@ x-cosigner: &cosigner
 
 # `rutli-cosigner health`: key store readable + writable AND the gRPC port open. A bare TCP check
 # stayed green through the 2026-10-07 incident, when a node's /data/keys went unreadable and it
-# failed every Sign. `|| [ $? -eq 2 ]`: exit 2 = clap usage error = image predates the `health`
-# subcommand → fall back to "process running"; drop this once the pin is ≥ the next release.
-# (`health` itself exits only 0 or 1.)
+# failed every Sign. `health` exits 0 (healthy) or 1; it exists since 0.3.1, so the image must be
+# ≥ 0.3.1.
 x-healthcheck: &hc
   interval: 10s
   timeout: 3s
@@ -49,7 +48,7 @@ services:
     ports: ["9101:9101", "9201:9200"]
     healthcheck:
       <<: *hc
-      test: ["CMD-SHELL", "rutli-cosigner --config /config/cosigner1.json health || [ $$? -eq 2 ]"]
+      test: ["CMD-SHELL", "rutli-cosigner --config /config/cosigner1.json health"]
 
   cosigner2:
     <<: *cosigner
@@ -61,7 +60,7 @@ services:
     ports: ["9102:9102", "9202:9200"]
     healthcheck:
       <<: *hc
-      test: ["CMD-SHELL", "rutli-cosigner --config /config/cosigner2.json health || [ $$? -eq 2 ]"]
+      test: ["CMD-SHELL", "rutli-cosigner --config /config/cosigner2.json health"]
 
   cosigner3:
     <<: *cosigner
@@ -73,7 +72,7 @@ services:
     ports: ["9103:9103", "9203:9200"]
     healthcheck:
       <<: *hc
-      test: ["CMD-SHELL", "rutli-cosigner --config /config/cosigner3.json health || [ $$? -eq 2 ]"]
+      test: ["CMD-SHELL", "rutli-cosigner --config /config/cosigner3.json health"]
 
 volumes:
   c1:
