@@ -35,6 +35,14 @@ impl SignerSvc {
     fn authorize<T>(&self, req: &Request<T>) -> Result<(), Status> {
         authorize_cn(self.allowed_cns.as_deref(), req, "Signer").map(|_| ())
     }
+
+    /// UNAVAILABLE while this node's key store fails its readiness probe — at the entry of every
+    /// Signer RPC that touches the store, so a sick node answers uniformly with the code every
+    /// driver version fails over on. Never NOT_FOUND (Canton would believe the key is gone) and
+    /// never an INTERNAL from deep inside the operation. Not applied to Health or Capabilities.
+    fn refuse_if_keystore_down(&self) -> Result<(), Status> {
+        self.node.refuse_if_keystore_down().map_err(Status::from)
+    }
 }
 
 /// Check the caller's mTLS client-cert Common Name against `allowed` (None = open, dev only).
@@ -78,12 +86,24 @@ pub fn cn_of(der: &[u8]) -> Option<String> {
 
 #[tonic::async_trait]
 impl Signer for SignerSvc {
-    // Health is intentionally NOT allowlisted — it leaks nothing and is useful for liveness.
+    // Health is intentionally NOT allowlisted — it reveals nothing beyond the key-store path and an
+    // OS error, and readiness checks need it.
+    //
+    // It answers ok=false ("NOT_SERVING: …") when this node's key store fails its readiness probe:
+    // such a node fails every Sign/Dkg it leads, and a Health that kept saying ok is what let the
+    // driver keep choosing one as leader (2026-10-07 incident). The gRPC status stays OK either way
+    // — the reply carries the verdict, and the driver reads `ok` (an RPC error also counts as down).
     async fn health(
         &self,
         _req: Request<pb::HealthRequest>,
     ) -> Result<Response<pb::HealthReply>, Status> {
-        Ok(Response::new(pb::HealthReply { ok: true, detail: "serving".into() }))
+        // Cached for a few seconds and single-flight (crate::health::probe), so a Health flood
+        // cannot turn into a probe flood on slow storage.
+        let reply = match crate::health::probe(self.node.keystore_health()).await {
+            Ok(()) => pb::HealthReply { ok: true, detail: "serving".into() },
+            Err(detail) => pb::HealthReply { ok: false, detail: format!("NOT_SERVING: {detail}") },
+        };
+        Ok(Response::new(reply))
     }
 
     async fn group_key(
@@ -91,6 +111,7 @@ impl Signer for SignerSvc {
         req: Request<pb::GroupKeyRequest>,
     ) -> Result<Response<pb::GroupKeyReply>, Status> {
         self.authorize(&req)?;
+        self.refuse_if_keystore_down()?;
         let key = self.node.group_key(&req.into_inner().key_id).map_err(Status::from)?;
         Ok(Response::new(pb::GroupKeyReply { group_verifying_key: key.to_vec() }))
     }
@@ -98,7 +119,12 @@ impl Signer for SignerSvc {
     async fn dkg(&self, req: Request<pb::DkgRequest>) -> Result<Response<pb::DkgReply>, Status> {
         self.authorize(&req)?;
         let key_id = req.into_inner().key_id;
-        let result = orchestrator::run_dkg(&self.peers, &key_id).await;
+        // A node whose key store failed its readiness probe declines to lead (UNAVAILABLE, so the
+        // driver picks another leader) rather than start a ceremony it cannot persist.
+        let result = match self.node.refuse_if_keystore_down() {
+            Ok(()) => orchestrator::run_dkg(&self.peers, &key_id).await,
+            Err(e) => Err(e),
+        };
         record_ceremony("dkg", result.is_ok());
         let key = result.map_err(Status::from)?;
         Ok(Response::new(pb::DkgReply { group_verifying_key: key.to_vec() }))
@@ -108,7 +134,13 @@ impl Signer for SignerSvc {
         self.authorize(&req)?;
         let r = req.into_inner();
         let started = std::time::Instant::now();
-        let result = orchestrator::sign(&self.node, &self.peers, &r.key_id, &r.message).await;
+        // Decline to lead while the key store fails its readiness probe: UNAVAILABLE, which every
+        // driver version fails over on, instead of an INTERNAL from deep inside the session. Counted
+        // as a sign error below so the sick node's own metrics show it.
+        let result = match self.node.refuse_if_keystore_down() {
+            Ok(()) => orchestrator::sign(&self.node, &self.peers, &r.key_id, &r.message).await,
+            Err(e) => Err(e),
+        };
         let outcome = if result.is_ok() { "ok" } else { "error" };
         metrics::counter!(crate::metrics::SIGN_REQUESTS, "result" => outcome).increment(1);
         metrics::histogram!(crate::metrics::SIGN_DURATION, "result" => outcome)
@@ -123,7 +155,10 @@ impl Signer for SignerSvc {
     ) -> Result<Response<pb::RefreshReply>, Status> {
         self.authorize(&req)?;
         let key_id = req.into_inner().key_id;
-        let result = orchestrator::run_refresh(&self.peers, &key_id).await;
+        let result = match self.node.refuse_if_keystore_down() {
+            Ok(()) => orchestrator::run_refresh(&self.peers, &key_id).await,
+            Err(e) => Err(e),
+        };
         record_ceremony("refresh", result.is_ok());
         let key = result.map_err(Status::from)?;
         Ok(Response::new(pb::RefreshReply { group_verifying_key: key.to_vec() }))
@@ -159,14 +194,19 @@ impl Signer for SignerSvc {
         self.authorize(&req)?;
         let r = req.into_inner();
         let spec = crate::hosted::HostedSpec::parse(&r.spec).map_err(Status::from)?;
-        let result = orchestrator::generate_hosted_key(
-            &self.node,
-            &self.peers,
-            &r.key_id,
-            spec,
-            self.hosted_write_quorum,
-        )
-        .await;
+        let result = match self.node.refuse_if_keystore_down() {
+            Ok(()) => {
+                orchestrator::generate_hosted_key(
+                    &self.node,
+                    &self.peers,
+                    &r.key_id,
+                    spec,
+                    self.hosted_write_quorum,
+                )
+                .await
+            }
+            Err(e) => Err(e),
+        };
         record_hosted_op("generate", result.is_ok());
         let (key, created, replicas) = result.map_err(Status::from)?;
         let public_key_der = if spec.is_asymmetric() {
@@ -188,6 +228,7 @@ impl Signer for SignerSvc {
         req: Request<pb::PublicKeyRequest>,
     ) -> Result<Response<pb::PublicKeyReply>, Status> {
         self.authorize(&req)?;
+        self.refuse_if_keystore_down()?;
         let key_id = req.into_inner().key_id;
         let key = self.load_hosted_repairing(&key_id).await?;
         Ok(Response::new(pb::PublicKeyReply {
@@ -201,6 +242,8 @@ impl Signer for SignerSvc {
         req: Request<pb::KeyInfoRequest>,
     ) -> Result<Response<pb::KeyInfoReply>, Status> {
         self.authorize(&req)?;
+        // Above all here: a sick node must not answer `exists: false` for a key it simply cannot read.
+        self.refuse_if_keystore_down()?;
         let key_id = req.into_inner().key_id;
         match self.load_hosted_repairing(&key_id).await {
             Ok(key) => {
@@ -225,7 +268,10 @@ impl Signer for SignerSvc {
     ) -> Result<Response<pb::DeleteKeyReply>, Status> {
         self.authorize(&req)?;
         let key_id = req.into_inner().key_id;
-        let result = orchestrator::delete_hosted_key(&self.peers, &key_id).await;
+        let result = match self.node.refuse_if_keystore_down() {
+            Ok(()) => orchestrator::delete_hosted_key(&self.peers, &key_id).await,
+            Err(e) => Err(e),
+        };
         record_hosted_op("delete", result.is_ok());
         Ok(Response::new(pb::DeleteKeyReply { deleted: result.map_err(Status::from)? }))
     }
@@ -235,6 +281,8 @@ impl Signer for SignerSvc {
         req: Request<pb::DecryptRequest>,
     ) -> Result<Response<pb::DecryptReply>, Status> {
         self.authorize(&req)?;
+        // Before charging the budget: a refused call does no work, so it must not spend any.
+        self.refuse_if_keystore_down()?;
         let r = req.into_inner();
         // Charge the budget BEFORE any work, including the read-repair fetch: an attacker must not
         // be able to drive cluster traffic at line rate just because the key is not local yet.
@@ -250,6 +298,7 @@ impl Signer for SignerSvc {
         req: Request<pb::SymmetricRequest>,
     ) -> Result<Response<pb::SymmetricReply>, Status> {
         self.authorize(&req)?;
+        self.refuse_if_keystore_down()?;
         let r = req.into_inner();
         self.load_hosted_repairing(&r.key_id).await?;
         let result = self.node.hosted_encrypt_symmetric(&r.key_id, &r.data);
@@ -262,6 +311,7 @@ impl Signer for SignerSvc {
         req: Request<pb::SymmetricRequest>,
     ) -> Result<Response<pb::SymmetricReply>, Status> {
         self.authorize(&req)?;
+        self.refuse_if_keystore_down()?;
         let r = req.into_inner();
         self.charge_decrypt(&r.key_id)?;
         self.load_hosted_repairing(&r.key_id).await?;

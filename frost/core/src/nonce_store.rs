@@ -57,8 +57,13 @@ impl NonceStore {
     }
 
     /// Whether a session has already been burned.
+    ///
+    /// Fails closed: an error looking up the marker (EACCES, a dead mount) is returned, never read
+    /// as "not burned". `Path::exists` would swallow it — and did, letting a cosigner whose key store
+    /// had become unreadable pass round 1 from its cached share, join a leader's quorum, then fail
+    /// round 2 on the marker write, sinking that signature (2026-10-07 incident).
     pub fn is_consumed(&self, session_id: &str) -> Result<bool> {
-        Ok(self.marker_path(session_id)?.exists())
+        Ok(self.marker_path(session_id)?.try_exists()?)
     }
 
     fn marker_path(&self, session_id: &str) -> Result<PathBuf> {
@@ -69,5 +74,29 @@ impl NonceStore {
             return Err(CoreError::NonceStore(format!("invalid session id: {session_id:?}")));
         }
         Ok(self.dir.join(format!("{session_id}.used")))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn is_consumed_fails_closed_when_the_store_cannot_be_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = NonceStore::open(tmp.path().join("k.nonces")).unwrap();
+        assert!(!store.is_consumed("s1").unwrap());
+
+        let set = |mode| fs::set_permissions(tmp.path(), fs::Permissions::from_mode(mode)).unwrap();
+        set(0o000);
+        if fs::read_dir(tmp.path()).is_ok() {
+            set(0o700);
+            eprintln!("permission bits not enforced (running as root?) — skipping");
+            return;
+        }
+        let verdict = store.is_consumed("s1");
+        set(0o700); // restore BEFORE asserting, or a failure leaves an undeletable tempdir
+        assert!(verdict.is_err(), "an unreadable store must not report a session as unburned");
     }
 }

@@ -51,6 +51,11 @@ pub const HOSTED_KEY_OPS: &str = "rutli_hosted_key_ops_total";
 /// fine transiently, but must not stay that way. Alert below `n` (warning) and below the write
 /// quorum (critical).
 pub const KEY_REPLICAS: &str = "rutli_key_replicas";
+/// 1 while this node's key store fails its readiness probe — the volume under `data_dir/keys`
+/// cannot be listed, opened, read or written — else 0. Every Sign/Dkg this node touches fails in
+/// that state, so alert on it (critical). Refreshed by the daemon's own probe loop and by every
+/// `Signer.Health` call; not the same as [`UNREADABLE_KEY_FILES`] (one file failing to unseal).
+pub const KEYSTORE_UNREADABLE: &str = "rutli_keystore_unreadable";
 
 /// Install the process-global Prometheus recorder and serve `/metrics` on `listen`.
 /// Call at most once, before serving traffic.
@@ -86,6 +91,7 @@ fn prime() {
     metrics::gauge!(KEY_REPLICAS).set(f64::NAN);
     metrics::counter!(SIGN_ABORTS).absolute(0);
     metrics::gauge!(PENDING_SIGN_SESSIONS).set(0.0);
+    metrics::gauge!(KEYSTORE_UNREADABLE).set(0.0);
 }
 
 /// Register help texts (shown in the Prometheus exposition; harmless without a recorder).
@@ -103,4 +109,8 @@ pub fn describe() {
     describe_counter!(UNREADABLE_KEY_FILES, "Key files that could not be opened and were skipped");
     describe_counter!(DECRYPT_RATE_LIMITED, "Hosted-key decryptions refused by the per-key rate limit");
     describe_gauge!(KEY_REPLICAS, "Fewest cosigners holding any one hosted key");
+    describe_gauge!(
+        KEYSTORE_UNREADABLE,
+        "1 while this node's key store cannot be listed, opened or written (readiness probe), else 0"
+    );
 }

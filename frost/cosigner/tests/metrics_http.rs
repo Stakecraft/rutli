@@ -23,6 +23,7 @@ async fn metrics_endpoint_serves_all_daemon_metrics() {
     metrics::counter!(rutli_cosigner::metrics::SIGN_ROUND1_SKIPS).increment(1);
     metrics::counter!(rutli_cosigner::metrics::SIGN_ABORTS).increment(1);
     metrics::gauge!(rutli_cosigner::metrics::PENDING_SIGN_SESSIONS).set(2.0);
+    metrics::gauge!(rutli_cosigner::metrics::KEYSTORE_UNREADABLE).set(1.0);
 
     // Scrape like Prometheus: plain HTTP GET (retry briefly while the listener comes up).
     let body = scrape(listen).await;
@@ -34,11 +35,13 @@ async fn metrics_endpoint_serves_all_daemon_metrics() {
         "rutli_sign_round1_skips_total",
         "rutli_sign_aborts_total",
         "rutli_pending_sign_sessions",
+        "rutli_keystore_unreadable",
     ] {
         assert!(body.contains(name), "scrape missing {name}:\n{body}");
     }
     assert!(body.contains(r#"result="ok""#), "labels must survive to the exposition");
     assert!(body.contains("rutli_pending_sign_sessions 2"), "gauge value must be exposed");
+    assert!(body.contains("rutli_keystore_unreadable 1"), "keystore gauge must be exposed");
 
     // A bad address is a config error, not a panic.
     assert!(rutli_cosigner::metrics::install("not-an-addr").is_err());

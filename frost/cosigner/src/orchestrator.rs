@@ -249,6 +249,9 @@ fn is_unreachable(e: &DaemonError) -> bool {
         DaemonError::Transport(_) => true,
         DaemonError::Status(s) => match s.code() {
             tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => true,
+            // Our own client-side deadline (peer::PEER_RPC_TIMEOUT): tonic reports it as Cancelled
+            // "Timeout expired". A peer that does not answer in time is as good as unreachable.
+            tonic::Code::Cancelled => s.message().contains("Timeout expired"),
             // tonic reports a connection that failed below the RPC layer as Unknown with the
             // message "transport error" — which is what a stopped cosigner actually produces, as
             // opposed to the Unavailable one might expect. Match it narrowly: a genuine refusal
@@ -544,4 +547,21 @@ pub async fn anti_entropy_sweep(node: &Node, peers: &Peers) -> Result<(usize, us
     metrics::gauge!(crate::metrics::KEY_REPLICAS)
         .set(replicas.values().copied().min().map(|m| m as f64).unwrap_or(f64::NAN));
     Ok((pulled, pushed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_peer_rpc_timeout_counts_as_unreachable_but_a_refusal_does_not() {
+        // What tonic returns when peer::PEER_RPC_TIMEOUT fires (also on a fresh connection whose
+        // handshake never completes — a wedged peer).
+        let timed_out = DaemonError::Status(tonic::Status::cancelled("Timeout expired"));
+        assert!(is_unreachable(&timed_out));
+        // A sick node's refusal (UNAVAILABLE) is skipped too; a genuine conflict is not.
+        assert!(is_unreachable(&DaemonError::Status(tonic::Status::unavailable("not serving"))));
+        assert!(!is_unreachable(&DaemonError::Status(tonic::Status::cancelled("client went away"))));
+        assert!(!is_unreachable(&DaemonError::Status(tonic::Status::aborted("ceremony in progress"))));
+    }
 }

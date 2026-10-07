@@ -25,11 +25,27 @@ pub enum DaemonError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
+    /// The key-store readiness probe failed ([`crate::keystore::KeyStore::check_readable`]): the
+    /// volume under `data_dir/keys` cannot be listed, opened, read or written. A node in this state
+    /// fails every Sign/Dkg it touches, so `Signer.Health` reports NOT_SERVING on it.
+    #[error("keystore {} {what}: {source}", .path.display())]
+    KeystoreUnavailable {
+        path: std::path::PathBuf,
+        /// "unreadable" | "not writable" | "unresponsive".
+        what: &'static str,
+        source: std::io::Error,
+    },
+
     #[error("rpc transport: {0}")]
     Transport(#[from] tonic::transport::Error),
 
     #[error("rpc status: {0}")]
     Status(#[from] tonic::Status),
+
+    /// This node's key store failed its last readiness probe, so it refuses to join a signing
+    /// quorum it could not finish. Leaders skip it like an unreachable peer.
+    #[error("not serving: {0}")]
+    NotServing(String),
 
     #[error("unknown key id: {0}")]
     UnknownKey(String),
@@ -74,7 +90,9 @@ impl From<DaemonError> for tonic::Status {
             DaemonError::UnknownKey(_) | DaemonError::UnknownDkg(_) => {
                 tonic::Status::not_found(e.to_string())
             }
-            DaemonError::ThresholdNotMet { .. } => tonic::Status::unavailable(e.to_string()),
+            DaemonError::ThresholdNotMet { .. } | DaemonError::NotServing(_) => {
+                tonic::Status::unavailable(e.to_string())
+            }
             DaemonError::Config(_) => tonic::Status::failed_precondition(e.to_string()),
             // invalid_argument, and nothing more: same code and message for every cause.
             DaemonError::DecryptFailed => tonic::Status::invalid_argument(e.to_string()),
