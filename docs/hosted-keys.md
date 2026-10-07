@@ -110,6 +110,7 @@ config {
     endpoints    = ["cosigner1:9101", "cosigner2:9102", "cosigner3:9103"]
     hosted-keys  = true
     delegate     = "none"
+    key-prefix   = ""        # set per participant when several share this cluster — see below
     tls = { ca-cert = "/certs/ca.crt", cert = "/certs/driver.crt", key = "/certs/driver.key" }
   }
 }
@@ -119,6 +120,14 @@ Routing is by key-id prefix: `frost-` → threshold Ed25519 in the cluster, `rut
 anything else → the delegate. With `delegate = "none"` there is no third path — the participant
 holds no key material at all, and any key id matching neither prefix fails loudly and names the key
 instead of silently doing local crypto.
+
+**Several participants on one cluster:** FROST ids derive from Canton's key name, so a second
+participant on the same cluster asks for the same `frost-namespace` and its DKG is refused with
+`ALREADY_EXISTS` — by design, that guard protects the live key. Give each participant its own
+`key-prefix` (`"soak1-"`, `"soak2-"`, …); it is prepended to every id, FROST and hosted, so the ids
+stay disjoint. Choose it before first bootstrap and never change it; leave it unset on an existing
+deployment, whose ids stay exactly as they are. Details and the rules that follow from it (approval
+rule prefixes, trust domain) in [architecture.md](architecture.md#one-cluster-several-participants--frostkey-prefix).
 
 Two deliberate absences:
 

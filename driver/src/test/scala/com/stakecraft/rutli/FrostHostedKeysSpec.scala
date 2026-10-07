@@ -31,11 +31,46 @@ class FrostHostedKeysSpec extends AnyWordSpec with Matchers {
   private val logger = LoggerFactory.getLogger(classOf[FrostHostedKeysSpec])
   private def await[T](f: scala.concurrent.Future[T]): T = Await.result(f, 10.seconds)
 
-  /** Minimal in-process Signer: records calls and serves hosted-key ops from a map. */
+  /** Minimal in-process Signer: records calls and serves hosted-key ops from a map. FROST ops are
+    * faked just enough to observe routing: DKG is create-once (ALREADY_EXISTS on a repeat, like the
+    * real cluster's guard), sign/groupKey answer for known ids only. */
   private class FakeCluster(hostedEnabled: Boolean = true, specs: Seq[String] = Seq("rsa-2048-oaep-sha256", "aes-256-gcm"))
       extends SignerGrpc.SignerImplBase {
     val calls: mutable.Buffer[String] = mutable.Buffer.empty
     private val keys = mutable.Map.empty[String, String] // key id -> spec
+    val frostKeys: mutable.Set[String] = mutable.Set.empty
+    // A genuine Ed25519 public key (raw 32 bytes): the driver re-parses what the cluster returns.
+    private val groupVerifyingKey: Array[Byte] =
+      java.security.KeyPairGenerator.getInstance("Ed25519").generateKeyPair().getPublic.getEncoded.takeRight(32)
+
+    override def dkg(req: DkgRequest, obs: StreamObserver[DkgReply]): Unit = {
+      calls += s"dkg:${req.getKeyId}"
+      if (frostKeys.contains(req.getKeyId))
+        obs.onError(Status.ALREADY_EXISTS.withDescription(s"key ${req.getKeyId} exists").asRuntimeException())
+      else {
+        frostKeys += req.getKeyId
+        obs.onNext(DkgReply.newBuilder().setGroupVerifyingKey(ByteString.copyFrom(groupVerifyingKey)).build())
+        obs.onCompleted()
+      }
+    }
+
+    override def sign(req: SignRequest, obs: StreamObserver[SignReply]): Unit = {
+      calls += s"sign:${req.getKeyId}"
+      if (!frostKeys.contains(req.getKeyId)) obs.onError(Status.NOT_FOUND.asRuntimeException())
+      else {
+        obs.onNext(SignReply.newBuilder().setSignature(ByteString.copyFrom(new Array[Byte](64))).build())
+        obs.onCompleted()
+      }
+    }
+
+    override def groupKey(req: GroupKeyRequest, obs: StreamObserver[GroupKeyReply]): Unit = {
+      calls += s"groupKey:${req.getKeyId}"
+      if (!frostKeys.contains(req.getKeyId)) obs.onError(Status.NOT_FOUND.asRuntimeException())
+      else {
+        obs.onNext(GroupKeyReply.newBuilder().setGroupVerifyingKey(ByteString.copyFrom(groupVerifyingKey)).build())
+        obs.onCompleted()
+      }
+    }
 
     override def capabilities(
         req: CapabilitiesRequest,
@@ -137,22 +172,31 @@ class FrostHostedKeysSpec extends AnyWordSpec with Matchers {
     override def health: Future[KmsDriverHealth] = Future.successful(KmsDriverHealth.Ok)
   }
 
-  private def withCluster[A](fake: FakeCluster, delegate: KmsBackend = new TripwireDelegate)(
-      body: FrostBackend => A
-  ): A = {
+  private def withCluster[A](
+      fake: FakeCluster,
+      delegate: KmsBackend = new TripwireDelegate,
+      keyPrefix: String = "",
+  )(body: FrostBackend => A): A = {
     val serverName = InProcessServerBuilder.generateName()
     val srv = InProcessServerBuilder.forName(serverName).directExecutor().addService(fake).build().start()
+    try withServer(serverName, delegate, keyPrefix)(body)
+    finally srv.shutdownNow()
+  }
+
+  /** A backend against an already-running fake, so two participants (two backends, two prefixes)
+    * can share one cluster in a test. */
+  private def withServer[A](serverName: String, delegate: KmsBackend, keyPrefix: String)(
+      body: FrostBackend => A
+  ): A = {
     // FrostBackend builds its own channel from the endpoint string, so point it at the in-process
     // name via the same plaintext path a dev deployment uses.
-    val backend = new FrostBackend(Seq(serverName), delegate, logger, None, 10.seconds, hostedKeys = true) {
-      override protected def buildChannel(endpoint: String): io.grpc.ManagedChannel =
-        InProcessChannelBuilder.forName(endpoint).directExecutor().build()
-    }
+    val backend =
+      new FrostBackend(Seq(serverName), delegate, logger, None, 10.seconds, hostedKeys = true, keyPrefix = keyPrefix) {
+        override protected def buildChannel(endpoint: String): io.grpc.ManagedChannel =
+          InProcessChannelBuilder.forName(endpoint).directExecutor().build()
+      }
     try body(backend)
-    finally {
-      backend.close()
-      srv.shutdownNow()
-    }
+    finally backend.close()
   }
 
   "FrostBackend with hosted keys" should {
@@ -254,6 +298,124 @@ class FrostHostedKeysSpec extends AnyWordSpec with Matchers {
         delegate.decrypted shouldBe true
         fake.calls should not contain "decrypt"
       }
+    }
+  }
+
+  "FrostBackend with the default key prefix" should {
+
+    "mint the FROST ids earlier releases minted and route them to the cluster" in {
+      // Byte-for-byte compatibility: an existing cluster already holds frost-namespace, and a driver
+      // upgraded to a release with the key-prefix knob (left unset) must keep asking for that id.
+      val fake = new FakeCluster()
+      withCluster(fake) { backend =>
+        val keyId = await(backend.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("namespace")))
+        keyId shouldBe "frost-namespace"
+        fake.calls should contain("dkg:frost-namespace")
+        await(backend.sign(new Array[Byte](34), keyId, SigningAlgoSpec.Ed25519)).length shouldBe 64
+        fake.calls should contain("sign:frost-namespace")
+        await(backend.keyExistsAndIsActive(keyId))
+        fake.calls should contain("groupKey:frost-namespace")
+      }
+    }
+
+    "refuse a second DKG for the same key name — the cluster's create-once guard" in {
+      // Two participants on one cluster without a prefix: the second one's DKG for `namespace`
+      // collides on frost-namespace and is refused. This is the failure key-prefix exists to avoid.
+      val fake = new FakeCluster()
+      withCluster(fake) { backend =>
+        await(backend.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("namespace")))
+        val err = intercept[Exception] {
+          await(backend.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("namespace")))
+        }
+        err.getMessage should include("ALREADY_EXISTS")
+      }
+    }
+  }
+
+  "FrostBackend with a per-participant key prefix" should {
+
+    "prefix the FROST id and route sign/getPublicKey/keyExists/delete on it to the cluster" in {
+      val fake = new FakeCluster()
+      withCluster(fake, keyPrefix = "soak1-") { backend =>
+        val keyId = await(backend.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("namespace")))
+        keyId shouldBe "soak1-frost-namespace"
+        fake.calls should contain("dkg:soak1-frost-namespace")
+
+        await(backend.sign(new Array[Byte](34), keyId, SigningAlgoSpec.Ed25519)).length shouldBe 64
+        fake.calls should contain("sign:soak1-frost-namespace")
+        await(backend.getPublicKey(keyId)).spec shouldBe SigningKeySpec.EcCurve25519
+        await(backend.keyExistsAndIsActive(keyId))
+        fake.calls.count(_ == "groupKey:soak1-frost-namespace") shouldBe 2
+        // Still the non-rotatable namespace key: not deletable via the API, prefixed or not.
+        intercept[UnsupportedOperationException](await(backend.deleteKey(keyId)))
+      }
+    }
+
+    "prefix hosted ids and route every hosted op on them to the cluster" in {
+      val fake = new FakeCluster()
+      withCluster(fake, keyPrefix = "soak1-") { backend =>
+        val encId = await(backend.generateEncryptionKeyPair(EncryptionKeySpec.Rsa2048, Some("encryption")))
+        encId should startWith("soak1-rutli-enc-encryption-")
+        await(backend.decryptAsymmetric(Array[Byte](1), encId, EncryptionAlgoSpec.RsaEsOaepSha256)) shouldBe
+          "plaintext".getBytes
+        await(backend.getPublicKey(encId)).key shouldBe Array[Byte](4, 5, 6)
+        await(backend.keyExistsAndIsActive(encId))
+
+        val symId = await(backend.generateSymmetricKey(Some("wrap")))
+        symId should startWith("soak1-rutli-sym-wrap-")
+        await(backend.encryptSymmetric(Array[Byte](1), symId)) shouldBe "sealed".getBytes
+        await(backend.decryptSymmetric(Array[Byte](1), symId)) shouldBe "opened".getBytes
+
+        await(backend.deleteKey(encId))
+        fake.calls should contain allOf ("generateKey:rsa-2048-oaep-sha256", "generateKey:aes-256-gcm", "decrypt",
+          "publicKey", "keyInfo", "symmetricEncrypt", "symmetricDecrypt", "deleteKey")
+      }
+    }
+
+    "let two participants share one cluster without colliding on the namespace key" in {
+      // The DevNet soak bring-up failure, fixed: same Canton key name, two prefixes, two DKGs.
+      val fake = new FakeCluster()
+      val serverName = InProcessServerBuilder.generateName()
+      val srv = InProcessServerBuilder.forName(serverName).directExecutor().addService(fake).build().start()
+      try {
+        val a = withServer(serverName, new TripwireDelegate, "soak1-") { b =>
+          await(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("namespace")))
+        }
+        val b = withServer(serverName, new TripwireDelegate, "soak2-") { b =>
+          await(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("namespace")))
+        }
+        a shouldBe "soak1-frost-namespace"
+        b shouldBe "soak2-frost-namespace"
+        fake.frostKeys should contain allOf (a, b)
+      } finally srv.shutdownNow()
+    }
+
+    "not treat an unprefixed or foreign-prefixed id as its own" in {
+      // Routing is strict on the full prefix: a bare frost-namespace (another participant's, or a
+      // legacy id) is not this driver's key and goes to the delegate like any other foreign id.
+      val fake = new FakeCluster()
+      val delegate = new SoftwareBackendProbe
+      withCluster(fake, delegate, keyPrefix = "soak1-") { backend =>
+        await(backend.decryptAsymmetric(Array[Byte](1), "rutli-enc-legacy-1", EncryptionAlgoSpec.RsaEsOaepSha256))
+        delegate.decrypted shouldBe true
+        fake.calls should not contain "decrypt"
+        // The tripwire delegate's AssertionError comes back boxed by the Future; check the root cause.
+        def rootMessage(t: Throwable): String =
+          Iterator.iterate(t)(_.getCause).takeWhile(_ != null).toList.last.getMessage
+        rootMessage(intercept[Throwable](await(backend.sign(Array[Byte](1), "frost-namespace", SigningAlgoSpec.Ed25519)))) should
+          include("sign must not reach the delegate")
+        rootMessage(intercept[Throwable](await(backend.sign(Array[Byte](1), "soak2-frost-namespace", SigningAlgoSpec.Ed25519)))) should
+          include("sign must not reach the delegate")
+        fake.calls.filter(_.startsWith("sign:")) shouldBe empty
+      }
+    }
+
+    "reject a prefix outside the cosigner keystore alphabet at construction" in {
+      val fake = new FakeCluster()
+      val err = intercept[IllegalArgumentException] {
+        withCluster(fake, keyPrefix = "soak 1/")(_ => ())
+      }
+      err.getMessage should include("frost.key-prefix")
     }
   }
 

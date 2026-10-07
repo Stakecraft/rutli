@@ -43,9 +43,12 @@ import scala.concurrent.{ExecutionContext, Future, blocking}
   * The driver thus presents a single KMS to Canton while, underneath, the highest-value key lives
   * in MPC and the rest live in the HSM.
   *
-  * Routing is by key-id prefix: keys this backend creates on the cluster are tagged `frost-`.
-  * `generateSigningKeyPair(EcCurve25519)` runs a distributed key generation on the cluster and
-  * returns the cluster key id; `sign` with that id calls the cluster's threshold Sign.
+  * Routing is by key-id prefix, and every id is minted and recognised through one helper,
+  * [[FrostKeyIds]]: keys this backend creates on the cluster are tagged `frost-` (threshold) or
+  * `rutli-` (cluster-hosted), optionally behind a per-participant `keyPrefix` so several
+  * participants can share one cluster. `generateSigningKeyPair(EcCurve25519)` runs a distributed
+  * key generation on the cluster and returns the cluster key id; `sign` with that id calls the
+  * cluster's threshold Sign.
   *
   * '''Availability:''' the backend is configured with the full cosigner roster and fails over
   * across endpoints — any live cosigner can lead a request (the cluster orchestrates the rest).
@@ -73,12 +76,17 @@ class FrostBackend(
     tls: Option[FrostTlsConfig] = None,
     requestTimeout: FiniteDuration = 60.seconds,
     hostedKeys: Boolean = false,
+    keyPrefix: String = "",
 )(implicit ec: ExecutionContext)
     extends KmsBackend {
 
   import FrostBackend._
 
   require(endpoints.nonEmpty, "FrostBackend needs at least one cosigner endpoint")
+
+  /** The single source of every key id this backend mints or routes on. Validates `keyPrefix`. */
+  private val ids: FrostKeyIds = FrostKeyIds(keyPrefix)
+  if (keyPrefix.nonEmpty) logger.info(s"FROST: key ids carry the per-participant prefix '$keyPrefix'")
 
   private val channels: Vector[ManagedChannel] = endpoints.toVector.map(buildChannel)
 
@@ -251,7 +259,7 @@ class FrostBackend(
       keyName: Option[String],
   ): Future[String] = spec match {
     case SigningKeySpec.EcCurve25519 =>
-      val keyId = frostKeyId(keyName)
+      val keyId = ids.frost(keyName)
       logger.info(s"FROST: initiating distributed key generation for $keyId")
       // DKG is a one-shot ceremony: only fail over if the endpoint is unreachable at the
       // connection level (no ceremony started). Never retry on DEADLINE_EXCEEDED — a slow but
@@ -267,7 +275,7 @@ class FrostBackend(
       keyName: Option[String],
   ): Future[String] = spec match {
     case EncryptionKeySpec.Rsa2048 if hostsRsa =>
-      val keyId = hostedKeyId("enc", keyName)
+      val keyId = ids.hosted("enc", keyName)
       logger.info(s"FROST: generating cluster-hosted $RsaSpec key $keyId")
       generateHosted(keyId, RsaSpec)
     case other => delegate.generateEncryptionKeyPair(other, keyName)
@@ -275,7 +283,7 @@ class FrostBackend(
 
   override def generateSymmetricKey(keyName: Option[String]): Future[String] =
     if (hostsAes) {
-      val keyId = hostedKeyId("sym", keyName)
+      val keyId = ids.hosted("sym", keyName)
       logger.info(s"FROST: generating cluster-hosted $AesSpec key $keyId")
       generateHosted(keyId, AesSpec)
     } else delegate.generateSymmetricKey(keyName)
@@ -298,7 +306,7 @@ class FrostBackend(
   }
 
   override def sign(data: Array[Byte], keyId: String, algo: SigningAlgoSpec): Future[Array[Byte]] =
-    if (isFrostKey(keyId))
+    if (ids.isFrost(keyId))
       precondition(algo == SigningAlgoSpec.Ed25519, s"FROST keys sign Ed25519 only, got $algo") {
         val req = SignRequest.newBuilder().setKeyId(keyId).setMessage(ByteString.copyFrom(data)).build()
         // Re-issuing through another leader opens a fresh session with fresh nonces; the sick
@@ -317,7 +325,7 @@ class FrostBackend(
       keyId: String,
       algo: EncryptionAlgoSpec,
   ): Future[Array[Byte]] =
-    if (isHostedKey(keyId))
+    if (ids.isHosted(keyId))
       precondition(
         algo == EncryptionAlgoSpec.RsaEsOaepSha256,
         s"cluster-hosted encryption keys decrypt RSAES-OAEP-SHA256 only, got $algo",
@@ -332,14 +340,14 @@ class FrostBackend(
     else delegate.decryptAsymmetric(ciphertext, keyId, algo)
 
   override def encryptSymmetric(data: Array[Byte], keyId: String): Future[Array[Byte]] =
-    if (isHostedKey(keyId)) {
+    if (ids.isHosted(keyId)) {
       val req =
         SymmetricRequest.newBuilder().setKeyId(keyId).setData(ByteString.copyFrom(data)).build()
       clusterCall("symmetricEncrypt", isLeaderSick)(_.symmetricEncrypt(req)).map(_.getData.toByteArray)
     } else delegate.encryptSymmetric(data, keyId)
 
   override def decryptSymmetric(ciphertext: Array[Byte], keyId: String): Future[Array[Byte]] =
-    if (isHostedKey(keyId)) {
+    if (ids.isHosted(keyId)) {
       val req = SymmetricRequest
         .newBuilder()
         .setKeyId(keyId)
@@ -349,14 +357,14 @@ class FrostBackend(
     } else delegate.decryptSymmetric(ciphertext, keyId)
 
   override def getPublicKey(keyId: String): Future[PublicKey] =
-    if (isFrostKey(keyId)) {
+    if (ids.isFrost(keyId)) {
       val req = GroupKeyRequest.newBuilder().setKeyId(keyId).build()
       clusterCall("groupKey", isLeaderSick)(_.groupKey(req)).map { reply =>
         val raw = reply.getGroupVerifyingKey.toByteArray
         require(raw.length == 32, s"expected 32-byte Ed25519 group key, got ${raw.length}")
         PublicKey(ed25519Spki(raw), SigningKeySpec.EcCurve25519)
       }
-    } else if (isHostedKey(keyId)) {
+    } else if (ids.isHosted(keyId)) {
       val req = PublicKeyRequest.newBuilder().setKeyId(keyId).build()
       // The cluster returns X.509 SubjectPublicKeyInfo DER — exactly what Canton's PublicKey wants.
       clusterCall("publicKey", isLeaderSick)(_.publicKey(req))
@@ -364,11 +372,11 @@ class FrostBackend(
     } else delegate.getPublicKey(keyId)
 
   override def keyExistsAndIsActive(keyId: String): Future[Unit] =
-    if (isFrostKey(keyId))
+    if (ids.isFrost(keyId))
       // groupKey returns NOT_FOUND if the cluster has no such key.
       clusterCall("groupKey", isLeaderSick)(_.groupKey(GroupKeyRequest.newBuilder().setKeyId(keyId).build()))
         .map(_ => ())
-    else if (isHostedKey(keyId))
+    else if (ids.isHosted(keyId))
       clusterCall("keyInfo", isLeaderSick)(_.keyInfo(KeyInfoRequest.newBuilder().setKeyId(keyId).build()))
         .map { reply =>
           if (!reply.getExists) throw new NoSuchElementException(s"key not found or inactive: $keyId")
@@ -376,11 +384,11 @@ class FrostBackend(
     else delegate.keyExistsAndIsActive(keyId)
 
   override def deleteKey(keyId: String): Future[Unit] =
-    if (isFrostKey(keyId))
+    if (ids.isFrost(keyId))
       // The cluster intentionally has no delete — the namespace key is non-rotatable and deleting
       // it would be catastrophic. Deletion is an operator ceremony, not an API call.
       Future.failed(new UnsupportedOperationException("FROST namespace keys cannot be deleted via the API"))
-    else if (isHostedKey(keyId))
+    else if (ids.isHosted(keyId))
       // Unlike the namespace key, Canton CAN rotate encryption keys, so hosted keys are deletable.
       // A write: fail over only when the node is down, never on a leader-side error.
       clusterCall("deleteKey", isNodeDown)(_.deleteKey(DeleteKeyRequest.newBuilder().setKeyId(keyId).build()))
@@ -417,13 +425,7 @@ class FrostBackend(
 }
 
 object FrostBackend {
-  private val FrostPrefix = "frost-"
-
-  private def isFrostKey(keyId: String): Boolean = keyId.startsWith(FrostPrefix)
-
-  /** Key ids the cluster hosts as whole (replicated, sealed) keys, as opposed to FROST shares. */
-  private val HostedPrefix = "rutli-"
-  private def isHostedKey(keyId: String): Boolean = keyId.startsWith(HostedPrefix)
+  // Key-id construction and routing live in FrostKeyIds — nothing here builds or parses an id.
 
   private val RsaSpec = "rsa-2048-oaep-sha256"
   private val AesSpec = "aes-256-gcm"
@@ -431,13 +433,6 @@ object FrostBackend {
   /** Assumed cluster capability when the Capabilities RPC is unavailable (older cosigner, or the
     * cluster was unreachable at startup) but the operator configured hosted keys. */
   private val DefaultHostedSpecs = Set(RsaSpec, AesSpec)
-
-  private def hostedKeyId(kind: String, keyName: Option[String]): String = {
-    // The cosigner keystore accepts [A-Za-z0-9_-] only, and a UUID keeps retries of *different*
-    // logical keys from colliding while GenerateKey stays idempotent for the same id.
-    val name = keyName.map(n => s"-${n.replaceAll("[^A-Za-z0-9_-]", "_")}").getOrElse("")
-    s"$HostedPrefix$kind$name-${java.util.UUID.randomUUID()}".take(300)
-  }
 
   // -- Failover predicates: which statuses move a request to the next cosigner. --
   //
@@ -482,11 +477,6 @@ object FrostBackend {
     * re-run against another leader is exactly what the ceremony guard exists to refuse. */
   private def connectionRefused(status: Status): Boolean =
     status.getCode == Status.Code.UNAVAILABLE
-
-  private def frostKeyId(keyName: Option[String]): String = {
-    val name = keyName.map(n => n.replaceAll("[^A-Za-z0-9_-]", "_")).getOrElse("key")
-    s"$FrostPrefix$name"
-  }
 
   /** Wrap a raw 32-byte Ed25519 public key in DER X.509 SubjectPublicKeyInfo — what Canton expects
     * from getPublicKey. The 12-byte prefix is the fixed Ed25519 SPKI header (SEQUENCE, alg OID

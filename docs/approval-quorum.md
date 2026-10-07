@@ -43,6 +43,7 @@ approval {
   inbox-dir = "/var/rutli/approvals"   # shared dir approvers can write to
   timeout   = 30m
   rules = [
+    # Matches the full key id: with `frost.key-prefix = "soak1-"` this must be "soak1-frost-".
     { key-id-prefix = "frost-", mode = "quorum", threshold = 2 }
   ]
   approvers = [
