@@ -127,3 +127,59 @@ affinity: {}
 
 # Extra env vars for every cosigner
 extraEnv: []
+
+# Nightly sealed-share backups, taken INSIDE each running cosigner with `kubectl exec` (one exec
+# per ordinal), streamed out as one tar per cosigner, then handed to `backup.ship` for off-cluster
+# storage. This is the only supported way to back a cosigner up on Kubernetes:
+#
+#   NEVER MOUNT A COSIGNER'S DATA VOLUME INTO ANOTHER POD. On 2026-10-07 a backup Job that bound a
+#   cosigner's ReadWriteOnce PVC left /data/keys unreadable to the live cosigner, which kept passing
+#   its health check and failed every Sign — a total signing outage on the DevNet soak
+#   (docs/soak-2026-10-devnet.md, incident #1). The chart refuses a backup.extraVolumes entry that
+#   names a cosigner's claim.
+#
+# Off by default. Turning it on also needs a destination: the default `ship` body exits 1, so an
+# unconfigured destination shows up as a failed Job, not as a silent gap. Each run also leaves a
+# seven-day rotation on the node's own volume (/data/backup-<weekday>), which is what the
+# "wipe keys/, restore" drill uses.
+backup:
+  enabled: false
+  schedule: "17 3 * * *" # daily 03:17 UTC — keep refresh drills away from this minute
+  image:
+    # kubectl + bash + coreutils. Pinned by digest; bump deliberately.
+    repository: alpine/k8s
+    tag: "1.31.13@sha256:7a319b15cfc99c9aaa27ec9891d6b4ca24632b795908591c7b0ba89b03549e0a"
+    pullPolicy: IfNotPresent
+  # POSIX sh body, run once per backup with $1 = a directory holding one tar per cosigner
+  # (<fullname>-0.tar … <fullname>-N.tar), each containing that node's backup-<weekday>/ directory
+  # of sealed share + hosted-key files. Keep the tars in a different trust domain from the seal
+  # secret, ideally one destination per cosigner (docs/disaster-recovery.md §4). For example:
+  #   cp -r "$1" /backups/                                        # a volume of the Job's OWN, via extraVolumes
+  #   rclone copy "$1" "remote:rutli-backups/$(basename "$1")"    # object storage; image + creds via extraEnv
+  ship: |
+    echo "ship.sh: no backup destination configured — set backup.ship" >&2
+    echo "ship.sh: this run's backups exist only on each cosigner's own volume (/data/backup-<weekday>)" >&2
+    exit 1
+  successfulJobsHistoryLimit: 7
+  failedJobsHistoryLimit: 7
+  activeDeadlineSeconds: 900 # a hung exec must not block the next night's run
+  resources:
+    requests:
+      cpu: 20m
+      memory: 64Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+  # Credentials for `ship` (e.g. object-storage keys via secretKeyRef).
+  extraEnv: []
+  # Volumes the backup Job OWNS (e.g. its own destination PVC mounted at /backups). A cosigner's
+  # claim (data-<fullname>-N) is rejected at template time.
+  extraVolumes: []
+  extraVolumeMounts: []
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    seccompProfile:
+      type: RuntimeDefault
+  nodeSelector: {}
+  tolerations: []

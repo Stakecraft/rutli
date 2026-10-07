@@ -48,6 +48,33 @@ Store backups **off the node's host** and, ideally, geographically separated. Be
 sealed, the backup is only usable together with the node's seal secret (which lives in your secret
 manager, not on disk) — keep the two recovery inputs in separate trust domains.
 
+**On Kubernetes: never mount a cosigner volume into another pod.** A cosigner's `data` PVC is
+mounted by that cosigner's pod and by nothing else, ever — not a backup Job, not a debug pod, not a
+sidecar. On 2026-10-07 the DevNet soak lost all signing for five minutes (54 failed signs) because a
+backup CronJob bound `cosigner-0`'s ReadWriteOnce claim into a second pod: the extra mount left
+`data_dir/keys` unreadable to the running cosigner, whose health check does not touch the key store,
+so it stayed in rotation and answered every Sign with `INTERNAL` — and the driver deliberately does
+not fail over on `INTERNAL`, so a sick leader at position 0 blocked the participant until the pod was
+restarted (`soak-2026-10-devnet.md`, incident #1). Take the backup **from inside the cosigner**
+instead, one `kubectl exec` per pod — which is what `deploy/k8s/cronjob-backup.yaml` and the Helm
+chart's `backup.enabled=true` do nightly, streaming each result out as a tar for your off-cluster
+destination:
+
+```sh
+# backup, from inside the running cosigner (share files are written atomically; keep refresh
+# ceremonies off the backup minute):
+kubectl -n rutli exec cosigner-1 -c cosigner -- rutli-cosigner --config /config/cosigner-2.json backup --out /data/backup-$(date -u +%u)
+kubectl -n rutli exec cosigner-1 -c cosigner -- tar -C /data -cf - backup-$(date -u +%u) > cosigner-1.tar   # then ship off-cluster
+
+# restore onto a rebuilt pod (empty PVC), again through the cosigner's own container:
+kubectl -n rutli exec -i cosigner-1 -c cosigner -- tar -C /tmp -xf - < cosigner-1.tar
+kubectl -n rutli exec cosigner-1 -c cosigner -- rutli-cosigner --config /config/cosigner-2.json restore --from /tmp/backup-<weekday> --force
+kubectl -n rutli delete pod cosigner-1   # the daemon reopens its key store with the restored share
+```
+
+A CSI volume snapshot is fine (it is the storage layer, not a second mount). A second mount is not,
+whatever its access mode or `fsGroup`.
+
 Cluster-hosted keys live in the same `data_dir/keys/` directory (one sealed file per key id), so
 these two commands already cover them — there is no second backup procedure and no sibling directory
 to forget. Two properties follow from the sealing: a node's backup restores onto **that node**
@@ -246,6 +273,9 @@ remains §1/§2/§3 — backups or repair from survivors. Full mechanics and the
 - **≥ `t` cosigner share backups**, encrypted (sealed) and stored in ≥ 2 separated locations. This is
   the difference between "recoverable" and "irrecoverable" for the catastrophic case.
 - **Seal secrets** for those shares in a secret manager, in a different trust domain from the backups.
+- On Kubernetes, the job that takes those backups runs `kubectl exec` **inside** each cosigner.
+  **Never mount a cosigner volume into another pod** — it took the DevNet soak's signing down on
+  2026-10-07 (§1).
 - A **documented, rehearsed** restore drill (test §1 and §3 on a devnet with the same tooling — the
   cluster test `a_lost_node_recovers_from_a_share_backup_and_the_cluster_signs` is the automated
   analogue).

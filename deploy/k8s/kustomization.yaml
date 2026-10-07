@@ -13,7 +13,10 @@ resources:
   - statefulset.yaml
   - networkpolicy.yaml
   - pdb.yaml
-  # Day-2 CronJobs are examples — review KEY_ID / PVC claimName before enabling:
+  # Day-2 CronJobs are opt-in. cronjob-backup.yaml backs up via `kubectl exec` into each cosigner
+  # (it never mounts a cosigner volume — see its header) and needs ship.sh in ConfigMap
+  # rutli-backup-destination pointed at your off-cluster destination first. cronjob-refresh.yaml
+  # needs KEY_ID.
   # - cronjob-backup.yaml
   # - cronjob-refresh.yaml
 images:

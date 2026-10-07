@@ -20,6 +20,22 @@ All notable changes to Rütli are documented here. Format loosely follows
     current line (3.7.0-SNAPSHOT) on machines that have built both.
   Docs now point at `canton-open-source-3.6.1`; the daml-components override default moved to a
   snapshot that v3.6.1 itself pins (`3.7.0-snapshot.20260929.14837.0.v5b67d18b`).
+- **Kubernetes backups never touch a cosigner's volume from outside.** `deploy/k8s/cronjob-backup.yaml`
+  — which until now mounted `cosigner-0`'s ReadWriteOnce PVC into a second pod, the exact pattern
+  behind the DevNet soak's incident #1 on 2026-10-07 (`docs/soak-2026-10-devnet.md`) — is replaced
+  by the exec design proven on the soak cluster (`deploy/soak/k8s/cosigner-backup-exec-cronjob.yaml`):
+  a ServiceAccount whose Role grants only `get` and `pods/exec` on the cosigner pods *by name*, a
+  CronJob on a digest-pinned `alpine/k8s` image that runs `rutli-cosigner backup` **inside** each
+  cosigner (one `kubectl exec` per ordinal, seven-day rotation under `/data/backup-<weekday>`),
+  streams each result out as a tar, and hands the tars to a `ship.sh` you supply in ConfigMap
+  `rutli-backup-destination` — the placeholder exits 1, so an unconfigured destination is a failed
+  Job rather than a silent gap. The Helm chart gains the same behind `backup.enabled`
+  (`backup.ship`, `backup.extraEnv` / `backup.extraVolumes` for credentials and a destination of
+  the Job's own) and refuses a `backup.extraVolumes` entry that names a cosigner's
+  `data-<fullname>-N` claim; the chart never had a template mounting one elsewhere.
+  `deploy/k8s/README.md`, the chart README and `docs/disaster-recovery.md` now state the rule in so
+  many words, with the incident: **never mount a cosigner volume into another pod.** The soak
+  cluster's applied copy gets the same Role tightening and image digest pin, behaviour unchanged.
 
 ### Added
 - **`deploy/monitoring/kustomization.yaml`** — Rütli observability for a kube-prometheus-stack

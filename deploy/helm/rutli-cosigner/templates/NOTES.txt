@@ -27,4 +27,15 @@ Canton driver endpoints (headless):
 Label the Canton namespace {{ .Values.networkPolicy.clientNamespaceLabel }}=true and the
 participant pod {{ .Values.networkPolicy.clientPodLabel }}=true so NetworkPolicy allows the driver.
 
+{{- if .Values.backup.enabled }}
+
+Backups: CronJob {{ include "rutli-cosigner.backup.name" . }} ({{ .Values.backup.schedule }}) runs
+`rutli-cosigner backup` INSIDE each cosigner via kubectl exec and hands the tars to backup.ship.
+The Job FAILS until backup.ship names an off-cluster destination.
+{{- else }}
+
+Backups are OFF (backup.enabled=false). Enable them before go-live. Never mount a cosigner volume
+into another pod to take one — the chart's backup runs inside the cosigner (README, "Backups").
+{{- end }}
+
 Docs: deploy/helm/rutli-cosigner/README.md · docs/key-ceremony.md · docs/disaster-recovery.md
