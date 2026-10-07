@@ -167,6 +167,17 @@ volume snapshot is fine (storage layer, no second mount); a second mount is not.
   label your scraper pod `rutli.io/scraper: "true"` for the NetworkPolicy). Alert rules + Grafana
   dashboard in `deploy/monitoring/`; metric reference in `docs/observability.md`.
 - **PDB**: `pdb.yaml` keeps `minAvailable: 2` so voluntary drains cannot drop below threshold.
+- **Probes**: readiness is `rutli-cosigner … health` (exec): the key store under `/data/keys` must
+  be listable, openable and writable and the gRPC port open, so a pod whose volume breaks shows
+  `READY 0/1` (and counts against the PDB / holds a rollout) instead of looking healthy while it
+  fails every Sign. It does **not** take the pod out of the driver's `frost.endpoints`:
+  `service.yaml` publishes not-ready addresses because the mesh needs them during DKG, so routing
+  around a sick node is the driver's failover plus the node itself answering `UNAVAILABLE` to
+  anything that needs its key store and refusing to join other leaders' quorums. Liveness stays a
+  TCP check on purpose — a restart does not fix a volume and discards the evidence. Alert:
+  `RutliKeystoreUnreadable`. On an image that predates the `health` subcommand (0.3.0) the probe
+  sees clap's usage-error exit 2 and falls back to "process running", so pinning 0.3.0 still rolls
+  out — just without the key-store check; the fallback goes once the pin moves past 0.3.0.
 
 ## Notes / hardening
 

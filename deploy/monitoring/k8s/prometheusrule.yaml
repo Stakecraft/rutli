@@ -22,6 +22,29 @@ spec:
         description: "Cosigner instance {{ $labels.instance }} (job rutli-cosigner) has had up == 0 for\
           \ more than 2 minutes. With a 2-of-3 quorum, one lost cosigner leaves zero margin \u2014 a second\
           \ failure will halt signing entirely."
+    - alert: RutliKeystoreUnreadable
+      expr: rutli_keystore_unreadable == 1
+      for: 1m
+      labels:
+        severity: critical
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }} cannot read or write its key store"
+        description: "{{ $labels.instance }} has been unable to list its key store (data_dir/keys), write\
+          \ to it, or open any key file in it for at least 1 minute. It answers UNAVAILABLE to Sign, Dkg,\
+          \ Refresh and every key operation (INTERNAL only in the first ~15s, before its first failed\
+          \ probe, where its share is not cached), reports Health NOT_SERVING, shows READY 0/1, and refuses\
+          \ to join other leaders' signing quorums (rutli_sign_round1_skips_total climbs) and ceremonies;\
+          \ the driver fails over away from it. Signing continues on the other two cosigners \u2014 but\
+          \ at 2-of-3 the margin is gone, one more failure halts signing, and no DKG or refresh can run\
+          \ until it is fixed. Usual cause: something outside the cosigner changed the volume \u2014 a\
+          \ backup or maintenance job remounting the RWO PVC, a recursive chown/chmod, a read-only remount\
+          \ after a storage fault. Check `kubectl -n rutli exec <pod> -- ls -la /data/keys`, the mount\
+          \ flags (`mount | grep /data`), and what else touched the PVC (CronJobs, operators, the CSI\
+          \ driver's events); the cosigner's error log names the path and the OS error. Fix the volume\
+          \ rather than restarting the pod \u2014 a restart does not repair it and discards the evidence;\
+          \ the gauge clears on its own within ~15s of recovery. Not the same as RutliUnreadableKeyFiles\
+          \ (rutli_unreadable_key_files_total), which is individual key files failing to open or unseal\
+          \ on an otherwise healthy volume."
     - alert: RutliSignErrors
       expr: rate(rutli_sign_requests_total{result="error"}[5m]) > 0
       for: 5m

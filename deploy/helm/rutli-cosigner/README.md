@@ -54,6 +54,20 @@ Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org A
 
 See [`values.yaml`](values.yaml) for the full set.
 
+## Probes
+
+Readiness execs `rutli-cosigner --config … health`: ready only while the key store under
+`/data/keys` can be listed, opened and written **and** the gRPC port accepts connections. (A
+kubelet `grpc:` probe cannot be used — the port is mTLS.) A pod whose volume breaks therefore shows
+`READY 0/1` and counts against the PDB instead of looking healthy while every Sign fails. The
+headless Service still publishes not-ready addresses (the mesh needs them during DKG), so the
+driver keeps resolving the pod; its own failover — the sick node answers `UNAVAILABLE` to anything
+that needs its key store — and the node refusing to join other leaders' quorums route around it.
+Liveness stays `tcpSocket` deliberately — restarting does not fix a volume and discards the
+evidence. With an image that predates the `health` subcommand (the 0.3.0 default) the probe sees
+clap's usage-error exit 2 and falls back to "process running": installs and upgrades still become
+ready, just without the key-store check until the pin moves past 0.3.0.
+
 ## Backups
 
 `backup.enabled=true` adds a CronJob (default 03:17 UTC) that runs `rutli-cosigner backup` **inside

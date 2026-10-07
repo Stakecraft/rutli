@@ -27,6 +27,11 @@ x-cosigner: &cosigner
     - ./config-tls:/config:ro
     - ./certs:/certs:ro
 
+# `rutli-cosigner health`: key store readable + writable AND the gRPC port open. A bare TCP check
+# stayed green through the 2026-10-07 incident, when a node's /data/keys went unreadable and it
+# failed every Sign. `|| [ $? -eq 2 ]`: exit 2 = clap usage error = image predates the `health`
+# subcommand → fall back to "process running"; drop this once the pin is ≥ the next release.
+# (`health` itself exits only 0 or 1.)
 x-healthcheck: &hc
   interval: 10s
   timeout: 3s
@@ -44,7 +49,7 @@ services:
     ports: ["9101:9101", "9201:9200"]
     healthcheck:
       <<: *hc
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9101' 2>/dev/null || exit 1"]
+      test: ["CMD-SHELL", "rutli-cosigner --config /config/cosigner1.json health || [ $$? -eq 2 ]"]
 
   cosigner2:
     <<: *cosigner
@@ -56,7 +61,7 @@ services:
     ports: ["9102:9102", "9202:9200"]
     healthcheck:
       <<: *hc
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9102' 2>/dev/null || exit 1"]
+      test: ["CMD-SHELL", "rutli-cosigner --config /config/cosigner2.json health || [ $$? -eq 2 ]"]
 
   cosigner3:
     <<: *cosigner
@@ -68,7 +73,7 @@ services:
     ports: ["9103:9103", "9203:9200"]
     healthcheck:
       <<: *hc
-      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/9103' 2>/dev/null || exit 1"]
+      test: ["CMD-SHELL", "rutli-cosigner --config /config/cosigner3.json health || [ $$? -eq 2 ]"]
 
 volumes:
   c1:
