@@ -84,6 +84,10 @@ enum Command {
         #[arg(long)]
         passphrase_env: Option<String>,
     },
+    /// Readiness check for container probes (k8s exec readinessProbe, compose healthcheck): the key
+    /// store under `data_dir/keys` can be listed, opened and written, and this node's gRPC port
+    /// accepts connections. Prints `ready` (exit 0) or the reason (exit 1). Needs no seal secret.
+    Health,
     /// Restore this node's key shares from a backup directory. Run with the node stopped.
     Restore {
         #[arg(long)]
@@ -116,6 +120,7 @@ async fn main() -> Result<()> {
             return import_key_command(&cfg, &r#in, passphrase_env.as_deref())
         }
         Some(Command::Restore { from, force }) => return restore_command(&cfg, &from, force),
+        Some(Command::Health) => health_command(&cfg),
         _ => {}
     }
     tracing::info!(identifier = cfg.identifier, listen = %cfg.listen, "starting cosigner");
@@ -168,6 +173,10 @@ async fn main() -> Result<()> {
         tracing::info!("cluster-hosted keys enabled (RSA-2048 encryption + AES-256-GCM symmetric)");
     }
     let node = Arc::new(node);
+
+    // Key-store readiness, re-probed in the background so `rutli_keystore_unreadable` and the
+    // transition log stay current even when nobody calls Health (which probes on every call too).
+    rutli_cosigner::health::spawn_monitor(node.clone(), rutli_cosigner::health::MONITOR_INTERVAL);
 
     // Load mTLS material once (if configured). Plaintext otherwise (dev only).
     let tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose()?;
@@ -311,6 +320,46 @@ fn backup_command(cfg: &Config, out: &std::path::Path) -> Result<()> {
     if cfg.share_seal.is_none() {
         tracing::warn!("shares are NOT sealed — this backup contains plaintext key shares");
     }
+    Ok(())
+}
+
+/// Container readiness probe — see [`Command::Health`]. Exits the process: 0 ready, 1 not.
+fn health_command(cfg: &Config) -> ! {
+    match readiness(cfg) {
+        Ok(()) => {
+            println!("ready");
+            std::process::exit(0)
+        }
+        Err(reason) => {
+            println!("not ready: {reason}");
+            std::process::exit(1)
+        }
+    }
+}
+
+fn readiness(cfg: &Config) -> std::result::Result<(), String> {
+    // check_dir rather than KeyStore::open: open would mkdir a missing key dir, and a probe must not
+    // change what it inspects.
+    KeyStore::check_dir(&cfg.data_dir.join("keys")).map_err(|e| e.to_string())?;
+
+    // Prove the server is up with a bare TCP connect: the port speaks mTLS, and the probe needs no
+    // client cert to know something is listening. Dial the local listen address, never this node's
+    // own DNS name: a not-ready pod normally loses its Service DNS record, so a probe that resolved
+    // itself would keep itself not-ready forever (the shipped headless Service publishes not-ready
+    // addresses, but the probe must not depend on that).
+    let listen: std::net::SocketAddr =
+        cfg.listen.parse().map_err(|e| format!("bad listen addr {}: {e}", cfg.listen))?;
+    let target = match listen.ip() {
+        std::net::IpAddr::V4(ip) if ip.is_unspecified() => {
+            std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, listen.port()))
+        }
+        std::net::IpAddr::V6(ip) if ip.is_unspecified() => {
+            std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, listen.port()))
+        }
+        _ => listen,
+    };
+    std::net::TcpStream::connect_timeout(&target, std::time::Duration::from_secs(2))
+        .map_err(|e| format!("gRPC listener {target} not accepting connections: {e}"))?;
     Ok(())
 }
 
@@ -461,6 +510,10 @@ fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 
 /// Copy regular files from `src` to `dst`. When `!overwrite`, existing destination files are an
 /// error (so a restore never clobbers a live share by accident).
+///
+/// Dotfiles are skipped: key files are `<key_id>.json` with ids limited to `[A-Za-z0-9_-]`, so a
+/// dotfile is never key material — but the readiness probe's write-test file (`.readyz-…`) is one,
+/// and a backup taken from a live pod (`kubectl exec … backup`) could otherwise catch it mid-probe.
 fn copy_dir_files(src: &std::path::Path, dst: &std::path::Path, overwrite: bool) -> Result<usize> {
     if !src.is_dir() {
         return Err(DaemonError::Config(format!("{} is not a directory", src.display())));
@@ -468,6 +521,9 @@ fn copy_dir_files(src: &std::path::Path, dst: &std::path::Path, overwrite: bool)
     let mut count = 0;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
         if entry.file_type()?.is_file() {
             let target = dst.join(entry.file_name());
             if target.exists() && !overwrite {
@@ -495,4 +551,23 @@ fn identifier_index(id: Identifier) -> Vec<u8> {
 async fn shutdown() {
     let _ = tokio::signal::ctrl_c().await;
     tracing::info!("shutdown signal received");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backup_copies_key_files_but_never_dotfiles() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (src, dst) = (tmp.path().join("keys"), tmp.path().join("backup"));
+        std::fs::create_dir_all(src.join("k.nonces")).unwrap();
+        std::fs::create_dir_all(&dst).unwrap();
+        std::fs::write(src.join("k.json"), b"sealed").unwrap();
+        std::fs::write(src.join(".readyz-1-2-3"), b"1").unwrap(); // a readiness probe mid-flight
+
+        assert_eq!(copy_dir_files(&src, &dst, false).unwrap(), 1);
+        assert!(dst.join("k.json").exists());
+        assert!(!dst.join(".readyz-1-2-3").exists(), "a probe file must never land in a backup");
+    }
 }

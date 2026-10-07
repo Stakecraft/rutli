@@ -52,6 +52,8 @@ pub struct Node {
     pub max_signers: u16,
     pub min_signers: u16,
     keystore: KeyStore,
+    /// Key-store readiness verdict (see [`crate::health`]), shared with Health and the monitor.
+    keystore_health: Arc<crate::health::KeystoreHealth>,
     cosigners: Mutex<std::collections::HashMap<String, Arc<Cosigner>>>,
     dkg_sessions: Mutex<std::collections::HashMap<String, DkgState>>,
     refresh_sessions: Mutex<std::collections::HashMap<String, RefreshState>>,
@@ -92,11 +94,13 @@ impl Node {
         keystore: KeyStore,
         ceremony_orphan_timeout: Duration,
     ) -> Self {
+        let keystore_health = Arc::new(crate::health::KeystoreHealth::new(keystore.dir()));
         Self {
             identifier,
             max_signers,
             min_signers,
             keystore,
+            keystore_health,
             cosigners: Mutex::new(Default::default()),
             dkg_sessions: Mutex::new(Default::default()),
             refresh_sessions: Mutex::new(Default::default()),
@@ -170,6 +174,15 @@ impl Node {
     /// refuses new signs while the ceremony is in flight. Refuses if this node still holds
     /// in-flight sign nonces for the key (reverse fence — drain first).
     pub fn ceremony_fence(&self, ceremony_id: &str, key_id: &str, kind: &'static str) -> Result<()> {
+        // A DKG/refresh participant persists a share at the very end. On a read-only remount
+        // `exists()`/`load()` still work, so without this the ceremony would fail only at this
+        // node's final save — after the nodes before it had already persisted theirs: a half-applied
+        // refresh, and no signing for that key until repaired. Refusing the fence makes `fence_all`
+        // roll back before any crypto. Hosted-key fences (genkey/delkey) are not gated: those writes
+        // tolerate a missing replica (write quorum / anti-entropy).
+        if matches!(kind, "dkg" | "refresh") {
+            self.refuse_if_keystore_down()?;
+        }
         let pending = self.pending_sign_count(key_id);
         if pending > 0 {
             return Err(DaemonError::SignInProgress {
@@ -212,6 +225,45 @@ impl Node {
         self.keystore.exists(key_id)
     }
 
+    /// Run the key-store readiness probe now and publish the verdict (gauge + transition log),
+    /// bypassing the Health cache. Blocking filesystem IO; the daemon itself goes through
+    /// [`crate::health::probe`].
+    pub fn check_keystore(&self) -> Result<()> {
+        self.keystore_health.check()
+    }
+
+    /// This node's key-store readiness state, for Health and the monitor loop.
+    pub fn keystore_health(&self) -> &Arc<crate::health::KeystoreHealth> {
+        &self.keystore_health
+    }
+
+    /// Serve Health's key-store verdict from cache for `fresh` instead of
+    /// [`crate::health::FRESH`]. Tests pass zero so every Health call probes.
+    pub fn with_keystore_probe_freshness(mut self, fresh: Duration) -> Self {
+        self.keystore_health = Arc::new(
+            crate::health::KeystoreHealth::new(self.keystore.dir()).with_freshness(fresh),
+        );
+        self
+    }
+
+    /// `Err(NotServing)` — gRPC UNAVAILABLE — while this node's key store fails its readiness probe
+    /// ([`crate::health`]). Checked at the entry of every store-touching Signer RPC (Sign, Dkg,
+    /// Refresh, GroupKey and the hosted-key operations), so a sick node declines to LEAD before
+    /// starting anything (the driver fails over on UNAVAILABLE — every driver version, not only one
+    /// that also fails over on INTERNAL — and no half-run ceremony is left behind); at the DKG/refresh
+    /// ceremony fence, so it declines to take part in one; and in [`Node::sign_round1`], so it
+    /// declines to JOIN another leader's quorum.
+    pub fn refuse_if_keystore_down(&self) -> Result<()> {
+        if self.keystore_health.is_down() {
+            return Err(DaemonError::NotServing(format!(
+                "key store {} failed its readiness probe — not leading or joining an operation it \
+                 cannot finish",
+                self.keystore.dir().display()
+            )));
+        }
+        Ok(())
+    }
+
     pub fn group_key(&self, key_id: &str) -> Result<[u8; 32]> {
         Ok(group_verifying_key_bytes(self.cosigner(key_id)?.public_key_package())?)
     }
@@ -234,6 +286,12 @@ impl Node {
                 other: "in progress".to_string(),
             });
         }
+        // Nor may a node whose key store failed its readiness probe ([`crate::health`]) volunteer
+        // for a quorum. Round 1 can still succeed from the cached share, but round 2 must write a
+        // nonce marker and would fail — sinking the signature for whichever healthy leader picked
+        // this node, which with identifier-ordered peers is every leader (2026-10-07 incident).
+        // Refusing here makes leaders skip it and sign with the rest.
+        self.refuse_if_keystore_down()?;
         let result = self.cosigner(key_id)?.round1(session_id);
         self.update_pending_gauge();
         Ok(result?)
@@ -282,6 +340,22 @@ impl Node {
             .get(key_id)
             .map(|c| c.pending_count())
             .unwrap_or(0)
+    }
+
+    /// Drop in-flight sign sessions past their TTL on every cached key (see
+    /// [`crate::health::spawn_monitor`]), and refresh the pending gauge.
+    pub fn prune_expired_sign_sessions(&self) {
+        let pruned: usize = self
+            .cosigners
+            .lock()
+            .expect("cosigners lock")
+            .values()
+            .map(|c| c.prune_expired())
+            .sum();
+        if pruned > 0 {
+            tracing::debug!(pruned, "dropped expired in-flight sign sessions");
+        }
+        self.update_pending_gauge();
     }
 
     /// In-flight sign sessions across all cached keys on this node.

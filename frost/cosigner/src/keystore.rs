@@ -105,6 +105,11 @@ impl KeyStore {
         Ok(self.dir.join(format!("{key_id}.json")))
     }
 
+    /// Advisory only: a lookup error (EACCES, a dead mount) reads as "absent". Nothing load-bearing
+    /// hangs on it — loads and deletes use `try_exists` and surface the error, a store the daemon
+    /// cannot stat it cannot write either (stat needs only the directory search permission that
+    /// create and rename also need), and a node whose store fails its readiness probe refuses
+    /// DKG/refresh at the fence and every key operation at the RPC entry ([`crate::health`]).
     pub fn exists(&self, key_id: &str) -> bool {
         self.path(key_id).map(|p| p.exists()).unwrap_or(false)
     }
@@ -147,7 +152,9 @@ impl KeyStore {
     /// Read a key file and unseal it, without interpreting the contents.
     fn read_plaintext(&self, key_id: &str) -> Result<Vec<u8>> {
         let path = self.path(key_id)?;
-        if !path.exists() {
+        // try_exists, not exists: an unreadable store must surface as an IO error (INTERNAL), never
+        // as UnknownKey (NOT_FOUND) — Canton would take NOT_FOUND to mean the key is gone.
+        if !path.try_exists()? {
             return Err(DaemonError::UnknownKey(key_id.to_string()));
         }
         let bytes = std::fs::read(&path)?;
@@ -237,7 +244,7 @@ impl KeyStore {
     /// rotating the seal master secret.
     pub fn delete(&self, key_id: &str) -> Result<()> {
         let path = self.path(key_id)?;
-        if path.exists() {
+        if path.try_exists()? {
             std::fs::remove_file(&path)?;
             std::fs::File::open(&self.dir)?.sync_all()?;
         }
@@ -250,6 +257,122 @@ impl KeyStore {
 
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Readiness probe: can this node still list, open, read and write its key store?
+    ///
+    /// Deliberately an OS-level check, NOT an unseal: a file that opens but will not unseal (seal
+    /// secret rotated, foreign restore, corruption) is a per-file problem an operator fixes, already
+    /// reported by `rutli_unreadable_key_files_total`, and the node still signs every other key.
+    /// This probe catches the *volume* failing — a remount, a permission change, a read-only or
+    /// dead mount — which takes every key on the node down at once (2026-10-07 DevNet incident:
+    /// the node answered every Sign with `Permission denied (os error 13)` while reporting healthy).
+    /// For the same reason, *some* key files failing to open (one mis-chowned file) is counted in
+    /// `rutli_unreadable_key_files_total` and logged, not failed: only all of them failing is.
+    ///
+    /// Cheap enough to run every few seconds: one `read_dir`, a few bytes from each `*.json`, and a
+    /// create+remove of a uniquely named dotfile (a sign must write nonce markers, so a read-only
+    /// store is the same outage). See [`KeyStore::check_dir`] for the details.
+    pub fn check_readable(&self) -> Result<()> {
+        Self::check_dir(&self.dir)
+    }
+
+    /// [`KeyStore::check_readable`] on a bare directory, without opening a store — `open` would
+    /// `mkdir` a missing key directory, which a read-only probe must never do. Used by the
+    /// `rutli-cosigner health` container probe.
+    pub fn check_dir(dir: &Path) -> Result<()> {
+        use std::io::Read;
+        let failed = |path: &Path, what: &'static str| {
+            let path = path.to_path_buf();
+            move |source| DaemonError::KeystoreUnavailable { path, what, source }
+        };
+
+        // (opened, unopenable): a subset failing is a per-file problem, every one failing is the volume.
+        let mut opened = 0usize;
+        let mut unopenable: Vec<(std::path::PathBuf, std::io::Error)> = Vec::new();
+        for entry in std::fs::read_dir(dir).map_err(failed(dir, "unreadable"))? {
+            let entry = entry.map_err(failed(dir, "unreadable"))?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let path = entry.path();
+            if name.starts_with(PROBE_PREFIX) {
+                sweep_stale_probe(&path);
+                continue;
+            }
+            // `*.json` only: `*.json.tmp` is an in-flight write and `*.nonces` is a directory.
+            if !name.ends_with(".json") {
+                continue;
+            }
+            // EACCES surfaces on open; a dead mount or stale handle on read.
+            let probe = std::fs::File::open(&path).and_then(|mut f| f.read(&mut [0u8; 16]));
+            match probe {
+                Ok(_) => opened += 1,
+                // Deleted (hosted-key delete) between read_dir and open — not a volume problem.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => unopenable.push((path, e)),
+            }
+        }
+        if opened == 0 {
+            if let Some((path, e)) = unopenable.pop() {
+                return Err(failed(&path, "unreadable")(e));
+            }
+        }
+        for (path, e) in unopenable {
+            metrics::counter!(crate::metrics::UNREADABLE_KEY_FILES).increment(1);
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "key file cannot be opened — that key is unusable on this node, the rest of the key \
+                 store is fine; fix its ownership/permissions"
+            );
+        }
+
+        // Write probe. The name is unique per process AND per call: the daemon (its monitor loop
+        // and every Health RPC) and the container's exec probe — a separate process — probe the
+        // same directory concurrently. `create_new` so a probe can never clobber anything.
+        let probe = dir.join(format!(
+            "{PROBE_PREFIX}{}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or_default(),
+            PROBE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        ));
+        // Create only, no data written — the same operation a sign needs (NonceStore::consume
+        // creates an O_EXCL marker and ignores a failed write), so a data-full disk does not take a
+        // node out of signing that could still sign. Inode exhaustion fails here, as it would there.
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+            .map_err(failed(dir, "not writable"))?;
+        match std::fs::remove_file(&probe) {
+            // NotFound: a concurrent prober swept it as stale. Nothing left behind either way.
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Err(failed(dir, "not writable")(e))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Name prefix of [`KeyStore::check_dir`]'s write-probe files. A dotfile, so it can never collide
+/// with a key file (key ids are `[A-Za-z0-9_-]+`), and `rutli-cosigner backup`/`restore` skip it.
+const PROBE_PREFIX: &str = ".readyz-";
+static PROBE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A probe killed between create and remove (an exec probe hitting its timeout on a slow volume)
+/// leaves its file behind. Harmless — nothing reads dotfiles — but clear it up once it is clearly
+/// not in flight. Best effort: a failure here is the next probe's (or nobody's) problem.
+fn sweep_stale_probe(path: &Path) {
+    let stale = std::fs::symlink_metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age > std::time::Duration::from_secs(300));
+    if stale {
+        let _ = std::fs::remove_file(path);
     }
 }
 
@@ -378,5 +501,132 @@ mod tests {
         assert!(good.load_hosted("rutli-good").is_ok());
         // Reading the bad one directly still fails loudly — it is skipped, not treated as absent.
         assert!(good.load_hosted("rutli-stale").is_err());
+    }
+
+    /// chmod `path`, returning false (and restoring it) when the process can still read it anyway —
+    /// i.e. it runs as root, where permission bits are not enforced and these tests prove nothing.
+    #[cfg(unix)]
+    fn chmod_enforced(path: &Path, mode: u32, restore: u32) -> bool {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        let readable = if path.is_dir() {
+            std::fs::read_dir(path).is_ok()
+        } else {
+            std::fs::File::open(path).is_ok()
+        };
+        if readable && mode & 0o444 == 0 {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(restore)).unwrap();
+            eprintln!("permission bits not enforced (running as root?) — skipping");
+            return false;
+        }
+        true
+    }
+
+    #[cfg(unix)]
+    fn chmod(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_readable_fails_on_an_unreadable_key_dir_and_recovers() {
+        // The 2026-10-07 incident shape: the volume under /data/keys became unreadable and the node
+        // kept reporting healthy while every Sign failed with EACCES.
+        let tmp = tempfile::tempdir().unwrap();
+        let ks = store(&tmp, true);
+        ks.save_hosted("rutli-k", &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap())
+            .unwrap();
+        ks.check_readable().expect("a fresh store with a key must pass");
+        let leftovers: Vec<_> = std::fs::read_dir(ks.dir())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with('.'))
+            .collect();
+        assert!(leftovers.is_empty(), "the write probe must clean up after itself: {leftovers:?}");
+
+        if !chmod_enforced(ks.dir(), 0o000, 0o700) {
+            return;
+        }
+        let verdict = ks.check_readable();
+        chmod(ks.dir(), 0o700); // restore BEFORE asserting, or a failure leaves an undeletable tempdir
+
+        let msg = verdict.expect_err("an unreadable key dir must fail the probe").to_string();
+        assert!(msg.contains(&ks.dir().display().to_string()), "error must name the path: {msg}");
+        assert!(msg.contains("unreadable"), "{msg}");
+        ks.check_readable().expect("restoring the permissions must clear the verdict");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_readable_tolerates_one_unopenable_key_file_but_not_all_or_a_read_only_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ks = store(&tmp, true);
+        for id in ["rutli-k", "rutli-other"] {
+            ks.save_hosted(id, &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap()).unwrap();
+        }
+        let file = ks.dir().join("rutli-k.json");
+        let other = ks.dir().join("rutli-other.json");
+
+        // One key file the daemon cannot open (e.g. re-owned by a foreign job's chown): that key is
+        // unusable, but the node still signs everything else — counted and logged, not failed.
+        if !chmod_enforced(&file, 0o000, 0o600) {
+            return;
+        }
+        let one_bad = ks.check_readable();
+        // Every key file unopenable: that is the volume, not a file.
+        chmod(&other, 0o000);
+        let all_bad = ks.check_readable();
+        chmod(&file, 0o600);
+        chmod(&other, 0o600);
+        assert!(one_bad.is_ok(), "one bad file among good ones must not fail the node: {one_bad:?}");
+        let msg = all_bad.expect_err("every key file unopenable must fail the probe").to_string();
+        assert!(msg.contains("unreadable"), "{msg}");
+        assert!(msg.contains(&ks.dir().display().to_string()), "error must name the path: {msg}");
+
+        // Readable but not writable (a read-only remount): signing needs to write nonce markers.
+        chmod(ks.dir(), 0o500);
+        let verdict = ks.check_readable();
+        chmod(ks.dir(), 0o700);
+        let msg = verdict.expect_err("a read-only key dir must fail the probe").to_string();
+        assert!(msg.contains("not writable"), "{msg}");
+
+        ks.check_readable().expect("recovers once permissions are back");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_store_is_an_io_error_never_unknown_key() {
+        // NOT_FOUND is the worst possible answer here: Canton would believe the key is gone.
+        let tmp = tempfile::tempdir().unwrap();
+        let ks = store(&tmp, true);
+        ks.save_hosted("rutli-k", &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap())
+            .unwrap();
+        if !chmod_enforced(ks.dir(), 0o000, 0o700) {
+            return;
+        }
+        let loaded = ks.load_hosted("rutli-k");
+        let deleted = ks.delete("rutli-k");
+        chmod(ks.dir(), 0o700);
+        assert!(
+            matches!(loaded, Err(DaemonError::Io(_))),
+            "load on an unreadable store must be an IO error: {:?}",
+            loaded.err()
+        );
+        assert!(matches!(deleted, Err(DaemonError::Io(_))), "delete must not report success");
+        assert!(ks.load_hosted("rutli-k").is_ok(), "the key was never gone");
+    }
+
+    #[test]
+    fn check_readable_ignores_non_key_entries_and_sweeps_only_stale_probe_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ks = store(&tmp, false);
+        std::fs::create_dir_all(ks.nonce_dir("k")).unwrap(); // a `*.nonces` directory
+        std::fs::write(ks.dir().join("k.json.tmp"), b"partial").unwrap(); // an in-flight write
+        // A probe file another prober is still using must survive a concurrent probe.
+        let fresh = ks.dir().join(format!("{PROBE_PREFIX}1-2-3"));
+        std::fs::write(&fresh, b"1").unwrap();
+        ks.check_readable().unwrap();
+        assert!(fresh.exists(), "an in-flight probe file of another prober must not be removed");
     }
 }

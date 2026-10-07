@@ -207,6 +207,17 @@ impl PeerApi for LocalPeer {
     }
 }
 
+/// Deadline on every mesh RPC (and on establishing the connection for it).
+///
+/// Every peer RPC is small — a signing round, a ceremony part, a hosted-key replica or listing — so
+/// anything slower is a sick peer (a hung volume, a wedged process), and waiting on it would hold
+/// the leader past the driver's own deadline. A timeout surfaces as `CANCELLED: Timeout expired`:
+/// in sign round 1 the peer is skipped like any failure, in a ceremony it fails the ceremony (which
+/// rolls back), and a hosted-key write treats it as unreachable. It can never cause a nonce reuse:
+/// the leader never re-sends a round 2 (it aborts and starts a fresh session), and a peer burns its
+/// nonce marker before it computes a share, whether or not anyone is still waiting for the reply.
+pub const PEER_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// A remote cosigner, over gRPC. The channel connects lazily; FROST packages ride as JSON bytes.
 pub struct GrpcPeer {
     identifier: Identifier,
@@ -220,7 +231,9 @@ impl GrpcPeer {
         tls: Option<tonic::transport::ClientTlsConfig>,
     ) -> Result<Self> {
         let mut ep = tonic::transport::Endpoint::from_shared(endpoint.to_string())
-            .map_err(|e| crate::DaemonError::Config(format!("bad endpoint {endpoint}: {e}")))?;
+            .map_err(|e| crate::DaemonError::Config(format!("bad endpoint {endpoint}: {e}")))?
+            .timeout(PEER_RPC_TIMEOUT)
+            .connect_timeout(PEER_RPC_TIMEOUT);
         if let Some(t) = tls {
             ep = ep.tls_config(t)?;
         }

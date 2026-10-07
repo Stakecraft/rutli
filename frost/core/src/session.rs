@@ -131,6 +131,16 @@ impl Cosigner {
         self.pending.lock().expect("pending lock").remove(session_id);
     }
 
+    /// Drop in-flight sessions older than the pending TTL — the same sweep `round1` runs on every
+    /// call, for a node that is not getting round-1 calls (e.g. one refusing them while its key
+    /// store is down). Returns how many were dropped.
+    pub fn prune_expired(&self) -> usize {
+        let mut pending = self.pending.lock().expect("pending lock");
+        let before = pending.len();
+        pending.retain(|_, (_, started)| started.elapsed() < PENDING_TTL);
+        before - pending.len()
+    }
+
     /// Number of in-flight (round-1, not yet round-2) sessions. For observability/tests.
     pub fn pending_count(&self) -> usize {
         self.pending.lock().expect("pending lock").len()
