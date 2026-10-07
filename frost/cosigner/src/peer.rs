@@ -89,6 +89,10 @@ pub trait PeerApi: Send + Sync {
 }
 
 /// This node, called in-process.
+///
+/// Every call that may touch the key store runs through [`Node::blocking`], exactly as the same call
+/// does when it arrives over gRPC: the leader's own share of a sign round or ceremony must not park
+/// an async worker on a stalled volume any more than a peer's may.
 pub struct LocalPeer {
     node: Arc<Node>,
 }
@@ -105,7 +109,8 @@ impl PeerApi for LocalPeer {
         self.node.identifier
     }
     async fn sign_round1(&self, key_id: &str, session_id: &str) -> Result<SigningCommitments> {
-        self.node.sign_round1(key_id, session_id)
+        let (key_id, session_id) = (key_id.to_owned(), session_id.to_owned());
+        self.node.blocking(move |n| n.sign_round1(&key_id, &session_id)).await
     }
     async fn sign_round2(
         &self,
@@ -114,7 +119,9 @@ impl PeerApi for LocalPeer {
         message: &[u8],
         commitments: &BTreeMap<Identifier, SigningCommitments>,
     ) -> Result<SignatureShare> {
-        self.node.sign_round2(key_id, session_id, message, commitments)
+        let (key_id, session_id) = (key_id.to_owned(), session_id.to_owned());
+        let (message, commitments) = (message.to_vec(), commitments.clone());
+        self.node.blocking(move |n| n.sign_round2(&key_id, &session_id, &message, &commitments)).await
     }
     async fn abort_sign(&self, key_id: &str, session_id: &str) -> Result<()> {
         self.node.abort_sign(key_id, session_id);
@@ -128,7 +135,8 @@ impl PeerApi for LocalPeer {
         Ok(())
     }
     async fn dkg_part1(&self, dkg_id: &str, key_id: &str) -> Result<round1::Package> {
-        self.node.dkg_part1(dkg_id, key_id)
+        let (dkg_id, key_id) = (dkg_id.to_owned(), key_id.to_owned());
+        self.node.blocking(move |n| n.dkg_part1(&dkg_id, &key_id)).await
     }
     async fn dkg_part2(
         &self,
@@ -143,11 +151,14 @@ impl PeerApi for LocalPeer {
         round1_map: &BTreeMap<Identifier, round1::Package>,
         round2_for_me: &BTreeMap<Identifier, round2::Package>,
     ) -> Result<[u8; 32]> {
-        self.node.dkg_part3(dkg_id, round1_map, round2_for_me)
+        let dkg_id = dkg_id.to_owned();
+        let (round1_map, round2_for_me) = (round1_map.clone(), round2_for_me.clone());
+        self.node.blocking(move |n| n.dkg_part3(&dkg_id, &round1_map, &round2_for_me)).await
     }
 
     async fn refresh_part1(&self, refresh_id: &str, key_id: &str) -> Result<round1::Package> {
-        self.node.refresh_part1(refresh_id, key_id)
+        let (refresh_id, key_id) = (refresh_id.to_owned(), key_id.to_owned());
+        self.node.blocking(move |n| n.refresh_part1(&refresh_id, &key_id)).await
     }
     async fn refresh_part2(
         &self,
@@ -162,7 +173,9 @@ impl PeerApi for LocalPeer {
         round1_map: &BTreeMap<Identifier, round1::Package>,
         round2_for_me: &BTreeMap<Identifier, round2::Package>,
     ) -> Result<[u8; 32]> {
-        self.node.refresh_part3(refresh_id, round1_map, round2_for_me)
+        let refresh_id = refresh_id.to_owned();
+        let (round1_map, round2_for_me) = (round1_map.clone(), round2_for_me.clone());
+        self.node.blocking(move |n| n.refresh_part3(&refresh_id, &round1_map, &round2_for_me)).await
     }
 
     async fn node_info(&self) -> Result<(u16, [u8; 32])> {
@@ -178,32 +191,47 @@ impl PeerApi for LocalPeer {
         wrapped: &crate::wrap::Wrapped,
     ) -> Result<Vec<u8>> {
         let spec = crate::hosted::HostedSpec::parse(spec)?;
-        let key = self.node.hosted_unwrap(key_id, spec, wrapped)?;
-        self.node.hosted_store(key_id, &key)?;
-        self.node.hosted_commitment(&key)
+        let key = self.node.hosted_unwrap(key_id, spec, wrapped)?; // crypto only, no IO
+        let key_id = key_id.to_owned();
+        self.node
+            .blocking(move |n| {
+                n.hosted_store(&key_id, &key)?;
+                n.hosted_commitment(&key)
+            })
+            .await
     }
 
     async fn fetch_key(&self, key_id: &str) -> Result<(String, Vec<u8>, crate::wrap::Wrapped)> {
         // In-process: the "recipient" is this same node, so wrap to ourselves for a uniform path.
-        let key = self.node.hosted_load(key_id)?;
-        let (id, pk) = (crate::hosted::identifier_index(self.node.identifier), self.node.dist_public_key()?);
-        let w = self.node.hosted_wrap_for(key_id, &key, id, &pk)?;
-        let pub_der = if key.spec.is_asymmetric() { key.public_key_der()? } else { Vec::new() };
-        Ok((key.spec.as_str().to_string(), pub_der, w))
+        let key_id = key_id.to_owned();
+        self.node
+            .blocking(move |n| {
+                let key = n.hosted_load(&key_id)?;
+                let (id, pk) = (crate::hosted::identifier_index(n.identifier), n.dist_public_key()?);
+                let w = n.hosted_wrap_for(&key_id, &key, id, &pk)?;
+                let pub_der = if key.spec.is_asymmetric() { key.public_key_der()? } else { Vec::new() };
+                Ok((key.spec.as_str().to_string(), pub_der, w))
+            })
+            .await
     }
 
     async fn list_keys(&self) -> Result<Vec<(String, String, Vec<u8>)>> {
-        let mut out = Vec::new();
-        for key_id in self.node.hosted_list()? {
-            let key = self.node.hosted_load(&key_id)?;
-            let commitment = self.node.hosted_commitment(&key)?;
-            out.push((key_id, key.spec.as_str().to_string(), commitment));
-        }
-        Ok(out)
+        self.node
+            .blocking(|n| {
+                let mut out = Vec::new();
+                for key_id in n.hosted_list()? {
+                    let key = n.hosted_load(&key_id)?;
+                    let commitment = n.hosted_commitment(&key)?;
+                    out.push((key_id, key.spec.as_str().to_string(), commitment));
+                }
+                Ok(out)
+            })
+            .await
     }
 
     async fn purge_key(&self, _ceremony_id: &str, key_id: &str) -> Result<bool> {
-        self.node.hosted_delete(key_id)
+        let key_id = key_id.to_owned();
+        self.node.blocking(move |n| n.hosted_delete(&key_id)).await
     }
 }
 

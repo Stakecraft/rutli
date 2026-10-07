@@ -140,10 +140,10 @@ but must run on `spawn_blocking`. This is a blocking implementation decision, no
 > acceptable" fallback was never taken. Decryption failures return one opaque error for every
 > cause — a distinguishable padding failure is itself an oracle.
 >
-> **Not shipped:** the `spawn_blocking` half. `HostedKey::generate` is called directly from the
-> async generation path, so RSA-2048 keygen (tens to hundreds of ms of CPU) occupies a runtime
-> worker. It is one call per key rather than a hot path, but it should move onto a blocking thread
-> before a cluster carries production key ceremonies alongside signing traffic.
+> **Also shipped since:** the `spawn_blocking` half — RSA-2048 keygen runs on a blocking thread
+> (`orchestrator::generate_hosted_key`), and so does every hosted-key read and write
+> (`Node::blocking`), so neither CPU-heavy keygen nor a stalled data volume can occupy an async
+> worker.
 
 ## Decision 2 — v1 is replicated, sealed, whole keys
 

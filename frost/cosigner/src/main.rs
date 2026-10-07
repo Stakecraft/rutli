@@ -174,8 +174,9 @@ async fn main() -> Result<()> {
     }
     let node = Arc::new(node);
 
-    // Key-store readiness, re-probed in the background so `rutli_keystore_unreadable` and the
-    // transition log stay current even when nobody calls Health (which probes on every call too).
+    // Key-store readiness, re-probed in the background so `rutli_keystore_unreadable`, the
+    // transition log and the refusal gate stay current even when nobody calls Health. A dedicated
+    // OS thread, not a tokio task: on a stalled volume it must keep going when the runtime cannot.
     rutli_cosigner::health::spawn_monitor(node.clone(), rutli_cosigner::health::MONITOR_INTERVAL);
 
     // Load mTLS material once (if configured). Plaintext otherwise (dev only).
