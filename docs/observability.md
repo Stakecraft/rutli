@@ -76,8 +76,11 @@ Published latency snapshots and how to reproduce them: [`performance.md`](perfor
   conflict (critical).
 - Dashboard: import
   [`deploy/monitoring/grafana-dashboard.json`](../deploy/monitoring/grafana-dashboard.json)
-  (uid `rutli-cosigner`) — throughput, latency quantiles, skips, pending sessions, aborts,
-  ceremonies.
+  (uid `rutli-cosigner`) — cosigners up, *Key store readiness* (a state timeline of
+  `rutli_keystore_unreadable` per instance: green readable, red unreadable, grey not scraped),
+  round-1 skips as `increase(…[5m])` per leader (the counter climbs on the healthy nodes, so the
+  instance that stays flat while a readiness row is red is the one being skipped around),
+  throughput, latency quantiles, pending sessions, aborts, ceremonies.
 
 ## What to watch (2-of-3 cluster)
 

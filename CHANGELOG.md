@@ -141,7 +141,10 @@ All notable changes to Rütli are documented here. Format loosely follows
   `prometheus-rules.yml`, which stays the single source of truth for the compose stacks), a
   NetworkPolicy admitting the `monitoring` namespace to port 9200 (the chart's own policy only
   admits pods labelled `rutli.io/scraper=true`, and a stack-managed Prometheus pod does not carry
-  that label), and the Grafana dashboard as a sidecar-discovered ConfigMap. First used for the
+  that label), and the Grafana dashboard as a sidecar-discovered ConfigMap (the dashboard now has a
+  *Key store readiness* state timeline of `rutli_keystore_unreadable` per instance beside
+  *Cosigners Up*, and plots round-1 skips as `increase(…[5m])` per leader so the node being
+  skipped around is visible at a glance). First used for the
   DevNet soak validator on 2026-10-07.
 - **`deploy/soak/kustomization.yaml`** — the daily soak gate as a Kubernetes CronJob
   (`kubectl apply -k deploy/soak -n monitoring`): runs the unchanged `soak-check.sh` from a
