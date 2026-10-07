@@ -1,0 +1,46 @@
+{{- if .Values.backup.enabled }}
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Least privilege for the backup CronJob: `kubectl exec` is a GET on the pod followed by a POST on
+# pods/exec, so that is all the Role grants — and only for the cosigner pods by name. No list, no
+# logs, no secrets, and no volume of any cosigner (see backup-cronjob.yaml).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "rutli-cosigner.backup.name" . }}
+  labels:
+    {{- include "rutli-cosigner.backup.labels" . | nindent 4 }}
+automountServiceAccountToken: false # mounted explicitly on the Job pod only
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "rutli-cosigner.backup.name" . }}
+  labels:
+    {{- include "rutli-cosigner.backup.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get]
+    resourceNames: {{ include "rutli-cosigner.podNames" . }}
+  - apiGroups: [""]
+    resources: [pods/exec]
+    verbs: [create]
+    resourceNames: {{ include "rutli-cosigner.podNames" . }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "rutli-cosigner.backup.name" . }}
+  labels:
+    {{- include "rutli-cosigner.backup.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "rutli-cosigner.backup.name" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "rutli-cosigner.backup.name" . }}
+  apiGroup: rbac.authorization.k8s.io
+{{- end }}

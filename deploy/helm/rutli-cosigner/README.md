@@ -50,8 +50,40 @@ Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org A
 | `tlsSecretName` / `sealSecretName` | `rutli-cosigner-tls` / `rutli-seal` | Pre-created |
 | `signerAllowlist` | `[driver]` | Required under TLS |
 | `hostedKeys.enabled` | `false` | Cluster-hosted RSA/AES keys — replicated whole keys, not threshold shares |
+| `backup.enabled` | `false` | Nightly `backup` via `kubectl exec` inside each cosigner; needs `backup.ship` |
 
 See [`values.yaml`](values.yaml) for the full set.
+
+## Backups
+
+`backup.enabled=true` adds a CronJob (default 03:17 UTC) that runs `rutli-cosigner backup` **inside
+each cosigner** — one `kubectl exec` per ordinal, from a ServiceAccount whose Role grants only `get`
+and `pods/exec` on exactly those pods. Each run leaves a seven-day rotation on the node's own volume
+(`/data/backup-<weekday>`, what the "wipe `keys/`, restore" drill uses), streams every result out as
+`<fullname>-N.tar`, and hands the directory of tars to `backup.ship`, a shell body you supply. The
+default body exits 1, so an unconfigured destination is a failed Job you will notice, not a silent
+gap:
+
+```sh
+helm upgrade --install rutli deploy/helm/rutli-cosigner -n rutli \
+  --set backup.enabled=true \
+  --set-file backup.ship=./ship.sh   # e.g. rclone/aws to object storage; creds via backup.extraEnv,
+                                     # a destination PVC of the Job's own via backup.extraVolumes
+```
+
+Keep the tars in a different trust domain from `rutli-seal`, ideally one destination per cosigner
+(`docs/disaster-recovery.md` §4). Restore onto a rebuilt pod: stream the tar into the pod's `/tmp`
+(`kubectl exec -i <pod> -c cosigner -- tar -C /tmp -xf - < <pod>.tar`), run
+`rutli-cosigner --config /config/cosigner-<ordinal+1>.json restore --from /tmp/backup-<weekday> --force`
+there, then delete the pod so the daemon reopens its key store.
+
+**Never mount a cosigner volume into another pod.** The StatefulSet's `data-<fullname>-N` claims
+are for the cosigner pod only — no backup Job, no debug pod, no sidecar. On 2026-10-07 a backup Job
+that bound a cosigner's ReadWriteOnce claim left `/data/keys` unreadable to the live cosigner, which
+stayed healthy to its probe and failed every Sign: a total signing outage on the DevNet soak until
+the pod was restarted (`docs/soak-2026-10-devnet.md`, incident #1). No template in this chart mounts
+a cosigner's claim anywhere but its own pod, and the chart refuses a `backup.extraVolumes` entry that
+names one.
 
 ## Relation to raw manifests
 

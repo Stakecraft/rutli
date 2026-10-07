@@ -1,0 +1,135 @@
+{{- if .Values.backup.enabled }}
+{{- $fullname := include "rutli-cosigner.fullname" . }}
+{{- $backup := .Values.backup }}
+{{/* HARD RULE: never mount a cosigner's data volume into another pod. On 2026-10-07 a backup Job
+     that bound a cosigner's RWO PVC left /data/keys unreadable to the live cosigner — a total
+     signing outage on the DevNet soak (docs/soak-2026-10-devnet.md, incident #1). The StatefulSet's
+     claims are named data-<fullname>-N; refuse them here rather than in a postmortem. */}}
+{{- $claimPrefix := printf "data-%s-" $fullname }}
+{{- range $v := $backup.extraVolumes }}
+  {{- with $v.persistentVolumeClaim }}
+    {{- if hasPrefix $claimPrefix (toString .claimName) }}
+      {{- fail (printf "backup.extraVolumes: %q is a cosigner's data volume. Never mount a cosigner volume into another pod (DevNet soak incident #1, 2026-10-07) — backups run inside the cosigner via kubectl exec; give the Job its own claim instead." .claimName) }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Nightly sealed-share backups taken INSIDE each running cosigner (`kubectl exec`, one per
+# ordinal), streamed out as one tar per cosigner, then handed to backup.ship. See values.yaml.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rutli-cosigner.backup.name" . }}
+  labels:
+    {{- include "rutli-cosigner.backup.labels" . | nindent 4 }}
+data:
+  ship.sh: |
+    #!/bin/sh
+    # $1 = directory holding {{ $fullname }}-0.tar … {{ $fullname }}-{{ sub (int .Values.replicaCount) 1 }}.tar (from backup.ship)
+    set -eu
+{{ $backup.ship | indent 4 }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "rutli-cosigner.backup.name" . }}
+  labels:
+    {{- include "rutli-cosigner.backup.labels" . | nindent 4 }}
+spec:
+  schedule: {{ $backup.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: {{ $backup.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $backup.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: {{ $backup.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "rutli-cosigner.backup.labels" . | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "rutli-cosigner.backup.name" . }}
+          automountServiceAccountToken: true # kubectl needs the in-cluster token
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            {{- toYaml $backup.podSecurityContext | nindent 12 }}
+          {{- with $backup.nodeSelector }}
+          nodeSelector:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $backup.tolerations }}
+          tolerations:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          containers:
+            - name: backup
+              image: {{ printf "%s:%s" $backup.image.repository $backup.image.tag }}
+              imagePullPolicy: {{ $backup.image.pullPolicy }}
+              env:
+                - { name: HOME, value: /tmp } # kubectl writes its discovery cache under $HOME
+                - { name: REPLICAS, value: {{ .Values.replicaCount | quote }} }
+                - { name: POD_PREFIX, value: {{ $fullname | quote }} }
+                {{- with $backup.extraEnv }}
+                {{- toYaml . | nindent 16 }}
+                {{- end }}
+              command:
+                - /bin/bash
+                - -c
+                - |
+                  set -euo pipefail
+                  day=$(date -u +%u)                       # 1..7: seven-day rotation on each node
+                  stamp=$(date -u +%Y%m%dT%H%M%SZ)
+                  work="/work/$stamp"; mkdir -p "$work"
+                  rc=0
+                  for i in $(seq 0 $((REPLICAS - 1))); do
+                    pod="$POD_PREFIX-$i"
+                    cfg="/config/cosigner-$((i + 1)).json"
+                    if kubectl exec "$pod" -c cosigner -- sh -c \
+                         "rm -rf /data/backup-$day && rutli-cosigner --config $cfg backup --out /data/backup-$day" \
+                       && kubectl exec "$pod" -c cosigner -- tar -C /data -cf - "backup-$day" > "$work/$pod.tar"; then
+                      echo "$pod: backup at /data/backup-$day, copied out as $work/$pod.tar ($(wc -c < "$work/$pod.tar") bytes)"
+                    else
+                      echo "$pod: BACKUP FAILED" >&2; rc=1; rm -f "$work/$pod.tar"
+                    fi
+                  done
+                  # Ship whatever was taken, even on a partial failure — a backup of two shares
+                  # beats none. The default ship.sh fails until a destination is configured.
+                  if ls "$work"/*.tar >/dev/null 2>&1; then
+                    sh /destination/ship.sh "$work" || { echo "ship.sh FAILED" >&2; rc=1; }
+                  fi
+                  exit $rc
+              resources:
+                {{- toYaml $backup.resources | nindent 16 }}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: ["ALL"] }
+              volumeMounts:
+                - { name: destination, mountPath: /destination, readOnly: true }
+                - { name: work, mountPath: /work }
+                - { name: tmp, mountPath: /tmp }
+                {{- with $backup.extraVolumeMounts }}
+                {{- toYaml . | nindent 16 }}
+                {{- end }}
+          volumes:
+            - name: destination
+              configMap:
+                name: {{ include "rutli-cosigner.backup.name" . }}
+                defaultMode: 0555
+            # Scratch for the streamed-out tars. Only volumes the backup Job OWNS go here; a
+            # cosigner's claim never does (rejected at template time).
+            - name: work
+              emptyDir: {}
+            - name: tmp
+              emptyDir: {}
+            {{- with $backup.extraVolumes }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+{{- end }}
