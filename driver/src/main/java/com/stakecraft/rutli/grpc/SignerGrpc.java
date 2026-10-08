@@ -171,6 +171,68 @@ public final class SignerGrpc {
     return getRefreshMethod;
   }
 
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.KeyStatusRequest,
+      com.stakecraft.rutli.grpc.KeyStatusReply> getKeyStatusMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "KeyStatus",
+      requestType = com.stakecraft.rutli.grpc.KeyStatusRequest.class,
+      responseType = com.stakecraft.rutli.grpc.KeyStatusReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.KeyStatusRequest,
+      com.stakecraft.rutli.grpc.KeyStatusReply> getKeyStatusMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.KeyStatusRequest, com.stakecraft.rutli.grpc.KeyStatusReply> getKeyStatusMethod;
+    if ((getKeyStatusMethod = SignerGrpc.getKeyStatusMethod) == null) {
+      synchronized (SignerGrpc.class) {
+        if ((getKeyStatusMethod = SignerGrpc.getKeyStatusMethod) == null) {
+          SignerGrpc.getKeyStatusMethod = getKeyStatusMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.KeyStatusRequest, com.stakecraft.rutli.grpc.KeyStatusReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "KeyStatus"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.KeyStatusRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.KeyStatusReply.getDefaultInstance()))
+              .setSchemaDescriptor(new SignerMethodDescriptorSupplier("KeyStatus"))
+              .build();
+        }
+      }
+    }
+    return getKeyStatusMethod;
+  }
+
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonySignTestRequest,
+      com.stakecraft.rutli.grpc.CeremonySignTestReply> getCeremonySignTestMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "CeremonySignTest",
+      requestType = com.stakecraft.rutli.grpc.CeremonySignTestRequest.class,
+      responseType = com.stakecraft.rutli.grpc.CeremonySignTestReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonySignTestRequest,
+      com.stakecraft.rutli.grpc.CeremonySignTestReply> getCeremonySignTestMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonySignTestRequest, com.stakecraft.rutli.grpc.CeremonySignTestReply> getCeremonySignTestMethod;
+    if ((getCeremonySignTestMethod = SignerGrpc.getCeremonySignTestMethod) == null) {
+      synchronized (SignerGrpc.class) {
+        if ((getCeremonySignTestMethod = SignerGrpc.getCeremonySignTestMethod) == null) {
+          SignerGrpc.getCeremonySignTestMethod = getCeremonySignTestMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.CeremonySignTestRequest, com.stakecraft.rutli.grpc.CeremonySignTestReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "CeremonySignTest"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.CeremonySignTestRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.CeremonySignTestReply.getDefaultInstance()))
+              .setSchemaDescriptor(new SignerMethodDescriptorSupplier("CeremonySignTest"))
+              .build();
+        }
+      }
+    }
+    return getCeremonySignTestMethod;
+  }
+
   private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CapabilitiesRequest,
       com.stakecraft.rutli.grpc.CapabilitiesReply> getCapabilitiesMethod;
 
@@ -526,6 +588,33 @@ public final class SignerGrpc {
 
     /**
      * <pre>
+     * This node's local, read-only view of one FROST key — public values only (group key, its own
+     * verifying share, the public key package and its digest, provenance). For `rutli-cosigner
+     * verify-key`, which asks every node and compares. Allowlisted like GroupKey. The driver does
+     * not call it.
+     * </pre>
+     */
+    default void keyStatus(com.stakecraft.rutli.grpc.KeyStatusRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.KeyStatusReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getKeyStatusMethod(), responseObserver);
+    }
+
+    /**
+     * <pre>
+     * Split ceremony verification: sign a fixed, server-computed test digest for an imported key
+     * with EXACTLY the given quorum, so every t-subset of cosigners can be proven to sign. The
+     * message is never caller-supplied (0x1220 ‖ SHA-256("rutli-verify-key/" ‖ ceremony_id ‖
+     * key_id), from the key's recorded provenance), and keys without a dealer-split origin are
+     * refused. Callable by the operator role (operator_allowlist) as well as the driver role.
+     * </pre>
+     */
+    default void ceremonySignTest(com.stakecraft.rutli.grpc.CeremonySignTestRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonySignTestReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getCeremonySignTestMethod(), responseObserver);
+    }
+
+    /**
+     * <pre>
      * What this cluster supports. The driver queries it at startup instead of hardcoding specs, so
      * adding a key type later needs no driver release.
      * </pre>
@@ -675,6 +764,35 @@ public final class SignerGrpc {
 
     /**
      * <pre>
+     * This node's local, read-only view of one FROST key — public values only (group key, its own
+     * verifying share, the public key package and its digest, provenance). For `rutli-cosigner
+     * verify-key`, which asks every node and compares. Allowlisted like GroupKey. The driver does
+     * not call it.
+     * </pre>
+     */
+    public void keyStatus(com.stakecraft.rutli.grpc.KeyStatusRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.KeyStatusReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getKeyStatusMethod(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     * <pre>
+     * Split ceremony verification: sign a fixed, server-computed test digest for an imported key
+     * with EXACTLY the given quorum, so every t-subset of cosigners can be proven to sign. The
+     * message is never caller-supplied (0x1220 ‖ SHA-256("rutli-verify-key/" ‖ ceremony_id ‖
+     * key_id), from the key's recorded provenance), and keys without a dealer-split origin are
+     * refused. Callable by the operator role (operator_allowlist) as well as the driver role.
+     * </pre>
+     */
+    public void ceremonySignTest(com.stakecraft.rutli.grpc.CeremonySignTestRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonySignTestReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getCeremonySignTestMethod(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     * <pre>
      * What this cluster supports. The driver queries it at startup instead of hardcoding specs, so
      * adding a key type later needs no driver release.
      * </pre>
@@ -812,6 +930,33 @@ public final class SignerGrpc {
 
     /**
      * <pre>
+     * This node's local, read-only view of one FROST key — public values only (group key, its own
+     * verifying share, the public key package and its digest, provenance). For `rutli-cosigner
+     * verify-key`, which asks every node and compares. Allowlisted like GroupKey. The driver does
+     * not call it.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.KeyStatusReply keyStatus(com.stakecraft.rutli.grpc.KeyStatusRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getKeyStatusMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * Split ceremony verification: sign a fixed, server-computed test digest for an imported key
+     * with EXACTLY the given quorum, so every t-subset of cosigners can be proven to sign. The
+     * message is never caller-supplied (0x1220 ‖ SHA-256("rutli-verify-key/" ‖ ceremony_id ‖
+     * key_id), from the key's recorded provenance), and keys without a dealer-split origin are
+     * refused. Callable by the operator role (operator_allowlist) as well as the driver role.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.CeremonySignTestReply ceremonySignTest(com.stakecraft.rutli.grpc.CeremonySignTestRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getCeremonySignTestMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
      * What this cluster supports. The driver queries it at startup instead of hardcoding specs, so
      * adding a key type later needs no driver release.
      * </pre>
@@ -937,6 +1082,33 @@ public final class SignerGrpc {
     public com.stakecraft.rutli.grpc.RefreshReply refresh(com.stakecraft.rutli.grpc.RefreshRequest request) {
       return io.grpc.stub.ClientCalls.blockingUnaryCall(
           getChannel(), getRefreshMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * This node's local, read-only view of one FROST key — public values only (group key, its own
+     * verifying share, the public key package and its digest, provenance). For `rutli-cosigner
+     * verify-key`, which asks every node and compares. Allowlisted like GroupKey. The driver does
+     * not call it.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.KeyStatusReply keyStatus(com.stakecraft.rutli.grpc.KeyStatusRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getKeyStatusMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * Split ceremony verification: sign a fixed, server-computed test digest for an imported key
+     * with EXACTLY the given quorum, so every t-subset of cosigners can be proven to sign. The
+     * message is never caller-supplied (0x1220 ‖ SHA-256("rutli-verify-key/" ‖ ceremony_id ‖
+     * key_id), from the key's recorded provenance), and keys without a dealer-split origin are
+     * refused. Callable by the operator role (operator_allowlist) as well as the driver role.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.CeremonySignTestReply ceremonySignTest(com.stakecraft.rutli.grpc.CeremonySignTestRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getCeremonySignTestMethod(), getCallOptions(), request);
     }
 
     /**
@@ -1075,6 +1247,35 @@ public final class SignerGrpc {
 
     /**
      * <pre>
+     * This node's local, read-only view of one FROST key — public values only (group key, its own
+     * verifying share, the public key package and its digest, provenance). For `rutli-cosigner
+     * verify-key`, which asks every node and compares. Allowlisted like GroupKey. The driver does
+     * not call it.
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.KeyStatusReply> keyStatus(
+        com.stakecraft.rutli.grpc.KeyStatusRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getKeyStatusMethod(), getCallOptions()), request);
+    }
+
+    /**
+     * <pre>
+     * Split ceremony verification: sign a fixed, server-computed test digest for an imported key
+     * with EXACTLY the given quorum, so every t-subset of cosigners can be proven to sign. The
+     * message is never caller-supplied (0x1220 ‖ SHA-256("rutli-verify-key/" ‖ ceremony_id ‖
+     * key_id), from the key's recorded provenance), and keys without a dealer-split origin are
+     * refused. Callable by the operator role (operator_allowlist) as well as the driver role.
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.CeremonySignTestReply> ceremonySignTest(
+        com.stakecraft.rutli.grpc.CeremonySignTestRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getCeremonySignTestMethod(), getCallOptions()), request);
+    }
+
+    /**
+     * <pre>
      * What this cluster supports. The driver queries it at startup instead of hardcoding specs, so
      * adding a key type later needs no driver release.
      * </pre>
@@ -1157,14 +1358,16 @@ public final class SignerGrpc {
   private static final int METHODID_DKG = 2;
   private static final int METHODID_SIGN = 3;
   private static final int METHODID_REFRESH = 4;
-  private static final int METHODID_CAPABILITIES = 5;
-  private static final int METHODID_GENERATE_KEY = 6;
-  private static final int METHODID_PUBLIC_KEY = 7;
-  private static final int METHODID_KEY_INFO = 8;
-  private static final int METHODID_DELETE_KEY = 9;
-  private static final int METHODID_DECRYPT = 10;
-  private static final int METHODID_SYMMETRIC_ENCRYPT = 11;
-  private static final int METHODID_SYMMETRIC_DECRYPT = 12;
+  private static final int METHODID_KEY_STATUS = 5;
+  private static final int METHODID_CEREMONY_SIGN_TEST = 6;
+  private static final int METHODID_CAPABILITIES = 7;
+  private static final int METHODID_GENERATE_KEY = 8;
+  private static final int METHODID_PUBLIC_KEY = 9;
+  private static final int METHODID_KEY_INFO = 10;
+  private static final int METHODID_DELETE_KEY = 11;
+  private static final int METHODID_DECRYPT = 12;
+  private static final int METHODID_SYMMETRIC_ENCRYPT = 13;
+  private static final int METHODID_SYMMETRIC_DECRYPT = 14;
 
   private static final class MethodHandlers<Req, Resp> implements
       io.grpc.stub.ServerCalls.UnaryMethod<Req, Resp>,
@@ -1202,6 +1405,14 @@ public final class SignerGrpc {
         case METHODID_REFRESH:
           serviceImpl.refresh((com.stakecraft.rutli.grpc.RefreshRequest) request,
               (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.RefreshReply>) responseObserver);
+          break;
+        case METHODID_KEY_STATUS:
+          serviceImpl.keyStatus((com.stakecraft.rutli.grpc.KeyStatusRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.KeyStatusReply>) responseObserver);
+          break;
+        case METHODID_CEREMONY_SIGN_TEST:
+          serviceImpl.ceremonySignTest((com.stakecraft.rutli.grpc.CeremonySignTestRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonySignTestReply>) responseObserver);
           break;
         case METHODID_CAPABILITIES:
           serviceImpl.capabilities((com.stakecraft.rutli.grpc.CapabilitiesRequest) request,
@@ -1288,6 +1499,20 @@ public final class SignerGrpc {
               com.stakecraft.rutli.grpc.RefreshRequest,
               com.stakecraft.rutli.grpc.RefreshReply>(
                 service, METHODID_REFRESH)))
+        .addMethod(
+          getKeyStatusMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.KeyStatusRequest,
+              com.stakecraft.rutli.grpc.KeyStatusReply>(
+                service, METHODID_KEY_STATUS)))
+        .addMethod(
+          getCeremonySignTestMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.CeremonySignTestRequest,
+              com.stakecraft.rutli.grpc.CeremonySignTestReply>(
+                service, METHODID_CEREMONY_SIGN_TEST)))
         .addMethod(
           getCapabilitiesMethod(),
           io.grpc.stub.ServerCalls.asyncUnaryCall(
@@ -1397,6 +1622,8 @@ public final class SignerGrpc {
               .addMethod(getDkgMethod())
               .addMethod(getSignMethod())
               .addMethod(getRefreshMethod())
+              .addMethod(getKeyStatusMethod())
+              .addMethod(getCeremonySignTestMethod())
               .addMethod(getCapabilitiesMethod())
               .addMethod(getGenerateKeyMethod())
               .addMethod(getPublicKeyMethod())
