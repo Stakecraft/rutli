@@ -139,9 +139,10 @@ enum Command {
         yes_delete_installed_share: bool,
     },
     /// Check that every cosigner in the roster holds a consistent share of a FROST key with the
-    /// expected Canton fingerprint; with --sign-test, also that each node can lead a signature that
-    /// verifies under it. Runs against the live cluster with a Signer-allowlisted client cert (the
-    /// driver's), like `refresh`. Exits non-zero on any problem.
+    /// expected Canton fingerprint; with --sign-test (imported keys), also that EVERY t-subset of
+    /// cosigners signs the ceremony test digest, verified under it. Runs against the live cluster
+    /// with an operator certificate (`operator_allowlist`: KeyStatus + CeremonySignTest only, no
+    /// Sign); the driver certificate also works. Exits non-zero on any problem.
     VerifyKey {
         #[arg(long)]
         key_id: String,
@@ -305,6 +306,12 @@ async fn main() -> Result<()> {
              set peer_allowlist (the cosigner cert CNs) in production"
         ),
     }
+    let operator_cns = cfg.operator_allowlist.as_ref().map(|v| {
+        Arc::new(v.iter().cloned().collect::<std::collections::HashSet<String>>())
+    });
+    if let Some(cns) = &operator_cns {
+        tracing::info!(?cns, "operator role: KeyStatus and CeremonySignTest only");
+    }
 
     // Anti-entropy: pull hosted keys this node lacks and push ones a peer lacks. This is what
     // heals an under-quorum write and a node restored from a stale backup, so the 2-of-3 write
@@ -350,6 +357,7 @@ async fn main() -> Result<()> {
         node: node.clone(),
         peers,
         allowed_cns,
+        operator_cns,
         hosted_write_quorum,
         decrypt_limiter,
     };
@@ -404,8 +412,8 @@ async fn verify_key_command(
     sign_test: bool,
     json: bool,
 ) -> Result<()> {
-    use rutli_cosigner::pb::{KeyStatusRequest, SignRequest};
-    use rutli_cosigner::verify_key::{check_views, verify_message, NodeView};
+    use rutli_cosigner::pb::{CeremonySignTestRequest, KeyStatusRequest};
+    use rutli_cosigner::verify_key::{check_views, sign_test_plan, NodeView};
 
     let client_tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose()?.map(|t| t.client);
     let mut peers = cfg.peers.clone();
@@ -432,17 +440,25 @@ async fn verify_key_command(
 
     if sign_test {
         if report.ok {
-            let message = verify_message(report.ceremony_id.as_deref().unwrap_or(""), key_id);
-            for (leader, client) in clients {
-                let signature = match client {
-                    Ok(mut c) => c
-                        .sign(SignRequest { key_id: key_id.to_string(), message: message.to_vec() })
+            // Every t-subset, leader rotating: every share and every possible quorum is exercised.
+            let clients: std::collections::BTreeMap<u16, _> = clients.into_iter().collect();
+            for (leader, signers) in sign_test_plan(&roster, cfg.threshold) {
+                let result = match &clients[&leader] {
+                    Ok(c) => c
+                        .clone()
+                        .ceremony_sign_test(CeremonySignTestRequest {
+                            key_id: key_id.to_string(),
+                            signers: signers.iter().map(|&s| u32::from(s)).collect(),
+                        })
                         .await
-                        .map(|r| r.into_inner().signature)
+                        .map(|r| {
+                            let r = r.into_inner();
+                            (r.message, r.signature)
+                        })
                         .map_err(|s| format!("{:?}: {}", s.code(), s.message())),
                     Err(e) => Err(format!("unreachable: {e}")),
                 };
-                report.record_signature(leader, &message, signature);
+                report.record_signature(leader, &signers, result);
             }
         } else {
             report.problems.push("sign test skipped: the nodes' views are inconsistent".into());
@@ -474,7 +490,8 @@ async fn verify_key_command(
         }
         for s in &report.sign_test {
             println!(
-                "  sign test led by node {}: {}",
+                "  sign test by {:?} led by node {}: {}",
+                s.signers,
                 s.leader,
                 s.error.as_deref().unwrap_or("ok (verify_strict under the Canton key)")
             );

@@ -40,6 +40,11 @@ signerAllowlist:
 # can call it on `threshold` nodes can aggregate a signature over an arbitrary message.
 peerAllowlist: []
 
+# Client cert CNs of the operator role: KeyStatus + CeremonySignTest only (the split ceremony's
+# `verify-key --sign-test`), never Sign/DKG/Refresh/hosted keys. Empty = no operator role (then
+# verify-key needs the driver cert). Must not share a CN with signerAllowlist or peerAllowlist.
+operatorAllowlist: []
+
 # mTLS domain / shared SAN on cosigner certs
 tlsDomain: rutli-cosigner
 

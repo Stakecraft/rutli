@@ -65,6 +65,9 @@ data:
       "hosted_keys": { "enabled": true, "write_quorum": {{ int $hosted.writeQuorum }}, "anti_entropy_interval_secs": {{ int $hosted.antiEntropyIntervalSecs }}, "decrypt_rate_limit_per_min": {{ int (default 6000 $hosted.decryptRateLimitPerMin) }} },
       {{- end }}
       "signer_allowlist": {{ $allow | toJson }},
+      {{- if $.Values.operatorAllowlist }}
+      "operator_allowlist": {{ $.Values.operatorAllowlist | toJson }},
+      {{- end }}
       "peer_allowlist": {{ $peerAllow | toJson }}
     }
 {{- end }}

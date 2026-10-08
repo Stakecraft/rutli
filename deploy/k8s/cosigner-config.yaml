@@ -31,7 +31,8 @@ data:
       "share_seal": { "secret_env": "RUTLI_SEAL_SECRET" },
       "hosted_keys": { "enabled": true, "write_quorum": 2, "anti_entropy_interval_secs": 300, "decrypt_rate_limit_per_min": 6000 },
       "signer_allowlist": ["driver"],
-      "peer_allowlist": ["cosigner1", "cosigner2", "cosigner3"]
+      "peer_allowlist": ["cosigner1", "cosigner2", "cosigner3"],
+      "operator_allowlist": ["operator"]
     }
   cosigner-2.json: |
     {
@@ -49,7 +50,8 @@ data:
       "share_seal": { "secret_env": "RUTLI_SEAL_SECRET" },
       "hosted_keys": { "enabled": true, "write_quorum": 2, "anti_entropy_interval_secs": 300, "decrypt_rate_limit_per_min": 6000 },
       "signer_allowlist": ["driver"],
-      "peer_allowlist": ["cosigner1", "cosigner2", "cosigner3"]
+      "peer_allowlist": ["cosigner1", "cosigner2", "cosigner3"],
+      "operator_allowlist": ["operator"]
     }
   cosigner-3.json: |
     {
@@ -67,5 +69,6 @@ data:
       "share_seal": { "secret_env": "RUTLI_SEAL_SECRET" },
       "hosted_keys": { "enabled": true, "write_quorum": 2, "anti_entropy_interval_secs": 300, "decrypt_rate_limit_per_min": 6000 },
       "signer_allowlist": ["driver"],
-      "peer_allowlist": ["cosigner1", "cosigner2", "cosigner3"]
+      "peer_allowlist": ["cosigner1", "cosigner2", "cosigner3"],
+      "operator_allowlist": ["operator"]
     }

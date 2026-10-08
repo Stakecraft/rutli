@@ -113,6 +113,7 @@ fn signer_svc(node: &Arc<Node>, peers: &Peers) -> Arc<SignerSvc> {
         node: node.clone(),
         peers: peers.clone(),
         allowed_cns: None,
+        operator_cns: None,
         hosted_write_quorum: 1,
         decrypt_limiter: Arc::new(DecryptRateLimiter::new(0)),
     })

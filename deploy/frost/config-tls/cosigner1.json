@@ -40,5 +40,8 @@
     "cosigner1",
     "cosigner2",
     "cosigner3"
+  ],
+  "operator_allowlist": [
+    "operator"
   ]
 }

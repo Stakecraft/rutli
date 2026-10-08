@@ -49,6 +49,7 @@ Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org A
 | `fullnameOverride` | `rutli-cosigner` | Peer DNS base |
 | `tlsSecretName` / `sealSecretName` | `rutli-cosigner-tls` / `rutli-seal` | Pre-created |
 | `signerAllowlist` | `[driver]` | Required under TLS |
+| `operatorAllowlist` | `[]` | Operator role for the split ceremony's `verify-key` (KeyStatus + CeremonySignTest only), e.g. `[operator]` |
 | `hostedKeys.enabled` | `false` | Cluster-hosted RSA/AES keys — replicated whole keys, not threshold shares |
 | `backup.enabled` | `false` | Nightly `backup` via `kubectl exec` inside each cosigner; needs `backup.ship` |
 

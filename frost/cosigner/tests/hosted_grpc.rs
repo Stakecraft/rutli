@@ -123,6 +123,7 @@ async fn mesh() -> Mesh {
             node: nodes[i].clone(),
             peers: peers[i].clone(),
             allowed_cns: Some(signer_cns.clone()),
+            operator_cns: None,
             hosted_write_quorum: DEFAULT_WRITE_QUORUM,
             decrypt_limiter: Arc::new(DecryptRateLimiter::new(0)),
         };

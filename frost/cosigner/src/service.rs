@@ -26,6 +26,11 @@ pub struct SignerSvc {
     /// When set, only these client-cert CNs may call the sensitive Signer RPCs. `None` = open
     /// (mTLS still enforced by the transport). See `Config::signer_allowlist`.
     pub allowed_cns: Option<Arc<HashSet<String>>>,
+    /// Client-cert CNs of the **operator** role (`Config::operator_allowlist`): permitted the
+    /// read-only `KeyStatus` and the fixed-message `CeremonySignTest` only — never `Sign`, DKG,
+    /// refresh or hosted-key operations — so verifying a split ceremony needs no credential that
+    /// can sign arbitrary digests with a namespace key. `None` = no operator role.
+    pub operator_cns: Option<Arc<HashSet<String>>>,
     /// How many cosigners must hold a new hosted key before it is reported created, from
     /// `hosted_keys.write_quorum`. Carried here rather than read from a constant so the configured
     /// value is actually honoured.
@@ -39,6 +44,12 @@ impl SignerSvc {
     /// Enforce the client-cert allowlist (if configured) for a sensitive Signer call.
     fn authorize<T>(&self, req: &Request<T>) -> Result<(), Status> {
         authorize_cn(self.allowed_cns.as_deref(), req, "Signer").map(|_| ())
+    }
+
+    /// For the operator-role RPCs (`KeyStatus`, `CeremonySignTest`): the driver role or the
+    /// operator role.
+    fn authorize_operator<T>(&self, req: &Request<T>) -> Result<(), Status> {
+        authorize_either(self.allowed_cns.as_deref(), self.operator_cns.as_deref(), req)
     }
 
     /// UNAVAILABLE while this node's key store fails its readiness probe — at the entry of every
@@ -73,6 +84,23 @@ fn authorize_cn<T>(
         Err(Status::permission_denied(format!(
             "client '{cn}' is not permitted to call the {api} API"
         )))
+    }
+}
+
+/// Allow a caller whose CN is in `driver` or in `operator`. With no driver allowlist the API is
+/// open (plaintext dev), exactly as [`authorize_cn`]; an operator allowlist alone never opens it.
+fn authorize_either<T>(
+    driver: Option<&HashSet<String>>,
+    operator: Option<&HashSet<String>>,
+    req: &Request<T>,
+) -> Result<(), Status> {
+    let Some(driver) = driver else { return Ok(()) };
+    match authorize_cn(Some(driver), req, "Signer") {
+        Ok(_) => Ok(()),
+        Err(refused) => match operator {
+            Some(op) => authorize_cn(Some(op), req, "Signer").map(|_| ()),
+            None => Err(refused),
+        },
     }
 }
 
@@ -122,17 +150,41 @@ impl Signer for SignerSvc {
         Ok(Response::new(pb::GroupKeyReply { group_verifying_key: key.to_vec() }))
     }
 
-    // Read-only and public values only, but allowlisted like GroupKey: it is an operator tool, and
-    // nothing outside the driver/operator identity needs to enumerate key provenance.
+    // Read-only and public values only, but allowlisted (driver or operator role): nothing outside
+    // those identities needs to enumerate key provenance.
     async fn key_status(
         &self,
         req: Request<pb::KeyStatusRequest>,
     ) -> Result<Response<pb::KeyStatusReply>, Status> {
-        self.authorize(&req)?;
+        self.authorize_operator(&req)?;
         self.refuse_if_keystore_down()?;
         let key_id = req.into_inner().key_id;
         let reply = self.node.blocking(move |n| n.key_status(&key_id)).await.map_err(Status::from)?;
         Ok(Response::new(reply))
+    }
+
+    // The operator role may call this: the message is computed here from the key's provenance, so
+    // the caller chooses only WHICH cosigners sign the one fixed test digest, never what is signed.
+    async fn ceremony_sign_test(
+        &self,
+        req: Request<pb::CeremonySignTestRequest>,
+    ) -> Result<Response<pb::CeremonySignTestReply>, Status> {
+        self.authorize_operator(&req)?;
+        self.refuse_if_keystore_down()?;
+        let r = req.into_inner();
+        let signers: Vec<u16> = r
+            .signers
+            .iter()
+            .map(|&s| u16::try_from(s).map_err(|_| Status::invalid_argument("signer id out of range")))
+            .collect::<Result<_, _>>()?;
+        let (message, signature) =
+            orchestrator::ceremony_sign_test(&self.node, &self.peers, &r.key_id, &signers)
+                .await
+                .map_err(Status::from)?;
+        Ok(Response::new(pb::CeremonySignTestReply {
+            message: message.to_vec(),
+            signature: signature.to_vec(),
+        }))
     }
 
     async fn dkg(&self, req: Request<pb::DkgRequest>) -> Result<Response<pb::DkgReply>, Status> {
@@ -731,5 +783,19 @@ mod tests {
 
         // No allowlist configured = open (plaintext dev mode only).
         assert!(super::authorize_cn(None, &req, "Peer").is_ok());
+    }
+
+    #[test]
+    fn the_operator_role_never_opens_the_api_and_fails_closed() {
+        use std::collections::HashSet;
+        let driver: HashSet<String> = ["driver".to_string()].into_iter().collect();
+        let operator: HashSet<String> = ["operator".to_string()].into_iter().collect();
+        let req = tonic::Request::new(());
+        // A configured role set refuses a caller without a certificate, operator role or not.
+        let err = super::authorize_either(Some(&driver), Some(&operator), &req).unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+        assert!(super::authorize_either(Some(&driver), None, &req).is_err());
+        // Plaintext dev (no driver allowlist) stays open, as every other Signer RPC.
+        assert!(super::authorize_either(None, Some(&operator), &req).is_ok());
     }
 }
