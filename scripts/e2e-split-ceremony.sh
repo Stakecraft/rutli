@@ -113,9 +113,12 @@ for i in 1 2 3; do
     --out "$WORK/r$i.json")"
   jq -e --arg k "$KEY_ID" '.key_id == $k and .identifier > 0 and (.signer_chain | length) > 0' \
     "$WORK/r$i.json" >/dev/null
-  # Gate 0: the SAS as printed in the pod (the witnesses' independent channel).
+  # Gate 0: the SAS as printed in the pod, and as a witness re-reads it in a session of their own
+  # from the node's sealed state (recipient-sas). They must agree.
   SAS+=("$(awk -v n="$i" '$1 == "SAS" && $3 == n {print $4}' <<<"$out")")
   [ -n "${SAS[$((i - 1))]}" ] || fail "share-recipient on node $i printed no SAS"
+  witness="$(cli --config "$WORK/c$i.json" recipient-sas --key-id "$KEY_ID" | awk '{print $4}')"
+  [ "$witness" = "${SAS[$((i - 1))]}" ] || fail "recipient-sas on node $i disagrees: $witness"
 done
 SAS_LIST="$(IFS=,; echo "${SAS[*]}")"
 echo "SAS: $SAS_LIST"

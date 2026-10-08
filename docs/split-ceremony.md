@@ -147,9 +147,18 @@ command's last line is `SAS node <i> <16 hex>`. Carry all `n` request files to t
 
 ### Gate 0 — SAS, over an independent channel (witnesses)
 
-For each node, a witness reads the `SAS node <i> …` line **in the pod itself**, in a session of
-their own (not the one that copied the file, not a relayed screenshot), and writes it into the
-record (§8). The dealer operator types those recorded values in Step 2. A request file that was
+For each node, a witness opens **their own** `kubectl exec` session to the pod (not the operator's
+session, not a relayed screenshot) and runs the read-only
+
+```sh
+rutli-cosigner --config C<i> recipient-sas --key-id "$KEY_ID"
+# SAS node <i> <16 hex> ceremony <CEREMONY> key <KEY_ID>
+```
+
+which recomputes the SAS from the request stored in the node's sealed recipient file — what the
+node actually signed, independent of any file that travelled. It must equal the line
+`share-recipient` printed; the witness writes it into the record (§8). The dealer operator types
+those recorded values in Step 2. A request file that was
 replaced in transit has a different SAS; and even a witness who was fooled would not get a forged
 request past the dealer's signature check — the SAS is the second, independent lock.
 
