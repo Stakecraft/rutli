@@ -45,12 +45,13 @@ aws-lc-rs = { workspace = true }
 x25519-dalek = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 libc = { workspace = true }
+# verify-key checks every test signature with verify_strict, independently of the cluster.
+ed25519-dalek = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }
 protoc-bin-vendored = { workspace = true }
 
 [dev-dependencies]
-ed25519-dalek = { workspace = true }
 tempfile = "3"
 rcgen = { workspace = true }

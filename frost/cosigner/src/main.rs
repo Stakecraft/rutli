@@ -138,6 +138,23 @@ enum Command {
         #[arg(long)]
         yes_delete_installed_share: bool,
     },
+    /// Check that every cosigner in the roster holds a consistent share of a FROST key with the
+    /// expected Canton fingerprint; with --sign-test, also that each node can lead a signature that
+    /// verifies under it. Runs against the live cluster with a Signer-allowlisted client cert (the
+    /// driver's), like `refresh`. Exits non-zero on any problem.
+    VerifyKey {
+        #[arg(long)]
+        key_id: String,
+        /// The Canton fingerprint (`1220…`) the key must have.
+        #[arg(long)]
+        expect_fingerprint: String,
+        /// Have every node lead one signature over a domain-separated test digest.
+        #[arg(long)]
+        sign_test: bool,
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[tokio::main]
@@ -170,6 +187,9 @@ async fn main() -> Result<()> {
         }
         Some(Command::AbortImport { key_id, ceremony_id, yes_delete_installed_share }) => {
             return abort_import_command(&cfg, &key_id, &ceremony_id, yes_delete_installed_share)
+        }
+        Some(Command::VerifyKey { key_id, expect_fingerprint, sign_test, json }) => {
+            return verify_key_command(&cfg, &key_id, &expect_fingerprint, sign_test, json).await
         }
         Some(Command::Health) => health_command(&cfg),
         _ => {}
@@ -373,6 +393,117 @@ async fn refresh_command(cfg: &Config, key_id: &str, target: Option<String>) -> 
         hex::encode(reply.group_verifying_key)
     );
     Ok(())
+}
+
+/// Operator command: ask every cosigner for its view of `key_id` and check the cluster agrees on the
+/// expected key. See [`rutli_cosigner::verify_key`].
+async fn verify_key_command(
+    cfg: &Config,
+    key_id: &str,
+    expect_fingerprint: &str,
+    sign_test: bool,
+    json: bool,
+) -> Result<()> {
+    use rutli_cosigner::pb::{KeyStatusRequest, SignRequest};
+    use rutli_cosigner::verify_key::{check_views, verify_message, NodeView};
+
+    let client_tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose()?.map(|t| t.client);
+    let mut peers = cfg.peers.clone();
+    peers.sort_by_key(|p| p.identifier);
+    let roster: Vec<u16> = peers.iter().map(|p| p.identifier).collect();
+
+    let mut views = Vec::new();
+    let mut clients = Vec::new();
+    for p in &peers {
+        let client = signer_client(&p.endpoint, client_tls.clone()).await;
+        let status = match &client {
+            Ok(c) => c
+                .clone()
+                .key_status(KeyStatusRequest { key_id: key_id.to_string() })
+                .await
+                .map(|r| r.into_inner())
+                .map_err(|s| format!("{:?}: {}", s.code(), s.message())),
+            Err(e) => Err(format!("unreachable: {e}")),
+        };
+        views.push(NodeView { identifier: p.identifier, endpoint: p.endpoint.clone(), status });
+        clients.push((p.identifier, client));
+    }
+    let mut report = check_views(key_id, expect_fingerprint, &roster, cfg.threshold, &views);
+
+    if sign_test {
+        if report.ok {
+            let message = verify_message(report.ceremony_id.as_deref().unwrap_or(""), key_id);
+            for (leader, client) in clients {
+                let signature = match client {
+                    Ok(mut c) => c
+                        .sign(SignRequest { key_id: key_id.to_string(), message: message.to_vec() })
+                        .await
+                        .map(|r| r.into_inner().signature)
+                        .map_err(|s| format!("{:?}: {}", s.code(), s.message())),
+                    Err(e) => Err(format!("unreachable: {e}")),
+                };
+                report.record_signature(leader, &message, signature);
+            }
+        } else {
+            report.problems.push("sign test skipped: the nodes' views are inconsistent".into());
+        }
+    }
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("verify-key {key_id} — expected {expect_fingerprint}");
+        for n in &report.nodes {
+            match &n.error {
+                Some(e) => println!("  node {} {}: {e}", n.identifier, n.endpoint),
+                None => println!(
+                    "  node {} {}: fp {} digest {} own-share {} origin {} ceremony {:?} refreshes {}",
+                    n.identifier,
+                    n.endpoint,
+                    n.fingerprint,
+                    n.pkp_digest,
+                    if n.own_share_in_package { "ok" } else { "MISMATCH" },
+                    n.origin,
+                    n.ceremony_id,
+                    n.refresh_count
+                ),
+            }
+        }
+        if let (Some(g), Some(d)) = (&report.group_verifying_key, &report.pkp_digest) {
+            println!("  group key {g}\n  pkp digest {d}");
+        }
+        for s in &report.sign_test {
+            println!(
+                "  sign test led by node {}: {}",
+                s.leader,
+                s.error.as_deref().unwrap_or("ok (verify_strict under the Canton key)")
+            );
+        }
+        for p in &report.problems {
+            println!("  PROBLEM: {p}");
+        }
+        println!("{}", if report.ok { "OK" } else { "FAILED" });
+    }
+    if report.ok {
+        Ok(())
+    } else {
+        Err(DaemonError::Ceremony(format!("verify-key: {} problem(s)", report.problems.len())))
+    }
+}
+
+/// A Signer client for an operator command, with bounded connect and call times.
+async fn signer_client(
+    endpoint: &str,
+    tls: Option<tonic::transport::ClientTlsConfig>,
+) -> Result<SignerClient<tonic::transport::Channel>> {
+    let mut ep = tonic::transport::Endpoint::from_shared(endpoint.to_string())
+        .map_err(|e| DaemonError::Config(format!("bad endpoint {endpoint}: {e}")))?
+        .connect_timeout(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(30));
+    if let Some(tls) = tls {
+        ep = ep.tls_config(tls)?;
+    }
+    Ok(SignerClient::new(ep.connect().await?))
 }
 
 /// Back up the (sealed) key-share files from data_dir/keys to `out`. Shares are encrypted at rest
