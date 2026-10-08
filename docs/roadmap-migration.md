@@ -92,6 +92,52 @@ Calendar, if started 2026-10-13: v0.4.0 around **2026-11-14**, v0.5.0 around **2
 
 Soak (Track A) continues in the background and may preempt a day here and there.
 
+## Technical notes from scoping (keep; verified 2026-10-08 unless marked)
+
+**Canton 3.6.1 facts, from source (`~/.cache/canton-src`) and a live node**
+- Private key rows: `common_crypto_private_keys.data` is protobuf `SigningPrivateKey` /
+  `EncryptionPrivateKey` (`crypto.proto`: `id`, `format` DER=2|RAW=3, `private_key`, `usage`,
+  `key_spec`), `wrapper_key_id` NULL = plaintext. Public keys are DER SPKI.
+- Fingerprint = `Hash(purpose PublicKeyFingerprint=12, raw public key)`, hex-prefixed `1220`
+  (`Signing.scala:1537`). The topology `namespace` column carries the `1220` prefix.
+- ECIES wire format (`JcePureCrypto.scala:146-165, 521-565, 695-750`):
+  `iv(16) ‖ V(65, uncompressed 0x04) ‖ AES-128-CBC ct ‖ HMAC-SHA256 tag(32)`. Parameters
+  `ECIESwithSHA256andAES-CBC`, macKey 512 bit, cipherKey 128 bit, empty derivation/encoding
+  vectors. KDF is BouncyCastle KDF2-SHA256 over `V‖Z`, not HKDF despite the name; the MAC adds an
+  8-byte length tag. Canton caps the ciphertext at 256 bytes (`ByteString256`). JCE allows only
+  the CBC variant in 3.6.1, no GCM (`CryptoProvider.scala:81-95`).
+- Driver SPI decrypt is `decryptAsymmetric(ciphertext, keyId, algoSpec)`: the driver receives the
+  whole blob and must parse it.
+- `RegisterKmsSigningKey(kms_key_id, usage)` → driver `getPublicSigningKey(id)`; for a FROST id
+  this already returns the group key, so B2 needs no driver change. The id must include the
+  participant's `frost.key-prefix` if one is set.
+- Splice SV static synchronizer parameters are Canton JCE defaults on every network
+  (`apps/sv/.../LocalSynchronizerNode.scala:94`), so `EcP256` and `Rsa2048` are both admitted.
+- `ExportKeyPair(fingerprint, protocol_version, password)` exists; password-protected output uses
+  Canton's PBKDF scheme (MUST-VERIFY exact scheme before parsing it in B1).
+
+**Rütli facts**
+- `frost/core/src/lib.rs` states "no shard-existing-key path, by design": B2 reverses that and
+  the doc comment must change. `dkg_part1` refuses if the key exists on any node, which fences a
+  racing DKG during an import.
+- `frost-ed25519 2.2.0` exposes `keys::split(&SigningKey, max, min, IdentifierList, rng)`.
+  **Trap:** `SigningKey::deserialize` takes a scalar; Canton exports an RFC 8032 seed. Convert
+  with SHA-512, clamp, reduce mod ℓ. Assert the group verifying key equals the Canton raw public
+  key before writing anything.
+- Hosted-key replication already wraps per recipient (`wrap.rs`, ephemeral X25519 → HKDF →
+  AES-GCM, AAD-bound); reuse it to deliver dealer shares with spec `frost-ed25519-share`.
+- Driver hardcodes today: `generateEncryptionKeyPair` always RSA, `getPublicKey` maps the reply
+  spec as `Rsa2048`. Both must become spec-driven for C.
+- Upstream `KmsDriverTest` encrypts with `JcePureCrypto` and calls `decryptAsymmetric` for every
+  advertised algorithm, so advertising ECIES gives a JVM→driver differential test for free.
+- Validator on DevNet keeps 8 plaintext `pg_dumpall` copies on PVC plus AES-256-CBC copies in S3
+  `canton-k8s-validators-backup`. After a migration, every one of them still holds the whole
+  namespace key: purge, and say so in the runbook.
+
+**Reports behind the estimates:** deep-reasoner (read Canton source; A 7–11 d, B 7–10 d, spike
+2–3 d) and Codex (A 19–31 d, B 16–28 d, blind to Canton source). The table above takes the
+former's decomposition with part of the latter's buffer.
+
 ## Risks, by severity
 
 1. **B0 fails.** Canton 3.6.1 may not accept a driver-KMS key registered by id for an existing
