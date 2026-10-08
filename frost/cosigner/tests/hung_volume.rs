@@ -116,6 +116,7 @@ fn signer_svc(node: &Arc<Node>, peers: &Peers) -> Arc<SignerSvc> {
         operator_cns: None,
         hosted_write_quorum: 1,
         decrypt_limiter: Arc::new(DecryptRateLimiter::new(0)),
+        ceremony_test_limiter: Arc::new(DecryptRateLimiter::new(0)),
     })
 }
 

@@ -48,6 +48,12 @@ pub struct Config {
     /// `signer_allowlist` or `peer_allowlist`.
     #[serde(default)]
     pub operator_allowlist: Option<Vec<String>>,
+    /// Ceiling on `CeremonySignTest` calls this node leads, per key per minute (token bucket,
+    /// burst = one minute's allowance). Every call burns a durable nonce marker on each signer, so
+    /// the operator role must not be able to loop it. One `verify-key --sign-test` needs C(n,t)
+    /// calls (3 for 2-of-3, 10 for 3-of-5). `0` disables the limit.
+    #[serde(default = "default_ceremony_sign_test_rate_limit")]
+    pub ceremony_sign_test_rate_limit_per_min: u32,
     /// Address for the plaintext Prometheus /metrics endpoint (e.g. "0.0.0.0:9200"). When absent,
     /// no metrics endpoint is served. Metrics carry operation counts/latencies only — never key
     /// material, digests, or session ids — so plaintext HTTP is acceptable on a trusted network;
@@ -86,6 +92,13 @@ pub struct HostedKeysConfig {
     /// it is approaching the ceiling; the warning fires well before requests start failing.
     #[serde(default = "default_decrypt_rate_limit")]
     pub decrypt_rate_limit_per_min: u32,
+}
+
+/// Room for one `verify-key --sign-test` of a cluster up to 3-of-5 per minute, and little else.
+pub const DEFAULT_CEREMONY_SIGN_TEST_RATE_LIMIT_PER_MIN: u32 = 10;
+
+fn default_ceremony_sign_test_rate_limit() -> u32 {
+    DEFAULT_CEREMONY_SIGN_TEST_RATE_LIMIT_PER_MIN
 }
 
 fn default_write_quorum() -> usize {
@@ -265,6 +278,7 @@ mod tests {
             peer_allowlist: allow,
             metrics_listen: None,
             operator_allowlist: None,
+            ceremony_sign_test_rate_limit_per_min: DEFAULT_CEREMONY_SIGN_TEST_RATE_LIMIT_PER_MIN,
         }
     }
 
@@ -339,6 +353,7 @@ mod hosted_config_tests {
             peer_allowlist: None,
             metrics_listen: None,
             operator_allowlist: None,
+            ceremony_sign_test_rate_limit_per_min: DEFAULT_CEREMONY_SIGN_TEST_RATE_LIMIT_PER_MIN,
             hosted_keys: hosted,
         }
     }

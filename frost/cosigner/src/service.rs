@@ -38,6 +38,21 @@ pub struct SignerSvc {
     /// Per-key ceiling on decryptions. The bound on a stolen driver certificate — see
     /// [`crate::ratelimit`].
     pub decrypt_limiter: Arc<crate::ratelimit::DecryptRateLimiter>,
+    /// Per-key ceiling on `CeremonySignTest` calls led by this node
+    /// (`Config::ceremony_sign_test_rate_limit_per_min`; build with [`ceremony_sign_test_limiter`]).
+    /// Each call writes a durable nonce marker on every signer, so the operator role must not be
+    /// able to loop it.
+    pub ceremony_test_limiter: Arc<crate::ratelimit::DecryptRateLimiter>,
+}
+
+/// The `CeremonySignTest` limiter for `per_minute` (0 disables it).
+pub fn ceremony_sign_test_limiter(per_minute: u32) -> crate::ratelimit::DecryptRateLimiter {
+    crate::ratelimit::DecryptRateLimiter::named(
+        per_minute,
+        "ceremony sign test",
+        "ceremony_sign_test_rate_limit_per_min",
+        "someone with an operator or driver certificate looping CeremonySignTest",
+    )
 }
 
 impl SignerSvc {
@@ -172,6 +187,11 @@ impl Signer for SignerSvc {
         self.authorize_operator(&req)?;
         self.refuse_if_keystore_down()?;
         let r = req.into_inner();
+        // Before any work: every call that gets through burns a durable nonce marker per signer.
+        self.ceremony_test_limiter.check(&r.key_id).map_err(|limited| {
+            metrics::counter!(crate::metrics::CEREMONY_SIGN_TEST_RATE_LIMITED).increment(1);
+            Status::from(crate::DaemonError::RateLimited(limited.to_string()))
+        })?;
         let signers: Vec<u16> = r
             .signers
             .iter()

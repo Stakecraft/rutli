@@ -28,7 +28,20 @@ use std::time::{Duration, Instant};
 /// changes and transaction batches — while still bounding sustained throughput.
 pub struct DecryptRateLimiter {
     per_minute: u32,
+    labels: Labels,
     buckets: Mutex<HashMap<String, Bucket>>,
+}
+
+/// What a limiter guards, for its log and error messages. The same token bucket also caps the
+/// split ceremony's `CeremonySignTest` (see [`DecryptRateLimiter::named`]).
+#[derive(Debug, Clone, Copy)]
+struct Labels {
+    /// e.g. "hosted-key decryption".
+    what: &'static str,
+    /// The config setting that raises the limit.
+    setting: &'static str,
+    /// What sustained use near the ceiling may mean, appended to the warning.
+    hint: &'static str,
 }
 
 struct Bucket {
@@ -50,7 +63,18 @@ const WARN_THRESHOLD: f64 = 0.2; // warn once fewer than 20% of tokens remain
 impl DecryptRateLimiter {
     /// `per_minute` of 0 disables limiting entirely.
     pub fn new(per_minute: u32) -> Self {
-        Self { per_minute, buckets: Mutex::new(HashMap::new()) }
+        Self::named(
+            per_minute,
+            "hosted-key decryption",
+            "hosted_keys.decrypt_rate_limit_per_min",
+            "what a stolen driver certificate looks like",
+        )
+    }
+
+    /// A limiter for another operation: `what` names it in messages, `setting` is the config key
+    /// that raises it, `hint` is what sustained use near the ceiling may mean if it is not yours.
+    pub fn named(per_minute: u32, what: &'static str, setting: &'static str, hint: &'static str) -> Self {
+        Self { per_minute, labels: Labels { what, setting, hint }, buckets: Mutex::new(HashMap::new()) }
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -82,7 +106,12 @@ impl DecryptRateLimiter {
         bucket.last_refill = now;
 
         if bucket.tokens < 1.0 {
-            return Err(RateLimited { key_id: key_id.to_string(), per_minute: self.per_minute });
+            return Err(RateLimited {
+                key_id: key_id.to_string(),
+                per_minute: self.per_minute,
+                what: self.labels.what,
+                setting: self.labels.setting,
+            });
         }
         bucket.tokens -= 1.0;
 
@@ -97,9 +126,11 @@ impl DecryptRateLimiter {
                     key_id,
                     limit_per_min = self.per_minute,
                     remaining = bucket.tokens as u64,
-                    "hosted-key decryption is approaching its rate limit — if this is legitimate \
-                     traffic, raise hosted_keys.decrypt_rate_limit_per_min; if it is not, this is \
-                     what a stolen driver certificate looks like"
+                    "{} is approaching its rate limit — if this is legitimate traffic, raise {}; \
+                     if it is not, this is {}",
+                    self.labels.what,
+                    self.labels.setting,
+                    self.labels.hint
                 );
             }
         }
@@ -117,15 +148,17 @@ impl DecryptRateLimiter {
 pub struct RateLimited {
     pub key_id: String,
     pub per_minute: u32,
+    pub what: &'static str,
+    pub setting: &'static str,
 }
 
 impl std::fmt::Display for RateLimited {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "decryption rate limit reached for {} ({}/min) — retry shortly, or raise \
-             hosted_keys.decrypt_rate_limit_per_min if this is legitimate load",
-            self.key_id, self.per_minute
+            "{} rate limit reached for {} ({}/min) — retry shortly, or raise {} if this is \
+             legitimate load",
+            self.what, self.key_id, self.per_minute, self.setting
         )
     }
 }

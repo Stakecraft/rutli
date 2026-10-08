@@ -362,6 +362,15 @@ async fn main() -> Result<()> {
         tracing::info!(per_key_per_min = decrypt_limit, "hosted-key decryption rate limit active");
     }
     let decrypt_limiter = Arc::new(rutli_cosigner::ratelimit::DecryptRateLimiter::new(decrypt_limit));
+    if cfg.ceremony_sign_test_rate_limit_per_min == 0 {
+        tracing::warn!(
+            "CeremonySignTest rate limiting is DISABLED — an operator or driver certificate can \
+             loop it and fill the key volume with nonce markers"
+        );
+    }
+    let ceremony_test_limiter = Arc::new(rutli_cosigner::service::ceremony_sign_test_limiter(
+        cfg.ceremony_sign_test_rate_limit_per_min,
+    ));
 
     let signer = SignerSvc {
         node: node.clone(),
@@ -370,6 +379,7 @@ async fn main() -> Result<()> {
         operator_cns,
         hosted_write_quorum,
         decrypt_limiter,
+        ceremony_test_limiter,
     };
     let peer = PeerSvc { node, allowed_cns: peer_cns };
 

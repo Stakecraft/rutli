@@ -112,6 +112,21 @@ fn ceremony(root: &Path) -> (Vec<Site>, Vec<ShareBundle>, [u8; 32], String) {
     (sites, bundles, public, fingerprint)
 }
 
+/// The Signer API of `node`, as the daemon serves it (allowlists off: in-process caller).
+fn signer_svc(node: &Arc<Node>, peers: &Peers) -> rutli_cosigner::service::SignerSvc {
+    rutli_cosigner::service::SignerSvc {
+        node: node.clone(),
+        peers: peers.clone(),
+        allowed_cns: None,
+        operator_cns: None,
+        hosted_write_quorum: 2,
+        decrypt_limiter: Arc::new(rutli_cosigner::ratelimit::DecryptRateLimiter::new(0)),
+        ceremony_test_limiter: Arc::new(rutli_cosigner::service::ceremony_sign_test_limiter(
+            rutli_cosigner::config::DEFAULT_CEREMONY_SIGN_TEST_RATE_LIMIT_PER_MIN,
+        )),
+    }
+}
+
 fn local_peers(nodes: &[Arc<Node>]) -> Peers {
     nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect()
 }
@@ -451,4 +466,37 @@ async fn the_ceremony_sign_test_signs_only_its_own_digest_with_exactly_the_quoru
     run_dkg(&peers, "namespace-dkg").await.unwrap();
     let err = ceremony_sign_test(&nodes[0], &peers, "namespace-dkg", &[1, 2]).await.unwrap_err();
     assert!(matches!(err, DaemonError::Ceremony(_)), "{err:?}");
+}
+
+/// Review NEW-3 (PoC `poc2_operator_sign_test_leaves_unpruned_markers`): every CeremonySignTest
+/// burns one fsynced, never-pruned nonce marker on each signer. The operator role must not be able
+/// to loop it without bound — the Signer API rate-limits it per key (RESOURCE_EXHAUSTED).
+#[tokio::test]
+async fn the_operator_cannot_loop_the_sign_test_into_unbounded_nonce_markers() {
+    use rutli_cosigner::pb::signer_server::Signer;
+    let tmp = tempfile::tempdir().unwrap();
+    let (sites, bundles, _public, fingerprint) = ceremony(tmp.path());
+    for (site, bundle) in sites.iter().zip(&bundles) {
+        site.import(bundle, &fingerprint).unwrap();
+    }
+    let nodes: Vec<Arc<Node>> = sites.iter().map(Site::node).collect();
+    let peers = local_peers(&nodes);
+    let svc = signer_svc(&nodes[0], &peers);
+
+    let mut refused = 0;
+    for _ in 0..200 {
+        let req = tonic::Request::new(rutli_cosigner::pb::CeremonySignTestRequest {
+            key_id: KEY.into(),
+            signers: vec![1, 2],
+        });
+        match svc.ceremony_sign_test(req).await {
+            Ok(_) => {}
+            Err(s) if s.code() == tonic::Code::ResourceExhausted => refused += 1,
+            Err(s) => panic!("unexpected {s:?}"),
+        }
+    }
+    let dir = sites[0].data_dir.join("keys").join(format!("{KEY}.nonces"));
+    let markers = std::fs::read_dir(&dir).unwrap().count();
+    assert!(refused > 0, "200 back-to-back sign tests must hit the rate limit");
+    assert!(markers <= 20, "node 1 holds {markers} nonce markers after 200 operator calls");
 }

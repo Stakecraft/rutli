@@ -43,6 +43,9 @@ pub const UNREADABLE_KEY_FILES: &str = "rutli_unreadable_key_files_total";
 /// outgrown its configured ceiling, or bulk decryption by someone holding the driver certificate —
 /// both worth an operator's attention, so alert on any sustained value.
 pub const DECRYPT_RATE_LIMITED: &str = "rutli_decrypt_rate_limited_total";
+/// Split-ceremony sign tests refused by the per-key rate limit. A `verify-key --sign-test` run never
+/// trips it; a non-zero value means something is looping `CeremonySignTest`.
+pub const CEREMONY_SIGN_TEST_RATE_LIMITED: &str = "rutli_ceremony_sign_test_rate_limited_total";
 /// Hosted-key operations by op and result (generate/decrypt/symmetric/delete).
 pub const HOSTED_KEY_OPS: &str = "rutli_hosted_key_ops_total";
 /// The *fewest* cosigners holding any one hosted key, as last observed by anti-entropy.
@@ -107,6 +110,7 @@ fn prime() {
     metrics::gauge!(HOSTED_KEYS).set(0.0);
     metrics::counter!(UNREADABLE_KEY_FILES).absolute(0);
     metrics::counter!(DECRYPT_RATE_LIMITED).absolute(0);
+    metrics::counter!(CEREMONY_SIGN_TEST_RATE_LIMITED).absolute(0);
     // No hosted keys yet means no shortfall — not a shortfall of zero, which would page instantly.
     metrics::gauge!(KEY_REPLICAS).set(f64::NAN);
     metrics::counter!(SIGN_ABORTS).absolute(0);
@@ -128,6 +132,10 @@ pub fn describe() {
     describe_counter!(HOSTED_KEY_OPS, "Hosted-key operations, by op and result");
     describe_counter!(UNREADABLE_KEY_FILES, "Key files that could not be opened and were skipped");
     describe_counter!(DECRYPT_RATE_LIMITED, "Hosted-key decryptions refused by the per-key rate limit");
+    describe_counter!(
+        CEREMONY_SIGN_TEST_RATE_LIMITED,
+        "Split-ceremony sign tests refused by the per-key rate limit"
+    );
     describe_gauge!(KEY_REPLICAS, "Fewest cosigners holding any one hosted key");
     describe_gauge!(
         KEYSTORE_UNREADABLE,

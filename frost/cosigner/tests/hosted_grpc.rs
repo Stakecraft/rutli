@@ -126,6 +126,7 @@ async fn mesh() -> Mesh {
             operator_cns: None,
             hosted_write_quorum: DEFAULT_WRITE_QUORUM,
             decrypt_limiter: Arc::new(DecryptRateLimiter::new(0)),
+            ceremony_test_limiter: Arc::new(DecryptRateLimiter::new(0)),
         };
         let peer = PeerSvc { node: nodes[i].clone(), allowed_cns: Some(peer_cns.clone()) };
         let server = tonic::transport::Server::builder()
