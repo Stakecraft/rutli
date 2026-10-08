@@ -1892,6 +1892,7 @@ dependencies = [
  "protoc-bin-vendored",
  "rand 0.8.6",
  "rcgen",
+ "rutli-canton-key",
  "rutli-frost-core",
  "serde",
  "serde_json",

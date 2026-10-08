@@ -82,6 +82,18 @@ pub enum DaemonError {
 
     #[error("cluster disagreement: {0}")]
     Disagreement(String),
+
+    /// A split-ceremony step (share-recipient, import-share, abort-import, verify-key) refused.
+    /// Never carries key material.
+    #[error("split ceremony: {0}")]
+    Ceremony(String),
+
+    /// The key id is reserved for the split ceremony (`…frost-import-…`): DKG may never mint it.
+    #[error(
+        "key id {0} is reserved for imported keys (contains \"frost-import-\") — DKG refuses it; \
+         install it with the split ceremony (docs/split-ceremony.md)"
+    )]
+    ReservedKeyId(String),
 }
 
 impl From<DaemonError> for tonic::Status {
@@ -93,7 +105,10 @@ impl From<DaemonError> for tonic::Status {
             DaemonError::ThresholdNotMet { .. } | DaemonError::NotServing(_) => {
                 tonic::Status::unavailable(e.to_string())
             }
-            DaemonError::Config(_) => tonic::Status::failed_precondition(e.to_string()),
+            DaemonError::Config(_) | DaemonError::Ceremony(_) => {
+                tonic::Status::failed_precondition(e.to_string())
+            }
+            DaemonError::ReservedKeyId(_) => tonic::Status::invalid_argument(e.to_string()),
             // invalid_argument, and nothing more: same code and message for every cause.
             DaemonError::DecryptFailed => tonic::Status::invalid_argument(e.to_string()),
             // Retryable: a legitimate caller should back off and try again, not treat the key as
