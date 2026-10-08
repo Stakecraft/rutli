@@ -12,6 +12,8 @@
 //! is built to be run once, on an air-gapped live-boot host, and to leave nothing behind:
 //!
 //! - core dumps off (`RLIMIT_CORE = 0`) and, on Linux, not dumpable/ptraceable (`PR_SET_DUMPABLE`);
+//!   a refusal to run where the kernel would bypass both — a piped `core_pattern` or
+//!   `suid_dumpable = 2` — unless `--allow-core-handler` (recorded in dealer-record.json);
 //! - memory locked (`mlockall`, Linux, best effort) and a refusal to run with swap enabled unless
 //!   `--allow-swap` (where swap cannot be checked — not Linux — it is assumed present);
 //! - no logging subscriber at all, and every error message is key-free (the parser's and ours);
@@ -92,6 +94,10 @@ enum Command {
         /// paged to disk.
         #[arg(long)]
         allow_swap: bool,
+        /// Run even though the kernel would hand a crash dump to a user-space handler (a piped
+        /// `core_pattern`) or dump non-dumpable processes (`suid_dumpable = 2`).
+        #[arg(long)]
+        allow_core_handler: bool,
     },
 }
 
@@ -113,6 +119,7 @@ fn main() {
             out_dir,
             any_usage,
             allow_swap,
+            allow_core_handler,
         } => split_key(SplitKey {
             input: r#in,
             password_env,
@@ -126,6 +133,7 @@ fn main() {
             out_dir,
             any_usage,
             allow_swap,
+            allow_core_handler,
             hardening,
         }),
     };
@@ -149,6 +157,7 @@ struct SplitKey {
     out_dir: PathBuf,
     any_usage: bool,
     allow_swap: bool,
+    allow_core_handler: bool,
     hardening: Hardening,
 }
 
@@ -160,6 +169,12 @@ struct Hardening {
     memory_locked: bool,
     /// `Some(true)` swap on, `Some(false)` off, `None` could not be checked.
     swap_enabled: Option<bool>,
+    /// `/proc/sys/kernel/core_pattern` (Linux).
+    core_pattern: Option<String>,
+    /// `/proc/sys/fs/suid_dumpable` (Linux).
+    suid_dumpable: Option<u8>,
+    /// A piped core_pattern or suid_dumpable = 2: a crash could still hand memory to a handler.
+    core_handler_risk: bool,
 }
 
 fn split_key(a: SplitKey) -> Result<()> {
@@ -175,6 +190,14 @@ fn split_key(a: SplitKey) -> Result<()> {
                      the Linux live-boot host, or pass --allow-swap"
                 .into(),
         }));
+    }
+    if a.hardening.core_handler_risk && !a.allow_core_handler {
+        return Err(refuse(format!(
+            "a crash would still reach a core handler (core_pattern {:?}, suid_dumpable {:?}) — \
+             set kernel.core_pattern=core and fs.suid_dumpable=0 on the dealer host, or pass \
+             --allow-core-handler",
+            a.hardening.core_pattern, a.hardening.suid_dumpable
+        )));
     }
 
     // 1. Everything that needs no secret, first.
@@ -227,7 +250,7 @@ fn split_key(a: SplitKey) -> Result<()> {
         None => None,
     };
     let raw = Zeroizing::new(std::fs::read(&a.input)?);
-    let input = if a.stored_hex { Zeroizing::new(decode_hex_text(&raw)?) } else { raw };
+    let input = if a.stored_hex { decode_hex_text(&raw)? } else { raw };
     let key = rutli_canton_key::parse(&input, password.as_ref().map(|p| p.as_bytes()))
         .map_err(|e| refuse(format!("cannot read the key: {e}")))?;
     drop(input);
@@ -447,13 +470,20 @@ fn confirm_sas(requests: &[RecipientRequest], given: Option<&str>) -> Result<()>
 }
 
 /// Hex text → bytes, tolerating whitespace and a psql `\x` prefix.
-fn decode_hex_text(text: &[u8]) -> Result<Vec<u8>> {
-    let mut s: Zeroizing<String> =
-        Zeroizing::new(text.iter().filter(|b| !b.is_ascii_whitespace()).map(|&b| b as char).collect());
-    if let Some(rest) = s.strip_prefix("\\x") {
-        *s = rest.to_string();
+///
+/// Every intermediate is a zeroizing buffer sized once, never grown: no partially filled copy of
+/// the key's hex is freed unwiped by a reallocation. The `\x` prefix is sliced off, not copied.
+fn decode_hex_text(text: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    let mut compact = Zeroizing::new(Vec::with_capacity(text.len()));
+    compact.extend(text.iter().copied().filter(|b| !b.is_ascii_whitespace()));
+    let digits: &[u8] = compact.strip_prefix(b"\\x").unwrap_or(&compact);
+    if !digits.len().is_multiple_of(2) {
+        return Err(refuse("--stored-hex: the input is not hex".into()));
     }
-    hex::decode(s.as_bytes()).map_err(|_| refuse("--stored-hex: the input is not hex".into()))
+    let mut out = Zeroizing::new(vec![0u8; digits.len() / 2]);
+    hex::decode_to_slice(digits, &mut out[..])
+        .map_err(|_| refuse("--stored-hex: the input is not hex".into()))?;
+    Ok(out)
 }
 
 fn write_new(path: &Path, bytes: &[u8]) -> Result<()> {
@@ -536,7 +566,52 @@ fn harden() -> Hardening {
             .map(|s| s.lines().skip(1).any(|l| !l.trim().is_empty()));
         (not_dumpable, memory_locked, swap_enabled)
     };
+    // A piped core_pattern hands a crashing process's memory to a user-space handler regardless
+    // of RLIMIT_CORE (systemd-coredump, apport, abrt), and suid_dumpable = 2 dumps even processes
+    // that made themselves non-dumpable. Either defeats the two settings above.
+    #[cfg(target_os = "linux")]
+    let (core_pattern, suid_dumpable) = (
+        std::fs::read_to_string("/proc/sys/kernel/core_pattern").ok().map(|s| s.trim().to_string()),
+        std::fs::read_to_string("/proc/sys/fs/suid_dumpable").ok().and_then(|s| s.trim().parse().ok()),
+    );
+    #[cfg(not(target_os = "linux"))]
+    let (core_pattern, suid_dumpable): (Option<String>, Option<u8>) = (None, None);
+    let core_handler_risk = core_handler_risk(core_pattern.as_deref(), suid_dumpable);
     #[cfg(not(target_os = "linux"))]
     let (not_dumpable, memory_locked, swap_enabled) = (false, false, None);
-    Hardening { core_dumps_disabled, not_dumpable, memory_locked, swap_enabled }
+    Hardening {
+        core_dumps_disabled,
+        not_dumpable,
+        memory_locked,
+        swap_enabled,
+        core_pattern,
+        suid_dumpable,
+        core_handler_risk,
+    }
+}
+
+/// Would a crash reach a core handler despite `RLIMIT_CORE = 0` and `PR_SET_DUMPABLE = 0`?
+fn core_handler_risk(core_pattern: Option<&str>, suid_dumpable: Option<u8>) -> bool {
+    core_pattern.is_some_and(|p| p.starts_with('|')) || suid_dumpable == Some(2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stored_hex_text_is_decoded_with_or_without_the_psql_prefix() {
+        assert_eq!(decode_hex_text(b"\\x0aff\n").unwrap().as_slice(), &[0x0a, 0xff]);
+        assert_eq!(decode_hex_text(b" 0a ff ").unwrap().as_slice(), &[0x0a, 0xff]);
+        assert!(decode_hex_text(b"\\x0af").is_err(), "odd length");
+        assert!(decode_hex_text(b"zz").is_err());
+    }
+
+    #[test]
+    fn a_piped_core_pattern_or_suid_dumpable_2_is_a_core_handler_risk() {
+        assert!(core_handler_risk(Some("|/usr/lib/systemd/systemd-coredump %P"), Some(0)));
+        assert!(core_handler_risk(Some("core"), Some(2)));
+        assert!(!core_handler_risk(Some("core"), Some(0)));
+        assert!(!core_handler_risk(None, None), "not Linux: nothing known, nothing claimed");
+    }
 }

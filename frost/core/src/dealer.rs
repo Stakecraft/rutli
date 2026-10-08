@@ -44,10 +44,17 @@
 //!
 //! # Secret hygiene
 //!
-//! [`SecretShare`]s and [`KeyPackage`]s built during the checks are zeroized explicitly. The
-//! scalars inside FROST's types are `Copy`, so copies can outlive any wipe; the dealer therefore
-//! runs as its own short-lived process (`rutli-dealer`) with core dumps and ptrace disabled, and
-//! that process isolation is the real control.
+//! What is wiped: the seed's ed25519-dalek key (zeroize-on-drop), every scalar this module copies
+//! out (the expanded scalar, the reconstructed and original scalars compared in the checks), and
+//! every [`SecretShare`] and [`KeyPackage`] built during the checks.
+//!
+//! What cannot be: `frost_ed25519::SigningKey` implements neither `Zeroize` nor `Drop`, and it and
+//! the scalars inside FROST's types are `Copy`, so the copies frost-core makes internally (the
+//! `SigningKey` held for the split, the random polynomial coefficients in `keys::split`, the
+//! reconstructed key) are freed unwiped; so are serde_json's per-field temporaries when a share is
+//! serialized. The dealer therefore runs as its own short-lived process (`rutli-dealer`) with core
+//! dumps and ptrace disabled, memory locked where possible and swap refused, and that process
+//! isolation is the real control.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -68,7 +75,10 @@ pub const MAX_SIGNERS: usize = 16;
 /// expansion). See the module docs for why this is not `SigningKey::deserialize(seed)`.
 pub fn signing_key_from_seed(seed: &[u8; 32]) -> Result<frost::SigningKey> {
     let dalek = ed25519_dalek::SigningKey::from_bytes(seed); // zeroized on drop
-    Ok(frost::SigningKey::from_scalar(dalek.to_scalar())?)
+    let mut scalar = dalek.to_scalar();
+    let key = frost::SigningKey::from_scalar(scalar);
+    scalar.zeroize(); // our copy; the SigningKey's own cannot be wiped (see "Secret hygiene")
+    Ok(key?)
 }
 
 /// The raw 32-byte RFC 8032 public key of a seed — what Canton fingerprints for an Ed25519 key.
@@ -248,7 +258,11 @@ fn verify_split(
             let signed = selftest_sign(&quorum, pkp, &message);
             let mut quorum = quorum;
             wipe(&mut quorum);
-            if reconstructed?.to_scalar() != signing_key.to_scalar() {
+            let (mut got, mut want) = (reconstructed?.to_scalar(), signing_key.to_scalar());
+            let same = got == want;
+            got.zeroize();
+            want.zeroize();
+            if !same {
                 return Err(CoreError::Dealer(format!(
                     "shares {} do not reconstruct the original key",
                     describe(&ids)

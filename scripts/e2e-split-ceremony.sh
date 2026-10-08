@@ -120,12 +120,13 @@ done
 SAS_LIST="$(IFS=,; echo "${SAS[*]}")"
 echo "SAS: $SAS_LIST"
 
-# A laptop has swap (and macOS cannot be checked): --allow-swap. The runbook's live-boot host does not.
+# A laptop has swap (and macOS cannot be checked): --allow-swap. A dev Linux host usually pipes core
+# dumps to systemd-coredump: --allow-core-handler. The runbook's live-boot host needs neither.
 dealer() {
   "$DEALER" split-key --in "$VEC/namespace.export-pw.bin" --password-env E2E_EXPORT_PASSWORD \
     --expect-fingerprint "$FP" --key-id "$KEY_ID" --threshold 2 --ca-cert "$WORK/certs/ca.crt" \
     --recipient "$WORK/$1.json" --recipient "$WORK/r2.json" --recipient "$WORK/r3.json" \
-    --out-dir "$WORK/$2" --allow-swap --confirm-sas "$3"
+    --out-dir "$WORK/$2" --allow-swap --allow-core-handler --confirm-sas "$3"
 }
 
 step "   a substituted request is refused (signature), whatever SAS the witnesses were shown"
