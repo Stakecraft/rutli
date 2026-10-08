@@ -106,10 +106,13 @@ From `docs/wire-contract.md` (captured live):
   which is exactly what Phase 0 proved Canton accepts.
 - **Rust**, because the audited FROST implementations are Rust. The `FrostBackend` (Scala, in the
   driver) is a thin gRPC/mTLS client to the cluster; all FROST math lives in the Rust signer.
-- **Key generation: DKG, never trusted-dealer sharding.** Canton cannot migrate an existing node
-  into KMS mode (namespace root key is non-rotatable), so keys are born in the cluster via
-  distributed key generation — the whole private key never exists anywhere. (Horcrux shards an
-  existing Cosmos key; that path is closed to us, and DKG is strictly stronger.)
+- **Key generation: DKG for new nodes; trusted-dealer split only to migrate.** Keys for a new node
+  are born in the cluster via distributed key generation — the whole private key never exists
+  anywhere. Canton 3.5+ does allow moving an existing node onto a KMS under the same identity
+  (export keys, new participant, register by KMS id), so an existing namespace key can be split
+  into shares by an offline dealer, as Horcrux does for Cosmos keys. That path is planned
+  ([roadmap-migration.md](roadmap-migration.md), B2), not shipped, and is weaker than DKG: the key
+  existed whole on the old node and in its backups before the split.
 
 ## Topology
 
