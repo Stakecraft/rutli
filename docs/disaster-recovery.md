@@ -268,6 +268,28 @@ Applies to hosted keys only. A FROST share cannot be exported, so the namespace 
 remains §1/§2/§3 — backups or repair from survivors. Full mechanics and the security tradeoff:
 [`hosted-keys.md`](hosted-keys.md) §4.
 
+## §3e Keys imported by the split ceremony
+
+A namespace key moved in from an existing Canton node ([split-ceremony.md](split-ceremony.md)) is,
+once installed and refreshed, an ordinary FROST key: §1–§3 apply unchanged, `backup`/`restore` carry
+its share (provenance included, inside the sealed file), and `verify-key` is the post-recovery check.
+Three things differ:
+
+- **Founding backups come after the first refresh, never before.** Suspend the backup CronJob for
+  the ceremony window: a backup taken between `import-share` and the refresh holds the *dealt*
+  shares, and `t` of those plus the seal secret are the key as the dealer produced it. Any such
+  backup goes on the ceremony's destruction list. The daemon logs a startup WARN for every imported
+  key that has never been refreshed.
+- **A failed ceremony is backed out with `abort-import`**, per node:
+  `rutli-cosigner --config … abort-import --key-id <id> --ceremony-id <id> [--yes-delete-installed-share]`.
+  It deletes the pending recipient secret, and deletes an installed share only if it came from that
+  ceremony, was never refreshed, and the flag is given — it cannot touch a DKG key or a live
+  (refreshed) imported key. There is no generic key-destroy command.
+- **The old copies are part of the threat model, not of recovery.** Until destruction (runbook
+  Step 9) the old database and its backups are the rollback path for the cutover; after it, they
+  must be gone. They are never a recovery source for the cluster key — restoring the key from them
+  would mean another dealer run and a new ceremony.
+
 ## §4 What you MUST have in place before go-live
 
 - **≥ `t` cosigner share backups**, encrypted (sealed) and stored in ≥ 2 separated locations. This is
@@ -284,7 +306,10 @@ remains §1/§2/§3 — backups or repair from survivors. Full mechanics and the
   the only recovery from a lost seal master secret, and it cannot be produced retroactively — but it
   is also a portable copy of a private key, so storing one is a deliberate tradeoff, not a default.
 - A **key-ceremony record**: who ran DKG, the `t`/`n` chosen, cosigner host/account/region for each
-  share, and where each backup + seal secret lives. Keep it with your BCP documentation.
+  share, and where each backup + seal secret lives. Keep it with your BCP documentation. For an
+  imported key, the split-ceremony record and the signed destruction record instead
+  ([split-ceremony.md](split-ceremony.md) §8), and founding backups taken **after** its first
+  refresh (§3e).
 - **If hosted keys are enabled:** the same backup discipline covers them for free, but the input that
   actually decides recoverability is the **master seal secret** — without it a rebuilt node can
   neither open its own backup nor accept a replica from a peer. Rehearse a rebuild with an empty
@@ -300,6 +325,8 @@ After any restore/repair, confirm the node identity did not change:
 ```sh
 # the group verifying key (and therefore the Canton namespace) must be identical to before
 rutli-cosigner --config … refresh --key-id frost-<node>-namespace   # prints the group key; compare
+# or, read-only, every node at once: present, same package, own share consistent, each node signs
+rutli-cosigner --config … verify-key --key-id frost-<node>-namespace --expect-fingerprint 1220… --sign-test
 # and confirm the participant still reports the same PAR::…::<fingerprint> identity in the Canton console.
 ```
 

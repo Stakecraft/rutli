@@ -26,7 +26,9 @@
 //!    KMS/HSM import tool, and says so loudly.
 //!
 //! **Hosted keys only.** A FROST share is not a whole key — there is nothing to export, and
-//! exporting one node's share would be both useless and dangerous. The commands refuse it.
+//! exporting one node's share would be both useless and dangerous. The commands refuse it, and no
+//! other path exports a share either. The only way a share enters a node from outside is the split
+//! ceremony's `import-share` ([`crate::share_import`]) — offline too, for the same reasons as here.
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng, Payload};
 use aes_gcm::{AeadCore, Aes256Gcm, Key, Nonce};

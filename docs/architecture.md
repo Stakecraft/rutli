@@ -112,9 +112,9 @@ moment at creation. That is strictly stronger than sharding and stays the recomm
 Canton 3.5+ does document moving an existing participant onto a KMS: export its keys, start a new
 participant under the same identity, register the keys by KMS id. Digital Asset documents this for
 AWS/GCP KMS; carrying it to Rütli means splitting an existing namespace key into FROST shares
-(trusted-dealer, Horcrux style). That path is planned, not shipped — see
-[roadmap-migration.md](roadmap-migration.md). An imported key is weaker than a DKG key: it once
-lived whole on a server and in that node's backups, and splitting it cannot undo that exposure.
+(trusted-dealer, Horcrux style). That path ships in v0.4.0 as the split ceremony —
+[split-ceremony.md](split-ceremony.md). An imported key is weaker than a DKG key: it once lived
+whole on a server and in that node's backups, and splitting it cannot undo that exposure.
 
 **2. Cluster-side coordination, not a driver-side coordinator.** Horcrux's cosigners coordinate
 signing among themselves and the validator-facing side is a dumb client. We adopt the same shape,
@@ -247,8 +247,9 @@ two keys, two DKGs, no collision. Rules:
 - **Namespace root key is NOT rotatable.** It can be *moved* but never replaced: Canton 3.5+
   documents migrating an existing node from DB-keys → KMS by exporting the keys and starting a new
   participant under the same identity. Rütli's migration path (split an existing key into FROST
-  shares) is planned for v0.4.0, see [roadmap-migration.md](roadmap-migration.md); today the
-  product targets **freshly-deployed nodes**. A migrated namespace key is not as strong as a DKG
+  shares) ships in v0.4.0 as the split ceremony, [split-ceremony.md](split-ceremony.md); the full
+  node migration around it is [roadmap-migration.md](roadmap-migration.md). Freshly-deployed
+  nodes with DKG keys remain the recommended path. A migrated namespace key is not as strong as a DKG
   key: it existed whole on the old node, in its database and in every backup of it. Migration
   protects against future compromise and key loss; it cannot un-expose the past.
 - **Key loss = irrecoverable loss** of all Canton Coin for parties hosted under that namespace.
