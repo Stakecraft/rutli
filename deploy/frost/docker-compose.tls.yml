@@ -7,14 +7,14 @@
 # Prerequisites:
 #   1. Certs:   scripts/gen-frost-certs.sh 3 deploy/frost/certs
 #   2. Seal:    export RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
-#   3. Bring up (pulls ghcr.io/stakecraft/rutli-cosigner:0.3.1 by default):
+#   3. Bring up (pulls ghcr.io/stakecraft/rutli-cosigner:0.3.2 by default):
 #        RUTLI_SEAL_SECRET=… docker compose -f deploy/frost/docker-compose.tls.yml up -d
 #      Or build from source: add --build
 #
 # Override image: RUTLI_COSIGNER_IMAGE=ghcr.io/stakecraft/rutli-cosigner:latest
 
 x-cosigner: &cosigner
-  image: ${RUTLI_COSIGNER_IMAGE:-ghcr.io/stakecraft/rutli-cosigner:0.3.1}
+  image: ${RUTLI_COSIGNER_IMAGE:-ghcr.io/stakecraft/rutli-cosigner:0.3.2}
   build:
     context: ../../frost
     dockerfile: Dockerfile
