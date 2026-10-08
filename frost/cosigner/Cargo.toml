@@ -10,6 +10,11 @@ repository.workspace = true
 name = "rutli-cosigner"
 path = "src/main.rs"
 
+# The split ceremony's offline dealer. Never shipped in the cosigner image (see the Dockerfile).
+[[bin]]
+name = "rutli-dealer"
+path = "src/bin/rutli-dealer.rs"
+
 [dependencies]
 rutli-frost-core = { path = "../core" }
 # Canton key parsing (the split ceremony's dealer) and the Canton fingerprint of a group key.
@@ -39,6 +44,7 @@ metrics = { workspace = true }
 aws-lc-rs = { workspace = true }
 x25519-dalek = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+libc = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }
