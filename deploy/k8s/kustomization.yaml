@@ -21,5 +21,5 @@ resources:
   # - cronjob-refresh.yaml
 images:
   - name: ghcr.io/stakecraft/rutli-cosigner
-    newTag: "0.3.1"
-    digest: sha256:21fd2730fc47e57e59ec320063517c0cecc2784afa4e0fae3827b14a979f97a7
+    newTag: "0.3.2"
+    digest: sha256:af38fd04fdc2446dbfa7478ed65a3296d1cc24ba337f24ceb1e43940fc6d7d3f
