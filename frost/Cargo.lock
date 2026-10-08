@@ -1857,6 +1857,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "rutli-canton-key"
+version = "0.3.1"
+dependencies = [
+ "aes-gcm",
+ "argon2",
+ "aws-lc-rs",
+ "base64",
+ "ed25519-dalek",
+ "hex",
+ "pkcs8",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "zeroize",
+]
+
+[[package]]
 name = "rutli-cosigner"
 version = "0.3.1"
 dependencies = [

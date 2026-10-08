@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["core", "cosigner"]
+members = ["core", "cosigner", "canton-key"]
 
 [workspace.package]
 version = "0.3.1"
@@ -43,3 +43,8 @@ aws-lc-rs = "1.18"
 # X25519 for wrapping hosted key material to a specific peer node (see cosigner/src/wrap.rs).
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 metrics-exporter-prometheus = { version = "0.16", default-features = false, features = ["http-listener"] }
+# Strict DER PKCS#8 decoding for imported Canton keys (canton-key). Already in the lock through
+# ed25519-dalek; RustCrypto, rejects trailing data.
+pkcs8 = { version = "0.10", default-features = false }
+# PEM bodies of imported PKCS#8 keys (canton-key). Already in the lock through rcgen.
+base64 = "0.22"

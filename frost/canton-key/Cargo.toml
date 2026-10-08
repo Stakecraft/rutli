@@ -1,0 +1,24 @@
+[package]
+name = "rutli-canton-key"
+description = "Parser for every form in which an existing Canton node's private key can reach Rütli: stored SigningPrivateKey/EncryptionPrivateKey rows, ExportKeyPair output (plain and password-protected), and PKCS#8 PEM/DER. Offline, no networking; shared by the split ceremony, RSA import and ECIES hosted keys."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# All of these are already in Cargo.lock through the cosigner or ed25519-dalek; see lib.rs docs
+# ("Dependencies") for why each one is used.
+ed25519-dalek = { workspace = true }
+aws-lc-rs = { workspace = true }
+argon2 = { workspace = true }
+aes-gcm = { workspace = true }
+sha2 = { workspace = true }
+zeroize = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+pkcs8 = { workspace = true }
+base64 = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
