@@ -5,6 +5,10 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.3.2] — 2026-10-09
+
 ### Added
 - **`frost.key-prefix`** — an optional per-participant prefix prepended to every key id the driver
   mints or looks up on the cluster, FROST and hosted alike. Default `""`, so an existing deployment's
@@ -556,6 +560,7 @@ not audited. Do not place production authority keys behind it.
 - HSM backend validated only against SoftHSM.
 - No third-party security audit.
 
+[0.3.2]: https://github.com/Stakecraft/rutli/releases/tag/v0.3.2
 [0.3.1]: https://github.com/Stakecraft/rutli/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Stakecraft/rutli/releases/tag/v0.3.0
 [0.2.1]: https://github.com/Stakecraft/rutli/releases/tag/v0.2.1
