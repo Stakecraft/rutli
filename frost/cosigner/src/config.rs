@@ -132,6 +132,15 @@ impl Config {
         self.peers.len() as u16
     }
 
+    /// The cluster identity envelopes are bound to: [`crate::wrap::cluster_id_from_ca`] of the CA
+    /// certificate, or `plaintext-dev` without TLS. Reads the CA file.
+    pub fn cluster_id(&self) -> crate::Result<String> {
+        Ok(match &self.tls {
+            Some(t) => crate::wrap::cluster_id_from_ca(&std::fs::read(&t.ca_cert)?),
+            None => "plaintext-dev".to_string(),
+        })
+    }
+
     pub fn load(path: &std::path::Path) -> crate::Result<Self> {
         let text = std::fs::read_to_string(path)?;
         let cfg: Config = serde_json::from_str(&text)?;
