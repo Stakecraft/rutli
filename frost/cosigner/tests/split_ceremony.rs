@@ -27,6 +27,9 @@ use rutli_cosigner::seal::Sealer;
 use rutli_cosigner::share_delivery::{self, RecipientRequest, ShareBundle};
 use rutli_cosigner::share_import::{import_share, share_recipient, NodeContext};
 use rutli_cosigner::verify_key::{check_views, verify_message, NodeView};
+
+#[path = "common/pki.rs"]
+mod pki;
 use rutli_cosigner::{DaemonError, Result as DaemonResult};
 
 const N: u16 = 3;
@@ -52,6 +55,7 @@ fn canton_namespace_key() -> ([u8; 32], [u8; 32], String) {
 struct Site {
     data_dir: PathBuf,
     ctx: NodeContext,
+    signer: rutli_cosigner::request_auth::NodeSigner,
 }
 
 impl Site {
@@ -65,7 +69,8 @@ impl Site {
             roster: (1..=N).collect(),
             cluster_id: CLUSTER.into(),
         };
-        Self { data_dir, ctx }
+        let signer = pki::TestPki::new().signer(&format!("cosigner{identifier}"));
+        Self { data_dir, ctx, signer }
     }
 
     fn sealer(&self) -> Sealer {
@@ -79,7 +84,7 @@ impl Site {
     }
 
     fn recipient(&self) -> RecipientRequest {
-        share_recipient(&self.ctx, &self.keystore(), &self.sealer(), KEY, CEREMONY, false).unwrap()
+        share_recipient(&self.ctx, &self.keystore(), &self.sealer(), &self.signer, KEY, CEREMONY, false).unwrap()
     }
 
     fn import(&self, bundle: &ShareBundle, fingerprint: &str) -> DaemonResult<()> {
@@ -368,4 +373,45 @@ async fn a_half_finished_install_signs_refuses_refresh_and_changes_nothing() {
     let report = verify_key(&nodes, &peers, &fingerprint, true).await;
     assert!(report.ok, "{:?}", report.problems);
     assert_eq!(report.refresh_count, Some(1));
+}
+
+/// Review MEDIUM-1 (PoC `poc_sign_test_never_exercises_node3`): a node whose secret share is
+/// broken but whose public view is intact must fail the sign test. With "first t responders"
+/// quorums every test signature used nodes {1,2} and Gate B passed.
+#[tokio::test]
+#[ignore = "review MEDIUM-1: fails until verify-key exercises every t-subset (next commit)"]
+async fn the_sign_test_catches_a_node_with_a_broken_secret_share() {
+    use frost_ed25519::keys::{KeyPackage, SigningShare};
+    let tmp = tempfile::tempdir().unwrap();
+    let (sites, bundles, public, fingerprint) = ceremony(tmp.path());
+    for (site, bundle) in sites.iter().zip(&bundles) {
+        site.import(bundle, &fingerprint).unwrap();
+    }
+    // Corrupt node 3's signing share; everything public stays intact.
+    let ks = sites[2].keystore();
+    let mut share = ks.load(KEY).unwrap();
+    let kp = share.key_package.clone();
+    let mut b = [0u8; 32];
+    b[0] = 42;
+    let bad = SigningShare::deserialize(&b).unwrap();
+    share.key_package =
+        KeyPackage::new(*kp.identifier(), bad, *kp.verifying_share(), *kp.verifying_key(), *kp.min_signers());
+    ks.save(KEY, &share).unwrap();
+
+    let nodes: Vec<Arc<Node>> = sites.iter().map(Site::node).collect();
+    let peers = local_peers(&nodes);
+    let report = verify_key(&nodes, &peers, &fingerprint, true).await;
+    assert!(!report.ok, "Gate B must not pass with node 3's share broken");
+    let failed: Vec<_> = report.sign_test.iter().filter(|s| !s.ok).collect();
+    assert!(!failed.is_empty(), "{:?}", report.sign_test);
+
+    // And the reason it matters: {2,3} really cannot sign.
+    let degraded: Peers = vec![
+        Arc::new(DownPeer(Identifier::try_from(1u16).unwrap())) as Arc<dyn PeerApi>,
+        Arc::new(LocalPeer::new(nodes[1].clone())),
+        Arc::new(LocalPeer::new(nodes[2].clone())),
+    ];
+    let msg = rutli_frost_core::dealer::canton_test_message(b"node 1 lost");
+    let r = sign(&nodes[1], &degraded, KEY, &msg).await;
+    assert!(!r.as_ref().map(|s| verifies(&public, &msg, s)).unwrap_or(false));
 }

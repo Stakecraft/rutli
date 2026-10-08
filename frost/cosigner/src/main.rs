@@ -608,7 +608,17 @@ fn share_recipient_command(
             out.display()
         )));
     }
-    let request = share_recipient(&ctx, &keystore, &sealer, key_id, ceremony_id, replace)?;
+    // The request is signed with this node's mTLS identity, so the dealer can tell it from one an
+    // attacker substituted on the way (request_auth.rs). No TLS, no identity, no request.
+    let tls = cfg.tls.as_ref().ok_or_else(|| {
+        DaemonError::Config(
+            "share-recipient signs the request with this node's mTLS certificate, and tls is not \
+             configured — the split ceremony needs a TLS cluster"
+                .into(),
+        )
+    })?;
+    let signer = rutli_cosigner::request_auth::NodeSigner::from_files(&tls.cert, &tls.key)?;
+    let request = share_recipient(&ctx, &keystore, &sealer, &signer, key_id, ceremony_id, replace)?;
     let json = serde_json::to_vec_pretty(&request)?;
     if replace && out.exists() {
         std::fs::remove_file(out)?;
@@ -631,6 +641,9 @@ fn share_recipient_command(
         out.display(),
         request.recipient_pub
     );
+    // Gate 0: witnesses read this line here, in a session independent of the file transfer, and
+    // the dealer operator must type it back before anything is sealed.
+    println!("SAS node {} {}", request.identifier, rutli_cosigner::request_auth::sas(&request));
     Ok(())
 }
 

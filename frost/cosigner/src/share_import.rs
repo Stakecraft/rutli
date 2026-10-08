@@ -64,12 +64,14 @@ impl NodeContext {
 }
 
 /// `share-recipient`: mint this node's recipient keypair for `key_id` in ceremony `ceremony_id`
-/// and return the public request for the dealer. Refuses an id that is not an import id, a key that
-/// already exists here, and a pending recipient unless `replace`.
+/// and return the public request for the dealer, signed with this node's mTLS identity (`signer`,
+/// see [`crate::request_auth`]). Refuses an id that is not an import id, a key that already exists
+/// here, and a pending recipient unless `replace`.
 pub fn share_recipient(
     ctx: &NodeContext,
     keystore: &KeyStore,
     sealer: &Sealer,
+    signer: &crate::request_auth::NodeSigner,
     key_id: &str,
     ceremony_id: &str,
     replace: bool,
@@ -90,8 +92,11 @@ pub fn share_recipient(
         max_signers: ctx.max_signers,
         roster: ctx.roster.clone(),
         recipient_pub: String::new(),
+        signature_alg: String::new(),
+        signer_chain: Vec::new(),
+        signature: String::new(),
     };
-    share_delivery::create_recipient(&ctx.data_dir, sealer, template, replace)
+    share_delivery::create_recipient(&ctx.data_dir, sealer, signer, template, replace)
 }
 
 /// What `import-share` did (or, for a dry run, would do). Public values only.
@@ -447,6 +452,7 @@ mod tests {
         _tmp: tempfile::TempDir,
         ctx: NodeContext,
         sealer: Sealer,
+        signer: crate::request_auth::NodeSigner,
         keystore: KeyStore,
     }
 
@@ -470,11 +476,12 @@ mod tests {
                 ))),
             )
             .unwrap();
-            Self { _tmp: tmp, ctx, sealer, keystore }
+            let signer = crate::test_pki::TestPki::new().signer(&format!("cosigner{identifier}"));
+            Self { _tmp: tmp, ctx, sealer, signer, keystore }
         }
 
         fn recipient(&self) -> RecipientRequest {
-            share_recipient(&self.ctx, &self.keystore, &self.sealer, KEY, CEREMONY, false).unwrap()
+            share_recipient(&self.ctx, &self.keystore, &self.sealer, &self.signer, KEY, CEREMONY, false).unwrap()
         }
 
         fn import(&self, b: &ShareBundle, dry_run: bool) -> Result<ImportReport> {
@@ -604,15 +611,15 @@ mod tests {
     #[test]
     fn share_recipient_refuses_non_import_ids_existing_keys_and_needs_replace() {
         let n = TestNode::new(1);
-        let r = share_recipient(&n.ctx, &n.keystore, &n.sealer, "frost-namespace", CEREMONY, false);
+        let r = share_recipient(&n.ctx, &n.keystore, &n.sealer, &n.signer, "frost-namespace", CEREMONY, false);
         assert!(r.is_err());
         n.recipient();
-        assert!(share_recipient(&n.ctx, &n.keystore, &n.sealer, KEY, CEREMONY, false).is_err());
-        share_recipient(&n.ctx, &n.keystore, &n.sealer, KEY, CEREMONY, true).unwrap();
+        assert!(share_recipient(&n.ctx, &n.keystore, &n.sealer, &n.signer, KEY, CEREMONY, false).is_err());
+        share_recipient(&n.ctx, &n.keystore, &n.sealer, &n.signer, KEY, CEREMONY, true).unwrap();
 
         let (nodes, bundles) = three();
         nodes[2].import(&bundles[2], false).unwrap();
-        let again = share_recipient(&nodes[2].ctx, &nodes[2].keystore, &nodes[2].sealer, KEY, "c-9", true);
+        let again = share_recipient(&nodes[2].ctx, &nodes[2].keystore, &nodes[2].sealer, &nodes[2].signer, KEY, "c-9", true);
         assert!(matches!(again, Err(DaemonError::KeyExists(_))));
     }
 
