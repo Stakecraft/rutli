@@ -72,3 +72,41 @@ data:
       "peer_allowlist": ["cosigner1", "cosigner2", "cosigner3"],
       "operator_allowlist": ["operator"]
     }
+  # Client-side config for the driver role (cronjob-refresh.yaml: refresh). Only its roster, threshold
+  # and tls block are used; it presents driver.crt, never a cosigner key. identifier/listen/data_dir
+  # are placeholders the parser requires.
+  client-driver.json: |
+    {
+      "identifier": 1,
+      "listen": "127.0.0.1:0",
+      "threshold": 2,
+      "data_dir": "/tmp",
+      "peers": [
+        { "identifier": 1, "endpoint": "https://cosigner-0.rutli-cosigner:9101" },
+        { "identifier": 2, "endpoint": "https://cosigner-1.rutli-cosigner:9101" },
+        { "identifier": 3, "endpoint": "https://cosigner-2.rutli-cosigner:9101" }
+      ],
+      "tls": { "ca_cert": "/certs/ca.crt", "cert": "/certs/driver.crt", "key": "/certs/driver.key", "domain": "rutli-cosigner" },
+      "signer_allowlist": ["driver"],
+      "peer_allowlist": ["cosigner1", "cosigner2", "cosigner3"],
+      "operator_allowlist": ["operator"]
+    }
+  # Client-side config for the operator role (job-verify-key.example.yaml: verify-key). Only its roster, threshold
+  # and tls block are used; it presents operator.crt, never a cosigner key. identifier/listen/data_dir
+  # are placeholders the parser requires.
+  client-operator.json: |
+    {
+      "identifier": 1,
+      "listen": "127.0.0.1:0",
+      "threshold": 2,
+      "data_dir": "/tmp",
+      "peers": [
+        { "identifier": 1, "endpoint": "https://cosigner-0.rutli-cosigner:9101" },
+        { "identifier": 2, "endpoint": "https://cosigner-1.rutli-cosigner:9101" },
+        { "identifier": 3, "endpoint": "https://cosigner-2.rutli-cosigner:9101" }
+      ],
+      "tls": { "ca_cert": "/certs/ca.crt", "cert": "/certs/operator.crt", "key": "/certs/operator.key", "domain": "rutli-cosigner" },
+      "signer_allowlist": ["driver"],
+      "peer_allowlist": ["cosigner1", "cosigner2", "cosigner3"],
+      "operator_allowlist": ["operator"]
+    }

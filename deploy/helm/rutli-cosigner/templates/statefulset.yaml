@@ -70,6 +70,30 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
+      # Only this node's TLS material reaches the cosigner container: copy ca.crt and
+      # cosigner<id>.{crt,key} (id = ordinal + 1) from the source Secret(s) into the in-memory
+      # `certs` volume. The source volume is mounted here and nowhere else, so the long-running,
+      # network-facing process never has another node's key on its filesystem.
+      initContainers:
+        - name: tls-select
+          image: {{ include "rutli-cosigner.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              id=$(( ${HOSTNAME##*-} + 1 ))
+              umask 077
+              cat /tls-src/ca.crt > /certs/ca.crt
+              cat "/tls-src/cosigner${id}.crt" > "/certs/cosigner${id}.crt"
+              cat "/tls-src/cosigner${id}.key" > "/certs/cosigner${id}.key"
+              chmod 0444 /certs/ca.crt "/certs/cosigner${id}.crt"
+              chmod 0400 "/certs/cosigner${id}.key"
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - { name: tls-src, mountPath: /tls-src, readOnly: true }
+            - { name: certs, mountPath: /certs }
       containers:
         - name: cosigner
           image: {{ include "rutli-cosigner.image" . }}
@@ -134,10 +158,36 @@ spec:
         - name: config
           configMap:
             name: {{ include "rutli-cosigner.fullname" . }}-config
+        # This node's TLS material only (filled by tls-select); in memory, never on the node's disk.
         - name: certs
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        # Every node's TLS material — mounted into tls-select only.
+        - name: tls-src
+          {{- if eq .Values.tls.layout "perNode" }}
+          projected:
+            # 0440 (not 0400): with fsGroup the non-root user reads the keys via group perms.
+            defaultMode: 0440
+            sources:
+              - secret:
+                  name: {{ .Values.tls.caSecretName }}
+                  items: [{ key: ca.crt, path: ca.crt }]
+              {{- range $i := until (int .Values.replicaCount) }}
+              {{- $id := add $i 1 }}
+              - secret:
+                  name: {{ $.Values.tls.perNodeSecretPrefix }}{{ $id }}
+                  items:
+                    - { key: tls.crt, path: cosigner{{ $id }}.crt }
+                    - { key: tls.key, path: cosigner{{ $id }}.key }
+              {{- end }}
+          {{- else if eq .Values.tls.layout "shared" }}
           secret:
             secretName: {{ .Values.tlsSecretName }}
             defaultMode: 0440
+          {{- else }}
+          {{- fail "tls.layout must be perNode or shared" }}
+          {{- end }}
         - name: tmp
           emptyDir: {}
   volumeClaimTemplates:
