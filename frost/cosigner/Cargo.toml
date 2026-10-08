@@ -12,6 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 rutli-frost-core = { path = "../core" }
+# Canton key parsing (the split ceremony's dealer) and the Canton fingerprint of a group key.
+rutli-canton-key = { path = "../canton-key" }
 frost-ed25519 = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
