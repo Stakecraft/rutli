@@ -253,12 +253,22 @@ impl HostedKey {
 
 /// A FROST [`Identifier`] as the small integer the config uses (1..=n).
 ///
-/// Identifiers serialize to 32 big-endian bytes; cosigner ids are small, so the last two carry the
-/// value. Used to key per-node wrapping material off the same numbering as the config roster.
-pub fn identifier_index(id: frost_ed25519::Identifier) -> u16 {
+/// Ed25519 identifiers serialize as a **little-endian** scalar (id 2 is `02 00 .. 00`), so the value
+/// is in the first two bytes. Cosigner ids come from a `u16` config field, so every other byte must
+/// be zero; anything else is not an identifier this crate could have built, and is refused rather
+/// than silently truncated.
+///
+/// Used to key per-node wrapping material off the same numbering as the config roster, and it must
+/// agree with the number a peer derives from a certificate CN (`cosigner2` -> 2): a mismatch makes
+/// every envelope addressed over gRPC undecryptable by its recipient.
+pub fn identifier_index(id: frost_ed25519::Identifier) -> Result<u16> {
     let bytes = id.serialize();
-    let n = bytes.len();
-    u16::from_be_bytes([bytes[n - 2], bytes[n - 1]])
+    if bytes.len() < 2 || bytes[2..].iter().any(|&b| b != 0) {
+        return Err(DaemonError::Config(
+            "FROST identifier does not fit in 16 bits — cosigner ids are 1..=65535".into(),
+        ));
+    }
+    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
 }
 
 /// Seconds since the Unix epoch, for `created_at`.
@@ -272,6 +282,30 @@ pub fn now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identifier_index_inverts_identifier_try_from() {
+        for n in [1u16, 2, 3, 255, 256, 300, u16::MAX] {
+            let id = frost_ed25519::Identifier::try_from(n).unwrap();
+            assert_eq!(identifier_index(id).unwrap(), n, "id {n} must map back exactly");
+        }
+        // Distinct nodes must not collapse onto one index (the bug: every node read as 0).
+        let a = identifier_index(frost_ed25519::Identifier::try_from(1).unwrap()).unwrap();
+        let b = identifier_index(frost_ed25519::Identifier::try_from(2).unwrap()).unwrap();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn identifier_index_refuses_an_identifier_wider_than_16_bits() {
+        let wide = frost_ed25519::Identifier::deserialize(&{
+            let mut b = [0u8; 32];
+            b[0] = 1;
+            b[2] = 1; // 65537
+            b
+        })
+        .unwrap();
+        assert!(identifier_index(wide).is_err());
+    }
 
     #[test]
     fn rsa_roundtrip_and_public_key_shape() {

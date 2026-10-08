@@ -620,7 +620,8 @@ fn hosted_cluster(tmp: &tempfile::TempDir) -> (Vec<Arc<Node>>, Peers) {
         let ks =
             KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}")), Some(sealer)).unwrap();
         let node = Node::new(Identifier::try_from(i).unwrap(), N, T, ks)
-            .with_hosted_keys(HOSTED_MASTER, CLUSTER.to_string());
+            .with_hosted_keys(HOSTED_MASTER, CLUSTER.to_string())
+            .unwrap();
         nodes.push(Arc::new(node));
     }
     let peers: Peers =
@@ -707,8 +708,13 @@ async fn a_node_that_missed_a_write_is_repaired_and_then_serves_decrypts() {
     assert_eq!(replicas, 2);
     assert!(!nodes[2].hosted_exists("rutli-enc-3"), "node 3 should be missing it");
 
-    // Read-repair: node 2 pulls the key on demand rather than returning NOT_FOUND.
-    assert!(repair_hosted_key(&nodes[2], &peers, "rutli-enc-3").await.unwrap());
+    // Read-repair: node 2 pulls the key on demand rather than returning NOT_FOUND. It sees the
+    // others as peers calling on its behalf, so replies are wrapped to it, as over gRPC.
+    let as_node2: Peers = nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone()).on_behalf_of(nodes[2].clone())) as Arc<dyn PeerApi>)
+        .collect();
+    assert!(repair_hosted_key(&nodes[2], &as_node2, "rutli-enc-3").await.unwrap());
     let ct = key.encrypt_oaep(b"after repair").unwrap();
     assert_eq!(nodes[2].hosted_decrypt("rutli-enc-3", &ct).unwrap(), b"after repair");
 }
@@ -1165,4 +1171,27 @@ async fn a_peer_that_refuses_still_aborts_a_hosted_write() {
     .unwrap_err();
     assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "got {err:?}");
     assert!(!nodes[0].hosted_exists("rutli-enc-conflict"));
+}
+
+/// A commitment is compared across nodes (replication acks, anti-entropy), so it must be identical
+/// on every node, and byte-identical to what 0.3.1 nodes computed (they all keyed it off the
+/// distribution key for index 0) so a mixed-version cluster still agrees during a rolling upgrade.
+#[tokio::test]
+async fn hosted_commitments_are_node_independent_and_match_the_031_value() {
+    use sha2::{Digest, Sha256};
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, _peers) = hosted_cluster(&tmp);
+    let key = rutli_cosigner::hosted::HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
+
+    let legacy = {
+        let mut h = Sha256::new();
+        h.update(b"rutli-keycommit-v1");
+        h.update(rutli_cosigner::wrap::DistKey::derive(HOSTED_MASTER, 0).public_bytes());
+        h.update(key.spec.as_str().as_bytes());
+        h.update(key.private_der.as_bytes());
+        h.finalize().to_vec()
+    };
+    for n in &nodes {
+        assert_eq!(n.hosted_commitment(&key).unwrap(), legacy);
+    }
 }

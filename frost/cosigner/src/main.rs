@@ -169,7 +169,7 @@ async fn main() -> Result<()> {
             Some(t) => rutli_cosigner::wrap::cluster_id_from_ca(&std::fs::read(&t.ca_cert)?),
             None => "plaintext-dev".to_string(),
         };
-        node = node.with_hosted_keys(master.as_bytes(), cluster_id);
+        node = node.with_hosted_keys(master.as_bytes(), cluster_id)?;
         tracing::info!("cluster-hosted keys enabled (RSA-2048 encryption + AES-256-GCM symmetric)");
     }
     let node = Arc::new(node);
