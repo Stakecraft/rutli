@@ -172,7 +172,7 @@ pub fn import_share(
 
     // 4. Already installed?
     if key_present(keystore, &bundle.key_id)? {
-        return already_installed(ctx, keystore, bundle);
+        return already_installed(ctx, keystore, bundle, expect_fingerprint, dry_run);
     }
 
     // 5. The pending recipient for this key and ceremony.
@@ -290,11 +290,14 @@ fn already_installed(
     ctx: &NodeContext,
     keystore: &KeyStore,
     bundle: &ShareBundle,
+    expect_fingerprint: &str,
+    dry_run: bool,
 ) -> Result<ImportReport> {
     let exists = || DaemonError::KeyExists(bundle.key_id.clone());
     let Record::Frost(share) = keystore.load_record(&bundle.key_id)? else { return Err(exists()) };
     let Some(origin) = &share.origin else { return Err(exists()) };
     let digest = hex::encode(rutli_frost_core::dealer::pkp_digest(&share.public_key_package)?);
+    let group = rutli_frost_core::dkg::group_verifying_key_bytes(&share.public_key_package)?;
     let identical = origin.kind == ORIGIN_DEALER_SPLIT
         && origin.ceremony_id == bundle.ceremony_id
         && origin.refresh_count == 0
@@ -303,7 +306,21 @@ fn already_installed(
     if !identical {
         return Err(exists());
     }
-    let group = rutli_frost_core::dkg::group_verifying_key_bytes(&share.public_key_package)?;
+    // "Identical" must also mean "the key the operator expects": never report success for an
+    // installed key the operator did not name.
+    if origin.canton_fingerprint != expect_fingerprint
+        || share_delivery::ed25519_fingerprint(&group) != expect_fingerprint
+    {
+        return Err(ceremony(format!(
+            "{} is installed here with fingerprint {}, not the expected {expect_fingerprint}",
+            bundle.key_id, origin.canton_fingerprint
+        )));
+    }
+    // A crash between the create and the recipient deletion leaves the bundle openable; finish
+    // the job now.
+    if !dry_run {
+        share_delivery::delete_recipient(&ctx.data_dir, &bundle.key_id)?;
+    }
     Ok(ImportReport {
         key_id: bundle.key_id.clone(),
         ceremony_id: origin.ceremony_id.clone(),
@@ -538,6 +555,32 @@ mod tests {
 
         // Identical re-import: no-op success (the bundle can no longer be opened, and need not be).
         assert_eq!(n.import(&bundles[0], false).unwrap().outcome, "already-installed");
+    }
+
+    /// Review LOW-1: a crash between the create and the recipient deletion must not leave the
+    /// bundle openable for good, and "identical" must include the expected fingerprint.
+    #[test]
+    fn a_re_import_finishes_an_interrupted_install_and_checks_the_fingerprint() {
+        let (nodes, bundles) = three();
+        let n = &nodes[0];
+        let recipient = share_delivery::recipient_path(&n.ctx.data_dir, KEY).unwrap();
+        let saved = std::fs::read(&recipient).unwrap();
+        n.import(&bundles[0], false).unwrap();
+        // The crash: share created, recipient file never deleted.
+        std::fs::write(&recipient, &saved).unwrap();
+        assert!(share_delivery::load_recipient(&n.ctx.data_dir, &n.sealer, KEY).is_ok());
+
+        // Re-run with the wrong expectation: refused, nothing touched.
+        let wrong = format!("1220{}", "ab".repeat(32));
+        let r = import_share(&n.ctx, &n.keystore, &n.sealer, &bundles[0], &wrong, false);
+        assert_ceremony_err(r, "not the expected");
+        assert!(recipient.exists());
+        // A dry run reports, deletes nothing.
+        assert_eq!(n.import(&bundles[0], true).unwrap().outcome, "already-installed");
+        assert!(recipient.exists());
+        // The real re-run finishes the install: the recipient secret is gone.
+        assert_eq!(n.import(&bundles[0], false).unwrap().outcome, "already-installed");
+        assert!(!recipient.exists());
     }
 
     #[test]
