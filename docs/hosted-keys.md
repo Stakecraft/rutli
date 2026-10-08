@@ -318,8 +318,11 @@ Properties worth knowing before you rely on them:
   refused: this is the *only* protection on a portable private key. `--unsafe-plaintext` exists for
   piping into another KMS's import tool on a trusted host, and logs a warning saying the file is the
   key.
-- **Hosted keys only.** A FROST share is not a whole key — `export-key` refuses one. The namespace
-  key cannot leave the cluster, which is the entire point of it.
+- **Hosted keys only.** A FROST share is not a whole key — `export-key` refuses one, and there is
+  still no way for a share to leave a node. The namespace key cannot leave the cluster, which is
+  the entire point of it. The one way a FROST share *enters* a node from outside is the split
+  ceremony's offline `import-share` ([split-ceremony.md](split-ceremony.md)), which installs a
+  dealer share for a key migrated from an existing Canton node — also CLI-only, never an RPC.
 - **Import never overwrites.** Hosted keys are create-once-immutable, so importing over an existing
   id with *different* material is refused; an identical re-import is a no-op. Rotate to a new key id
   instead.
