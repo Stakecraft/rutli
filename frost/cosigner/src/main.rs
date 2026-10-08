@@ -113,6 +113,13 @@ enum Command {
         #[arg(long)]
         replace: bool,
     },
+    /// Split ceremony, Gate 0: print the SAS of this node's PENDING recipient request, read from
+    /// the sealed recipient file (not from any request file). Read-only. Witnesses run it in their
+    /// own session to check the SAS the dealer is given.
+    RecipientSas {
+        #[arg(long)]
+        key_id: String,
+    },
     /// Split ceremony: verify this node's share bundle and install it (never overwrites a key).
     /// Offline only — there is no RPC for this. Safe against a stopped node or inside the live pod.
     ImportShare {
@@ -183,6 +190,7 @@ async fn main() -> Result<()> {
         Some(Command::ShareRecipient { key_id, ceremony_id, out, replace }) => {
             return share_recipient_command(&cfg, &key_id, &ceremony_id, &out, replace)
         }
+        Some(Command::RecipientSas { key_id }) => return recipient_sas_command(&cfg, &key_id),
         Some(Command::ImportShare { r#in, expect_fingerprint, dry_run }) => {
             return import_share_command(&cfg, &r#in, &expect_fingerprint, dry_run)
         }
@@ -685,6 +693,14 @@ fn share_recipient_command(
 }
 
 /// Split ceremony: `import-share`. See [`rutli_cosigner::share_import::import_share`].
+/// Split ceremony, Gate 0: `recipient-sas`. See [`rutli_cosigner::share_import::recipient_sas`].
+fn recipient_sas_command(cfg: &Config, key_id: &str) -> Result<()> {
+    let sealer = offline_sealer(cfg)?;
+    let line = rutli_cosigner::share_import::recipient_sas(&cfg.data_dir, &sealer, key_id)?;
+    println!("{line}");
+    Ok(())
+}
+
 fn import_share_command(
     cfg: &Config,
     input: &std::path::Path,

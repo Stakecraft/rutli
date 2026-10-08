@@ -99,6 +99,23 @@ pub fn share_recipient(
     share_delivery::create_recipient(&ctx.data_dir, sealer, signer, template, replace)
 }
 
+/// `recipient-sas`: the Gate 0 line for this node's pending recipient, `SAS node <i> <sas>
+/// ceremony <id> key <key_id>`, computed from the request stored in the sealed recipient file —
+/// the request this node actually signed, whatever file reached the dealer. Read-only; needs the
+/// seal secret (the file is sealed), which the pod has.
+pub fn recipient_sas(data_dir: &Path, sealer: &Sealer, key_id: &str) -> Result<String> {
+    check_import_id(key_id)?;
+    let state = share_delivery::load_recipient(data_dir, sealer, key_id)?;
+    let r = &state.request;
+    Ok(format!(
+        "SAS node {} {} ceremony {} key {}",
+        r.identifier,
+        crate::request_auth::sas(r),
+        r.ceremony_id,
+        r.key_id
+    ))
+}
+
 /// What `import-share` did (or, for a dry run, would do). Public values only.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ImportReport {
@@ -555,6 +572,21 @@ mod tests {
 
         // Identical re-import: no-op success (the bundle can no longer be opened, and need not be).
         assert_eq!(n.import(&bundles[0], false).unwrap().outcome, "already-installed");
+    }
+
+    /// Review NEW-2: a witness can re-derive the SAS from the node's own sealed state, in a session
+    /// of their own, any time before install.
+    #[test]
+    fn recipient_sas_is_read_back_from_the_sealed_state_until_install() {
+        let n = TestNode::new(2);
+        let request = n.recipient();
+        let line = recipient_sas(&n.ctx.data_dir, &n.sealer, KEY).unwrap();
+        assert!(line.starts_with(&format!("SAS node 2 {} ", crate::request_auth::sas(&request))), "{line}");
+        assert!(line.contains(CEREMONY));
+        // Not with another node's seal key, not for a non-import id.
+        let other = Sealer::from_master_secret(b"share import test master", 3);
+        assert!(recipient_sas(&n.ctx.data_dir, &other, KEY).is_err());
+        assert!(recipient_sas(&n.ctx.data_dir, &n.sealer, "frost-namespace").is_err());
     }
 
     /// Review LOW-1: a crash between the create and the recipient deletion must not leave the
