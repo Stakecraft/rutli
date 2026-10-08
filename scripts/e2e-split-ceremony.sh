@@ -69,8 +69,10 @@ mkconfig() { # node-config-name  cert-name  out
     | del(.metrics_listen)' "$REPO/deploy/frost/config-tls/$1.json" >"$3"
 }
 for i in 1 2 3; do mkconfig "cosigner$i" "cosigner$i" "$WORK/c$i.json"; done
-# The operator's view: the driver's client cert, like the refresh CronJob.
-mkconfig cosigner1 driver "$WORK/operator.json"
+# The operator role (operator_allowlist: KeyStatus + CeremonySignTest only) runs verify-key; the
+# driver cert, like the refresh CronJob, runs refresh.
+mkconfig cosigner1 operator "$WORK/operator.json"
+mkconfig cosigner1 driver "$WORK/driver.json"
 
 start() {
   RUST_LOG=info "$COSIGNER" --config "$WORK/c$1.json" serve >>"$WORK/node$1.log" 2>&1 &
@@ -173,14 +175,28 @@ grep -q "never been refreshed" "$WORK/node1.log" || fail "no startup warning for
 step "5. verify-key --sign-test"
 rep="$(cli --config "$WORK/operator.json" verify-key --key-id "$KEY_ID" --expect-fingerprint "$FP" --sign-test --json || true)"
 jq -e --arg d "$DIGEST" '.ok and .pkp_digest == $d and .refresh_count == 0 and (.sign_test | length == 3)
-  and all(.sign_test[]; .ok)' <<<"$rep" >/dev/null || fail "verify-key: $rep"
-echo "verify-key OK: 3/3 nodes, digest $DIGEST, 3 test signatures"
+  and all(.sign_test[]; .ok)
+  and ([.sign_test[].signers] == [[1,2],[1,3],[2,3]]) and ([.sign_test[].leader] == [1,2,3])' <<<"$rep" >/dev/null \
+  || fail "verify-key: $rep"
+echo "verify-key OK (operator cert): 3/3 nodes, digest $DIGEST, quorums {1,2} {1,3} {2,3} all sign"
+
+step "   the operator cert cannot Sign an arbitrary digest (only the ceremony test digest)"
+MSG_B64="$(printf '\022\040%s' "$(printf 'x%.0s' $(seq 1 32))" | base64)"
+if out="$(grpcurl -cacert "$WORK/certs/ca.crt" -cert "$WORK/certs/operator.crt" -key "$WORK/certs/operator.key" \
+  -servername rutli-cosigner -import-path "$REPO/frost/cosigner/proto" -proto cosigner.proto \
+  -d "{\"key_id\":\"$KEY_ID\",\"message\":\"$MSG_B64\"}" "127.0.0.1:$((BASE_PORT + 1))" \
+  rutli.cosigner.v1.Signer/Sign 2>&1)"; then fail "the operator cert signed an arbitrary digest"; fi
+grep -q "PermissionDenied" <<<"$out" || fail "operator Sign refused for the wrong reason: $out"
+echo "operator Sign -> PermissionDenied"
 
 step "   DKG is still refused for the installed id"
 expect_dkg_refused "installed"
 
 step "6. refresh"
-out="$(cli --config "$WORK/operator.json" refresh --key-id "$KEY_ID")"
+if cli --config "$WORK/operator.json" refresh --key-id "$KEY_ID" >/dev/null 2>&1; then
+  fail "the operator role could run a refresh"
+fi
+out="$(cli --config "$WORK/driver.json" refresh --key-id "$KEY_ID")"
 grep -q "$GROUP" <<<"$out" || fail "refresh changed the group key: $out"
 
 step "7. verify-key after refresh"

@@ -23,6 +23,12 @@ service Signer {
   // verify-key`, which asks every node and compares. Allowlisted like GroupKey. The driver does
   // not call it.
   rpc KeyStatus(KeyStatusRequest) returns (KeyStatusReply);
+  // Split ceremony verification: sign a fixed, server-computed test digest for an imported key
+  // with EXACTLY the given quorum, so every t-subset of cosigners can be proven to sign. The
+  // message is never caller-supplied (0x1220 ‖ SHA-256("rutli-verify-key/" ‖ ceremony_id ‖
+  // key_id), from the key's recorded provenance), and keys without a dealer-split origin are
+  // refused. Callable by the operator role (operator_allowlist) as well as the driver role.
+  rpc CeremonySignTest(CeremonySignTestRequest) returns (CeremonySignTestReply);
 
   // --- cluster-hosted (non-FROST) keys: RSA-2048 encryption, AES-256-GCM symmetric ---
   // These are replicated whole keys, not threshold shares (docs/hosted-keys-design.md). They let a
@@ -99,6 +105,16 @@ message DkgReply { bytes group_verifying_key = 1; }
 // Proactively refresh shares for a key (same group key, re-randomized shares).
 message RefreshRequest { string key_id = 1; }
 message RefreshReply { bytes group_verifying_key = 1; } // unchanged; returned for confirmation
+
+message CeremonySignTestRequest {
+  string key_id = 1;
+  // Configured identifiers of the quorum; exactly `threshold` distinct roster members.
+  repeated uint32 signers = 2;
+}
+message CeremonySignTestReply {
+  bytes message = 1;    // the 34-byte digest that was signed (server-computed)
+  bytes signature = 2;  // 64-byte Ed25519 signature under the group key
+}
 
 message KeyStatusRequest { string key_id = 1; }
 message KeyStatusReply {

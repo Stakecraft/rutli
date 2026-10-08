@@ -21,12 +21,12 @@ use frost_ed25519::Identifier;
 
 use rutli_cosigner::keystore::KeyStore;
 use rutli_cosigner::node::Node;
-use rutli_cosigner::orchestrator::{run_dkg, run_refresh, sign, Peers};
+use rutli_cosigner::orchestrator::{ceremony_sign_test, run_dkg, run_refresh, sign, Peers};
 use rutli_cosigner::peer::{LocalPeer, PeerApi};
 use rutli_cosigner::seal::Sealer;
 use rutli_cosigner::share_delivery::{self, RecipientRequest, ShareBundle};
 use rutli_cosigner::share_import::{import_share, share_recipient, NodeContext};
-use rutli_cosigner::verify_key::{check_views, verify_message, NodeView};
+use rutli_cosigner::verify_key::{check_views, sign_test_plan, NodeView};
 
 #[path = "common/pki.rs"]
 mod pki;
@@ -135,10 +135,14 @@ async fn verify_key(nodes: &[Arc<Node>], peers: &Peers, fingerprint: &str, sign_
     let roster: Vec<u16> = (1..=N).collect();
     let mut report = check_views(KEY, fingerprint, &roster, T, &views);
     if sign_test && report.ok {
-        let msg = verify_message(report.ceremony_id.as_deref().unwrap_or(""), KEY);
-        for (n, id) in nodes.iter().zip(1u16..) {
-            let sig = sign(n, peers, KEY, &msg).await.map(|s| s.to_vec()).map_err(|e| e.to_string());
-            report.record_signature(id, &msg, sig);
+        // What `verify-key --sign-test` does over gRPC: every t-subset, leader rotating.
+        for (leader, signers) in sign_test_plan(&roster, T) {
+            let n = &nodes[usize::from(leader) - 1];
+            let result = ceremony_sign_test(n, peers, KEY, &signers)
+                .await
+                .map(|(m, s)| (m.to_vec(), s.to_vec()))
+                .map_err(|e| e.to_string());
+            report.record_signature(leader, &signers, result);
         }
     }
     report
@@ -379,7 +383,6 @@ async fn a_half_finished_install_signs_refuses_refresh_and_changes_nothing() {
 /// broken but whose public view is intact must fail the sign test. With "first t responders"
 /// quorums every test signature used nodes {1,2} and Gate B passed.
 #[tokio::test]
-#[ignore = "review MEDIUM-1: fails until verify-key exercises every t-subset (next commit)"]
 async fn the_sign_test_catches_a_node_with_a_broken_secret_share() {
     use frost_ed25519::keys::{KeyPackage, SigningShare};
     let tmp = tempfile::tempdir().unwrap();
@@ -414,4 +417,38 @@ async fn the_sign_test_catches_a_node_with_a_broken_secret_share() {
     let msg = rutli_frost_core::dealer::canton_test_message(b"node 1 lost");
     let r = sign(&nodes[1], &degraded, KEY, &msg).await;
     assert!(!r.as_ref().map(|s| verifies(&public, &msg, s)).unwrap_or(false));
+}
+
+/// Review MEDIUM-2: the sign test signs one fixed, server-computed digest, only for imported keys,
+/// with exactly the requested quorum — nothing an operator credential could turn into `Sign`.
+#[tokio::test]
+async fn the_ceremony_sign_test_signs_only_its_own_digest_with_exactly_the_quorum_asked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (sites, bundles, public, fingerprint) = ceremony(tmp.path());
+    for (site, bundle) in sites.iter().zip(&bundles) {
+        site.import(bundle, &fingerprint).unwrap();
+    }
+    let nodes: Vec<Arc<Node>> = sites.iter().map(Site::node).collect();
+    let peers = local_peers(&nodes);
+
+    let (msg, sig) = ceremony_sign_test(&nodes[0], &peers, KEY, &[2, 3]).await.unwrap();
+    assert_eq!(msg, rutli_cosigner::verify_key::verify_message(CEREMONY, KEY));
+    assert!(verifies(&public, &msg, &sig));
+
+    // Wrong quorum sizes, duplicates and strangers are refused, not "fixed up".
+    for bad in [&[1u16][..], &[1, 2, 3], &[2, 2], &[1, 4]] {
+        assert!(ceremony_sign_test(&nodes[0], &peers, KEY, bad).await.is_err(), "{bad:?}");
+    }
+    // No substitution: a requested signer that is down fails the test.
+    let degraded: Peers = vec![
+        Arc::new(LocalPeer::new(nodes[0].clone())) as Arc<dyn PeerApi>,
+        Arc::new(LocalPeer::new(nodes[1].clone())),
+        Arc::new(DownPeer(nodes[2].identifier)),
+    ];
+    assert!(ceremony_sign_test(&nodes[0], &degraded, KEY, &[1, 3]).await.is_err());
+
+    // A DKG key has no ceremony digest: refused.
+    run_dkg(&peers, "namespace-dkg").await.unwrap();
+    let err = ceremony_sign_test(&nodes[0], &peers, "namespace-dkg", &[1, 2]).await.unwrap_err();
+    assert!(matches!(err, DaemonError::Ceremony(_)), "{err:?}");
 }

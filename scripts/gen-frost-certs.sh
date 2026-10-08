@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Generate a mutual-TLS trust domain for a FROST cluster: one cluster CA, a cert per cosigner, and
-# a client cert for the driver. Every cert is signed by the CA (the sole trust anchor). Cosigner
-# certs carry a SAN of `cosignerN` and `127.0.0.1` so they work in Docker and locally.
+# a client cert for the driver and one for the operator (split ceremony verify-key: KeyStatus and
+# CeremonySignTest only, via operator_allowlist). Every cert is signed by the CA (the sole trust
+# anchor). Cosigner certs carry a SAN of `cosignerN` and `127.0.0.1` so they work in Docker and
+# locally, and the CN `cosignerN` (N = the node's configured identifier) — the identity the Peer
+# API's FetchKey and the split ceremony's request signatures rely on.
 #
 #   scripts/gen-frost-certs.sh [N] [OUT_DIR]      (defaults: N=3, OUT_DIR=deploy/frost/certs)
 #
@@ -44,6 +47,9 @@ done
 echo "Generating driver client cert..."
 gen_cert "driver" "subjectAltName=DNS:rutli-cosigner,DNS:driver,DNS:localhost,IP:127.0.0.1"
 
+echo "Generating operator client cert..."
+gen_cert "operator" "subjectAltName=DNS:operator,DNS:localhost,IP:127.0.0.1"
+
 rm -f ca.srl
 chmod 600 ./*.key
 
@@ -61,6 +67,7 @@ if [ -n "${RUTLI_CERT_UID:-}" ]; then
   fi
 fi
 echo
-echo "Wrote CA + $N cosigner certs + driver cert to $OUT"
+echo "Wrote CA + $N cosigner certs + driver cert + operator cert to $OUT"
 echo "Point each cosigner config's tls { ca_cert, cert, key } at ca.crt / cosignerN.{crt,key},"
-echo "and the driver's frost.tls at ca.crt / driver.{crt,key}."
+echo "the driver's frost.tls at ca.crt / driver.{crt,key}, and the operator's verify-key config at"
+echo "ca.crt / operator.{crt,key} (CN operator, listed in operator_allowlist)."

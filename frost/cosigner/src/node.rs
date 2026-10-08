@@ -353,6 +353,21 @@ impl Node {
         Ok(reply)
     }
 
+    /// The split-ceremony test digest for `key_id`, computed from the key's recorded provenance —
+    /// never from caller input — or `Ceremony` if the key was not installed by the split ceremony.
+    pub fn ceremony_test_message(&self, key_id: &str) -> Result<[u8; 34]> {
+        let share = self.keystore.load(key_id)?;
+        match &share.origin {
+            Some(o) if o.kind == crate::keystore::ORIGIN_DEALER_SPLIT => {
+                Ok(crate::verify_key::verify_message(&o.ceremony_id, key_id))
+            }
+            _ => Err(DaemonError::Ceremony(format!(
+                "{key_id} has no split-ceremony provenance — the ceremony sign test only signs \
+                 for imported keys"
+            ))),
+        }
+    }
+
     pub fn threshold_for(&self, key_id: &str) -> Result<u16> {
         Ok(self.cosigner(key_id)?.min_signers())
     }

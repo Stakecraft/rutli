@@ -41,6 +41,13 @@ pub struct Config {
     /// (or any other cluster-CA holder) off the mesh. Required when TLS is enabled.
     #[serde(default)]
     pub peer_allowlist: Option<Vec<String>>,
+    /// Client-certificate Common Names of the **operator** role: allowed `KeyStatus` and
+    /// `CeremonySignTest` (the split ceremony's `verify-key`) and nothing else on the Signer API —
+    /// in particular not `Sign`, so verifying a ceremony needs no credential that can sign
+    /// arbitrary digests with a namespace key. Optional; must not share a CN with
+    /// `signer_allowlist` or `peer_allowlist`.
+    #[serde(default)]
+    pub operator_allowlist: Option<Vec<String>>,
     /// Address for the plaintext Prometheus /metrics endpoint (e.g. "0.0.0.0:9200"). When absent,
     /// no metrics endpoint is served. Metrics carry operation counts/latencies only — never key
     /// material, digests, or session ids — so plaintext HTTP is acceptable on a trusted network;
@@ -191,6 +198,28 @@ impl Config {
                     .into(),
             ));
         }
+        // The operator role exists to be weaker than the driver role; a CN in two role lists
+        // would quietly be the stronger one (and a cosigner CN would put a mesh cert on the
+        // Signer API).
+        if let Some(ops) = &self.operator_allowlist {
+            if ops.is_empty() {
+                return Err(Config(
+                    "operator_allowlist is empty — omit it, or list the operator cert CN(s)".into(),
+                ));
+            }
+            let other: Vec<&String> = self
+                .signer_allowlist
+                .iter()
+                .chain(self.peer_allowlist.iter())
+                .flatten()
+                .collect();
+            if let Some(cn) = ops.iter().find(|cn| other.contains(cn)) {
+                return Err(Config(format!(
+                    "operator_allowlist CN {cn:?} is also in signer_allowlist or peer_allowlist — \
+                     give the operator its own certificate"
+                )));
+            }
+        }
         // Hosted keys are whole private keys at rest on every node. Refusing to hold them
         // unsealed is the whole point of the feature — an unsealed replica would be strictly worse
         // than the HSM delegate it replaces.
@@ -235,6 +264,7 @@ mod tests {
             hosted_keys: None,
             peer_allowlist: allow,
             metrics_listen: None,
+            operator_allowlist: None,
         }
     }
 
@@ -274,6 +304,18 @@ mod tests {
         c.peer_allowlist = Some(vec!["cosigner1".into(), "cosigner2".into(), "cosigner3".into()]);
         c.validate().unwrap();
     }
+
+    #[test]
+    fn the_operator_role_must_be_its_own_identity() {
+        let mut c = base(Some(tls()), Some(vec!["driver".into()]));
+        c.peer_allowlist = Some(vec!["cosigner1".into(), "cosigner2".into(), "cosigner3".into()]);
+        c.operator_allowlist = Some(vec!["operator".into()]);
+        c.validate().unwrap();
+        for bad in [vec![], vec!["driver".to_string()], vec!["operator".into(), "cosigner2".into()]] {
+            c.operator_allowlist = Some(bad.clone());
+            assert!(c.validate().is_err(), "{bad:?}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -296,6 +338,7 @@ mod hosted_config_tests {
             signer_allowlist: None,
             peer_allowlist: None,
             metrics_listen: None,
+            operator_allowlist: None,
             hosted_keys: hosted,
         }
     }

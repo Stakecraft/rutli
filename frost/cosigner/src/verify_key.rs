@@ -16,11 +16,17 @@
 //! - the package interpolates: every `t`-subset of verifying shares yields the group key;
 //! - provenance agrees (origin, ceremony id, refresh count).
 //!
-//! With `--sign-test`, each node then leads one signature over [`verify_message`], verified with
-//! `verify_strict` under the Canton key — the end-to-end proof that any quorum signs. The message
-//! is `0x1220 ‖ SHA-256("rutli-verify-key/" ‖ ceremony_id ‖ key_id)`: Canton-shaped (the cosigners
-//! sign nothing else), and not the hash of any Canton topology transaction — Canton's hashes start
-//! with a 4-byte hash purpose, which these ASCII bytes are not.
+//! A public view can be perfect while a node's *secret* share is wrong, so with `--sign-test` the
+//! command then has the cluster sign with **every `t`-subset** of cosigners in turn
+//! ([`sign_test_plan`], `Signer.CeremonySignTest`, leader rotating), each verified with
+//! `verify_strict` under the Canton key — the end-to-end proof that every quorum that may ever
+//! have to sign can. (A "first `t` responders" quorum would use the same `t` nodes every time and
+//! never touch the others' shares.) The cosigner computes the message itself from the key's
+//! recorded provenance, `0x1220 ‖ SHA-256("rutli-verify-key/" ‖ ceremony_id ‖ key_id)`
+//! ([`verify_message`]), and only for imported keys: Canton-shaped (the cosigners sign nothing
+//! else), never chosen by the caller, and not the hash of any Canton topology transaction —
+//! Canton's hashes start with a 4-byte hash purpose, which these ASCII bytes are not. That is what
+//! lets the **operator** role (`operator_allowlist`) run it without a credential that can `Sign`.
 
 use std::collections::BTreeSet;
 
@@ -56,6 +62,8 @@ pub struct NodeRow {
 #[derive(Debug, Clone, Serialize)]
 pub struct SignRow {
     pub leader: u16,
+    /// The exact quorum that signed.
+    pub signers: Vec<u16>,
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -86,16 +94,23 @@ impl VerifyReport {
         self.group_verifying_key.as_ref().and_then(|h| hex::decode(h).ok()?.try_into().ok())
     }
 
-    /// Record one `--sign-test` signature: `signature` (or the error getting it) from `leader`.
+    /// Record one `CeremonySignTest` result: `(message, signature)` as the cluster returned them
+    /// (or the error), for quorum `signers` led by `leader`. The message must be the one this side
+    /// computes independently ([`verify_message`] over the agreed ceremony id), and the signature
+    /// must pass `verify_strict` under the agreed (expected) group key.
     pub fn record_signature(
         &mut self,
         leader: u16,
-        message: &[u8],
-        signature: std::result::Result<Vec<u8>, String>,
+        signers: &[u16],
+        result: std::result::Result<(Vec<u8>, Vec<u8>), String>,
     ) {
-        let outcome = signature.and_then(|sig| {
+        let expected = verify_message(self.ceremony_id.as_deref().unwrap_or(""), &self.key_id);
+        let outcome = result.and_then(|(message, sig)| {
             let group = self.agreed_group_key().ok_or("no agreed group key")?;
-            if signature_verifies(&group, message, &sig) {
+            if message != expected {
+                return Err("the cluster signed a different message than the ceremony test digest".into());
+            }
+            if signature_verifies(&group, &expected, &sig) {
                 Ok(())
             } else {
                 Err("signature does not verify (verify_strict) under the Canton key".to_string())
@@ -103,10 +118,37 @@ impl VerifyReport {
         });
         if let Err(e) = &outcome {
             self.ok = false;
-            self.problems.push(format!("sign test led by node {leader}: {e}"));
+            self.problems.push(format!("sign test by {signers:?} (led by node {leader}): {e}"));
         }
-        self.sign_test.push(SignRow { leader, ok: outcome.is_ok(), error: outcome.err() });
+        self.sign_test.push(SignRow {
+            leader,
+            signers: signers.to_vec(),
+            ok: outcome.is_ok(),
+            error: outcome.err(),
+        });
     }
+}
+
+/// The `--sign-test` plan: every `t`-subset of `roster` (so every share is exercised, and every
+/// quorum that may one day have to sign is proven to), each led by a different node in turn.
+pub fn sign_test_plan(roster: &[u16], t: u16) -> Vec<(u16, Vec<u16>)> {
+    fn go(start: usize, roster: &[u16], k: usize, cur: &mut Vec<u16>, out: &mut Vec<Vec<u16>>) {
+        if cur.len() == k {
+            out.push(cur.clone());
+            return;
+        }
+        for i in start..roster.len() {
+            cur.push(roster[i]);
+            go(i + 1, roster, k, cur, out);
+            cur.pop();
+        }
+    }
+    let mut subsets = Vec::new();
+    if roster.is_empty() {
+        return Vec::new();
+    }
+    go(0, roster, usize::from(t), &mut Vec::new(), &mut subsets);
+    subsets.into_iter().enumerate().map(|(k, s)| (roster[k % roster.len()], s)).collect()
 }
 
 /// The `--sign-test` message for a key: `0x1220 ‖ SHA-256("rutli-verify-key/" ‖ ceremony_id ‖
@@ -352,11 +394,25 @@ mod tests {
         let (v, fp) = views([1u8; 32]);
         let mut r = check_views(KEY, &fp, &[1, 2, 3], 2, &v);
         let msg = verify_message("c", KEY);
-        r.record_signature(1, &msg, Err("UNAVAILABLE".into()));
-        r.record_signature(2, &msg, Ok(vec![0u8; 64]));
+        r.record_signature(1, &[1, 2], Err("UNAVAILABLE".into()));
+        r.record_signature(2, &[1, 3], Ok((msg.to_vec(), vec![0u8; 64])));
+        // A valid-looking reply over a message the operator did not expect is a failure too.
+        r.record_signature(3, &[2, 3], Ok((verify_message("other", KEY).to_vec(), vec![0u8; 64])));
         assert!(!r.ok);
-        assert_eq!(r.sign_test.iter().filter(|s| !s.ok).count(), 2);
+        assert_eq!(r.sign_test.iter().filter(|s| !s.ok).count(), 3);
         assert_eq!(&msg[..2], &[0x12, 0x20]);
         assert_ne!(verify_message("c", KEY), verify_message("d", KEY));
+    }
+
+    #[test]
+    fn the_plan_covers_every_quorum_and_rotates_the_leader() {
+        assert_eq!(
+            sign_test_plan(&[1, 2, 3], 2),
+            vec![(1, vec![1, 2]), (2, vec![1, 3]), (3, vec![2, 3])]
+        );
+        let plan = sign_test_plan(&[1, 2, 3, 4, 5], 3);
+        assert_eq!(plan.len(), 10);
+        let leaders: std::collections::BTreeSet<u16> = plan.iter().map(|(l, _)| *l).collect();
+        assert_eq!(leaders.len(), 5);
     }
 }

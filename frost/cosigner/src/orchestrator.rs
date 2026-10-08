@@ -198,6 +198,70 @@ pub async fn sign(node: &Arc<Node>, peers: &Peers, key_id: &str, message: &[u8])
     node.blocking(move |n| n.aggregate(&key_id, &message, &commitments, &shares)).await
 }
 
+/// The split ceremony's sign test (`Signer.CeremonySignTest`): sign the key's fixed test digest
+/// ([`Node::ceremony_test_message`], computed here from the key's provenance, never supplied by the
+/// caller) with **exactly** the quorum `signers` — no substitution if one of them fails — so
+/// `verify-key` can prove that every `t`-subset of cosigners signs. Returns (message, signature).
+///
+/// Deliberately separate from [`sign`]: the production path keeps its "first `t` responders"
+/// quorum selection untouched.
+pub async fn ceremony_sign_test(
+    node: &Arc<Node>,
+    peers: &Peers,
+    key_id: &str,
+    signers: &[u16],
+) -> Result<([u8; 34], [u8; 64])> {
+    let (message, threshold) = {
+        let key_id = key_id.to_owned();
+        node.blocking(move |n| Ok((n.ceremony_test_message(&key_id)?, n.threshold_for(&key_id)?)))
+            .await?
+    };
+    let wanted: std::collections::BTreeSet<Identifier> = signers
+        .iter()
+        .map(|&i| Identifier::try_from(i).map_err(DaemonError::Frost))
+        .collect::<Result<_>>()?;
+    if wanted.len() != signers.len() || wanted.len() != usize::from(threshold) {
+        return Err(DaemonError::Ceremony(format!(
+            "a sign-test quorum is exactly {threshold} distinct cosigners, got {signers:?}"
+        )));
+    }
+    let quorum: Vec<&Arc<dyn PeerApi>> =
+        peers.iter().filter(|p| wanted.contains(&p.identifier())).collect();
+    if quorum.len() != wanted.len() {
+        return Err(DaemonError::Ceremony(format!("{signers:?} are not all in this node's roster")));
+    }
+
+    let session_id = new_id("signtest");
+    let mut commitments: BTreeMap<Identifier, SigningCommitments> = BTreeMap::new();
+    for p in &quorum {
+        match p.sign_round1(key_id, &session_id).await {
+            Ok(c) => {
+                commitments.insert(p.identifier(), c);
+            }
+            Err(e) => {
+                abort_sign(&quorum, key_id, &session_id).await;
+                return Err(e);
+            }
+        }
+    }
+    let mut shares: BTreeMap<Identifier, SignatureShare> = BTreeMap::new();
+    for p in &quorum {
+        match p.sign_round2(key_id, &session_id, &message, &commitments).await {
+            Ok(share) => {
+                shares.insert(p.identifier(), share);
+            }
+            Err(e) => {
+                abort_sign(&quorum, key_id, &session_id).await;
+                return Err(e);
+            }
+        }
+    }
+    let key_id = key_id.to_owned();
+    let signature =
+        node.blocking(move |n| n.aggregate(&key_id, &message, &commitments, &shares)).await?;
+    Ok((message, signature))
+}
+
 /// Best-effort: tell each quorum member to drop the in-flight session so its round-1 nonces are
 /// freed now instead of at the pending-TTL sweep. Errors are swallowed — abort is a courtesy, and
 /// the per-session TTL is the correctness backstop. Aborting a session a peer already completed
