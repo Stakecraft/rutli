@@ -30,11 +30,11 @@ soak finds things. Exit criteria in `docs/testnet-soak.md`.
 
 | # | Milestone | Scope | Est. | Gate / deliverable |
 |---|---|---|---|---|
-| B0 | **Cutover spike** | Scratch JCE validator on DevNet. Export keys, bring up a new participant with `provider = kms` + Rütli driver, `init.identity.type = manual`, `RegisterKms*Key` for a DKG-born key under the same identifier. Prove the node starts, connects, signs topology. No new code: use a DKG-born namespace just to test the Canton path. | 2–3 d | **Go/no-go for the whole track.** If Canton refuses, stop and write up why. |
+| B0 | **Cutover spike** | On the soak validator `stakecraft-devnet-rutli-01`, whose keys already live in the cluster: stop the participant, give it a fresh database, start it with `init.identity.type = manual` and the same identifier, `RegisterKmsSigningKey("frost-namespace", NAMESPACE)` + the signing and `rutli-enc-…` keys by id, `init_id` under the existing namespace, then `export_acs`/`import_acs` from the old database. This is exactly the Canton half of a migration, with no key export and no new code. Backup first (`pg_dumpall` CronJob runs every 4 h; take one by hand). Logged in the soak log as a planned cutover drill. | 2–3 d | **Go/no-go for the whole track.** If Canton refuses, stop and write up why. Rollback: restore the old database. |
 | B1 | **Canton key parser** | `canton_key.rs`: parse `SigningPrivateKey` / `EncryptionPrivateKey` protobuf (DER / RAW), PKCS#8 PEM, `ExportKeyPair` output incl. password-protected. Shared by B2, B3, C1. | 1–1.5 d | Unit tests against keys exported from a 3.6.1 node. |
 | B2 | **Split ceremony** | Offline dealer: `split-key` turns an Ed25519 key into 2-of-3 FROST shares (`frost_ed25519::keys::split`, seed→scalar), verifies group key == Canton fingerprint, wraps each share to its cosigner with the existing per-recipient sealing. Per node: `import-share` under the create-once guard. `verify-key` + immediate `Refresh`. Runbook incl. destruction of the whole key. Driver unchanged. | 8–12 d | Signatures verify under the original Canton public key. DKG refused for an imported id. Refresh keeps the group key. |
 | B3 | **RSA import** | `import-key` accepts a Canton RSA-2048 export (via B1), not only Rütli's own envelope. Lets the encryption key be rotated to RSA on the old JCE node *before* cutover, per Digital Asset's procedure, then carried over. | 1–2 d | Import → replicate 3/3 → Canton decrypts. |
-| B4 | **Cutover rehearsal** | Full procedure on the scratch DevNet validator: rotate encryption to RSA on the old node, export, split, install, new participant, `RegisterKms*Key`, `export_acs`/`import_acs`, validator-app switch, old key cleanup. Written as `docs/migration.md`. | 2–3 d | Party IDs unchanged, wallet works, transfer in and out succeeds. |
+| B4 | **Cutover rehearsal** | Needs a JCE source node, so onboard a scratch JCE validator on DevNet (cheap, disposable). Target cluster: the existing soak cluster, with `frost.key-prefix` set so its ids do not collide with rutli-01's. Full procedure: rotate encryption to RSA on the old node, export, split, install, new participant, `RegisterKms*Key`, `export_acs`/`import_acs`, validator-app switch, old key cleanup. Written as `docs/migration.md`. | 2–3 d | Party IDs unchanged, wallet works, transfer in and out succeeds. |
 | B5 | **Docs fix** | Remove the three stale "unsupported" claims; state the exposure caveat: an imported namespace key once lived whole on a server and in backups, it is not "as strong as DKG". | 0.5 d | Can ship any time, do it first. |
 
 **Release: v0.4.0 "migrate existing nodes"** after B4. Total B0–B5: **15–22 engineer-days**.
@@ -77,7 +77,8 @@ engineering work is not the long pole; the audit's external lead time is. So:
 ## Sequence and timeline (one engineer, sequential)
 
 ```
-wk 1        B5 docs fix · B0 spike (gate) · book the audit · onboard scratch DevNet validator
+wk 1        B5 docs fix · B0 spike on rutli-01 (gate) · book the audit
+wk 4        onboard scratch JCE validator on DevNet for B4
 wk 2–4      B1 parser · B2 split ceremony · B3 RSA import
 wk 5        B4 rehearsal → v0.4.0 (audit code freeze) · start TestNet validator run
 wk 6–8      audit in progress · C1–C3 → v0.5.0
@@ -110,5 +111,5 @@ after B4. Offer: we migrate a scratch validator of theirs alongside ours, same r
 ## Open decisions
 
 - Auditor choice and earliest start date. Sets the 1.0 date.
-- Scratch DevNet validator for B0/B4: onboard a fresh one (recommended) rather than touching
-  `validator-stakecraft-validator-1`.
+- B0 runs on the soak validator (decided 2026-10-08). B4 needs a scratch JCE validator on
+  DevNet; `validator-stakecraft-validator-1` stays untouched.
