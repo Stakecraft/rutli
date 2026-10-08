@@ -15,6 +15,12 @@ pub struct TestPki {
     ca: rcgen::Certificate,
 }
 
+/// One test cluster CA per test binary, for tests that need several nodes of the same cluster.
+pub fn shared() -> &'static TestPki {
+    static PKI: std::sync::OnceLock<TestPki> = std::sync::OnceLock::new();
+    PKI.get_or_init(TestPki::new)
+}
+
 impl TestPki {
     pub fn new() -> Self {
         Self::with_alg(&rcgen::PKCS_ECDSA_P256_SHA256)

@@ -37,7 +37,6 @@ const T: u16 = 2;
 const KEY: &str = "frost-import-1220cb0e";
 const CEREMONY: &str = "b2-cluster-test";
 const MASTER: &[u8] = b"split ceremony cluster test master secret";
-const CLUSTER: &str = "plaintext-dev";
 
 /// The namespace key of B1's throwaway 3.6.1 node: (seed, raw public key, fingerprint).
 fn canton_namespace_key() -> ([u8; 32], [u8; 32], String) {
@@ -67,9 +66,9 @@ impl Site {
             threshold: T,
             max_signers: N,
             roster: (1..=N).collect(),
-            cluster_id: CLUSTER.into(),
+            cluster_id: pki::shared().cluster_id(),
         };
-        let signer = pki::TestPki::new().signer(&format!("cosigner{identifier}"));
+        let signer = pki::shared().signer(&format!("cosigner{identifier}"));
         Self { data_dir, ctx, signer }
     }
 
@@ -107,7 +106,12 @@ fn ceremony(root: &Path) -> (Vec<Site>, Vec<ShareBundle>, [u8; 32], String) {
     let bundles = requests
         .iter()
         .zip(&shares)
-        .map(|(r, s)| share_delivery::seal_share(r, s, &pkp, &fingerprint).unwrap())
+        .map(|(r, s)| {
+            // What the dealer does first: verify the request to the cluster CA.
+            let verified =
+                rutli_cosigner::request_auth::verify_request(r, pki::shared().ca_pem.as_bytes()).unwrap();
+            share_delivery::seal_share(&verified, s, &pkp, &fingerprint).unwrap()
+        })
         .collect();
     (sites, bundles, public, fingerprint)
 }

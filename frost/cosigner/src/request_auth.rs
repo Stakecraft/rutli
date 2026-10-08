@@ -239,8 +239,26 @@ impl NodeSigner {
 }
 
 /// Verify that `r` was signed by the cosigner it names, under the cluster CA `ca_pem` (the exact
-/// CA file the cosigners use — `cluster_id` is a hash of those bytes).
-pub fn verify_request(r: &RecipientRequest, ca_pem: &[u8]) -> Result<()> {
+/// CA file the cosigners use — `cluster_id` is a hash of those bytes). The returned
+/// [`VerifiedRequest`] is the only thing [`crate::share_delivery::seal_share`] accepts.
+pub fn verify_request(r: &RecipientRequest, ca_pem: &[u8]) -> Result<VerifiedRequest> {
+    check_request(r, ca_pem)?;
+    Ok(VerifiedRequest(r.clone()))
+}
+
+/// A recipient request that passed [`verify_request`]. It cannot be built any other way (the
+/// field is private to this module), so no caller can seal a share to an unverified request.
+#[derive(Debug, Clone)]
+pub struct VerifiedRequest(RecipientRequest);
+
+impl std::ops::Deref for VerifiedRequest {
+    type Target = RecipientRequest;
+    fn deref(&self) -> &RecipientRequest {
+        &self.0
+    }
+}
+
+fn check_request(r: &RecipientRequest, ca_pem: &[u8]) -> Result<()> {
     let expected_cluster = crate::wrap::cluster_id_from_ca(ca_pem);
     if r.cluster_id != expected_cluster {
         return Err(auth(format!(

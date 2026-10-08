@@ -479,7 +479,6 @@ mod tests {
 
     const KEY: &str = "frost-import-test";
     const CEREMONY: &str = "c-1";
-    const CLUSTER: &str = "cluster-under-test";
     const SEED: [u8; 32] = [3u8; 32];
 
     struct TestNode {
@@ -499,7 +498,7 @@ mod tests {
                 threshold: 2,
                 max_signers: 3,
                 roster: vec![1, 2, 3],
-                cluster_id: CLUSTER.into(),
+                cluster_id: crate::test_pki::shared().cluster_id(),
             };
             let sealer = Sealer::from_master_secret(b"share import test master", identifier);
             let keystore = KeyStore::open_with_sealer(
@@ -510,7 +509,7 @@ mod tests {
                 ))),
             )
             .unwrap();
-            let signer = crate::test_pki::TestPki::new().signer(&format!("cosigner{identifier}"));
+            let signer = crate::test_pki::shared().signer(&format!("cosigner{identifier}"));
             Self { _tmp: tmp, ctx, sealer, signer, keystore }
         }
 
@@ -533,7 +532,11 @@ mod tests {
         let bundles = requests
             .iter()
             .zip(&shares)
-            .map(|(r, s)| share_delivery::seal_share(r, s, &pkp, &fingerprint()).unwrap())
+            .map(|(r, s)| {
+                let ca = crate::test_pki::shared().ca_pem.as_bytes();
+                let verified = crate::request_auth::verify_request(r, ca).unwrap();
+                share_delivery::seal_share(&verified, s, &pkp, &fingerprint()).unwrap()
+            })
             .collect();
         (bundles, pkp)
     }
