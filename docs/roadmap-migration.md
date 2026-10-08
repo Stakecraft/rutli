@@ -17,6 +17,16 @@ namespace or any party ID.
   `EciesHkdfHmacSha256Aes128Cbc`.
 - The Global Synchronizer admits `EcP256`: Splice SVs use Canton's JCE defaults for static
   parameters on every network, and DevNet/TestNet validators run ECIES keys today.
+- **Migration keeps the namespace, not the participant ID.** A participant UID that was ever
+  onboarded cannot onboard again on the same synchronizer (`GrpcSequencerConnectService.scala:251-267`),
+  and a fresh database under an already-known UID replays history from registration, so an ACS
+  import on top double-creates contracts. DA's own `KmsMigrationIntegrationTest` uses a new
+  participant; Splice says participant ids cannot be reused. The working shape is: **new participant
+  UID under the same namespace, then move the parties** (Splice `newParticipantIdentifier` +
+  `migrateValidatorParty`). Party IDs survive because they live under the namespace. Found
+  2026-10-08 while writing the B0 runbook; deep-reasoner and Codex agree independently.
+- `RegisterKmsSigningKey` only fetches the public key through the driver and checks its spec; there
+  is no namespace or existing-identity check (`KmsPrivateCrypto.scala:78-104`).
 - Rütli today: Ed25519 keys are born by DKG only. No import of an existing key as shares, no
   ECIES hosted keys. Those are the gaps.
 
@@ -30,11 +40,11 @@ soak finds things. Exit criteria in `docs/testnet-soak.md`.
 
 | # | Milestone | Scope | Est. | Gate / deliverable |
 |---|---|---|---|---|
-| B0 | **Cutover spike** | On the soak validator `stakecraft-devnet-rutli-01`, whose keys already live in the cluster: stop the participant, give it a fresh database, start it with `init.identity.type = manual` and the same identifier, `RegisterKmsSigningKey("frost-namespace", NAMESPACE)` + the signing and `rutli-enc-…` keys by id, `init_id` under the existing namespace, then `export_acs`/`import_acs` from the old database. This is exactly the Canton half of a migration, with no key export and no new code. Backup first (`pg_dumpall` CronJob runs every 4 h; take one by hand). Logged in the soak log as a planned cutover drill. | 2–3 d | **Go/no-go for the whole track.** If Canton refuses, stop and write up why. Rollback: restore the old database. |
+| B0 | **Cutover spike** | On the soak validator `stakecraft-devnet-rutli-01`, whose keys already live in the cluster: new participant on a fresh database under a **new UID in the same namespace**, the three existing keys registered by KMS id (`RegisterKms*Key`, no key export, no new code), then the validator app re-onboards with an identities dump, `newParticipantIdentifier` and `migrateValidatorParty`, which moves the validator party and its contracts. This is the Canton and Splice half of a migration. Manual `pg_dumpall` first. Runbook: [b0-cutover-spike.md](b0-cutover-spike.md). Logged in the soak log as a planned cutover drill. | 2–3 d | **Go/no-go for the whole track.** If Canton or Splice refuses, stop and write up why. Rollback (point the releases back at the untouched old databases) only works **before** the migrator removes the old participant's trust certificate; after that, fix forward only. |
 | B1 | **Canton key parser** | `canton_key.rs`: parse `SigningPrivateKey` / `EncryptionPrivateKey` protobuf (DER / RAW), PKCS#8 PEM, `ExportKeyPair` output incl. password-protected. Shared by B2, B3, C1. | 1–1.5 d | Unit tests against keys exported from a 3.6.1 node. |
 | B2 | **Split ceremony** | Offline dealer: `split-key` turns an Ed25519 key into 2-of-3 FROST shares (`frost_ed25519::keys::split`, seed→scalar), verifies group key == Canton fingerprint, wraps each share to its cosigner with the existing per-recipient sealing. Per node: `import-share` under the create-once guard. `verify-key` + immediate `Refresh`. Runbook incl. destruction of the whole key. Driver unchanged. | 8–12 d | Signatures verify under the original Canton public key. DKG refused for an imported id. Refresh keeps the group key. |
 | B3 | **RSA import** | `import-key` accepts a Canton RSA-2048 export (via B1), not only Rütli's own envelope. Lets the encryption key be rotated to RSA on the old JCE node *before* cutover, per Digital Asset's procedure, then carried over. | 1–2 d | Import → replicate 3/3 → Canton decrypts. |
-| B4 | **Cutover rehearsal** | Needs a JCE source node, so onboard a scratch JCE validator on DevNet (cheap, disposable). Target cluster: the existing soak cluster, with `frost.key-prefix` set so its ids do not collide with rutli-01's. Full procedure: rotate encryption to RSA on the old node, export, split, install, new participant, `RegisterKms*Key`, `export_acs`/`import_acs`, validator-app switch, old key cleanup. Written as `docs/migration.md`. | 2–3 d | Party IDs unchanged, wallet works, transfer in and out succeeds. |
+| B4 | **Cutover rehearsal** | Needs a JCE source node, so onboard a scratch JCE validator on DevNet (cheap, disposable). Target cluster: the existing soak cluster, with `frost.key-prefix` set so its ids do not collide with rutli-01's. Full procedure: rotate encryption to RSA on the old node, export, split, install, new participant under a new UID in the same namespace, `RegisterKms*Key`, Splice re-onboard with identities dump + `migrateValidatorParty` (the B0 shape), old key cleanup incl. the offboarded member's owner-to-key mapping and every backup holding the plaintext key. Written as `docs/migration.md`. | 2–3 d | Party IDs unchanged, wallet works, transfer in and out succeeds. |
 | B5 | **Docs fix** | Remove the three stale "unsupported" claims; state the exposure caveat: an imported namespace key once lived whole on a server and in backups, it is not "as strong as DKG". | 0.5 d | Can ship any time, do it first. |
 
 **Release: v0.4.0 "migrate existing nodes"** after B4. Total B0–B5: **15–22 engineer-days**.
@@ -140,8 +150,11 @@ former's decomposition with part of the latter's buffer.
 
 ## Risks, by severity
 
-1. **B0 fails.** Canton 3.6.1 may not accept a driver-KMS key registered by id for an existing
-   namespace. DA documents the path for AWS/GCP only. Mitigation: it is the first thing we do.
+1. **B0 fails.** The Canton-side risk (refusing a KMS key registered by id for an existing
+   namespace) is retired at code level. What remains is Splice: the 0.9.0 migrator and chart are
+   unverified (scoping read 0.5.5), the point of no return is early and permanent, the party is
+   hosted nowhere for a short window, the Scan-sourced import covers only contracts shared with the
+   DSO, and the new member starts with no purchased traffic. Mitigation: B0 is first, on the soak.
 2. **Seed→scalar in B2.** `SigningKey::deserialize` takes a scalar, Canton exports a seed. Tests
    catch it; a wrong conversion signs under a different key, loudly.
 3. **ECIES byte-exactness in C2.** Avoided by reusing BouncyCastle's own engine rather than
@@ -157,5 +170,5 @@ after B4. Offer: we migrate a scratch validator of theirs alongside ours, same r
 ## Open decisions
 
 - Auditor choice and earliest start date. Sets the 1.0 date.
-- B0 runs on the soak validator (decided 2026-10-08). B4 needs a scratch JCE validator on
+- B0 runs on the soak validator in the new-UID shape ("B0-B", decided 2026-10-08; the same-UID replay variant was dropped). B4 needs a scratch JCE validator on
   DevNet; `validator-stakecraft-validator-1` stays untouched.
