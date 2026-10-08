@@ -47,6 +47,8 @@ metrics-exporter-prometheus = { workspace = true }
 libc = { workspace = true }
 # verify-key checks every test signature with verify_strict, independently of the cluster.
 ed25519-dalek = { workspace = true }
+# PEM bodies of the mTLS cert/key that sign split-ceremony recipient requests (request_auth.rs).
+base64 = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }

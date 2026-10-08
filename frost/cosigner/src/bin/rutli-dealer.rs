@@ -70,6 +70,16 @@ enum Command {
         /// One `share-recipient` request per cosigner (repeat the flag).
         #[arg(long = "recipient", value_name = "FILE", required = true)]
         recipients: Vec<PathBuf>,
+        /// The cluster CA certificate — the exact file the cosigners use (`tls.ca_cert`). Every
+        /// request must be signed by the mTLS key of the cosigner it names, certified by this CA,
+        /// and its cluster id must be this CA's.
+        #[arg(long, value_name = "FILE")]
+        ca_cert: PathBuf,
+        /// The SAS of every request, comma-separated in identifier order, as witnesses read them
+        /// in each pod (`share-recipient` prints `SAS node <i> <sas>`). Without this flag the
+        /// dealer asks for each one on the terminal.
+        #[arg(long, value_name = "SAS1,SAS2,…")]
+        confirm_sas: Option<String>,
         /// Directory for the bundles and the dealer record. Created 0700 if missing; existing
         /// output files are never overwritten.
         #[arg(long)]
@@ -98,6 +108,8 @@ fn main() {
             key_id,
             threshold,
             recipients,
+            ca_cert,
+            confirm_sas,
             out_dir,
             any_usage,
             allow_swap,
@@ -109,6 +121,8 @@ fn main() {
             key_id,
             threshold,
             recipients,
+            ca_cert,
+            confirm_sas,
             out_dir,
             any_usage,
             allow_swap,
@@ -130,6 +144,8 @@ struct SplitKey {
     key_id: String,
     threshold: u16,
     recipients: Vec<PathBuf>,
+    ca_cert: PathBuf,
+    confirm_sas: Option<String>,
     out_dir: PathBuf,
     any_usage: bool,
     allow_swap: bool,
@@ -172,7 +188,10 @@ fn split_key(a: SplitKey) -> Result<()> {
     if !(expect.len() == 68 && expect.starts_with("1220") && expect.chars().all(|c| c.is_ascii_hexdigit())) {
         return Err(refuse(format!("--expect-fingerprint {expect:?} is not a 1220… Canton fingerprint")));
     }
-    let requests = read_recipients(&a.recipients)?;
+    let ca_pem = std::fs::read(&a.ca_cert)
+        .map_err(|e| refuse(format!("--ca-cert {}: {e}", a.ca_cert.display())))?;
+    let requests = read_recipients(&a.recipients, &ca_pem)?;
+    confirm_sas(&requests, a.confirm_sas.as_deref())?;
     let first = &requests[0];
     if first.key_id != a.key_id {
         return Err(refuse(format!(
@@ -272,7 +291,12 @@ fn split_key(a: SplitKey) -> Result<()> {
         pkp_digest: hex::encode(rutli_frost_core::dealer::pkp_digest(&pkp)?),
         recipients: requests
             .iter()
-            .map(|r| RecordRecipient { identifier: r.identifier, recipient_pub: r.recipient_pub.clone() })
+            .map(|r| RecordRecipient {
+                identifier: r.identifier,
+                recipient_pub: r.recipient_pub.clone(),
+                sas: rutli_cosigner::request_auth::sas(r),
+                signer_chain: r.signer_chain.clone(),
+            })
             .collect(),
         bundles: outputs[..bundles.len()]
             .iter()
@@ -325,16 +349,24 @@ struct DealerRecord {
 struct RecordRecipient {
     identifier: u16,
     recipient_pub: String,
+    /// The SAS confirmed at Gate 0.
+    sas: String,
+    /// The certificate chain that signed the request (base64 DER, leaf first).
+    signer_chain: Vec<String>,
 }
 
-/// Read every request and check they describe one ceremony: same key, ceremony, cluster, threshold,
-/// size and roster; one request per roster member, no duplicates, no strays.
-fn read_recipients(paths: &[PathBuf]) -> Result<Vec<RecipientRequest>> {
+/// Read every request, verify it was minted by the cosigner it names (signature by that node's mTLS
+/// key, certified by the cluster CA, cluster id = the CA's — `request_auth::verify_request`), and
+/// check they describe one ceremony: same key, ceremony, cluster, threshold, size and roster; one
+/// request per roster member, no duplicates, no strays.
+fn read_recipients(paths: &[PathBuf], ca_pem: &[u8]) -> Result<Vec<RecipientRequest>> {
     let mut requests = Vec::with_capacity(paths.len());
     for p in paths {
         let r: RecipientRequest = serde_json::from_slice(&std::fs::read(p)?)
             .map_err(|e| refuse(format!("{} is not a share-recipient request: {e}", p.display())))?;
         r.validate().map_err(|e| refuse(format!("{}: {e}", p.display())))?;
+        rutli_cosigner::request_auth::verify_request(&r, ca_pem)
+            .map_err(|e| refuse(format!("{}: {e} — do not seal to it; see the runbook", p.display())))?;
         requests.push(r);
     }
     let first = requests.first().ok_or_else(|| refuse("no --recipient given".into()))?.clone();
@@ -366,6 +398,52 @@ fn read_recipients(paths: &[PathBuf]) -> Result<Vec<RecipientRequest>> {
     }
     requests.sort_by_key(|r| r.identifier);
     Ok(requests)
+}
+
+/// Gate 0: every request's SAS must match what witnesses read in the pod, over a channel that did
+/// not carry the request files. From `--confirm-sas` (identifier order), or typed on the terminal.
+fn confirm_sas(requests: &[RecipientRequest], given: Option<&str>) -> Result<()> {
+    use std::io::{BufRead, IsTerminal};
+    let expected: Vec<(u16, String)> =
+        requests.iter().map(|r| (r.identifier, rutli_cosigner::request_auth::sas(r))).collect();
+    for (id, sas) in &expected {
+        println!("request node {id}: SAS {sas}");
+    }
+    let typed: Vec<String> = match given {
+        Some(list) => list.split(',').map(|s| s.trim().to_ascii_lowercase()).collect(),
+        None => {
+            if !std::io::stdin().is_terminal() {
+                return Err(refuse(
+                    "confirm every request's SAS: pass --confirm-sas or run on a terminal".into(),
+                ));
+            }
+            let mut out = Vec::new();
+            let stdin = std::io::stdin();
+            for (id, _) in &expected {
+                eprint!("SAS for node {id}, as read in its pod by the witnesses: ");
+                let mut line = String::new();
+                stdin.lock().read_line(&mut line)?;
+                out.push(line.trim().to_ascii_lowercase());
+            }
+            out
+        }
+    };
+    if typed.len() != expected.len() {
+        return Err(refuse(format!(
+            "{} SAS given, {} requests — one per node, in identifier order",
+            typed.len(),
+            expected.len()
+        )));
+    }
+    for ((id, sas), t) in expected.iter().zip(&typed) {
+        if sas != t {
+            return Err(refuse(format!(
+                "SAS mismatch for node {id}: the request file says {sas}, the pod said {t} — the \
+                 request was replaced on its way here. STOP: do not seal; see the runbook"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Hex text → bytes, tolerating whitespace and a psql `\x` prefix.

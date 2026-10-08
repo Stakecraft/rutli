@@ -30,16 +30,28 @@
 //! there is no per-node binding at all. A per-ceremony key that lives only until install has none
 //! of these problems, and the public half travels in the request, so the dealer needs no secret.
 //!
-//! # What the envelope does not do
+//! # Forged requests (dealer side): the request is signed
+//!
+//! The dangerous forgery runs the other way. A request names the key the dealer seals a real share
+//! to; whoever substitutes `t` request files between the pods and the dealer receives `t` real
+//! shares and reconstructs the key. So every request is signed with the node's mTLS leaf key and
+//! carries its certificate chain, and the dealer refuses any request that does not verify up to the
+//! cluster CA as coming from the cosigner it names ([`crate::request_auth`]). Independently, each
+//! request has a short authentication string (SAS) that witnesses read from the pod and the dealer
+//! operator must confirm before anything is sealed (Gate 0 of the runbook). Defeating both needs a
+//! CA-issued cosigner key **and** a witness who confirms the wrong SAS.
+//!
+//! # Forged bundles (node side): the envelope does not authenticate the dealer
 //!
 //! Sealing to a public key gives confidentiality, not sender authentication: anyone who sees a
 //! request can mint a bundle that opens. Authenticity comes from the checks around it — the group
 //! key must equal the Canton key the operator expects (`--expect-fingerprint`), the share must pass
 //! VSS against the package's commitment and interpolate with it, and `verify-key` compares the
-//! package digest across every node and signs with the result. Someone who forges bundles without
-//! the real key can know at most `t − 1` shares of a sharing whose secret they do not know; the
-//! result fails verification (different digests across nodes) and cannot sign — a denial of
-//! service at the ceremony, never a key under their control.
+//! package digest across every node and signs with every `t`-subset. Someone who forges bundles
+//! without the real key can know at most `t − 1` shares of a sharing whose secret they do not know;
+//! the result fails verification and cannot sign. But a bundle that fails authentication at install
+//! also means *someone else had a way into the path*: treat it as a possible exposure of the real
+//! bundles and investigate before any re-deal (runbook failure table).
 
 use std::path::{Path, PathBuf};
 
@@ -120,6 +132,14 @@ pub struct RecipientRequest {
     pub roster: Vec<u16>,
     /// Hex X25519 public key, minted for this ceremony.
     pub recipient_pub: String,
+    /// How `signature` was made: `ecdsa-p256-sha256`, `ecdsa-p384-sha384`, `ed25519` or
+    /// `rsa-pkcs1-sha256` (the node's mTLS leaf key type).
+    pub signature_alg: String,
+    /// The node's mTLS certificate chain, base64 DER, leaf first.
+    pub signer_chain: Vec<String>,
+    /// Base64 signature by the leaf key over [`crate::request_auth::canonical_bytes`] — every field
+    /// above `signature_alg`. Verified by the dealer against the cluster CA.
+    pub signature: String,
 }
 
 impl RecipientRequest {
@@ -204,12 +224,14 @@ pub fn recipient_path(data_dir: &Path, key_id: &str) -> Result<PathBuf> {
     Ok(ceremony_dir(data_dir).join(format!("{key_id}.recipient")))
 }
 
-/// Mint a recipient keypair for `template` (all fields but `recipient_pub`, which is filled in),
-/// store the secret sealed, and return the public request. Refuses to replace a pending recipient
-/// file unless `replace` — a second request would orphan a bundle the dealer may already have made.
+/// Mint a recipient keypair for `template` (all fields but `recipient_pub` and the signature, which
+/// are filled in), sign the request with the node's mTLS identity, store the secret sealed, and
+/// return the public request. Refuses to replace a pending recipient file unless `replace` — a
+/// second request would orphan a bundle the dealer may already have made.
 pub fn create_recipient(
     data_dir: &Path,
     sealer: &Sealer,
+    signer: &crate::request_auth::NodeSigner,
     mut template: RecipientRequest,
     replace: bool,
 ) -> Result<RecipientRequest> {
@@ -225,6 +247,7 @@ pub fn create_recipient(
     let secret = StaticSecret::random_from_rng(OsRng);
     template.recipient_pub = hex::encode(PublicKey::from(&secret).as_bytes());
     template.validate()?;
+    signer.sign(&mut template)?;
 
     let file = RecipientSecretFile {
         v: 1,
@@ -233,7 +256,7 @@ pub fn create_recipient(
         secret: hex::encode(secret.as_bytes()),
         created_at: crate::hosted::now_secs(),
     };
-    let plain = Zeroizing::new(serde_json::to_vec(&file)?);
+    let plain = to_json_zeroizing(&file)?;
     drop(Zeroizing::new(file.secret)); // wipe the hex copy
     let sealed = sealer.seal(&plain)?;
     write_private_atomic(&path, &sealed)?;
@@ -374,7 +397,7 @@ pub fn seal_share(
         canton_fingerprint,
         &digest,
     );
-    let plain = Zeroizing::new(serde_json::to_vec(share)?);
+    let plain = to_json_zeroizing(share)?;
     let (epk, ct) = wrap::seal_to(&request.public_key()?, &plain, &aad)?;
     Ok(ShareBundle {
         v: BUNDLE_VERSION,
@@ -521,6 +544,29 @@ impl ShareBundle {
     }
 }
 
+/// JSON of a secret-bearing value into a zeroize-on-drop buffer that is never reallocated: the
+/// exact size is measured first, so no partially filled copy is freed unwiped as the buffer grows.
+/// (serde_json's own per-field temporaries — e.g. a share's hex string — are outside our reach;
+/// the dealer's process isolation covers those.)
+pub fn to_json_zeroizing<T: Serialize>(value: &T) -> Result<Zeroizing<Vec<u8>>> {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0 += b.len();
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, value)?;
+    let mut buf = Zeroizing::new(Vec::with_capacity(count.0));
+    serde_json::to_writer(&mut *buf, value)?;
+    debug_assert_eq!(buf.capacity(), count.0, "the buffer must not have been reallocated");
+    Ok(buf)
+}
+
 fn ident(id: u16) -> Result<Identifier> {
     Identifier::try_from(id).map_err(DaemonError::Frost)
 }
@@ -595,6 +641,10 @@ mod tests {
         Sealer::from_master_secret(b"share delivery test master secret", node)
     }
 
+    fn signer(node: u16) -> crate::request_auth::NodeSigner {
+        crate::test_pki::TestPki::new().signer(&format!("cosigner{node}"))
+    }
+
     fn template(identifier: u16) -> RecipientRequest {
         RecipientRequest {
             v: RECIPIENT_VERSION,
@@ -607,6 +657,9 @@ mod tests {
             max_signers: 3,
             roster: vec![1, 2, 3],
             recipient_pub: String::new(),
+            signature_alg: String::new(),
+            signer_chain: Vec::new(),
+            signature: String::new(),
         }
     }
 
@@ -619,7 +672,7 @@ mod tests {
     impl Node {
         fn new(id: u16) -> Self {
             let dir = tempfile::tempdir().unwrap();
-            let request = create_recipient(dir.path(), &sealer(id), template(id), false).unwrap();
+            let request = create_recipient(dir.path(), &sealer(id), &signer(id), template(id), false).unwrap();
             Self { dir, id, request }
         }
         fn state(&self) -> Result<RecipientState> {
@@ -759,7 +812,7 @@ mod tests {
         assert!(nodes[0].state().is_err(), "no secret, no replay");
         assert!(!delete_recipient(nodes[0].dir.path(), KEY).unwrap(), "idempotent");
         // A NEW recipient for the same key cannot open the old bundle either.
-        let fresh = create_recipient(nodes[0].dir.path(), &sealer(1), template(1), false).unwrap();
+        let fresh = create_recipient(nodes[0].dir.path(), &sealer(1), &signer(1), template(1), false).unwrap();
         assert_ne!(fresh.recipient_pub, nodes[0].request.recipient_pub);
         assert!(bundles[0].open(&nodes[0].state().unwrap()).is_err());
     }
@@ -787,9 +840,9 @@ mod tests {
     #[test]
     fn a_pending_recipient_is_not_replaced_unless_asked() {
         let node = Node::new(1);
-        let err = create_recipient(node.dir.path(), &sealer(1), template(1), false).unwrap_err();
+        let err = create_recipient(node.dir.path(), &sealer(1), &signer(1), template(1), false).unwrap_err();
         assert!(err.to_string().contains("already pending"), "{err}");
-        let replaced = create_recipient(node.dir.path(), &sealer(1), template(1), true).unwrap();
+        let replaced = create_recipient(node.dir.path(), &sealer(1), &signer(1), template(1), true).unwrap();
         assert_ne!(replaced.recipient_pub, node.request.recipient_pub);
         assert_eq!(node.state().unwrap().request, replaced);
     }

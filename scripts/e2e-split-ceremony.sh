@@ -105,18 +105,37 @@ step "DKG is refused for the import id before anything is installed"
 expect_dkg_refused "reserved"
 
 step "1. share-recipient on every node (the running daemons share the data dir, as under kubectl exec)"
+SAS=()
 for i in 1 2 3; do
-  cli --config "$WORK/c$i.json" share-recipient --key-id "$KEY_ID" --ceremony-id "$CEREMONY" \
-    --out "$WORK/r$i.json" >/dev/null
-  jq -e --arg k "$KEY_ID" '.key_id == $k and .identifier > 0' "$WORK/r$i.json" >/dev/null
+  out="$(cli --config "$WORK/c$i.json" share-recipient --key-id "$KEY_ID" --ceremony-id "$CEREMONY" \
+    --out "$WORK/r$i.json")"
+  jq -e --arg k "$KEY_ID" '.key_id == $k and .identifier > 0 and (.signer_chain | length) > 0' \
+    "$WORK/r$i.json" >/dev/null
+  # Gate 0: the SAS as printed in the pod (the witnesses' independent channel).
+  SAS+=("$(awk -v n="$i" '$1 == "SAS" && $3 == n {print $4}' <<<"$out")")
+  [ -n "${SAS[$((i - 1))]}" ] || fail "share-recipient on node $i printed no SAS"
 done
+SAS_LIST="$(IFS=,; echo "${SAS[*]}")"
+echo "SAS: $SAS_LIST"
+
+# A laptop has swap (and macOS cannot be checked): --allow-swap. The runbook's live-boot host does not.
+dealer() {
+  "$DEALER" split-key --in "$VEC/namespace.export-pw.bin" --password-env E2E_EXPORT_PASSWORD \
+    --expect-fingerprint "$FP" --key-id "$KEY_ID" --threshold 2 --ca-cert "$WORK/certs/ca.crt" \
+    --recipient "$WORK/$1.json" --recipient "$WORK/r2.json" --recipient "$WORK/r3.json" \
+    --out-dir "$WORK/$2" --allow-swap --confirm-sas "$3"
+}
+
+step "   a substituted request is refused (signature), whatever SAS the witnesses were shown"
+jq --arg p "$(openssl rand -hex 32)" '.recipient_pub = $p' "$WORK/r1.json" >"$WORK/r1-forged.json"
+if dealer r1-forged dealer-forged "$SAS_LIST" >"$WORK/forged.out" 2>&1; then fail "dealer accepted a forged request"; fi
+grep -q "bad request signature" "$WORK/forged.out" || fail "forged request refused for the wrong reason: $(cat "$WORK/forged.out")"
+if dealer r1 dealer-forged "0000000000000000,${SAS[1]},${SAS[2]}" >"$WORK/sas.out" 2>&1; then fail "dealer accepted a wrong SAS"; fi
+grep -q "SAS mismatch" "$WORK/sas.out" || fail "wrong SAS refused for the wrong reason: $(cat "$WORK/sas.out")"
+[ -e "$WORK/dealer-forged" ] && fail "a refused dealer run left output behind"
 
 step "2. Dealer: split the Canton namespace key ${FP}"
-# A laptop has swap (and macOS cannot be checked): --allow-swap. The runbook's live-boot host does not.
-"$DEALER" split-key --in "$VEC/namespace.export-pw.bin" --password-env E2E_EXPORT_PASSWORD \
-  --expect-fingerprint "$FP" --key-id "$KEY_ID" --threshold 2 \
-  --recipient "$WORK/r1.json" --recipient "$WORK/r2.json" --recipient "$WORK/r3.json" \
-  --out-dir "$WORK/dealer" --allow-swap
+dealer r1 dealer "$SAS_LIST"
 DIGEST="$(jq -r .pkp_digest "$WORK/dealer/dealer-record.json")"
 GROUP="$(jq -r .group_verifying_key "$WORK/dealer/dealer-record.json")"
 

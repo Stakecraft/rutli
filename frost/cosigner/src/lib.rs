@@ -25,6 +25,7 @@ pub mod node;
 pub mod orchestrator;
 pub mod peer;
 pub mod ratelimit;
+pub mod request_auth;
 pub mod seal;
 pub mod service;
 pub mod share_delivery;
@@ -41,6 +42,13 @@ pub mod wrap;
 pub mod pb {
     tonic::include_proto!("rutli.cosigner.v1");
 }
+
+// The test PKI helper is shared with the integration tests, which name this crate by its name.
+#[cfg(test)]
+extern crate self as rutli_cosigner;
+#[cfg(test)]
+#[path = "../tests/common/pki.rs"]
+pub(crate) mod test_pki;
 
 pub use error::DaemonError;
 pub type Result<T> = std::result::Result<T, DaemonError>;
