@@ -5,13 +5,15 @@
 //!
 //! This crate contains the pure protocol logic each cosigner runs:
 //!
-//! - [`dkg`] — distributed key generation. The group key is *born distributed*; the full private
-//!   key never exists anywhere. (Canton's namespace key cannot be rotated and existing nodes
-//!   cannot migrate into KMS mode, so keys must be created inside the cluster — there is no
-//!   "shard an existing key" path, by design.)
+//! - [`dkg`] — distributed key generation, the default. The group key is *born distributed*; the
+//!   full private key never exists anywhere.
+//! - [`dealer`] — a one-time trusted-dealer split of an **existing** Ed25519 key, for migrating a
+//!   Canton node's key into a cluster without changing its namespace (milestone B2). Strictly
+//!   weaker than DKG: that key existed whole on the old node and in its backups before the split.
 //! - [`session`] — the two-round signing flow (commit → sign → aggregate) producing a standard
-//!   RFC 8032 Ed25519 signature, byte-identical to a single-signer one. Canton's verifier — like
-//!   any stock Ed25519 verifier — accepts it unchanged.
+//!   RFC 8032 Ed25519 signature. It is format-identical to a single-signer one, not
+//!   value-identical (FROST's nonce is random, RFC 8032's is derived from the message), and
+//!   Canton's verifier — like any stock Ed25519 verifier — accepts it unchanged.
 //! - [`nonce_store`] — a crash-safe single-use guard for signing nonces. Reusing a round-1 nonce
 //!   across two messages leaks the participant's key share; the store persists a session marker
 //!   *before* any share leaves the process, so not even a crash+restart can lead to reuse.
@@ -26,6 +28,7 @@
 // Err variant would hurt readability more than it helps here.
 #![allow(clippy::result_large_err)]
 
+pub mod dealer;
 pub mod dkg;
 pub mod nonce_store;
 pub mod refresh;
@@ -56,6 +59,10 @@ pub enum CoreError {
 
     #[error("ceremony called out of order: {0}")]
     InvalidCeremonyState(&'static str),
+
+    /// A trusted-dealer split or a public key package failed a check. Never carries key material.
+    #[error("dealer: {0}")]
+    Dealer(String),
 
     #[error("io: {0}")]
     Io(#[from] std::io::Error),

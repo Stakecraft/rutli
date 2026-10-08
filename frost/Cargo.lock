@@ -1919,10 +1919,13 @@ dependencies = [
  "frost-ed25519",
  "hex",
  "rand 0.8.6",
+ "rutli-canton-key",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror 2.0.18",
+ "zeroize",
 ]
 
 [[package]]

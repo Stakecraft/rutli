@@ -14,7 +14,13 @@ thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 hex = { workspace = true }
+# The dealer (dealer.rs) expands an RFC 8032 seed with dalek's own code and checks every split
+# with `verify_strict`; sha2 digests the public key package. All already in Cargo.lock.
+ed25519-dalek = { workspace = true }
+sha2 = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
-ed25519-dalek = { workspace = true }
 tempfile = "3"
+# B1's real Canton 3.6.1 key vectors, for the dealer tests.
+rutli-canton-key = { path = "../canton-key" }
