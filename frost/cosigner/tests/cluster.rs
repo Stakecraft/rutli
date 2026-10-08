@@ -297,6 +297,63 @@ async fn dkg_refuses_when_the_key_already_exists() {
 }
 
 #[tokio::test]
+async fn dkg_refuses_ids_reserved_for_imported_keys_on_every_path() {
+    // Before any node has imported anything: the id is reserved, not merely taken.
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = cluster(&tmp);
+    for id in ["frost-import-1220cb0e", "p1-frost-import-x"] {
+        let err = run_dkg(&peers, id).await.unwrap_err();
+        assert!(matches!(err, DaemonError::ReservedKeyId(_)), "got {err:?}");
+        let err = nodes[1].dkg_part1("d", id).unwrap_err();
+        assert!(matches!(err, DaemonError::ReservedKeyId(_)), "got {err:?}");
+        let err = nodes[2].ceremony_fence("d", id, "dkg").unwrap_err();
+        assert!(matches!(err, DaemonError::ReservedKeyId(_)), "got {err:?}");
+        assert!(!nodes.iter().any(|n| n.has_key(id)));
+    }
+    // A refresh fence on such an id is fine (that is how an imported key is refreshed).
+    nodes[0].ceremony_fence("r", "frost-import-x", "refresh").unwrap();
+    nodes[0].ceremony_release("r", "frost-import-x");
+}
+
+#[tokio::test]
+async fn refresh_carries_a_dealt_keys_origin_and_counts_refreshes() {
+    use rutli_cosigner::keystore::{KeyOrigin, Share, ORIGIN_DEALER_SPLIT};
+    const IMPORTED: &str = "frost-import-refresh";
+    let tmp = tempfile::tempdir().unwrap();
+    let seed = [11u8; 32];
+    let (shares, pkp) =
+        rutli_frost_core::dealer::split_ed25519_seed(&seed, &[1, 2, 3], T).unwrap();
+    let origin = KeyOrigin {
+        kind: ORIGIN_DEALER_SPLIT.into(),
+        ceremony_id: "c".into(),
+        canton_fingerprint: "1220".into(),
+        installed_at: 1,
+        refresh_count: 0,
+    };
+    for (i, s) in shares.iter().enumerate() {
+        let ks = KeyStore::open(tmp.path().join(format!("node-{}", i + 1))).unwrap();
+        let key_package = frost_ed25519::keys::KeyPackage::try_from(s.clone()).unwrap();
+        ks.create(IMPORTED, &Share { key_package, public_key_package: pkp.clone(), origin: Some(origin.clone()) })
+            .unwrap();
+    }
+    let (_nodes, peers) = cluster(&tmp);
+    let public = rutli_frost_core::dealer::public_key_from_seed(&seed);
+    assert_eq!(run_refresh(&peers, IMPORTED).await.unwrap(), public);
+    assert_eq!(run_refresh(&peers, IMPORTED).await.unwrap(), public);
+    for i in 1..=N {
+        let ks = KeyStore::open(tmp.path().join(format!("node-{i}"))).unwrap();
+        let got = ks.load(IMPORTED).unwrap().origin.expect("origin survives refresh");
+        assert_eq!(got, KeyOrigin { refresh_count: 2, ..origin.clone() });
+        assert!(ks.dealt_keys_never_refreshed().unwrap().is_empty());
+    }
+    // A DKG key stays origin-less through a refresh.
+    run_dkg(&peers, KEY_ID).await.unwrap();
+    run_refresh(&peers, KEY_ID).await.unwrap();
+    let ks = KeyStore::open(tmp.path().join("node-1")).unwrap();
+    assert_eq!(ks.load(KEY_ID).unwrap().origin, None);
+}
+
+#[tokio::test]
 async fn refresh_refuses_a_concurrent_ceremony_for_the_same_key() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = cluster(&tmp);

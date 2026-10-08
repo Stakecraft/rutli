@@ -24,7 +24,31 @@ use crate::{DaemonError, Result};
 pub struct Share {
     pub key_package: frost::keys::KeyPackage,
     pub public_key_package: frost::keys::PublicKeyPackage,
+    /// Where the key came from. `None` — every file written before the split ceremony existed, and
+    /// every DKG key since — means it was born distributed by DKG. Inside the sealed envelope, so
+    /// backup/restore carry it unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<KeyOrigin>,
 }
+
+/// Provenance of a share that did not come from DKG.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyOrigin {
+    /// [`ORIGIN_DEALER_SPLIT`]: installed by `import-share` from a trusted-dealer split of an
+    /// existing Canton key (docs/split-ceremony.md).
+    pub kind: String,
+    pub ceremony_id: String,
+    pub canton_fingerprint: String,
+    /// Seconds since the Unix epoch.
+    pub installed_at: u64,
+    /// Completed proactive refreshes since install. Zero means the shares are still the ones the
+    /// dealer handed out — every copy of a dealt bundle, and the dealer's memory, still combine
+    /// with the live shares. The daemon warns about such keys at startup.
+    #[serde(default)]
+    pub refresh_count: u64,
+}
+
+pub const ORIGIN_DEALER_SPLIT: &str = "dealer-split";
 
 /// What a key file holds. FROST shares and cluster-hosted whole keys live in the *same* directory
 /// and the same sealed envelope, distinguished by a `kind` tag in the plaintext.
@@ -146,6 +170,61 @@ impl KeyStore {
 
     pub fn save(&self, key_id: &str, share: &Share) -> Result<()> {
         self.write_sealed(key_id, &serde_json::to_vec_pretty(share)?)
+    }
+
+    /// Persist a **new** share: fails with [`DaemonError::KeyExists`] if any file already exists
+    /// for `key_id`, atomically — two racing creates (a DKG and an `import-share`, two imports)
+    /// cannot both succeed and neither can overwrite the other. Same durability as [`save`]: the
+    /// sealed bytes go to a uniquely named temp file (fsynced), which is hard-linked into place —
+    /// `link(2)` refuses an existing target, unlike `rename(2)` — then the directory is fsynced.
+    ///
+    /// [`save`]: KeyStore::save
+    pub fn create(&self, key_id: &str, share: &Share) -> Result<()> {
+        let path = self.path(key_id)?;
+        self.touch(&path);
+        let plain = zeroize::Zeroizing::new(serde_json::to_vec_pretty(share)?);
+        let bytes = match &self.sealer {
+            Some(s) => s.seal(&plain)?,
+            None => plain.to_vec(),
+        };
+        // A dotfile: never a key file (ids are [A-Za-z0-9_-]+), skipped by backup and the probe.
+        let tmp = self.dir.join(format!(".create-{key_id}-{}.tmp", uuid::Uuid::new_v4()));
+        {
+            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+            f.write_all(&bytes)?;
+            f.sync_all()?;
+        }
+        let linked = std::fs::hard_link(&tmp, &path);
+        let _ = std::fs::remove_file(&tmp);
+        match linked {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(DaemonError::KeyExists(key_id.to_string()))
+            }
+            Err(e) => return Err(e.into()),
+        }
+        std::fs::File::open(&self.dir)?.sync_all()?;
+        Ok(())
+    }
+
+    /// FROST keys installed by the split ceremony that have not been refreshed since: their live
+    /// shares are still the dealt ones. Unreadable files are skipped (they are reported elsewhere).
+    pub fn dealt_keys_never_refreshed(&self) -> Result<Vec<String>> {
+        self.touch(&self.dir);
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Some(key_id) = name.strip_suffix(".json") else { continue };
+            if let Ok(Record::Frost(share)) = self.load_record(key_id) {
+                if share.origin.as_ref().is_some_and(|o| o.refresh_count == 0) {
+                    out.push(key_id.to_string());
+                }
+            }
+        }
+        out.sort();
+        Ok(out)
     }
 
     /// Seal `plain` and write it durably: temp file + fsync, atomic rename, fsync the directory —
@@ -470,6 +549,98 @@ mod tests {
             Err(_) => {} // frost rejects the empty packages; classification is what matters here
         }
         assert!(ks.list_hosted().is_err() || ks.list_hosted().unwrap().is_empty());
+    }
+
+    /// A real 2-of-3 dealt share for node 1, with or without an origin.
+    fn dealt_share(origin: Option<KeyOrigin>) -> Share {
+        let (shares, pkp) =
+            rutli_frost_core::dealer::split_ed25519_seed(&[5u8; 32], &[1, 2, 3], 2).unwrap();
+        let key_package = frost::keys::KeyPackage::try_from(shares[0].clone()).unwrap();
+        Share { key_package, public_key_package: pkp, origin }
+    }
+
+    fn origin() -> KeyOrigin {
+        KeyOrigin {
+            kind: ORIGIN_DEALER_SPLIT.into(),
+            ceremony_id: "c1".into(),
+            canton_fingerprint: "1220ab".into(),
+            installed_at: 1,
+            refresh_count: 0,
+        }
+    }
+
+    #[test]
+    fn create_never_clobbers_an_existing_key_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ks = store(&tmp, true);
+        ks.create("frost-import-a", &dealt_share(Some(origin()))).unwrap();
+        let before = std::fs::read(ks.dir().join("frost-import-a.json")).unwrap();
+
+        let again = ks.create("frost-import-a", &dealt_share(None));
+        assert!(matches!(again, Err(DaemonError::KeyExists(_))), "{:?}", again.err());
+        // Nor over a hosted key, nor leaving temp files behind.
+        ks.save_hosted("rutli-x", &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap()).unwrap();
+        assert!(matches!(ks.create("rutli-x", &dealt_share(None)), Err(DaemonError::KeyExists(_))));
+        assert_eq!(std::fs::read(ks.dir().join("frost-import-a.json")).unwrap(), before);
+        let names: Vec<String> = std::fs::read_dir(ks.dir())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
+
+        // What was created is sealed and loads with its origin.
+        assert!(crate::seal::Sealer::is_sealed(&before));
+        assert_eq!(ks.load("frost-import-a").unwrap().origin, Some(origin()));
+    }
+
+    #[test]
+    fn racing_creates_have_exactly_one_winner() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ks = Arc::new(store(&tmp, false));
+        let wins: usize = (0..8)
+            .map(|_| {
+                let ks = ks.clone();
+                std::thread::spawn(move || ks.create("frost-import-race", &dealt_share(None)).is_ok())
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|h| h.join().unwrap() as usize)
+            .sum();
+        assert_eq!(wins, 1);
+    }
+
+    #[test]
+    fn a_legacy_share_has_no_origin_and_stays_that_way() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ks = store(&tmp, false);
+        // A share file as every release before the split ceremony wrote it: no `origin` field.
+        let share = dealt_share(None);
+        let legacy = serde_json::json!({
+            "key_package": share.key_package,
+            "public_key_package": share.public_key_package,
+        });
+        std::fs::write(ks.dir().join("k.json"), serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let loaded = ks.load("k").unwrap();
+        assert_eq!(loaded.origin, None, "legacy = DKG");
+        // Re-saving a DKG share writes no origin field at all (byte-compatible with old readers).
+        ks.save("k", &loaded).unwrap();
+        let raw = String::from_utf8(std::fs::read(ks.dir().join("k.json")).unwrap()).unwrap();
+        assert!(!raw.contains("origin"), "{raw}");
+        // And a dealt share's origin survives a round trip.
+        ks.save("d", &dealt_share(Some(origin()))).unwrap();
+        assert_eq!(ks.load("d").unwrap().origin, Some(origin()));
+    }
+
+    #[test]
+    fn unrefreshed_dealt_keys_are_listed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ks = store(&tmp, true);
+        ks.create("frost-import-new", &dealt_share(Some(origin()))).unwrap();
+        ks.create("frost-import-done", &dealt_share(Some(KeyOrigin { refresh_count: 1, ..origin() })))
+            .unwrap();
+        ks.create("frost-namespace", &dealt_share(None)).unwrap();
+        ks.save_hosted("rutli-x", &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap()).unwrap();
+        assert_eq!(ks.dealt_keys_never_refreshed().unwrap(), vec!["frost-import-new".to_string()]);
     }
 
     #[test]
