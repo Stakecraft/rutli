@@ -36,6 +36,7 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use rutli_canton_key::{KeySpec, PrivateKeyMaterial, SigningKeyUsage};
+use rutli_cosigner::request_auth::VerifiedRequest;
 use rutli_cosigner::share_delivery::{self, RecipientRequest};
 use rutli_cosigner::{DaemonError, Result};
 
@@ -389,15 +390,15 @@ struct RecordRecipient {
 /// key, certified by the cluster CA, cluster id = the CA's — `request_auth::verify_request`), and
 /// check they describe one ceremony: same key, ceremony, cluster, threshold, size and roster; one
 /// request per roster member, no duplicates, no strays.
-fn read_recipients(paths: &[PathBuf], ca_pem: &[u8]) -> Result<Vec<RecipientRequest>> {
+fn read_recipients(paths: &[PathBuf], ca_pem: &[u8]) -> Result<Vec<VerifiedRequest>> {
     let mut requests = Vec::with_capacity(paths.len());
     for p in paths {
         let r: RecipientRequest = serde_json::from_slice(&std::fs::read(p)?)
             .map_err(|e| refuse(format!("{} is not a share-recipient request: {e}", p.display())))?;
         r.validate().map_err(|e| refuse(format!("{}: {e}", p.display())))?;
-        rutli_cosigner::request_auth::verify_request(&r, ca_pem)
+        let verified = rutli_cosigner::request_auth::verify_request(&r, ca_pem)
             .map_err(|e| refuse(format!("{}: {e} — do not seal to it; see the runbook", p.display())))?;
-        requests.push(r);
+        requests.push(verified);
     }
     let first = requests.first().ok_or_else(|| refuse("no --recipient given".into()))?.clone();
     for r in &requests[1..] {
@@ -432,7 +433,7 @@ fn read_recipients(paths: &[PathBuf], ca_pem: &[u8]) -> Result<Vec<RecipientRequ
 
 /// Gate 0: every request's SAS must match what witnesses read in the pod, over a channel that did
 /// not carry the request files. From `--confirm-sas` (identifier order), or typed on the terminal.
-fn confirm_sas(requests: &[RecipientRequest], given: Option<&str>) -> Result<()> {
+fn confirm_sas(requests: &[VerifiedRequest], given: Option<&str>) -> Result<()> {
     use std::io::{BufRead, IsTerminal};
     let expected: Vec<(u16, String)> =
         requests.iter().map(|r| (r.identifier, rutli_cosigner::request_auth::sas(r))).collect();

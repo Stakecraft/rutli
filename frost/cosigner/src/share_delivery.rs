@@ -372,9 +372,11 @@ pub fn ed25519_fingerprint(group_verifying_key: &[u8; 32]) -> String {
     rutli_canton_key::fingerprint(&rutli_canton_key::PublicKey::Ed25519(*group_verifying_key))
 }
 
-/// Seal `share` for the node that published `request` (dealer side).
+/// Seal `share` for the node that published `request` (dealer side). Takes only a
+/// [`crate::request_auth::VerifiedRequest`]: a share can never be sealed to a request whose
+/// signature, chain, identity and cluster were not checked.
 pub fn seal_share(
-    request: &RecipientRequest,
+    request: &crate::request_auth::VerifiedRequest,
     share: &SecretShare,
     pkp: &PublicKeyPackage,
     canton_fingerprint: &str,
@@ -632,7 +634,6 @@ fn create_private_dir(dir: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
-    const CLUSTER: &str = "0123456789abcdef";
     const KEY: &str = "frost-import-1220cb0e";
     const CEREMONY: &str = "b2-2026-10-08";
     const SEED: [u8; 32] = [7u8; 32];
@@ -642,7 +643,12 @@ mod tests {
     }
 
     fn signer(node: u16) -> crate::request_auth::NodeSigner {
-        crate::test_pki::TestPki::new().signer(&format!("cosigner{node}"))
+        crate::test_pki::shared().signer(&format!("cosigner{node}"))
+    }
+
+    /// What the dealer does before sealing: verify the request against the cluster CA.
+    fn verified(r: &RecipientRequest) -> crate::request_auth::VerifiedRequest {
+        crate::request_auth::verify_request(r, crate::test_pki::shared().ca_pem.as_bytes()).unwrap()
     }
 
     fn template(identifier: u16) -> RecipientRequest {
@@ -651,7 +657,7 @@ mod tests {
             kind: RECIPIENT_KIND.into(),
             ceremony_id: CEREMONY.into(),
             key_id: KEY.into(),
-            cluster_id: CLUSTER.into(),
+            cluster_id: crate::test_pki::shared().cluster_id(),
             identifier,
             threshold: 2,
             max_signers: 3,
@@ -688,7 +694,7 @@ mod tests {
         let bundles = nodes
             .iter()
             .zip(&shares)
-            .map(|(n, s)| seal_share(&n.request, s, &pkp, &fp).unwrap())
+            .map(|(n, s)| seal_share(&verified(&n.request), s, &pkp, &fp).unwrap())
             .collect();
         (bundles, pkp, shares)
     }
