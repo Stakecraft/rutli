@@ -28,6 +28,7 @@ pub mod ratelimit;
 pub mod seal;
 pub mod service;
 pub mod share_delivery;
+pub mod share_import;
 pub mod tls;
 pub mod wrap;
 

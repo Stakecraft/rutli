@@ -96,6 +96,48 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Split ceremony, step 1 (docs/split-ceremony.md): mint this node's one-time recipient key for
+    /// an imported key and write the public request the dealer needs. The secret half stays here,
+    /// sealed, until import-share installs the share. Needs share_seal.
+    ShareRecipient {
+        /// The id the imported key will have: `<prefix>frost-import-<name>`.
+        #[arg(long)]
+        key_id: String,
+        /// An id for this ceremony, the same on every node (e.g. `b2-2026-10-20`).
+        #[arg(long)]
+        ceremony_id: String,
+        /// Where to write the public request (refuses to overwrite unless --replace).
+        #[arg(long)]
+        out: std::path::PathBuf,
+        /// Discard a pending recipient for this key; any bundle made for it will no longer open.
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Split ceremony: verify this node's share bundle and install it (never overwrites a key).
+    /// Offline only — there is no RPC for this. Safe against a stopped node or inside the live pod.
+    ImportShare {
+        /// The dealer's `share-<key_id>-node<identifier>.json` for this node.
+        #[arg(long, value_name = "FILE")]
+        r#in: std::path::PathBuf,
+        /// The Canton fingerprint (`1220…`) of the key being imported, from the old node — not from
+        /// the bundle. The import refuses any other key.
+        #[arg(long)]
+        expect_fingerprint: String,
+        /// Run every check, install nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Split ceremony: back out on this node. Deletes the pending recipient secret. Deletes an
+    /// installed share only if it came from this ceremony, was never refreshed, and
+    /// --yes-delete-installed-share is given. Restart the daemon afterwards if it was running.
+    AbortImport {
+        #[arg(long)]
+        key_id: String,
+        #[arg(long)]
+        ceremony_id: String,
+        #[arg(long)]
+        yes_delete_installed_share: bool,
+    },
 }
 
 #[tokio::main]
@@ -120,6 +162,15 @@ async fn main() -> Result<()> {
             return import_key_command(&cfg, &r#in, passphrase_env.as_deref())
         }
         Some(Command::Restore { from, force }) => return restore_command(&cfg, &from, force),
+        Some(Command::ShareRecipient { key_id, ceremony_id, out, replace }) => {
+            return share_recipient_command(&cfg, &key_id, &ceremony_id, &out, replace)
+        }
+        Some(Command::ImportShare { r#in, expect_fingerprint, dry_run }) => {
+            return import_share_command(&cfg, &r#in, &expect_fingerprint, dry_run)
+        }
+        Some(Command::AbortImport { key_id, ceremony_id, yes_delete_installed_share }) => {
+            return abort_import_command(&cfg, &key_id, &ceremony_id, yes_delete_installed_share)
+        }
         Some(Command::Health) => health_command(&cfg),
         _ => {}
     }
@@ -181,10 +232,7 @@ async fn main() -> Result<()> {
         })?;
         // Bind envelopes to this trust domain: derived from the CA cert, so it changes if the
         // cluster does and an envelope can never be replayed into a different deployment.
-        let cluster_id = match &cfg.tls {
-            Some(t) => rutli_cosigner::wrap::cluster_id_from_ca(&std::fs::read(&t.ca_cert)?),
-            None => "plaintext-dev".to_string(),
-        };
+        let cluster_id = cfg.cluster_id()?;
         node = node.with_hosted_keys(master.as_bytes(), cluster_id)?;
         tracing::info!("cluster-hosted keys enabled (RSA-2048 encryption + AES-256-GCM symmetric)");
     }
@@ -394,16 +442,125 @@ fn restore_command(cfg: &Config, from: &std::path::Path, force: bool) -> Result<
 /// Hosted keys are always sealed at rest, so the seal secret is required — which is exactly the
 /// second factor that makes these commands safe as CLI operations: host access alone is not enough.
 fn offline_keystore(cfg: &Config) -> Result<KeyStore> {
+    let sealer = offline_sealer(cfg)?;
+    KeyStore::open_with_sealer(cfg.data_dir.join("keys"), Some(sealer))
+}
+
+/// This node's sealer, for an offline command. Every such command handles key material, which is
+/// never stored unsealed — so no share_seal, no command.
+fn offline_sealer(cfg: &Config) -> Result<Arc<rutli_cosigner::seal::Sealer>> {
     let seal_cfg = cfg.share_seal.as_ref().ok_or_else(|| {
         DaemonError::Config(
-            "share_seal is not configured — cluster-hosted keys are always sealed, so there is \
-             nothing for this command to open"
+            "share_seal is not configured — cluster-hosted keys and imported shares are always \
+             sealed, so this command refuses to run without it"
                 .into(),
         )
     })?;
-    let sealer =
-        Arc::new(rutli_cosigner::seal::Sealer::from_env(&seal_cfg.secret_env, cfg.identifier)?);
-    KeyStore::open_with_sealer(cfg.data_dir.join("keys"), Some(sealer))
+    Ok(Arc::new(rutli_cosigner::seal::Sealer::from_env(&seal_cfg.secret_env, cfg.identifier)?))
+}
+
+/// Split ceremony: `share-recipient`. See [`rutli_cosigner::share_import::share_recipient`].
+fn share_recipient_command(
+    cfg: &Config,
+    key_id: &str,
+    ceremony_id: &str,
+    out: &std::path::Path,
+    replace: bool,
+) -> Result<()> {
+    use rutli_cosigner::share_import::{share_recipient, NodeContext};
+    let sealer = offline_sealer(cfg)?;
+    let keystore = KeyStore::open_with_sealer(cfg.data_dir.join("keys"), Some(sealer.clone()))?;
+    let ctx = NodeContext::from_config(cfg)?;
+    if out.exists() && !replace {
+        return Err(DaemonError::Config(format!(
+            "{} exists; pass --replace to overwrite it (and discard any pending recipient)",
+            out.display()
+        )));
+    }
+    let request = share_recipient(&ctx, &keystore, &sealer, key_id, ceremony_id, replace)?;
+    let json = serde_json::to_vec_pretty(&request)?;
+    if replace && out.exists() {
+        std::fs::remove_file(out)?;
+    }
+    // The request is public, but create_new keeps a stale file from ever being mistaken for it.
+    use std::io::Write;
+    let mut f = rutli_cosigner::share_delivery::private_create_new(out)?;
+    f.write_all(&json)?;
+    f.sync_all()?;
+    tracing::warn!(
+        key_id,
+        ceremony_id,
+        identifier = cfg.identifier,
+        "split ceremony: recipient key minted; its secret is sealed under data_dir/ceremony until \
+         import-share or abort-import"
+    );
+    println!("{}", String::from_utf8_lossy(&json));
+    println!(
+        "wrote {} — hand it to the dealer; recipient_pub {}",
+        out.display(),
+        request.recipient_pub
+    );
+    Ok(())
+}
+
+/// Split ceremony: `import-share`. See [`rutli_cosigner::share_import::import_share`].
+fn import_share_command(
+    cfg: &Config,
+    input: &std::path::Path,
+    expect_fingerprint: &str,
+    dry_run: bool,
+) -> Result<()> {
+    use rutli_cosigner::share_import::{import_share, read_bundle, NodeContext};
+    let sealer = offline_sealer(cfg)?;
+    let keystore = KeyStore::open_with_sealer(cfg.data_dir.join("keys"), Some(sealer.clone()))?;
+    let ctx = NodeContext::from_config(cfg)?;
+    let bundle = read_bundle(input)?;
+    let report = import_share(&ctx, &keystore, &sealer, &bundle, expect_fingerprint, dry_run)?;
+    if report.outcome == "installed" {
+        // Audible on purpose: the node's log may be the only record that a dealt share arrived.
+        tracing::warn!(
+            key_id = %report.key_id,
+            ceremony_id = %report.ceremony_id,
+            fingerprint = %report.canton_fingerprint,
+            pkp_digest = %report.pkp_digest,
+            "IMPORTED a dealer-split FROST share; recipient secret deleted. Refresh the key once \
+             every node has its share (docs/split-ceremony.md)"
+        );
+    }
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+/// Split ceremony: `abort-import`. See [`rutli_cosigner::share_import::abort_import`].
+fn abort_import_command(
+    cfg: &Config,
+    key_id: &str,
+    ceremony_id: &str,
+    delete_installed: bool,
+) -> Result<()> {
+    use rutli_cosigner::share_import::{abort_import, NodeContext};
+    let sealer = offline_sealer(cfg)?;
+    let keystore = KeyStore::open_with_sealer(cfg.data_dir.join("keys"), Some(sealer.clone()))?;
+    let ctx = NodeContext::from_config(cfg)?;
+    let report = abort_import(&ctx, &keystore, &sealer, key_id, ceremony_id, delete_installed)?;
+    tracing::warn!(
+        key_id,
+        ceremony_id,
+        recipient_deleted = report.recipient_deleted,
+        installed_share = report.installed_share,
+        "split ceremony aborted on this node"
+    );
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    if report.installed_share == "kept" {
+        println!(
+            "an installed share from this ceremony is still present; pass \
+             --yes-delete-installed-share to delete it"
+        );
+    }
+    if report.installed_share == "deleted" {
+        println!("restart this cosigner if it is running, so it drops any cached copy of the share");
+    }
+    Ok(())
 }
 
 /// Operator command: write one hosted key out as a portable artifact.
