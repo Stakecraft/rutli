@@ -103,12 +103,18 @@ FROST threshold, encryption key cluster-hosted or on an HSM) behind one Canton-f
 
 ## Phase 2 MPC cluster — two Horcrux-informed decisions
 
-**1. DKG, never key-sharding.** Horcrux shards an *existing* `priv_validator_key.json`
-(trusted-dealer style) because Cosmos validators already have keys. That path is useless here:
-Canton does not support migrating an existing node into KMS mode (the namespace root key cannot be
-rotated), so keys must be **born inside the KMS**. The cluster therefore runs distributed key
+**1. DKG by default; sharding only to migrate.** Horcrux shards an *existing*
+`priv_validator_key.json` (trusted-dealer style) because Cosmos validators already have keys. For a
+new Canton node we do better: keys are **born inside the KMS**. The cluster runs distributed key
 generation (DKG) at node bootstrap — the full private key never exists anywhere, not even for a
-moment at creation. Strictly stronger than sharding, and the only option Canton leaves open anyway.
+moment at creation. That is strictly stronger than sharding and stays the recommended path.
+
+Canton 3.5+ does document moving an existing participant onto a KMS: export its keys, start a new
+participant under the same identity, register the keys by KMS id. Digital Asset documents this for
+AWS/GCP KMS; carrying it to Rütli means splitting an existing namespace key into FROST shares
+(trusted-dealer, Horcrux style). That path is planned, not shipped — see
+[roadmap-migration.md](roadmap-migration.md). An imported key is weaker than a DKG key: it once
+lived whole on a server and in that node's backups, and splitting it cannot undo that exposure.
 
 **2. Cluster-side coordination, not a driver-side coordinator.** Horcrux's cosigners coordinate
 signing among themselves and the validator-facing side is a dumb client. We adopt the same shape,
@@ -238,8 +244,13 @@ two keys, two DKGs, no collision. Rules:
 
 ## Hard constraints (design around these)
 
-- **Namespace root key is NOT rotatable.** Migrating an existing node from DB-keys → KMS is
-  unsupported by Canton. This product targets **freshly-deployed nodes** (or a full node rebuild).
+- **Namespace root key is NOT rotatable.** It can be *moved* but never replaced: Canton 3.5+
+  documents migrating an existing node from DB-keys → KMS by exporting the keys and starting a new
+  participant under the same identity. Rütli's migration path (split an existing key into FROST
+  shares) is planned for v0.4.0, see [roadmap-migration.md](roadmap-migration.md); today the
+  product targets **freshly-deployed nodes**. A migrated namespace key is not as strong as a DKG
+  key: it existed whole on the old node, in its database and in every backup of it. Migration
+  protects against future compromise and key loss; it cannot un-expose the past.
 - **Key loss = irrecoverable loss** of all Canton Coin for parties hosted under that namespace.
   No slashing in Canton, but compromise = "SV failure" that cuts the network BFT buffer until the
   SV is offboarded. DR / share backup is a first-class product concern, not an afterthought.

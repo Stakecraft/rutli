@@ -50,8 +50,10 @@ correctly and the key that resulted is the one the node now carries.
       config using `backend = "frost"`, the full cosigner `endpoints`, `frost.tls`, and
       `audit-log-path` set. (Approval is usually left auto for the bootstrap signatures and tightened
       afterwards — see step 6.)
-- [ ] Fresh Canton participant (no pre-existing identity): the namespace key cannot be migrated in,
-      so the node MUST be new.
+- [ ] Fresh Canton participant (no pre-existing identity). This ceremony births the namespace key
+      by DKG, so the node MUST be new. Moving an existing node's key in is a different procedure
+      (trusted-dealer split, planned for v0.4.0, see [roadmap-migration.md](roadmap-migration.md))
+      and yields a weaker key: it existed whole on the old node and in its backups.
 
 ## Ceremony
 
