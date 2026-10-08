@@ -228,6 +228,17 @@ is *the* FROST footgun. Mitigations, all mandatory:
 - Enforce canonical encoding of the group public key and `R` at the boundary.
 - Lean on the audited ZF crate's nonce API rather than hand-rolling.
 
+**Known limitation (follow-up, deliberately not changed before the audit): nonce markers are never
+pruned.** Every round 2 writes one small fsynced marker file under `data_dir/keys/<key>.nonces/`
+and nothing ever deletes them, because the marker *is* the single-use guarantee and pruning it
+safely needs a design of its own (e.g. epoch-scoped session ids). So anything that can make a node
+sign grows that directory without bound: the driver role through `Sign` (normal traffic does this
+slowly), and — since the split ceremony — the operator role through `CeremonySignTest`, which is
+therefore rate-limited per key (`ceremony_sign_test_rate_limit_per_min`, default 10/min per
+leading node; metric `rutli_ceremony_sign_test_rate_limited_total`). The limit is per leader, so
+the worst case is about `n × limit` sign tests per minute across the cluster. Watch the data
+volume's usage and inode count (observability.md); a pruning scheme is tracked for after the audit.
+
 ## Cluster-hosted keys (non-FROST material in the same cluster)
 
 The cluster also holds the key material FROST cannot produce: **RSA-2048-OAEP-SHA256** encryption

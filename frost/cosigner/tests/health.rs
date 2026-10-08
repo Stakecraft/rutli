@@ -63,6 +63,7 @@ async fn unreadable_keys_dir_makes_health_not_serving() {
         operator_cns: None,
         hosted_write_quorum: 1,
         decrypt_limiter: Arc::new(DecryptRateLimiter::new(0)),
+        ceremony_test_limiter: Arc::new(DecryptRateLimiter::new(0)),
     };
     std::fs::write(keys.join("some-key.json"), b"{}").unwrap();
 
