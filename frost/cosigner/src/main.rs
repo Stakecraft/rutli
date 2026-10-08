@@ -228,6 +228,16 @@ async fn main() -> Result<()> {
     // A key installed by the split ceremony is only as strong as its dealt shares until the first
     // refresh: every copy of a dealt bundle (and the dealer's memory) still combines with the live
     // shares. Say so at every start until someone runs one.
+    // Temps of a create that crashed before its no-replace move: sealed keys that never became
+    // live. Old enough that no concurrent offline create (import-share in the pod) still owns them.
+    match keystore.sweep_stale_create_temps(std::time::Duration::from_secs(300)) {
+        Ok(removed) => {
+            for name in removed {
+                tracing::warn!(file = %name, "removed a stale key-store create temp (interrupted create)");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "could not sweep stale key-store create temps"),
+    }
     match keystore.dealt_keys_never_refreshed() {
         Ok(keys) => {
             for key_id in keys {
@@ -805,6 +815,9 @@ fn import_key_command(
     // Hosted keys are create-once-immutable: a key id maps to one key forever, because Canton
     // rotates by minting a new id. Overwriting could destroy material the cluster already
     // committed to, so refuse unless it is byte-identical.
+    if rutli_cosigner::share_delivery::is_reserved_for_import(&key_id) {
+        return Err(DaemonError::ReservedKeyId(key_id));
+    }
     if keystore.exists(&key_id) {
         let existing = keystore.load_hosted(&key_id)?;
         if existing.private_der != key.private_der {
@@ -817,7 +830,8 @@ fn import_key_command(
         return Ok(());
     }
 
-    keystore.save_hosted(&key_id, &key)?;
+    // create, not save: never replaces a file that appeared meanwhile (e.g. an installed share).
+    keystore.create_hosted(&key_id, &key)?;
     tracing::warn!(key_id = %key_id, path = %input.display(), "IMPORTED a cluster-hosted key");
     println!(
         "imported {key_id} ({}) — start the daemon; anti-entropy will replicate it to the cluster",

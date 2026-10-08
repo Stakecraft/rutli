@@ -710,6 +710,14 @@ impl Node {
     }
 }
 
+/// Hosted keys may never live under an id reserved for the split ceremony (`…frost-import-…`).
+pub(crate) fn refuse_reserved_for_hosted(key_id: &str) -> Result<()> {
+    if crate::share_delivery::is_reserved_for_import(key_id) {
+        return Err(DaemonError::ReservedKeyId(key_id.to_string()));
+    }
+    Ok(())
+}
+
 fn without_self(
     map: &BTreeMap<Identifier, round1::Package>,
     me: Identifier,
@@ -801,6 +809,7 @@ impl Node {
         spec: crate::hosted::HostedSpec,
     ) -> Result<(crate::hosted::HostedKey, bool)> {
         self.hosted_ctx()?;
+        refuse_reserved_for_hosted(key_id)?;
         if self.keystore.exists(key_id) {
             let existing = self.keystore.load_hosted(key_id)?;
             if existing.spec != spec {
@@ -813,26 +822,38 @@ impl Node {
             return Ok((existing, false));
         }
         let key = crate::hosted::HostedKey::generate(spec, crate::hosted::now_secs())?;
-        self.keystore.save_hosted(key_id, &key)?;
+        // create, not save: whatever appeared under the id meanwhile is never replaced.
+        self.keystore.create_hosted(key_id, &key)?;
         Ok((key, true))
     }
 
     /// Store a hosted key received from a peer (already unwrapped and verified).
     pub fn hosted_store(&self, key_id: &str, key: &crate::hosted::HostedKey) -> Result<()> {
         self.hosted_ctx()?;
+        // A peer may never push a hosted key under an id reserved for the split ceremony: it would
+        // squat on an import, or (with a rename-based write) replace an installed share.
+        refuse_reserved_for_hosted(key_id)?;
         // Create-once-immutable: a key id maps to one key forever. Canton rotates by minting a new
         // id plus a topology transaction, so a differing replica is a genuine conflict — never a
         // merge. Overwriting here could silently destroy the material peers already committed to.
-        if self.keystore.exists(key_id) {
-            let existing = self.keystore.load_hosted(key_id)?;
-            if self.hosted_commitment(&existing)? != self.hosted_commitment(key)? {
+        let identical_or_conflict = |node: &Node| -> Result<()> {
+            let existing = node.keystore.load_hosted(key_id)?;
+            if node.hosted_commitment(&existing)? != node.hosted_commitment(key)? {
                 return Err(DaemonError::KeyExists(format!(
                     "{key_id} already exists here with different material — refusing to overwrite"
                 )));
             }
-            return Ok(()); // identical replica: idempotent no-op
+            Ok(()) // identical replica: idempotent no-op
+        };
+        if self.keystore.exists(key_id) {
+            return identical_or_conflict(self);
         }
-        self.keystore.save_hosted(key_id, key)
+        // create, not save: a file that appeared since the check (a racing push, a FROST share) is
+        // never renamed over; it is compared like any existing one.
+        match self.keystore.create_hosted(key_id, key) {
+            Err(DaemonError::KeyExists(_)) => identical_or_conflict(self),
+            other => other,
+        }
     }
 
     pub fn hosted_load(&self, key_id: &str) -> Result<crate::hosted::HostedKey> {

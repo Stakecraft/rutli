@@ -173,38 +173,98 @@ impl KeyStore {
     }
 
     /// Persist a **new** share: fails with [`DaemonError::KeyExists`] if any file already exists
-    /// for `key_id`, atomically — two racing creates (a DKG and an `import-share`, two imports)
-    /// cannot both succeed and neither can overwrite the other. Same durability as [`save`]: the
-    /// sealed bytes go to a uniquely named temp file (fsynced), which is hard-linked into place —
-    /// `link(2)` refuses an existing target, unlike `rename(2)` — then the directory is fsynced.
+    /// for `key_id`, atomically — two racing creates (a DKG and an `import-share`, two imports, a
+    /// hosted-key push) cannot both succeed and neither can overwrite the other. Same durability as
+    /// [`save`]: see [`KeyStore::create_bytes`].
     ///
     /// [`save`]: KeyStore::save
     pub fn create(&self, key_id: &str, share: &Share) -> Result<()> {
+        let plain = crate::share_delivery::to_json_zeroizing(share)?;
+        self.create_bytes(key_id, &plain)
+    }
+
+    /// [`KeyStore::create`] for a cluster-hosted key: a new hosted key never replaces any file —
+    /// in particular never an installed FROST share under the same id.
+    pub fn create_hosted(&self, key_id: &str, key: &crate::hosted::HostedKey) -> Result<()> {
+        let mut value = serde_json::to_value(key)?;
+        value
+            .as_object_mut()
+            .expect("HostedKey serializes to a JSON object")
+            .insert("kind".into(), serde_json::Value::String(KIND_HOSTED.into()));
+        self.create_bytes(key_id, &zeroize::Zeroizing::new(serde_json::to_vec(&value)?))
+    }
+
+    /// Seal `plain` into a uniquely named dotfile temp (fsynced), move it into place **only if
+    /// nothing is there**, then fsync the directory. The no-replace move is `renameat2(…,
+    /// RENAME_NOREPLACE)` on Linux/glibc and `renamex_np(…, RENAME_EXCL)` on macOS; where the
+    /// filesystem or platform lacks it, `link(2)` (which also refuses an existing target) is the
+    /// fallback, and a filesystem with neither is a clear error rather than a silent overwrite.
+    /// Temps orphaned by a crash are removed by [`KeyStore::sweep_stale_create_temps`].
+    fn create_bytes(&self, key_id: &str, plain: &[u8]) -> Result<()> {
         let path = self.path(key_id)?;
         self.touch(&path);
-        let plain = zeroize::Zeroizing::new(serde_json::to_vec_pretty(share)?);
         let bytes = match &self.sealer {
-            Some(s) => s.seal(&plain)?,
+            Some(s) => s.seal(plain)?,
             None => plain.to_vec(),
         };
         // A dotfile: never a key file (ids are [A-Za-z0-9_-]+), skipped by backup and the probe.
-        let tmp = self.dir.join(format!(".create-{key_id}-{}.tmp", uuid::Uuid::new_v4()));
+        let tmp = self.dir.join(format!("{CREATE_TMP_PREFIX}{key_id}-{}.tmp", uuid::Uuid::new_v4()));
         {
             let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
             f.write_all(&bytes)?;
             f.sync_all()?;
         }
-        let linked = std::fs::hard_link(&tmp, &path);
-        let _ = std::fs::remove_file(&tmp);
-        match linked {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Err(DaemonError::KeyExists(key_id.to_string()))
-            }
-            Err(e) => return Err(e.into()),
-        }
+        let outcome = match rename_noreplace(&tmp, &path) {
+            Ok(NoReplace::Moved) => Ok(()),
+            Ok(NoReplace::Exists) => Err(DaemonError::KeyExists(key_id.to_string())),
+            Ok(NoReplace::Unsupported) => match std::fs::hard_link(&tmp, &path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    Err(DaemonError::KeyExists(key_id.to_string()))
+                }
+                Err(e) => Err(DaemonError::Io(std::io::Error::new(
+                    e.kind(),
+                    format!(
+                        "the key store filesystem supports neither a no-replace rename nor hard \
+                         links ({e}); create-once writes need one of them — refusing rather than \
+                         risk overwriting a key"
+                    ),
+                ))),
+            },
+            Err(e) => Err(e.into()),
+        };
+        let _ = std::fs::remove_file(&tmp); // already gone after a successful rename
+        outcome?;
         std::fs::File::open(&self.dir)?.sync_all()?;
         Ok(())
+    }
+
+    /// Remove `.create-*.tmp` files older than `older_than`: left behind when a create crashed
+    /// between writing its temp and moving it into place. They hold a sealed key that never became
+    /// live. Run at daemon start; returns the names removed (for the log).
+    pub fn sweep_stale_create_temps(&self, older_than: std::time::Duration) -> Result<Vec<String>> {
+        self.touch(&self.dir);
+        let mut removed = Vec::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !(name.starts_with(CREATE_TMP_PREFIX) && name.ends_with(".tmp")) {
+                continue;
+            }
+            let stale = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age >= older_than);
+            if stale && std::fs::remove_file(entry.path()).is_ok() {
+                removed.push(name);
+            }
+        }
+        if !removed.is_empty() {
+            std::fs::File::open(&self.dir)?.sync_all()?;
+        }
+        Ok(removed)
     }
 
     /// FROST keys installed by the split ceremony that have not been refreshed since: their live
@@ -470,6 +530,58 @@ impl KeyStore {
     }
 }
 
+/// Name prefix of [`KeyStore::create`]'s temp files (a dotfile, like the probe's).
+const CREATE_TMP_PREFIX: &str = ".create-";
+
+enum NoReplace {
+    Moved,
+    Exists,
+    /// The platform or filesystem has no no-replace rename: use the `link(2)` fallback.
+    Unsupported,
+}
+
+/// Rename `from` to `to` unless `to` exists, atomically.
+fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<NoReplace> {
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let c = |p: &Path| {
+            std::ffi::CString::new(p.as_os_str().as_bytes())
+                .map_err(|_| std::io::Error::other("path contains a NUL byte"))
+        };
+        let (from_c, to_c) = (c(from)?, c(to)?);
+        // SAFETY: two valid NUL-terminated paths; no memory is shared with the call.
+        #[cfg(target_os = "linux")]
+        let rc = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                from_c.as_ptr(),
+                libc::AT_FDCWD,
+                to_c.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        // SAFETY: as above.
+        #[cfg(target_os = "macos")]
+        let rc = unsafe { libc::renamex_np(from_c.as_ptr(), to_c.as_ptr(), libc::RENAME_EXCL) };
+        if rc == 0 {
+            return Ok(NoReplace::Moved);
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            Some(libc::EEXIST) => Ok(NoReplace::Exists),
+            // ENOTSUP is EOPNOTSUPP on Linux; macOS reports ENOTSUP for a volume without it.
+            Some(libc::EINVAL) | Some(libc::ENOSYS) | Some(libc::ENOTSUP) => Ok(NoReplace::Unsupported),
+            _ => Err(err),
+        }
+    }
+    #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
+    {
+        let _ = (from, to);
+        Ok(NoReplace::Unsupported)
+    }
+}
+
 /// Name prefix of [`KeyStore::check_dir`]'s write-probe files. A dotfile, so it can never collide
 /// with a key file (key ids are `[A-Za-z0-9_-]+`), and `rutli-cosigner backup`/`restore` skip it.
 const PROBE_PREFIX: &str = ".readyz-";
@@ -607,6 +719,59 @@ mod tests {
             .map(|h| h.join().unwrap() as usize)
             .sum();
         assert_eq!(wins, 1);
+        // Losers leave no temp behind.
+        let temps = std::fs::read_dir(ks.dir())
+            .unwrap()
+            .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().ends_with(".tmp"))
+            .count();
+        assert_eq!(temps, 0);
+    }
+
+    #[test]
+    fn the_no_replace_move_and_the_link_fallback_both_refuse_an_existing_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        let (a, b, target) = (dir.join("a"), dir.join("b"), dir.join("t"));
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        match rename_noreplace(&a, &target).unwrap() {
+            NoReplace::Moved => {
+                assert!(matches!(rename_noreplace(&b, &target).unwrap(), NoReplace::Exists));
+                assert_eq!(std::fs::read(&target).unwrap(), b"a");
+            }
+            // Platform without it (e.g. musl): create() falls back to link(2).
+            NoReplace::Unsupported => {}
+            NoReplace::Exists => panic!("target did not exist"),
+        }
+        assert!(std::fs::hard_link(&b, &target).is_err() || !cfg!(unix));
+    }
+
+    #[test]
+    fn stale_create_temps_are_swept_and_fresh_ones_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ks = store(&tmp, true);
+        let temp = ks.dir().join(format!("{CREATE_TMP_PREFIX}frost-import-x-123.tmp"));
+        std::fs::write(&temp, b"sealed key that never became live").unwrap();
+        std::fs::write(ks.dir().join("not-a-temp.json.tmp"), b"x").unwrap();
+        assert!(ks.sweep_stale_create_temps(std::time::Duration::from_secs(3600)).unwrap().is_empty());
+        assert!(temp.exists(), "a fresh temp may belong to a create in flight");
+        let removed = ks.sweep_stale_create_temps(std::time::Duration::ZERO).unwrap();
+        assert_eq!(removed, vec![format!("{CREATE_TMP_PREFIX}frost-import-x-123.tmp")]);
+        assert!(!temp.exists());
+        assert!(ks.dir().join("not-a-temp.json.tmp").exists(), "only create temps are swept");
+    }
+
+    #[test]
+    fn create_hosted_never_replaces_anything() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ks = store(&tmp, true);
+        ks.create("frost-import-a", &dealt_share(Some(origin()))).unwrap();
+        let key = HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
+        assert!(matches!(ks.create_hosted("frost-import-a", &key), Err(DaemonError::KeyExists(_))));
+        assert!(ks.load("frost-import-a").is_ok());
+        ks.create_hosted("rutli-sym-1", &key).unwrap();
+        assert_eq!(ks.load_hosted("rutli-sym-1").unwrap().created_at, 1);
+        assert!(matches!(ks.create_hosted("rutli-sym-1", &key), Err(DaemonError::KeyExists(_))));
     }
 
     #[test]
