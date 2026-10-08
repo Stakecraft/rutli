@@ -13,6 +13,20 @@ use tonic::transport::{Certificate, ClientTlsConfig, Identity, ServerTlsConfig};
 use crate::config::TlsConfig;
 use crate::Result;
 
+/// The identity a certificate's subject names: its Common Name, **only** if there is exactly one
+/// CN attribute and it decodes as a string. Two CNs, or one that does not decode, name nobody —
+/// otherwise two parsers could disagree about which one counts. The one rule for every
+/// identity decision: the Signer/Peer allowlists (`service::cn_of`) and the split ceremony's
+/// request signatures (`request_auth`).
+pub fn subject_cn(cert: &x509_parser::certificate::X509Certificate<'_>) -> Option<String> {
+    let mut cns = cert.subject().iter_common_name();
+    let cn = cns.next()?;
+    if cns.next().is_some() {
+        return None;
+    }
+    cn.as_str().ok().map(str::to_string)
+}
+
 pub struct Tls {
     pub client: ClientTlsConfig,
     pub server: ServerTlsConfig,

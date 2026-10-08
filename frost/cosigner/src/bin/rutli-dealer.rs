@@ -178,6 +178,10 @@ struct Hardening {
 }
 
 fn split_key(a: SplitKey) -> Result<()> {
+    // An air-gapped live-boot host has only its RTC; certificate validity (request checks) depends
+    // on it. Printed and recorded so witnesses can sanity-check it against their own watches.
+    let clock = x509_parser::time::ASN1Time::now().to_string();
+    println!("dealer clock (UTC): {clock}");
     for warning in a.hardening.warnings() {
         eprintln!("rutli-dealer: warning: {warning}");
     }
@@ -329,6 +333,7 @@ fn split_key(a: SplitKey) -> Result<()> {
         dealer_version: env!("CARGO_PKG_VERSION"),
         hardening: a.hardening.clone(),
         created_at: rutli_cosigner::hosted::now_secs(),
+        dealer_clock_utc: clock,
     };
     let record_path = outputs.last().expect("record path");
     write_new(record_path, &serde_json::to_vec_pretty(&record)?)?;
@@ -366,6 +371,8 @@ struct DealerRecord {
     dealer_version: &'static str,
     hardening: Hardening,
     created_at: u64,
+    /// The dealer host's clock at start, human-readable — it also decided certificate validity.
+    dealer_clock_utc: String,
 }
 
 #[derive(Serialize)]
