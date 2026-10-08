@@ -674,7 +674,7 @@ impl Peer for PeerSvc {
     ) -> Result<Response<pb::NodeInfoReply>, Status> {
         self.authorize(&req)?;
         Ok(Response::new(pb::NodeInfoReply {
-            identifier: crate::hosted::identifier_index(self.node.identifier) as u32,
+            identifier: crate::hosted::identifier_index(self.node.identifier).map_err(Status::from)? as u32,
             dist_public_key: self.node.dist_public_key().map_err(Status::from)?.to_vec(),
         }))
     }

@@ -42,6 +42,34 @@ All notable changes to Rütli are documented here. Format loosely follows
   - The rules, dashboard and `docs/observability.md` already assumed a histogram, so they need no
     query changes. The rules header, `docs/observability.md` and `docs/performance.md` now
     document the buckets and the summary on 0.3.1 and earlier.
+- **Hosted-key pull replication and read-repair over gRPC were broken: every cosigner believed it
+  was node 0.** `hosted::identifier_index` read the last two bytes of a FROST identifier as
+  big-endian, but Ed25519 identifiers serialize as a little-endian scalar (id 2 is `02 00 … 00`),
+  so it returned 0 for every node. All nodes therefore derived the same distribution key (index 0)
+  and reported `NodeInfo.identifier = 0`, while `Peer.FetchKey` wraps its reply to the number in the
+  caller's certificate CN (`cosigner2` → 2). The receiver then refused its own envelope
+  (`addressed to node 2, not this node (0)`), so read-repair and the pull half of the anti-entropy
+  sweep never succeeded on a live cluster. Push replication (`generate_hosted_key`, the push half
+  of the sweep) worked by accident: the pusher wraps to whatever `NodeInfo` reports, and that was
+  consistently 0. Cluster tests wired nodes with `LocalPeer` and hid it. Found in code review while designing the split ceremony (B2).
+  `identifier_index` now decodes little-endian and returns an error for an identifier wider than
+  16 bits instead of truncating. Each node now gets its own distribution key, matching what peers
+  derive for it from its cert CN.
+  - **Commitments stay node-independent.** `hosted_commitment` was keyed off the computing node's
+    own distribution key, which only agreed across nodes because they all had index 0. Left alone,
+    the fix would have made every replication ack disagree (`stored different material`) and
+    failed every hosted-key write. The commitment is now keyed off the index-0 distribution key on
+    every node, byte-identical to the 0.3.1 value, so mixed-version clusters keep agreeing.
+  - **Rolling upgrade is safe, no ordering required.** Wrap keys are derived on use and never
+    stored, and nothing persisted depends on the index: sealed shares and hosted keys are keyed off
+    the configured `identifier`, and commitments are computed on demand. Pushes between old and
+    fixed nodes work in both directions, since the pusher addresses whatever the target's
+    `NodeInfo` reports. A fixed node can pull from any node; an old node still cannot pull until it
+    is upgraded, which is no worse than 0.3.1.
+  - A new `hosted_grpc` integration test runs three nodes over real mTLS sockets (`cosigner1..3`
+    CNs) and covers `NodeInfo`, read-repair via `FetchKey`, push replication and the anti-entropy
+    pull. It fails on the old code. `LocalPeer::on_behalf_of` models a remote caller in-process,
+    so the in-process repair test wraps to the caller as the network path does.
 
 ## [0.3.1] — 2026-10-07
 

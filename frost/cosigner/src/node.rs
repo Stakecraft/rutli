@@ -65,8 +65,19 @@ pub struct Node {
     hosted: Option<HostedCtx>,
 }
 
+/// Node index whose distribution public key keys [`Node::hosted_commitment`].
+///
+/// A commitment is compared across nodes (replication acks, anti-entropy), so it must be the same
+/// on every node: it is keyed off one fixed, cluster-wide value, not off the computing node's own
+/// distribution key. It is 0 because that is the value every node effectively used before the
+/// identifier-index fix (0.3.2), when each node's index read as 0 — keeping it makes commitments
+/// from a 0.3.1 node and a fixed node agree during a rolling upgrade.
+const COMMITMENT_KEY_INDEX: u16 = 0;
+
 struct HostedCtx {
     dist_key: crate::wrap::DistKey,
+    /// Public half of the cluster-wide commitment key (see [`COMMITMENT_KEY_INDEX`]).
+    commitment_key: [u8; 32],
     cluster_id: String,
     /// Needed to derive a *peer's* distribution public key when serving FetchKey. Under today's
     /// shared master secret every node can already derive every peer's key; with per-node secrets
@@ -650,14 +661,16 @@ fn without_self(
 impl Node {
     /// Enable hosted keys on this node: derive its wrapping key from the cluster master secret and
     /// bind envelopes to `cluster_id`. Without this, every hosted-key op returns an error.
-    pub fn with_hosted_keys(mut self, master_secret: &[u8], cluster_id: String) -> Self {
-        let id = crate::hosted::identifier_index(self.identifier);
+    pub fn with_hosted_keys(mut self, master_secret: &[u8], cluster_id: String) -> Result<Self> {
+        let id = crate::hosted::identifier_index(self.identifier)?;
         self.hosted = Some(HostedCtx {
             dist_key: crate::wrap::DistKey::derive(master_secret, id),
+            commitment_key: crate::wrap::DistKey::derive(master_secret, COMMITMENT_KEY_INDEX)
+                .public_bytes(),
             cluster_id,
             master: zeroize::Zeroizing::new(master_secret.to_vec()),
         });
-        self
+        Ok(self)
     }
 
     pub fn hosted_enabled(&self) -> bool {
@@ -795,7 +808,7 @@ impl Node {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         h.update(b"rutli-keycommit-v1");
-        h.update(ctx.dist_key.public_bytes()); // cluster-scoped, not a bare hash of the key
+        h.update(ctx.commitment_key); // cluster-scoped, not a bare hash of the key
         h.update(key.spec.as_str().as_bytes());
         h.update(key.private_der.as_bytes());
         Ok(h.finalize().to_vec())

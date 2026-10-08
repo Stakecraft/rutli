@@ -95,11 +95,24 @@ pub trait PeerApi: Send + Sync {
 /// an async worker on a stalled volume any more than a peer's may.
 pub struct LocalPeer {
     node: Arc<Node>,
+    /// Who `fetch_key` wraps to. `None` = this node itself (the leader reading its own store).
+    /// Set, it models another cosigner calling this node over gRPC, where the reply is wrapped to
+    /// the authenticated caller — see [`LocalPeer::on_behalf_of`].
+    caller: Option<Arc<Node>>,
 }
 
 impl LocalPeer {
     pub fn new(node: Arc<Node>) -> Self {
-        Self { node }
+        Self { node, caller: None }
+    }
+
+    /// This node as seen by `caller` over the mesh: `fetch_key` wraps to `caller`, exactly as
+    /// `Peer.FetchKey` does for the certificate-identified caller. In-process clusters (tests) hand
+    /// one node a `LocalPeer` of another; without this the envelope would be addressed to the
+    /// serving node and the caller could not open it.
+    pub fn on_behalf_of(mut self, caller: Arc<Node>) -> Self {
+        self.caller = Some(caller);
+        self
     }
 }
 
@@ -179,7 +192,7 @@ impl PeerApi for LocalPeer {
     }
 
     async fn node_info(&self) -> Result<(u16, [u8; 32])> {
-        Ok((crate::hosted::identifier_index(self.node.identifier), self.node.dist_public_key()?))
+        Ok((crate::hosted::identifier_index(self.node.identifier)?, self.node.dist_public_key()?))
     }
 
     async fn replicate_key(
@@ -202,12 +215,17 @@ impl PeerApi for LocalPeer {
     }
 
     async fn fetch_key(&self, key_id: &str) -> Result<(String, Vec<u8>, crate::wrap::Wrapped)> {
-        // In-process: the "recipient" is this same node, so wrap to ourselves for a uniform path.
+        // In-process the recipient is this same node, unless `on_behalf_of` named another caller.
         let key_id = key_id.to_owned();
+        let caller = self.caller.clone();
         self.node
             .blocking(move |n| {
                 let key = n.hosted_load(&key_id)?;
-                let (id, pk) = (crate::hosted::identifier_index(n.identifier), n.dist_public_key()?);
+                let recipient = caller.as_deref().unwrap_or(n);
+                let (id, pk) = (
+                    crate::hosted::identifier_index(recipient.identifier)?,
+                    recipient.dist_public_key()?,
+                );
                 let w = n.hosted_wrap_for(&key_id, &key, id, &pk)?;
                 let pub_der = if key.spec.is_asymmetric() { key.public_key_der()? } else { Vec::new() };
                 Ok((key.spec.as_str().to_string(), pub_der, w))
