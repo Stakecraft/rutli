@@ -3,8 +3,10 @@
 #
 # Example: weekly proactive share refresh. Runs against one Signer endpoint; the leader fences the
 # key cluster-wide, so drain heavy topology traffic first (or accept SignInProgress retries).
-# Set KEY_ID to the FROST key (e.g. frost-participant1-namespace). Requires the driver client cert
-# (allowlisted CN) — mount rutli-cosigner-tls or a dedicated driver TLS secret.
+# Set KEY_ID to the FROST key (e.g. frost-participant1-namespace). Runs as the driver role (CN
+# `driver`, on signer_allowlist): it mounts ONLY the driver's cert/key (Secret rutli-driver-tls,
+# kubernetes.io/tls) and the CA (rutli-cosigner-ca) — never a cosigner key — with the client config
+# client-driver.json from rutli-cosigner-config.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -24,6 +26,8 @@ spec:
             rutli.io/client: "true" # NetworkPolicy: may dial Signer
         spec:
           restartPolicy: Never
+          # fsGroup so uid 10001 can read the 0440 projected key.
+          securityContext: { fsGroup: 10001, seccompProfile: { type: RuntimeDefault } }
           containers:
             - name: refresh
               image: ghcr.io/stakecraft/rutli-cosigner:0.3.2@sha256:af38fd04fdc2446dbfa7478ed65a3296d1cc24ba337f24ceb1e43940fc6d7d3f
@@ -35,8 +39,8 @@ spec:
                 - /bin/sh
                 - -c
                 - |
-                  set -euo pipefail
-                  rutli-cosigner --config /config/cosigner-1.json \
+                  set -eu
+                  rutli-cosigner --config /config/client-driver.json \
                     refresh --key-id "$KEY_ID" \
                     --target https://cosigner-0.rutli-cosigner.rutli.svc.cluster.local:9101
               securityContext:
@@ -53,6 +57,12 @@ spec:
             - name: config
               configMap: { name: rutli-cosigner-config }
             - name: certs
-              secret: { secretName: rutli-cosigner-tls, defaultMode: 0440 }
+              projected:
+                defaultMode: 0440
+                sources:
+                  - secret: { name: rutli-cosigner-ca, items: [{ key: ca.crt, path: ca.crt }] }
+                  - secret:
+                      name: rutli-driver-tls
+                      items: [{ key: tls.crt, path: driver.crt }, { key: tls.key, path: driver.key }]
             - name: tmp
               emptyDir: {}

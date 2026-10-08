@@ -5,11 +5,19 @@ Replicas: {{ .Values.replicaCount }}  threshold: {{ .Values.threshold }}
 
 BEFORE the pods can start you must create secrets in this namespace:
 
-  1) mTLS material (CA + cosigner1..N certs/keys):
+  1) mTLS material ({{ if eq .Values.tls.layout "perNode" }}the CA + one Secret per cosigner{{ else }}legacy single Secret{{ end }}):
+{{- if eq .Values.tls.layout "perNode" }}
+     kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.tls.caSecretName }} --from-file=ca.crt=certs/ca.crt
+{{- range $i := until (int .Values.replicaCount) }}
+     kubectl -n {{ $.Release.Namespace }} create secret tls {{ $.Values.tls.perNodeSecretPrefix }}{{ add $i 1 }} --cert=certs/cosigner{{ add $i 1 }}.crt --key=certs/cosigner{{ add $i 1 }}.key
+{{- end }}
+{{- else }}
      kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.tlsSecretName }} \
        --from-file=ca.crt=certs/ca.crt \
        --from-file=cosigner1.crt=certs/cosigner1.crt --from-file=cosigner1.key=certs/cosigner1.key \
        # … repeat for each cosigner …
+{{- end }}
+     Each cosigner container sees only its own key (init container tls-select); see README.
 
   2) Seal master secret (≥ 32 chars):
      kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.sealSecretName }} \

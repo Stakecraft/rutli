@@ -22,11 +22,10 @@ kubectl -n rutli label namespace rutli \
   pod-security.kubernetes.io/enforce=restricted \
   pod-security.kubernetes.io/warn=restricted --overwrite
 
-kubectl -n rutli create secret generic rutli-cosigner-tls \
-  --from-file=ca.crt=certs/ca.crt \
-  --from-file=cosigner1.crt=certs/cosigner1.crt --from-file=cosigner1.key=certs/cosigner1.key \
-  --from-file=cosigner2.crt=certs/cosigner2.crt --from-file=cosigner2.key=certs/cosigner2.key \
-  --from-file=cosigner3.crt=certs/cosigner3.crt --from-file=cosigner3.key=certs/cosigner3.key
+kubectl -n rutli create secret generic rutli-cosigner-ca --from-file=ca.crt=certs/ca.crt
+for i in 1 2 3; do        # one kubernetes.io/tls Secret per cosigner (cert-manager can write these)
+  kubectl -n rutli create secret tls rutli-cosigner-tls-$i --cert=certs/cosigner$i.crt --key=certs/cosigner$i.key
+done
 
 kubectl -n rutli create secret generic rutli-seal \
   --from-literal=RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
@@ -47,13 +46,44 @@ Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org A
 | `image.tag` | `0.3.2@sha256:af38fd…6d7d3f` | Digest-pinned |
 | `replicaCount` / `threshold` | `3` / `2` | Must match cert count |
 | `fullnameOverride` | `rutli-cosigner` | Peer DNS base |
-| `tlsSecretName` / `sealSecretName` | `rutli-cosigner-tls` / `rutli-seal` | Pre-created |
+| `tls.layout` | `perNode` | `perNode`: `tls.caSecretName` (`rutli-cosigner-ca`, key `ca.crt`) + `tls.perNodeSecretPrefix<id>` (`rutli-cosigner-tls-1..N`, `tls.crt`/`tls.key`). `shared`: the legacy single `tlsSecretName`. Either way each cosigner container sees only its own key (below) |
+| `sealSecretName` | `rutli-seal` | Pre-created |
 | `signerAllowlist` | `[driver]` | Required under TLS |
 | `operatorAllowlist` | `[]` | Operator role for the split ceremony's `verify-key` (KeyStatus + CeremonySignTest only), e.g. `[operator]` |
 | `hostedKeys.enabled` | `false` | Cluster-hosted RSA/AES keys — replicated whole keys, not threshold shares |
 | `backup.enabled` | `false` | Nightly `backup` via `kubectl exec` inside each cosigner; needs `backup.ship` |
 
 See [`values.yaml`](values.yaml) for the full set.
+
+## TLS material: what each pod sees
+
+The cosigner container of pod `<fullname>-<o>` sees only `ca.crt` and its own
+`cosigner<o+1>.{crt,key}`: a `tls-select` init container copies them from the source Secret(s)
+into an in-memory `certs` volume, and the source volume is mounted into that init container only.
+A StatefulSet has one pod template and Kubernetes cannot mount a different Secret per ordinal, so
+the pod spec, the kubelet and the (short, network-less) init container still see every node's key;
+full per-pod isolation needs one StatefulSet per node. **Residual risk:** anyone with `get secrets`
+in the namespace, root on a cosigner's node, or the right to create pods mounting these Secrets has
+every node's key — restrict them accordingly. Certificates are read at startup: restart the pods
+after rotating a Secret. The operator cert used by the split ceremony's `verify-key` is never part
+of this release (`deploy/k8s/job-verify-key.example.yaml`).
+
+### Migrating from the shared TLS Secret (≤ 0.3.x installs, e.g. the DevNet soak)
+
+Two options; neither changes a certificate.
+
+1. **Keep the old Secret for now:** `helm upgrade … --set tls.layout=shared`. The pods restart with
+   the init-container split (each cosigner container sees only its own key); nothing else changes.
+2. **Move to per-node Secrets** (the default): create `rutli-cosigner-ca` and
+   `rutli-cosigner-tls-1..N` from the existing `rutli-cosigner-tls` — exact commands in
+   [`deploy/k8s/README.md`](../../k8s/README.md), "Migrating from the shared TLS Secret"
+   — then `helm upgrade` without `tls.layout` (or with `tls.layout=perNode`). Check
+   `kubectl exec <pod> -c cosigner -- ls /certs` shows one node's files, then delete
+   `rutli-cosigner-tls`. Copy `ca.crt` byte for byte: the split ceremony's cluster id is its hash.
+
+Upgrading with the default `perNode` before the new Secrets exist leaves the first rolled pod in
+`ContainerCreating` (missing Secret) — the rollout stops there with two nodes still signing; create
+the Secrets and it proceeds.
 
 ## Probes
 

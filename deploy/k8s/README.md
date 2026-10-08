@@ -13,8 +13,9 @@ statefulset.yaml       3 cosigners, 1 durable PVC each, non-root + read-only roo
 networkpolicy.yaml     signing port reachable only from the mesh + the Canton driver
 pdb.yaml               minAvailable 2 — voluntary drains cannot drop below threshold
 cronjob-backup.yaml    opt-in: nightly `backup` run INSIDE each cosigner via kubectl exec, shipped off-cluster
-cronjob-refresh.yaml   opt-in: weekly proactive share refresh
-secrets.example.yaml   shape of the two Secrets you create out-of-band (never commit real ones)
+cronjob-refresh.yaml   opt-in: weekly proactive share refresh (driver cert only)
+job-verify-key.example.yaml  split ceremony: one-off verify-key with a temporary operator cert
+secrets.example.yaml   shape of the Secrets you create out-of-band (never commit real ones)
 kustomization.yaml     applies everything except the Secrets and the opt-in CronJobs
 ```
 
@@ -35,11 +36,11 @@ docker push ghcr.io/stakecraft/rutli-cosigner:$(git rev-parse --short HEAD)
 kubectl create namespace rutli
 scripts/gen-frost-certs.sh 3 ./certs          # CA + per-cosigner certs (shared `rutli-cosigner` SAN)
 
-kubectl -n rutli create secret generic rutli-cosigner-tls \
-  --from-file=ca.crt=certs/ca.crt \
-  --from-file=cosigner1.crt=certs/cosigner1.crt --from-file=cosigner1.key=certs/cosigner1.key \
-  --from-file=cosigner2.crt=certs/cosigner2.crt --from-file=cosigner2.key=certs/cosigner2.key \
-  --from-file=cosigner3.crt=certs/cosigner3.crt --from-file=cosigner3.key=certs/cosigner3.key
+kubectl -n rutli create secret generic rutli-cosigner-ca --from-file=ca.crt=certs/ca.crt
+for i in 1 2 3; do                            # one kubernetes.io/tls Secret per cosigner
+  kubectl -n rutli create secret tls rutli-cosigner-tls-$i \
+    --cert=certs/cosigner$i.crt --key=certs/cosigner$i.key
+done
 
 kubectl -n rutli create secret generic rutli-seal \
   --from-literal=RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"   # from your secret manager in prod
@@ -129,6 +130,52 @@ needs a human.
 
 See [`docs/hosted-keys.md`](../../docs/hosted-keys.md).
 
+## TLS material: what each pod sees
+
+Each cosigner holds one mTLS identity, and since the split ceremony that identity also signs
+recipient requests (`docs/split-ceremony.md`), so one node must not be able to act as another.
+
+- **The cosigner container of pod `cosigner-<o>` sees only `ca.crt` and its own
+  `cosigner<o+1>.{crt,key}`.** The `tls-select` init container copies them from the projected
+  `tls-src` volume (the CA Secret + every `rutli-cosigner-tls-<i>`) into an in-memory `certs`
+  volume; `tls-src` is mounted into the init container only. A compromise of the long-running,
+  network-facing cosigner process does not hand over the other nodes' keys.
+- **Why not more:** a StatefulSet has one pod template, and Kubernetes cannot mount a different
+  Secret per ordinal, so every pod *spec* still references every node's Secret, the kubelet
+  materialises all of them for each pod, and the (short, network-less) init container reads them.
+  Full per-pod isolation needs one single-replica StatefulSet per node (different pod and PVC
+  names — not a drop-in change), or a CSI secrets driver with per-pod identity.
+- **Residual risk, stated plainly:** anyone with `get secrets` in this namespace, root on a node
+  running a cosigner, or the ability to create pods that mount these Secrets has **every** node's
+  key. Restrict `secrets` RBAC in the namespace to the people who could run the ceremony anyway.
+- The refresh CronJob mounts only the driver's cert (`rutli-driver-tls`); the operator cert for
+  `verify-key` is never a standing Secret (`job-verify-key.example.yaml` creates and deletes it).
+- Certificates are read at startup: after rotating a Secret, restart the pods.
+
+### Migrating from the shared TLS Secret (≤ 0.3.x layout)
+
+Earlier manifests mounted one Secret `rutli-cosigner-tls` (`ca.crt` + every `cosigner<i>.{crt,key}`)
+into every pod. To move an existing install (e.g. the DevNet soak) without changing any
+certificate:
+
+```sh
+umask 077; d=$(mktemp -d)                    # tmpfs if you have one; delete afterwards
+kubectl -n rutli get secret rutli-cosigner-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > $d/ca.crt
+kubectl -n rutli create secret generic rutli-cosigner-ca --from-file=ca.crt=$d/ca.crt
+for i in 1 2 3; do
+  kubectl -n rutli get secret rutli-cosigner-tls -o jsonpath="{.data.cosigner$i\.crt}" | base64 -d > $d/c.crt
+  kubectl -n rutli get secret rutli-cosigner-tls -o jsonpath="{.data.cosigner$i\.key}" | base64 -d > $d/c.key
+  kubectl -n rutli create secret tls rutli-cosigner-tls-$i --cert=$d/c.crt --key=$d/c.key
+done
+rm -rf $d
+kubectl apply -k deploy/k8s                   # rolls the pods one at a time (PDB minAvailable 2)
+kubectl -n rutli exec cosigner-0 -c cosigner -- ls /certs   # ca.crt cosigner1.crt cosigner1.key
+```
+
+Then, once every pod is Ready and signing, delete `rutli-cosigner-tls`. If you run the refresh
+CronJob, create `rutli-driver-tls` from the driver's cert first. The `ca.crt` bytes must not change
+(the split ceremony's cluster id is a hash of them), which copying it as above guarantees.
+
 ## Never mount a cosigner volume into another pod
 
 A cosigner's `data` PVC is mounted by that cosigner's pod and by nothing else, ever — not a backup
@@ -154,8 +201,9 @@ volume snapshot is fine (storage layer, no second mount); a second mount is not.
   tars to `ship.sh` in ConfigMap `rutli-backup-destination` — point that script at your off-cluster
   destination before enabling the file in `kustomization.yaml`; the placeholder fails the Job on
   purpose. Keep the tars in a different trust domain from `rutli-seal`. See `docs/disaster-recovery.md`.
-- **Proactive refresh**: `rutli-cosigner --config /config/cosigner-1.json refresh --key-id frost-<participant>-namespace`
-  against any pod — same key, rotated shares. Example CronJob: `cronjob-refresh.yaml` (set `KEY_ID`).
+- **Proactive refresh**: `rutli-cosigner --config /config/client-driver.json refresh --key-id frost-<participant>-namespace`
+  with the driver's identity (a cosigner cert is not on `signer_allowlist`) — same key, rotated
+  shares. Example CronJob: `cronjob-refresh.yaml` (set `KEY_ID`; mounts only `rutli-driver-tls`).
   Refresh fences signing cluster-wide; avoid topology bursts mid-refresh.
 - **Restore** a replaced pod: its PVC is empty → stream the tar back in and restore, again through
   the cosigner's own container:

@@ -120,7 +120,15 @@ are the key).
       `scripts/gen-frost-certs.sh` makes one) and every cosigner config listing it in
       `operator_allowlist` (Helm: `operatorAllowlist`). The operator role may call `KeyStatus` and
       `CeremonySignTest` only — never `Sign` — so no one in the ceremony needs the driver
-      certificate. Each cosigner's mTLS certificate has CN `cosigner<identifier>`.
+      certificate. Each cosigner's mTLS certificate has CN `cosigner<identifier>`. On Kubernetes,
+      create the operator Secret only for the ceremony and run `verify-key` as the one-off
+      `deploy/k8s/job-verify-key.example.yaml`; delete both afterwards.
+- [ ] Per-node TLS deployment (chart/manifests ≥ 0.4.0, `tls.layout: perNode` or at least the
+      `tls-select` init container): each cosigner container holds only its own mTLS key, so one
+      compromised cosigner cannot sign recipient requests as another node. **Residual risk:** whoever
+      has `get secrets` in the namespace (or root on a cosigner's node) holds every node's key and
+      could sign requests as any node — list those people in the record; Gate 0's SAS, read in the
+      pod by a witness, is the control that does not depend on them.
 - [ ] The key file obtained from the old node (export, preferably password-protected; or the DB row)
       and carried to the dealer host on removable media. Note L7/L8 for every copy.
 - [ ] Location inventory §3.2 complete.

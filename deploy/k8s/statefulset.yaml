@@ -47,6 +47,33 @@ spec:
           labelSelector:
             matchLabels:
               app.kubernetes.io/name: rutli-cosigner
+      # Only this node's TLS material reaches the cosigner container: copy ca.crt and
+      # cosigner<id>.{crt,key} (id = ordinal + 1) from tls-src into the in-memory `certs` volume.
+      # tls-src is mounted here and nowhere else, so the long-running, network-facing process never
+      # has another node's key on its filesystem. (One StatefulSet cannot mount a different Secret
+      # per ordinal; see README, "TLS material: what each pod sees".)
+      initContainers:
+        - name: tls-select
+          image: ghcr.io/stakecraft/rutli-cosigner:0.3.1@sha256:21fd2730fc47e57e59ec320063517c0cecc2784afa4e0fae3827b14a979f97a7
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              id=$(( ${HOSTNAME##*-} + 1 ))
+              umask 077
+              cat /tls-src/ca.crt > /certs/ca.crt
+              cat "/tls-src/cosigner${id}.crt" > "/certs/cosigner${id}.crt"
+              cat "/tls-src/cosigner${id}.key" > "/certs/cosigner${id}.key"
+              chmod 0444 /certs/ca.crt "/certs/cosigner${id}.crt"
+              chmod 0400 "/certs/cosigner${id}.key"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - { name: tls-src, mountPath: /tls-src, readOnly: true }
+            - { name: certs, mountPath: /certs }
       containers:
         - name: cosigner
           image: ghcr.io/stakecraft/rutli-cosigner:0.3.2@sha256:af38fd04fdc2446dbfa7478ed65a3296d1cc24ba337f24ceb1e43940fc6d7d3f
@@ -109,9 +136,26 @@ spec:
       volumes:
         - name: config
           configMap: { name: rutli-cosigner-config }
+        # This node's TLS material only (filled by tls-select); in memory, never on the node's disk.
         - name: certs
-          # 0440 (not 0400): with fsGroup 10001 the non-root user reads the key via group perms.
-          secret: { secretName: rutli-cosigner-tls, defaultMode: 0440 }
+          emptyDir: { medium: Memory, sizeLimit: 1Mi }
+        # Every node's TLS material: one kubernetes.io/tls Secret per node + the CA. Mounted into
+        # the tls-select init container only. 0440 (not 0400): with fsGroup 10001 the non-root
+        # user reads the keys via group perms. Edit the list for another n.
+        - name: tls-src
+          projected:
+            defaultMode: 0440
+            sources:
+              - secret: { name: rutli-cosigner-ca, items: [{ key: ca.crt, path: ca.crt }] }
+              - secret:
+                  name: rutli-cosigner-tls-1
+                  items: [{ key: tls.crt, path: cosigner1.crt }, { key: tls.key, path: cosigner1.key }]
+              - secret:
+                  name: rutli-cosigner-tls-2
+                  items: [{ key: tls.crt, path: cosigner2.crt }, { key: tls.key, path: cosigner2.key }]
+              - secret:
+                  name: rutli-cosigner-tls-3
+                  items: [{ key: tls.crt, path: cosigner3.crt }, { key: tls.key, path: cosigner3.key }]
         - name: tmp
           emptyDir: {}
   volumeClaimTemplates:

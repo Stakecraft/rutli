@@ -22,8 +22,23 @@ service:
   grpcPort: 9101
   metricsPort: 9200
 
-# Existing Secret with CA + per-cosigner cert/key (and optionally driver cert for operators).
-# Keys expected: ca.crt, cosigner1.crt, cosigner1.key, … cosignerN.crt/key
+# mTLS material. Whatever the layout, the cosigner CONTAINER of pod <fullname>-<o> (identifier
+# o+1) only ever sees ca.crt and its own cosigner<o+1>.crt/.key: a short init container copies
+# them from the source Secret(s) into an in-memory volume, and only that volume is mounted into
+# the cosigner. (A single StatefulSet cannot mount a different Secret per ordinal, so the pod spec
+# and its init container still reference every node's material — see README, "TLS material".)
+tls:
+  # perNode (default): one Secret per node named <perNodeSecretPrefix><identifier>, with keys
+  #   tls.crt / tls.key (the kubernetes.io/tls shape; cert-manager can write it), plus
+  #   <caSecretName> with key ca.crt.
+  # shared (the ≤ 0.3.x layout): one Secret <tlsSecretName> holding ca.crt and every
+  #   cosigner<i>.crt / cosigner<i>.key. Keep it for an existing install until it has migrated
+  #   (README, "Migrating from the shared TLS Secret").
+  layout: perNode
+  perNodeSecretPrefix: rutli-cosigner-tls-
+  caSecretName: rutli-cosigner-ca
+
+# tls.layout=shared only: the legacy Secret with ca.crt + cosigner1..N .crt/.key.
 tlsSecretName: rutli-cosigner-tls
 
 # Existing Secret with key RUTLI_SEAL_SECRET (≥ 32 chars; e.g. openssl rand -hex 32)
