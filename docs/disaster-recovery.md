@@ -325,8 +325,9 @@ After any restore/repair, confirm the node identity did not change:
 ```sh
 # the group verifying key (and therefore the Canton namespace) must be identical to before
 rutli-cosigner --config … refresh --key-id frost-<node>-namespace   # prints the group key; compare
-# or, read-only, every node at once: present, same package, own share consistent, each node signs
-rutli-cosigner --config … verify-key --key-id frost-<node>-namespace --expect-fingerprint 1220… --sign-test
+# or, read-only, every node at once: present, same package, own verifying share consistent
+# (operator cert; add --sign-test for an imported key: every t-subset of cosigners signs)
+rutli-cosigner --config … verify-key --key-id frost-<node>-namespace --expect-fingerprint 1220…
 # and confirm the participant still reports the same PAR::…::<fingerprint> identity in the Canton console.
 ```
 
