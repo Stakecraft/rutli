@@ -1,0 +1,195 @@
+#!/usr/bin/env bash
+# End-to-end: the split ceremony (docs/split-ceremony.md) on a local 2-of-3 cosigner cluster with
+# mutual TLS and sealed shares — the deploy/frost/config-tls configs, run as native processes on
+# 127.0.0.1 from this working tree (no Docker, no image pulls, no network).
+#
+#   scripts/e2e-split-ceremony.sh          (from the repo root; KEEP=1 keeps the work dir)
+#
+# Imports B1's throwaway Canton 3.6.1 namespace key (frost/canton-key/testdata) and checks, in
+# order: DKG on the import id is refused (ALREADY_EXISTS) before and after; share-recipient on the
+# running nodes; the dealer; import-share --dry-run then for real; an identical re-import is a
+# no-op; the startup warning for an unrefreshed dealt key; verify-key --sign-test; refresh;
+# verify-key again (new digest, refresh count 1); a re-import after refresh is refused; restart of
+# every node then verify-key; a Sign with one node down, verified independently by OpenSSL.
+#
+# Requires: cargo, openssl (3.x, for Ed25519 verify), jq, grpcurl.
+set -euo pipefail
+
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+BASE_PORT="${E2E_BASE_PORT:-19100}"
+VEC="$REPO/frost/canton-key/testdata/vectors"
+FP="$(jq -r '.keys[] | select(.name == "namespace") | .fingerprint' "$VEC/manifest.json")"
+export E2E_EXPORT_PASSWORD
+E2E_EXPORT_PASSWORD="$(jq -r .password "$VEC/manifest.json")"
+KEY_ID="frost-import-${FP:4:8}"
+CEREMONY="e2e-$(date +%s)"
+
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/rutli-e2e-split.XXXXXX")"
+PIDS=(0 0 0 0)
+
+step() { printf '\n==> %s\n' "$*"; }
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+cleanup() {
+  rc=$?
+  for i in 1 2 3; do
+    [ "${PIDS[$i]}" != 0 ] && kill "${PIDS[$i]}" 2>/dev/null || true
+  done
+  wait 2>/dev/null || true
+  if [ "$rc" -ne 0 ]; then
+    for i in 1 2 3; do
+      echo "--- node$i log (tail) ---"
+      tail -n 30 "$WORK/node$i.log" 2>/dev/null || true
+    done
+  fi
+  if [ "${KEEP:-0}" = 1 ]; then echo "work dir kept: $WORK"; else rm -rf "$WORK"; fi
+  [ "$rc" -eq 0 ] && echo "==> split ceremony e2e OK"
+  return "$rc"
+}
+trap cleanup EXIT
+
+step "Build rutli-cosigner and rutli-dealer from the working tree"
+(cd "$REPO/frost" && cargo build ${CARGO_FLAGS:-} -p rutli-cosigner --bins)
+BIN="$REPO/frost/target/debug"
+COSIGNER="$BIN/rutli-cosigner"
+DEALER="$BIN/rutli-dealer"
+
+step "mTLS trust domain, seal secret, configs (deploy/frost/config-tls on 127.0.0.1:$((BASE_PORT + 1))..$((BASE_PORT + 3)))"
+"$REPO/scripts/gen-frost-certs.sh" 3 "$WORK/certs" >/dev/null
+export RUTLI_SEAL_SECRET
+RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
+mkconfig() { # node-config-name  cert-name  out
+  jq --arg work "$WORK" --arg cert "$2" --argjson base "$BASE_PORT" '
+      .listen = "127.0.0.1:\($base + .identifier)"
+    | .data_dir = "\($work)/node\(.identifier)"
+    | .peers |= map(.endpoint = "https://127.0.0.1:\($base + .identifier)")
+    | .tls.ca_cert = "\($work)/certs/ca.crt"
+    | .tls.cert = "\($work)/certs/\($cert).crt"
+    | .tls.key = "\($work)/certs/\($cert).key"
+    | del(.metrics_listen)' "$REPO/deploy/frost/config-tls/$1.json" >"$3"
+}
+for i in 1 2 3; do mkconfig "cosigner$i" "cosigner$i" "$WORK/c$i.json"; done
+# The operator's view: the driver's client cert, like the refresh CronJob.
+mkconfig cosigner1 driver "$WORK/operator.json"
+
+start() {
+  RUST_LOG=info "$COSIGNER" --config "$WORK/c$1.json" serve >>"$WORK/node$1.log" 2>&1 &
+  PIDS[$1]=$!
+}
+stop() { kill "${PIDS[$1]}" 2>/dev/null || true; wait "${PIDS[$1]}" 2>/dev/null || true; PIDS[$1]=0; }
+wait_healthy() {
+  for _ in $(seq 1 120); do
+    "$COSIGNER" --config "$WORK/c$1.json" health >/dev/null 2>&1 && return 0
+    sleep 0.25
+  done
+  fail "node $1 did not become healthy"
+}
+cli() { RUST_LOG=off "$COSIGNER" "$@"; }
+grpc() {
+  grpcurl -cacert "$WORK/certs/ca.crt" -cert "$WORK/certs/driver.crt" -key "$WORK/certs/driver.key" \
+    -servername rutli-cosigner -import-path "$REPO/frost/cosigner/proto" -proto cosigner.proto "$@"
+}
+expect_dkg_refused() {
+  if out="$(grpc -d "{\"key_id\":\"$KEY_ID\"}" "127.0.0.1:$((BASE_PORT + 1))" rutli.cosigner.v1.Signer/Dkg 2>&1)"; then
+    fail "Dkg on $KEY_ID succeeded: $out"
+  fi
+  grep -q "AlreadyExists" <<<"$out" || fail "Dkg on $KEY_ID: expected AlreadyExists, got: $out"
+  echo "Dkg $KEY_ID -> AlreadyExists ($1)"
+}
+
+step "Start three cosigners (mTLS, sealed shares)"
+for i in 1 2 3; do start "$i"; done
+for i in 1 2 3; do wait_healthy "$i"; done
+
+step "DKG is refused for the import id before anything is installed"
+expect_dkg_refused "reserved"
+
+step "1. share-recipient on every node (the running daemons share the data dir, as under kubectl exec)"
+for i in 1 2 3; do
+  cli --config "$WORK/c$i.json" share-recipient --key-id "$KEY_ID" --ceremony-id "$CEREMONY" \
+    --out "$WORK/r$i.json" >/dev/null
+  jq -e --arg k "$KEY_ID" '.key_id == $k and .identifier > 0' "$WORK/r$i.json" >/dev/null
+done
+
+step "2. Dealer: split the Canton namespace key ${FP}"
+# A laptop has swap (and macOS cannot be checked): --allow-swap. The runbook's live-boot host does not.
+"$DEALER" split-key --in "$VEC/namespace.export-pw.bin" --password-env E2E_EXPORT_PASSWORD \
+  --expect-fingerprint "$FP" --key-id "$KEY_ID" --threshold 2 \
+  --recipient "$WORK/r1.json" --recipient "$WORK/r2.json" --recipient "$WORK/r3.json" \
+  --out-dir "$WORK/dealer" --allow-swap
+DIGEST="$(jq -r .pkp_digest "$WORK/dealer/dealer-record.json")"
+GROUP="$(jq -r .group_verifying_key "$WORK/dealer/dealer-record.json")"
+
+step "3. import-share --dry-run on every node"
+for i in 1 2 3; do
+  rep="$(cli --config "$WORK/c$i.json" import-share --in "$WORK/dealer/share-$KEY_ID-node$i.json" \
+    --expect-fingerprint "$FP" --dry-run)"
+  jq -e --arg d "$DIGEST" '.outcome == "dry-run" and .pkp_digest == $d' <<<"$rep" >/dev/null \
+    || fail "dry run on node $i: $rep"
+done
+[ -e "$WORK/node1/keys/$KEY_ID.json" ] && fail "a dry run installed something"
+
+step "   wrong node and wrong fingerprint are refused"
+if cli --config "$WORK/c1.json" import-share --in "$WORK/dealer/share-$KEY_ID-node2.json" \
+  --expect-fingerprint "$FP" >/dev/null 2>&1; then fail "node 1 installed node 2's bundle"; fi
+if cli --config "$WORK/c1.json" import-share --in "$WORK/dealer/share-$KEY_ID-node1.json" \
+  --expect-fingerprint "1220$(printf '0%.0s' $(seq 1 64))" >/dev/null 2>&1; then fail "wrong fingerprint accepted"; fi
+
+step "4. import-share on every node"
+for i in 1 2 3; do
+  rep="$(cli --config "$WORK/c$i.json" import-share --in "$WORK/dealer/share-$KEY_ID-node$i.json" \
+    --expect-fingerprint "$FP")"
+  jq -e --arg d "$DIGEST" '.outcome == "installed" and .pkp_digest == $d' <<<"$rep" >/dev/null \
+    || fail "import on node $i: $rep"
+  [ -e "$WORK/node$i/ceremony/$KEY_ID.recipient" ] && fail "node $i kept its recipient secret"
+done
+rep="$(cli --config "$WORK/c2.json" import-share --in "$WORK/dealer/share-$KEY_ID-node2.json" --expect-fingerprint "$FP")"
+jq -e '.outcome == "already-installed"' <<<"$rep" >/dev/null || fail "identical re-import: $rep"
+echo "identical re-import -> already-installed"
+
+step "   a restarted node warns that the dealt key was never refreshed"
+stop 1; start 1; wait_healthy 1
+grep -q "never been refreshed" "$WORK/node1.log" || fail "no startup warning for the unrefreshed key"
+
+step "5. verify-key --sign-test"
+rep="$(cli --config "$WORK/operator.json" verify-key --key-id "$KEY_ID" --expect-fingerprint "$FP" --sign-test --json || true)"
+jq -e --arg d "$DIGEST" '.ok and .pkp_digest == $d and .refresh_count == 0 and (.sign_test | length == 3)
+  and all(.sign_test[]; .ok)' <<<"$rep" >/dev/null || fail "verify-key: $rep"
+echo "verify-key OK: 3/3 nodes, digest $DIGEST, 3 test signatures"
+
+step "   DKG is still refused for the installed id"
+expect_dkg_refused "installed"
+
+step "6. refresh"
+out="$(cli --config "$WORK/operator.json" refresh --key-id "$KEY_ID")"
+grep -q "$GROUP" <<<"$out" || fail "refresh changed the group key: $out"
+
+step "7. verify-key after refresh"
+rep="$(cli --config "$WORK/operator.json" verify-key --key-id "$KEY_ID" --expect-fingerprint "$FP" --sign-test --json || true)"
+jq -e --arg d "$DIGEST" '.ok and .pkp_digest != $d and .refresh_count == 1 and all(.sign_test[]; .ok)' <<<"$rep" >/dev/null \
+  || fail "verify-key after refresh: $rep"
+echo "verify-key OK: new digest $(jq -r .pkp_digest <<<"$rep"), refresh count 1"
+if cli --config "$WORK/c3.json" import-share --in "$WORK/dealer/share-$KEY_ID-node3.json" \
+  --expect-fingerprint "$FP" >/dev/null 2>&1; then fail "a dealt bundle re-imported over a refreshed key"; fi
+echo "re-import after refresh -> refused"
+
+step "8. Restart every node, verify again"
+for i in 1 2 3; do stop "$i"; done
+for i in 1 2 3; do start "$i"; done
+for i in 1 2 3; do wait_healthy "$i"; done
+rep="$(cli --config "$WORK/operator.json" verify-key --key-id "$KEY_ID" --expect-fingerprint "$FP" --sign-test --json || true)"
+jq -e '.ok and .refresh_count == 1' <<<"$rep" >/dev/null || fail "verify-key after restart: $rep"
+
+step "9. Sign with node 3 down, verified by OpenSSL under the Canton public key"
+stop 3
+MSG_HEX="1220$(printf 'rutli e2e split ceremony' | openssl dgst -sha256 -hex | awk '{print $NF}')"
+MSG_B64="$(printf '%s' "$MSG_HEX" | xxd -r -p | base64)"
+sig="$(grpc -d "{\"key_id\":\"$KEY_ID\",\"message\":\"$MSG_B64\"}" "127.0.0.1:$((BASE_PORT + 1))" \
+  rutli.cosigner.v1.Signer/Sign | jq -r .signature)"
+printf '%s' "$MSG_HEX" | xxd -r -p >"$WORK/msg.bin"
+printf '%s' "$sig" | base64 -d >"$WORK/sig.bin" 2>/dev/null || printf '%s' "$sig" | base64 -D >"$WORK/sig.bin"
+# SubjectPublicKeyInfo for a raw Ed25519 key: fixed 12-byte prefix ‖ 32-byte key.
+printf '302a300506032b6570032100%s' "$GROUP" | xxd -r -p >"$WORK/pub.der"
+openssl pkey -pubin -inform DER -in "$WORK/pub.der" -out "$WORK/pub.pem"
+openssl pkeyutl -verify -pubin -inkey "$WORK/pub.pem" -rawin -in "$WORK/msg.bin" -sigfile "$WORK/sig.bin" \
+  || fail "OpenSSL rejects the cluster's signature"
