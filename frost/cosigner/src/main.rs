@@ -153,6 +153,22 @@ async fn main() -> Result<()> {
         0 => {}
         n => tracing::info!(count = n, "migrated legacy plaintext shares to sealed envelopes"),
     }
+    // A key installed by the split ceremony is only as strong as its dealt shares until the first
+    // refresh: every copy of a dealt bundle (and the dealer's memory) still combines with the live
+    // shares. Say so at every start until someone runs one.
+    match keystore.dealt_keys_never_refreshed() {
+        Ok(keys) => {
+            for key_id in keys {
+                tracing::warn!(
+                    key_id = %key_id,
+                    "key installed by the split ceremony has never been refreshed — the dealt shares \
+                     still combine with the live ones; run `rutli-cosigner refresh --key-id {key_id}` \
+                     (docs/split-ceremony.md)"
+                );
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "could not check for unrefreshed imported keys"),
+    }
     let mut node = Node::new(identifier, cfg.max_signers(), cfg.threshold, keystore);
 
     // Cluster-hosted (non-FROST) keys. The wrapping key and the at-rest seal key both come from the

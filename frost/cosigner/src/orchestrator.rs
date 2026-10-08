@@ -27,6 +27,10 @@ pub const CANTON_DIGEST_LEN: usize = 34;
 /// Coordinate a full DKG across every peer and return the agreed 32-byte group verifying key.
 /// Every peer persists its own share; the whole private key is never assembled anywhere.
 pub async fn run_dkg(peers: &Peers, key_id: &str) -> Result<[u8; 32]> {
+    // Every peer refuses too (fence and part 1); this just answers before touching the mesh.
+    if crate::share_delivery::is_reserved_for_import(key_id) {
+        return Err(DaemonError::ReservedKeyId(key_id.to_string()));
+    }
     let dkg_id = new_id("dkg");
     fence_all(peers, &dkg_id, key_id, "dkg").await?;
 
@@ -287,6 +291,10 @@ pub async fn generate_hosted_key(
     spec: crate::hosted::HostedSpec,
     write_quorum: usize,
 ) -> Result<(crate::hosted::HostedKey, bool, usize)> {
+    // A hosted key squatting on an import id would make the split ceremony's install fail.
+    if crate::share_delivery::is_reserved_for_import(key_id) {
+        return Err(DaemonError::ReservedKeyId(key_id.to_string()));
+    }
     let ceremony_id = new_id("genkey");
 
     // Fence the key cluster-wide: the guard is per-key, so this also serializes against a

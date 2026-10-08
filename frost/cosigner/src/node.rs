@@ -196,6 +196,11 @@ impl Node {
         if matches!(kind, "dkg" | "refresh") {
             self.refuse_if_keystore_down()?;
         }
+        // Ids reserved for imported keys are never minted by DKG — refused at the fence, so not
+        // even a guard is taken for one.
+        if kind == "dkg" && crate::share_delivery::is_reserved_for_import(key_id) {
+            return Err(DaemonError::ReservedKeyId(key_id.to_string()));
+        }
         let pending = self.pending_sign_count(key_id);
         if pending > 0 {
             return Err(DaemonError::SignInProgress {
@@ -437,6 +442,12 @@ impl Node {
     // -- DKG peer ops --
 
     pub fn dkg_part1(&self, dkg_id: &str, key_id: &str) -> Result<round1::Package> {
+        // `…frost-import-…` ids belong to the split ceremony. Refusing them here, on every node and
+        // whether or not the import has happened yet, means a DKG can never mint a key under an id
+        // an operator is about to install (and a half-installed import is never "completed" by one).
+        if crate::share_delivery::is_reserved_for_import(key_id) {
+            return Err(DaemonError::ReservedKeyId(key_id.to_string()));
+        }
         // DKG must never clobber a provisioned key — the namespace key is non-rotatable, so an
         // accidental re-DKG (failover retry, ops mistake) would destroy the node's identity.
         if self.keystore.exists(key_id) {
@@ -525,8 +536,11 @@ impl Node {
         let others = without_self(round1_map, self.identifier);
         let (key_package, public_key_package) = state.participant.part3(&others, round2_for_me)?;
 
-        let share = Share { key_package, public_key_package: public_key_package.clone() };
-        self.keystore.save(&state.key_id, &share)?;
+        let share =
+            Share { key_package, public_key_package: public_key_package.clone(), origin: None };
+        // create, not save: fails if the file appeared since the check above (an import-share run
+        // in the pod, a racing ceremony) instead of overwriting it.
+        self.keystore.create(&state.key_id, &share)?;
         // Drop any cached cosigner so it is reloaded fresh from the saved share.
         self.cosigners.lock().expect("cosigners lock").remove(&state.key_id);
         Ok(group_verifying_key_bytes(&public_key_package)?)
@@ -625,6 +639,12 @@ impl Node {
     ) -> Result<[u8; 32]> {
         let old = self.keystore.load(&state.key_id)?;
         let old_group = group_verifying_key_bytes(&old.public_key_package)?;
+        // A dealt key's provenance survives the refresh, which is counted: after the first one, the
+        // dealer's copies of the shares no longer combine with the live ones.
+        let origin = old.origin.clone().map(|mut o| {
+            o.refresh_count += 1;
+            o
+        });
         let others = without_self(round1_map, self.identifier);
         let (key_package, public_key_package) = state.participant.part3(
             &others,
@@ -642,7 +662,7 @@ impl Node {
             )));
         }
 
-        let share = Share { key_package, public_key_package };
+        let share = Share { key_package, public_key_package, origin };
         self.keystore.save(&state.key_id, &share)?;
         self.cosigners.lock().expect("cosigners lock").remove(&state.key_id);
         Ok(new_group)
