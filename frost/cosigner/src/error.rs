@@ -108,7 +108,9 @@ impl From<DaemonError> for tonic::Status {
             DaemonError::Config(_) | DaemonError::Ceremony(_) => {
                 tonic::Status::failed_precondition(e.to_string())
             }
-            DaemonError::ReservedKeyId(_) => tonic::Status::invalid_argument(e.to_string()),
+            // ALREADY_EXISTS, like a DKG over an existing key: the id is taken — by the import
+            // mechanism, whether or not the share has been installed yet.
+            DaemonError::ReservedKeyId(_) => tonic::Status::already_exists(e.to_string()),
             // invalid_argument, and nothing more: same code and message for every cause.
             DaemonError::DecryptFailed => tonic::Status::invalid_argument(e.to_string()),
             // Retryable: a legitimate caller should back off and try again, not treat the key as
