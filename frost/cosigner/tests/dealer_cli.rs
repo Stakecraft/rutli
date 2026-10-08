@@ -116,6 +116,9 @@ impl Ceremony {
             .arg(self.out())
             .arg("--ca-cert")
             .arg(self.tmp.path().join("ca.crt"))
+            // CI runners (and most dev Linux hosts) pipe core dumps to systemd-coredump; the
+            // refusal is the runbook host's concern, not what these tests exercise.
+            .arg("--allow-core-handler")
             .env(PASSWORD_ENV, password())
             .stdin(std::process::Stdio::null());
         for r in &self.requests {
