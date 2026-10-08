@@ -128,8 +128,7 @@ fn record_ceremony(kind: &'static str, ok: bool) {
 /// Extract the subject Common Name from a DER-encoded X.509 certificate.
 pub fn cn_of(der: &[u8]) -> Option<String> {
     let (_, cert) = x509_parser::parse_x509_certificate(der).ok()?;
-    let cn = cert.subject().iter_common_name().next()?.as_str().ok()?.to_string();
-    Some(cn)
+    crate::tls::subject_cn(&cert)
 }
 
 #[tonic::async_trait]
@@ -788,6 +787,20 @@ mod tests {
     #[test]
     fn cn_of_rejects_garbage() {
         assert_eq!(cn_of(b"not a certificate"), None);
+    }
+
+    #[test]
+    fn cn_of_names_nobody_for_two_cns_or_an_undecodable_one() {
+        // The same rule the split ceremony's request check uses (tls::subject_cn).
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut two = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        two.distinguished_name.push(rcgen::DnType::CommonName, "driver");
+        two.distinguished_name.push(rcgen::DnType::CustomDnType(vec![2, 5, 4, 3]), "cosigner1");
+        assert_eq!(cn_of(two.self_signed(&key).unwrap().der()), None);
+        let mut bmp = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        bmp.distinguished_name
+            .push(rcgen::DnType::CommonName, rcgen::DnValue::BmpString("driver".try_into().unwrap()));
+        assert_eq!(cn_of(bmp.self_signed(&key).unwrap().der()), None);
     }
 
     #[test]

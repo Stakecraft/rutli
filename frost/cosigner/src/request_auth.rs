@@ -269,32 +269,55 @@ pub fn verify_request(r: &RecipientRequest, ca_pem: &[u8]) -> Result<()> {
     }
     let chain: Vec<X509Certificate<'_>> = chain_der.iter().map(|d| parse(d)).collect::<Result<_>>()?;
 
-    // Chain: each certificate signed by the next, the last by the CA. Intermediates must be CAs.
+    // Trust anchor: itself valid now, and a CA allowed to sign certificates.
     let now = x509_parser::time::ASN1Time::now();
+    if !ca.validity().is_valid_at(now) {
+        return Err(auth("the CA certificate is expired or not yet valid".into()));
+    }
+    require_issuer(&ca, "the CA certificate")?;
+
+    // Chain: each certificate signed by the next, the last by the CA. Intermediates must be CAs.
     for (i, cert) in chain.iter().enumerate() {
         if !cert.validity().is_valid_at(now) {
             return Err(auth(format!("certificate {i} of signer_chain is expired or not yet valid")));
         }
         let issuer = chain.get(i + 1).unwrap_or(&ca);
-        if i + 1 < chain.len() && !issuer.is_ca() {
-            return Err(auth("an intermediate in signer_chain is not a CA certificate".into()));
+        if i + 1 < chain.len() {
+            require_issuer(issuer, "an intermediate in signer_chain")?;
         }
         verify_cert_signature(cert, issuer)?;
     }
 
-    // Identity: the leaf is the cosigner the request names.
+    // The leaf: an end-entity TLS certificate, not a CA, usable for signatures.
     let leaf = &chain[0];
-    let cns: Vec<&str> =
-        leaf.subject().iter_common_name().filter_map(|cn| cn.as_str().ok()).collect();
-    let named = match cns.as_slice() {
-        [cn] => identifier_from_cn(cn),
-        _ => None,
-    };
-    if named != Some(r.identifier) {
+    if ca_flag(leaf)? {
+        return Err(auth("the signing certificate is a CA certificate, not a cosigner's".into()));
+    }
+    match leaf.key_usage() {
+        Ok(Some(ku)) if !ku.value.digital_signature() => {
+            return Err(auth("the signing certificate's keyUsage lacks digitalSignature".into()))
+        }
+        Ok(_) => {}
+        Err(_) => return Err(auth("the signing certificate's keyUsage is malformed".into())),
+    }
+    match leaf.extended_key_usage() {
+        Ok(Some(eku)) if !(eku.value.client_auth || eku.value.server_auth) => {
+            return Err(auth(
+                "the signing certificate's extendedKeyUsage has neither clientAuth nor serverAuth"
+                    .into(),
+            ))
+        }
+        Ok(_) => {}
+        Err(_) => return Err(auth("the signing certificate's extendedKeyUsage is malformed".into())),
+    }
+
+    // Identity: the leaf is the cosigner the request names — by the same CN rule as mTLS.
+    let cn = crate::tls::subject_cn(leaf);
+    if cn.as_deref().and_then(identifier_from_cn) != Some(r.identifier) {
         return Err(auth(format!(
-            "the request is for node {}, but it is signed by certificate CN {:?} (expected \
-             \"cosigner{}\")",
-            r.identifier, cns, r.identifier
+            "the request is for node {}, but it is signed by certificate CN {:?} (expected exactly \
+             one CN \"cosigner{}\")",
+            r.identifier, cn, r.identifier
         )));
     }
 
@@ -311,6 +334,27 @@ pub fn verify_request(r: &RecipientRequest, ca_pem: &[u8]) -> Result<()> {
     UnparsedPublicKey::new(kind.request_verifier(), leaf.public_key().subject_public_key.data.as_ref())
         .verify(&canonical_bytes(r), &sig)
         .map_err(|_| auth(format!("bad request signature for node {}", r.identifier)))
+}
+
+/// The basicConstraints CA flag; a malformed or duplicated extension is an error, not "no".
+fn ca_flag(cert: &X509Certificate<'_>) -> Result<bool> {
+    cert.basic_constraints()
+        .map(|bc| bc.is_some_and(|bc| bc.value.ca))
+        .map_err(|_| auth("a certificate's basicConstraints is malformed".into()))
+}
+
+/// `cert` may issue certificates: CA flag set, and keyCertSign if it has a keyUsage at all.
+fn require_issuer(cert: &X509Certificate<'_>, what: &str) -> Result<()> {
+    if !ca_flag(cert)? {
+        return Err(auth(format!("{what} is not a CA certificate (basicConstraints CA)")));
+    }
+    match cert.key_usage() {
+        Ok(Some(ku)) if !ku.value.key_cert_sign() => {
+            Err(auth(format!("{what} may not sign certificates (keyUsage lacks keyCertSign)")))
+        }
+        Ok(_) => Ok(()),
+        Err(_) => Err(auth(format!("{what} has a malformed keyUsage"))),
+    }
 }
 
 /// Check `cert`'s signature with `issuer`'s key, and that the names chain.
@@ -461,6 +505,79 @@ mod tests {
         assert_eq!(before.len(), 16);
         r.recipient_pub = hex::encode([9u8; 32]);
         assert_ne!(sas(&r), before);
+    }
+
+    /// Review NEW-4 (PoC `poc2_request_auth_edge_cases`): leaves and anchors the chain check
+    /// accepted.
+    #[test]
+    fn leaf_and_anchor_edge_cases_are_refused() {
+        let pki = TestPki::new();
+        let signed_by = |(cert, key): (String, String)| {
+            let mut r = request(&pki, 1);
+            NodeSigner::from_pem(cert.as_bytes(), key.as_bytes()).unwrap().sign(&mut r).unwrap();
+            verify_request(&r, pki.ca_pem.as_bytes())
+        };
+        let cn1 = |p: &mut rcgen::CertificateParams| {
+            p.distinguished_name.push(rcgen::DnType::CommonName, "cosigner1");
+        };
+        // (a) a CA certificate as the leaf.
+        assert!(signed_by(pki.leaf_custom(|p| {
+            cn1(p);
+            p.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+            p.key_usages = vec![rcgen::KeyUsagePurpose::KeyCertSign];
+        }))
+        .is_err());
+        // (b) two CN attributes (a BMPString naming cosigner2, then UTF8 cosigner1).
+        assert!(signed_by(pki.leaf_custom(|p| {
+            p.distinguished_name.push(
+                rcgen::DnType::CommonName,
+                rcgen::DnValue::BmpString("cosigner2".try_into().unwrap()),
+            );
+            p.distinguished_name.push(rcgen::DnType::CustomDnType(vec![2, 5, 4, 3]), "cosigner1");
+        }))
+        .is_err());
+        // (b') a single CN that does not decode as a string.
+        assert!(signed_by(pki.leaf_custom(|p| {
+            p.distinguished_name.push(
+                rcgen::DnType::CommonName,
+                rcgen::DnValue::BmpString("cosigner1".try_into().unwrap()),
+            );
+        }))
+        .is_err());
+        // (c) an EKU without clientAuth/serverAuth.
+        assert!(signed_by(pki.leaf_custom(|p| {
+            cn1(p);
+            p.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::CodeSigning];
+        }))
+        .is_err());
+        // (d) a keyUsage without digitalSignature.
+        assert!(signed_by(pki.leaf_custom(|p| {
+            cn1(p);
+            p.key_usages = vec![rcgen::KeyUsagePurpose::KeyEncipherment];
+        }))
+        .is_err());
+        // What gen-frost-certs.sh issues passes: KU digitalSignature, EKU serverAuth + clientAuth.
+        signed_by(pki.leaf_custom(|p| {
+            cn1(p);
+            p.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
+            p.extended_key_usages = vec![
+                rcgen::ExtendedKeyUsagePurpose::ServerAuth,
+                rcgen::ExtendedKeyUsagePurpose::ClientAuth,
+            ];
+        }))
+        .unwrap();
+        // (e) a trust anchor that is not a CA, or is expired.
+        for bad_ca in [
+            TestPki::with_ca(&rcgen::PKCS_ECDSA_P256_SHA256, |p| p.is_ca = rcgen::IsCa::NoCa),
+            TestPki::with_ca(&rcgen::PKCS_ECDSA_P256_SHA256, |p| {
+                p.not_before = rcgen::date_time_ymd(2001, 1, 1);
+                p.not_after = rcgen::date_time_ymd(2002, 1, 1);
+            }),
+        ] {
+            let mut r = request(&bad_ca, 1);
+            bad_ca.signer("cosigner1").sign(&mut r).unwrap();
+            assert!(verify_request(&r, bad_ca.ca_pem.as_bytes()).is_err());
+        }
     }
 
     #[test]

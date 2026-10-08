@@ -369,7 +369,7 @@ fn substituted_recipient_requests_are_refused() {
     c.signers[1].sign(&mut r).unwrap();
     c.write(0, &r);
     let out = c.cmd(&input, &fp, KEY, Some(&c.sas_of_files())).arg(SWAP).output().unwrap();
-    refused(&out, "expected \"cosigner1\"");
+    refused(&out, "one CN \"cosigner1\"");
 
     // 4. Signed by a CA-issued certificate that is not a cosigner's (the driver's).
     let c = Ceremony::new();

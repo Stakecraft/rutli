@@ -21,12 +21,31 @@ impl TestPki {
     }
 
     pub fn with_alg(alg: &'static rcgen::SignatureAlgorithm) -> Self {
+        Self::with_ca(alg, |_| {})
+    }
+
+    /// A CA whose parameters `f` may change after the defaults (CN, CA=true) are set.
+    pub fn with_ca(
+        alg: &'static rcgen::SignatureAlgorithm,
+        f: impl FnOnce(&mut rcgen::CertificateParams),
+    ) -> Self {
         let ca_key = rcgen::KeyPair::generate_for(alg).unwrap();
         let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
         params.distinguished_name.push(rcgen::DnType::CommonName, "rutli-frost-cluster-ca");
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        f(&mut params);
         let ca = params.self_signed(&ca_key).unwrap();
         Self { ca_pem: ca.pem(), ca_key, ca }
+    }
+
+    /// (certificate PEM, key PEM) for a P-256 leaf whose parameters `f` sets entirely (subject
+    /// included) — for the edge cases.
+    pub fn leaf_custom(&self, f: impl FnOnce(&mut rcgen::CertificateParams)) -> (String, String) {
+        let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).unwrap();
+        let mut params = rcgen::CertificateParams::new(vec!["rutli-cosigner".to_string()]).unwrap();
+        f(&mut params);
+        let cert = params.signed_by(&key, &self.ca, &self.ca_key).unwrap();
+        (cert.pem(), key.serialize_pem())
     }
 
     /// A leaf with subject CN `cn` (P-256), signed by this CA, and its signer.
