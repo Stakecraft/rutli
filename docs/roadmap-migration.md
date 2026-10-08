@@ -106,8 +106,12 @@ Soak (Track A) continues in the background and may preempt a day here and there.
 
 **Canton 3.6.1 facts, from source (`~/.cache/canton-src`) and a live node**
 - Private key rows: `common_crypto_private_keys.data` is protobuf `SigningPrivateKey` /
-  `EncryptionPrivateKey` (`crypto.proto`: `id`, `format` DER=2|RAW=3, `private_key`, `usage`,
-  `key_spec`), `wrapper_key_id` NULL = plaintext. Public keys are DER SPKI.
+  `EncryptionPrivateKey` (`crypto.proto`: `id`, `format`, `private_key`, `usage`, `key_spec`)
+  **inside an `UntypedVersionedMessage` (version 30)**, `wrapper_key_id` NULL = plaintext. Public
+  keys are DER SPKI. *Corrected by B1:* `format` is **DER_PKCS8 = 5** for every key 3.6.1 writes;
+  DER=2 / RAW=3 are legacy labels Canton migrates on load. Ed25519 is a minimal PKCS#8 v1 around
+  the 32-byte RFC 8032 **seed**; P-256 is PKCS#8 around SEC1 (with embedded public point); RSA is
+  PKCS#8 CRT, e = 65537. Parser: `frost/canton-key` (docs cite file:line).
 - Fingerprint = `Hash(purpose PublicKeyFingerprint=12, raw public key)`, hex-prefixed `1220`
   (`Signing.scala:1537`). The topology `namespace` column carries the `1220` prefix.
 - ECIES wire format (`JcePureCrypto.scala:146-165, 521-565, 695-750`):
@@ -123,8 +127,16 @@ Soak (Track A) continues in the background and may preempt a day here and there.
   participant's `frost.key-prefix` if one is set.
 - Splice SV static synchronizer parameters are Canton JCE defaults on every network
   (`apps/sv/.../LocalSynchronizerNode.scala:94`), so `EcP256` and `Rsa2048` are both admitted.
-- `ExportKeyPair(fingerprint, protocol_version, password)` exists; password-protected output uses
-  Canton's PBKDF scheme (MUST-VERIFY exact scheme before parsing it in B1).
+- `ExportKeyPair(fingerprint, protocol_version, password)` exists and needs
+  `features.enable-preview-commands`. Output: versioned `CryptoKeyPair` holding only the private
+  key (Canton re-derives the public key). *Verified in B1 against source and a real 3.6.1 export:*
+  the password form is a versioned `PasswordBasedEncrypted` = Argon2id (m = 12288 KiB, t = 3,
+  p = 1, v0x13, 16-byte salt, UTF-8 password) → AES-128-GCM, `iv(12) ‖ ct ‖ tag(16)`, no AAD,
+  over the plain export bytes.
+- Fingerprint input differs by key type: Ed25519 hashes the **raw 32-byte** public key, P-256 and
+  RSA hash the SPKI DER (`Signing.scala:1531-1543`).
+- A default-config 3.6.1 participant creates **four** keys at auto-init: namespace, `signing`
+  (protocol) and `sequencer-auth` (both Ed25519, separate keys), and ECIES P-256 encryption.
 
 **Rütli facts**
 - `frost/core/src/lib.rs` states "no shard-existing-key path, by design": B2 reverses that and
