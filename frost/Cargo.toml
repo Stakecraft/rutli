@@ -48,3 +48,5 @@ metrics-exporter-prometheus = { version = "0.16", default-features = false, feat
 pkcs8 = { version = "0.10", default-features = false }
 # PEM bodies of imported PKCS#8 keys (canton-key). Already in the lock through rcgen.
 base64 = "0.22"
+# rutli-dealer's process hardening (setrlimit, prctl, mlockall). Already in the lock through tokio.
+libc = "0.2"
