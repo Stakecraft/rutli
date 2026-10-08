@@ -18,6 +18,11 @@ service Signer {
   rpc Sign(SignRequest) returns (SignReply);
   // Proactively refresh the shares for a key. Same group key out; shares re-randomized cluster-wide.
   rpc Refresh(RefreshRequest) returns (RefreshReply);
+  // This node's local, read-only view of one FROST key — public values only (group key, its own
+  // verifying share, the public key package and its digest, provenance). For `rutli-cosigner
+  // verify-key`, which asks every node and compares. Allowlisted like GroupKey. The driver does
+  // not call it.
+  rpc KeyStatus(KeyStatusRequest) returns (KeyStatusReply);
 
   // --- cluster-hosted (non-FROST) keys: RSA-2048 encryption, AES-256-GCM symmetric ---
   // These are replicated whole keys, not threshold shares (docs/hosted-keys-design.md). They let a
@@ -94,6 +99,23 @@ message DkgReply { bytes group_verifying_key = 1; }
 // Proactively refresh shares for a key (same group key, re-randomized shares).
 message RefreshRequest { string key_id = 1; }
 message RefreshReply { bytes group_verifying_key = 1; } // unchanged; returned for confirmation
+
+message KeyStatusRequest { string key_id = 1; }
+message KeyStatusReply {
+  // This node's FROST identifier, serialized (32-byte little-endian scalar).
+  bytes identifier = 1;
+  bytes group_verifying_key = 2;   // 32-byte RFC 8032 Ed25519 key
+  bytes own_verifying_share = 3;   // this node's verifying share (32-byte point)
+  bytes pkp_digest = 4;            // SHA-256 of the canonical public key package
+  uint32 threshold = 5;
+  bytes public_key_package = 6;    // JSON of the frost-ed25519 PublicKeyPackage (public)
+  // "dkg" (born distributed, or written before provenance was recorded) or "dealer-split".
+  string origin = 7;
+  string ceremony_id = 8;          // dealer-split only
+  string canton_fingerprint = 9;   // dealer-split only
+  uint64 installed_at = 10;        // dealer-split only, seconds since the Unix epoch
+  uint64 refresh_count = 11;       // dealer-split only: refreshes since install
+}
 
 message RefreshPart1Request {
   string refresh_id = 1;

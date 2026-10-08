@@ -327,6 +327,32 @@ impl Node {
         Ok(group_verifying_key_bytes(self.cosigner(key_id)?.public_key_package())?)
     }
 
+    /// This node's view of FROST key `key_id`, public values only, read from the key file (not the
+    /// signing cache) so it shows what is persisted, provenance included. For `verify-key`.
+    pub fn key_status(&self, key_id: &str) -> Result<crate::pb::KeyStatusReply> {
+        let share = self.keystore.load(key_id)?;
+        let kp = &share.key_package;
+        let pkp = &share.public_key_package;
+        let mut reply = crate::pb::KeyStatusReply {
+            identifier: kp.identifier().serialize(),
+            group_verifying_key: group_verifying_key_bytes(pkp)?.to_vec(),
+            own_verifying_share: kp.verifying_share().serialize()?,
+            pkp_digest: rutli_frost_core::dealer::pkp_digest(pkp)?.to_vec(),
+            threshold: u32::from(*kp.min_signers()),
+            public_key_package: serde_json::to_vec(pkp)?,
+            origin: "dkg".into(),
+            ..Default::default()
+        };
+        if let Some(o) = &share.origin {
+            reply.origin = o.kind.clone();
+            reply.ceremony_id = o.ceremony_id.clone();
+            reply.canton_fingerprint = o.canton_fingerprint.clone();
+            reply.installed_at = o.installed_at;
+            reply.refresh_count = o.refresh_count;
+        }
+        Ok(reply)
+    }
+
     pub fn threshold_for(&self, key_id: &str) -> Result<u16> {
         Ok(self.cosigner(key_id)?.min_signers())
     }

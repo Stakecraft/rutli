@@ -122,6 +122,19 @@ impl Signer for SignerSvc {
         Ok(Response::new(pb::GroupKeyReply { group_verifying_key: key.to_vec() }))
     }
 
+    // Read-only and public values only, but allowlisted like GroupKey: it is an operator tool, and
+    // nothing outside the driver/operator identity needs to enumerate key provenance.
+    async fn key_status(
+        &self,
+        req: Request<pb::KeyStatusRequest>,
+    ) -> Result<Response<pb::KeyStatusReply>, Status> {
+        self.authorize(&req)?;
+        self.refuse_if_keystore_down()?;
+        let key_id = req.into_inner().key_id;
+        let reply = self.node.blocking(move |n| n.key_status(&key_id)).await.map_err(Status::from)?;
+        Ok(Response::new(reply))
+    }
+
     async fn dkg(&self, req: Request<pb::DkgRequest>) -> Result<Response<pb::DkgReply>, Status> {
         self.authorize(&req)?;
         let key_id = req.into_inner().key_id;
