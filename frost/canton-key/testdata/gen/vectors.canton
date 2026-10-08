@@ -1,0 +1,76 @@
+// Generates rutli-canton-key test vectors from a throwaway in-memory Canton participant.
+// Run via ./generate.sh, which sets RUTLI_VECTOR_OUT. Every key written here is a disposable test
+// key that never belonged to any network.
+
+import com.digitalasset.canton.crypto._
+import com.digitalasset.canton.version.ProtocolVersion
+import com.google.protobuf.ByteString
+import java.nio.file.{Files, Paths}
+
+val out = sys.env("RUTLI_VECTOR_OUT")
+// Fixed, public, test-only password. The README documents it.
+val password = "rutli-test-vector-password"
+val pv = ProtocolVersion.latest
+
+def write(name: String, bytes: ByteString): Unit =
+  Files.write(Paths.get(out, name), bytes.toByteArray)
+
+participant1.health.wait_for_initialized()
+
+// Auto-init gave us namespace (Ed25519), signing (Ed25519, protocol + sequencer auth) and
+// encryption (ECIES P-256) keys. Add the other specs the parser has to handle.
+participant1.keys.secret.generate_signing_key(
+  "extra-ecp256-signing",
+  Set(SigningKeyUsage.Protocol),
+  Some(SigningKeySpec.EcP256),
+)
+participant1.keys.secret.generate_encryption_key(
+  "extra-rsa2048-encryption",
+  Some(EncryptionKeySpec.Rsa2048),
+)
+
+val keys = participant1.keys.secret.list()
+val manifest = new StringBuilder
+manifest.append("{\n  \"canton_version\": \"3.6.1\",\n  \"protocol_version\": \"" + pv.toString + "\",\n")
+manifest.append("  \"password\": \"" + password + "\",\n  \"keys\": [\n")
+
+keys.zipWithIndex.foreach { case (k, i) =>
+  val fp = k.publicKey.fingerprint
+  // Stable file stem: the node name prefix is dropped so the files do not depend on it.
+  val name = k.name.map(_.unwrap).getOrElse(fp.unwrap).stripPrefix("participant1-")
+
+  // 1. ExportKeyPair without a password (console keys.secret.download).
+  val plain = participant1.keys.secret.download(fp, pv)
+  write(s"$name.export.bin", plain)
+
+  // 2. ExportKeyPair with a password.
+  write(s"$name.export-pw.bin", participant1.keys.secret.download(fp, pv, Some(password)))
+
+  // 3. The public key as Canton serializes it (keys.public.download).
+  write(s"$name.pub.bin", participant1.keys.public.download(fp, pv))
+
+  // 4. The stored form: exactly what CryptoPrivateStoreExtended writes into
+  //    common_crypto_private_keys.data for an unwrapped key, i.e. privateKey.toByteString(pv).
+  val pair = CryptoKeyPair.fromTrustedByteString(plain).fold(e => sys.error(e.toString), identity)
+  val stored: ByteString = pair.privateKey match {
+    case s: SigningPrivateKey => s.toByteString(pv).fold(e => sys.error(e), identity)
+    case e: EncryptionPrivateKey => e.toByteString(pv)
+    case other => sys.error(s"unexpected private key type $other")
+  }
+  write(s"$name.stored.bin", stored)
+
+  val (purpose, spec, usage) = k.publicKey match {
+    case s: SigningPublicKey =>
+      ("signing", s.keySpec.toString, s.usage.toSeq.map(_.toString).sorted.mkString(","))
+    case e: EncryptionPublicKey => ("encryption", e.keySpec.toString, "")
+    case other => sys.error(s"unexpected public key type $other")
+  }
+  manifest.append(
+    "    {\"name\": \"" + name + "\", \"fingerprint\": \"" + fp.unwrap +
+      "\", \"purpose\": \"" + purpose + "\", \"key_spec\": \"" + spec +
+      "\", \"usage\": \"" + usage + "\"}" + (if (i < keys.size - 1) ",\n" else "\n")
+  )
+}
+manifest.append("  ]\n}\n")
+Files.write(Paths.get(out, "manifest.json"), manifest.toString.getBytes("UTF-8"))
+println(s"wrote ${keys.size} keys to $out")

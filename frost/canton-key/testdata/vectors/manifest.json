@@ -1,0 +1,13 @@
+{
+  "canton_version": "3.6.1",
+  "protocol_version": "36",
+  "password": "rutli-test-vector-password",
+  "keys": [
+    {"name": "namespace", "fingerprint": "1220cb0e86a9696add3a5e1daca40daee41bcd709d325c77cda974a63bccc6a0d6a5", "purpose": "signing", "key_spec": "EC-Curve25519", "usage": "namespace"},
+    {"name": "encryption", "fingerprint": "1220afe2841c9c2dd4091065fced37b5934576154c584e89d99201f21eb774d04cb9", "purpose": "encryption", "key_spec": "EC-P256", "usage": ""},
+    {"name": "extra-ecp256-signing", "fingerprint": "1220fe427682ca0d0570488e165f980dbb869846776fee0e1c56a652bbb5d7f59790", "purpose": "signing", "key_spec": "EC-P256", "usage": "proof-of-ownership,signing"},
+    {"name": "sequencer-auth", "fingerprint": "1220e15816faf6fed797bc09f4498d6ddb6eab48ddd5293b03f10323d4755191131f", "purpose": "signing", "key_spec": "EC-Curve25519", "usage": "proof-of-ownership,sequencer-auth"},
+    {"name": "signing", "fingerprint": "1220f2bd11097f78ff4eb2354a43a62fd5b90271889914dece696d356f24beb3c9b4", "purpose": "signing", "key_spec": "EC-Curve25519", "usage": "proof-of-ownership,signing"},
+    {"name": "extra-rsa2048-encryption", "fingerprint": "12204d693ed0477c1d3cc0caeb227db21d38d10417767fef11442e74d50372ab1225", "purpose": "encryption", "key_spec": "RSA-2048", "usage": ""}
+  ]
+}
