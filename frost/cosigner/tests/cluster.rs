@@ -838,6 +838,34 @@ async fn hosted_keys_and_frost_shares_do_not_interfere() {
     assert!(nodes[0].hosted_delete(KEY_ID).is_err(), "the namespace key must not be deletable");
 }
 
+/// Review LOW-2: a hosted key can never be written under a split-ceremony id, by any path, and a
+/// hosted write never replaces an installed share.
+#[tokio::test]
+async fn hosted_keys_never_land_on_import_ids_or_over_a_share() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, _peers) = hosted_cluster(&tmp);
+    let key = rutli_cosigner::hosted::HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
+    for id in ["frost-import-x", "p-frost-import-y"] {
+        assert!(matches!(nodes[1].hosted_store(id, &key), Err(DaemonError::ReservedKeyId(_))));
+        assert!(matches!(
+            nodes[1].hosted_generate(id, HostedSpec::Aes256Gcm),
+            Err(DaemonError::ReservedKeyId(_))
+        ));
+        assert!(!nodes[1].has_key(id));
+    }
+    // A hosted create onto an id that holds a FROST share is refused; the share survives.
+    let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&[4u8; 32], &[1, 2, 3], 2).unwrap();
+    let share = rutli_cosigner::keystore::Share {
+        key_package: frost_ed25519::keys::KeyPackage::try_from(shares[1].clone()).unwrap(),
+        public_key_package: pkp,
+        origin: None,
+    };
+    let frost_ks = KeyStore::open(tmp.path().join("frost-only")).unwrap();
+    frost_ks.create("rutli-sym-taken", &share).unwrap();
+    assert!(matches!(frost_ks.create_hosted("rutli-sym-taken", &key), Err(DaemonError::KeyExists(_))));
+    assert!(frost_ks.load("rutli-sym-taken").is_ok(), "the share is still there");
+}
+
 #[tokio::test]
 async fn deleting_a_hosted_key_removes_it_cluster_wide() {
     let tmp = tempfile::tempdir().unwrap();
