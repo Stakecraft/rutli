@@ -24,4 +24,53 @@ public interface NodeInfoReplyOrBuilder extends
    * @return The distPublicKey.
    */
   com.google.protobuf.ByteString getDistPublicKey();
+
+  /**
+   * <pre>
+   * The hosted-key specs this node can store and serve (as in CapabilitiesReply). Empty from a
+   * cosigner older than ec-p256-ecies, or with hosted keys off: a leader refuses to create a key of
+   * a spec some peer does not report, so a mixed-version cluster never holds one.
+   * </pre>
+   *
+   * <code>repeated string hosted_key_specs = 3;</code>
+   * @return A list containing the hostedKeySpecs.
+   */
+  java.util.List<java.lang.String>
+      getHostedKeySpecsList();
+  /**
+   * <pre>
+   * The hosted-key specs this node can store and serve (as in CapabilitiesReply). Empty from a
+   * cosigner older than ec-p256-ecies, or with hosted keys off: a leader refuses to create a key of
+   * a spec some peer does not report, so a mixed-version cluster never holds one.
+   * </pre>
+   *
+   * <code>repeated string hosted_key_specs = 3;</code>
+   * @return The count of hostedKeySpecs.
+   */
+  int getHostedKeySpecsCount();
+  /**
+   * <pre>
+   * The hosted-key specs this node can store and serve (as in CapabilitiesReply). Empty from a
+   * cosigner older than ec-p256-ecies, or with hosted keys off: a leader refuses to create a key of
+   * a spec some peer does not report, so a mixed-version cluster never holds one.
+   * </pre>
+   *
+   * <code>repeated string hosted_key_specs = 3;</code>
+   * @param index The index of the element to return.
+   * @return The hostedKeySpecs at the given index.
+   */
+  java.lang.String getHostedKeySpecs(int index);
+  /**
+   * <pre>
+   * The hosted-key specs this node can store and serve (as in CapabilitiesReply). Empty from a
+   * cosigner older than ec-p256-ecies, or with hosted keys off: a leader refuses to create a key of
+   * a spec some peer does not report, so a mixed-version cluster never holds one.
+   * </pre>
+   *
+   * <code>repeated string hosted_key_specs = 3;</code>
+   * @param index The index of the value to return.
+   * @return The bytes of the hostedKeySpecs at the given index.
+   */
+  com.google.protobuf.ByteString
+      getHostedKeySpecsBytes(int index);
 }
