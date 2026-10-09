@@ -82,6 +82,10 @@ class FrostBackend(
     requestTimeout: FiniteDuration = 60.seconds,
     hostedKeys: Boolean = false,
     keyPrefix: String = "",
+    // How long the first Capabilities probe keeps retrying endpoints that do not answer before it
+    // settles for an unconfirmed result, and how soon an unconfirmed result is asked again.
+    capabilitiesRetryBudget: FiniteDuration = 30.seconds,
+    capabilitiesRequery: FiniteDuration = 60.seconds,
 )(implicit ec: ExecutionContext)
     extends KmsBackend {
 
@@ -205,43 +209,97 @@ class FrostBackend(
   private def precondition[A](ok: Boolean, msg: => String)(call: => Future[A]): Future[A] =
     if (ok) call else Future.failed(new IllegalArgumentException(s"requirement failed: $msg"))
 
-  /** Which hosted-key specs the cluster actually serves, asked once at startup.
+  /** Which hosted-key specs the cluster serves: the specs **every configured cosigner** reports.
     *
-    * Queried rather than hardcoded so a cluster can add a key type without a driver release. An
-    * older cluster answers UNIMPLEMENTED, and a cluster that is simply unreachable at startup must
-    * not permanently disable the feature either — both fall back to the configured expectation and
-    * are logged, because silently advertising fewer specs to Canton would look like a config bug.
+    * Queried rather than hardcoded so a cluster can add a key type without a driver release. Every
+    * endpoint is asked, not just the leader, and the answers are intersected: a cosigner that
+    * predates a spec cannot serve it — read-repair skips the key, `KeyInfo` says it does not exist —
+    * so a spec one node lacks must not be advertised to Canton (review M1). An answer of
+    * UNIMPLEMENTED (a cosigner older than `Capabilities`) counts as RSA + AES.
+    *
+    * Endpoints that do not answer are retried with backoff for up to `capabilitiesRetryBudget` on
+    * the first probe, so a cosigner restarting alongside the participant does not change what is
+    * advertised. If some still do not answer, the result is **unconfirmed**: the configured
+    * expectation (RSA + AES) as far as the answering nodes agree, never a spec newer than v1, logged
+    * at WARN with the silent endpoints — and asked again on the next use after
+    * `capabilitiesRequery`, rather than cached for the life of the driver. What Canton is told at
+    * startup is fixed then (`RutliDriver` captures the supported specs once); a later confirmation
+    * only changes what the backend routes to the cluster.
     */
-  private lazy val clusterSpecs: Set[String] =
+  private val specsLock = new Object
+  @volatile private var specsProbe: Option[SpecsProbe] = None
+
+  private def clusterSpecs: Set[String] =
     if (!hostedKeys) Set.empty
     else
-      try {
-        // A one-off startup probe, not part of any operation: failovers here are logged only, even
-        // if it happens to be forced from inside an audited call.
-        val reply = blocking(
-          withFailover("capabilities", isLeaderSick, AuditNotes.discard)(
-            _.capabilities(CapabilitiesRequest.newBuilder().build())
-          )
-        )
-        if (!reply.getHostedKeysEnabled) {
-          logger.warn(
-            "FROST: driver has hosted-keys enabled but the cluster reports them disabled — " +
-              "non-FROST keys will fall back to the delegate. Set hosted_keys.enabled on the cosigners."
-          )
-          Set.empty[String]
-        } else {
-          val specs = reply.getHostedKeySpecsList.asScala.toSet
-          logger.info(s"FROST: cluster hosts non-FROST keys (${specs.mkString(", ")})")
-          specs
-        }
-      } catch {
-        case e: StatusRuntimeException =>
-          logger.warn(
-            s"FROST: could not read cluster capabilities (${e.getStatus.getCode}); assuming the " +
-              "configured hosted-key specs. Upgrade the cosigners if this persists."
-          )
-          DefaultHostedSpecs
+      specsProbe match {
+        case Some(p) if p.confirmed => p.specs
+        case Some(p) if System.nanoTime() - p.atNanos < capabilitiesRequery.toNanos => p.specs
+        case _ =>
+          specsLock.synchronized {
+            specsProbe match {
+              case Some(p) if p.confirmed || System.nanoTime() - p.atNanos < capabilitiesRequery.toNanos => p.specs
+              case previous =>
+                // Only the very first probe waits out the retry budget; a re-query is one round.
+                val probe = blocking(probeCapabilities(if (previous.isEmpty) capabilitiesRetryBudget else Duration.Zero))
+                specsProbe = Some(probe)
+                probe.specs
+            }
+          }
       }
+
+  /** Ask every endpoint for its capabilities, retrying silent ones until `budget` is spent. */
+  private def probeCapabilities(budget: FiniteDuration): SpecsProbe = {
+    val deadline = System.nanoTime() + budget.toNanos
+    val probeTimeout = requestTimeout.min(5.seconds)
+    val answers = scala.collection.mutable.Map.empty[Int, Set[String]]
+    var lastError = Map.empty[Int, String]
+    var backoff = 250.millis
+    @tailrec def round(): Unit = {
+      channels.indices.filterNot(answers.contains).foreach { i =>
+        try {
+          val reply = SignerGrpc
+            .newBlockingStub(channels(i))
+            .withDeadlineAfter(probeTimeout.toMillis, TimeUnit.MILLISECONDS)
+            .capabilities(CapabilitiesRequest.newBuilder().build())
+          answers(i) = if (reply.getHostedKeysEnabled) reply.getHostedKeySpecsList.asScala.toSet else Set.empty
+          if (!reply.getHostedKeysEnabled)
+            logger.warn(
+              s"FROST: cosigner ${endpoints(i)} reports hosted keys disabled — non-FROST keys will fall " +
+                "back to the delegate. Set hosted_keys.enabled on every cosigner."
+            )
+        } catch {
+          case e: StatusRuntimeException if e.getStatus.getCode == Status.Code.UNIMPLEMENTED =>
+            answers(i) = DefaultHostedSpecs // older than Capabilities: RSA + AES, nothing newer
+          case e: StatusRuntimeException =>
+            lastError += i -> e.getStatus.getCode.toString
+        }
+      }
+      val remaining = deadline - System.nanoTime()
+      if (answers.size < channels.size && remaining > 0) {
+        Thread.sleep(backoff.toMillis.min(remaining / 1000000L).max(1L))
+        backoff = (backoff * 2).min(4.seconds)
+        round()
+      }
+    }
+    round()
+    val agreed = answers.values.reduceOption(_ intersect _)
+    if (answers.size == channels.size) {
+      val specs = agreed.getOrElse(Set.empty)
+      logger.info(s"FROST: every cosigner hosts non-FROST keys (${specs.toSeq.sorted.mkString(", ")})")
+      SpecsProbe(specs, confirmed = true, System.nanoTime())
+    } else {
+      val silent = channels.indices.filterNot(answers.contains).map(i => s"${endpoints(i)} (${lastError.getOrElse(i, "?")})")
+      val specs = agreed.fold(DefaultHostedSpecs)(_ intersect DefaultHostedSpecs)
+      logger.warn(
+        s"FROST: could not read capabilities from every cosigner — no answer from ${silent.mkString(", ")}. " +
+          s"Assuming only ${specs.toSeq.sorted.mkString(", ")}: a spec newer than RSA/AES (ec-p256-ecies) is " +
+          "advertised only when every cosigner confirms it. Will ask again; restart the participant once all " +
+          "cosigners are up if it needs ECIES."
+      )
+      SpecsProbe(specs, confirmed = false, System.nanoTime())
+    }
+  }
 
   private def hostsRsa: Boolean = clusterSpecs.contains(RsaSpec)
   private def hostsAes: Boolean = clusterSpecs.contains(AesSpec)
@@ -359,8 +417,15 @@ class FrostBackend(
     * a malformed ciphertext costs no cluster call and no decryption budget. `EcdhDerive` is
     * re-issuable like `Decrypt` (it is a pure function of key and point), hence [[isLeaderSick]]. */
   private def decryptEcies(ciphertext: Array[Byte], keyId: String): Future[Array[Byte]] = {
+    // The cluster cannot see the MAC/padding outcome — its metrics count every EcdhDerive that
+    // produced a Z as ok. So a failure here is noted in this operation's audit entry
+    // (`ecies-failure=shape|after-ecdh`) and logged at WARN, which is what to alert on
+    // (docs/observability.md).
+    val notes = currentNotes.get
     scala.util.Try(CantonEcies.parse(ciphertext)) match {
-      case scala.util.Failure(e) => Future.failed(e)
+      case scala.util.Failure(e) =>
+        notes.add("ecies-failure=shape")
+        Future.failed(e)
       case scala.util.Success(parsed) =>
         val req = EcdhDeriveRequest
           .newBuilder()
@@ -368,9 +433,19 @@ class FrostBackend(
           .setPeerPoint(ByteString.copyFrom(parsed.ephemeralPoint))
           .build()
         clusterCall("ecdhDerive", isLeaderSick)(_.ecdhDerive(req)).map { reply =>
+          // The JVM cannot promise this is the only copy of Z: the protobuf ByteString holds one
+          // that cannot be wiped, and the GC may have moved either. Wiping ours is best-effort.
           val z = reply.getSharedSecret.toByteArray
           try CantonEcies.decrypt(parsed, z)
-          finally java.util.Arrays.fill(z, 0.toByte)
+          catch {
+            case e: CantonEcies.EciesException =>
+              notes.add("ecies-failure=after-ecdh")
+              logger.warn(
+                s"FROST: ECIES decryption failed after a successful EcdhDerive for $keyId (MAC, padding or a " +
+                  "wrong shared secret) — a forged or corrupted ciphertext, or a cosigner answering with the wrong key"
+              )
+              throw e
+          } finally java.util.Arrays.fill(z, 0.toByte)
         }
     }
   }
@@ -468,6 +543,14 @@ object FrostBackend {
   private val AesSpec = "aes-256-gcm"
   private val EcSpec = "ec-p256-ecies"
 
+  /** DER prefix of a named-curve P-256 SPKI with an uncompressed point, up to and including the
+    * point's 0x04 tag; the full SPKI is 91 bytes. */
+  private[backend] val P256SpkiPrefix: Array[Byte] = Array(
+    0x30, 0x59, 0x30, 0x13, 0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, 0x06, 0x08, 0x2a, 0x86,
+    0x48, 0xce, 0x3d, 0x03, 0x01, 0x07, 0x03, 0x42, 0x00, 0x04,
+  ).map(_.toByte)
+  private[backend] val P256SpkiLength = 91
+
   /** The P-256 group order, to recognise the curve of an EC public key without trusting names. */
   private val P256Order = new java.math.BigInteger(
     "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
@@ -482,13 +565,18 @@ object FrostBackend {
     spec match {
       case RsaSpec => PublicKey(spki, EncryptionKeySpec.Rsa2048)
       case EcSpec =>
+        // The exact DER Canton/BouncyCastle write for a P-256 key: SEQUENCE { SEQUENCE {
+        // id-ecPublicKey, prime256v1 }, BIT STRING 0x00 ‖ 0x04 ‖ X ‖ Y } — 91 bytes. Anything else
+        // (another curve, explicit parameters, a compressed point) is refused, then the point is
+        // parsed as a sanity check; Canton validates it again (`KmsEncryptionPublicKey.create`).
         val ok =
-          try
-            KeyFactory.getInstance("EC").generatePublic(new X509EncodedKeySpec(spki)) match {
-              case k: ECPublicKey => k.getParams.getOrder == P256Order && k.getParams.getCofactor == 1
-              case _              => false
-            }
-          catch { case _: java.security.GeneralSecurityException => false }
+          spki.length == P256SpkiLength && spki.startsWith(P256SpkiPrefix) &&
+            (try
+              KeyFactory.getInstance("EC").generatePublic(new X509EncodedKeySpec(spki)) match {
+                case k: ECPublicKey => k.getParams.getOrder == P256Order && k.getParams.getCofactor == 1
+                case _              => false
+              }
+            catch { case _: java.security.GeneralSecurityException => false })
         if (!ok) throw new IllegalStateException(s"cluster returned a public key for $keyId that is not EC P-256")
         PublicKey(spki, EncryptionKeySpec.EcP256)
       case other =>
@@ -498,6 +586,9 @@ object FrostBackend {
   /** Assumed cluster capability when the Capabilities RPC is unavailable (older cosigner, or the
     * cluster was unreachable at startup) but the operator configured hosted keys. */
   private val DefaultHostedSpecs = Set(RsaSpec, AesSpec)
+
+  /** One Capabilities probe of the whole roster: the agreed specs, and whether every endpoint answered. */
+  private final case class SpecsProbe(specs: Set[String], confirmed: Boolean, atNanos: Long)
 
   // -- Failover predicates: which statuses move a request to the next cosigner. --
   //
