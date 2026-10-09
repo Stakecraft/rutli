@@ -25,7 +25,17 @@ All notable changes to Rütli are documented here. Format loosely follows
   - **`gen-frost-certs.sh`**: `RUTLI_CA_DIR` reuses an existing CA to issue leaves (`ca.key` is never
     copied out), `RUTLI_CERTS` issues a subset (e.g. just `operator`), `RUTLI_CA_CN` / `RUTLI_CA_DAYS`
     name and size a new CA; it refuses to replace an existing `ca.key`, a key-less `ca.crt` or any
-    leaf key unless `RUTLI_FORCE=1`, and prints the CA's SHA-256 and derived cluster id.
+    leaf key unless `RUTLI_FORCE=1`, and prints the CA's SHA-256 and derived cluster id. It runs
+    under `umask 077` (no key is ever readable by others, not even before its `chmod`; certificates
+    end up 0644, the output directory 0700, chowned with `RUTLI_CERT_UID`), and `RUTLI_CA_CN` is
+    limited to `[A-Za-z0-9._-]`, so it cannot inject name attributes into `-subj` (review L9).
+  - The runbook's gates check the pin's exact value and print every `cluster id` line (L1); the
+    Phase D negative control uses `verify-key`'s own exit code and requires a TLS alert per node
+    (L2); the new CA key is shredded right after a tested escrow and the driver leaf is issued from
+    escrow only in Phase B and shredded after the copy (L3); escrow uses PKCS#8 v2 with
+    AES-256-CBC and 600 000 PBKDF2 iterations (L4); rolling back Phase 0 rolls the pods by hand
+    (L5); the inventory lists the repo's client configs and says when the mesh gate proves nothing
+    (L6).
   - Driver: `FrostTlsTrustBundleSpec` pins that the driver's Netty channel accepts a two-CA trust
     file.
   - The hosted-key anti-entropy sweep no longer skips an unreachable peer silently: it logs

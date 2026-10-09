@@ -308,8 +308,17 @@ renewals. Losing it (the DevNet soak, found 2026-10-09) does not stop anything t
   are in flight, not at rest. The only persisted holders are a pending recipient
   (`data_dir/ceremony/*.recipient`) and the dealer's files during a ceremony. Pin it (`cluster_id`,
   chart `clusterId`) to its current value before the CA file changes ([ca-rotation.md](ca-rotation.md) §2).
+  Each node also records the id it runs under in `data_dir/cluster-id` and refuses to start under
+  another (`cluster id mismatch`): a dropped pin stops a pod instead of splitting the cluster. The
+  file is not in `backup` (which copies `data_dir/keys`); a node restored onto a fresh volume
+  records its id again at first start, so restore its config with the pin first.
 - **A deadline.** When the leaves expire (soak: 2028-10-19, together with the CA), every handshake
-  fails and the cluster stops signing. Rotate well before that.
+  fails and the cluster stops signing. Rotate well before that. An expired **CA** bites first at a
+  restart: a cosigner (and the driver) refuses a trust file holding an expired CA, so every pod
+  that restarts after the CA's notAfter stays down. `tls.allow_expired_ca` (chart
+  `tls.allowExpiredCa`, driver `frost.tls.allow-expired-ca`) is the emergency override for the
+  rotation away from it. Each cosigner logs `trust anchor … not_after=…` at startup and warns from
+  30 days before.
 - **If the key may be exposed rather than lost**, it is a security incident. Whoever holds it can
   mint a certificate with CN `driver` and use the Signer API: the allowlists match CNs, not issuers.
   Rotate immediately, drop the old CA from cosigners and driver without waiting for a planned
@@ -335,8 +344,10 @@ by comparing public keys, and record where it lives in the key-ceremony record.
 - A **documented, rehearsed** restore drill (test §1 and §3 on a devnet with the same tooling — the
   cluster test `a_lost_node_recovers_from_a_share_backup_and_the_cluster_signs` is the automated
   analogue).
-- The **cluster CA private key escrowed**: encrypted, in ≥ 2 independent locations, restore tested
-  (`openssl pkey -pubout` of the restored key equals the CA certificate's public key). It is the
+- The **cluster CA private key escrowed**: encrypted with a strong KDF (`openssl pkcs8 -topk8 -v2
+  aes-256-cbc -iter 600000`, or `age`; not `openssl pkey -aes256`), in ≥ 2 independent locations,
+  restore tested (`openssl pkey -pubout` of the restored key equals the CA certificate's public
+  key), and the plaintext shredded right after. It is the
   only way to issue operator, replacement, renewal or new-node certificates; losing it forces a CA
   rotation (§3f). Record the CA's sha256 and the leaves' expiry date, and keep the cluster id pinned
   (`cluster_id`) so the CA file can change without touching it.
