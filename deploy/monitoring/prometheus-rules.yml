@@ -23,9 +23,9 @@
 #   rutli_anti_entropy_conflicts_total                               counter
 #   rutli_key_replicas                                               gauge
 #
-# The last six cover cluster-hosted keys (RSA/AES key material replicated
+# The last six cover cluster-hosted keys (RSA/EC/AES key material replicated
 # whole to every node, unlike the FROST share, which is never copied between
-# nodes). `op` is one of generate | decrypt | symmetric_encrypt |
+# nodes). `op` is one of generate | decrypt | ecdh_derive | symmetric_encrypt |
 # symmetric_decrypt | delete. Unlike every other metric above, the hosted-key
 # op series are not pre-primed at zero — an (op, result) pair first appears on
 # use — so the hosted-key rules below alert on rates, never on absence.

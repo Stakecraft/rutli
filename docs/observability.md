@@ -117,7 +117,7 @@ sum(rate(rutli_sign_duration_seconds_sum{result="ok"}[1h]))
 4. **`rutli_pending_sign_sessions` climbing** — sessions are being opened faster than
    completed/aborted; the TTL sweep will cap it, but sustained growth means a flapping peer or a
    stuck driver.
-5. **`rutli_hosted_key_ops_total{op="decrypt",result="error"}` sustained** — Canton has no
+5. **`rutli_hosted_key_ops_total{op=~"decrypt|ecdh_derive",result="error"}` sustained** — Canton has no
    software fallback for a KMS decrypt: a persistent failure surfaces as `KmsDecryptError` and
    disconnects the participant from the synchronizer. Read the error before assuming replication:
    an error on a node that simply lacks the key is a lag/repair problem, an error on a node that

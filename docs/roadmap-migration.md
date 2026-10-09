@@ -53,9 +53,26 @@ soak finds things. Exit criteria in `docs/testnet-soak.md`.
 
 | # | Milestone | Scope | Est. |
 |---|---|---|---|
-| C1 | `HostedSpec::EcP256`, keygen, SPKI, `EcdhDerive` RPC on the cosigner via aws-lc-rs, under the decrypt rate limit | 3–4 d |
-| C2 | Driver: advertise `EcP256`/ECIES from Capabilities, parse `iv ‖ V ‖ ct ‖ mac`, DEM via BouncyCastle `IESEngine` with a stub agreement that returns Z from the cluster | 3–4 d |
-| C3 | Tests: Wycheproof invalid-point vectors, upstream `KmsDriverTest` differential, e2e on 3.6.1 with an imported ECIES key | 2–3 d |
+| C1 | **Done** (branch `feat/c-ecies-hosted-keys`, on B2). `HostedSpec::EcP256` (`ec-p256-ecies`), keygen, SPKI byte-identical to Canton's, `EcdhDerive` RPC on the cosigner via aws-lc-rs (65-byte uncompressed points only, on-curve by aws-lc), under the decrypt rate limit; `import-key` also reads a Canton EC P-256 encryption key export (B1) and refuses unless the served SPKI is Canton's | 3–4 d |
+| C2 | **Done.** Driver: advertise `EcP256`/ECIES from Capabilities, spec-driven keygen and public key, parse `iv ‖ V ‖ ct ‖ mac`, DEM via BouncyCastle `IESEngine` with a stub agreement that returns Z from the cluster. BouncyCastle aligned to Canton's 1.85 | 3–4 d |
+| C3 | **Done**, with one substitution. Invalid-point tests are hand-built (no Wycheproof vectors offline; see below); upstream `KmsDriverTest` passes over the frost backend with ECIES advertised (`CONFORMANCE=1`); `scripts/e2e-ecies-hosted.sh` boots 3.6.1 with a generated and then an imported ECIES key and Canton decrypts through the driver | 2–3 d |
+
+What C turned up, for the record:
+- **Wycheproof:** no ECDH secp256r1 vectors were available offline. The invalid-point tests are hand-built
+  from an independent Python P-256 (off-curve, (0,0), y = 0, x ≥ p, a point on y² = x³ − 3x,
+  compressed, hybrid, wrong lengths), plus a known-answer `Z` shared by the Rust and JVM tests. Adding
+  `ecdh_secp256r1_ecpoint_test.json` later is cheap.
+- **aws-lc accepts compressed and hybrid points** in `agreement::agree`; the cosigner refuses them
+  before aws-lc sees them (test `the_uncompressed_only_gate_is_load_bearing`).
+- **Canton's ECIES does not authenticate the IV.** The HMAC covers the CBC ciphertext only, so a flipped
+  IV bit flips the first plaintext block, and Canton's own decryptor accepts it. The driver matches
+  Canton byte for byte (pinned by a test) rather than diverge; worth an upstream note.
+- A Canton session key encrypted with ECIES is 145 bytes (16 + 65 + 32 + 32); Canton caches session
+  keys, so a ping round trip costs one or two `EcdhDerive` calls, not one per view.
+- Canton 3.6.1 runs on BouncyCastle 1.85 and its launcher puts its own jar first, so the driver's
+  bundled BouncyCastle never mattered at runtime; the driver build now uses 1.85 too.
+- The upstream conformance suite deletes every key it generates and the driver refuses to delete a
+  FROST key, so the frost-backend run uses predefined keys.
 
 **Release: v0.5.0.** Total **8–11 d** on top of Track B (B1 is reused). Value: an existing node
 migrates without touching its encryption key, and ECIES is the key type that thresholds later (v2),
@@ -170,7 +187,8 @@ former's decomposition with part of the latter's buffer.
 2. **Seed→scalar in B2.** `SigningKey::deserialize` takes a scalar, Canton exports a seed. Tests
    catch it; a wrong conversion signs under a different key, loudly.
 3. **ECIES byte-exactness in C2.** Avoided by reusing BouncyCastle's own engine rather than
-   reimplementing KDF2 and the length-tag quirk.
+   reimplementing KDF2 and the length-tag quirk. *Retired:* Canton's `JcePureCrypto` → driver passes
+   in the upstream conformance suite and on a live 3.6.1 participant.
 4. **Exposure caveat is a sales risk.** Say it up front: migration protects the future and against
    loss; it cannot un-expose the past. Fresh nodes with DKG keys remain the recommended path.
 

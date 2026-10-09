@@ -1,8 +1,10 @@
 # Cluster-hosted keys (non-FROST key material) — design
 
 **Status: v1 shipped — cluster side and driver side — and verified end to end on a real Canton 3.5.6
-participant (2026-08-28).** Written after the 2026-08-12 DevNet incident in which a participant
-restart destroyed a heap-only RSA encryption key. Two independent design passes plus a Rust
+participant (2026-08-28). v1.5 (hosted EC P-256 keys, ECIES) shipped 2026-10-09 (roadmap Track C,
+branch `feat/c-ecies-hosted-keys`) and verified end to end on Canton 3.6.1 — see *What v1.5 adds*.**
+Written after the 2026-08-12 DevNet incident in which a participant restart destroyed a heap-only
+RSA encryption key. Two independent design passes plus a Rust
 threshold-crypto crate survey fed this document; where they disagreed, the resolution is called out.
 
 The rationale below is left as written — it is the record of *why* each choice was made, not a
@@ -64,6 +66,32 @@ generated as a cluster-hosted key and confirmed replicated to all three cosigner
 the FROST shares. One config gotcha worth recording: Canton's HOCON name for the algorithm is
 `rsa-oaep-sha-256` — pureconfig kebab-cases `RsaOaepSha256`, splitting the digits — not the driver
 SPI's `RsaEsOaepSha256` spelling.
+
+### What v1.5 adds (Track C, 2026-10-09)
+
+- `HostedSpec::EcP256`, on the wire `ec-p256-ecies`: an EC P-256 **encryption** key, generated on
+  aws-lc-rs, stored as PKCS#8, served as SPKI DER byte-identical to Canton's encoding, replicated,
+  sealed, exported and imported like every hosted key. `HostedKey::validate` refuses EC material
+  whose stored public key is not the one its scalar derives, on replication and on import.
+- Signer RPC `EcdhDerive(key_id, peer_point) → Z`, the 32-byte x-coordinate of `d·V`
+  ([`hosted.rs`](../frost/cosigner/src/hosted.rs), [`service.rs`](../frost/cosigner/src/service.rs)).
+  Only a 65-byte uncompressed SEC1 point is accepted — aws-lc's `agree` would also take compressed
+  and hybrid encodings, so the gate is ours — and aws-lc refuses a point off the curve. Refused for
+  every other spec and for ids reserved for the split ceremony; charged to the per-key decryption
+  budget it shares with `Decrypt`; counted as `op="ecdh_derive"`.
+- `import-key` also reads an existing Canton node's EC P-256 encryption key (B1's parser) and refuses
+  unless the SPKI the cluster will serve is Canton's, byte for byte — the node migrates without
+  rotating its encryption key ([`export.rs`](../frost/cosigner/src/export.rs) `import_canton`).
+- Driver: `EcP256` / `EciesHkdfHmacSha256Aes128Cbc` advertised only when the cluster reports
+  `ec-p256-ecies`; spec-driven `generateEncryptionKeyPair` and `getPublicKey`; ECIES decryption in
+  [`CantonEcies`](../driver/src/main/scala/com/stakecraft/rutli/backend/CantonEcies.scala) — the
+  blob's shape is checked before any cluster call, and the DEM is BouncyCastle's own `IESEngine` with
+  a stub agreement that returns the cluster's `Z` for exactly one `V`. BouncyCastle 1.85, Canton's.
+- Verified: upstream `KmsDriverTest` over the frost backend with ECIES advertised (Canton's
+  `JcePureCrypto` encrypts, the driver decrypts), a BouncyCastle differential over every plaintext
+  length up to the 256-byte bound, and `scripts/e2e-ecies-hosted.sh`: a Canton 3.6.1 participant
+  with a cluster-generated, then a Canton-imported ECIES key (same fingerprint as on the old node),
+  pinging a JCE participant both ways.
 
 ### Export and import — not in this design, added on operator request
 
@@ -182,9 +210,10 @@ class gets.
 
 ## Decision 3 — the ECIES lever (why the roadmap inverts)
 
-> **Not shipped — this is the v1.5/v2 plan, unchanged.** v1 advertises exactly two specs through
-> `Capabilities` (`rsa-2048-oaep-sha256`, `aes-256-gcm`); there is no EC-P256 key type and no
-> `EcdhDerive`. The constraint at the end of this section is still unverified.
+> **v1.5 shipped (2026-10-09); v2 not yet.** The cluster advertises `ec-p256-ecies` through
+> `Capabilities`, serves `EcdhDerive`, and the driver advertises `EcP256` + ECIES to Canton. The
+> constraint at the end of this section is answered: yes (see *Open questions*). v2 (threshold) is
+> unchanged as a plan.
 
 The scheme Canton's KMS mode uses by default (RSA) is the one that cannot be thresholded; the scheme
 that thresholds beautifully (ECIES over P-256) is one Canton supports but AWS/GCP KMS cannot serve —
@@ -234,7 +263,17 @@ README, *never independently audited*. The NCC Group 2023 review covered `crypto
 > and returns plaintext; raw `c^d mod N` is never exposed. The ciphertext length is checked against
 > the 256-byte RSA-2048 bound before the key is touched, and every failure — wrong length, wrong
 > key, bad padding — returns the same opaque error.
-> **ECIES: not shipped**, still v1.5.
+> **ECIES: shipped as described (v1.5).** The cluster returns `Z = x(d·V)` and nothing else; the
+> driver completes KDF2 + AES-128-CBC + HMAC-SHA256 in BouncyCastle's `IESEngine`, assembled exactly
+> as `IESCipher.ECIESwithSHA256andAESCBC` assembles it, with the agreement swapped for one that
+> returns the cluster's `Z` for the one `V` it was computed for. Point validation is a 65-byte
+> uncompressed-only gate on the cluster (aws-lc would accept compressed and hybrid points) plus
+> aws-lc's on-curve check; the driver repeats both with BouncyCastle before calling the cluster.
+> "Refusing `EcdhDerive` on keys whose recorded usage is signing" is enforced by the spec: the only
+> EC spec is `ec-p256-ecies`, an encryption key, and the Canton import refuses a P-256 signing key.
+> One upstream property surfaced: Canton's ECIES MACs the ciphertext but not the IV, so the first
+> plaintext block is malleable; the driver matches Canton rather than diverge
+> ([`hosted-keys.md`](hosted-keys.md) §5).
 
 ### Replication
 
@@ -260,7 +299,7 @@ vulnerable releases were never yanked).
 >    remains excluded for the reason given above.
 > 2. The AAD binds `(cluster_id, key_id, spec, recipient_id)` — **no `usage`**. v1 has no usage
 >    dimension at all: `GenerateKey` takes only `key_id` and `spec`, because with RSA-decrypt and
->    AES-symmetric there is nothing to disambiguate. `usage` comes back in v1.5, where refusing
+>    AES-symmetric there is nothing to disambiguate. `usage` was to come back in v1.5, where refusing
 >    `EcdhDerive` on a signing key needs it.
 > 3. `cluster_id` needed no new config field: it is the first 8 bytes of SHA-256 over the cluster CA
 >    certificate, so it changes exactly when the trust domain changes and an envelope can never be
@@ -380,7 +419,9 @@ existing key rather than failing).
 `Capabilities` lets the driver learn the cluster's supported specs at startup instead of hardcoding
 them, which is what allows v1.5 to add `EcP256` without a driver release.
 
-> **Shipped, minus `EcdhDerive` (v1.5) and minus `usage`.** `GenerateKey(key_id, spec)` is
+> **Shipped, minus `usage`; `EcdhDerive` shipped with v1.5.** Usage is carried by the spec instead
+> (`ec-p256-ecies` is an encryption key; a P-256 signing key would get its own spec), so the API and
+> the AAD needed no new field. `GenerateKey(key_id, spec)` is
 > idempotent as designed: a repeat for an existing id returns the existing key with `created: false`
 > and repairs replicas, and a repeat under a *different* spec is an error rather than a silent
 > replacement. Every hosted-key Signer RPC is behind `signer_allowlist` except `Capabilities`,
@@ -443,7 +484,7 @@ with `audit-log-path` set, every decrypt takes a synchronous hash-chain fsync to
 |---|---|---|
 | **P0** | Peer-API allowlist ✅, type-aware reseal ✅, peer-channel deadlines (still open) | none |
 | **v1** ✅ | Hosted RSA-2048 + AES-256-GCM, replicated + sealed; `delegate = "none"` possible. RSA decrypt via `aws-lc-rs`/OpenSSL, **not** the `rsa` crate | none — standard primitives |
-| **v1.5** | `EcdhDerive` + hosted EC-P256 keys (still whole-key); driver-side DEM via BouncyCastle `IESEngine`. Advertise `EcP256`/ECIES to steer Canton off RSA | low — no new crypto in Rust |
+| **v1.5** ✅ | `EcdhDerive` + hosted EC-P256 keys (still whole-key); driver-side DEM via BouncyCastle `IESEngine`. Advertise `EcP256`/ECIES to steer Canton off RSA | low — no new crypto in Rust |
 | **v2** | **Threshold ECIES**: `frost-p256` DKG + Lagrange partial-point ECDH + DLEQ proofs. **Wire contract unchanged from v1.5** — server-side only | moderate, well-understood, no nonce state |
 | **v3** | Threshold ECDSA (`cggmp21`, LFDT, Kudelski-audited) only if a synchronizer requires EC signing | per crate maturity |
 | **never** | Threshold RSA — deprecate RSA in favour of ECIES where the synchronizer permits, and say so publicly | — |
@@ -453,16 +494,17 @@ tomorrow" is a server upgrade and a config flag, not an API migration.
 
 ## Open questions
 
-None of these blocked v1, and shipping v1 — driver side and the end-to-end run included — answered
-none of them. They are all on the v1.5/v2 path or the recovery path, and they stay open.
+None of these blocked v1, and shipping v1 answered none of them. v1.5 answered the first two.
 
-- Live Global Synchronizer `requiredEncryptionSpecs` — does it admit `EcP256`/ECIES? Decides whether
-  the v1.5/v2 lever is usable on mainnet at all. **Still open**; v1 ships RSA precisely because this
-  is unknown.
-- Byte-exact BouncyCastle `ECIESwithSHA256andAES-CBC` framing — components are confirmed
-  (`ECDHBasicAgreement` + KDF2-SHA256 + HMAC-SHA256, IV prepended by Canton itself), but interop
-  needs a JVM-encrypt → driver-decrypt differential test, not documentation. **Still open** — v1 has
-  no ECIES path, so nothing has exercised it.
+- Live Global Synchronizer `requiredEncryptionSpecs` — does it admit `EcP256`/ECIES? **Answered:
+  yes.** Splice SVs use Canton's JCE defaults for static synchronizer parameters on every network
+  (`apps/sv/.../LocalSynchronizerNode.scala:94`), which allow `EcP256` and `Rsa2048`, and DevNet and
+  TestNet validators run ECIES keys today ([`roadmap-migration.md`](roadmap-migration.md)).
+- Byte-exact BouncyCastle `ECIESwithSHA256andAES-CBC` framing. **Answered: interoperates.** Canton's
+  own `JcePureCrypto` encrypts and the driver decrypts in the upstream conformance suite
+  (`RutliDriverFrostConformanceTest`, `CONFORMANCE=1`) and on a live 3.6.1 participant
+  (`scripts/e2e-ecies-hosted.sh`); `FrostEciesSpec` adds a BouncyCastle differential over every
+  plaintext length up to Canton's 256-byte bound and a `Z` with a leading zero byte.
 - Whether `owner_to_key_mappings.rotate_key` succeeds when the outgoing encryption key's private
   half is **missing** — the incident-recovery path depends on it. Test on a scratch participant.
   **Still open**, and now the *only* untested step in that path: sealed disk persistence, cluster
@@ -480,7 +522,9 @@ none of them. They are all on the v1.5/v2 path or the recovery path, and they st
 - **Wrapping construction:** hand-rolled ephemeral X25519 → HKDF-SHA256 → AES-256-GCM rather than
   the `hpke` crate; versioned on the wire so it can be replaced.
 - **Cluster identity for the AAD:** derived from the CA certificate, not a new config field.
-- **Key usage:** dropped from the v1 API and AAD entirely; it returns in v1.5 with `EcdhDerive`.
+- **Key usage:** dropped from the v1 API and AAD entirely, and v1.5 did not need it back: the spec
+  name carries it (`ec-p256-ecies`), so `EcdhDerive` is refused for every key that is not an ECIES
+  encryption key.
 - **Where hosted keys live:** the same `data_dir/keys/` as FROST shares, tagged by `kind`, so
   `backup`/`restore` cover them and untagged legacy files still parse as shares.
 - **Portability, which this design did not cover:** offline, passphrase-protected `export-key` /
