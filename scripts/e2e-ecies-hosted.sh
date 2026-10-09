@@ -22,7 +22,11 @@
 #      participant1 by KMS id (RegisterKmsEncryptionKey) — its Canton fingerprint must come out
 #      identical to the one on the old node — and rotated in as participant1's encryption key;
 #      pings again, now decrypting with the imported key;
-#   C. the driver's audit lines show ECIES decryptions with both keys and no failure.
+#   C. the driver's audit lines show ECIES decryptions with both keys and no failure;
+#   D. (SKIP_DOWN=1 skips it) with cosigner 3 stopped, a participant configured for ECIES gets past
+#      Canton's crypto init: the driver still advertises EcP256 because a silent cosigner does not
+#      veto it. (A *fresh* participant then needs every cosigner for its namespace DKG, so D stops
+#      once key generation starts; a restarted participant with existing keys would carry on.)
 #
 # Requires: cargo, sbt, jq, openssl, an OpenJDK 17+ (Oracle's JDK refuses Canton's unsigned
 # BouncyCastle for Cipher; set CANTON_JAVA_HOME, default: Homebrew's openjdk).
@@ -233,3 +237,34 @@ echo "ECIES decryptions ok: $GEN_OK (with the imported key: $IMP_OK), failed: $B
 [ "$IMP_OK" -gt 0 ] || fail "no ECIES decryption with the imported key"
 [ "$BAD" -eq 0 ] || fail "$BAD decryptions failed"
 grep -q "every cosigner hosts non-FROST keys (.*ec-p256-ecies" "$WORK"/canton*.log || fail "the driver never saw ec-p256-ecies in Capabilities"
+
+if [ "${SKIP_DOWN:-0}" != 1 ]; then
+  step "D. Cosigner 3 down: a participant configured for ECIES still passes Canton's crypto init"
+  kill "${PIDS[3]}" 2>/dev/null || true
+  wait "${PIDS[3]}" 2>/dev/null || true
+  PIDS[3]=0
+  sed -e 's/key-prefix = "e2e1-"/key-prefix = "e2e2-"/' "$WORK/canton.conf" >"$WORK/canton-down.conf"
+  printf 'nodes.local.start()\nparticipant1.health.wait_for_initialized()\n' >"$WORK/down.canton"
+  (
+    cd "$WORK"
+    EXTRA_CLASSPATH="$DRIVER_JAR" exec "$CANTON_HOME/bin/canton" run "$WORK/down.canton" \
+      --config "$WORK/canton-down.conf" --no-tty --log-file-name "$WORK/down.log" \
+      --kms-log-file-name "$WORK/down_kms.log" >"$WORK/down.out" 2>&1
+  ) &
+  DOWN_PID=$!
+  verdict=""
+  for _ in $(seq 1 240); do
+    if grep -qh "not supported by the KMS" "$WORK"/down*.log "$WORK/down.out" 2>/dev/null; then verdict=refused; break; fi
+    if grep -qh "initiating distributed key generation for e2e2-" "$WORK"/down*.log 2>/dev/null; then verdict=past-crypto-init; break; fi
+    kill -0 "$DOWN_PID" 2>/dev/null || { verdict=exited; break; }
+    sleep 0.5
+  done
+  pkill -P "$DOWN_PID" 2>/dev/null || true
+  kill "$DOWN_PID" 2>/dev/null || true
+  wait "$DOWN_PID" 2>/dev/null || true
+  grep -h "no capabilities answer from" "$WORK"/down*.log | sed 's/^.* - //' | cut -c1-300 || true
+  [ "$verdict" = past-crypto-init ] || fail "with cosigner 3 down the participant did not get past crypto init ($verdict)"
+  grep -qh "Advertising what every answering cosigner serves: .*ec-p256-ecies" "$WORK"/down*.log \
+    || fail "the driver did not advertise ec-p256-ecies with one cosigner silent"
+  echo "participant passed crypto init with EcP256 advertised while cosigner 3 was down"
+fi
