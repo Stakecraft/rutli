@@ -284,53 +284,6 @@ async fn main() -> Result<()> {
     }
     let mut node = Node::new(identifier, cfg.max_signers(), cfg.threshold, keystore);
 
-    // The cluster identity envelopes are bound to — logged whether or not hosted keys are on, so a
-    // CA rotation can confirm the pin took effect on every node before the CA file changes
-    // (docs/ca-rotation.md greps for `cluster id <id> (pinned in config)`).
-    // An unreadable CA file is not reported here but by `tls::load` below, with its diagnosis.
-    match (&cfg.cluster_id, &cfg.tls) {
-        (Some(pinned), Some(_)) => {
-            tracing::info!("cluster id {pinned} (pinned in config)");
-            if let Ok(derived) = cfg.derived_cluster_id() {
-                if derived != *pinned {
-                    tracing::info!(
-                        "cluster id {pinned} differs from the id derived from tls.ca_cert \
-                         ({derived}) — expected during and after a CA rotation (docs/ca-rotation.md)"
-                    );
-                }
-            }
-        }
-        (Some(pinned), None) => tracing::info!("cluster id {pinned} (pinned in config)"),
-        (None, Some(_)) => {
-            if let Ok(derived) = cfg.derived_cluster_id() {
-                tracing::info!("cluster id {derived} (derived from tls.ca_cert)");
-            }
-        }
-        (None, None) => tracing::info!("cluster id plaintext-dev (plaintext-dev, no TLS)"),
-    }
-
-    // Cluster-hosted (non-FROST) keys. The wrapping key and the at-rest seal key both come from the
-    // same operator master secret, so hosted keys require share_seal (enforced by config
-    // validation) — a hosted key is a whole private key and must never sit unsealed on disk.
-    if cfg.hosted_keys.as_ref().map(|h| h.enabled).unwrap_or(false) {
-        let seal_cfg = cfg.share_seal.as_ref().expect("validate() requires share_seal");
-        let master = std::env::var(&seal_cfg.secret_env).map_err(|_| {
-            DaemonError::Config(format!("hosted keys enabled but {} is not set", seal_cfg.secret_env))
-        })?;
-        // Bind envelopes to this trust domain (the pinned `cluster_id`, else derived from the CA
-        // cert), so an envelope can never be replayed into a different deployment.
-        node = node.with_hosted_keys(master.as_bytes(), cfg.cluster_id()?)?;
-        tracing::info!(
-            "cluster-hosted keys enabled (RSA-2048 and EC P-256 encryption, AES-256-GCM symmetric)"
-        );
-    }
-    let node = Arc::new(node);
-
-    // Key-store readiness, re-probed in the background so `rutli_keystore_unreadable`, the
-    // transition log and the refusal gate stay current even when nobody calls Health. A dedicated
-    // OS thread, not a tokio task: on a stalled volume it must keep going when the runtime cannot.
-    rutli_cosigner::health::spawn_monitor(node.clone(), rutli_cosigner::health::MONITOR_INTERVAL);
-
     // Load mTLS material once (if configured). Plaintext otherwise (dev only).
     let tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose()?;
     if let Some(t) = &tls {
@@ -364,6 +317,66 @@ async fn main() -> Result<()> {
     } else {
         tracing::warn!("running WITHOUT TLS — plaintext gRPC, do not use in production");
     }
+
+    // The cluster identity envelopes are bound to — logged whether or not hosted keys are on, so a
+    // CA rotation can confirm the pin took effect on every node before the CA file changes
+    // (docs/ca-rotation.md greps for `cluster id <id> (pinned in config)`).
+    let cluster_id = cfg.cluster_id()?;
+    let source = cfg.cluster_id_source();
+    tracing::info!("cluster id {cluster_id} ({source})");
+    if cfg.cluster_id.is_some() && cfg.tls.is_some() {
+        if let Ok(derived) = cfg.derived_cluster_id() {
+            if derived != cluster_id {
+                tracing::info!(
+                    "cluster id {cluster_id} differs from the id derived from tls.ca_cert \
+                     ({derived}) — expected during and after a CA rotation (docs/ca-rotation.md)"
+                );
+            }
+        }
+    }
+    // ...and it must be the id this node ran under before (review M2): a `helm upgrade` that drops
+    // the pin would otherwise move the node to another cluster id silently.
+    use rutli_cosigner::cluster_identity::{self, Recorded};
+    match cluster_identity::reconcile(&cfg.data_dir, &cluster_id, source, cfg.cluster_id_change_allowed)? {
+        Recorded::First => tracing::info!(
+            "cluster id {cluster_id} recorded in {} (first start with this check)",
+            cluster_identity::path(&cfg.data_dir).display()
+        ),
+        Recorded::Unchanged => {}
+        Recorded::Changed { previous } => tracing::warn!(
+            "cluster id CHANGED from {} to {cluster_id} ({source}) because cluster_id_change_allowed \
+             is set — remove that flag now",
+            previous.as_deref().unwrap_or("<unreadable record>")
+        ),
+    }
+    if cfg.cluster_id_change_allowed {
+        tracing::warn!(
+            "cluster_id_change_allowed is set: this node would start under any cluster id — remove \
+             it once the change has rolled out"
+        );
+    }
+
+    // Cluster-hosted (non-FROST) keys. The wrapping key and the at-rest seal key both come from the
+    // same operator master secret, so hosted keys require share_seal (enforced by config
+    // validation) — a hosted key is a whole private key and must never sit unsealed on disk.
+    if cfg.hosted_keys.as_ref().map(|h| h.enabled).unwrap_or(false) {
+        let seal_cfg = cfg.share_seal.as_ref().expect("validate() requires share_seal");
+        let master = std::env::var(&seal_cfg.secret_env).map_err(|_| {
+            DaemonError::Config(format!("hosted keys enabled but {} is not set", seal_cfg.secret_env))
+        })?;
+        // Bind envelopes to this trust domain (the pinned `cluster_id`, else derived from the CA
+        // cert), so an envelope can never be replayed into a different deployment.
+        node = node.with_hosted_keys(master.as_bytes(), cluster_id.clone())?;
+        tracing::info!(
+            "cluster-hosted keys enabled (RSA-2048 and EC P-256 encryption, AES-256-GCM symmetric)"
+        );
+    }
+    let node = Arc::new(node);
+
+    // Key-store readiness, re-probed in the background so `rutli_keystore_unreadable`, the
+    // transition log and the refusal gate stay current even when nobody calls Health. A dedicated
+    // OS thread, not a tokio task: on a stalled volume it must keep going when the runtime cannot.
+    rutli_cosigner::health::spawn_monitor(node.clone(), rutli_cosigner::health::MONITOR_INTERVAL);
 
     // Build the peer roster: this node as a local peer, every other as a lazy gRPC client.
     let mut peers: Vec<Arc<dyn PeerApi>> = Vec::new();
@@ -719,6 +732,7 @@ fn share_recipient_command(
     replace: bool,
 ) -> Result<()> {
     use rutli_cosigner::share_import::{share_recipient, NodeContext};
+    check_cluster_identity(cfg)?;
     let sealer = offline_sealer(cfg)?;
     let keystore = KeyStore::open_with_sealer(cfg.data_dir.join("keys"), Some(sealer.clone()))?;
     let ctx = NodeContext::from_config(cfg)?;
@@ -767,6 +781,17 @@ fn share_recipient_command(
     Ok(())
 }
 
+/// The ceremony commands bind their files to the cluster id: refuse to use one this node does not
+/// run under ([`rutli_cosigner::cluster_identity::check`], review M2). Never writes the record.
+fn check_cluster_identity(cfg: &Config) -> Result<()> {
+    rutli_cosigner::cluster_identity::check(
+        &cfg.data_dir,
+        &cfg.cluster_id()?,
+        cfg.cluster_id_source(),
+        cfg.cluster_id_change_allowed,
+    )
+}
+
 /// Split ceremony: `import-share`. See [`rutli_cosigner::share_import::import_share`].
 /// Split ceremony, Gate 0: `recipient-sas`. See [`rutli_cosigner::share_import::recipient_sas`].
 fn recipient_sas_command(cfg: &Config, key_id: &str) -> Result<()> {
@@ -783,6 +808,7 @@ fn import_share_command(
     dry_run: bool,
 ) -> Result<()> {
     use rutli_cosigner::share_import::{import_share, read_bundle, NodeContext};
+    check_cluster_identity(cfg)?;
     let sealer = offline_sealer(cfg)?;
     let keystore = KeyStore::open_with_sealer(cfg.data_dir.join("keys"), Some(sealer.clone()))?;
     let ctx = NodeContext::from_config(cfg)?;

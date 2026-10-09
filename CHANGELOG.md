@@ -55,7 +55,25 @@ All notable changes to Rütli are documented here. Format loosely follows
     mirrors the cosigner flag. (The JDK already refused a non-CA anchor at the handshake, as an
     opaque `UNAVAILABLE`; an expired CA it accepted.)
 
+- **A dropped cluster id pin no longer moves a node to another cluster silently (review M2).** A
+  `helm upgrade` without `--reuse-values` / `-f <saved values>` resets `clusterId` to `""`, and
+  after a CA rotation the id derived from the trust file is a different one: hosted-key
+  replication with the peers would fail and split-ceremony files in flight stop opening. Each
+  cosigner now records the cluster id it runs under in `data_dir/cluster-id` at its first start
+  and refuses to start under a different one (`cluster id mismatch`, naming both ids and the fix);
+  `share-recipient` and `import-share` check it too. A deliberate change takes
+  `cluster_id_change_allowed: true` (chart `clusterIdChangeAllowed`) for one start. The file sits
+  beside `keys/`, so the key store, the readiness probe and `backup`/`restore` never see it; a node
+  restored onto a fresh volume records its id again. The chart's `values.yaml` now says never to
+  copy `clusterId` to another cluster (a new cluster leaves it empty, review L7) and to upgrade with
+  saved values.
+
 ### Upgrade notes (breaking)
+- The first start of this release writes `data_dir/cluster-id` with the id the node already runs
+  under; nothing else changes. From then on a cosigner whose effective cluster id changes refuses
+  to start. A dev setup that regenerates its CA on an existing data volume (e.g.
+  `deploy/frost` compose without `down -v`) now hits this: remove the volume, or set
+  `cluster_id_change_allowed` once.
 - A cosigner now **refuses to start** when `tls.ca_cert` holds anything but currently valid CA
   certificates. Before upgrading, check the file: `openssl crl2pkcs7 -nocrl -certfile ca.crt |
   openssl pkcs7 -print_certs -noout` lists what it holds; every entry must be a CA
