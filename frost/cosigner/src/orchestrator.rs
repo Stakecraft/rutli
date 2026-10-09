@@ -359,6 +359,9 @@ pub async fn generate_hosted_key(
     if crate::share_delivery::is_reserved_for_import(key_id) {
         return Err(DaemonError::ReservedKeyId(key_id.to_string()));
     }
+    if spec.needs_every_node() {
+        ensure_every_peer_supports(node, peers, spec).await?;
+    }
     let ceremony_id = new_id("genkey");
 
     // Fence the key cluster-wide: the guard is per-key, so this also serializes against a
@@ -396,6 +399,41 @@ pub async fn generate_hosted_key(
         generate_hosted_fenced(node, peers, key_id, spec, write_quorum, &ceremony_id).await;
     release_fences(&fenced, &ceremony_id, key_id).await;
     outcome
+}
+
+/// Refuse to create a `spec` key unless every other cosigner reports the spec (`NodeInfo`).
+///
+/// A cosigner that predates the spec cannot store or serve the key, and worse, answers for it as if
+/// it did not exist (read-repair skips what it cannot parse; `KeyInfo` says `exists: false`) — the
+/// shape that turns a lagging replica into a Canton `KmsDecryptError`. So unlike an RSA/AES write,
+/// which commits at the write quorum with a node down, an EC key is only created when every node is
+/// up and upgraded: a peer that cannot be asked is refused too, because it cannot be shown to be
+/// upgraded. Key creation is rare (onboarding, rotation); this costs no availability on any
+/// serving path.
+async fn ensure_every_peer_supports(
+    node: &Arc<Node>,
+    peers: &Peers,
+    spec: crate::hosted::HostedSpec,
+) -> Result<()> {
+    for p in peers {
+        if p.identifier() == node.identifier {
+            continue;
+        }
+        let who = crate::hosted::identifier_index(p.identifier()).map(|i| format!("cosigner {i}"))?;
+        let problem = match p.hosted_specs().await {
+            Ok(specs) if specs.iter().any(|s| s == spec.as_str()) => continue,
+            Ok(_) => format!("{who} does not support it"),
+            Err(e) => format!("{who} could not be asked ({e})"),
+        };
+        return Err(DaemonError::Config(format!(
+            "refusing to create an {} key: {problem}. Every cosigner must run a release that serves \
+             {} — and be up — before keys of that spec are created (docs/hosted-keys.md, rollout \
+             order). RSA and AES keys are unaffected.",
+            spec.as_str(),
+            spec.as_str()
+        )));
+    }
+    Ok(())
 }
 
 async fn generate_hosted_fenced(

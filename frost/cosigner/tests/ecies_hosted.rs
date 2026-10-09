@@ -155,10 +155,83 @@ async fn a_replica_whose_public_key_is_not_its_own_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, _) = hosted_cluster(&tmp);
     let mut forged = HostedKey::generate(HostedSpec::EcP256, 1).unwrap();
-    forged.public_der = HostedKey::generate(HostedSpec::EcP256, 1).unwrap().public_der;
+    forged.public_der = HostedKey::generate(HostedSpec::EcP256, 1).unwrap().public_der.clone();
     let to = nodes[1].dist_public_key().unwrap();
     let wrapped = nodes[0].hosted_wrap_for("rutli-enc-forged", &forged, 2, &to).unwrap();
     assert!(nodes[1].hosted_unwrap("rutli-enc-forged", HostedSpec::EcP256, &wrapped).is_err());
+}
+
+// ── mixed-version clusters (review M1) ─────────────────────────────────────────────────────────
+
+/// A cosigner whose NodeInfo reports no `ec-p256-ecies` — as one built before Track C does (its
+/// reply has no specs field at all, which decodes as an empty list). Modelled by a node with hosted
+/// keys off, which reports exactly that.
+fn node_without_ec(tmp: &tempfile::TempDir, i: u16) -> Arc<Node> {
+    let ks = KeyStore::open(tmp.path().join(format!("old-{i}"))).unwrap();
+    Arc::new(Node::new(Identifier::try_from(i).unwrap(), N, T, ks))
+}
+
+#[tokio::test]
+async fn an_ec_key_is_not_created_while_a_peer_does_not_report_the_spec() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, _) = hosted_cluster(&tmp);
+    let old = node_without_ec(&tmp, 3);
+    assert!(old.hosted_specs().is_empty());
+    let peers: Peers = vec![
+        Arc::new(LocalPeer::new(nodes[0].clone())) as Arc<dyn PeerApi>,
+        Arc::new(LocalPeer::new(nodes[1].clone())),
+        Arc::new(LocalPeer::new(old)),
+    ];
+
+    let err = generate_hosted_key(&nodes[0], &peers, "rutli-enc-ec-mixed", HostedSpec::EcP256, 2)
+        .await
+        .unwrap_err();
+    let status = tonic::Status::from(err);
+    assert_eq!(status.code(), Code::FailedPrecondition, "{status:?}");
+    assert!(status.message().contains("cosigner 3 does not support it"), "{status:?}");
+    assert!(status.message().contains("upgrade") || status.message().contains("release"), "{status:?}");
+    // Nothing was written anywhere, and no fence is left behind.
+    assert!(!nodes[0].hosted_exists("rutli-enc-ec-mixed"));
+    assert!(!nodes[1].hosted_exists("rutli-enc-ec-mixed"));
+
+    // v1 specs are unaffected: an RSA key still commits at the write quorum.
+    let (_, created, replicas) =
+        generate_hosted_key(&nodes[0], &peers, "rutli-enc-rsa-mixed", HostedSpec::Rsa2048, 2).await.unwrap();
+    assert!(created);
+    assert_eq!(replicas, 2);
+}
+
+#[tokio::test]
+async fn an_ec_key_is_not_created_while_a_peer_cannot_be_asked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, _) = hosted_cluster(&tmp);
+    // Node 3 is down: nothing listens on its endpoint.
+    let down = rutli_cosigner::peer::GrpcPeer::connect_lazy(
+        Identifier::try_from(3u16).unwrap(),
+        "http://127.0.0.1:1",
+        None,
+    )
+    .unwrap();
+    let peers: Peers = vec![
+        Arc::new(LocalPeer::new(nodes[0].clone())) as Arc<dyn PeerApi>,
+        Arc::new(LocalPeer::new(nodes[1].clone())),
+        Arc::new(down),
+    ];
+    let err = generate_hosted_key(&nodes[0], &peers, "rutli-enc-ec-down", HostedSpec::EcP256, 2)
+        .await
+        .unwrap_err();
+    let status = tonic::Status::from(err);
+    assert_eq!(status.code(), Code::FailedPrecondition, "{status:?}");
+    assert!(status.message().contains("cosigner 3 could not be asked"), "{status:?}");
+    // An RSA write still goes through with the node down (2-of-3 write quorum).
+    generate_hosted_key(&nodes[0], &peers, "rutli-enc-rsa-down", HostedSpec::Rsa2048, 2).await.unwrap();
+}
+
+#[test]
+fn only_specs_newer_than_v1_need_every_node() {
+    assert!(HostedSpec::EcP256.needs_every_node());
+    assert!(!HostedSpec::Rsa2048.needs_every_node());
+    assert!(!HostedSpec::Aes256Gcm.needs_every_node());
 }
 
 // ── the EcdhDerive RPC ─────────────────────────────────────────────────────────────────────────
@@ -263,7 +336,7 @@ fn an_ec_key_survives_a_portable_export_into_another_cluster() {
 
     // An artifact whose EC public key was swapped is refused on import.
     let mut forged = key.clone();
-    forged.public_der = HostedKey::generate(HostedSpec::EcP256, 1).unwrap().public_der;
+    forged.public_der = HostedKey::generate(HostedSpec::EcP256, 1).unwrap().public_der.clone();
     let env = rutli_cosigner::export::export_plaintext("rutli-enc-ec-forged", &forged).unwrap();
     assert!(rutli_cosigner::export::import(&env, None).is_err());
 }
@@ -359,7 +432,7 @@ fn canton_import_refuses_every_key_that_is_not_the_expected_ecies_key() {
     // Plain PKCS#8 carries no purpose, so it cannot be told from a signing key.
     let parsed = rutli_canton_key::parse(&read("encryption.export.bin"), None).unwrap();
     let rutli_canton_key::PrivateKeyMaterial::EcP256 { scalar } = &parsed.material else { panic!() };
-    let pkcs8 = HostedKey::ec_p256_from_scalar(scalar.as_ref(), 1).unwrap().private_der;
+    let pkcs8 = HostedKey::ec_p256_from_scalar(scalar.as_ref(), 1).unwrap().private_der.clone();
     let e = refused(&hex::decode(pkcs8).unwrap(), None, &fp);
     assert!(e.contains("PKCS#8"), "{e}");
     // Garbage.
@@ -430,12 +503,21 @@ fn import_key_cli_installs_a_canton_ecies_key_once() {
         &cfg,
         &["--in", input, "--passphrase-env", PW_ENV, "--key-id", "rutli-frost-import-x", "--expect-fingerprint", &fp],
     );
-    assert!(!ok && out.contains("ReservedKeyId"), "{out}");
+    assert!(!ok && out.contains("FROST routing tag"), "{out}");
+    // --key-prefix must match the id.
+    let (ok, out) = import_key(
+        &cfg,
+        &["--in", input, "--passphrase-env", PW_ENV, "--key-id", id, "--expect-fingerprint", &fp, "--key-prefix", "soak2-"],
+    );
+    assert!(!ok && out.contains("soak2-rutli-"), "{out}");
 
-    let args = ["--in", input, "--passphrase-env", PW_ENV, "--key-id", id, "--expect-fingerprint", &fp];
+    let args = [
+        "--in", input, "--passphrase-env", PW_ENV, "--key-id", id, "--expect-fingerprint", &fp, "--key-prefix", "soak1-",
+    ];
     let (ok, out) = import_key(&cfg, &args);
     assert!(ok, "{out}");
     assert!(out.contains("ec-p256-ecies") && out.contains(&fp), "{out}");
+    assert!(out.contains("frost.key-prefix is \"soak1-\""), "{out}");
 
     // Installed, sealed, and serving the key Canton recorded.
     let ks = KeyStore::open_with_sealer(

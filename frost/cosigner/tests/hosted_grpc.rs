@@ -150,6 +150,10 @@ async fn nodes_report_their_own_identifier_and_distribution_key_over_grpc() {
         let (id, pk) = peer.node_info().await.unwrap();
         assert_eq!(id, j as u16 + 1, "NodeInfo must report the config number, not 0");
         assert_eq!(pk, m.nodes[j].dist_public_key().unwrap());
+        // ...and which hosted-key specs it serves, so a leader can refuse an EC key while any
+        // node predates it.
+        let specs = peer.hosted_specs().await.unwrap();
+        assert!(specs.contains(&"ec-p256-ecies".to_string()), "{specs:?}");
     }
     let keys: HashSet<[u8; 32]> = m.nodes.iter().map(|n| n.dist_public_key().unwrap()).collect();
     assert_eq!(keys.len(), N as usize, "each node must have its own distribution key");
