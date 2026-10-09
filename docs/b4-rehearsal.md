@@ -143,7 +143,8 @@ openssl x509 -req -in operator.csr -CA ca.crt -CAkey $CA/ca.key -CAcreateserial 
 openssl pkcs8 -topk8 -nocrypt -in operator.key -out operator.pk8 && mv operator.pk8 operator.key && rm -f operator.csr ca.srl && chmod 600 operator.key
 ```
 This is the same profile as `scripts/gen-frost-certs.sh:26-40`, with 30 days of validity. The CN `operator` goes on `operatorAllowlist` (0.5 Step B).
-**If the July CA key is lost:** leave `operatorAllowlist` empty and run `verify-key` with the driver certificate. The
+**The July CA key is lost (confirmed 2026-10-09).** The fix is a CA rotation ([ca-rotation.md](ca-rotation.md)). After it, issue the operator cert from the escrowed new CA, and pass `--cluster-id 453bb4aea2088bb5` to `rutli-dealer` in S2 (the CA file no longer hashes to the cluster id). Until then:
+leave `operatorAllowlist` empty and run `verify-key` with the driver certificate. The
 code allows it (`service.rs:63-68`, `authorize_either`), but the operator role goes unrehearsed: record that as a gap. Do not re-issue
 the cluster PKI for B4.
 
