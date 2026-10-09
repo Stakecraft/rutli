@@ -11,11 +11,14 @@ import com.stakecraft.rutli.grpc.{
   DecryptRequest,
   DeleteKeyRequest,
   DkgRequest,
+  EcdhDeriveReply,
   EcdhDeriveRequest,
   GenerateKeyRequest,
   GroupKeyRequest,
   HealthRequest,
+  KeyInfoReply,
   KeyInfoRequest,
+  PublicKeyReply,
   PublicKeyRequest,
   SignRequest,
   SignerGrpc,
@@ -86,6 +89,9 @@ class FrostBackend(
     // settles for an unconfirmed result, and how soon an unconfirmed result is asked again.
     capabilitiesRetryBudget: FiniteDuration = 30.seconds,
     capabilitiesRequery: FiniteDuration = 60.seconds,
+    // Once a majority has answered, how much longer the first probe waits for the silent rest, so
+    // a cosigner that is down delays participant startup by this much, not the whole budget.
+    capabilitiesSilentGrace: FiniteDuration = 5.seconds,
 )(implicit ec: ExecutionContext)
     extends KmsBackend {
 
@@ -172,6 +178,86 @@ class FrostBackend(
     attempt(0)
   }
 
+  /** Hosted-key specs learned in this process (`GenerateKey`, `PublicKey`, `KeyInfo` replies), so
+    * that EC-only failover applies only to keys that are, or may be, EC. */
+  private val hostedSpecOf = new java.util.concurrent.ConcurrentHashMap[String, String]()
+  private def learnSpec(keyId: String, spec: String): Unit = if (spec.nonEmpty) { hostedSpecOf.put(keyId, spec); () }
+
+  /** [[withFailover]] for an operation on a hosted key that is, or may be, `ec-p256-ecies`.
+    *
+    * A cosigner older than that spec cannot hold the key, and says so in ways that are normally
+    * authoritative: NOT_FOUND (read-repair skips what it cannot parse), `KeyInfo.exists = false`,
+    * UNIMPLEMENTED for `EcdhDerive`. While the driver no longer refuses ECIES because a silent
+    * cosigner might be old, such an answer is treated here as "this node may be old or missing the
+    * key": the next cosigner is asked, and the answering node does **not** become the preferred
+    * leader (review M1, 2026-10-09 decision). `stale` recognises such an answer; leader-sick
+    * statuses fail over as usual.
+    *
+    * `acceptAfterStale` decides whether an answer found after a stale one is used. For a key the
+    * driver has not seen yet it is "only if the answer says the key is EC": for any other key type,
+    * the first node's NOT_FOUND / does-not-exist stays the answer, exactly as without this path, so
+    * FROST/RSA/AES semantics are unchanged. If every node is stale, the first stale answer stands. */
+  private def withEcFailover[A](
+      what: String,
+      notes: AuditNotes,
+      stale: Either[StatusRuntimeException, A] => Boolean,
+      acceptAfterStale: A => Boolean,
+  )(op: SignerGrpc.SignerBlockingStub => A): A = {
+    val n = channels.size
+    val start = preferred.get
+    @tailrec def attempt(k: Int, firstStale: Option[Either[StatusRuntimeException, A]]): A = {
+      val i = (start + k) % n
+      val outcome =
+        try Right(op(stubFor(channels(i))))
+        catch { case e: StatusRuntimeException => Left(e) }
+      def settle(o: Either[StatusRuntimeException, A]): A = o.fold(e => throw e, identity)
+      val next = if (k + 1 < n) Some(endpoints((i + 1) % n)) else None
+      outcome match {
+        case Left(e) if isLeaderSick(e.getStatus) =>
+          next match {
+            case Some(to) =>
+              logger.warn(s"FROST: $what via ${endpoints(i)} failed (${e.getStatus.getCode}); failing over to $to")
+              notes.add(s"failover=${endpoints(i)}→$to reason=${e.getStatus.getCode}")
+              attempt(k + 1, firstStale)
+            case None => settle(firstStale.getOrElse(outcome))
+          }
+        case o if stale(o) =>
+          val reason = o.fold(_.getStatus.getCode.toString, _ => "NOT_FOUND")
+          val first = firstStale.orElse(Some(o))
+          next match {
+            case Some(to) =>
+              logger.warn(
+                s"FROST: $what via ${endpoints(i)} answered $reason for an EC hosted key — that cosigner may " +
+                  s"predate ec-p256-ecies or lack the key; asking $to"
+              )
+              notes.add(s"ec-failover=${endpoints(i)}→$to reason=$reason")
+              attempt(k + 1, first)
+            case None => settle(first.get)
+          }
+        case Right(answer) if firstStale.nonEmpty && !acceptAfterStale(answer) =>
+          settle(firstStale.get) // not an EC key after all: the first answer stands, as before
+        case o =>
+          preferred.set(i)
+          settle(o)
+      }
+    }
+    attempt(0, None)
+  }
+
+  /** [[clusterCall]] for [[withEcFailover]]. */
+  private def clusterCallEc[A](
+      what: String,
+      stale: Either[StatusRuntimeException, A] => Boolean,
+      acceptAfterStale: A => Boolean,
+  )(op: SignerGrpc.SignerBlockingStub => A): Future[A] = {
+    val notes = currentNotes.get
+    Future(blocking(withEcFailover(what, notes, stale, acceptAfterStale)(op)))
+  }
+
+  /** Whether `keyId` is, or for all the driver knows may be, an EC hosted key. */
+  private def mayBeEc(keyId: String): Boolean =
+    Option(hostedSpecOf.get(keyId)).forall(_ == EcSpec)
+
   /** The audit notes of the operation being issued on this thread: bound by [[withAuditNotes]],
     * [[AuditNotes.discard]] outside it.
     *
@@ -209,22 +295,29 @@ class FrostBackend(
   private def precondition[A](ok: Boolean, msg: => String)(call: => Future[A]): Future[A] =
     if (ok) call else Future.failed(new IllegalArgumentException(s"requirement failed: $msg"))
 
-  /** Which hosted-key specs the cluster serves: the specs **every configured cosigner** reports.
+  /** Which hosted-key specs the cluster serves: the specs **every answering cosigner** reports.
     *
     * Queried rather than hardcoded so a cluster can add a key type without a driver release. Every
     * endpoint is asked, not just the leader, and the answers are intersected: a cosigner that
     * predates a spec cannot serve it — read-repair skips the key, `KeyInfo` says it does not exist —
-    * so a spec one node lacks must not be advertised to Canton (review M1). An answer of
-    * UNIMPLEMENTED (a cosigner older than `Capabilities`) counts as RSA + AES.
+    * so a spec that an answering node lacks is never advertised (review M1). An answer of
+    * UNIMPLEMENTED (a cosigner older than `Capabilities`) counts as RSA + AES, and so vetoes ECIES.
     *
-    * Endpoints that do not answer are retried with backoff for up to `capabilitiesRetryBudget` on
-    * the first probe, so a cosigner restarting alongside the participant does not change what is
-    * advertised. If some still do not answer, the result is **unconfirmed**: the configured
-    * expectation (RSA + AES) as far as the answering nodes agree, never a spec newer than v1, logged
-    * at WARN with the silent endpoints — and asked again on the next use after
-    * `capabilitiesRequery`, rather than cached for the life of the driver. What Canton is told at
-    * startup is fixed then (`RutliDriver` captures the supported specs once); a later confirmation
-    * only changes what the backend routes to the cluster.
+    * A cosigner that does not answer at all (down, unreachable, deadline) does **not** veto: one node
+    * down must not stop a participant from restarting (decided 2026-10-09; restart availability over
+    * the residual risk). That risk — a silent node that is old and comes back — is covered at run
+    * time instead: an EC operation that meets "not found" or UNIMPLEMENTED fails over to the next
+    * cosigner ([[withEcFailover]]), and a leader never creates an EC key unless every cosigner
+    * supports it (cosigner side). But a spec newer than v1 needs a **majority** of the roster to
+    * have answered: the driver does not know the cluster's threshold, and for the deployed shapes
+    * (2-of-3, 3-of-5) a majority is the threshold; one lone answering node is not allowed to speak
+    * for a cluster whose majority is silent.
+    *
+    * Silent endpoints are retried with backoff — for up to `capabilitiesRetryBudget` on the first
+    * probe, cut to `capabilitiesSilentGrace` once a majority has answered — and logged at WARN. A
+    * result with silent endpoints is unconfirmed and asked again on the next use after
+    * `capabilitiesRequery`, so a later answer (including an old node's veto) changes routing. What
+    * Canton is told at startup is fixed then (`RutliDriver` captures the supported specs once).
     */
   private val specsLock = new Object
   @volatile private var specsProbe: Option[SpecsProbe] = None
@@ -248,13 +341,18 @@ class FrostBackend(
           }
       }
 
+  /** The answers needed before a spec newer than v1 is advertised: a majority of the roster. */
+  private val capabilitiesQuorum: Int = channels.size / 2 + 1
+
   /** Ask every endpoint for its capabilities, retrying silent ones until `budget` is spent. */
   private def probeCapabilities(budget: FiniteDuration): SpecsProbe = {
-    val deadline = System.nanoTime() + budget.toNanos
+    val started = System.nanoTime()
+    var deadline = started + budget.toNanos
     val probeTimeout = requestTimeout.min(5.seconds)
     val answers = scala.collection.mutable.Map.empty[Int, Set[String]]
     var lastError = Map.empty[Int, String]
     var backoff = 250.millis
+    var graceApplied = false
     @tailrec def round(): Unit = {
       channels.indices.filterNot(answers.contains).foreach { i =>
         try {
@@ -275,6 +373,10 @@ class FrostBackend(
             lastError += i -> e.getStatus.getCode.toString
         }
       }
+      if (!graceApplied && answers.size >= capabilitiesQuorum && answers.size < channels.size) {
+        graceApplied = true
+        deadline = deadline.min(System.nanoTime() + capabilitiesSilentGrace.toNanos)
+      }
       val remaining = deadline - System.nanoTime()
       if (answers.size < channels.size && remaining > 0) {
         Thread.sleep(backoff.toMillis.min(remaining / 1000000L).max(1L))
@@ -284,18 +386,30 @@ class FrostBackend(
     }
     round()
     val agreed = answers.values.reduceOption(_ intersect _)
+    val vetoes = channels.indices.filter(i => answers.get(i).exists(a => !a.contains(EcSpec))).map(endpoints)
     if (answers.size == channels.size) {
       val specs = agreed.getOrElse(Set.empty)
       logger.info(s"FROST: every cosigner hosts non-FROST keys (${specs.toSeq.sorted.mkString(", ")})")
+      if (vetoes.nonEmpty && answers.values.exists(_.contains(EcSpec)))
+        logger.warn(s"FROST: ec-p256-ecies not advertised: ${vetoes.mkString(", ")} do(es) not serve it — upgrade every cosigner")
       SpecsProbe(specs, confirmed = true, System.nanoTime())
     } else {
       val silent = channels.indices.filterNot(answers.contains).map(i => s"${endpoints(i)} (${lastError.getOrElse(i, "?")})")
-      val specs = agreed.fold(DefaultHostedSpecs)(_ intersect DefaultHostedSpecs)
+      val (specs, why) =
+        if (answers.size >= capabilitiesQuorum)
+          (agreed.getOrElse(Set.empty), s"${answers.size} of ${channels.size} answered, a majority")
+        else
+          (
+            agreed.fold(DefaultHostedSpecs)(_ intersect DefaultHostedSpecs),
+            s"only ${answers.size} of ${channels.size} answered, fewer than the majority ($capabilitiesQuorum) " +
+              "needed to advertise a spec newer than RSA/AES",
+          )
       logger.warn(
-        s"FROST: could not read capabilities from every cosigner — no answer from ${silent.mkString(", ")}. " +
-          s"Assuming only ${specs.toSeq.sorted.mkString(", ")}: a spec newer than RSA/AES (ec-p256-ecies) is " +
-          "advertised only when every cosigner confirms it. Will ask again; restart the participant once all " +
-          "cosigners are up if it needs ECIES."
+        s"FROST: no capabilities answer from ${silent.mkString(", ")}; $why. Advertising what every answering " +
+          s"cosigner serves: ${specs.toSeq.sorted.mkString(", ")}" +
+          (if (vetoes.nonEmpty) s" (ec-p256-ecies vetoed by ${vetoes.mkString(", ")})" else "") +
+          ". A silent cosigner does not veto; EC operations fail over past a node that turns out not to serve " +
+          "the key. Will ask again."
       )
       SpecsProbe(specs, confirmed = false, System.nanoTime())
     }
@@ -372,6 +486,7 @@ class FrostBackend(
   private def generateHosted(keyId: String, spec: String): Future[String] = {
     val req = GenerateKeyRequest.newBuilder().setKeyId(keyId).setSpec(spec).build()
     clusterCall("generateKey", isNodeDown)(_.generateKey(req)).map { reply =>
+      learnSpec(keyId, spec)
       logger.info(
         s"FROST: hosted key $keyId ready (created=${reply.getCreated}, replicas=${reply.getReplicas})"
       )
@@ -432,7 +547,16 @@ class FrostBackend(
           .setKeyId(keyId)
           .setPeerPoint(ByteString.copyFrom(parsed.ephemeralPoint))
           .build()
-        clusterCall("ecdhDerive", isLeaderSick)(_.ecdhDerive(req)).map { reply =>
+        // A cosigner that predates EcdhDerive answers UNIMPLEMENTED, one that lacks the key NOT_FOUND:
+        // ask the next one (withEcFailover). Every other status behaves as for Decrypt.
+        clusterCallEc[EcdhDeriveReply](
+          "ecdhDerive",
+          {
+            case Left(e) => e.getStatus.getCode == Status.Code.UNIMPLEMENTED || e.getStatus.getCode == Status.Code.NOT_FOUND
+            case Right(_) => false
+          },
+          _ => true,
+        )(_.ecdhDerive(req)).map { reply =>
           // The JVM cannot promise this is the only copy of Z: the protobuf ByteString holds one
           // that cannot be wiped, and the GC may have moved either. Wiping ours is best-effort.
           val z = reply.getSharedSecret.toByteArray
@@ -479,8 +603,20 @@ class FrostBackend(
       val req = PublicKeyRequest.newBuilder().setKeyId(keyId).build()
       // The cluster returns X.509 SubjectPublicKeyInfo DER — exactly what Canton's PublicKey wants —
       // and the spec it holds the key under, which decides what Canton is told it is.
-      clusterCall("publicKey", isLeaderSick)(_.publicKey(req))
-        .map(reply => hostedPublicKey(keyId, reply.getSpec, reply.getPublicKeyDer.toByteArray))
+      // For a key that is (or may be) EC, a NOT_FOUND may come from a cosigner that predates the
+      // spec: confirm it with the others (withEcFailover). A key known to be RSA keeps the plain path.
+      val call =
+        if (mayBeEc(keyId))
+          clusterCallEc[PublicKeyReply](
+            "publicKey",
+            { case Left(e) => e.getStatus.getCode == Status.Code.NOT_FOUND; case Right(_) => false },
+            _.getSpec == EcSpec,
+          )(_.publicKey(req))
+        else clusterCall("publicKey", isLeaderSick)(_.publicKey(req))
+      call.map { reply =>
+        learnSpec(keyId, reply.getSpec)
+        hostedPublicKey(keyId, reply.getSpec, reply.getPublicKeyDer.toByteArray)
+      }
     } else delegate.getPublicKey(keyId)
 
   override def keyExistsAndIsActive(keyId: String): Future[Unit] =
@@ -488,11 +624,26 @@ class FrostBackend(
       // groupKey returns NOT_FOUND if the cluster has no such key.
       clusterCall("groupKey", isLeaderSick)(_.groupKey(GroupKeyRequest.newBuilder().setKeyId(keyId).build()))
         .map(_ => ())
-    else if (ids.isHosted(keyId))
-      clusterCall("keyInfo", isLeaderSick)(_.keyInfo(KeyInfoRequest.newBuilder().setKeyId(keyId).build()))
-        .map { reply =>
-          if (!reply.getExists) throw new NoSuchElementException(s"key not found or inactive: $keyId")
-        }
+    else if (ids.isHosted(keyId)) {
+      val req = KeyInfoRequest.newBuilder().setKeyId(keyId).build()
+      // As for getPublicKey: `exists = false` for a key that is (or may be) EC is confirmed with the
+      // other cosigners before it is believed.
+      val call =
+        if (mayBeEc(keyId))
+          clusterCallEc[KeyInfoReply](
+            "keyInfo",
+            {
+              case Left(e)      => e.getStatus.getCode == Status.Code.NOT_FOUND
+              case Right(reply) => !reply.getExists
+            },
+            _.getSpec == EcSpec,
+          )(_.keyInfo(req))
+        else clusterCall("keyInfo", isLeaderSick)(_.keyInfo(req))
+      call.map { reply =>
+        if (!reply.getExists) throw new NoSuchElementException(s"key not found or inactive: $keyId")
+        learnSpec(keyId, reply.getSpec)
+      }
+    }
     else delegate.keyExistsAndIsActive(keyId)
 
   override def deleteKey(keyId: String): Future[Unit] =

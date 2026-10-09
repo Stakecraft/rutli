@@ -50,7 +50,12 @@ class FrostCapabilitiesSpec extends AnyWordSpec with Matchers {
   private def serve(name: String, fake: CryptoFakeCluster): Server =
     InProcessServerBuilder.forName(name).directExecutor().addService(fake).build().start()
 
-  private def backend(names: Seq[String], budget: FiniteDuration = 5.seconds, requery: FiniteDuration = 60.seconds) =
+  private def backend(
+      names: Seq[String],
+      budget: FiniteDuration = 5.seconds,
+      requery: FiniteDuration = 60.seconds,
+      grace: FiniteDuration = 5.seconds,
+  ) =
     new FrostBackend(
       names,
       new NoDelegateBackend,
@@ -60,6 +65,7 @@ class FrostCapabilitiesSpec extends AnyWordSpec with Matchers {
       hostedKeys = true,
       capabilitiesRetryBudget = budget,
       capabilitiesRequery = requery,
+      capabilitiesSilentGrace = grace,
     ) {
       override protected def buildChannel(endpoint: String): io.grpc.ManagedChannel =
         InProcessChannelBuilder.forName(endpoint).directExecutor().build()
@@ -74,7 +80,7 @@ class FrostCapabilitiesSpec extends AnyWordSpec with Matchers {
 
   "ECIES advertisement (review M1a)" should {
 
-    "require every configured cosigner to report ec-p256-ecies" in {
+    "let an answering cosigner without ec-p256-ecies veto it" in {
       withServers(Seq(new CryptoFakeCluster(New), new CryptoFakeCluster(Old), new CryptoFakeCluster(New))) { names =>
         val b = backend(names)
         try {
@@ -91,6 +97,40 @@ class FrostCapabilitiesSpec extends AnyWordSpec with Matchers {
           b.supportedEncryptionKeySpecs shouldBe Set(EncryptionKeySpec.Rsa2048, EncryptionKeySpec.EcP256)
           b.supportedEncryptionAlgoSpecs should contain(Ecies)
         } finally b.close()
+      }
+    }
+
+    "not let a silent cosigner veto it, so a participant can start with one node down" in {
+      // Three configured, one never answers: the two that answer are a majority and both serve EC.
+      withServers(Seq(new CryptoFakeCluster(New), new CryptoFakeCluster(New))) { names =>
+        val down = InProcessServerBuilder.generateName() // nothing serves it
+        val b = backend(names :+ down, budget = 10.seconds, grace = 300.millis)
+        try {
+          val started = System.nanoTime()
+          b.supportedEncryptionKeySpecs shouldBe Set(EncryptionKeySpec.Rsa2048, EncryptionKeySpec.EcP256)
+          b.supportedEncryptionAlgoSpecs should contain(Ecies)
+          // Startup waited the grace for the silent node, not the whole retry budget.
+          (System.nanoTime() - started).nanos should be < 5.seconds
+          // And an EC key can be minted (the routing agrees with what was advertised).
+          await(b.generateEncryptionKeyPair(EncryptionKeySpec.EcP256, None)) should startWith("rutli-enc-")
+        } finally b.close()
+      }
+    }
+
+    "still let an answering old cosigner veto it while another is silent" in {
+      withServers(Seq(new CryptoFakeCluster(New), new CryptoFakeCluster(Old))) { names =>
+        val b = backend(names :+ InProcessServerBuilder.generateName(), grace = 200.millis)
+        try b.supportedEncryptionKeySpecs shouldBe Set(EncryptionKeySpec.Rsa2048)
+        finally b.close()
+      }
+    }
+
+    "need a majority of the roster to answer before advertising it" in {
+      withServers(Seq(new CryptoFakeCluster(New))) { names =>
+        val silent = Seq.fill(2)(InProcessServerBuilder.generateName())
+        val b = backend(names ++ silent, budget = 300.millis)
+        try b.supportedEncryptionKeySpecs shouldBe Set(EncryptionKeySpec.Rsa2048)
+        finally b.close()
       }
     }
 
@@ -120,7 +160,7 @@ class FrostCapabilitiesSpec extends AnyWordSpec with Matchers {
       }
     }
 
-    "fall back without EC when a cosigner stays silent, and pick it up once it answers" in {
+    "fall back without EC while fewer than a majority answer, and pick it up once they do" in {
       val up = new CryptoFakeCluster(New)
       val upName = InProcessServerBuilder.generateName()
       val laterName = InProcessServerBuilder.generateName() // nothing serves this yet

@@ -49,6 +49,9 @@ class CryptoFakeCluster(
   /** The EC key pair the fake holds under `keyId` (for tests that need the private half). */
   def ecKey(keyId: String): KeyPair = hosted(keyId)._2.asInstanceOf[KeyPair]
 
+  /** The spec the fake holds `keyId` under, if any. */
+  def specOf(keyId: String): Option[String] = hosted.get(keyId).map(_._1)
+
   private def reply[A](obs: StreamObserver[A])(a: => A): Unit =
     try { obs.onNext(a); obs.onCompleted() }
     catch { case e: io.grpc.StatusRuntimeException => obs.onError(e) }
