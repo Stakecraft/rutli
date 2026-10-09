@@ -73,6 +73,13 @@ What C turned up, for the record:
   bundled BouncyCastle never mattered at runtime; the driver build now uses 1.85 too.
 - The upstream conformance suite deletes every key it generates and the driver refuses to delete a
   FROST key, so the frost-backend run uses predefined keys.
+- Adversarial review (no critical/high): fixed a mixed-version hazard (an older cosigner answers
+  for an EC key as if it did not exist) with a cosigner-side refusal to create EC keys unless every
+  peer reports the spec, and a driver that advertises ECIES only when every cosigner does; plus
+  Capabilities retry/re-query, stricter import key ids, zeroized `Z`, ECIES failures in the audit
+  entry, an exact P-256 SPKI check. Its randomised differential (3000 keys × 4 mutations, 0
+  mismatches) is in the driver suite at a smaller default size. Cost: a participant configured for
+  ECIES does not (re)start while a cosigner is unreachable (`hosted-keys.md` §2).
 
 **Release: v0.5.0.** Total **8–11 d** on top of Track B (B1 is reused). Value: an existing node
 migrates without touching its encryption key, and ECIES is the key type that thresholds later (v2),
