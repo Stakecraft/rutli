@@ -746,6 +746,16 @@ impl Node {
         self.hosted.is_some()
     }
 
+    /// The hosted-key specs this node can store and serve: every spec this build knows, or none
+    /// with hosted keys off. Reported in `Capabilities` (to the driver) and `NodeInfo` (to peers).
+    pub fn hosted_specs(&self) -> Vec<String> {
+        if self.hosted_enabled() {
+            crate::hosted::HostedSpec::ALL.iter().map(|s| s.as_str().to_string()).collect()
+        } else {
+            Vec::new()
+        }
+    }
+
     fn hosted_ctx(&self) -> Result<&HostedCtx> {
         self.hosted.as_ref().ok_or_else(|| {
             DaemonError::Config(
@@ -905,7 +915,8 @@ impl Node {
         recipient_pub: &[u8; 32],
     ) -> Result<crate::wrap::Wrapped> {
         let ctx = self.hosted_ctx()?;
-        let material = serde_json::to_vec(key)?;
+        // The key in the clear, briefly: wiped on drop.
+        let material = zeroize::Zeroizing::new(serde_json::to_vec(key)?);
         crate::wrap::wrap_for(
             recipient,
             recipient_pub,

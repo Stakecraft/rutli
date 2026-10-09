@@ -263,11 +263,7 @@ impl Signer for SignerSvc {
         // Deliberately not allowlisted: it reveals only which algorithms the cluster supports, and
         // the driver needs it before it can do anything else.
         let enabled = self.node.hosted_enabled();
-        let specs = if enabled {
-            crate::hosted::HostedSpec::ALL.iter().map(|s| s.as_str().to_string()).collect()
-        } else {
-            Vec::new()
-        };
+        let specs = self.node.hosted_specs();
         Ok(Response::new(pb::CapabilitiesReply {
             hosted_key_specs: specs,
             hosted_keys_enabled: enabled,
@@ -401,12 +397,24 @@ impl Signer for SignerSvc {
         // Then the budget, before the read-repair fetch — as for Decrypt.
         self.charge_decrypt(&r.key_id)?;
         self.load_hosted_repairing(&r.key_id).await?;
-        let result = self
+        // Z stays in its Zeroizing array until the reply is built. The one copy that is not wiped is
+        // the reply's own `Vec` (and tonic's encode buffer after it): prost owns those, and the
+        // bytes must leave the process anyway. The driver side has the JVM equivalent of this limit.
+        let z: zeroize::Zeroizing<[u8; crate::hosted::P256_SHARED_SECRET_LEN]> = match self
             .node
-            .blocking(move |n| n.hosted_ecdh(&r.key_id, &r.peer_point).map(|z| z.to_vec()))
-            .await;
-        record_hosted_op("ecdh_derive", result.is_ok());
-        Ok(Response::new(pb::EcdhDeriveReply { shared_secret: result.map_err(Status::from)? }))
+            .blocking(move |n| n.hosted_ecdh(&r.key_id, &r.peer_point))
+            .await
+        {
+            Ok(z) => {
+                record_hosted_op("ecdh_derive", true);
+                z
+            }
+            Err(e) => {
+                record_hosted_op("ecdh_derive", false);
+                return Err(Status::from(e));
+            }
+        };
+        Ok(Response::new(pb::EcdhDeriveReply { shared_secret: z.to_vec() }))
     }
 
     async fn symmetric_encrypt(
@@ -787,6 +795,7 @@ impl Peer for PeerSvc {
         Ok(Response::new(pb::NodeInfoReply {
             identifier: crate::hosted::identifier_index(self.node.identifier).map_err(Status::from)? as u32,
             dist_public_key: self.node.dist_public_key().map_err(Status::from)?.to_vec(),
+            hosted_key_specs: self.node.hosted_specs(),
         }))
     }
 }

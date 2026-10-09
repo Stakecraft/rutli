@@ -71,6 +71,12 @@ pub trait PeerApi: Send + Sync {
 
     /// This peer's identifier and X25519 distribution public key, so material can be wrapped to it.
     async fn node_info(&self) -> Result<(u16, [u8; 32])>;
+    /// The hosted-key specs this peer can store and serve (`NodeInfo.hosted_key_specs`). An older
+    /// cosigner reports none. The default — "cannot tell" — is what a peer that does not implement
+    /// it gets, and makes the leader refuse any spec that needs every node's support.
+    async fn hosted_specs(&self) -> Result<Vec<String>> {
+        Err(crate::DaemonError::Config("this peer does not report its hosted-key specs".into()))
+    }
     /// Push a wrapped hosted key to this peer. Returns the peer's commitment to the material.
     async fn replicate_key(
         &self,
@@ -193,6 +199,10 @@ impl PeerApi for LocalPeer {
 
     async fn node_info(&self) -> Result<(u16, [u8; 32])> {
         Ok((crate::hosted::identifier_index(self.node.identifier)?, self.node.dist_public_key()?))
+    }
+
+    async fn hosted_specs(&self) -> Result<Vec<String>> {
+        Ok(self.node.hosted_specs())
     }
 
     async fn replicate_key(
@@ -469,6 +479,10 @@ impl PeerApi for GrpcPeer {
             .try_into()
             .map_err(|_| crate::DaemonError::Config("peer sent a malformed distribution key".into()))?;
         Ok((reply.identifier as u16, pk))
+    }
+    async fn hosted_specs(&self) -> Result<Vec<String>> {
+        let reply = self.client.clone().node_info(pb::NodeInfoRequest {}).await?.into_inner();
+        Ok(reply.hosted_key_specs)
     }
 
     async fn replicate_key(

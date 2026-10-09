@@ -95,6 +95,10 @@ enum Command {
         /// (`keys.secret.list`), not from the file. Any other key is refused.
         #[arg(long)]
         expect_fingerprint: Option<String>,
+        /// Canton input only: the participant's `frost.key-prefix`; --key-id must then start with
+        /// `<key-prefix>rutli-`. Without it the prefix is inferred and printed.
+        #[arg(long)]
+        key_prefix: Option<String>,
     },
     /// Readiness check for container probes (k8s exec readinessProbe, compose healthcheck): the key
     /// store under `data_dir/keys` can be listed, opened and written, and this node's gRPC port
@@ -195,13 +199,14 @@ async fn main() -> Result<()> {
         Some(Command::ExportKey { key_id, out, passphrase_env, unsafe_plaintext }) => {
             return export_key_command(&cfg, &key_id, &out, passphrase_env.as_deref(), unsafe_plaintext)
         }
-        Some(Command::ImportKey { r#in, passphrase_env, key_id, expect_fingerprint }) => {
+        Some(Command::ImportKey { r#in, passphrase_env, key_id, expect_fingerprint, key_prefix }) => {
             return import_key_command(
                 &cfg,
                 &r#in,
                 passphrase_env.as_deref(),
                 key_id.as_deref(),
                 expect_fingerprint.as_deref(),
+                key_prefix.as_deref(),
             )
         }
         Some(Command::Restore { from, force }) => return restore_command(&cfg, &from, force),
@@ -847,6 +852,7 @@ fn import_key_command(
     passphrase_env: Option<&str>,
     canton_key_id: Option<&str>,
     expect_fingerprint: Option<&str>,
+    key_prefix: Option<&str>,
 ) -> Result<()> {
     let keystore = offline_keystore(cfg)?;
     let raw = zeroize::Zeroizing::new(std::fs::read(input)?);
@@ -862,10 +868,10 @@ fn import_key_command(
     // refused for the other, so an operator never believes a check ran that did not.
     let is_rutli_envelope = raw.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'{');
     let (key_id, key, origin) = if is_rutli_envelope {
-        if canton_key_id.is_some() || expect_fingerprint.is_some() {
+        if canton_key_id.is_some() || expect_fingerprint.is_some() || key_prefix.is_some() {
             return Err(DaemonError::Config(
-                "--key-id and --expect-fingerprint apply to a Canton key; this is a Rütli export \
-                 artifact, which carries its own key id"
+                "--key-id, --expect-fingerprint and --key-prefix apply to a Canton key; this is a \
+                 Rütli export artifact, which carries its own key id"
                     .into(),
             ));
         }
@@ -881,13 +887,11 @@ fn import_key_command(
                     .into(),
             ));
         };
-        if !key_id.contains(HOSTED_ROUTING_TAG) {
-            return Err(DaemonError::Config(format!(
-                "--key-id {key_id} does not carry the driver's hosted routing tag \
-                 `{HOSTED_ROUTING_TAG}` (ids are <frost.key-prefix>{HOSTED_ROUTING_TAG}…), so the \
-                 driver could never route Canton to it"
-            )));
-        }
+        let prefix = rutli_cosigner::export::hosted_import_key_id(key_id, key_prefix)?;
+        println!(
+            "{key_id} is reachable by a driver whose frost.key-prefix is {prefix:?}{}",
+            if key_prefix.is_none() { " (pass --key-prefix to enforce it)" } else { "" }
+        );
         let imported = rutli_cosigner::export::import_canton(
             &raw,
             passphrase.as_deref().map(|p| p.as_bytes()),
@@ -932,10 +936,6 @@ fn import_key_command(
     );
     Ok(())
 }
-
-/// The driver's routing tag for cluster-hosted keys (`FrostKeyIds.HostedTag`): it serves an id
-/// from the cluster's hosted keys only if it is `<frost.key-prefix>rutli-…`.
-const HOSTED_ROUTING_TAG: &str = "rutli-";
 
 /// Create `path` with owner-only permissions BEFORE writing, so the contents are never briefly
 /// readable by other users on the host.

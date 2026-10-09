@@ -100,6 +100,17 @@ impl HostedSpec {
         }
     }
 
+    /// Whether every cosigner must report this spec before a key of it may be created.
+    ///
+    /// True for every spec newer than v1 (RSA-2048, AES-256-GCM). A cosigner that predates a spec
+    /// cannot parse it: replication to it fails, read-repair on it skips the key, and it answers
+    /// `KeyInfo` with "does not exist" — so the leader refuses to create such a key while any peer
+    /// does not report the spec (`orchestrator::generate_hosted_key`). v1 specs are exempt: every
+    /// released cosigner serves them, and checking them would break a rolling upgrade.
+    pub fn needs_every_node(&self) -> bool {
+        !matches!(self, HostedSpec::Rsa2048 | HostedSpec::Aes256Gcm)
+    }
+
     /// Whether this spec has a public half (asymmetric).
     pub fn is_asymmetric(&self) -> bool {
         matches!(self, HostedSpec::Rsa2048 | HostedSpec::EcP256)
@@ -120,6 +131,17 @@ pub struct HostedKey {
     pub private_der: String,
     #[serde(default)]
     pub public_der: String,
+}
+
+/// Wipe the hex private material when a key goes out of scope, so the many short-lived copies a
+/// request makes (load, read-repair, replication) do not linger in freed heap. Best-effort, like
+/// every zeroize in a program that also holds the bytes in other forms (serde buffers, aws-lc's own
+/// key structures, which aws-lc clears on free).
+impl Drop for HostedKey {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.private_der.zeroize();
+    }
 }
 
 impl HostedKey {
@@ -704,7 +726,7 @@ mod tests {
     #[test]
     fn validate_catches_a_public_key_that_is_not_the_private_keys() {
         let mut k = kat_key();
-        k.public_der = HostedKey::generate(HostedSpec::EcP256, 1).unwrap().public_der;
+        k.public_der = HostedKey::generate(HostedSpec::EcP256, 1).unwrap().public_der.clone();
         assert!(k.validate().is_err());
         let mut k = kat_key();
         k.public_der = String::new();

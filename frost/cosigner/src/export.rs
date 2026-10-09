@@ -209,6 +209,64 @@ pub fn import(envelope: &ExportEnvelope, passphrase: Option<&str>) -> Result<Hos
     Ok(key)
 }
 
+/// The driver's routing tag for cluster-hosted keys (`FrostKeyIds.HostedTag`).
+pub const HOSTED_ROUTING_TAG: &str = "rutli-";
+/// The driver's routing tag for FROST threshold keys (`FrostKeyIds.FrostTag`).
+pub const FROST_ROUTING_TAG: &str = "frost-";
+
+/// Check an operator-chosen id for an imported hosted key against the driver's routing, and return
+/// the `frost.key-prefix` a driver must run with to reach it.
+///
+/// The driver (`FrostKeyIds`) routes an id to the cluster's hosted keys iff it starts with
+/// `<prefix>rutli-`, and to FROST iff it starts with `<prefix>frost-` — checked first. So an
+/// importable id is `<prefix>rutli-<name>`, all in the keystore alphabet `[A-Za-z0-9_-]`, with a
+/// non-empty name, and it never contains `frost-` (with some prefix, the driver would read it as a
+/// FROST key; and `…frost-import-…` is reserved for the split ceremony).
+///
+/// With `key_prefix` given, the id must start with exactly `key_prefix + "rutli-"`. Without it, the
+/// prefix is everything before the first `rutli-` — returned so the operator can check it is the
+/// participant's `frost.key-prefix`.
+pub fn hosted_import_key_id(key_id: &str, key_prefix: Option<&str>) -> Result<String> {
+    let alphabet = |s: &str| s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    let refuse = |why: String| DaemonError::Config(format!("--key-id {key_id:?}: {why}"));
+    if !alphabet(key_id) {
+        return Err(refuse("only [A-Za-z0-9_-] is allowed (the cosigner keystore alphabet)".into()));
+    }
+    if key_id.contains(FROST_ROUTING_TAG) {
+        return Err(refuse(format!(
+            "contains `{FROST_ROUTING_TAG}`, the driver's FROST routing tag; a hosted key id must not"
+        )));
+    }
+    let prefix = match key_prefix {
+        Some(p) => {
+            if !alphabet(p) {
+                return Err(refuse(format!("--key-prefix {p:?} is outside [A-Za-z0-9_-]")));
+            }
+            if !key_id.starts_with(&format!("{p}{HOSTED_ROUTING_TAG}")) {
+                return Err(refuse(format!(
+                    "a driver with frost.key-prefix {p:?} routes only `{p}{HOSTED_ROUTING_TAG}…` \
+                     to hosted keys"
+                )));
+            }
+            p.to_string()
+        }
+        None => match key_id.find(HOSTED_ROUTING_TAG) {
+            Some(at) => key_id[..at].to_string(),
+            None => {
+                return Err(refuse(format!(
+                    "does not carry the driver's hosted routing tag `{HOSTED_ROUTING_TAG}` \
+                     (ids are <frost.key-prefix>{HOSTED_ROUTING_TAG}<name>), so the driver could \
+                     never route Canton to it"
+                )))
+            }
+        },
+    };
+    if key_id.len() == prefix.len() + HOSTED_ROUTING_TAG.len() {
+        return Err(refuse(format!("needs a name after `{prefix}{HOSTED_ROUTING_TAG}`")));
+    }
+    Ok(prefix)
+}
+
 /// A key read from a Canton export, ready to be created under an operator-chosen hosted key id.
 #[derive(Debug)]
 pub struct CantonImport {
@@ -412,6 +470,49 @@ mod tests {
 
         let back = import(&env, None).unwrap();
         assert_eq!(back.decrypt_oaep(&ct).unwrap().as_slice(), b"plaintext path");
+    }
+
+    /// Mirrors the driver's `FrostKeyIds(prefix)`: hosted iff `id.startsWith(prefix + "rutli-")`,
+    /// FROST iff `id.startsWith(prefix + "frost-")` (checked first).
+    fn driver_routes_to_hosted(id: &str, prefix: &str) -> bool {
+        !id.starts_with(&format!("{prefix}frost-")) && id.starts_with(&format!("{prefix}rutli-"))
+    }
+
+    #[test]
+    fn an_import_key_id_is_one_the_driver_routes_to_hosted_keys() {
+        // Accepted, with the prefix a driver must run with.
+        for (id, prefix) in [
+            ("rutli-enc-imported-1", ""),
+            ("soak1-rutli-enc-imported-1", "soak1-"),
+            ("e2e1-rutli-x", "e2e1-"),
+            ("rutli-a-rutli-b", ""), // the first `rutli-` is the tag
+        ] {
+            assert_eq!(hosted_import_key_id(id, None).unwrap(), prefix, "{id}");
+            assert_eq!(hosted_import_key_id(id, Some(prefix)).unwrap(), prefix, "{id}");
+            assert!(driver_routes_to_hosted(id, prefix), "{id}");
+        }
+        // Refused: no tag, no name after it, outside the alphabet, any `frost-` (a FROST id under
+        // some prefix, or the split ceremony's reserved `frost-import-`).
+        for id in [
+            "enc-1",
+            "rutli-",
+            "soak1-rutli-",
+            "rutli-enc/1",
+            "rutli-enc 1",
+            "rutli-é",
+            "",
+            "frost-rutli-x",
+            "rutli-frost-import-x",
+            "frost-import-1220cb0e",
+            "a-frost-b-rutli-c",
+        ] {
+            assert!(hosted_import_key_id(id, None).is_err(), "{id:?} must be refused");
+        }
+        // With --key-prefix the id must carry exactly that prefix.
+        assert!(hosted_import_key_id("soak1-rutli-x", Some("soak2-")).is_err());
+        assert!(hosted_import_key_id("rutli-x", Some("soak1-")).is_err());
+        assert!(hosted_import_key_id("soak1-rutli-x", Some("")).is_err(), "prefix \"\" means no prefix");
+        assert!(hosted_import_key_id("soak1-rutli-x", Some("so ak1-")).is_err());
     }
 
     #[test]
