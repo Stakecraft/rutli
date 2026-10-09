@@ -27,7 +27,7 @@ All notable changes to Rütli are documented here. Format loosely follows
     name and size a new CA; it refuses to replace an existing `ca.key`, a key-less `ca.crt` or any
     leaf key unless `RUTLI_FORCE=1`, and prints the CA's SHA-256 and derived cluster id.
   - Driver: `FrostTlsTrustBundleSpec` pins that the driver's Netty channel accepts a two-CA trust
-    file (no driver code change).
+    file.
   - The hosted-key anti-entropy sweep no longer skips an unreachable peer silently: it logs
     `anti-entropy: cannot list keys on peer` at WARN with the peer and the error (e.g. an mTLS
     `UnknownIssuer` during a rotation), once per peer per sweep.
@@ -48,6 +48,12 @@ All notable changes to Rütli are documented here. Format loosely follows
   file holds more than one CA (review L8).
   - `tls.allow_expired_ca` (chart `tls.allowExpiredCa`), default off: accept an expired or
     not-yet-valid CA, never a non-CA. Only for a rotation away from a CA that has already expired.
+  - **Driver:** the same rule (`FrostTrustFile`) on `frost.tls.ca-cert` before any channel is built;
+    a bad file fails driver init with the path and the offending block. The channel trusts exactly
+    the validated certificates (no longer Netty's `trustManager(File)`), and each anchor is logged
+    (`FROST: trust anchor <i>: subject=… notAfter=… sha256=…`). `frost.tls.allow-expired-ca`
+    mirrors the cosigner flag. (The JDK already refused a non-CA anchor at the handshake, as an
+    opaque `UNAVAILABLE`; an expired CA it accepted.)
 
 ### Upgrade notes (breaking)
 - A cosigner now **refuses to start** when `tls.ca_cert` holds anything but currently valid CA
@@ -55,6 +61,8 @@ All notable changes to Rütli are documented here. Format loosely follows
   openssl pkcs7 -print_certs -noout` lists what it holds; every entry must be a CA
   (`openssl x509 -noout -ext basicConstraints`) and inside its validity period. A rolling upgrade
   stops at the first pod that refuses (it never becomes Ready), with the other nodes still signing.
+  The driver applies the same rule to `frost.tls.ca-cert`: a participant whose file fails it does
+  not start.
 
 ## [0.4.0-rc.1] — 2026-10-09
 

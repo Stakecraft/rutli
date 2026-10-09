@@ -108,16 +108,22 @@ final case class FrostConfig(
 /** Mutual-TLS material for the driver→cluster gRPC channel. The driver presents a client cert
   * signed by the cluster CA; the cluster requires it (mTLS).
   *
-  * @param caCert  PEM CA cert (the cluster trust anchor).
+  * @param caCert  PEM file of the cluster CA certificate(s): one CA, or during a CA rotation the
+  *                bundle old + new. Every block must be a currently valid CA certificate, or the
+  *                driver refuses to start ([[com.stakecraft.rutli.backend.FrostTrustFile]]).
   * @param cert    PEM client cert this driver presents.
   * @param key     PEM private key for `cert` (PKCS#8).
   * @param domain  Expected server SAN/authority (overrides the endpoint host for cert validation).
+  * @param allowExpiredCa Accept an expired or not-yet-valid CA in `caCert` (never a non-CA).
+  *                Emergency use only: a rotation away from a CA that has already expired
+  *                (docs/ca-rotation.md). Remove it afterwards.
   */
 final case class FrostTlsConfig(
     caCert: String,
     cert: String,
     key: String,
     domain: Option[String] = None,
+    allowExpiredCa: Boolean = false,
 )
 
 /** PKCS#11 connection config for the HSM backend (Phase 1).

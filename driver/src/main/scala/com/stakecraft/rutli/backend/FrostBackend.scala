@@ -103,15 +103,33 @@ class FrostBackend(
   private val ids: FrostKeyIds = FrostKeyIds(keyPrefix)
   if (keyPrefix.nonEmpty) logger.info(s"FROST: key ids carry the per-participant prefix '$keyPrefix'")
 
+  /** The validated anchors of `tls.caCert`, once, before any channel is built: a trust file with
+    * anything but valid CA certificates fails driver init here ([[FrostTrustFile]], review M1). */
+  private val trustAnchors: Option[Seq[FrostTrustFile.Anchor]] = tls.map { t =>
+    val anchors = FrostTrustFile.load(t.caCert, t.allowExpiredCa)
+    logger.info(s"FROST: ${anchors.size} trust anchor(s) in ${t.caCert}")
+    anchors.zipWithIndex.foreach { case (a, i) =>
+      logger.info(s"FROST: trust anchor $i: ${a.describe}")
+      if (!a.validNow)
+        logger.warn(
+          s"FROST: trust anchor $i (${a.subject}) is expired or not yet valid, accepted because " +
+            "allow-expired-ca is set — finish the CA rotation and remove it"
+        )
+    }
+    anchors
+  }
+
   private val channels: Vector[ManagedChannel] = endpoints.toVector.map(buildChannel)
 
   /** Build the gRPC channel for one endpoint. Overridable so tests can substitute an in-process
     * channel without standing up a TLS listener. */
   protected def buildChannel(endpoint: String): ManagedChannel = tls match {
     case Some(t) =>
+      // Exactly the certificates FrostTrustFile validated, not the file: nothing else is trusted.
+      val anchors = trustAnchors.getOrElse(FrostTrustFile.load(t.caCert, t.allowExpiredCa)).map(_.cert)
       val ssl = GrpcSslContexts
         .forClient()
-        .trustManager(new File(t.caCert))
+        .trustManager(anchors: _*)
         .keyManager(new File(t.cert), new File(t.key))
         .build()
       val b = NettyChannelBuilder.forTarget(endpoint).sslContext(ssl)
