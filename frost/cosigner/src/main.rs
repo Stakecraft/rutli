@@ -74,15 +74,27 @@ enum Command {
     },
     /// Import a cluster-hosted key from an export artifact. Run with the node stopped.
     ///
-    /// The key is written to this node only; once the daemon starts, anti-entropy replicates it to
-    /// the rest of the cluster.
+    /// Reads either a Rütli `export-key` artifact (JSON) or an existing Canton node's EC P-256
+    /// encryption key — `ExportKeyPair` / `keys.secret.download` output, plain or
+    /// password-protected — which migrates the node without rotating its encryption key. A Canton
+    /// key needs --key-id and --expect-fingerprint. The key is written to this node only; once the
+    /// daemon starts, anti-entropy replicates it to the rest of the cluster.
     ImportKey {
         /// The export artifact to read.
         #[arg(long, value_name = "FILE")]
         r#in: std::path::PathBuf,
-        /// Env var holding the passphrase, for an encrypted artifact.
+        /// Env var holding the passphrase of an encrypted Rütli artifact, or the password of a
+        /// password-protected Canton export.
         #[arg(long)]
         passphrase_env: Option<String>,
+        /// Canton input only: the hosted key id to create, `<frost.key-prefix>rutli-…` (the driver
+        /// routes only ids carrying its prefix and the `rutli-` tag), e.g. `rutli-enc-imported-1`.
+        #[arg(long)]
+        key_id: Option<String>,
+        /// Canton input only: the key's Canton fingerprint (`1220…`), taken from the old node
+        /// (`keys.secret.list`), not from the file. Any other key is refused.
+        #[arg(long)]
+        expect_fingerprint: Option<String>,
     },
     /// Readiness check for container probes (k8s exec readinessProbe, compose healthcheck): the key
     /// store under `data_dir/keys` can be listed, opened and written, and this node's gRPC port
@@ -183,8 +195,14 @@ async fn main() -> Result<()> {
         Some(Command::ExportKey { key_id, out, passphrase_env, unsafe_plaintext }) => {
             return export_key_command(&cfg, &key_id, &out, passphrase_env.as_deref(), unsafe_plaintext)
         }
-        Some(Command::ImportKey { r#in, passphrase_env }) => {
-            return import_key_command(&cfg, &r#in, passphrase_env.as_deref())
+        Some(Command::ImportKey { r#in, passphrase_env, key_id, expect_fingerprint }) => {
+            return import_key_command(
+                &cfg,
+                &r#in,
+                passphrase_env.as_deref(),
+                key_id.as_deref(),
+                expect_fingerprint.as_deref(),
+            )
         }
         Some(Command::Restore { from, force }) => return restore_command(&cfg, &from, force),
         Some(Command::ShareRecipient { key_id, ceremony_id, out, replace }) => {
@@ -819,24 +837,65 @@ fn export_key_command(
     Ok(())
 }
 
-/// Operator command: read a portable artifact back into this node's keystore.
+/// Operator command: read a portable artifact — a Rütli export, or an existing Canton node's EC
+/// P-256 encryption key — into this node's keystore.
 fn import_key_command(
     cfg: &Config,
     input: &std::path::Path,
     passphrase_env: Option<&str>,
+    canton_key_id: Option<&str>,
+    expect_fingerprint: Option<&str>,
 ) -> Result<()> {
     let keystore = offline_keystore(cfg)?;
-    let envelope: rutli_cosigner::export::ExportEnvelope =
-        serde_json::from_slice(&std::fs::read(input)?)?;
-
+    let raw = zeroize::Zeroizing::new(std::fs::read(input)?);
     let passphrase = match passphrase_env {
-        Some(name) => Some(std::env::var(name).map_err(|_| {
+        Some(name) => Some(zeroize::Zeroizing::new(std::env::var(name).map_err(|_| {
             DaemonError::Config(format!("import passphrase: env var {name} is not set"))
-        })?),
+        })?)),
         None => None,
     };
-    let key = rutli_cosigner::export::import(&envelope, passphrase.as_deref())?;
-    let key_id = envelope.key_id.clone();
+
+    // A Rütli artifact is a JSON object; a Canton export is a protobuf, which never starts with
+    // `{` (its first field tag is 0x0a). The flags that only make sense for one of them are
+    // refused for the other, so an operator never believes a check ran that did not.
+    let is_rutli_envelope = raw.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'{');
+    let (key_id, key, origin) = if is_rutli_envelope {
+        if canton_key_id.is_some() || expect_fingerprint.is_some() {
+            return Err(DaemonError::Config(
+                "--key-id and --expect-fingerprint apply to a Canton key; this is a Rütli export \
+                 artifact, which carries its own key id"
+                    .into(),
+            ));
+        }
+        let envelope: rutli_cosigner::export::ExportEnvelope = serde_json::from_slice(&raw)?;
+        let key = rutli_cosigner::export::import(&envelope, passphrase.as_deref().map(|p| p.as_str()))?;
+        (envelope.key_id.clone(), key, "a Rütli export".to_string())
+    } else {
+        let (Some(key_id), Some(expect)) = (canton_key_id, expect_fingerprint) else {
+            return Err(DaemonError::Config(
+                "this looks like a Canton key export: pass --key-id (the hosted key id to create, \
+                 <frost.key-prefix>rutli-…) and --expect-fingerprint (the key's 1220… fingerprint \
+                 from the old node)"
+                    .into(),
+            ));
+        };
+        if !key_id.contains(HOSTED_ROUTING_TAG) {
+            return Err(DaemonError::Config(format!(
+                "--key-id {key_id} does not carry the driver's hosted routing tag \
+                 `{HOSTED_ROUTING_TAG}` (ids are <frost.key-prefix>{HOSTED_ROUTING_TAG}…), so the \
+                 driver could never route Canton to it"
+            )));
+        }
+        let imported = rutli_cosigner::export::import_canton(
+            &raw,
+            passphrase.as_deref().map(|p| p.as_bytes()),
+            expect,
+            rutli_cosigner::hosted::now_secs(),
+        )?;
+        (key_id.to_string(), imported.key, format!("Canton key {}", imported.fingerprint))
+    };
+    drop(raw);
+    drop(passphrase);
 
     // Hosted keys are create-once-immutable: a key id maps to one key forever, because Canton
     // rotates by minting a new id. Overwriting could destroy material the cluster already
@@ -846,7 +905,7 @@ fn import_key_command(
     }
     if keystore.exists(&key_id) {
         let existing = keystore.load_hosted(&key_id)?;
-        if existing.private_der != key.private_der {
+        if existing.spec != key.spec || existing.private_der != key.private_der {
             return Err(DaemonError::KeyExists(format!(
                 "{key_id} already exists on this node with different material — refusing to \
                  overwrite. Rotate to a new key id instead."
@@ -858,13 +917,23 @@ fn import_key_command(
 
     // create, not save: never replaces a file that appeared meanwhile (e.g. an installed share).
     keystore.create_hosted(&key_id, &key)?;
-    tracing::warn!(key_id = %key_id, path = %input.display(), "IMPORTED a cluster-hosted key");
+    tracing::warn!(
+        key_id = %key_id,
+        path = %input.display(),
+        origin = %origin,
+        "IMPORTED a cluster-hosted key"
+    );
     println!(
-        "imported {key_id} ({}) — start the daemon; anti-entropy will replicate it to the cluster",
+        "imported {key_id} ({}) from {origin} — start the daemon; anti-entropy will replicate it \
+         to the cluster",
         key.spec.as_str()
     );
     Ok(())
 }
+
+/// The driver's routing tag for cluster-hosted keys (`FrostKeyIds.HostedTag`): it serves an id
+/// from the cluster's hosted keys only if it is `<frost.key-prefix>rutli-…`.
+const HOSTED_ROUTING_TAG: &str = "rutli-";
 
 /// Create `path` with owner-only permissions BEFORE writing, so the contents are never briefly
 /// readable by other users on the host.

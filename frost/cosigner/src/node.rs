@@ -931,6 +931,9 @@ impl Node {
                 "wrapped key spec does not match the declared spec".into(),
             ));
         }
+        // A peer's material must be self-consistent before it is stored: an EC key whose public
+        // half is not its own would have this node serve a public key it cannot decrypt for.
+        key.validate()?;
         Ok(key)
     }
 
@@ -938,6 +941,18 @@ impl Node {
 
     pub fn hosted_decrypt(&self, key_id: &str, ciphertext: &[u8]) -> Result<Vec<u8>> {
         Ok(self.hosted_load(key_id)?.decrypt_oaep(ciphertext)?.to_vec())
+    }
+
+    /// The static ECDH for an `ec-p256-ecies` key: `Z = x(d·V)`. Refuses ids reserved for the
+    /// split ceremony and every other spec (an RSA, AES or FROST key is never an ECDH oracle).
+    /// See [`crate::hosted::HostedKey::ecdh_p256`] for the peer-point rules.
+    pub fn hosted_ecdh(
+        &self,
+        key_id: &str,
+        peer_point: &[u8],
+    ) -> Result<zeroize::Zeroizing<[u8; crate::hosted::P256_SHARED_SECRET_LEN]>> {
+        refuse_reserved_for_hosted(key_id)?;
+        self.hosted_load(key_id)?.ecdh_p256(peer_point)
     }
 
     pub fn hosted_encrypt_symmetric(&self, key_id: &str, data: &[u8]) -> Result<Vec<u8>> {

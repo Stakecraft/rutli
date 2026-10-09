@@ -264,10 +264,7 @@ impl Signer for SignerSvc {
         // the driver needs it before it can do anything else.
         let enabled = self.node.hosted_enabled();
         let specs = if enabled {
-            vec![
-                crate::hosted::HostedSpec::Rsa2048.as_str().to_string(),
-                crate::hosted::HostedSpec::Aes256Gcm.as_str().to_string(),
-            ]
+            crate::hosted::HostedSpec::ALL.iter().map(|s| s.as_str().to_string()).collect()
         } else {
             Vec::new()
         };
@@ -383,6 +380,35 @@ impl Signer for SignerSvc {
         Ok(Response::new(pb::DecryptReply { plaintext: result.map_err(Status::from)? }))
     }
 
+    // ECIES: the static ECDH only (docs/hosted-keys-design.md, "Where the trust boundary sits").
+    // For a recorded ciphertext, Z is as good as the plaintext — so this is the same capability as
+    // Decrypt and is guarded like it: driver allowlist, per-key decryption budget, metrics.
+    async fn ecdh_derive(
+        &self,
+        req: Request<pb::EcdhDeriveRequest>,
+    ) -> Result<Response<pb::EcdhDeriveReply>, Status> {
+        self.authorize(&req)?;
+        self.refuse_if_keystore_down()?;
+        let r = req.into_inner();
+        // Refused before any budget is charged or any work done: an id reserved for the split
+        // ceremony is never a hosted key, and a malformed point is refused from the request alone,
+        // without the key (on-curve is checked later, by aws-lc, as part of the agreement).
+        crate::node::refuse_reserved_for_hosted(&r.key_id).map_err(Status::from)?;
+        crate::hosted::check_uncompressed_p256_point(&r.peer_point).map_err(|e| {
+            record_hosted_op("ecdh_derive", false);
+            Status::from(e)
+        })?;
+        // Then the budget, before the read-repair fetch — as for Decrypt.
+        self.charge_decrypt(&r.key_id)?;
+        self.load_hosted_repairing(&r.key_id).await?;
+        let result = self
+            .node
+            .blocking(move |n| n.hosted_ecdh(&r.key_id, &r.peer_point).map(|z| z.to_vec()))
+            .await;
+        record_hosted_op("ecdh_derive", result.is_ok());
+        Ok(Response::new(pb::EcdhDeriveReply { shared_secret: result.map_err(Status::from)? }))
+    }
+
     async fn symmetric_encrypt(
         &self,
         req: Request<pb::SymmetricRequest>,
@@ -437,8 +463,9 @@ impl SignerSvc {
 impl SignerSvc {
     /// Charge one decryption against `key_id`'s budget, or refuse.
     ///
-    /// Applies to both decrypt paths and not to encryption: encrypting is not an exfiltration
-    /// route, and throttling it would break legitimate writes for no security gain.
+    /// Applies to every decrypt path (RSA `Decrypt`, `SymmetricDecrypt`, ECIES `EcdhDerive`) and
+    /// not to encryption: encrypting is not an exfiltration route, and throttling it would break
+    /// legitimate writes for no security gain.
     fn charge_decrypt(&self, key_id: &str) -> Result<(), Status> {
         self.decrypt_limiter.check(key_id).map_err(|limited| {
             metrics::counter!(crate::metrics::DECRYPT_RATE_LIMITED).increment(1);
