@@ -30,6 +30,7 @@ key, Canton can rotate them.
 | Every copy of a **cluster-hosted** key lost (whole cluster, no backup) | Only from backups | Restore **one** node's own backup onto that node (§3); the cluster re-replicates from it. With no backup the key is gone — rotate in Canton and accept §3b's bounded data gap. |
 | Seal **master secret** lost (backups intact but unopenable) | Only from an export | A sealed backup is useless without the master secret. An `export-key` artifact taken beforehand is the only recovery — see §3d. Without either, the key is gone: rotate in Canton and accept §3b's bounded gap. |
 | A **cluster-hosted** encryption key exposed | Mitigate, not undo | Rotate the key in Canton topology (the namespace key signs it; node identity is untouched). Rotation protects future traffic only — recorded traffic encrypted to the old key stays readable to whoever holds it. |
+| **Cluster CA private key** lost | Yes, no key material at risk | Nothing breaks until the certificates expire, but no certificate can be issued (operator, replacement, new node, renewal). **Rotate the CA** with a dual-CA overlap (§3f, [ca-rotation.md](ca-rotation.md)). Shares, hosted keys, backups and exports do not depend on the CA. |
 
 ## §1 Restore a single cosigner from backup
 
@@ -290,6 +291,39 @@ Three things differ:
   must be gone. They are never a recovery source for the cluster key — restoring the key from them
   would mean another dealer run and a new ceremony.
 
+## §3f Loss of the CA private key
+
+The cluster CA (`tls.ca_cert`) is the only trust anchor of the mesh and of the driver → cluster
+hop. Its private key exists only to **issue** certificates: an operator certificate for
+`verify-key`, a replacement cosigner or driver certificate, a certificate for an added node, and
+renewals. Losing it (the DevNet soak, found 2026-10-09) does not stop anything that is running.
+
+**What is at risk, and what is not**
+
+- **No key material.** Sealed shares, hosted keys at rest, their commitments, `backup`/`restore`
+  files and `export-key` artifacts contain nothing derived from the CA. Nothing needs re-sealing or
+  re-importing.
+- **The cluster id.** Unless pinned, it is a hash of the CA *file* (`wrap::cluster_id_from_ca`), and
+  it is bound into hosted-key replication envelopes and split-ceremony requests and bundles. Those
+  are in flight, not at rest. The only persisted holders are a pending recipient
+  (`data_dir/ceremony/*.recipient`) and the dealer's files during a ceremony. Pin it (`cluster_id`,
+  chart `clusterId`) to its current value before the CA file changes ([ca-rotation.md](ca-rotation.md) §2).
+- **A deadline.** When the leaves expire (soak: 2028-10-19, together with the CA), every handshake
+  fails and the cluster stops signing. Rotate well before that.
+- **If the key may be exposed rather than lost**, it is a security incident. Whoever holds it can
+  mint a certificate with CN `driver` and use the Signer API: the allowlists match CNs, not issuers.
+  Rotate immediately, drop the old CA from cosigners and driver without waiting for a planned
+  restart ([ca-rotation.md](ca-rotation.md) §6), and treat `Sign` calls in that window as suspect
+  (driver audit log).
+
+**Recovery:** a zero-downtime CA rotation. Pin the cluster id, have the cosigners trust old + new,
+give the driver the bundle and a new leaf (one participant restart), swap the cosigner leaves, then
+drop the old CA. Every intermediate state is mutually compatible, so a rolling restart never splits
+the mesh. Exact commands, per-step gates and rollback: [ca-rotation.md](ca-rotation.md).
+
+**Prevention (§4):** escrow the new CA key encrypted in two independent locations, test the restore
+by comparing public keys, and record where it lives in the key-ceremony record.
+
 ## §4 What you MUST have in place before go-live
 
 - **≥ `t` cosigner share backups**, encrypted (sealed) and stored in ≥ 2 separated locations. This is
@@ -301,6 +335,11 @@ Three things differ:
 - A **documented, rehearsed** restore drill (test §1 and §3 on a devnet with the same tooling — the
   cluster test `a_lost_node_recovers_from_a_share_backup_and_the_cluster_signs` is the automated
   analogue).
+- The **cluster CA private key escrowed**: encrypted, in ≥ 2 independent locations, restore tested
+  (`openssl pkey -pubout` of the restored key equals the CA certificate's public key). It is the
+  only way to issue operator, replacement, renewal or new-node certificates; losing it forces a CA
+  rotation (§3f). Record the CA's sha256 and the leaves' expiry date, and keep the cluster id pinned
+  (`cluster_id`) so the CA file can change without touching it.
 - A **proactive-refresh schedule** so a share exposed at any point has a bounded useful lifetime.
 - A decision, recorded, on whether to take an **`export-key` artifact** for each hosted key. It is
   the only recovery from a lost seal master secret, and it cannot be produced retroactively — but it
