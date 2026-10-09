@@ -78,8 +78,10 @@ What C turned up, for the record:
   peer reports the spec, and a driver that advertises ECIES only when every cosigner does; plus
   Capabilities retry/re-query, stricter import key ids, zeroized `Z`, ECIES failures in the audit
   entry, an exact P-256 SPKI check. Its randomised differential (3000 keys × 4 mutations, 0
-  mismatches) is in the driver suite at a smaller default size. Cost: a participant configured for
-  ECIES does not (re)start while a cosigner is unreachable (`hosted-keys.md` §2).
+  mismatches) is in the driver suite at a smaller default size. Follow-up decision (2026-10-09):
+  restart availability wins — ECIES is gated on the cosigners that answer (an old one vetoes, a
+  silent one does not, a majority must answer), and EC operations fail over past a node that says it
+  lacks the key (`hosted-keys.md` §2).
 
 **Release: v0.5.0.** Total **8–11 d** on top of Track B (B1 is reused). Value: an existing node
 migrates without touching its encryption key, and ECIES is the key type that thresholds later (v2),
