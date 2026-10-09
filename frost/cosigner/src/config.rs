@@ -75,6 +75,13 @@ pub struct Config {
     /// lowercase hex characters.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cluster_id: Option<String>,
+    /// Allow this start to run under a different cluster id than the one recorded in
+    /// `data_dir/cluster-id` at an earlier start ([`crate::cluster_identity`]). Without it a node
+    /// whose effective id changed — typically a `helm upgrade` that dropped `clusterId` — refuses
+    /// to start. Only for a deliberate change (a node moved to another cluster, a dev cluster
+    /// started over); set it for one start, then remove it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cluster_id_change_allowed: bool,
 }
 
 /// Cluster-hosted key settings.
@@ -176,6 +183,15 @@ impl Config {
         match &self.cluster_id {
             Some(pinned) => Ok(pinned.clone()),
             None => self.derived_cluster_id(),
+        }
+    }
+
+    /// Where [`Config::cluster_id`] comes from, as the startup log and error messages say it.
+    pub fn cluster_id_source(&self) -> &'static str {
+        match (&self.cluster_id, &self.tls) {
+            (Some(_), _) => "pinned in config",
+            (None, Some(_)) => "derived from tls.ca_cert",
+            (None, None) => "plaintext-dev, no TLS",
         }
     }
 
@@ -313,6 +329,7 @@ mod tests {
             operator_allowlist: None,
             ceremony_sign_test_rate_limit_per_min: DEFAULT_CEREMONY_SIGN_TEST_RATE_LIMIT_PER_MIN,
             cluster_id: None,
+            cluster_id_change_allowed: false,
         }
     }
 
@@ -443,6 +460,7 @@ mod hosted_config_tests {
             ceremony_sign_test_rate_limit_per_min: DEFAULT_CEREMONY_SIGN_TEST_RATE_LIMIT_PER_MIN,
             hosted_keys: hosted,
             cluster_id: None,
+            cluster_id_change_allowed: false,
         }
     }
 

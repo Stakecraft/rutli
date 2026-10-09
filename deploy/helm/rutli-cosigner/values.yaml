@@ -76,7 +76,22 @@ tlsDomain: rutli-cosigner
 # lowercase hex characters; pass it as a string (`--set-string clusterId=…`).
 # Requires a cosigner image with `cluster_id` support — older images silently ignore the field:
 # check each pod's startup log for `cluster id <id> (pinned in config)`.
+#
+# The id belongs to ONE cluster: never copy clusterId (or a values file that carries it) to another
+# cluster. A new cluster leaves it empty and gets its own derived id.
+#
+# Once set, it must survive every later upgrade. `helm upgrade` WITHOUT `--reuse-values` or
+# `-f <saved values>` resets it to "" — the pods would then derive an id from ca.crt, which after a
+# rotation is a different one. Upgrade with `-f <saved values>` (`helm get values <release> -o yaml
+# > saved.yaml` first) or `--reuse-values`. As a backstop each cosigner records the id it runs under
+# in data_dir/cluster-id and refuses to start under a different one (`cluster id mismatch` in the
+# pod log; the rollout stops at that pod with the others still serving).
 clusterId: ""
+
+# Allow the next start of every cosigner to run under a different cluster id than the one it
+# recorded (see clusterId). Only for a deliberate change, never for a rotation: set it for one
+# rollout, then set it back to false.
+clusterIdChangeAllowed: false
 
 # Cluster-hosted (non-FROST) keys: the RSA-2048-OAEP encryption keypair and the AES-256-GCM
 # symmetric key Canton needs, held by the cluster so the participant needs no HSM and no local key

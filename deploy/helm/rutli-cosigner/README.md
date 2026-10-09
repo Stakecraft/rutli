@@ -50,7 +50,8 @@ Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org A
 | `tls.allowExpiredCa` | `false` | Accept an expired/not-yet-valid CA in `ca.crt` (never a non-CA). Emergency rotation away from an already-expired CA only |
 | `sealSecretName` | `rutli-seal` | Pre-created |
 | `signerAllowlist` | `[driver]` | Required under TLS |
-| `clusterId` | `""` | Cluster id pin (16 lowercase hex). Empty = derived from `ca.crt`'s bytes. Set it to the current derived id before changing `ca.crt` — see "Rotating the cluster CA" |
+| `clusterId` | `""` | Cluster id pin (16 lowercase hex). Empty = derived from `ca.crt`'s bytes. Set it to the current derived id before changing `ca.crt` — see "Rotating the cluster CA". Never copy it to another cluster |
+| `clusterIdChangeAllowed` | `false` | Let the cosigners start under a different cluster id than the one each recorded in `data_dir/cluster-id`. Deliberate changes only, for one rollout |
 | `operatorAllowlist` | `[]` | Operator role for the split ceremony's `verify-key` (KeyStatus + CeremonySignTest only), e.g. `[operator]` |
 | `hostedKeys.enabled` | `false` | Cluster-hosted RSA/AES keys — replicated whole keys, not threshold shares |
 | `backup.enabled` | `false` | Nightly `backup` via `kubectl exec` inside each cosigner; needs `backup.ship` |
@@ -81,6 +82,11 @@ drops the old CA — [`docs/ca-rotation.md`](../../../docs/ca-rotation.md). Beca
 cluster id is a hash of `ca.crt`'s bytes, first pin it to the current value
 (`--set-string clusterId=$(shasum -a 256 certs/ca.crt | cut -c1-16)`) and confirm every pod logs
 `cluster id <id> (pinned in config)`; an image without `cluster_id` support ignores the value.
+
+Keep the pin in every later upgrade: `helm upgrade` without `--reuse-values` or `-f <saved values>`
+resets `clusterId` to `""`. Each cosigner records the id it runs under in `data_dir/cluster-id`
+and refuses to start under a different one (`cluster id mismatch`), so a dropped pin stops the
+rollout at the first pod instead of splitting the cluster; put the value back and roll again.
 
 ### Migrating from the shared TLS Secret (≤ 0.3.x installs, e.g. the DevNet soak)
 
