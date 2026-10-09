@@ -91,3 +91,16 @@ impl TestPki {
         rutli_cosigner::wrap::cluster_id_from_ca(self.ca_pem.as_bytes())
     }
 }
+
+/// A CA-rotation trust bundle: the CA certificates of `pkis`, concatenated in order — what
+/// `tls.ca_cert` holds during the overlap (`cat old/ca.crt new/ca.crt`).
+pub fn bundle(pkis: &[&TestPki]) -> String {
+    let mut out = String::new();
+    for p in pkis {
+        out.push_str(&p.ca_pem);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out
+}

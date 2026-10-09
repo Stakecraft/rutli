@@ -64,6 +64,17 @@ pub struct Config {
     /// the cluster so a participant needs no HSM and no local key state. Off by default.
     #[serde(default)]
     pub hosted_keys: Option<HostedKeysConfig>,
+    /// Explicit cluster identity that envelopes are bound to (hosted-key replication, split-ceremony
+    /// recipient requests and share bundles). When unset it is derived from the `tls.ca_cert` file
+    /// bytes ([`crate::wrap::cluster_id_from_ca`]), or `plaintext-dev` without TLS — so any change
+    /// to the CA file, including adding a second CA for a rotation, would change it.
+    ///
+    /// Pin it to the **current derived value** (`shasum -a 256 ca.crt | cut -c1-16`) *before* changing
+    /// the CA file (CA rotation, docs/ca-rotation.md), and never change it afterwards: it must be
+    /// identical on every node, and in-flight split-ceremony recipient files carry it. Exactly 16
+    /// lowercase hex characters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_id: Option<String>,
 }
 
 /// Cluster-hosted key settings.
@@ -152,9 +163,18 @@ impl Config {
         self.peers.len() as u16
     }
 
-    /// The cluster identity envelopes are bound to: [`crate::wrap::cluster_id_from_ca`] of the CA
-    /// certificate, or `plaintext-dev` without TLS. Reads the CA file.
+    /// The cluster identity envelopes are bound to: the pinned [`Config::cluster_id`] when set,
+    /// else [`Config::derived_cluster_id`].
     pub fn cluster_id(&self) -> crate::Result<String> {
+        match &self.cluster_id {
+            Some(pinned) => Ok(pinned.clone()),
+            None => self.derived_cluster_id(),
+        }
+    }
+
+    /// The cluster identity the CA file implies: [`crate::wrap::cluster_id_from_ca`] of the
+    /// `tls.ca_cert` bytes, or `plaintext-dev` without TLS. Reads the CA file. Ignores the pin.
+    pub fn derived_cluster_id(&self) -> crate::Result<String> {
         Ok(match &self.tls {
             Some(t) => crate::wrap::cluster_id_from_ca(&std::fs::read(&t.ca_cert)?),
             None => "plaintext-dev".to_string(),
@@ -170,6 +190,12 @@ impl Config {
 
     pub fn validate(&self) -> crate::Result<()> {
         use crate::DaemonError::Config;
+        if let Some(pinned) = &self.cluster_id {
+            crate::wrap::check_cluster_id(pinned).map_err(|e| match e {
+                Config(msg) => Config(format!("cluster_id: {msg}")),
+                other => other,
+            })?;
+        }
         if self.peers.is_empty() {
             return Err(Config("peer roster is empty".into()));
         }
@@ -279,6 +305,7 @@ mod tests {
             metrics_listen: None,
             operator_allowlist: None,
             ceremony_sign_test_rate_limit_per_min: DEFAULT_CEREMONY_SIGN_TEST_RATE_LIMIT_PER_MIN,
+            cluster_id: None,
         }
     }
 
@@ -320,6 +347,58 @@ mod tests {
     }
 
     #[test]
+    fn a_pinned_cluster_id_overrides_the_ca_derived_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = dir.path().join("ca.crt");
+        std::fs::write(&ca, b"-----BEGIN CERTIFICATE-----\nold\n-----END CERTIFICATE-----\n").unwrap();
+        let mut c = base(Some(TlsConfig { ca_cert: ca.clone(), ..tls() }), Some(vec!["driver".into()]));
+
+        // Unset: derived from the CA file's bytes, as before.
+        let derived = crate::wrap::cluster_id_from_ca(&std::fs::read(&ca).unwrap());
+        assert_eq!(c.cluster_id().unwrap(), derived);
+        assert_eq!(c.derived_cluster_id().unwrap(), derived);
+
+        // Pinned to the derived value, then the CA file becomes a rotation bundle: the id holds.
+        c.cluster_id = Some(derived.clone());
+        c.validate().unwrap();
+        let mut bundle = std::fs::read(&ca).unwrap();
+        bundle.extend_from_slice(b"-----BEGIN CERTIFICATE-----\nnew\n-----END CERTIFICATE-----\n");
+        std::fs::write(&ca, &bundle).unwrap();
+        assert_eq!(c.cluster_id().unwrap(), derived);
+        assert_ne!(c.derived_cluster_id().unwrap(), derived, "the file changed, the pin did not");
+
+        // Without TLS, a pin wins over plaintext-dev too.
+        let mut p = base(None, None);
+        assert_eq!(p.cluster_id().unwrap(), "plaintext-dev");
+        p.cluster_id = Some("453bb4aea2088bb5".into());
+        assert_eq!(p.cluster_id().unwrap(), "453bb4aea2088bb5");
+    }
+
+    #[test]
+    fn a_malformed_cluster_id_pin_is_rejected() {
+        let mut c = base(Some(tls()), Some(vec!["driver".into()]));
+        c.cluster_id = Some("453bb4aea2088bb5".into());
+        c.validate().unwrap();
+        for bad in ["453BB4AEA2088BB5", "453bb4aea2088bb", "453bb4aea2088bb5a", "453bb4aea2088bbz", ""] {
+            c.cluster_id = Some(bad.into());
+            let e = c.validate().unwrap_err().to_string();
+            assert!(e.contains("cluster_id") && e.contains("shasum -a 256 ca.crt | cut -c1-16"), "{bad:?}: {e}");
+        }
+    }
+
+    #[test]
+    fn cluster_id_is_optional_in_json_and_omitted_when_unset() {
+        let json = r#"{"identifier":1,"listen":"127.0.0.1:9101","threshold":1,"data_dir":"/tmp/x",
+                       "peers":[{"identifier":1,"endpoint":"http://a:9101"}]}"#;
+        let c: Config = serde_json::from_str(json).unwrap();
+        assert_eq!(c.cluster_id, None);
+        assert!(!serde_json::to_string(&c).unwrap().contains("cluster_id"));
+        let pinned: Config =
+            serde_json::from_str(&json.replacen('{', r#"{"cluster_id":"453bb4aea2088bb5","#, 1)).unwrap();
+        assert_eq!(pinned.cluster_id().unwrap(), "453bb4aea2088bb5");
+    }
+
+    #[test]
     fn the_operator_role_must_be_its_own_identity() {
         let mut c = base(Some(tls()), Some(vec!["driver".into()]));
         c.peer_allowlist = Some(vec!["cosigner1".into(), "cosigner2".into(), "cosigner3".into()]);
@@ -355,6 +434,7 @@ mod hosted_config_tests {
             operator_allowlist: None,
             ceremony_sign_test_rate_limit_per_min: DEFAULT_CEREMONY_SIGN_TEST_RATE_LIMIT_PER_MIN,
             hosted_keys: hosted,
+            cluster_id: None,
         }
     }
 

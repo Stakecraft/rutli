@@ -122,7 +122,8 @@ pub struct RecipientRequest {
     pub kind: String,
     pub ceremony_id: String,
     pub key_id: String,
-    /// `wrap::cluster_id_from_ca` of the node's CA certificate (`plaintext-dev` without TLS).
+    /// The node's cluster id (`Config::cluster_id`): the pinned `cluster_id`, else
+    /// `wrap::cluster_id_from_ca` of its CA certificate (`plaintext-dev` without TLS).
     pub cluster_id: String,
     /// This node's configured FROST identifier.
     pub identifier: u16,

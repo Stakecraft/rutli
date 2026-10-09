@@ -191,8 +191,26 @@ pub fn open_with(
 
 /// A stable cluster identifier derived from the CA certificate — no new config field, and it
 /// changes if the trust domain changes (so envelopes never cross clusters).
+///
+/// This is only the *default* identity: a cluster may pin it (`cluster_id` in the cosigner config,
+/// `--cluster-id` on the dealer) so that changing the CA file — e.g. adding a second CA during a
+/// CA rotation (docs/ca-rotation.md) — does not change what envelopes are bound to.
 pub fn cluster_id_from_ca(ca_pem: &[u8]) -> String {
     hex::encode(&Sha256::digest(ca_pem)[..8])
+}
+
+/// Check that `s` has the shape [`cluster_id_from_ca`] produces: exactly 16 lowercase hex
+/// characters. Used for an explicitly pinned cluster id, where a typo (or an uppercase copy of the
+/// value) would otherwise silently split the cluster into nodes that cannot open each other's
+/// envelopes.
+pub fn check_cluster_id(s: &str) -> Result<()> {
+    if s.len() == 16 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return Ok(());
+    }
+    Err(DaemonError::Config(format!(
+        "cluster id {s:?} must be exactly 16 lowercase hex characters — the id derived from the \
+         current CA file: `shasum -a 256 ca.crt | cut -c1-16`"
+    )))
 }
 
 const NONCE_LEN: usize = 12;
@@ -308,6 +326,27 @@ mod tests {
     fn cluster_id_tracks_the_trust_domain() {
         assert_eq!(cluster_id_from_ca(b"ca-pem").len(), 16);
         assert_ne!(cluster_id_from_ca(b"ca-pem"), cluster_id_from_ca(b"other-ca-pem"));
+    }
+
+    #[test]
+    fn a_pinned_cluster_id_must_have_the_derived_shape() {
+        // Whatever the CA derivation produces is a valid pin (that is what operators copy).
+        check_cluster_id(&cluster_id_from_ca(b"ca-pem")).unwrap();
+        check_cluster_id("453bb4aea2088bb5").unwrap();
+        check_cluster_id(CLUSTER).unwrap();
+        for bad in [
+            "",
+            "453BB4AEA2088BB5",   // uppercase: a different string, so a different AAD
+            "453bb4aea2088bb",    // 15
+            "453bb4aea2088bb5a",  // 17
+            "453bb4aea2088bbg",   // not hex
+            " 453bb4aea2088bb5",  // padding
+            "453bb4aea2088bb5\n", // a trailing newline from `echo`
+            "plaintext-dev",
+        ] {
+            let e = check_cluster_id(bad).unwrap_err().to_string();
+            assert!(e.contains("shasum -a 256 ca.crt | cut -c1-16"), "{bad:?}: {e}");
+        }
     }
 
     #[test]

@@ -10,9 +10,15 @@
 //!
 //! - `share-recipient` signs the request's canonical bytes ([`canonical_bytes`]) with the node's
 //!   **mTLS leaf private key** and embeds the leaf certificate chain ([`NodeSigner`]);
-//! - `rutli-dealer` verifies ([`verify_request`]) the chain up to the cluster CA it was given
-//!   (`--ca-cert`), the signature, that `cluster_id` is that CA's (`wrap::cluster_id_from_ca`), and
-//!   that the leaf's identity is the request's `identifier`.
+//! - `rutli-dealer` verifies ([`verify_request`], [`verify_request_for_cluster`]) the chain up to
+//!   a cluster CA it was given (`--ca-cert`), the signature, that `cluster_id` is the cluster's —
+//!   the pinned `--cluster-id`, else that CA file's (`wrap::cluster_id_from_ca`) — and that the
+//!   leaf's identity is the request's `identifier`.
+//!
+//! **Trust anchors.** Every `CERTIFICATE` block of the CA file is a trust anchor, as it is for the
+//! cosigners' mTLS (tonic loads every certificate in `tls.ca_cert`): during a CA rotation
+//! (docs/ca-rotation.md) the file is a bundle of the old and the new CA, and a node's leaf may be
+//! issued by either. An anchor counts only while it is valid and allowed to sign certificates.
 //!
 //! **Identity rule.** A leaf certificate names cosigner `N` iff its subject Common Name is exactly
 //! `cosigner<N>` (decimal, no leading zeros) — the CN `scripts/gen-frost-certs.sh` issues, the one
@@ -238,11 +244,23 @@ impl NodeSigner {
     }
 }
 
-/// Verify that `r` was signed by the cosigner it names, under the cluster CA `ca_pem` (the exact
-/// CA file the cosigners use — `cluster_id` is a hash of those bytes). The returned
-/// [`VerifiedRequest`] is the only thing [`crate::share_delivery::seal_share`] accepts.
+/// Verify that `r` was signed by the cosigner it names, under the cluster CA file `ca_pem` (the
+/// exact CA file the cosigners use), for an **unpinned** cluster: the expected `cluster_id` is the
+/// hash of those bytes ([`crate::wrap::cluster_id_from_ca`]). See [`verify_request_for_cluster`].
 pub fn verify_request(r: &RecipientRequest, ca_pem: &[u8]) -> Result<VerifiedRequest> {
-    check_request(r, ca_pem)?;
+    verify_request_for_cluster(r, ca_pem, &crate::wrap::cluster_id_from_ca(ca_pem))
+}
+
+/// Verify that `r` was signed by the cosigner it names, certified by any CA in `ca_pem` (one CA, or
+/// a bundle during a CA rotation), and that it is for cluster `cluster_id` — the id the cosigners
+/// are pinned to (`cluster_id` in their config), or the CA-derived one when they are not. The
+/// returned [`VerifiedRequest`] is the only thing [`crate::share_delivery::seal_share`] accepts.
+pub fn verify_request_for_cluster(
+    r: &RecipientRequest,
+    ca_pem: &[u8],
+    cluster_id: &str,
+) -> Result<VerifiedRequest> {
+    check_request(r, ca_pem, cluster_id)?;
     Ok(VerifiedRequest(r.clone()))
 }
 
@@ -258,20 +276,23 @@ impl std::ops::Deref for VerifiedRequest {
     }
 }
 
-fn check_request(r: &RecipientRequest, ca_pem: &[u8]) -> Result<()> {
-    let expected_cluster = crate::wrap::cluster_id_from_ca(ca_pem);
+fn check_request(r: &RecipientRequest, ca_pem: &[u8], expected_cluster: &str) -> Result<()> {
     if r.cluster_id != expected_cluster {
         return Err(auth(format!(
-            "request is for cluster {}, the CA given is cluster {expected_cluster}",
+            "request is for cluster {}, the cluster given is {expected_cluster}",
             r.cluster_id
         )));
     }
-    let ca_der = pem_blocks(ca_pem)?
+    let anchors_der: Vec<Zeroizing<Vec<u8>>> = pem_blocks(ca_pem)?
         .into_iter()
-        .find(|(label, _)| label == "CERTIFICATE")
-        .map(|(_, der)| der.to_vec())
-        .ok_or_else(|| auth("no certificate in the CA file".into()))?;
-    let ca = parse(&ca_der)?;
+        .filter(|(label, _)| label == "CERTIFICATE")
+        .map(|(_, der)| der)
+        .collect();
+    if anchors_der.is_empty() {
+        return Err(auth("no certificate in the CA file".into()));
+    }
+    let anchors: Vec<X509Certificate<'_>> =
+        anchors_der.iter().map(|d| parse(d)).collect::<Result<_>>()?;
 
     let b64 = base64::engine::general_purpose::STANDARD;
     let chain_der: Vec<Vec<u8>> = r
@@ -287,23 +308,60 @@ fn check_request(r: &RecipientRequest, ca_pem: &[u8]) -> Result<()> {
     }
     let chain: Vec<X509Certificate<'_>> = chain_der.iter().map(|d| parse(d)).collect::<Result<_>>()?;
 
-    // Trust anchor: itself valid now, and a CA allowed to sign certificates.
+    // Trust anchors: each itself valid now, and a CA allowed to sign certificates. An anchor that
+    // is neither is not usable — but it does not poison the others in a rotation bundle. With a
+    // single anchor the errors are what they always were.
     let now = x509_parser::time::ASN1Time::now();
-    if !ca.validity().is_valid_at(now) {
-        return Err(auth("the CA certificate is expired or not yet valid".into()));
+    let mut usable: Vec<&X509Certificate<'_>> = Vec::with_capacity(anchors.len());
+    let mut first_unusable: Option<DaemonError> = None;
+    for (i, ca) in anchors.iter().enumerate() {
+        let checked = if !ca.validity().is_valid_at(now) {
+            Err(auth(if anchors.len() == 1 {
+                "the CA certificate is expired or not yet valid".into()
+            } else {
+                format!("CA certificate {i} of the CA file is expired or not yet valid")
+            }))
+        } else {
+            require_issuer(ca, "the CA certificate")
+        };
+        match checked {
+            Ok(()) => usable.push(ca),
+            Err(e) => {
+                first_unusable.get_or_insert(e);
+            }
+        }
     }
-    require_issuer(&ca, "the CA certificate")?;
+    if usable.is_empty() {
+        if anchors.len() > 1 && anchors.iter().all(|ca| !ca.validity().is_valid_at(now)) {
+            return Err(auth(
+                "the CA certificate is expired or not yet valid (every CA in the CA file)".into(),
+            ));
+        }
+        return Err(first_unusable.expect("no usable anchor means at least one was refused"));
+    }
 
-    // Chain: each certificate signed by the next, the last by the CA. Intermediates must be CAs.
+    // Chain: each certificate signed by the next. Intermediates must be CAs.
     for (i, cert) in chain.iter().enumerate() {
         if !cert.validity().is_valid_at(now) {
             return Err(auth(format!("certificate {i} of signer_chain is expired or not yet valid")));
         }
-        let issuer = chain.get(i + 1).unwrap_or(&ca);
-        if i + 1 < chain.len() {
+        if let Some(issuer) = chain.get(i + 1) {
             require_issuer(issuer, "an intermediate in signer_chain")?;
+            verify_cert_signature(cert, issuer)?;
         }
-        verify_cert_signature(cert, issuer)?;
+    }
+    // ...and the last by a usable trust anchor: the first that verifies it. With one anchor, its
+    // own error stands (issuer mismatch, unsupported algorithm, bad signature).
+    let last = chain.last().expect("signer_chain is not empty");
+    let mut errors = usable.iter().map(|ca| verify_cert_signature(last, ca));
+    if usable.len() == 1 {
+        errors.next().expect("one anchor")?;
+    } else if !errors.any(|e| e.is_ok()) {
+        return Err(auth(format!(
+            "signer_chain is not signed by the cluster CA — not certified by any of the {} usable \
+             CA certificates in the CA file",
+            usable.len()
+        )));
     }
 
     // The leaf: an end-entity TLS certificate, not a CA, usable for signatures.
@@ -596,6 +654,95 @@ mod tests {
             bad_ca.signer("cosigner1").sign(&mut r).unwrap();
             assert!(verify_request(&r, bad_ca.ca_pem.as_bytes()).is_err());
         }
+    }
+
+    /// CA rotation (docs/ca-rotation.md): the CA file is a bundle of the old and the new CA, the
+    /// cluster id is pinned, and a node's leaf may come from either CA.
+    #[test]
+    fn a_request_verifies_against_any_ca_of_a_rotation_bundle_under_the_pinned_cluster_id() {
+        let old = TestPki::new();
+        let new = TestPki::new();
+        let pinned = old.cluster_id(); // pinned to the pre-rotation derived id
+        // Node 2 already has its new leaf (CA B), its request carries the pinned id.
+        let mut r = request(&old, 2);
+        new.signer("cosigner2").sign(&mut r).unwrap();
+        // ...and node 1 still has its old leaf (CA A).
+        let mut r_old = request(&old, 1);
+        old.signer("cosigner1").sign(&mut r_old).unwrap();
+
+        for bundle in [crate::test_pki::bundle(&[&old, &new]), crate::test_pki::bundle(&[&new, &old])] {
+            verify_request_for_cluster(&r, bundle.as_bytes(), &pinned).unwrap();
+            verify_request_for_cluster(&r_old, bundle.as_bytes(), &pinned).unwrap();
+            // Unpinned verification derives the id from the bundle's bytes, which is neither CA's.
+            let e = verify_request(&r, bundle.as_bytes()).unwrap_err().to_string();
+            assert!(e.contains("cluster"), "{e}");
+            // A wrong pin is refused, whatever the chain.
+            for wrong in [new.cluster_id(), wrap_id(&bundle), "0000000000000000".into()] {
+                assert!(verify_request_for_cluster(&r, bundle.as_bytes(), &wrong).is_err(), "{wrong}");
+            }
+        }
+        // Against the old CA alone, the new leaf is not certified.
+        let e = verify_request_for_cluster(&r, old.ca_pem.as_bytes(), &pinned).unwrap_err().to_string();
+        assert!(e.contains("not signed by the cluster CA"), "{e}");
+        // Every other check still runs per request: another node's new leaf naming node 2.
+        let mut forged = request(&old, 2);
+        new.signer("cosigner3").sign(&mut forged).unwrap();
+        let bundle = crate::test_pki::bundle(&[&old, &new]);
+        assert!(verify_request_for_cluster(&forged, bundle.as_bytes(), &pinned).is_err());
+        // A third, unrelated CA's leaf is certified by neither CA in the bundle.
+        let rogue = TestPki::new();
+        let mut r = request(&old, 2);
+        rogue.signer("cosigner2").sign(&mut r).unwrap();
+        let e = verify_request_for_cluster(&r, bundle.as_bytes(), &pinned).unwrap_err().to_string();
+        assert!(e.contains("not certified by any of the 2"), "{e}");
+    }
+
+    #[test]
+    fn verify_request_requires_the_id_derived_from_the_exact_ca_file_bytes() {
+        let a = TestPki::new();
+        let b = TestPki::new();
+        let bundle = crate::test_pki::bundle(&[&a, &b]);
+        let mut r = request(&a, 1);
+        r.cluster_id = wrap_id(&bundle);
+        b.signer("cosigner1").sign(&mut r).unwrap();
+        // An unpinned cluster whose CA file *is* the bundle: the derived id matches.
+        verify_request(&r, bundle.as_bytes()).unwrap();
+        // The same CAs in the other order are different bytes, so a different cluster.
+        assert!(verify_request(&r, crate::test_pki::bundle(&[&b, &a]).as_bytes()).is_err());
+    }
+
+    #[test]
+    fn an_expired_issuing_ca_in_a_bundle_does_not_certify_even_if_the_other_ca_is_valid() {
+        let expired = TestPki::with_ca(&rcgen::PKCS_ECDSA_P256_SHA256, |p| {
+            p.not_before = rcgen::date_time_ymd(2001, 1, 1);
+            p.not_after = rcgen::date_time_ymd(2002, 1, 1);
+        });
+        let valid = TestPki::new();
+        let pinned = valid.cluster_id();
+        let bundle = crate::test_pki::bundle(&[&expired, &valid]);
+        // Signed by a (valid) leaf of the expired CA: refused.
+        let mut r = request(&valid, 1);
+        expired.signer("cosigner1").sign(&mut r).unwrap();
+        assert!(verify_request_for_cluster(&r, bundle.as_bytes(), &pinned).is_err());
+        // The valid CA's leaves still verify under the same bundle.
+        let mut ok = request(&valid, 1);
+        valid.signer("cosigner1").sign(&mut ok).unwrap();
+        verify_request_for_cluster(&ok, bundle.as_bytes(), &pinned).unwrap();
+        // Every CA in the file expired: the error says so.
+        let both = crate::test_pki::bundle(&[&expired, &expired]);
+        let e = verify_request_for_cluster(&r, both.as_bytes(), &pinned).unwrap_err().to_string();
+        assert!(e.contains("the CA certificate is expired or not yet valid"), "{e}");
+        // A non-CA certificate in the bundle is no anchor either.
+        let not_ca = TestPki::with_ca(&rcgen::PKCS_ECDSA_P256_SHA256, |p| p.is_ca = rcgen::IsCa::NoCa);
+        let mut r = request(&valid, 1);
+        not_ca.signer("cosigner1").sign(&mut r).unwrap();
+        let bundle = crate::test_pki::bundle(&[&not_ca, &valid]);
+        assert!(verify_request_for_cluster(&r, bundle.as_bytes(), &pinned).is_err());
+        verify_request_for_cluster(&ok, bundle.as_bytes(), &pinned).unwrap();
+    }
+
+    fn wrap_id(pem: &str) -> String {
+        crate::wrap::cluster_id_from_ca(pem.as_bytes())
     }
 
     #[test]

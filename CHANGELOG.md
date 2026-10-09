@@ -5,7 +5,31 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **Zero-downtime cluster CA rotation (`docs/ca-rotation.md`).** A runbook to move a live cluster to
+  a new mTLS CA — including when the old CA's private key is lost — by trusting a bundle of the old
+  and the new CA during the overlap, swapping leaves node by node, then dropping the old CA.
+  - **`cluster_id` config pin** (chart: `clusterId`). The identity hosted-key replication envelopes
+    and split-ceremony requests/bundles are bound to was always derived from the bytes of
+    `tls.ca_cert`, so adding a second CA would have split the cluster mid-rollout. Pin it to the
+    current derived id (`shasum -a 256 ca.crt | cut -c1-16`) before changing the CA file; 16 lowercase
+    hex characters, validated at startup and at `helm template`. Each cosigner logs
+    `cluster id <id> (pinned in config)` (or `(derived from tls.ca_cert)`) at startup, and the CA
+    certificate count of its trust file. Older images ignore the field — check that log line.
+  - **Multi-CA trust files.** mTLS already trusted every certificate in `tls.ca_cert`
+    (`tests/tls_rotation.rs` proves both directions over real sockets); the split ceremony's request
+    verification now does too: a cosigner leaf certified by any valid CA in the file is accepted.
+  - **`rutli-dealer split-key --cluster-id <ID>`**: the id the cosigners are pinned to; without it
+    the id is derived from `--ca-cert`, as before. Required after a CA rotation.
+  - **`gen-frost-certs.sh`**: `RUTLI_CA_DIR` reuses an existing CA to issue leaves (`ca.key` is never
+    copied out), `RUTLI_CERTS` issues a subset (e.g. just `operator`), `RUTLI_CA_CN` / `RUTLI_CA_DAYS`
+    name and size a new CA; it refuses to replace an existing `ca.key`, a key-less `ca.crt` or any
+    leaf key unless `RUTLI_FORCE=1`, and prints the CA's SHA-256 and derived cluster id.
+  - Driver: `FrostTlsTrustBundleSpec` pins that the driver's Netty channel accepts a two-CA trust
+    file (no driver code change).
+  - The hosted-key anti-entropy sweep no longer skips an unreachable peer silently: it logs
+    `anti-entropy: cannot list keys on peer` at WARN with the peer and the error (e.g. an mTLS
+    `UnknownIssuer` during a rotation), once per peer per sweep.
 
 ## [0.4.0-rc.1] — 2026-10-09
 

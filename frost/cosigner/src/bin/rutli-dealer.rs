@@ -73,11 +73,17 @@ enum Command {
         /// One `share-recipient` request per cosigner (repeat the flag).
         #[arg(long = "recipient", value_name = "FILE", required = true)]
         recipients: Vec<PathBuf>,
-        /// The cluster CA certificate — the exact file the cosigners use (`tls.ca_cert`). Every
-        /// request must be signed by the mTLS key of the cosigner it names, certified by this CA,
-        /// and its cluster id must be this CA's.
+        /// The cluster CA certificate — the exact file the cosigners use (`tls.ca_cert`); during a
+        /// CA rotation, the bundle of the old and the new CA. Every request must be signed by the
+        /// mTLS key of the cosigner it names, certified by a CA in this file, and its cluster id
+        /// must be the cluster's (see --cluster-id).
         #[arg(long, value_name = "FILE")]
         ca_cert: PathBuf,
+        /// The cluster id the cosigners are pinned to (`cluster_id` in their config). Without it,
+        /// the id is derived from --ca-cert, as the cosigners do when unpinned. Required after a
+        /// CA rotation.
+        #[arg(long, value_name = "ID")]
+        cluster_id: Option<String>,
         /// The SAS of every request, comma-separated in identifier order, as witnesses read them
         /// in each pod (`share-recipient` prints `SAS node <i> <sas>`). Without this flag the
         /// dealer asks for each one on the terminal.
@@ -116,6 +122,7 @@ fn main() {
             threshold,
             recipients,
             ca_cert,
+            cluster_id,
             confirm_sas,
             out_dir,
             any_usage,
@@ -130,6 +137,7 @@ fn main() {
             threshold,
             recipients,
             ca_cert,
+            cluster_id,
             confirm_sas,
             out_dir,
             any_usage,
@@ -154,6 +162,7 @@ struct SplitKey {
     threshold: u16,
     recipients: Vec<PathBuf>,
     ca_cert: PathBuf,
+    cluster_id: Option<String>,
     confirm_sas: Option<String>,
     out_dir: PathBuf,
     any_usage: bool,
@@ -216,9 +225,19 @@ fn split_key(a: SplitKey) -> Result<()> {
     if !(expect.len() == 68 && expect.starts_with("1220") && expect.chars().all(|c| c.is_ascii_hexdigit())) {
         return Err(refuse(format!("--expect-fingerprint {expect:?} is not a 1220… Canton fingerprint")));
     }
+    if let Some(id) = &a.cluster_id {
+        rutli_cosigner::wrap::check_cluster_id(id).map_err(|e| match e {
+            DaemonError::Config(msg) => refuse(format!("--cluster-id: {msg}")),
+            other => other,
+        })?;
+    }
     let ca_pem = std::fs::read(&a.ca_cert)
         .map_err(|e| refuse(format!("--ca-cert {}: {e}", a.ca_cert.display())))?;
-    let requests = read_recipients(&a.recipients, &ca_pem)?;
+    let cluster_id = match &a.cluster_id {
+        Some(pinned) => pinned.clone(),
+        None => rutli_cosigner::wrap::cluster_id_from_ca(&ca_pem),
+    };
+    let requests = read_recipients(&a.recipients, &ca_pem, &cluster_id)?;
     confirm_sas(&requests, a.confirm_sas.as_deref())?;
     let first = &requests[0];
     if first.key_id != a.key_id {
@@ -387,16 +406,17 @@ struct RecordRecipient {
 }
 
 /// Read every request, verify it was minted by the cosigner it names (signature by that node's mTLS
-/// key, certified by the cluster CA, cluster id = the CA's — `request_auth::verify_request`), and
-/// check they describe one ceremony: same key, ceremony, cluster, threshold, size and roster; one
-/// request per roster member, no duplicates, no strays.
-fn read_recipients(paths: &[PathBuf], ca_pem: &[u8]) -> Result<Vec<VerifiedRequest>> {
+/// key, certified by a CA in the CA file, cluster id = `cluster_id` —
+/// `request_auth::verify_request_for_cluster`), and check they describe one ceremony: same key,
+/// ceremony, cluster, threshold, size and roster; one request per roster member, no duplicates, no
+/// strays.
+fn read_recipients(paths: &[PathBuf], ca_pem: &[u8], cluster_id: &str) -> Result<Vec<VerifiedRequest>> {
     let mut requests = Vec::with_capacity(paths.len());
     for p in paths {
         let r: RecipientRequest = serde_json::from_slice(&std::fs::read(p)?)
             .map_err(|e| refuse(format!("{} is not a share-recipient request: {e}", p.display())))?;
         r.validate().map_err(|e| refuse(format!("{}: {e}", p.display())))?;
-        let verified = rutli_cosigner::request_auth::verify_request(&r, ca_pem)
+        let verified = rutli_cosigner::request_auth::verify_request_for_cluster(&r, ca_pem, cluster_id)
             .map_err(|e| refuse(format!("{}: {e} — do not seal to it; see the runbook", p.display())))?;
         requests.push(verified);
     }

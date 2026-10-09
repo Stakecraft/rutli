@@ -618,7 +618,17 @@ pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<(usiz
         if p.identifier() == node.identifier {
             continue;
         }
-        let Ok(theirs) = p.list_keys().await else { continue };
+        // Never skip a peer silently: an unreachable peer — e.g. an mTLS UnknownIssuer while the
+        // cluster CA is being rotated (docs/ca-rotation.md) — is exactly what an operator must see.
+        // With hosted keys on, every node sweeps every peer each interval, so this line covers
+        // every directed mesh link.
+        let theirs = match p.list_keys().await {
+            Ok(theirs) => theirs,
+            Err(e) => {
+                tracing::warn!(peer = ?p.identifier(), error = %e, "anti-entropy: cannot list keys on peer");
+                continue;
+            }
+        };
         let their_ids: std::collections::HashSet<String> =
             theirs.iter().map(|(id, _, _)| id.clone()).collect();
         for id in &their_ids {

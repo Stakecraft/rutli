@@ -63,6 +63,16 @@ operatorAllowlist: []
 # mTLS domain / shared SAN on cosigner certs
 tlsDomain: rutli-cosigner
 
+# Cluster id pin (`cluster_id` in every cosigner's config): the identity hosted-key replication
+# envelopes and split-ceremony requests/bundles are bound to. Empty = derived from the bytes of
+# ca.crt (`shasum -a 256 ca.crt | cut -c1-16`), so ANY change to ca.crt — including adding a second CA
+# for a rotation — would change it and split the cluster mid-rollout. Set it to the CURRENT derived
+# id before any CA change, and never change it afterwards (docs/ca-rotation.md). Exactly 16
+# lowercase hex characters; pass it as a string (`--set-string clusterId=…`).
+# Requires a cosigner image with `cluster_id` support — older images silently ignore the field:
+# check each pod's startup log for `cluster id <id> (pinned in config)`.
+clusterId: ""
+
 # Cluster-hosted (non-FROST) keys: the RSA-2048-OAEP encryption keypair and the AES-256-GCM
 # symmetric key Canton needs, held by the cluster so the participant needs no HSM and no local key
 # state. Off by default — turning it on is a custody decision, not a tuning knob.
