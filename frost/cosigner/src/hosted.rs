@@ -1,8 +1,8 @@
 // Copyright 2026 StakeCraft
 // SPDX-License-Identifier: Apache-2.0
 
-//! Cluster-hosted (non-FROST) key material: RSA-2048 encryption keypairs and AES-256-GCM
-//! symmetric keys.
+//! Cluster-hosted (non-FROST) key material: RSA-2048 encryption keypairs, EC P-256 (ECIES)
+//! encryption keypairs and AES-256-GCM symmetric keys.
 //!
 //! These are **whole keys**, not threshold shares — see `docs/hosted-keys-design.md` for why
 //! (short version: no Rust implementation of threshold RSA decryption exists, and the one that
@@ -20,7 +20,19 @@
 //! and MGF1, and an empty label — which is what BouncyCastle's
 //! `RSA/NONE/OAEPWithSHA-256AndMGF1Padding` + `PSource.PSpecified.DEFAULT` produces on the JVM
 //! side, and what `OAEP_SHA256_MGF1SHA256` with a `None` label produces here.
+//!
+//! **EC P-256 (ECIES, v1.5 in `docs/hosted-keys-design.md`).** The cluster performs only the
+//! secret-dependent step of Canton's `EciesHkdfHmacSha256Aes128Cbc`: the static ECDH
+//! `Z = x(d·V)` with the sender's ephemeral point `V` ([`HostedKey::ecdh_p256`], served as the
+//! `EcdhDerive` RPC). KDF2, AES-128-CBC and HMAC-SHA256 are public computation on `Z` and stay in
+//! the driver, inside BouncyCastle's own `IESEngine` — the byte-exact reference implementation of
+//! the framing Canton encrypts with. That split is also the v2 wire contract: a threshold P-256 key
+//! returns the same `Z` from partial points, so promoting this key type to threshold changes the
+//! server side only. ECDH runs on aws-lc-rs (FIPS-validated, constant-time); the peer point is
+//! accepted only as a 65-byte uncompressed SEC1 point and must lie on the curve (checked by
+//! aws-lc on decode — the uncompressed encoding cannot express the point at infinity).
 
+use aws_lc_rs::agreement::{self, UnparsedPublicKey, ECDH_P256};
 use aws_lc_rs::encoding::{AsDer, Pkcs8V1Der, PublicKeyX509Der};
 use aws_lc_rs::rsa::{
     KeySize, OaepPrivateDecryptingKey, OaepPublicEncryptingKey, PrivateDecryptingKey,
@@ -35,6 +47,13 @@ use crate::{DaemonError, Result};
 /// and plaintext at 190 out, which is exactly RSA-2048-OAEP-SHA256 (256 − 2·32 − 2).
 pub const RSA2048_CIPHERTEXT_LEN: usize = 256;
 pub const RSA2048_MAX_PLAINTEXT_LEN: usize = 190;
+
+/// EC P-256 ECDH input and output sizes: the peer's ephemeral public key is accepted only as an
+/// uncompressed SEC1 point `0x04 ‖ X ‖ Y` (what BouncyCastle's ECIES writes, and the only form
+/// Canton produces), and the shared secret is the 32-byte big-endian x-coordinate of `d·V` — the
+/// value BouncyCastle's `ECDHBasicAgreement` yields, padded to the field size as `IESEngine` does.
+pub const P256_UNCOMPRESSED_POINT_LEN: usize = 65;
+pub const P256_SHARED_SECRET_LEN: usize = 32;
 
 /// AES-256-GCM symmetric blob framing: `version ‖ nonce(12) ‖ ciphertext‖tag`.
 ///
@@ -52,6 +71,12 @@ pub enum HostedSpec {
     Rsa2048,
     #[serde(rename = "aes-256-gcm")]
     Aes256Gcm,
+    /// An EC P-256 **encryption** key for Canton's ECIES (`EciesHkdfHmacSha256Aes128Cbc`). The
+    /// spec names the usage as well as the curve: this key serves `EcdhDerive` and nothing else.
+    /// A P-256 *signing* key, should the cluster ever host one, gets its own spec, so ECDH can
+    /// never be asked of it.
+    #[serde(rename = "ec-p256-ecies")]
+    EcP256,
 }
 
 impl HostedSpec {
@@ -59,28 +84,34 @@ impl HostedSpec {
         match self {
             HostedSpec::Rsa2048 => "rsa-2048-oaep-sha256",
             HostedSpec::Aes256Gcm => "aes-256-gcm",
+            HostedSpec::EcP256 => "ec-p256-ecies",
         }
     }
+
+    /// Every spec this build can generate and serve, in the order `Capabilities` reports them.
+    pub const ALL: [HostedSpec; 3] = [HostedSpec::Rsa2048, HostedSpec::Aes256Gcm, HostedSpec::EcP256];
 
     pub fn parse(s: &str) -> Result<Self> {
         match s {
             "rsa-2048-oaep-sha256" | "rsa2048" => Ok(HostedSpec::Rsa2048),
             "aes-256-gcm" | "aes256-gcm" => Ok(HostedSpec::Aes256Gcm),
+            "ec-p256-ecies" => Ok(HostedSpec::EcP256),
             other => Err(DaemonError::Config(format!("unsupported hosted key spec: {other}"))),
         }
     }
 
     /// Whether this spec has a public half (asymmetric).
     pub fn is_asymmetric(&self) -> bool {
-        matches!(self, HostedSpec::Rsa2048)
+        matches!(self, HostedSpec::Rsa2048 | HostedSpec::EcP256)
     }
 }
 
 /// A hosted key as stored (sealed) on disk and replicated between cosigners.
 ///
-/// `private_der` is PKCS#8 DER for RSA, or the raw 32-byte key for AES-256. `public_der` is X.509
-/// SubjectPublicKeyInfo DER for RSA — exactly the encoding Canton's `PublicKey` expects — and
-/// empty for symmetric keys. Both are hex so the record stays plain JSON inside the sealed
+/// `private_der` is PKCS#8 DER for RSA and EC P-256, or the raw 32-byte key for AES-256.
+/// `public_der` is X.509 SubjectPublicKeyInfo DER for RSA and EC P-256 — exactly the encoding
+/// Canton's `PublicKey` expects (for P-256: `id-ecPublicKey`, named curve `prime256v1`,
+/// uncompressed point, byte-identical to what BouncyCastle writes) — and empty for symmetric keys. Both are hex so the record stays plain JSON inside the sealed
 /// envelope, matching how FROST shares are stored.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HostedKey {
@@ -111,6 +142,11 @@ impl HostedKey {
                     public_der: hex::encode(spki.as_ref()),
                 })
             }
+            HostedSpec::EcP256 => {
+                let sk = agreement::PrivateKey::generate(&ECDH_P256)
+                    .map_err(|_| DaemonError::Config("EC P-256 keygen failed".into()))?;
+                Self::from_ec_private_key(&sk, now_secs)
+            }
             HostedSpec::Aes256Gcm => {
                 use aes_gcm::aead::rand_core::RngCore;
                 let mut key = Zeroizing::new([0u8; 32]);
@@ -123,6 +159,89 @@ impl HostedKey {
                 })
             }
         }
+    }
+
+    /// An EC P-256 hosted key from its private scalar (32 bytes, big-endian, 0 < d < n), e.g. the
+    /// scalar of an encryption key exported from Canton. The public half is derived, never taken
+    /// from anywhere else.
+    pub fn ec_p256_from_scalar(scalar: &[u8], now_secs: u64) -> Result<Self> {
+        let sk = agreement::PrivateKey::from_private_key(&ECDH_P256, scalar)
+            .map_err(|_| DaemonError::Config("not a valid EC P-256 private scalar".into()))?;
+        Self::from_ec_private_key(&sk, now_secs)
+    }
+
+    fn from_ec_private_key(sk: &agreement::PrivateKey, now_secs: u64) -> Result<Self> {
+        let pkcs8 = AsDer::<Pkcs8V1Der>::as_der(sk)
+            .map_err(|_| DaemonError::Config("EC private key encode failed".into()))?;
+        let spki = ec_spki(sk)?;
+        Ok(Self {
+            spec: HostedSpec::EcP256,
+            created_at: now_secs,
+            private_der: hex::encode(pkcs8.as_ref()),
+            public_der: hex::encode(spki),
+        })
+    }
+
+    /// The stored EC P-256 private key. Refuses every other spec.
+    fn ec_private_key(&self) -> Result<agreement::PrivateKey> {
+        if self.spec != HostedSpec::EcP256 {
+            return Err(DaemonError::Config(format!(
+                "key spec {} cannot perform ECDH",
+                self.spec.as_str()
+            )));
+        }
+        let der = self.private_bytes()?;
+        agreement::PrivateKey::from_private_key_der(&ECDH_P256, &der)
+            .map_err(|_| DaemonError::Config("stored EC P-256 key is unusable".into()))
+    }
+
+    /// Check that the stored material is internally consistent: for EC P-256, that the stored
+    /// public key is the one the private scalar derives. Run on every path that accepts key
+    /// material from outside this node (replication, import), so a peer or an artifact can never
+    /// pair a private key with somebody else's public key — Canton would then publish a key this
+    /// cluster cannot decrypt for. RSA and AES material is checked by its own operations' parsers.
+    pub fn validate(&self) -> Result<()> {
+        if self.spec == HostedSpec::EcP256 {
+            let sk = self.ec_private_key()?;
+            if ec_spki(&sk)? != self.public_key_der()? {
+                return Err(DaemonError::Config(
+                    "EC P-256 key material is inconsistent: the stored public key is not the one \
+                     the private key derives"
+                        .into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The static ECDH of Canton's ECIES: `Z = x(d·V)` for the sender's ephemeral point `V`.
+    ///
+    /// `peer_point` must be exactly the 65-byte uncompressed SEC1 encoding `0x04 ‖ X ‖ Y`.
+    /// Compressed (`0x02`/`0x03`) and hybrid (`0x06`/`0x07`) encodings, SPKI, and anything of
+    /// another length are refused here, *before* aws-lc sees them — aws-lc would accept several of
+    /// them, and accepting more than Canton produces only widens what an attacker can send. aws-lc
+    /// then decodes the point and refuses one that is not on P-256; the uncompressed form cannot
+    /// encode the point at infinity, and P-256 has cofactor 1, so every accepted point generates
+    /// the full prime-order group (no small-subgroup or invalid-curve leakage of `d`).
+    ///
+    /// Returns the 32-byte big-endian x-coordinate, the same bytes BouncyCastle's
+    /// `ECDHBasicAgreement` + `BigIntegers.asUnsignedByteArray(fieldSize, z)` produce.
+    pub fn ecdh_p256(&self, peer_point: &[u8]) -> Result<Zeroizing<[u8; P256_SHARED_SECRET_LEN]>> {
+        let sk = self.ec_private_key()?;
+        check_uncompressed_p256_point(peer_point)?;
+        agreement::agree(
+            &sk,
+            UnparsedPublicKey::new(&ECDH_P256, peer_point),
+            DaemonError::InvalidPoint("the peer point is not on P-256".into()),
+            |z| {
+                if z.len() != P256_SHARED_SECRET_LEN {
+                    return Err(DaemonError::InvalidPoint("unexpected ECDH output length".into()));
+                }
+                let mut out = Zeroizing::new([0u8; P256_SHARED_SECRET_LEN]);
+                out.copy_from_slice(z);
+                Ok(out)
+            },
+        )
     }
 
     /// X.509 SubjectPublicKeyInfo DER. Errors for symmetric keys, which have no public half.
@@ -249,6 +368,36 @@ impl HostedKey {
         }
         Ok(k)
     }
+}
+
+/// SPKI DER of an EC P-256 private key's public half.
+fn ec_spki(sk: &agreement::PrivateKey) -> Result<Vec<u8>> {
+    let pk = sk
+        .compute_public_key()
+        .map_err(|_| DaemonError::Config("EC public key derivation failed".into()))?;
+    let spki = AsDer::<PublicKeyX509Der>::as_der(&pk)
+        .map_err(|_| DaemonError::Config("EC public key encode failed".into()))?;
+    Ok(spki.as_ref().to_vec())
+}
+
+/// The syntactic half of peer-point validation: exactly 65 bytes, uncompressed tag `0x04`. The
+/// on-curve half is aws-lc's, in [`HostedKey::ecdh_p256`]. Public so the RPC can refuse a
+/// malformed request before charging the key's decryption budget.
+pub fn check_uncompressed_p256_point(peer_point: &[u8]) -> Result<()> {
+    if peer_point.len() != P256_UNCOMPRESSED_POINT_LEN {
+        return Err(DaemonError::InvalidPoint(format!(
+            "the peer point must be a {P256_UNCOMPRESSED_POINT_LEN}-byte uncompressed SEC1 point, \
+             got {} bytes",
+            peer_point.len()
+        )));
+    }
+    if peer_point[0] != 0x04 {
+        return Err(DaemonError::InvalidPoint(format!(
+            "the peer point must be uncompressed (leading byte 0x04), got 0x{:02x}",
+            peer_point[0]
+        )));
+    }
+    Ok(())
 }
 
 /// A FROST [`Identifier`] as the small integer the config uses (1..=n).
@@ -390,5 +539,180 @@ mod tests {
         assert!(HostedSpec::parse("rsa-4096").is_err());
         let json = serde_json::to_string(&HostedSpec::Rsa2048).unwrap();
         assert_eq!(json, "\"rsa-2048-oaep-sha256\"");
+        assert_eq!(HostedSpec::EcP256.as_str(), "ec-p256-ecies");
+        assert_eq!(HostedSpec::parse("ec-p256-ecies").unwrap(), HostedSpec::EcP256);
+        assert_eq!(serde_json::to_string(&HostedSpec::EcP256).unwrap(), "\"ec-p256-ecies\"");
+        // The curve alone is not a spec: the usage is part of it.
+        assert!(HostedSpec::parse("ec-p256").is_err());
+        assert!(HostedSpec::parse("ec-p256-ecdsa").is_err());
+    }
+
+    // ── EC P-256 / ECIES ────────────────────────────────────────────────────────────────────────
+    //
+    // Known-answer values from an independent textbook affine P-256 implementation (Python, not
+    // aws-lc): d is a fixed test scalar, V = e·G for a fixed e, Z = x(d·V) = x(e·Q). The driver's
+    // tests check the same vector on the JVM (JCA ECDH), so all three implementations agree on Z.
+    const KAT_D: &str = "c9afa9d845ba75166b5c215767b1d6934e50c3db36e89b127b8a622b120f6721";
+    const KAT_Q: &str = "0460fed4ba255a9d31c961eb74c6356d68c049b8923b61fa6ce669622e60f29fb6\
+                         7903fe1008b8bc99a41ae9e95628bc64f2f1b20c2d7e9f5177a3c294d4462299";
+    const KAT_V: &str = "041f5efe3b2928f7db57c6befca0428a5833ea10b2e70fada8ccf40478c29bbcdb\
+                         3a143c9e3f9982325a7750a8b095d0b3feaf12fd01ef6172739b82e9ec62c421";
+    const KAT_Z: &str = "605c4045e713174af954ea4740a93c48b42298ab59425be60430752ace33dc1e";
+    /// -G: a valid point; d·(-G) = -Q, whose x-coordinate is x(Q).
+    const NEG_G: &str = "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296\
+                         b01cbd1c01e58065711814b583f061e9d431cca994cea1313449bf97c840ae0a";
+    /// The valid point with the smallest x (x = 5)…
+    const SMALL_X: &str = "040000000000000000000000000000000000000000000000000000000000000005\
+                           459243b9aa581806fe913bce99817ade11ca503c64d9a3c533415c083248fbcc";
+    /// …and the same point with x written as x + p: a non-reduced field element.
+    const SMALL_X_PLUS_P: &str = "04ffffffff00000001000000000000000000000001000000000000000000000004\
+                                  459243b9aa581806fe913bce99817ade11ca503c64d9a3c533415c083248fbcc";
+    /// A point on y² = x³ − 3x (b = 0), the classic invalid-curve-attack input.
+    const INVALID_CURVE: &str = "040000000000000000000000000000000000000000000000000000000000000002\
+                                 af8bbdfe8cdd5577acbf345b543d28cf402f4e94d3865b97ea0787f2d3aa5d22";
+
+    fn kat_key() -> HostedKey {
+        HostedKey::ec_p256_from_scalar(&hex::decode(KAT_D).unwrap(), 1).unwrap()
+    }
+
+    fn invalid_point(r: Result<Zeroizing<[u8; 32]>>) -> bool {
+        matches!(r, Err(DaemonError::InvalidPoint(_)))
+    }
+
+    #[test]
+    fn ecdh_matches_an_independent_implementation() {
+        let k = kat_key();
+        let z = k.ecdh_p256(&hex::decode(KAT_V).unwrap()).unwrap();
+        assert_eq!(hex::encode(z.as_ref()), KAT_Z);
+
+        // d·(-G) = -Q: the shared secret is x(Q), which the stored public key carries.
+        let z = k.ecdh_p256(&hex::decode(NEG_G).unwrap()).unwrap();
+        assert_eq!(hex::encode(z.as_ref()), &KAT_Q[2..66]);
+
+        // A valid point with a tiny x-coordinate is still just a point.
+        assert!(k.ecdh_p256(&hex::decode(SMALL_X).unwrap()).is_ok());
+    }
+
+    #[test]
+    fn the_ec_public_key_is_canton_spki_and_derives_from_the_scalar() {
+        let k = kat_key();
+        let spki = k.public_key_der().unwrap();
+        // Byte-identical to the encoding Canton/BouncyCastle use, as rutli-canton-key builds it.
+        let point: [u8; 65] = hex::decode(KAT_Q).unwrap().try_into().unwrap();
+        assert_eq!(spki, rutli_canton_key::PublicKey::EcP256(point).spki_der());
+        assert_eq!(spki.len(), 91, "P-256 SPKI with a named curve and uncompressed point");
+        k.validate().unwrap();
+    }
+
+    #[test]
+    fn a_generated_ec_key_round_trips_through_serialization() {
+        let k = HostedKey::generate(HostedSpec::EcP256, 7).unwrap();
+        k.validate().unwrap();
+        let json = serde_json::to_vec(&k).unwrap();
+        let reloaded: HostedKey = serde_json::from_slice(&json).unwrap();
+        // Same key: the same peer point gives the same Z before and after the reload.
+        let v = hex::decode(KAT_V).unwrap();
+        assert_eq!(k.ecdh_p256(&v).unwrap().as_ref(), reloaded.ecdh_p256(&v).unwrap().as_ref());
+        assert_eq!(reloaded.public_key_der().unwrap(), k.public_key_der().unwrap());
+        // Two generations are two keys.
+        let other = HostedKey::generate(HostedSpec::EcP256, 7).unwrap();
+        assert_ne!(other.ecdh_p256(&v).unwrap().as_ref(), k.ecdh_p256(&v).unwrap().as_ref());
+    }
+
+    #[test]
+    fn ecdh_refuses_every_encoding_but_65_byte_uncompressed() {
+        let k = kat_key();
+        let v = hex::decode(KAT_V).unwrap();
+        // Lengths: empty, SEC1 point at infinity (0x00), compressed, truncated, one byte long, SPKI.
+        let mut compressed = vec![if v[64] & 1 == 1 { 0x03 } else { 0x02 }];
+        compressed.extend_from_slice(&v[1..33]);
+        let mut long = v.clone();
+        long.push(0);
+        let spki = kat_key().public_key_der().unwrap();
+        for bad in [&[][..], &[0x00][..], &compressed, &v[..64], &long, &spki] {
+            assert!(invalid_point(k.ecdh_p256(bad)), "{}-byte input must be refused", bad.len());
+        }
+        // Right length, wrong tag: compressed tags, hybrid tags, infinity tag, garbage.
+        for tag in [0x00u8, 0x02, 0x03, 0x05, 0x06, 0x07, 0xff] {
+            let mut p = v.clone();
+            p[0] = tag;
+            assert!(invalid_point(k.ecdh_p256(&p)), "tag 0x{tag:02x} must be refused");
+        }
+    }
+
+    #[test]
+    fn ecdh_refuses_points_that_are_not_on_p256() {
+        let k = kat_key();
+        let v = hex::decode(KAT_V).unwrap();
+        let mut off = v.clone();
+        off[64] ^= 1; // y + 1 or y - 1: no longer on the curve
+        let mut zero = vec![0u8; 65];
+        zero[0] = 0x04; // (0, 0): the "identity as coordinates" encoding
+        let mut y_zero = v.clone();
+        y_zero[33..].fill(0); // P-256 has no point with y = 0 (prime order, no 2-torsion)
+        for (what, bad) in [
+            ("off-curve", off),
+            ("(0,0)", zero),
+            ("y = 0", y_zero),
+            ("x + p, non-reduced", hex::decode(SMALL_X_PLUS_P).unwrap()),
+            ("invalid curve b = 0", hex::decode(INVALID_CURVE).unwrap()),
+            ("all 0xff", [&[0x04u8][..], &[0xffu8; 64][..]].concat()),
+        ] {
+            assert!(invalid_point(k.ecdh_p256(&bad)), "{what} must be refused");
+        }
+    }
+
+    #[test]
+    fn the_uncompressed_only_gate_is_load_bearing() {
+        // aws-lc on its own accepts compressed and hybrid encodings of a valid point. Rütli refuses
+        // them before aws-lc sees them: Canton never produces them, and accepting more than Canton
+        // produces only widens what an attacker can send.
+        let k = kat_key();
+        let sk = k.ec_private_key().unwrap();
+        let v = hex::decode(KAT_V).unwrap();
+        let odd = v[64] & 1 == 1;
+        let mut compressed = vec![if odd { 0x03 } else { 0x02 }];
+        compressed.extend_from_slice(&v[1..33]);
+        let mut hybrid = v.clone();
+        hybrid[0] = if odd { 0x07 } else { 0x06 };
+        for (what, enc) in [("compressed", compressed), ("hybrid", hybrid)] {
+            let z = agreement::agree(
+                &sk,
+                UnparsedPublicKey::new(&ECDH_P256, &enc),
+                (),
+                |z| Ok(z.to_vec()),
+            );
+            assert_eq!(z.map(hex::encode).as_deref(), Ok(KAT_Z), "aws-lc accepts {what}");
+            assert!(invalid_point(k.ecdh_p256(&enc)), "Rütli must refuse {what}");
+        }
+    }
+
+    #[test]
+    fn ecdh_is_only_served_by_ec_keys_and_ec_keys_serve_nothing_else() {
+        let v = hex::decode(KAT_V).unwrap();
+        let rsa = HostedKey::generate(HostedSpec::Rsa2048, 1).unwrap();
+        let aes = HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
+        assert!(rsa.ecdh_p256(&v).is_err(), "an RSA key is not an ECDH oracle");
+        assert!(aes.ecdh_p256(&v).is_err(), "an AES key is not an ECDH oracle");
+        let ec = kat_key();
+        assert!(ec.decrypt_oaep(&[0u8; 256]).is_err());
+        assert!(ec.encrypt_oaep(b"x").is_err());
+        assert!(ec.encrypt_symmetric(b"x").is_err());
+        assert!(ec.decrypt_symmetric(&[1u8; 40]).is_err());
+    }
+
+    #[test]
+    fn validate_catches_a_public_key_that_is_not_the_private_keys() {
+        let mut k = kat_key();
+        k.public_der = HostedKey::generate(HostedSpec::EcP256, 1).unwrap().public_der;
+        assert!(k.validate().is_err());
+        let mut k = kat_key();
+        k.public_der = String::new();
+        assert!(k.validate().is_err());
+        // Not a valid scalar: zero, and the group order n itself.
+        assert!(HostedKey::ec_p256_from_scalar(&[0u8; 32], 1).is_err());
+        let n = hex::decode("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551").unwrap();
+        assert!(HostedKey::ec_p256_from_scalar(&n, 1).is_err());
+        assert!(HostedKey::ec_p256_from_scalar(&[1u8; 31], 1).is_err(), "wrong length");
     }
 }

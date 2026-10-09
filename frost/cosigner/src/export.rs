@@ -25,6 +25,10 @@
 //!    escrow the passphrase as they see fit. `--unsafe-plaintext` exists for piping into another
 //!    KMS/HSM import tool, and says so loudly.
 //!
+//! **Importing from Canton.** Besides its own envelope, `import-key` reads an existing Canton
+//! node's EC P-256 encryption key ([`import_canton`]), so a node can move into the cluster without
+//! rotating its encryption key. Same rules: offline, create-once, never an RPC.
+//!
 //! **Hosted keys only.** A FROST share is not a whole key — there is nothing to export, and
 //! exporting one node's share would be both useless and dangerous. The commands refuse it, and no
 //! other path exports a share either. The only way a share enters a node from outside is the split
@@ -201,7 +205,109 @@ pub fn import(envelope: &ExportEnvelope, passphrase: Option<&str>) -> Result<Hos
             key.spec.as_str()
         )));
     }
+    key.validate()?;
     Ok(key)
+}
+
+/// A key read from a Canton export, ready to be created under an operator-chosen hosted key id.
+#[derive(Debug)]
+pub struct CantonImport {
+    pub key: HostedKey,
+    /// The Canton fingerprint (`1220…`), re-derived from the stored public key.
+    pub fingerprint: String,
+}
+
+/// Import an **existing Canton encryption key** as a hosted key: `ExportKeyPair` output, plain or
+/// password-protected, or a `common_crypto_private_keys.data` value — parsed by
+/// `rutli-canton-key` (milestone B1).
+///
+/// This is how a node migrates into the cluster without touching its encryption key: the
+/// participant re-registers the very same key by KMS id (`RegisterKmsEncryptionKey`), so its
+/// fingerprint — and the topology mapping that publishes it — stay what they were. That only works
+/// if the public key the cluster serves is **byte-identical** to the one Canton recorded, so this
+/// checks exactly that, and refuses on any disagreement:
+///
+/// - only an EC P-256 key whose Canton purpose is *encryption* is accepted (`ec-p256-ecies`). A
+///   P-256 *signing* key is refused (the cluster never turns a signing key into an ECDH oracle), as
+///   is plain PKCS#8, which carries no purpose. Ed25519 keys go through the split ceremony, and
+///   RSA-2048 import is milestone B3 — both refused here with a pointer;
+/// - the key's Canton fingerprint must equal `expect_fingerprint`, which the operator copies from
+///   the old node (`keys.secret.list`), not from the file;
+/// - the SPKI DER this cluster will serve must equal the SPKI Canton derives for the key
+///   (`rutli_canton_key::PublicKey::spki_der`), byte for byte, and fingerprint to the same value.
+pub fn import_canton(
+    input: &[u8],
+    password: Option<&[u8]>,
+    expect_fingerprint: &str,
+    now_secs: u64,
+) -> Result<CantonImport> {
+    use rutli_canton_key::{KeyPurpose, KeySpec, PrivateKeyMaterial, Source};
+
+    let refuse = |msg: String| DaemonError::Config(format!("Canton key import: {msg}"));
+    let expect = expect_fingerprint.trim().to_ascii_lowercase();
+    let parsed = rutli_canton_key::parse(input, password)
+        .map_err(|e| refuse(format!("cannot read the key: {e}")))?;
+
+    if let Source::Pkcs8 { .. } = parsed.source {
+        return Err(refuse(
+            "plain PKCS#8 carries no Canton purpose or fingerprint; import the node's \
+             ExportKeyPair output (keys.secret.download) instead"
+                .into(),
+        ));
+    }
+    let fingerprint = parsed.fingerprint();
+    if fingerprint != expect || parsed.canton_id.as_ref().is_some_and(|id| *id != expect) {
+        return Err(refuse(format!(
+            "this key's fingerprint is {fingerprint}, not the expected {expect} — wrong key file"
+        )));
+    }
+    let key = match (parsed.spec(), parsed.purpose, &parsed.material) {
+        (KeySpec::EcP256, Some(KeyPurpose::Encryption), PrivateKeyMaterial::EcP256 { scalar }) => {
+            HostedKey::ec_p256_from_scalar(scalar.as_ref(), now_secs)?
+        }
+        (KeySpec::EcP256, _, _) => {
+            return Err(refuse(
+                "this is an EC P-256 signing key; only encryption keys are hosted (ec-p256-ecies), \
+                 and a signing key is never used for ECDH"
+                    .into(),
+            ))
+        }
+        (KeySpec::Ed25519, _, _) => {
+            return Err(refuse(
+                "this is an Ed25519 signing key; namespace and signing keys move into the cluster \
+                 through the split ceremony (docs/split-ceremony.md), not import-key"
+                    .into(),
+            ))
+        }
+        (KeySpec::Rsa2048, _, _) => {
+            return Err(refuse(
+                "RSA-2048 import is not supported yet (roadmap milestone B3); only EC P-256 \
+                 encryption keys are"
+                    .into(),
+            ))
+        }
+    };
+    key.validate()?;
+
+    // The load-bearing check: Canton re-registers the key by the fingerprint of the SPKI the
+    // driver returns, so the cluster must serve exactly the bytes Canton derives.
+    let served = key.public_key_der()?;
+    if served != parsed.public.spki_der() {
+        return Err(refuse(
+            "the public key this cluster would serve is not byte-identical to Canton's encoding — \
+             refusing, Canton would see a different key"
+                .into(),
+        ));
+    }
+    let served_fp = rutli_canton_key::PublicKey::from_spki_der(&served)
+        .map_err(|e| refuse(format!("cannot re-read the served public key: {e}")))?
+        .fingerprint();
+    if served_fp != expect {
+        return Err(refuse(format!(
+            "the served public key fingerprints to {served_fp}, not {expect}"
+        )));
+    }
+    Ok(CantonImport { key, fingerprint })
 }
 
 fn aad(key_id: &str, spec: &str) -> Vec<u8> {

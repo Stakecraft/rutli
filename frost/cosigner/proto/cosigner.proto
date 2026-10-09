@@ -30,7 +30,7 @@ service Signer {
   // refused. Callable by the operator role (operator_allowlist) as well as the driver role.
   rpc CeremonySignTest(CeremonySignTestRequest) returns (CeremonySignTestReply);
 
-  // --- cluster-hosted (non-FROST) keys: RSA-2048 encryption, AES-256-GCM symmetric ---
+  // --- cluster-hosted (non-FROST) keys: RSA-2048 and EC P-256 (ECIES) encryption, AES-256-GCM ---
   // These are replicated whole keys, not threshold shares (docs/hosted-keys-design.md). They let a
   // participant run with no HSM and no local key state.
 
@@ -46,6 +46,12 @@ service Signer {
   // RSAES-OAEP-SHA256. The full unpad happens server-side — returning raw c^d mod N would be a
   // padding oracle.
   rpc Decrypt(DecryptRequest) returns (DecryptReply);
+  // ECIES (EcP256 / EciesHkdfHmacSha256Aes128Cbc): the static ECDH only, Z = x(d·V) for the
+  // sender's ephemeral point V. The driver completes KDF2 + AES-128-CBC + HMAC-SHA256 with
+  // BouncyCastle's own IESEngine, so the cluster never reimplements Canton's framing — and a v2
+  // threshold P-256 key answers this same RPC from partial points. Charged against the key's
+  // decryption rate limit like Decrypt; refused for every spec but "ec-p256-ecies".
+  rpc EcdhDerive(EcdhDeriveRequest) returns (EcdhDeriveReply);
   rpc SymmetricEncrypt(SymmetricRequest) returns (SymmetricReply);
   rpc SymmetricDecrypt(SymmetricRequest) returns (SymmetricReply);
 }
@@ -204,14 +210,15 @@ message DkgPart3Reply { bytes group_verifying_key = 1; }
 
 message CapabilitiesRequest {}
 message CapabilitiesReply {
-  // Spec identifiers this cluster can generate/serve, e.g. "rsa-2048-oaep-sha256", "aes-256-gcm".
+  // Spec identifiers this cluster can generate/serve: "rsa-2048-oaep-sha256", "aes-256-gcm",
+  // "ec-p256-ecies".
   repeated string hosted_key_specs = 1;
   bool hosted_keys_enabled = 2;
 }
 
 message GenerateKeyRequest {
   string key_id = 1;  // caller-supplied; regenerating the same id is a no-op, not an error
-  string spec = 2;    // e.g. "rsa-2048-oaep-sha256"
+  string spec = 2;    // "rsa-2048-oaep-sha256", "aes-256-gcm" or "ec-p256-ecies"
 }
 message GenerateKeyReply {
   string key_id = 1;
@@ -243,6 +250,19 @@ message DecryptRequest {
   bytes ciphertext = 2;
 }
 message DecryptReply { bytes plaintext = 1; }
+
+message EcdhDeriveRequest {
+  string key_id = 1;
+  // The sender's ephemeral public key: exactly 65 bytes, uncompressed SEC1 (0x04 ‖ X ‖ Y), on
+  // P-256. Compressed, hybrid and SPKI encodings are refused (INVALID_ARGUMENT), as is a point that
+  // is not on the curve.
+  bytes peer_point = 2;
+}
+message EcdhDeriveReply {
+  // Z: the 32-byte big-endian x-coordinate of d·V (BouncyCastle ECDHBasicAgreement, padded to the
+  // field size).
+  bytes shared_secret = 1;
+}
 
 message SymmetricRequest {
   string key_id = 1;

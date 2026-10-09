@@ -22,6 +22,12 @@ pub enum DaemonError {
     #[error("{0}")]
     RateLimited(String),
 
+    /// An `EcdhDerive` peer point that is not a 65-byte uncompressed SEC1 point on P-256. Saying
+    /// why is safe here, unlike [`DaemonError::DecryptFailed`]: whether a point is well-formed and
+    /// on the curve is public information, computed without the key.
+    #[error("invalid peer point: {0}")]
+    InvalidPoint(String),
+
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 
@@ -123,7 +129,7 @@ impl From<DaemonError> for tonic::Status {
             DaemonError::CeremonyInProgress { .. } => tonic::Status::aborted(e.to_string()),
             DaemonError::CeremonySuperseded { .. } => tonic::Status::aborted(e.to_string()),
             DaemonError::SignInProgress { .. } => tonic::Status::aborted(e.to_string()),
-            DaemonError::InvalidMessageLength { .. } => {
+            DaemonError::InvalidMessageLength { .. } | DaemonError::InvalidPoint(_) => {
                 tonic::Status::invalid_argument(e.to_string())
             }
             _ => tonic::Status::internal(e.to_string()),

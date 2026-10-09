@@ -178,6 +178,35 @@ async fn a_node_pulls_a_missing_hosted_key_over_grpc_fetchkey() {
 }
 
 #[tokio::test]
+async fn an_ec_p256_key_replicates_and_repairs_over_grpc() {
+    let m = mesh().await;
+    let peer = hex::decode(
+        "041f5efe3b2928f7db57c6befca0428a5833ea10b2e70fada8ccf40478c29bbcdb\
+         3a143c9e3f9982325a7750a8b095d0b3feaf12fd01ef6172739b82e9ec62c421",
+    )
+    .unwrap();
+
+    // Push path over the wire (ReplicateKey carries the spec string and the SPKI).
+    let (key, _, replicas) =
+        generate_hosted_key(&m.nodes[0], &m.peers[0], "rutli-enc-ec", HostedSpec::EcP256, DEFAULT_WRITE_QUORUM)
+            .await
+            .unwrap();
+    assert_eq!(replicas, N as usize);
+    let z = key.ecdh_p256(&peer).unwrap();
+    for n in &m.nodes {
+        assert_eq!(n.hosted_ecdh("rutli-enc-ec", &peer).unwrap().as_ref(), z.as_ref());
+    }
+
+    // Pull path (FetchKey) for a key only node 1 holds.
+    let (only, _) = m.nodes[0].hosted_generate("rutli-enc-ec-2", HostedSpec::EcP256).unwrap();
+    assert!(repair_hosted_key(&m.nodes[2], &m.peers[2], "rutli-enc-ec-2").await.unwrap());
+    assert_eq!(
+        m.nodes[2].hosted_ecdh("rutli-enc-ec-2", &peer).unwrap().as_ref(),
+        only.ecdh_p256(&peer).unwrap().as_ref()
+    );
+}
+
+#[tokio::test]
 async fn a_hosted_key_replicates_over_grpc_and_the_sweep_pulls_and_converges() {
     let m = mesh().await;
 
