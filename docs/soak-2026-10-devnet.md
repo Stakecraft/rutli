@@ -77,6 +77,17 @@ a second of start. Old jars kept on the volume as `rutli-driver-0.2.1.jar` /
 `RutliKeystoreUnreadable`, readiness panel on the dashboard). This is the first planned restart
 of the soak; the week-3 "participant restart" drill will repeat it under observation.
 
+**Planned event — cosigners to 0.3.2, 2026-10-09 09:01:52 → 09:04:51 UTC (no participant restart).**
+Release [v0.3.2](https://github.com/Stakecraft/rutli/releases/tag/v0.3.2) fixes hosted-key pull
+replication and read-repair over gRPC (every cosigner had computed its identifier as 0) and moves the
+sign latency to a histogram. Cosigners only: `helm upgrade` to chart 0.3.2 (revision 4) with the
+saved values; a server-side dry-run diff showed only the image and the chart labels changing. Rolling,
+one pod at a time; `health` answered `ready` on all three afterwards, and each node logged its own
+identifier (1, 2, 3) at start. The driver stayed on 0.3.1 (the only driver change in 0.3.2 is the
+optional `frost.key-prefix`). During the roll, one sign hit the restarting cosigner-0 and failed over
+to cosigner-1 (`reason=UNAVAILABLE`, `outcome=ok`); 8/8 signs ok in the window, no participant errors.
+Rollback path kept: `helm -n rutli rollback rutli 3`.
+
 ## Drill calendar
 
 | Week | Drill | Status |
