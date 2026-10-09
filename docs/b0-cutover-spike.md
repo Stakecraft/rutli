@@ -114,17 +114,55 @@ Work directory outside the repo: `mkdir -p ~/b0-drill/b0 && chmod 700 ~/b0-drill
 
 `helm get values canton-validator` holds secrets in plain values. Never paste it anywhere.
 
-### 1.2 Splice 0.9.0 checks (operator, local; our source checkout is 0.5.5)
+### 1.2 Splice 0.9.0 checks: done 2026-10-09 against the deployed artifacts
 
-- `helm show values $CHART_VALIDATOR --version 0.9.0 | grep -n -A4 -E 'participantIdentitiesDumpImport|migrateValidatorParty|nodeIdentifier'`.
-  The keys must exist, as in 0.5.5 `splice-validator/values.schema.json:263,465`.
-- `docker run --rm --entrypoint sh $IMAGE_PARTICIPANT -c 'grep -n -A3 "init = {" /app/app.conf; ls /app/bin'`.
-  Expect `generate-topology-transactions-and-keys = false` and `identity.type = manual`. The Canton default
-  `true` would mint keys right after `init_id` (`InitConfig.scala:99-106`, `CantonNodeBootstrap.scala:1248-1260`).
-  `/app/bin/canton` must exist (console). **STOP if not.**
-- Read the 0.9.0 docs page *Validator Disaster Recovery → Re-onboard a validator* and the 0.9.0 release
-  notes. Look for any change to `newParticipantIdentifier` / `migrateValidatorParty` and for whether the
-  migrator now uses the onboarding flag. Record the deltas.
+Verified from chart `splice-validator` 0.9.0 (OCI digest `sha256:a3becb24…`), image
+`canton-participant:0.9.0@sha256:67bd5b1e…` and `validator-app:0.9.0@sha256:bbde8294…` (classes in
+`/app/splice-node/lib/splice-node.jar`). Re-run only if the chart or image changes.
+
+- Chart: `participantIdentitiesDumpImport.{secretName,newParticipantIdentifier}`, `migrateValidatorParty`
+  and `nodeIdentifier` exist (`values.schema.json:398,571,633-636`). The dump Secret is mounted at
+  `/participant-bootstrapping-dump/content`, so its key must be `content` (as in §3 step 1). With no
+  `scanClient` in our values, `migrate-validator-party.scan.admin-api.url` falls back to `scanAddress`
+  (`https://scan.sv-1.dev.global.canton.network.sync.global`): no overlay change needed.
+- Participant image: `init = { generate-topology-transactions-and-keys = false, identity.type = manual }`
+  (`/app/app.conf:23-26`), `/app/bin/canton` present, Canton 3.6.1. The image is **linux/amd64 only**:
+  on an arm64 laptop add `--platform linux/amd64` to every `docker run` below (emulated, slower).
+- Validator app: `ParticipantPartyMigrator` keeps the log lines this runbook keys on: `Preparing to remove
+  domain trust certificate because we will be migrating …` (PNR), `Removing domain trust certificate.`,
+  `Importing ACS for party ids …`, `ACS import complete`, `Party migration already complete, continuing`.
+  New since 0.5.5: migration state lives in the validator DB (`DbStorePartiesToMigrate`,
+  `ValidatorConfigProvider.PartiesBeingMigrated`), one more reason for the fresh `cantonnet_validator_b0`.
+  No onboarding-flag use in the migrator, same as 0.5.5.
+- **New check for §1.4:** `NodeInitializer` logs *"Removing keys from OwnerToKeyMapping as they are not
+  flagged for proof-of-ownership usage"*. The signing key's recorded usage (`SIG_USAGE`) must include
+  `ProofOfOwnership`, and §3 step 6 must register it with exactly that usage. **STOP if it does not**:
+  the new member's OwnerToKeyMapping would lose its signing key.
+
+### 1.2a Tokens (operator)
+
+Both tokens come from the validator's Auth0 M2M client in Secret `splice-app-validator-ledger-api-auth`
+(keys `url` = OIDC discovery URL, `client-id`, `client-secret`, `audience`, `ledger-api-user`). Nothing
+here prints a secret; keep the shell private and `unset` the variables afterwards.
+
+```sh
+cat > ~/b0-drill/auth.sh <<'SH'
+_sec() { kubectl -n stakecraft-devnet-rutli-01 get secret splice-app-validator-ledger-api-auth -o jsonpath="{.data.$1}" | base64 -d; }
+_token() {  # $1 = audience
+  local ep; ep=$(curl -sf "$(_sec url)" | jq -r .token_endpoint) || return 1
+  jq -n --arg id "$(_sec client-id)" --arg sec "$(_sec client-secret)" --arg aud "$1" \
+    '{grant_type:"client_credentials", client_id:$id, client_secret:$sec, audience:$aud}' |
+  curl -sf "$ep" -H 'content-type: application/json' --data @- | jq -er .access_token
+}
+export LEDGER_API_TOKEN=$(_token "$(_sec audience)")
+export VALIDATOR_TOKEN=$(_token "$(helm -n stakecraft-devnet-rutli-01 get values validator -o json | jq -r .auth.audience)")
+SH
+chmod 600 ~/b0-drill/auth.sh && source ~/b0-drill/auth.sh
+echo "ledger ${#LEDGER_API_TOKEN} chars, validator ${#VALIDATOR_TOKEN} chars"   # both > 0
+```
+
+If `VALIDATOR_TOKEN` comes back empty, Auth0 has not granted this client the wallet API audience; use
+the wallet UI login instead (§1.6) and fetch the dump with the browser session's token.
 
 ### 1.3 Canton console (operator machine)
 
@@ -143,7 +181,7 @@ canton {
   }
 }
 ```
-`docker run --rm -it -v ~/b0-drill/b0:/b0 -e LEDGER_API_TOKEN --entrypoint /app/bin/canton $IMAGE_PARTICIPANT -c /b0/remote.conf`
+`docker run --rm -it --platform linux/amd64 -v ~/b0-drill/b0:/b0 -e LEDGER_API_TOKEN --entrypoint /app/bin/canton $IMAGE_PARTICIPANT -c /b0/remote.conf`
 
 Config keys: `CantonConfig.scala:404-406`, `ParticipantNodeConfig.scala:150-156`. **Keep one console session open
 from 1.4 through §3 step 8**, because step 8 reuses the in-memory `syncCfg`.
@@ -205,7 +243,14 @@ Expect: `id` = `PAR::` + `OLD_UID`, and 3 entries `{type: signing|encryption, ke
 
 ### 1.6 Baselines
 
-- **Wallet UI** (validator wallet user): `WALLET_BALANCE`, plus the latest transaction.
+- **Wallet** (validator wallet user): `WALLET_BALANCE` plus the latest transaction. Either the wallet UI, or
+  the validator's wallet API with the `VALIDATOR_TOKEN` from §1.2a through the port-forward of §1.5:
+  ```sh
+  curl -sf http://localhost:5003/api/validator/v0/wallet/balance -H "authorization: Bearer $VALIDATOR_TOKEN" | jq
+  curl -sf -X POST http://localhost:5003/api/validator/v0/wallet/transactions -H "authorization: Bearer $VALIDATOR_TOKEN" \
+    -H 'content-type: application/json' -d '{"page_size":1}' | jq '.items[0] | {transaction_type, date, amulet_price}'
+  ```
+  Record `effective_unlocked_qty` (+ `effective_locked_qty`) as `WALLET_BALANCE`.
 - **Grafana Explore**:
   - `sum(rutli_ceremony_requests_total) by (kind,result)` (expect dkg ok = 2)
   - `sum(rutli_hosted_key_ops_total{op="generate"})` (1)
