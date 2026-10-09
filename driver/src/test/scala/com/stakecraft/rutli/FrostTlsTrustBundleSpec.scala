@@ -64,14 +64,19 @@ class FrostTlsTrustBundleSpec extends AnyWordSpec with Matchers with BeforeAndAf
   private val notAfter = new Date(System.currentTimeMillis() + 24 * 3600 * 1000L)
   private val extUtils = new JcaX509ExtensionUtils()
 
-  private def newCa(cn: String): Ca = {
+  private def newCa(
+      cn: String,
+      from: Date = notBefore,
+      to: Date = notAfter,
+      usage: Int = KeyUsage.keyCertSign | KeyUsage.cRLSign,
+  ): Ca = {
     val name = new X500Name(s"CN=$cn")
     val keys = ecKeys()
     val b = new JcaX509v3CertificateBuilder(
-      name, new BigInteger(64, new java.security.SecureRandom()), notBefore, notAfter, name, keys.getPublic
+      name, new BigInteger(64, new java.security.SecureRandom()), from, to, name, keys.getPublic
     )
     b.addExtension(Extension.basicConstraints, true, new BasicConstraints(true))
-    b.addExtension(Extension.keyUsage, true, new KeyUsage(KeyUsage.keyCertSign | KeyUsage.cRLSign))
+    b.addExtension(Extension.keyUsage, true, new KeyUsage(usage))
     b.addExtension(Extension.subjectKeyIdentifier, false, extUtils.createSubjectKeyIdentifier(keys.getPublic))
     val signer = new JcaContentSignerBuilder("SHA256withECDSA").build(keys.getPrivate)
     Ca(name, keys, b.build(signer))
@@ -149,13 +154,39 @@ class FrostTlsTrustBundleSpec extends AnyWordSpec with Matchers with BeforeAndAf
     server.getPort
   }
 
+  /** A cosigner leaf (CA=false) issued by `ca`, wrapped as a [[Ca]] so its key can issue in turn —
+    * what whoever holds a leaf's key can do once that leaf sits in a trust file. */
+  private def leafAsIssuer(ca: Ca, cn: String): Ca = {
+    val name = new X500Name(s"CN=$cn")
+    val keys = ecKeys()
+    val b = new JcaX509v3CertificateBuilder(
+      ca.name, new BigInteger(64, new java.security.SecureRandom()), notBefore, notAfter, name, keys.getPublic
+    )
+    b.addExtension(Extension.basicConstraints, true, new BasicConstraints(false))
+    b.addExtension(Extension.keyUsage, true, new KeyUsage(KeyUsage.digitalSignature))
+    b.addExtension(
+      Extension.subjectAlternativeName, false, new GeneralNames(new GeneralName(GeneralName.dNSName, Domain))
+    )
+    Ca(name, keys, b.build(new JcaContentSignerBuilder("SHA256withECDSA").build(ca.keys.getPrivate)))
+  }
+
   /** Drive one `Sign` through a production-built [[FrostBackend]] whose TLS config is the given files. */
-  private def signVia(tag: String, port: Int, clientTrust: Seq[Ca], clientLeaf: Leaf): Array[Byte] = {
+  private def signVia(tag: String, port: Int, clientTrust: Seq[Ca], clientLeaf: Leaf): Array[Byte] =
+    signViaTrust(tag, port, clientTrust.map(_.pem).mkString, clientLeaf)
+
+  private def signViaTrust(
+      tag: String,
+      port: Int,
+      trustPem: String,
+      clientLeaf: Leaf,
+      allowExpiredCa: Boolean = false,
+  ): Array[Byte] = {
     val tls = FrostTlsConfig(
-      caCert = write(s"$tag-client-ca.crt", clientTrust.map(_.pem).mkString),
+      caCert = write(s"$tag-client-ca.crt", trustPem),
       cert = write(s"$tag-client.crt", clientLeaf.certPem),
       key = write(s"$tag-client.key", clientLeaf.keyPem),
       domain = Some(Domain),
+      allowExpiredCa = allowExpiredCa,
     )
     val backend = new FrostBackend(Seq(s"localhost:$port"), new NoDelegateBackend, logger, Some(tls), 10.seconds)
     try Await.result(backend.sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519), 20.seconds)
@@ -181,6 +212,63 @@ class FrostTlsTrustBundleSpec extends AnyWordSpec with Matchers with BeforeAndAf
       val client = issue(oldCa, "driver", None, serverAuth = false)
       val err = intercept[StatusRuntimeException](signVia("c", port, Seq(oldCa), client))
       err.getStatus.getCode shouldBe Status.Code.UNAVAILABLE
+    }
+  }
+
+  "FrostBackend's trust file (review M1)" should {
+
+    "be refused at driver init when it holds a cosigner leaf, whose key could otherwise pose as any cosigner" in {
+      // `cat ca.crt cosigner1.crt > ca.crt`: the cosigner1 key holder mints a "cosigner2" server
+      // certificate issued by that leaf. rustls (the cosigners) trusted such an anchor; the JDK's
+      // PKIX validator happens to refuse a non-CA anchor at the handshake (allowNonCaAnchor is off
+      // by default), as an opaque UNAVAILABLE. The driver now refuses the file at init, by name.
+      val leaf = leafAsIssuer(oldCa, "cosigner1")
+      val port = startServer("m1", issue(leaf, "cosigner2", Some(Domain), serverAuth = true), Seq(oldCa))
+      val client = issue(oldCa, "driver", None, serverAuth = false)
+      val err = intercept[IllegalArgumentException](signViaTrust("m1", port, oldCa.pem + leaf.pem, client))
+      err.getMessage should (include("certificate 1") and include("not a CA") and include("m1-client-ca.crt"))
+      // With the trust file as it should be, the forged server is refused at the handshake.
+      intercept[StatusRuntimeException](signVia("m1ok", port, Seq(oldCa), client)).getStatus.getCode shouldBe
+        Status.Code.UNAVAILABLE
+    }
+
+    "be refused when a CA in it is expired or not yet valid, unless allow-expired-ca is set" in {
+      val day = 24 * 3600 * 1000L
+      val expired = newCa("expired-ca", new Date(System.currentTimeMillis() - 400 * day), new Date(System.currentTimeMillis() - day))
+      val future = newCa("future-ca", new Date(System.currentTimeMillis() + 300 * day), new Date(System.currentTimeMillis() + 400 * day))
+      val port = startServer("m1e", issue(newerCa, "cosigner1", Some(Domain), serverAuth = true), Seq(newerCa))
+      val client = issue(newerCa, "driver", None, serverAuth = false)
+      for ((tag, bad) <- Seq("m1x" -> expired, "m1f" -> future)) {
+        val err = intercept[IllegalArgumentException](signViaTrust(tag, port, bad.pem + newerCa.pem, client))
+        err.getMessage should (include("certificate 0") and include("expired or not yet valid") and include("allow-expired-ca"))
+      }
+      // The emergency override: the expired CA is accepted, the channel works.
+      signViaTrust("m1xo", port, expired.pem + newerCa.pem, client, allowExpiredCa = true) shouldBe Signature
+      // ...but never a non-CA.
+      val leaf = leafAsIssuer(newerCa, "cosigner3")
+      intercept[IllegalArgumentException](
+        signViaTrust("m1lo", port, newerCa.pem + leaf.pem, client, allowExpiredCa = true)
+      ).getMessage should include("not a CA")
+    }
+
+    "be refused when it holds a private key (never echoed), no certificate, or a malformed block" in {
+      val port = startServer("m1k", issue(newerCa, "cosigner1", Some(Domain), serverAuth = true), Seq(newerCa))
+      val client = issue(newerCa, "driver", None, serverAuth = false)
+      val keyBody = client.keyPem.linesIterator.drop(1).next()
+      val err = intercept[IllegalArgumentException](signViaTrust("m1k", port, newerCa.pem + client.keyPem, client))
+      err.getMessage should (include("PEM block 1") and include("PRIVATE KEY") and not include keyBody)
+      for (
+        (tag, junk, needle) <- Seq(
+          ("m1z", "", "no CERTIFICATE"),
+          ("m1t", "not a pem\n", "no CERTIFICATE"),
+          ("m1g", "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n", "malformed"),
+          ("m1u", "-----BEGIN CERTIFICATE-----\nAAAA\n", "unterminated"),
+        )
+      ) intercept[IllegalArgumentException](signViaTrust(tag, port, junk, client)).getMessage should include(needle)
+      // A CA whose keyUsage does not allow certificate signing.
+      val noSign = newCa("no-keycertsign-ca", usage = KeyUsage.digitalSignature)
+      intercept[IllegalArgumentException](signViaTrust("m1n", port, newerCa.pem + noSign.pem, client)).getMessage should
+        include("keyCertSign")
     }
   }
 }
