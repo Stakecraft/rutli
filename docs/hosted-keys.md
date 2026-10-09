@@ -143,8 +143,26 @@ Keep `delegate = "hsm"` (or `"software"`) if you still need key types the cluste
 **Which encryption key type Canton mints is Canton's choice**, not the driver's: a KMS participant
 defaults to RSA-2048 (`CryptoProvider.Kms`). To use an ECIES key — the type every JCE participant
 already uses, and the one that can become a threshold key later (section 6) — set it in the
-participant's crypto block. The driver advertises `EcP256` / `EciesHkdfHmacSha256Aes128Cbc` only
-when the cluster reports `ec-p256-ecies` in `Capabilities`, so upgrade every cosigner first.
+participant's crypto block.
+
+**Rollout order for ECIES — cosigners first, all of them.** A cosigner older than `ec-p256-ecies`
+cannot store or serve such a key, and would answer for it as if it did not exist (read-repair
+skips what it cannot parse, `KeyInfo` says `exists: false`) — the shape that ends in a Canton
+`KmsDecryptError`. Two guards keep a mixed-version cluster from ever holding one:
+
+1. **Upgrade every cosigner.** A leader refuses `GenerateKey` for `ec-p256-ecies` with
+   `FAILED_PRECONDITION` ("refusing to create an ec-p256-ecies key: cosigner N does not support it")
+   unless every peer reports the spec in `NodeInfo` — and a peer that is down cannot be shown to
+   be upgraded, so all of them must also be **up** to create an EC key. RSA/AES writes are
+   unchanged and still commit at the write quorum with a node down.
+2. **Then restart the participant with the two lines below.** The driver asks every configured
+   cosigner for `Capabilities` at startup (retrying for up to 30 s) and advertises `EcP256` /
+   `EciesHkdfHmacSha256Aes128Cbc` only if **every one** reports `ec-p256-ecies`. If one is still old,
+   or does not answer within 30 s, ECIES is not advertised and a participant configured for it
+   fails to start, loudly — rather than starting against a cluster where one node would drop its
+   decryptions. The trade-off to know: a participant configured for ECIES cannot (re)start while a
+   cosigner is unreachable. Decryption itself is unaffected by a node being down; only the startup
+   check is.
 
 ```hocon
 crypto {
@@ -387,8 +405,11 @@ val key = participant.keys.secret.register_kms_encryption_key("<prefix>rutli-enc
 // key.fingerprint is the old node's encryption key fingerprint
 ```
 
-The key id must carry the driver's `rutli-` routing tag behind any `frost.key-prefix`. Start the
-cosigner afterwards; anti-entropy and read-repair spread the key. The exposure caveat of every
+The key id must be one the driver routes to hosted keys: `<frost.key-prefix>rutli-<name>` in
+`[A-Za-z0-9_-]`, never containing `frost-`. Pass the participant's prefix as `--key-prefix` to have
+it enforced (otherwise the inferred prefix is printed for you to check). Import into a cluster whose
+cosigners are all upgraded (rollout order above): anti-entropy cannot push an EC key to an older
+node, and the driver will not advertise ECIES while one remains. Start the cosigner afterwards; anti-entropy and read-repair spread the key. The exposure caveat of every
 migrated key applies: the old node's database and its backups hold this key in the clear — purge
 them (`b0-cutover-spike.md`, `roadmap-migration.md`).
 
@@ -471,6 +492,10 @@ Properties to understand before you rely on hosted keys in production.
   (prime order, cofactor 1) it leaks nothing about `d` beyond what the answers are, and the known
   static-DH speed-ups need far more queries than the rate limit allows. It is the same capability
   `Decrypt` gives for RSA, bounded the same way.
+- **The shared secret `Z` is wiped where Rust controls it, not everywhere.** The cosigner keeps `Z`
+  (and every decoded private key) in zeroizing buffers until the gRPC reply is built; the reply's
+  own buffer and the driver's copy on the JVM (a protobuf `ByteString`, moved by the GC) cannot be
+  wiped. Same as the plaintext `Decrypt` returns.
 - **Canton's ECIES does not authenticate its IV.** The HMAC covers the CBC ciphertext, not the IV
   Canton prepends, so a changed IV changes the first plaintext block without failing the MAC.
   Canton's own decryptor behaves the same way and the driver matches it exactly; in practice the

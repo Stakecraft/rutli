@@ -123,6 +123,16 @@ sum(rate(rutli_sign_duration_seconds_sum{result="ok"}[1h]))
    an error on a node that simply lacks the key is a lag/repair problem, an error on a node that
    holds it is a sealing or backend problem. `generate` and `delete` errors are less urgent but
    block key rotation, which is the whole recoverability story for hosted keys.
+   **Blind spot for ECIES:** the cosigner only does the ECDH, so `op="ecdh_derive",result="ok"`
+   counts every request that produced a shared secret — including forged or corrupted
+   ciphertexts, whose MAC check then fails in the driver. The driver has no metrics endpoint;
+   those failures show up in its log instead: a WARN `ECIES decryption failed after a successful
+   EcdhDerive for <key>` and, with `audit-logging = true` (or `audit-log-path`), the operation's
+   audit entry `AUDIT decryptAsymmetric … algo=EciesHkdfHmacSha256Aes128Cbc ecies-failure=after-ecdh
+   … outcome=failed` (`ecies-failure=shape` when the blob was refused before any cluster call).
+   Alert on the log, e.g. in Loki:
+   `sum(count_over_time({app="canton-participant"} |= "AUDIT decryptAsymmetric" |= "outcome=failed" [10m])) > 0`.
+   A trickle is someone sending malformed ciphertexts; anything sustained is a page, as for (5).
 6. **`rutli_key_replicas` below the cluster size** (or `rutli_hosted_keys` differing across
    instances, the same signal seen sideways) — a key exists on fewer nodes than the cluster is
    configured for. Writes commit at `write_quorum` (default 2 of 3) and roll back below it, so a

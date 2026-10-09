@@ -30,8 +30,21 @@ All notable changes to Rütli are documented here. Format loosely follows
     `crypto.encryption.algorithms.default = ecies-hkdf-hmac-sha-256-aes-128-cbc`; upgrade every
     cosigner first.
   - Verified by the upstream `KmsDriverTest` over the frost backend (`CONFORMANCE=1`), a
-    BouncyCastle differential, invalid-point tests and `scripts/e2e-ecies-hosted.sh` on a real
+    BouncyCastle differential plus a randomised one (200 keys × 10 single-bit mutations per run;
+    3000 × 4 in the review), invalid-point tests and `scripts/e2e-ecies-hosted.sh` on a real
     Canton 3.6.1 participant with a generated and a Canton-imported key.
+  - **Rollout order: upgrade every cosigner, then switch the participant to ECIES.** A cosigner
+    older than this release cannot serve an EC key. `NodeInfo` now reports each node's hosted-key
+    specs, and a leader refuses to create an `ec-p256-ecies` key (`FAILED_PRECONDITION`) unless
+    every peer reports it and is up. The driver asks every configured cosigner for `Capabilities`
+    (retrying for up to 30 s at startup, re-asking after 60 s if it could not confirm) and
+    advertises ECIES only if every one reports it — so a participant configured for ECIES does not
+    start while a cosigner is old or unreachable. RSA/AES behaviour is unchanged.
+  - `import-key --key-prefix P` enforces that `--key-id` is `P + "rutli-" + name`; ids containing
+    `frost-` or outside `[A-Za-z0-9_-]` are refused.
+  - An ECIES failure the cluster cannot see (MAC or padding, in the driver) is noted in the
+    operation's audit entry (`ecies-failure=after-ecdh` / `=shape`) and logged at WARN; see
+    `docs/observability.md` for the log-based alert.
 
 ### Changed
 - The driver builds against BouncyCastle 1.85, the version Canton 3.6.1 ships (and, since Canton's
