@@ -105,7 +105,8 @@ existing nodes ([b0-cutover-spike.md](b0-cutover-spike.md), [roadmap-migration.m
   13:07:33 validator initialised, `ValidatorLicense found => already onboarded` (no onboarding secret used).
 - G6: balance unchanged (120.3228663581 CC); the validator's top-up automation immediately ran a Tap
   (+581.36 CC) and an Extra Traffic Purchase (−581.36 CC) through the new participant, so signing and
-  confirmation work end to end. No restarts, no ERROR in either app.
+  confirmation work end to end. A manual wallet Tap at 13:14:48 UTC (+8.0744789943 CC, 1 USD) also
+  succeeded, so user-initiated submissions work too. No restarts, no ERROR in either app.
 - Cost: the old member's 1.2 M purchased traffic is stranded; old member `PAR::stakecraft-rutli-soak-1` is
   offboarded for good. Old DB `participant` and `cantonnet_validator` kept for forensics.
 - Gaps: participant stdout runs at DEBUG and rotated within minutes, so the per-sign driver audit for the
