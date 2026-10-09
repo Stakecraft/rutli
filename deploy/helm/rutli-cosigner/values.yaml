@@ -37,6 +37,11 @@ tls:
   layout: perNode
   perNodeSecretPrefix: rutli-cosigner-tls-
   caSecretName: rutli-cosigner-ca
+  # ca.crt must hold only CA certificates that are valid now — a cosigner refuses to start on a
+  # leaf, a private key or an expired/not-yet-valid CA in it (each is a full mTLS trust anchor).
+  # true accepts an expired or not-yet-valid CA (never a non-CA): emergency use only, to rotate
+  # away from a CA that has already expired (docs/ca-rotation.md). Set it back to false after.
+  allowExpiredCa: false
 
 # tls.layout=shared only: the legacy Secret with ca.crt + cosigner1..N .crt/.key.
 tlsSecretName: rutli-cosigner-tls

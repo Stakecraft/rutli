@@ -68,7 +68,7 @@ fn write_tls(dir: &std::path::Path, ca: &(rcgen::Certificate, KeyPair), cn: &str
     std::fs::write(&cert_path, cert.pem()).unwrap();
     std::fs::write(&key_path, key.serialize_pem()).unwrap();
     std::fs::write(&ca_path, ca.0.pem()).unwrap();
-    TlsConfig { ca_cert: ca_path, cert: cert_path, key: key_path, domain: Some(SAN.to_string()) }
+    TlsConfig { ca_cert: ca_path, cert: cert_path, key: key_path, domain: Some(SAN.to_string()), allow_expired_ca: false }
 }
 
 async fn mesh() -> Mesh {

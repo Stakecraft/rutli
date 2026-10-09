@@ -31,6 +31,7 @@ pub mod service;
 pub mod share_delivery;
 pub mod share_import;
 pub mod tls;
+pub mod trust;
 pub mod verify_key;
 pub mod wrap;
 

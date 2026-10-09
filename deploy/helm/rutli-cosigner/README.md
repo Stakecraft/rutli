@@ -47,6 +47,7 @@ Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org A
 | `replicaCount` / `threshold` | `3` / `2` | Must match cert count |
 | `fullnameOverride` | `rutli-cosigner` | Peer DNS base |
 | `tls.layout` | `perNode` | `perNode`: `tls.caSecretName` (`rutli-cosigner-ca`, key `ca.crt`) + `tls.perNodeSecretPrefix<id>` (`rutli-cosigner-tls-1..N`, `tls.crt`/`tls.key`). `shared`: the legacy single `tlsSecretName`. Either way each cosigner container sees only its own key (below) |
+| `tls.allowExpiredCa` | `false` | Accept an expired/not-yet-valid CA in `ca.crt` (never a non-CA). Emergency rotation away from an already-expired CA only |
 | `sealSecretName` | `rutli-seal` | Pre-created |
 | `signerAllowlist` | `[driver]` | Required under TLS |
 | `clusterId` | `""` | Cluster id pin (16 lowercase hex). Empty = derived from `ca.crt`'s bytes. Set it to the current derived id before changing `ca.crt` — see "Rotating the cluster CA" |
@@ -71,7 +72,10 @@ of this release (`deploy/k8s/job-verify-key.example.yaml`).
 
 ### Rotating the cluster CA
 
-`ca.crt` may hold several CA certificates; every cosigner trusts all of them. A zero-downtime
+`ca.crt` may hold several CA certificates; every cosigner trusts all of them. It must hold
+**only** CA certificates that are valid now: a cosigner refuses to start on a leaf, a private key or
+an expired CA in it (each certificate would be a full mTLS trust anchor) and logs every anchor's
+subject, notAfter and SHA-256 at startup (`trust anchor`). A zero-downtime
 rotation runs a bundle of the old and the new CA during the overlap, swaps each node's leaf, then
 drops the old CA — [`docs/ca-rotation.md`](../../../docs/ca-rotation.md). Because the default
 cluster id is a hash of `ca.crt`'s bytes, first pin it to the current value

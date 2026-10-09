@@ -16,9 +16,10 @@ All notable changes to Rütli are documented here. Format loosely follows
     hex characters, validated at startup and at `helm template`. Each cosigner logs
     `cluster id <id> (pinned in config)` (or `(derived from tls.ca_cert)`) at startup, and the CA
     certificate count of its trust file. Older images ignore the field — check that log line.
-  - **Multi-CA trust files.** mTLS already trusted every certificate in `tls.ca_cert`
-    (`tests/tls_rotation.rs` proves both directions over real sockets); the split ceremony's request
-    verification now does too: a cosigner leaf certified by any valid CA in the file is accepted.
+  - **Multi-CA trust files.** mTLS already trusted every certificate in `tls.ca_cert` (now only
+    valid CA certificates, see Security; `tests/tls_rotation.rs` proves both directions over real
+    sockets); the split ceremony's request verification now does too: a cosigner leaf certified by
+    any valid CA in the file is accepted.
   - **`rutli-dealer split-key --cluster-id <ID>`**: the id the cosigners are pinned to; without it
     the id is derived from `--ca-cert`, as before. Required after a CA rotation.
   - **`gen-frost-certs.sh`**: `RUTLI_CA_DIR` reuses an existing CA to issue leaves (`ca.key` is never
@@ -30,6 +31,30 @@ All notable changes to Rütli are documented here. Format loosely follows
   - The hosted-key anti-entropy sweep no longer skips an unreachable peer silently: it logs
     `anti-entropy: cannot list keys on peer` at WARN with the peer and the error (e.g. an mTLS
     `UnknownIssuer` during a rotation), once per peer per sweep.
+
+### Security
+- **Trust files hold CA certificates only (review M1).** rustls made every certificate in
+  `tls.ca_cert` a full trust anchor, never checking its CA flag, key usage or validity: a cosigner
+  leaf concatenated into the file (`cat ca.crt cosigner1.crt`) let whoever holds that leaf's key
+  mint a `cosigner2` or `driver` certificate that passed the handshake and every CN allowlist, and
+  an expired CA kept certifying its leaves. One shared validation (`trust::load_trust_anchors`) now
+  refuses a trust file unless every PEM block is a `CERTIFICATE` that is a CA (basicConstraints
+  CA, keyCertSign if a keyUsage is present) valid now; a private key pasted into it is refused
+  without being echoed. Applied by the cosigner at startup (`tls::load`, so also `refresh` and
+  `verify-key`), which then hands rustls exactly the certificates it validated, and by
+  `rutli-dealer split-key --ca-cert` before it reads any request. The cosigner logs every anchor
+  (`trust anchor` with subject, notAfter, SHA-256; WARN under 30 days to expiry); the dealer prints
+  them, records them in `dealer-record.json` (`ca_anchors`, `ca_file_sha256`) and warns when the
+  file holds more than one CA (review L8).
+  - `tls.allow_expired_ca` (chart `tls.allowExpiredCa`), default off: accept an expired or
+    not-yet-valid CA, never a non-CA. Only for a rotation away from a CA that has already expired.
+
+### Upgrade notes (breaking)
+- A cosigner now **refuses to start** when `tls.ca_cert` holds anything but currently valid CA
+  certificates. Before upgrading, check the file: `openssl crl2pkcs7 -nocrl -certfile ca.crt |
+  openssl pkcs7 -print_certs -noout` lists what it holds; every entry must be a CA
+  (`openssl x509 -noout -ext basicConstraints`) and inside its validity period. A rolling upgrade
+  stops at the first pod that refuses (it never becomes Ready), with the other nodes still signing.
 
 ## [0.4.0-rc.1] — 2026-10-09
 

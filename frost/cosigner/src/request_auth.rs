@@ -15,10 +15,14 @@
 //!   the pinned `--cluster-id`, else that CA file's (`wrap::cluster_id_from_ca`) — and that the
 //!   leaf's identity is the request's `identifier`.
 //!
-//! **Trust anchors.** Every `CERTIFICATE` block of the CA file is a trust anchor, as it is for the
-//! cosigners' mTLS (tonic loads every certificate in `tls.ca_cert`): during a CA rotation
-//! (docs/ca-rotation.md) the file is a bundle of the old and the new CA, and a node's leaf may be
-//! issued by either. An anchor counts only while it is valid and allowed to sign certificates.
+//! **Trust anchors.** The CA file may hold several CAs: during a CA rotation (docs/ca-rotation.md)
+//! it is a bundle of the old and the new CA, and a node's leaf may be issued by either. Whoever
+//! reads a CA file validates it first with [`crate::trust::load_trust_anchors`] — the cosigners'
+//! mTLS (`tls::load`) and `rutli-dealer` both refuse a file holding anything but valid CA
+//! certificates, because rustls would otherwise trust every certificate in it, leaf or expired.
+//! Here, independently, each `CERTIFICATE` block is an anchor only if it passes the same
+//! [`crate::trust::check_anchor`] rule (a valid CA allowed to sign certificates); one that does not
+//! is skipped rather than poisoning the others.
 //!
 //! **Identity rule.** A leaf certificate names cosigner `N` iff its subject Common Name is exactly
 //! `cosigner<N>` (decimal, no leading zeros) — the CN `scripts/gen-frost-certs.sh` issues, the one
@@ -42,7 +46,7 @@ use x509_parser::oid_registry::{
     OID_PKCS1_SHA256WITHRSA, OID_PKCS1_SHA384WITHRSA, OID_SIG_ECDSA_WITH_SHA256,
     OID_SIG_ECDSA_WITH_SHA384, OID_SIG_ED25519,
 };
-use x509_parser::prelude::{FromDer, X509Certificate};
+use x509_parser::prelude::X509Certificate;
 use zeroize::Zeroizing;
 
 use crate::share_delivery::RecipientRequest;
@@ -311,23 +315,19 @@ fn check_request(r: &RecipientRequest, ca_pem: &[u8], expected_cluster: &str) ->
     // Trust anchors: each itself valid now, and a CA allowed to sign certificates. An anchor that
     // is neither is not usable — but it does not poison the others in a rotation bundle. With a
     // single anchor the errors are what they always were.
+    // The one anchor rule (`trust::check_anchor`), applied per anchor.
     let now = x509_parser::time::ASN1Time::now();
     let mut usable: Vec<&X509Certificate<'_>> = Vec::with_capacity(anchors.len());
     let mut first_unusable: Option<DaemonError> = None;
     for (i, ca) in anchors.iter().enumerate() {
-        let checked = if !ca.validity().is_valid_at(now) {
-            Err(auth(if anchors.len() == 1 {
-                "the CA certificate is expired or not yet valid".into()
-            } else {
-                format!("CA certificate {i} of the CA file is expired or not yet valid")
-            }))
-        } else {
-            require_issuer(ca, "the CA certificate")
-        };
-        match checked {
+        match crate::trust::check_anchor(ca, now) {
             Ok(()) => usable.push(ca),
             Err(e) => {
-                first_unusable.get_or_insert(e);
+                first_unusable.get_or_insert(auth(if anchors.len() == 1 {
+                    format!("the CA certificate {e}")
+                } else {
+                    format!("CA certificate {i} of the CA file {e}")
+                }));
             }
         }
     }
@@ -412,25 +412,14 @@ fn check_request(r: &RecipientRequest, ca_pem: &[u8], expected_cluster: &str) ->
         .map_err(|_| auth(format!("bad request signature for node {}", r.identifier)))
 }
 
-/// The basicConstraints CA flag; a malformed or duplicated extension is an error, not "no".
+/// The basicConstraints CA flag ([`crate::trust::ca_flag`]).
 fn ca_flag(cert: &X509Certificate<'_>) -> Result<bool> {
-    cert.basic_constraints()
-        .map(|bc| bc.is_some_and(|bc| bc.value.ca))
-        .map_err(|_| auth("a certificate's basicConstraints is malformed".into()))
+    crate::trust::ca_flag(cert).map_err(|e| auth(format!("a certificate {e}")))
 }
 
-/// `cert` may issue certificates: CA flag set, and keyCertSign if it has a keyUsage at all.
+/// `cert` may issue certificates ([`crate::trust::check_issuer`]).
 fn require_issuer(cert: &X509Certificate<'_>, what: &str) -> Result<()> {
-    if !ca_flag(cert)? {
-        return Err(auth(format!("{what} is not a CA certificate (basicConstraints CA)")));
-    }
-    match cert.key_usage() {
-        Ok(Some(ku)) if !ku.value.key_cert_sign() => {
-            Err(auth(format!("{what} may not sign certificates (keyUsage lacks keyCertSign)")))
-        }
-        Ok(_) => Ok(()),
-        Err(_) => Err(auth(format!("{what} has a malformed keyUsage"))),
-    }
+    crate::trust::check_issuer(cert).map_err(|e| auth(format!("{what} {e}")))
 }
 
 /// Check `cert`'s signature with `issuer`'s key, and that the names chain.
@@ -460,33 +449,12 @@ fn verify_cert_signature(cert: &X509Certificate<'_>, issuer: &X509Certificate<'_
 }
 
 fn parse(der: &[u8]) -> Result<X509Certificate<'_>> {
-    match X509Certificate::from_der(der) {
-        Ok(([], cert)) => Ok(cert),
-        _ => Err(auth("malformed certificate".into())),
-    }
+    crate::trust::parse(der).map_err(auth)
 }
 
-/// `(label, DER)` for every PEM block in `text`. The DER is zeroized on drop (key files).
-fn pem_blocks(text: &[u8]) -> Result<Vec<(String, Zeroizing<Vec<u8>>)>> {
-    let text = std::str::from_utf8(text).map_err(|_| auth("PEM file is not UTF-8".into()))?;
-    let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(start) = rest.find("-----BEGIN ") {
-        let after = &rest[start + 11..];
-        let label_end = after.find("-----").ok_or_else(|| auth("malformed PEM header".into()))?;
-        let label = after[..label_end].to_string();
-        let body_start = &after[label_end + 5..];
-        let end_marker = format!("-----END {label}-----");
-        let body_end = body_start.find(&end_marker).ok_or_else(|| auth("unterminated PEM block".into()))?;
-        let body: Zeroizing<String> =
-            Zeroizing::new(body_start[..body_end].chars().filter(|c| !c.is_whitespace()).collect());
-        let der = base64::engine::general_purpose::STANDARD
-            .decode(body.as_bytes())
-            .map_err(|_| auth("PEM body is not base64".into()))?;
-        out.push((label, Zeroizing::new(der)));
-        rest = &body_start[body_end + end_marker.len()..];
-    }
-    Ok(out)
+/// `(label, DER)` for every PEM block in `text` ([`crate::trust::pem_blocks`]).
+fn pem_blocks(text: &[u8]) -> Result<Vec<crate::trust::PemBlock>> {
+    crate::trust::pem_blocks(text).map_err(auth)
 }
 
 fn auth(msg: String) -> DaemonError {
