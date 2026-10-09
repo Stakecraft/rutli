@@ -28,6 +28,8 @@ private static final long serialVersionUID = 0L;
   }
   private NodeInfoReply() {
     distPublicKey_ = com.google.protobuf.ByteString.EMPTY;
+    hostedKeySpecs_ =
+        com.google.protobuf.LazyStringArrayList.emptyList();
   }
 
   public static final com.google.protobuf.Descriptors.Descriptor
@@ -69,6 +71,67 @@ private static final long serialVersionUID = 0L;
     return distPublicKey_;
   }
 
+  public static final int HOSTED_KEY_SPECS_FIELD_NUMBER = 3;
+  @SuppressWarnings("serial")
+  private com.google.protobuf.LazyStringArrayList hostedKeySpecs_ =
+      com.google.protobuf.LazyStringArrayList.emptyList();
+  /**
+   * <pre>
+   * The hosted-key specs this node can store and serve (as in CapabilitiesReply). Empty from a
+   * cosigner older than ec-p256-ecies, or with hosted keys off: a leader refuses to create a key of
+   * a spec some peer does not report, so a mixed-version cluster never holds one.
+   * </pre>
+   *
+   * <code>repeated string hosted_key_specs = 3;</code>
+   * @return A list containing the hostedKeySpecs.
+   */
+  public com.google.protobuf.ProtocolStringList
+      getHostedKeySpecsList() {
+    return hostedKeySpecs_;
+  }
+  /**
+   * <pre>
+   * The hosted-key specs this node can store and serve (as in CapabilitiesReply). Empty from a
+   * cosigner older than ec-p256-ecies, or with hosted keys off: a leader refuses to create a key of
+   * a spec some peer does not report, so a mixed-version cluster never holds one.
+   * </pre>
+   *
+   * <code>repeated string hosted_key_specs = 3;</code>
+   * @return The count of hostedKeySpecs.
+   */
+  public int getHostedKeySpecsCount() {
+    return hostedKeySpecs_.size();
+  }
+  /**
+   * <pre>
+   * The hosted-key specs this node can store and serve (as in CapabilitiesReply). Empty from a
+   * cosigner older than ec-p256-ecies, or with hosted keys off: a leader refuses to create a key of
+   * a spec some peer does not report, so a mixed-version cluster never holds one.
+   * </pre>
+   *
+   * <code>repeated string hosted_key_specs = 3;</code>
+   * @param index The index of the element to return.
+   * @return The hostedKeySpecs at the given index.
+   */
+  public java.lang.String getHostedKeySpecs(int index) {
+    return hostedKeySpecs_.get(index);
+  }
+  /**
+   * <pre>
+   * The hosted-key specs this node can store and serve (as in CapabilitiesReply). Empty from a
+   * cosigner older than ec-p256-ecies, or with hosted keys off: a leader refuses to create a key of
+   * a spec some peer does not report, so a mixed-version cluster never holds one.
+   * </pre>
+   *
+   * <code>repeated string hosted_key_specs = 3;</code>
+   * @param index The index of the value to return.
+   * @return The bytes of the hostedKeySpecs at the given index.
+   */
+  public com.google.protobuf.ByteString
+      getHostedKeySpecsBytes(int index) {
+    return hostedKeySpecs_.getByteString(index);
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -89,6 +152,9 @@ private static final long serialVersionUID = 0L;
     if (!distPublicKey_.isEmpty()) {
       output.writeBytes(2, distPublicKey_);
     }
+    for (int i = 0; i < hostedKeySpecs_.size(); i++) {
+      com.google.protobuf.GeneratedMessage.writeString(output, 3, hostedKeySpecs_.getRaw(i));
+    }
     getUnknownFields().writeTo(output);
   }
 
@@ -105,6 +171,14 @@ private static final long serialVersionUID = 0L;
     if (!distPublicKey_.isEmpty()) {
       size += com.google.protobuf.CodedOutputStream
         .computeBytesSize(2, distPublicKey_);
+    }
+    {
+      int dataSize = 0;
+      for (int i = 0; i < hostedKeySpecs_.size(); i++) {
+        dataSize += computeStringSizeNoTag(hostedKeySpecs_.getRaw(i));
+      }
+      size += dataSize;
+      size += 1 * getHostedKeySpecsList().size();
     }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
@@ -125,6 +199,8 @@ private static final long serialVersionUID = 0L;
         != other.getIdentifier()) return false;
     if (!getDistPublicKey()
         .equals(other.getDistPublicKey())) return false;
+    if (!getHostedKeySpecsList()
+        .equals(other.getHostedKeySpecsList())) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -140,6 +216,10 @@ private static final long serialVersionUID = 0L;
     hash = (53 * hash) + getIdentifier();
     hash = (37 * hash) + DIST_PUBLIC_KEY_FIELD_NUMBER;
     hash = (53 * hash) + getDistPublicKey().hashCode();
+    if (getHostedKeySpecsCount() > 0) {
+      hash = (37 * hash) + HOSTED_KEY_SPECS_FIELD_NUMBER;
+      hash = (53 * hash) + getHostedKeySpecsList().hashCode();
+    }
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -273,6 +353,8 @@ private static final long serialVersionUID = 0L;
       bitField0_ = 0;
       identifier_ = 0;
       distPublicKey_ = com.google.protobuf.ByteString.EMPTY;
+      hostedKeySpecs_ =
+          com.google.protobuf.LazyStringArrayList.emptyList();
       return this;
     }
 
@@ -312,6 +394,10 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000002) != 0)) {
         result.distPublicKey_ = distPublicKey_;
       }
+      if (((from_bitField0_ & 0x00000004) != 0)) {
+        hostedKeySpecs_.makeImmutable();
+        result.hostedKeySpecs_ = hostedKeySpecs_;
+      }
     }
 
     @java.lang.Override
@@ -331,6 +417,16 @@ private static final long serialVersionUID = 0L;
       }
       if (other.getDistPublicKey() != com.google.protobuf.ByteString.EMPTY) {
         setDistPublicKey(other.getDistPublicKey());
+      }
+      if (!other.hostedKeySpecs_.isEmpty()) {
+        if (hostedKeySpecs_.isEmpty()) {
+          hostedKeySpecs_ = other.hostedKeySpecs_;
+          bitField0_ |= 0x00000004;
+        } else {
+          ensureHostedKeySpecsIsMutable();
+          hostedKeySpecs_.addAll(other.hostedKeySpecs_);
+        }
+        onChanged();
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -368,6 +464,12 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000002;
               break;
             } // case 18
+            case 26: {
+              java.lang.String s = input.readStringRequireUtf8();
+              ensureHostedKeySpecsIsMutable();
+              hostedKeySpecs_.add(s);
+              break;
+            } // case 26
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -457,6 +559,171 @@ private static final long serialVersionUID = 0L;
     public Builder clearDistPublicKey() {
       bitField0_ = (bitField0_ & ~0x00000002);
       distPublicKey_ = getDefaultInstance().getDistPublicKey();
+      onChanged();
+      return this;
+    }
+
+    private com.google.protobuf.LazyStringArrayList hostedKeySpecs_ =
+        com.google.protobuf.LazyStringArrayList.emptyList();
+    private void ensureHostedKeySpecsIsMutable() {
+      if (!hostedKeySpecs_.isModifiable()) {
+        hostedKeySpecs_ = new com.google.protobuf.LazyStringArrayList(hostedKeySpecs_);
+      }
+      bitField0_ |= 0x00000004;
+    }
+    /**
+     * <pre>
+     * The hosted-key specs this node can store and serve (as in CapabilitiesReply). Empty from a
+     * cosigner older than ec-p256-ecies, or with hosted keys off: a leader refuses to create a key of
+     * a spec some peer does not report, so a mixed-version cluster never holds one.
+     * </pre>
+     *
+     * <code>repeated string hosted_key_specs = 3;</code>
+     * @return A list containing the hostedKeySpecs.
+     */
+    public com.google.protobuf.ProtocolStringList
+        getHostedKeySpecsList() {
+      hostedKeySpecs_.makeImmutable();
+      return hostedKeySpecs_;
+    }
+    /**
+     * <pre>
+     * The hosted-key specs this node can store and serve (as in CapabilitiesReply). Empty from a
+     * cosigner older than ec-p256-ecies, or with hosted keys off: a leader refuses to create a key of
+     * a spec some peer does not report, so a mixed-version cluster never holds one.
+     * </pre>
+     *
+     * <code>repeated string hosted_key_specs = 3;</code>
+     * @return The count of hostedKeySpecs.
+     */
+    public int getHostedKeySpecsCount() {
+      return hostedKeySpecs_.size();
+    }
+    /**
+     * <pre>
+     * The hosted-key specs this node can store and serve (as in CapabilitiesReply). Empty from a
+     * cosigner older than ec-p256-ecies, or with hosted keys off: a leader refuses to create a key of
+     * a spec some peer does not report, so a mixed-version cluster never holds one.
+     * </pre>
+     *
+     * <code>repeated string hosted_key_specs = 3;</code>
+     * @param index The index of the element to return.
+     * @return The hostedKeySpecs at the given index.
+     */
+    public java.lang.String getHostedKeySpecs(int index) {
+      return hostedKeySpecs_.get(index);
+    }
+    /**
+     * <pre>
+     * The hosted-key specs this node can store and serve (as in CapabilitiesReply). Empty from a
+     * cosigner older than ec-p256-ecies, or with hosted keys off: a leader refuses to create a key of
+     * a spec some peer does not report, so a mixed-version cluster never holds one.
+     * </pre>
+     *
+     * <code>repeated string hosted_key_specs = 3;</code>
+     * @param index The index of the value to return.
+     * @return The bytes of the hostedKeySpecs at the given index.
+     */
+    public com.google.protobuf.ByteString
+        getHostedKeySpecsBytes(int index) {
+      return hostedKeySpecs_.getByteString(index);
+    }
+    /**
+     * <pre>
+     * The hosted-key specs this node can store and serve (as in CapabilitiesReply). Empty from a
+     * cosigner older than ec-p256-ecies, or with hosted keys off: a leader refuses to create a key of
+     * a spec some peer does not report, so a mixed-version cluster never holds one.
+     * </pre>
+     *
+     * <code>repeated string hosted_key_specs = 3;</code>
+     * @param index The index to set the value at.
+     * @param value The hostedKeySpecs to set.
+     * @return This builder for chaining.
+     */
+    public Builder setHostedKeySpecs(
+        int index, java.lang.String value) {
+      if (value == null) { throw new NullPointerException(); }
+      ensureHostedKeySpecsIsMutable();
+      hostedKeySpecs_.set(index, value);
+      bitField0_ |= 0x00000004;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * The hosted-key specs this node can store and serve (as in CapabilitiesReply). Empty from a
+     * cosigner older than ec-p256-ecies, or with hosted keys off: a leader refuses to create a key of
+     * a spec some peer does not report, so a mixed-version cluster never holds one.
+     * </pre>
+     *
+     * <code>repeated string hosted_key_specs = 3;</code>
+     * @param value The hostedKeySpecs to add.
+     * @return This builder for chaining.
+     */
+    public Builder addHostedKeySpecs(
+        java.lang.String value) {
+      if (value == null) { throw new NullPointerException(); }
+      ensureHostedKeySpecsIsMutable();
+      hostedKeySpecs_.add(value);
+      bitField0_ |= 0x00000004;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * The hosted-key specs this node can store and serve (as in CapabilitiesReply). Empty from a
+     * cosigner older than ec-p256-ecies, or with hosted keys off: a leader refuses to create a key of
+     * a spec some peer does not report, so a mixed-version cluster never holds one.
+     * </pre>
+     *
+     * <code>repeated string hosted_key_specs = 3;</code>
+     * @param values The hostedKeySpecs to add.
+     * @return This builder for chaining.
+     */
+    public Builder addAllHostedKeySpecs(
+        java.lang.Iterable<java.lang.String> values) {
+      ensureHostedKeySpecsIsMutable();
+      com.google.protobuf.AbstractMessageLite.Builder.addAll(
+          values, hostedKeySpecs_);
+      bitField0_ |= 0x00000004;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * The hosted-key specs this node can store and serve (as in CapabilitiesReply). Empty from a
+     * cosigner older than ec-p256-ecies, or with hosted keys off: a leader refuses to create a key of
+     * a spec some peer does not report, so a mixed-version cluster never holds one.
+     * </pre>
+     *
+     * <code>repeated string hosted_key_specs = 3;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearHostedKeySpecs() {
+      hostedKeySpecs_ =
+        com.google.protobuf.LazyStringArrayList.emptyList();
+      bitField0_ = (bitField0_ & ~0x00000004);;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * The hosted-key specs this node can store and serve (as in CapabilitiesReply). Empty from a
+     * cosigner older than ec-p256-ecies, or with hosted keys off: a leader refuses to create a key of
+     * a spec some peer does not report, so a mixed-version cluster never holds one.
+     * </pre>
+     *
+     * <code>repeated string hosted_key_specs = 3;</code>
+     * @param value The bytes of the hostedKeySpecs to add.
+     * @return This builder for chaining.
+     */
+    public Builder addHostedKeySpecsBytes(
+        com.google.protobuf.ByteString value) {
+      if (value == null) { throw new NullPointerException(); }
+      checkByteStringIsUtf8(value);
+      ensureHostedKeySpecsIsMutable();
+      hostedKeySpecs_.add(value);
+      bitField0_ |= 0x00000004;
       onChanged();
       return this;
     }
