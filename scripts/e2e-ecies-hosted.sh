@@ -96,7 +96,7 @@ done
 
 step "B (setup). import-key: B1's Canton ECIES encryption key into node 1, before the cluster starts"
 RUST_LOG=off "$COSIGNER" --config "$WORK/c1.json" import-key --in "$VEC/encryption.export-pw.bin" \
-  --passphrase-env E2E_EXPORT_PASSWORD --key-id "$IMPORTED_ID" --expect-fingerprint "$FP" \
+  --passphrase-env E2E_EXPORT_PASSWORD --key-id "$IMPORTED_ID" --key-prefix "$PREFIX" --expect-fingerprint "$FP" \
   | tee "$WORK/import.out"
 grep -q "ec-p256-ecies" "$WORK/import.out" || fail "import-key did not report an ec-p256-ecies key"
 
@@ -232,4 +232,4 @@ echo "ECIES decryptions ok: $GEN_OK (with the imported key: $IMP_OK), failed: $B
 [ "$GEN_OK" -gt "$IMP_OK" ] || fail "no ECIES decryption with the generated key"
 [ "$IMP_OK" -gt 0 ] || fail "no ECIES decryption with the imported key"
 [ "$BAD" -eq 0 ] || fail "$BAD decryptions failed"
-grep -q "cluster hosts non-FROST keys (.*ec-p256-ecies" "$WORK"/canton*.log || fail "the driver never saw ec-p256-ecies in Capabilities"
+grep -q "every cosigner hosts non-FROST keys (.*ec-p256-ecies" "$WORK"/canton*.log || fail "the driver never saw ec-p256-ecies in Capabilities"
