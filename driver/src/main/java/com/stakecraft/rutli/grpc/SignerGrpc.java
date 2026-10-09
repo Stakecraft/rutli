@@ -419,6 +419,37 @@ public final class SignerGrpc {
     return getDecryptMethod;
   }
 
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.EcdhDeriveRequest,
+      com.stakecraft.rutli.grpc.EcdhDeriveReply> getEcdhDeriveMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "EcdhDerive",
+      requestType = com.stakecraft.rutli.grpc.EcdhDeriveRequest.class,
+      responseType = com.stakecraft.rutli.grpc.EcdhDeriveReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.EcdhDeriveRequest,
+      com.stakecraft.rutli.grpc.EcdhDeriveReply> getEcdhDeriveMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.EcdhDeriveRequest, com.stakecraft.rutli.grpc.EcdhDeriveReply> getEcdhDeriveMethod;
+    if ((getEcdhDeriveMethod = SignerGrpc.getEcdhDeriveMethod) == null) {
+      synchronized (SignerGrpc.class) {
+        if ((getEcdhDeriveMethod = SignerGrpc.getEcdhDeriveMethod) == null) {
+          SignerGrpc.getEcdhDeriveMethod = getEcdhDeriveMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.EcdhDeriveRequest, com.stakecraft.rutli.grpc.EcdhDeriveReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "EcdhDerive"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.EcdhDeriveRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.EcdhDeriveReply.getDefaultInstance()))
+              .setSchemaDescriptor(new SignerMethodDescriptorSupplier("EcdhDerive"))
+              .build();
+        }
+      }
+    }
+    return getEcdhDeriveMethod;
+  }
+
   private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.SymmetricRequest,
       com.stakecraft.rutli.grpc.SymmetricReply> getSymmetricEncryptMethod;
 
@@ -670,6 +701,20 @@ public final class SignerGrpc {
     }
 
     /**
+     * <pre>
+     * ECIES (EcP256 / EciesHkdfHmacSha256Aes128Cbc): the static ECDH only, Z = x(d·V) for the
+     * sender's ephemeral point V. The driver completes KDF2 + AES-128-CBC + HMAC-SHA256 with
+     * BouncyCastle's own IESEngine, so the cluster never reimplements Canton's framing — and a v2
+     * threshold P-256 key answers this same RPC from partial points. Charged against the key's
+     * decryption rate limit like Decrypt; refused for every spec but "ec-p256-ecies".
+     * </pre>
+     */
+    default void ecdhDerive(com.stakecraft.rutli.grpc.EcdhDeriveRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.EcdhDeriveReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getEcdhDeriveMethod(), responseObserver);
+    }
+
+    /**
      */
     default void symmetricEncrypt(com.stakecraft.rutli.grpc.SymmetricRequest request,
         io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.SymmetricReply> responseObserver) {
@@ -854,6 +899,21 @@ public final class SignerGrpc {
     }
 
     /**
+     * <pre>
+     * ECIES (EcP256 / EciesHkdfHmacSha256Aes128Cbc): the static ECDH only, Z = x(d·V) for the
+     * sender's ephemeral point V. The driver completes KDF2 + AES-128-CBC + HMAC-SHA256 with
+     * BouncyCastle's own IESEngine, so the cluster never reimplements Canton's framing — and a v2
+     * threshold P-256 key answers this same RPC from partial points. Charged against the key's
+     * decryption rate limit like Decrypt; refused for every spec but "ec-p256-ecies".
+     * </pre>
+     */
+    public void ecdhDerive(com.stakecraft.rutli.grpc.EcdhDeriveRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.EcdhDeriveReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getEcdhDeriveMethod(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
      */
     public void symmetricEncrypt(com.stakecraft.rutli.grpc.SymmetricRequest request,
         io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.SymmetricReply> responseObserver) {
@@ -1012,6 +1072,20 @@ public final class SignerGrpc {
     }
 
     /**
+     * <pre>
+     * ECIES (EcP256 / EciesHkdfHmacSha256Aes128Cbc): the static ECDH only, Z = x(d·V) for the
+     * sender's ephemeral point V. The driver completes KDF2 + AES-128-CBC + HMAC-SHA256 with
+     * BouncyCastle's own IESEngine, so the cluster never reimplements Canton's framing — and a v2
+     * threshold P-256 key answers this same RPC from partial points. Charged against the key's
+     * decryption rate limit like Decrypt; refused for every spec but "ec-p256-ecies".
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.EcdhDeriveReply ecdhDerive(com.stakecraft.rutli.grpc.EcdhDeriveRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getEcdhDeriveMethod(), getCallOptions(), request);
+    }
+
+    /**
      */
     public com.stakecraft.rutli.grpc.SymmetricReply symmetricEncrypt(com.stakecraft.rutli.grpc.SymmetricRequest request) throws io.grpc.StatusException {
       return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
@@ -1165,6 +1239,20 @@ public final class SignerGrpc {
     public com.stakecraft.rutli.grpc.DecryptReply decrypt(com.stakecraft.rutli.grpc.DecryptRequest request) {
       return io.grpc.stub.ClientCalls.blockingUnaryCall(
           getChannel(), getDecryptMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * ECIES (EcP256 / EciesHkdfHmacSha256Aes128Cbc): the static ECDH only, Z = x(d·V) for the
+     * sender's ephemeral point V. The driver completes KDF2 + AES-128-CBC + HMAC-SHA256 with
+     * BouncyCastle's own IESEngine, so the cluster never reimplements Canton's framing — and a v2
+     * threshold P-256 key answers this same RPC from partial points. Charged against the key's
+     * decryption rate limit like Decrypt; refused for every spec but "ec-p256-ecies".
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.EcdhDeriveReply ecdhDerive(com.stakecraft.rutli.grpc.EcdhDeriveRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getEcdhDeriveMethod(), getCallOptions(), request);
     }
 
     /**
@@ -1337,6 +1425,21 @@ public final class SignerGrpc {
     }
 
     /**
+     * <pre>
+     * ECIES (EcP256 / EciesHkdfHmacSha256Aes128Cbc): the static ECDH only, Z = x(d·V) for the
+     * sender's ephemeral point V. The driver completes KDF2 + AES-128-CBC + HMAC-SHA256 with
+     * BouncyCastle's own IESEngine, so the cluster never reimplements Canton's framing — and a v2
+     * threshold P-256 key answers this same RPC from partial points. Charged against the key's
+     * decryption rate limit like Decrypt; refused for every spec but "ec-p256-ecies".
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.EcdhDeriveReply> ecdhDerive(
+        com.stakecraft.rutli.grpc.EcdhDeriveRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getEcdhDeriveMethod(), getCallOptions()), request);
+    }
+
+    /**
      */
     public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.SymmetricReply> symmetricEncrypt(
         com.stakecraft.rutli.grpc.SymmetricRequest request) {
@@ -1366,8 +1469,9 @@ public final class SignerGrpc {
   private static final int METHODID_KEY_INFO = 10;
   private static final int METHODID_DELETE_KEY = 11;
   private static final int METHODID_DECRYPT = 12;
-  private static final int METHODID_SYMMETRIC_ENCRYPT = 13;
-  private static final int METHODID_SYMMETRIC_DECRYPT = 14;
+  private static final int METHODID_ECDH_DERIVE = 13;
+  private static final int METHODID_SYMMETRIC_ENCRYPT = 14;
+  private static final int METHODID_SYMMETRIC_DECRYPT = 15;
 
   private static final class MethodHandlers<Req, Resp> implements
       io.grpc.stub.ServerCalls.UnaryMethod<Req, Resp>,
@@ -1437,6 +1541,10 @@ public final class SignerGrpc {
         case METHODID_DECRYPT:
           serviceImpl.decrypt((com.stakecraft.rutli.grpc.DecryptRequest) request,
               (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DecryptReply>) responseObserver);
+          break;
+        case METHODID_ECDH_DERIVE:
+          serviceImpl.ecdhDerive((com.stakecraft.rutli.grpc.EcdhDeriveRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.EcdhDeriveReply>) responseObserver);
           break;
         case METHODID_SYMMETRIC_ENCRYPT:
           serviceImpl.symmetricEncrypt((com.stakecraft.rutli.grpc.SymmetricRequest) request,
@@ -1556,6 +1664,13 @@ public final class SignerGrpc {
               com.stakecraft.rutli.grpc.DecryptReply>(
                 service, METHODID_DECRYPT)))
         .addMethod(
+          getEcdhDeriveMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.EcdhDeriveRequest,
+              com.stakecraft.rutli.grpc.EcdhDeriveReply>(
+                service, METHODID_ECDH_DERIVE)))
+        .addMethod(
           getSymmetricEncryptMethod(),
           io.grpc.stub.ServerCalls.asyncUnaryCall(
             new MethodHandlers<
@@ -1630,6 +1745,7 @@ public final class SignerGrpc {
               .addMethod(getKeyInfoMethod())
               .addMethod(getDeleteKeyMethod())
               .addMethod(getDecryptMethod())
+              .addMethod(getEcdhDeriveMethod())
               .addMethod(getSymmetricEncryptMethod())
               .addMethod(getSymmetricDecryptMethod())
               .build();
