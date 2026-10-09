@@ -88,6 +88,29 @@ optional `frost.key-prefix`). During the roll, one sign hit the restarting cosig
 to cosigner-1 (`reason=UNAVAILABLE`, `outcome=ok`); 8/8 signs ok in the window, no participant errors.
 Rollback path kept: `helm -n rutli rollback rutli 3`.
 
+**Planned event: B0 cutover drill, 2026-10-09 11:59 → 13:09 UTC (party unhosted 7 s, wallet down ~25 min).**
+The soak validator moved to a **new participant UID in the same FROST namespace**: the migration shape for
+existing nodes ([b0-cutover-spike.md](b0-cutover-spike.md), [roadmap-migration.md](roadmap-migration.md) B0).
+- Pre-flight: Splice 0.9.0 chart/images verified; identities dump held KMS ids only (`hasKeyPair: false` ×3).
+  Baselines: wallet 120.3228663581 CC, ACS 5, purchased traffic 1.2 M. Manual `pg_dumpall` 10:59 (1.4 G,
+  sha `362f18c6…`, S3 OK, 0 private-key rows) + cosigner backup.
+- 12:13 old participant disconnected, reference ACS exported (`END_OLD` 921659), scaled to 0; old DB untouched.
+- 12:26 new participant on `participant_b0` (needed `enableParticipantDbConflictCheck=false`). The three cluster
+  keys were registered by KMS id, fingerprints identical (G1); `init_id` as `stakecraft-rutli-soak-1-b0`
+  under namespace `12203286…22ea`; OTK signed by `frost-namespace` + `frost-signing` (12:35, G2).
+- 12:37 trust certificate signed by `frost-namespace`; member onboarded; it processed ~850 k bootstrap topology
+  events and caught up at 12:47 (G3).
+- 13:03:14 **PNR** (`Preparing to remove domain trust certificate…`); 13:04:51 old party mapping removed;
+  13:04:54 old trust certificate removed; 13:04:58 party hosted on `-b0`; 13:05:04 ACS imported from Scan;
+  13:07:33 validator initialised, `ValidatorLicense found => already onboarded` (no onboarding secret used).
+- G6: balance unchanged (120.3228663581 CC); the validator's top-up automation immediately ran a Tap
+  (+581.36 CC) and an Extra Traffic Purchase (−581.36 CC) through the new participant, so signing and
+  confirmation work end to end. No restarts, no ERROR in either app.
+- Cost: the old member's 1.2 M purchased traffic is stranded; old member `PAR::stakecraft-rutli-soak-1` is
+  offboarded for good. Old DB `participant` and `cantonnet_validator` kept for forensics.
+- Gaps: participant stdout runs at DEBUG and rotated within minutes, so the per-sign driver audit for the
+  window survives only in the driver's file audit log; one SV sequencer (C7) flapped throughout (not ours).
+
 ## Drill calendar
 
 | Week | Drill | Status |
