@@ -284,6 +284,31 @@ async fn main() -> Result<()> {
     }
     let mut node = Node::new(identifier, cfg.max_signers(), cfg.threshold, keystore);
 
+    // The cluster identity envelopes are bound to — logged whether or not hosted keys are on, so a
+    // CA rotation can confirm the pin took effect on every node before the CA file changes
+    // (docs/ca-rotation.md greps for `cluster id <id> (pinned in config)`).
+    // An unreadable CA file is not reported here but by `tls::load` below, with its diagnosis.
+    match (&cfg.cluster_id, &cfg.tls) {
+        (Some(pinned), Some(_)) => {
+            tracing::info!("cluster id {pinned} (pinned in config)");
+            if let Ok(derived) = cfg.derived_cluster_id() {
+                if derived != *pinned {
+                    tracing::info!(
+                        "cluster id {pinned} differs from the id derived from tls.ca_cert \
+                         ({derived}) — expected during and after a CA rotation (docs/ca-rotation.md)"
+                    );
+                }
+            }
+        }
+        (Some(pinned), None) => tracing::info!("cluster id {pinned} (pinned in config)"),
+        (None, Some(_)) => {
+            if let Ok(derived) = cfg.derived_cluster_id() {
+                tracing::info!("cluster id {derived} (derived from tls.ca_cert)");
+            }
+        }
+        (None, None) => tracing::info!("cluster id plaintext-dev (plaintext-dev, no TLS)"),
+    }
+
     // Cluster-hosted (non-FROST) keys. The wrapping key and the at-rest seal key both come from the
     // same operator master secret, so hosted keys require share_seal (enforced by config
     // validation) — a hosted key is a whole private key and must never sit unsealed on disk.
@@ -292,10 +317,9 @@ async fn main() -> Result<()> {
         let master = std::env::var(&seal_cfg.secret_env).map_err(|_| {
             DaemonError::Config(format!("hosted keys enabled but {} is not set", seal_cfg.secret_env))
         })?;
-        // Bind envelopes to this trust domain: derived from the CA cert, so it changes if the
-        // cluster does and an envelope can never be replayed into a different deployment.
-        let cluster_id = cfg.cluster_id()?;
-        node = node.with_hosted_keys(master.as_bytes(), cluster_id)?;
+        // Bind envelopes to this trust domain (the pinned `cluster_id`, else derived from the CA
+        // cert), so an envelope can never be replayed into a different deployment.
+        node = node.with_hosted_keys(master.as_bytes(), cfg.cluster_id()?)?;
         tracing::info!(
             "cluster-hosted keys enabled (RSA-2048 and EC P-256 encryption, AES-256-GCM symmetric)"
         );
@@ -309,8 +333,12 @@ async fn main() -> Result<()> {
 
     // Load mTLS material once (if configured). Plaintext otherwise (dev only).
     let tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose()?;
-    if tls.is_some() {
-        tracing::info!("mutual TLS enabled (cluster CA trust anchor)");
+    if let Some(t) = &cfg.tls {
+        // How many CA certificates the trust file holds: 2 while a CA rotation's bundle is live.
+        let ca_certs = std::fs::read_to_string(&t.ca_cert)
+            .map(|s| s.matches("-----BEGIN CERTIFICATE-----").count())
+            .unwrap_or(0);
+        tracing::info!(ca_certs, "mutual TLS enabled (cluster CA trust anchor)");
     } else {
         tracing::warn!("running WITHOUT TLS — plaintext gRPC, do not use in production");
     }

@@ -63,11 +63,27 @@ impl Ceremony {
     /// Three nodes of one TLS cluster run share-recipient (via the library) and drop their signed
     /// requests in `requests/`.
     fn new() -> Self {
+        let pki = TestPki::new();
+        let signers: Vec<NodeSigner> = (1..=3u16).map(|i| pki.signer(&format!("cosigner{i}"))).collect();
+        let (ca_pem, cluster) = (pki.ca_pem.clone(), pki.cluster_id());
+        Self::build(pki, signers, &ca_pem, &cluster)
+    }
+
+    /// Mid CA rotation (docs/ca-rotation.md): the cosigners are pinned to the old CA's derived
+    /// cluster id, their CA file is the bundle old+new, node 1 still has its old-CA leaf and nodes 2
+    /// and 3 already have new-CA leaves. `pki` is the new CA.
+    fn rotated() -> Self {
+        let old = TestPki::new();
+        let new = TestPki::new();
+        let signers = vec![old.signer("cosigner1"), new.signer("cosigner2"), new.signer("cosigner3")];
+        let bundle = pki::bundle(&[&old, &new]);
+        Self::build(new, signers, &bundle, &old.cluster_id())
+    }
+
+    fn build(pki: TestPki, signers: Vec<NodeSigner>, ca_pem: &str, cluster: &str) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("requests")).unwrap();
-        let pki = TestPki::new();
-        std::fs::write(tmp.path().join("ca.crt"), &pki.ca_pem).unwrap();
-        let signers: Vec<NodeSigner> = (1..=3u16).map(|i| pki.signer(&format!("cosigner{i}"))).collect();
+        std::fs::write(tmp.path().join("ca.crt"), ca_pem).unwrap();
         let mut requests = Vec::new();
         let mut sas = Vec::new();
         for id in 1..=3u16 {
@@ -75,7 +91,7 @@ impl Ceremony {
                 &tmp.path().join(format!("node{id}")),
                 &sealer(id),
                 &signers[usize::from(id) - 1],
-                template(id, &pki.cluster_id()),
+                template(id, cluster),
                 false,
             )
             .unwrap();
@@ -401,4 +417,49 @@ fn the_dealer_requires_the_sas_the_witnesses_read() {
     // Case and spacing are forgiven, content is not.
     let loose = c.sas.iter().map(|s| format!(" {} ", s.to_uppercase())).collect::<Vec<_>>().join(",");
     ok(&c.cmd(&input, &fp, KEY, Some(&loose)).arg(SWAP).output().unwrap());
+}
+
+/// CA rotation: the CA file is a two-CA bundle, so its derived id is not the cluster's; the dealer
+/// needs `--cluster-id` (the cosigners' pin), and then accepts leaves from either CA.
+#[test]
+fn a_rotation_bundle_needs_the_pinned_cluster_id_and_then_accepts_leaves_of_either_ca() {
+    let fp = fingerprint_of("namespace");
+    let c = Ceremony::rotated();
+    let pinned = c.read(0).cluster_id;
+
+    // Without --cluster-id the dealer derives the id from the bundle's bytes: not the cluster's.
+    refused(&c.dealer("namespace.export.bin", &fp, &[SWAP]), "cluster");
+    assert!(!c.out().exists());
+    // A malformed id is refused before anything is read.
+    for bad in ["453BB4AEA2088BB5", "453bb4aea2088bb", "not-hex-at-all!!"] {
+        refused(&c.dealer("namespace.export.bin", &fp, &[SWAP, "--cluster-id", bad]), "--cluster-id");
+    }
+    // A well-formed id that is not the cosigners' pin.
+    refused(&c.dealer("namespace.export.bin", &fp, &[SWAP, "--cluster-id", "0000000000000000"]), "cluster");
+    assert!(!c.out().exists());
+
+    // The pin: old- and new-CA leaves both verify, and every bundle opens on its node.
+    ok(&c.dealer("namespace.export.bin", &fp, &[SWAP, "--cluster-id", &pinned]));
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(c.out().join("dealer-record.json")).unwrap()).unwrap();
+    assert_eq!(record["cluster_id"], pinned.as_str());
+    for node in 1..=3u16 {
+        let b = c.bundle(node);
+        assert_eq!(b.cluster_id, pinned);
+        b.open(&c.state(node)).unwrap();
+    }
+
+    // A request certified by neither CA of the bundle is still refused under the pin.
+    let c = Ceremony::rotated();
+    let pinned = c.read(0).cluster_id;
+    let mut r = c.read(1);
+    TestPki::new().signer("cosigner2").sign(&mut r).unwrap();
+    c.write(1, &r);
+    let input = vectors().join("namespace.export.bin");
+    let out = c
+        .cmd(&input, &fp, KEY, Some(&c.sas_of_files()))
+        .args([SWAP, "--cluster-id", &pinned])
+        .output()
+        .unwrap();
+    refused(&out, "not certified by any");
 }

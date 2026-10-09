@@ -7,6 +7,13 @@
 //! trust anchor. The server requires a client cert (`client_ca_root`) — i.e. real mTLS, not
 //! server-only TLS — so a peer or client without a cluster-signed cert cannot even open a channel,
 //! let alone request a signature.
+//!
+//! The CA file may hold **several** CA certificates: tonic's `Certificate::from_pem` loads every
+//! certificate in the PEM as a trust anchor, for both the client (`ca_certificate`) and the server
+//! (`client_ca_root`) side. That is what makes a zero-downtime CA rotation possible
+//! (docs/ca-rotation.md): every node trusts the bundle old+new while leaves are swapped, then the
+//! old CA is dropped (`tests/tls_rotation.rs`). Changing the file's bytes changes the CA-derived
+//! cluster id, so pin `cluster_id` in the config before the first change.
 
 use tonic::transport::{Certificate, ClientTlsConfig, Identity, ServerTlsConfig};
 

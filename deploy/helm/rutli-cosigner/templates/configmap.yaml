@@ -30,6 +30,17 @@ data:
      The cosigner refuses to start on an unreachable write quorum; fail at template time instead so
      the operator sees it here rather than as a CrashLoopBackOff. Sealing is always configured
      below, which is the other precondition. */}}
+{{- /* Cluster id pin (docs/ca-rotation.md): must have the derived shape, or nodes would bind envelopes
+     to different ids. A bare all-digit value would reach here as a number (YAML), not a string. */}}
+{{- $clusterId := .Values.clusterId | default "" }}
+{{- if $clusterId }}
+  {{- if not (kindIs "string" $clusterId) }}
+    {{- fail (printf "clusterId must be a string — quote it, or use --set-string clusterId=<id> (got %v)" $clusterId) }}
+  {{- end }}
+  {{- if not (regexMatch "^[0-9a-f]{16}$" $clusterId) }}
+    {{- fail (printf "clusterId %q must be exactly 16 lowercase hex characters — the id derived from the current CA: shasum -a 256 ca.crt | cut -c1-16" $clusterId) }}
+  {{- end }}
+{{- end }}
 {{- $hosted := .Values.hostedKeys }}
 {{- if $hosted.enabled }}
   {{- $q := int $hosted.writeQuorum }}
@@ -42,6 +53,9 @@ data:
   cosigner-{{ $id }}.json: |
     {
       "identifier": {{ $id }},
+      {{- if $clusterId }}
+      "cluster_id": {{ $clusterId | quote }},
+      {{- end }}
       "listen": "0.0.0.0:{{ $port }}",
       {{- if $.Values.metrics.enabled }}
       "metrics_listen": "0.0.0.0:{{ $metricsPort }}",

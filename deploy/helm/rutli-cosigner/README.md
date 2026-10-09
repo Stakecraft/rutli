@@ -49,6 +49,7 @@ Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org A
 | `tls.layout` | `perNode` | `perNode`: `tls.caSecretName` (`rutli-cosigner-ca`, key `ca.crt`) + `tls.perNodeSecretPrefix<id>` (`rutli-cosigner-tls-1..N`, `tls.crt`/`tls.key`). `shared`: the legacy single `tlsSecretName`. Either way each cosigner container sees only its own key (below) |
 | `sealSecretName` | `rutli-seal` | Pre-created |
 | `signerAllowlist` | `[driver]` | Required under TLS |
+| `clusterId` | `""` | Cluster id pin (16 lowercase hex). Empty = derived from `ca.crt`'s bytes. Set it to the current derived id before changing `ca.crt` — see "Rotating the cluster CA" |
 | `operatorAllowlist` | `[]` | Operator role for the split ceremony's `verify-key` (KeyStatus + CeremonySignTest only), e.g. `[operator]` |
 | `hostedKeys.enabled` | `false` | Cluster-hosted RSA/AES keys — replicated whole keys, not threshold shares |
 | `backup.enabled` | `false` | Nightly `backup` via `kubectl exec` inside each cosigner; needs `backup.ship` |
@@ -67,6 +68,15 @@ in the namespace, root on a cosigner's node, or the right to create pods mountin
 every node's key — restrict them accordingly. Certificates are read at startup: restart the pods
 after rotating a Secret. The operator cert used by the split ceremony's `verify-key` is never part
 of this release (`deploy/k8s/job-verify-key.example.yaml`).
+
+### Rotating the cluster CA
+
+`ca.crt` may hold several CA certificates; every cosigner trusts all of them. A zero-downtime
+rotation runs a bundle of the old and the new CA during the overlap, swaps each node's leaf, then
+drops the old CA — [`docs/ca-rotation.md`](../../../docs/ca-rotation.md). Because the default
+cluster id is a hash of `ca.crt`'s bytes, first pin it to the current value
+(`--set-string clusterId=$(shasum -a 256 certs/ca.crt | cut -c1-16)`) and confirm every pod logs
+`cluster id <id> (pinned in config)`; an image without `cluster_id` support ignores the value.
 
 ### Migrating from the shared TLS Secret (≤ 0.3.x installs, e.g. the DevNet soak)
 
