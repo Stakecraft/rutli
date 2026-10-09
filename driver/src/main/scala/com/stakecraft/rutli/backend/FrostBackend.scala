@@ -11,6 +11,7 @@ import com.stakecraft.rutli.grpc.{
   DecryptRequest,
   DeleteKeyRequest,
   DkgRequest,
+  EcdhDeriveRequest,
   GenerateKeyRequest,
   GroupKeyRequest,
   HealthRequest,
@@ -27,6 +28,7 @@ import org.slf4j.Logger
 
 import java.io.File
 import java.security.KeyFactory
+import java.security.interfaces.ECPublicKey
 import java.security.spec.X509EncodedKeySpec
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
@@ -39,6 +41,9 @@ import scala.concurrent.{ExecutionContext, Future, blocking}
   * cluster (threshold signing, no node ever holds the whole key). Every other operation — ECDSA
   * signing, RSA/ECIES decryption, symmetric crypto — is delegated to a co-located [[KmsBackend]]
   * (the HSM in production), because threshold-izing those is out of scope (see docs/architecture.md).
+  * With `hosted-keys = true` the cluster also serves the encryption and symmetric keys as replicated
+  * whole keys (docs/hosted-keys.md): RSA-OAEP decryption entirely, ECIES as the ECDH only, completed
+  * here by [[CantonEcies]].
   *
   * The driver thus presents a single KMS to Canton while, underneath, the highest-value key lives
   * in MPC and the rest live in the HSM.
@@ -240,19 +245,24 @@ class FrostBackend(
 
   private def hostsRsa: Boolean = clusterSpecs.contains(RsaSpec)
   private def hostsAes: Boolean = clusterSpecs.contains(AesSpec)
+  private def hostsEc: Boolean = clusterSpecs.contains(EcSpec)
 
   // Advertise Ed25519 (threshold-signed by the cluster) plus, when hosted keys are on, the
   // encryption specs the cluster serves — and whatever the delegate still supports on top.
+  // EcP256/ECIES appears only when the cluster itself reports `ec-p256-ecies`: never from the
+  // fallback for an older or unreachable cluster, which could not serve EcdhDerive.
   override def supportedSigningKeySpecs: Set[SigningKeySpec] =
     delegate.supportedSigningKeySpecs + SigningKeySpec.EcCurve25519
   override def supportedSigningAlgoSpecs: Set[SigningAlgoSpec] =
     delegate.supportedSigningAlgoSpecs + SigningAlgoSpec.Ed25519
   override def supportedEncryptionKeySpecs: Set[EncryptionKeySpec] =
     delegate.supportedEncryptionKeySpecs ++
-      (if (hostsRsa) Set(EncryptionKeySpec.Rsa2048) else Set.empty)
+      (if (hostsRsa) Set(EncryptionKeySpec.Rsa2048) else Set.empty) ++
+      (if (hostsEc) Set(EncryptionKeySpec.EcP256) else Set.empty)
   override def supportedEncryptionAlgoSpecs: Set[EncryptionAlgoSpec] =
     delegate.supportedEncryptionAlgoSpecs ++
-      (if (hostsRsa) Set(EncryptionAlgoSpec.RsaEsOaepSha256) else Set.empty)
+      (if (hostsRsa) Set(EncryptionAlgoSpec.RsaEsOaepSha256) else Set.empty) ++
+      (if (hostsEc) Set(EncryptionAlgoSpec.EciesHkdfHmacSha256Aes128Cbc) else Set.empty)
 
   override def generateSigningKeyPair(
       spec: SigningKeySpec,
@@ -274,10 +284,16 @@ class FrostBackend(
       spec: EncryptionKeySpec,
       keyName: Option[String],
   ): Future[String] = spec match {
+    // The spec is Canton's choice (`crypto.encryption.keys.default`, RSA-2048 for a KMS unless
+    // configured otherwise); the driver mints exactly what was asked for.
     case EncryptionKeySpec.Rsa2048 if hostsRsa =>
       val keyId = ids.hosted("enc", keyName)
       logger.info(s"FROST: generating cluster-hosted $RsaSpec key $keyId")
       generateHosted(keyId, RsaSpec)
+    case EncryptionKeySpec.EcP256 if hostsEc =>
+      val keyId = ids.hosted("enc", keyName)
+      logger.info(s"FROST: generating cluster-hosted $EcSpec key $keyId")
+      generateHosted(keyId, EcSpec)
     case other => delegate.generateEncryptionKeyPair(other, keyName)
   }
 
@@ -325,19 +341,39 @@ class FrostBackend(
       keyId: String,
       algo: EncryptionAlgoSpec,
   ): Future[Array[Byte]] =
-    if (ids.isHosted(keyId))
-      precondition(
-        algo == EncryptionAlgoSpec.RsaEsOaepSha256,
-        s"cluster-hosted encryption keys decrypt RSAES-OAEP-SHA256 only, got $algo",
-      ) {
+    if (ids.isHosted(keyId)) algo match {
+      case EncryptionAlgoSpec.RsaEsOaepSha256 =>
         val req = DecryptRequest
           .newBuilder()
           .setKeyId(keyId)
           .setCiphertext(ByteString.copyFrom(ciphertext))
           .build()
         clusterCall("decrypt", isLeaderSick)(_.decrypt(req)).map(_.getPlaintext.toByteArray)
-      }
+      case EncryptionAlgoSpec.EciesHkdfHmacSha256Aes128Cbc =>
+        decryptEcies(ciphertext, keyId)
+    }
     else delegate.decryptAsymmetric(ciphertext, keyId, algo)
+
+  /** ECIES for a hosted P-256 key: the cluster does the ECDH, BouncyCastle's `IESEngine` the rest
+    * ([[CantonEcies]]). The blob is checked against Canton's exact shape before anything is sent, so
+    * a malformed ciphertext costs no cluster call and no decryption budget. `EcdhDerive` is
+    * re-issuable like `Decrypt` (it is a pure function of key and point), hence [[isLeaderSick]]. */
+  private def decryptEcies(ciphertext: Array[Byte], keyId: String): Future[Array[Byte]] = {
+    scala.util.Try(CantonEcies.parse(ciphertext)) match {
+      case scala.util.Failure(e) => Future.failed(e)
+      case scala.util.Success(parsed) =>
+        val req = EcdhDeriveRequest
+          .newBuilder()
+          .setKeyId(keyId)
+          .setPeerPoint(ByteString.copyFrom(parsed.ephemeralPoint))
+          .build()
+        clusterCall("ecdhDerive", isLeaderSick)(_.ecdhDerive(req)).map { reply =>
+          val z = reply.getSharedSecret.toByteArray
+          try CantonEcies.decrypt(parsed, z)
+          finally java.util.Arrays.fill(z, 0.toByte)
+        }
+    }
+  }
 
   override def encryptSymmetric(data: Array[Byte], keyId: String): Future[Array[Byte]] =
     if (ids.isHosted(keyId)) {
@@ -366,9 +402,10 @@ class FrostBackend(
       }
     } else if (ids.isHosted(keyId)) {
       val req = PublicKeyRequest.newBuilder().setKeyId(keyId).build()
-      // The cluster returns X.509 SubjectPublicKeyInfo DER — exactly what Canton's PublicKey wants.
+      // The cluster returns X.509 SubjectPublicKeyInfo DER — exactly what Canton's PublicKey wants —
+      // and the spec it holds the key under, which decides what Canton is told it is.
       clusterCall("publicKey", isLeaderSick)(_.publicKey(req))
-        .map(reply => PublicKey(reply.getPublicKeyDer.toByteArray, EncryptionKeySpec.Rsa2048))
+        .map(reply => hostedPublicKey(keyId, reply.getSpec, reply.getPublicKeyDer.toByteArray))
     } else delegate.getPublicKey(keyId)
 
   override def keyExistsAndIsActive(keyId: String): Future[Unit] =
@@ -429,6 +466,34 @@ object FrostBackend {
 
   private val RsaSpec = "rsa-2048-oaep-sha256"
   private val AesSpec = "aes-256-gcm"
+  private val EcSpec = "ec-p256-ecies"
+
+  /** The P-256 group order, to recognise the curve of an EC public key without trusting names. */
+  private val P256Order = new java.math.BigInteger(
+    "ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551",
+    16,
+  )
+
+  /** Canton's view of a hosted public key: the spec comes from what the cluster holds the key as,
+    * never from a guess. An EC key is checked to be a P-256 SPKI before Canton sees it; Canton
+    * validates the key again itself (`KmsEncryptionPublicKey.create`). A spec the driver does not
+    * know (a symmetric key, a newer cluster's type) is refused rather than mislabelled. */
+  private[backend] def hostedPublicKey(keyId: String, spec: String, spki: Array[Byte]): PublicKey =
+    spec match {
+      case RsaSpec => PublicKey(spki, EncryptionKeySpec.Rsa2048)
+      case EcSpec =>
+        val ok =
+          try
+            KeyFactory.getInstance("EC").generatePublic(new X509EncodedKeySpec(spki)) match {
+              case k: ECPublicKey => k.getParams.getOrder == P256Order && k.getParams.getCofactor == 1
+              case _              => false
+            }
+          catch { case _: java.security.GeneralSecurityException => false }
+        if (!ok) throw new IllegalStateException(s"cluster returned a public key for $keyId that is not EC P-256")
+        PublicKey(spki, EncryptionKeySpec.EcP256)
+      case other =>
+        throw new IllegalStateException(s"hosted key $keyId has spec '$other', which has no Canton public key")
+    }
 
   /** Assumed cluster capability when the Capabilities RPC is unavailable (older cosigner, or the
     * cluster was unreachable at startup) but the operator configured hosted keys. */
