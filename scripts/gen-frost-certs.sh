@@ -17,7 +17,9 @@
 #                       cert, from the escrowed CA.
 #   RUTLI_CA_CN=<cn>    Common Name of a NEW CA (default `rutli-frost-cluster-ca`). Give a rotated
 #                       CA a distinct one (e.g. `rutli-frost-cluster-ca-2026-10`) so the old and the
-#                       new CA can be told apart in a trust bundle (docs/ca-rotation.md).
+#                       new CA can be told apart in a trust bundle (docs/ca-rotation.md). Letters,
+#                       digits, `.`, `_` and `-` only, at most 64 (it goes into `-subj`, where `/`,
+#                       `+` or `=` would add name attributes).
 #   RUTLI_CA_DAYS=<n>   Validity of a NEW CA in days (default 825). Leaves are always 825 days.
 #   RUTLI_CERTS="..."   Space-separated subset of the certs to issue, among `cosigner1..N driver
 #                       operator` (default: all of them).
@@ -35,9 +37,14 @@
 # At the end the script prints the SHA-256 of ca.crt and the cluster id a cosigner derives from it
 # when `cluster_id` is not pinned in its config (the first 16 hex characters).
 #
+# Every file is created owner-only (umask 077), so no private key is ever readable by others, not
+# even between openssl writing it and the chmod; the certificates are made world-readable at the
+# end (they are public).
+#
 # Dev tooling. Production should issue these from the operator's own PKI / cert-manager, ideally
 # with per-node keys generated in the node's enclave/HSM and short-lived, rotated certs.
 set -euo pipefail
+umask 077
 
 N="${1:-3}"
 OUT="${2:-deploy/frost/certs}"
@@ -54,6 +61,8 @@ die() {
 
 case "$N" in '' | *[!0-9]* | 0) die "N must be a positive integer, got '$N'" ;; esac
 case "$CA_DAYS" in '' | *[!0-9]* | 0) die "RUTLI_CA_DAYS must be a positive integer, got '$CA_DAYS'" ;; esac
+[[ "$CA_CN" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] \
+  || die "RUTLI_CA_CN must be 1-64 of [A-Za-z0-9._-], starting with a letter or digit, got '$CA_CN'"
 
 # Which certs to issue. Validated before anything is written.
 ALL_CERTS="$(for i in $(seq 1 "$N"); do printf 'cosigner%s ' "$i"; done)driver operator"
@@ -168,6 +177,8 @@ if wanted operator; then
 fi
 
 rm -f ca.srl
+# Certificates are public; keys stay 0600 (umask 077 above).
+chmod 644 ./*.crt
 
 # The container images run the cosigner as uid 10001. On Linux, a bind-mounted cert directory
 # keeps its host ownership, so these 0600 files — owned by whoever ran this script — are
@@ -175,7 +186,8 @@ rm -f ca.srl
 # this only bites on Linux.) Set RUTLI_CERT_UID to hand the keys to the container user; needs
 # root, so run the script under sudo, or chown afterwards.
 if [ -n "${RUTLI_CERT_UID:-}" ]; then
-  if chown "$RUTLI_CERT_UID" ./*.key ./*.crt 2>/dev/null; then
+  # The directory too: created 0700 under umask 077, it must be traversable by the container user.
+  if chown "$RUTLI_CERT_UID" . ./*.key ./*.crt 2>/dev/null; then
     echo "Chowned certs to uid $RUTLI_CERT_UID (container user)"
   else
     echo "WARNING: could not chown certs to uid $RUTLI_CERT_UID — run as root, or the cosigner" >&2

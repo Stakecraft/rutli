@@ -28,12 +28,21 @@ until they expire.
 
 Two different things read `tls.ca_cert`.
 
-**The TLS trust anchor.** The cosigners use rustls through tonic, the driver uses Netty. Both load
-**every** certificate in the file (tonic `add_certs_from_pem` for both `ca_certificate` and
-`client_ca_root`; Netty `trustManager(File)`). A file holding two concatenated CAs therefore trusts
-both. This is what makes a dual-CA overlap possible, and it needs no code change.
-`FrostTlsTrustBundleSpec` (driver) and `frost/cosigner/tests/tls_rotation.rs` (cosigner) pin the
-behaviour.
+**The TLS trust anchor.** The cosigners use rustls through tonic, the driver uses Netty. Every
+certificate in the file is a trust anchor for both, so a file holding two concatenated CAs trusts
+both. This is what makes a dual-CA overlap possible. `FrostTlsTrustBundleSpec` (driver) and
+`frost/cosigner/tests/tls_rotation.rs` (cosigner) pin the behaviour.
+
+Because every certificate in the file is an anchor, the file must hold **only valid CA
+certificates**: a cosigner leaf in it would let whoever holds that leaf's key mint any identity.
+The cosigners (`trust::load_trust_anchors`), `rutli-dealer` and the driver (`FrostTrustFile`)
+refuse a file holding anything else (a leaf, a private key, an expired or not-yet-valid CA) and
+log each anchor's subject, notAfter and SHA-256 (`trust anchor` in the cosigner log, `FROST: trust
+anchor` in the participant log). A cosigner fed a bad file never becomes Ready, so `roll_one`
+times out and the phase STOPs with the other two pods still serving; a participant fed one fails
+driver init. Build the bundle exactly as Phase 1 says. If the old CA has **already expired**, the
+bundle would be refused: set `tls.allowExpiredCa=true` (chart) and `allow-expired-ca = true`
+(driver `frost.tls`) for the rotation, and remove both at the close-out.
 
 **The cluster id.** Without a pin, `cluster_id = hex(sha256(ca.crt file bytes)[..8])`
 (`wrap::cluster_id_from_ca`, `Config::cluster_id`). Adding a second CA to the file changes the id.
@@ -60,6 +69,13 @@ change it on a live cluster.
 > so they accept the pin and derive the id anyway. Check the startup line
 > `cluster id <id> (pinned in config)` on **every** pod before any CA byte changes (§5 Phase 0); the
 > per-pod gate does exactly that.
+
+From the release that adds the pin on, each cosigner also records the id it runs under in
+`data_dir/cluster-id` at its first start and **refuses to start** under a different one
+(`cluster id mismatch` in the pod log). Phase 0 passes this check: the pin equals the derived value,
+so the id does not change. It is what catches a later `helm upgrade` that dropped `clusterId`
+(an upgrade without `-f <saved values>` / `--reuse-values` resets it): the rolled pod never becomes
+Ready instead of leaving the cluster. Put the value back and roll that pod again.
 
 The dealer must be told the pinned id after a rotation: `rutli-dealer split-key --ca-cert <current
 ca.crt> --cluster-id 453bb4aea2088bb5 …`. Without `--cluster-id` it derives the id from the file,
@@ -121,10 +137,19 @@ mesh-check wait) plus Phase 0 and one participant restart.
    (`deploy/soak/soak-check.sh` or the Grafana dashboard), all three cosigners Ready.
 5. **Inventory of every holder of a cluster certificate.** The soak has one: the soak
    participant's driver (PVC `rutli-kms-bundle` in `stakecraft-devnet-rutli-01`). Check for others:
-   a B4 participant, a `verify-key` Job or Secret (`rutli-operator-tls`), laptops, CI. Every
-   **client** must get Phase B treatment (trust old + new, new leaf) **before Phase C**. If it
+   a B4 participant, laptops, CI, and every client config this repo ships:
+   - `deploy/k8s/cronjob-refresh.yaml`: Secret `rutli-driver-tls` (driver leaf) + CA from
+     `rutli-cosigner-ca`;
+   - `deploy/k8s/job-verify-key.example.yaml`: Secret `rutli-operator-tls` (operator leaf) + CA
+     from `rutli-cosigner-ca`;
+   - `deploy/soak/validator/compose-rutli-kms.yaml`: a validator's driver, `./certs/{ca.crt,
+     driver.crt,driver.key}` next to the compose file.
+
+   Every **client** must get Phase B treatment (trust old + new, new leaf) **before Phase C**. If it
    still holds an old leaf at Phase D, it is locked out. If it trusts only the old CA at Phase C, it
-   rejects the new cosigner leaves.
+   rejects the new cosigner leaves. The two `deploy/k8s` clients read `ca.crt` from
+   `rutli-cosigner-ca`, so `put_ca` moves their trust with the cosigners' (on `perNode`); only
+   their leaf Secrets need a new leaf, between Phase A and Phase D.
 6. **The TLS layout.** The soak runs `shared` (one Secret `rutli-cosigner-tls`). After B4 Step A it
    runs `perNode` (`rutli-cosigner-ca` + `rutli-cosigner-tls-{1,2,3}`). Set `LAYOUT` below
    accordingly, and do not change it during the rotation. The **live** soak StatefulSet was
@@ -185,8 +210,10 @@ roll_one() { # roll_one <ordinal>
 # The checks after each pod (see "Per-pod gate" below). Non-zero exit on any STOP.
 gate() { # gate <ordinal> <expected sha256 of ca.crt>
   local o=$1 fail=0
-  kc -n $NS logs rutli-cosigner-$o -c cosigner | grep -m1 'cluster id .* (pinned in config)' \
-    || { echo "STOP: pod $o is not pinned"; fail=1; }
+  # Exactly $PIN, pinned. `grep -F`: the whole line, not just "some id, pinned".
+  kc -n $NS logs rutli-cosigner-$o -c cosigner | grep -F "cluster id $PIN (pinned in config)" \
+    || { echo "STOP: pod $o does not run pinned to $PIN"; fail=1; }
+  kc -n $NS logs rutli-cosigner-$o -c cosigner | grep 'trust anchor'      # what ca.crt holds, one line per CA
   kc -n $NS exec rutli-cosigner-$o -c cosigner -- sha256sum /certs/ca.crt | grep -q "^$2" \
     && echo "pod $o ca.crt ok" || { echo "STOP: pod $o ca.crt is not $2"; fail=1; }
   echo "waiting 6 min: one anti-entropy sweep from every node to every peer"; sleep 360
@@ -215,13 +242,19 @@ STOP. Then check that the loop ended on `gate 0: PASS` before going on.
 4. Since the pod became Ready, through one anti-entropy interval (300 s on the soak; a sweep
    sleeps first, then runs), no TLS or mesh errors on **any** pod. With hosted keys on, every node
    lists keys on every peer each sweep and logs `anti-entropy: cannot list keys on peer` when that
-   fails, so one clean interval covers every directed link of the mesh.
+   fails, so one clean interval covers every directed link of the mesh. **Without hosted keys this
+   step proves nothing:** no sweep runs, and the mesh only carries signing rounds, between whichever
+   nodes the leader picks. The soak has hosted keys on; on an install without them, lean on step 5
+   and treat the 6-minute wait as unproven.
 5. Signing is unaffected: on the Grafana soak dashboard, `rutli_sign_requests_total{result="error"}`
    stays flat, `rutli_sign_round1_skips_total` stays flat, and ok-signs keep coming. The same
    checks run in `deploy/soak/soak-check.sh`.
 
 **STOP** on any failure: do not roll the next pod. Two nodes are still signing. Restore the previous
-phase's material (§7) and roll the failed pod again.
+phase's material (§7) and roll the failed pod again. A pod that never becomes Ready says why in
+`kc -n $NS logs rutli-cosigner-<o> -c cosigner`: `cluster id mismatch` (the pin is missing or
+different: fix `clusterId`), or `tls.ca_cert …` (the trust file holds something other than valid
+CA certificates).
 
 ### Laptop `verify-key` (from Phase A on)
 
@@ -284,10 +317,15 @@ helm --kube-context $KUBECONTEXT -n $NS upgrade rutli deploy/helm/rutli-cosigner
   --set tls.layout=$LAYOUT                                   # + the release's image values
 kc -n $NS rollout status sts/rutli-cosigner --timeout=20m
 kc -n $NS get pods -l app.kubernetes.io/name=rutli-cosigner      # AGE: all three restarted by the upgrade?
-for o in 0 1 2; do kc -n $NS logs rutli-cosigner-$o -c cosigner | grep -m1 'cluster id'; done
+for o in 0 1 2; do echo "pod $o:"; kc -n $NS logs rutli-cosigner-$o -c cosigner | grep 'cluster id'; done
+for o in 0 1 2; do kc -n $NS logs rutli-cosigner-$o -c cosigner | grep -qF "cluster id $PIN (pinned in config)" \
+  && echo "pod $o pinned to $PIN" || echo "STOP: pod $o is not pinned to $PIN"; done
 ```
 
-Expect `cluster id 453bb4aea2088bb5 (pinned in config)` three times, with no "differs" line yet.
+Expect `cluster id 453bb4aea2088bb5 (pinned in config)` on every pod, with no "differs" line yet,
+and on the first start of the new image `cluster id 453bb4aea2088bb5 recorded in
+/data/cluster-id`. All of each pod's `cluster id` lines are printed (no `-m1`): a "differs" or
+"recorded" line must not hide behind the first match.
 During this roll the pinned (new) pods and the derived (old) pods compute the same id, so nothing
 can mismatch.
 
@@ -308,37 +346,59 @@ the pin logs `(derived from tls.ca_cert)`. Do **not** go on to Phase A until all
 
 ### Phase 1: new PKI, offline [no cluster change]
 
+The driver leaf is **not** issued here. It can sign with the namespace key (CN `driver`, Signer
+API) as soon as Phase A trusts the new CA, and Phase B may be days away, so it is issued from
+escrow in Phase B and shredded minutes later.
+
 ```sh
 cd <rutli checkout at the release tag>
-RUTLI_CA_CN=rutli-frost-cluster-ca-2026-10 RUTLI_CA_DAYS=3650 scripts/gen-frost-certs.sh 3 $R/new
-openssl verify -CAfile $R/new/ca.crt $R/new/{cosigner1,cosigner2,cosigner3,driver,operator}.crt
-for c in cosigner1 cosigner2 cosigner3 driver operator; do
+RUTLI_CA_CN=rutli-frost-cluster-ca-2026-10 RUTLI_CA_DAYS=3650 \
+  RUTLI_CERTS="cosigner1 cosigner2 cosigner3 operator" scripts/gen-frost-certs.sh 3 $R/new
+openssl verify -CAfile $R/new/ca.crt $R/new/{cosigner1,cosigner2,cosigner3,operator}.crt
+for c in cosigner1 cosigner2 cosigner3 operator; do
   openssl x509 -in $R/new/$c.crt -noout -subject -ext subjectAltName,extendedKeyUsage; done
 ```
 
-Expect five `OK`. The CNs are `cosigner1..3`, `driver` and `operator`. The cosigner SANs match the
+Expect four `OK`. The CNs are `cosigner1..3` and `operator`. The cosigner SANs match the
 live ones (`DNS:rutli-cosigner, DNS:cosignerN, DNS:cosigner-(N-1), DNS:localhost, IP:127.0.0.1`).
 Compare with
 `kc -n $NS get secret rutli-cosigner-tls -o jsonpath='{.data.cosigner1\.crt}' | base64 -d | openssl x509 -noout -ext subjectAltName`.
 The new CA has a **different CN** from the old one, so the two are easy to tell apart in the bundle.
 
-**Escrow the new CA key now**, before it touches any cluster:
+**Escrow the new CA key now**, before it touches any cluster, then **shred the plaintext**:
 
 ```sh
-openssl pkey -in $R/new/ca.key -aes256 -out $R/new/ca.key.enc        # strong passphrase, stored separately
-# copy ca.key.enc + ca.crt to the two escrow locations (4.3), then prove a restore works:
+# PKCS#8 v2, AES-256-CBC, PBKDF2 with 600 000 iterations (a bare `pkey -aes256` is a far weaker KDF).
+# Strong passphrase, stored separately from the file.
+openssl pkcs8 -topk8 -v2 aes-256-cbc -iter 600000 -in $R/new/ca.key -out $R/new/ca.key.enc
+# copy ca.key.enc + ca.crt to the two escrow locations (4.3), then prove a restore works from EACH:
 openssl pkey -in <escrow copy>/ca.key.enc -pubout | diff - <(openssl x509 -in $R/new/ca.crt -pubkey -noout) && echo ESCROW-OK
+shred -u $R/new/ca.key 2>/dev/null || rm -P $R/new/ca.key; ls $R/new/ca.key 2>/dev/null && echo "STOP: ca.key still there"
 ```
 
 Record in the soak log: new CA subject, `shasum -a 256 $R/new/ca.crt`, notAfter, the escrow
-locations, and `ESCROW-OK`.
+locations, `ESCROW-OK` for each, and the shred. From here on the CA key exists only encrypted.
+Whenever a later step needs it (the driver leaf in Phase B, a re-issue for rollback, a later
+operator cert), restore it into a temporary 0700 directory for that one command and shred it
+right after:
+
+```sh
+ca_restore() { # ca_restore <dir> — decrypt the escrowed CA key next to its certificate
+  mkdir -m 700 "$1" && cp $R/new/ca.crt "$1/" \
+    && ( umask 077; openssl pkcs8 -in <escrow copy>/ca.key.enc -out "$1/ca.key" )
+}
+ca_shred() { shred -u "$1/ca.key" 2>/dev/null || rm -P "$1/ca.key"; rm -rf "$1"; }
+```
 
 Build the trust bundle, old CA first. `printf` guarantees a newline between the two PEM blocks
 even if the old file lacks a trailing one:
 
 ```sh
 printf '%s\n%s\n' "$(cat $R/old/ca.crt)" "$(cat $R/new/ca.crt)" > $R/bundle.crt
-grep -c 'BEGIN CERTIFICATE' $R/bundle.crt                      # 2
+grep -c 'BEGIN' $R/bundle.crt                                  # 2: two blocks, nothing else
+openssl crl2pkcs7 -nocrl -certfile $R/bundle.crt | openssl pkcs7 -print_certs -noout   # the two CA subjects
+for f in $R/old/ca.crt $R/new/ca.crt; do                       # each a CA, valid now (the nodes refuse anything else)
+  openssl x509 -in $f -noout -subject -enddate -checkend 0 -ext basicConstraints; done
 export SHA_OLD=$(shasum -a 256 $R/old/ca.crt | cut -d' ' -f1) \
        SHA_BUNDLE=$(shasum -a 256 $R/bundle.crt | cut -d' ' -f1) \
        SHA_NEW=$(shasum -a 256 $R/new/ca.crt | cut -d' ' -f1)
@@ -365,18 +425,27 @@ put_ca $R/bundle.crt
 for o in 2 1 0; do roll_one $o && gate $o $SHA_BUNDLE || break; done
 ```
 
-Then the end-to-end check with **new-CA** client certificates. This is the first moment a new-CA
+Then the end-to-end check with a **new-CA** client certificate. This is the first moment a new-CA
 certificate is accepted anywhere:
 
 ```sh
 client_cfg op-bundle $R/bundle.crt $R/new/operator.crt $R/new/operator.key && vk op-bundle   # OK
-client_cfg drv-bundle $R/bundle.crt $R/new/driver.crt $R/new/driver.key && vk drv-bundle     # OK: the driver's new leaf is accepted by all 3
 ```
 
-`drv-bundle` exercises the exact certificate set Phase B gives the driver. rustls stands in here for
-Netty, whose multi-CA trust is covered by `FrostTlsTrustBundleSpec`.
-
 ### Phase B: driver bundle + new driver leaf (participant restart: planned soak event) [MUTATES]
+
+First issue the driver leaf from escrow and check it against the live cluster. It exists in
+plaintext only until the end of this phase's copy:
+
+```sh
+ca_restore $R/ca-tmp && RUTLI_CA_DIR=$R/ca-tmp RUTLI_CERTS=driver <rutli checkout>/scripts/gen-frost-certs.sh 3 $R/new
+ca_shred $R/ca-tmp
+openssl verify -CAfile $R/new/ca.crt $R/new/driver.crt                                       # OK
+client_cfg drv-bundle $R/bundle.crt $R/new/driver.crt $R/new/driver.key && vk drv-bundle     # OK: accepted by all 3
+```
+
+`drv-bundle` exercises the exact certificate set this phase gives the driver. rustls stands in here
+for Netty, whose multi-CA trust is covered by `FrostTlsTrustBundleSpec`.
 
 The participant (`deploy/participant`, `strategy: Recreate`, node `agent-cx33-fsn-vkh`) mounts PVC
 `rutli-kms-bundle`, subPath `certs`, at `/rutli-certs`. The driver reads `ca.crt`, `driver.crt` and
@@ -400,6 +469,15 @@ kc cp $R/new/driver.key  $PNS/rutli-kms-ca-rotate:/bundle/certs/driver.key.new
 kc -n $PNS exec rutli-kms-ca-rotate -- sh -c 'cd /bundle/certs && for f in ca.crt driver.crt driver.key; do cat $f.new > $f && rm $f.new; done &&
   ls -ln && sha256sum ca.crt driver.crt'                                                        # ca.crt = $SHA_BUNDLE; modes/owners unchanged
 kc -n $PNS delete pod rutli-kms-ca-rotate
+```
+
+Every other driver-certificate holder from the inventory (4.5) gets the same leaf now, e.g. the
+refresh CronJob's `rutli-driver-tls` (`kc -n $NS create secret tls rutli-driver-tls
+--cert=$R/new/driver.crt --key=$R/new/driver.key --dry-run=client -o yaml | kc apply -f -`). Then
+shred the plaintext key; a rollback or a later client re-issues one from escrow:
+
+```sh
+shred -u $R/new/driver.key 2>/dev/null || rm -P $R/new/driver.key; rm -rf $R/client/drv-bundle.json $R/client/data-drv-bundle
 ```
 
 The files are now in place for the **next** participant start. An unplanned restart in between is
@@ -446,9 +524,16 @@ refusal can only come from the cosigners no longer trusting the old CA:
 ```sh
 [ -s $R/old/driver.crt ] && [ -s $R/old/driver.key ] || echo "STOP: old driver leaf missing"
 client_cfg old-driver $R/bundle.crt $R/old/driver.crt $R/old/driver.key
-vk old-driver 2>&1 | tee $R/neg.txt; echo "exit $?"
-grep -Eci 'UnknownCA|unknown ca|BadCertificate|certificate|handshake|tls' $R/neg.txt   # ≥ 3 (all nodes): a TLS refusal, not a config error
+vk old-driver > $R/neg.txt 2>&1; rc=$?; cat $R/neg.txt     # no pipe: $rc is verify-key's own exit code
+[ $rc -ne 0 ] || echo "STOP: verify-key succeeded with an old-CA certificate"
+# One line per node, each naming the TLS alert; anything else (a config error, a timeout) is a STOP.
+[ "$(grep -E '^  node [0-9]+ ' $R/neg.txt | grep -Ec 'UnknownCA|unknown ca|BadCertificate')" = 3 ] \
+  && echo "negative control PASS" || echo "STOP: not 3 TLS refusals"
 ```
+
+`verify-key` prints the transport error behind each failure (`received fatal alert: UnknownCA`).
+A binary older than that prints only `transport error`, and this check STOPs; use the release's
+binary (4.2).
 
 On `shared`, the Secret still carries the old `driver.crt`/`driver.key`. The cosigners never used
 them. After confirming nothing else reads them (the NAAS `rutli-prereqs.sh` copied them once into
@@ -467,14 +552,19 @@ harmless only if the old key is truly gone; if it may be exposed, do E right aft
 
 ### Close-out
 
-- `shred -u`/`rm -P` `$R/old/*.key`, `$R/new/*.key` (the plaintext CA key included; the escrowed
-  `ca.key.enc` copies are now the only ones) and `$R/client`. On APFS/SSD this is not provable
-  erasure; record it like the B4 destruction list.
+- `shred -u`/`rm -P` `$R/old/*.key`, `$R/new/*.key` and `$R/client` (the CA key and the new
+  driver key were shredded in Phase 1 and Phase B; check they are gone). On APFS/SSD this is not
+  provable erasure; record it like the B4 destruction list.
+- Remove `tls.allowExpiredCa` / `allow-expired-ca` if the rotation needed them (§2).
 - Keep `operator.crt/.key` only where verify-key runs, or re-issue a short-lived one per use from
   escrow (`RUTLI_CA_DIR=<escrow restore dir> RUTLI_CERTS=operator scripts/gen-frost-certs.sh 3 <out>`).
 - Soak log: phases, timestamps, hashes, the participant restart, and gate results.
 - Calendar: the new leaves expire 825 days after issue. Renew 60 days ahead from escrow.
-- The pin stays. `clusterId` remains in the Helm values for the life of the cluster.
+- The pin stays. `clusterId` remains in the Helm values for the life of the cluster. Every later
+  `helm upgrade` must carry it: `helm get values rutli -o yaml > saved.yaml` and `-f saved.yaml`, or
+  `--reuse-values`. A plain `helm upgrade --set …` resets it; the pods then refuse to start
+  (`cluster id mismatch`) instead of leaving the cluster, and the rollout stalls at the first pod.
+  Never copy `clusterId` into another cluster's values.
 - The dealer from now on: `rutli-dealer split-key --ca-cert <new ca.crt, alone> --cluster-id 453bb4aea2088bb5 …`.
   Not the bundle: if the old key was exposed, the bundle would let old-CA-minted recipient
   requests verify, and only the SAS check would stand in the way.
@@ -501,7 +591,7 @@ back past Phase D. That is intended: the old CA cannot be re-trusted for leaves 
 | C | `put_leaf $i $R/old/cosigner$i.crt $R/old/cosigner$i.key` for i=1..3, then roll 2 1 0. | D undone (cosigners trust old + new) |
 | B | Helper pod: `for f in ca.crt driver.crt driver.key; do cat $f.pre-ca-rotation > $f; done` (after E, from `$R/old` via `kc cp`), then restart the participant. | C undone, or the driver would no longer trust the new leaves still in use |
 | A | `put_ca $R/old/ca.crt`, then roll 2 1 0 with `$SHA_OLD`. | B undone (the driver's new leaf needs the new CA trusted) |
-| 0 | `helm rollback rutli <rev>`. Safe at any time *only before A*. Once the CA file changed, an unpinned node derives a different id. | A undone |
+| 0 | `helm rollback rutli <rev>`, then `for o in 2 1 0; do roll_one $o \|\| break; done` and check each pod's `cluster id` line: `(derived from tls.ca_cert)` with `$PIN`, or no line on an image older than the pin (`gate` expects the pin, so not `gate` here). The pod template has no config checksum, so a rollback that changes only the ConfigMap restarts nothing by itself. Safe at any time *only before A*. Once the CA file changed, an unpinned node derives a different id, and a node with this release refuses to start under it (`cluster id mismatch`). | A undone |
 
 Single-pod failure mid-phase: put the previous phase's material back for the whole Secret, which
 is compatible with every pod still running, and roll the failed pod again. Do not continue the
@@ -520,12 +610,15 @@ windows, during the Phase A and Phase D rolls, in which nodes disagree on the id
 - after the rotation the id is the hash of the **new** `ca.crt`. Pass that file to every later
   `rutli-dealer --ca-cert`.
 
-The pin removes all of that for one config line, so prefer waiting for the release.
+The pin removes all of that for one config line, so prefer waiting for the release. (On a release
+that has the pin, an unpinned rotation is not even possible without
+`clusterIdChangeAllowed=true`: each node refuses to start under the changed derived id.)
 
 ## 9. Other installs
 
 - **Raw manifests** (`deploy/k8s`): add `"cluster_id": "<16 hex>"` to every `cosigner-N.json` in
-  `cosigner-config.yaml`. Secrets as in `secrets.example.yaml` (shared layout). Roll with
+  `cosigner-config.yaml` (and keep it there: each node records its id in `data_dir/cluster-id` and
+  refuses another). Secrets as in `secrets.example.yaml` (shared layout). Roll with
   `kubectl delete pod` as above.
 - **Docker Compose** (`deploy/frost`): the same config field. Restart one container at a time
   (`docker compose restart cosignerN`). The certs are bind-mounted, so replace the files in place.
