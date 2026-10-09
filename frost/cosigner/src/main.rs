@@ -291,7 +291,9 @@ async fn main() -> Result<()> {
         // cluster does and an envelope can never be replayed into a different deployment.
         let cluster_id = cfg.cluster_id()?;
         node = node.with_hosted_keys(master.as_bytes(), cluster_id)?;
-        tracing::info!("cluster-hosted keys enabled (RSA-2048 encryption + AES-256-GCM symmetric)");
+        tracing::info!(
+            "cluster-hosted keys enabled (RSA-2048 and EC P-256 encryption, AES-256-GCM symmetric)"
+        );
     }
     let node = Arc::new(node);
 
