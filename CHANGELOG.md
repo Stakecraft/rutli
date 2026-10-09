@@ -68,6 +68,11 @@ All notable changes to Rütli are documented here. Format loosely follows
   copy `clusterId` to another cluster (a new cluster leaves it empty, review L7) and to upgrade with
   saved values.
 
+### Fixed
+- `verify-key` printed an unreachable node as `Unknown: transport error`, dropping the reason. It now
+  prints the error chain, e.g. `connection error: received fatal alert: UnknownCA` for a certificate
+  the node does not trust — what the CA rotation's negative control checks for (review L2).
+
 ### Upgrade notes (breaking)
 - The first start of this release writes `data_dir/cluster-id` with the id the node already runs
   under; nothing else changes. From then on a cosigner whose effective cluster id changes refuses
