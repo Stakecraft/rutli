@@ -5,7 +5,96 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.4.0-rc.1] — 2026-10-09
+
+_Release candidate, pre-audit: for soak and review, not for production key custody._
+
 ### Added
+- **Split ceremony (roadmap B2): an existing Canton Ed25519 key, the namespace key in practice,
+  becomes a `t`-of-`n` FROST key in a Rütli cluster with the same public key and fingerprint**, so
+  the namespace and every party ID under it survive a migration. Runbook, role table, gates, failure
+  table and record templates: `docs/split-ceremony.md`. A key born by DKG never exists whole; a key
+  brought in this way did, so the runbook carries a location inventory and a destruction record,
+  and says plainly that the ceremony cannot un-expose the past. For a new node, use DKG.
+  - **`rutli-dealer split-key`** — a separate offline binary, not in the cosigner image. Reads the
+    key file (`ExportKeyPair` / `keys.secret.download` output, plain or password-protected, a stored
+    database row via `--in` or `--stored-hex`, or PKCS#8), requires `--expect-fingerprint`, and
+    refuses a different fingerprint, a non-Ed25519 key, or (without `--any-usage`) a key without
+    `namespace` usage. Before writing anything it proves that the group key equals the key's public
+    key byte for byte, that every share passes VSS, and that every `t`-subset reconstructs the key
+    and produces a signature `verify_strict` accepts. Hardening: refuses to run with swap enabled
+    (`--allow-swap` for tests) or behind a core handler (piped `core_pattern`, `suid_dumpable = 2`),
+    locks memory, zeroizes the key and refuses to overwrite an output file. Writes one `0600` share
+    bundle per node and a public `dealer-record.json` (package, package digest, recipient keys, SAS
+    and signer chains, binary hash, hardening outcome).
+    - **Requests are authenticated (`--ca-cert`, mandatory).** A request names the key the dealer
+      seals a real share to, so a substituted request is the dangerous direction. Each request is
+      signed with the node's mTLS key and carries its certificate chain; the dealer refuses any that
+      does not verify to the cluster CA as certificate CN `cosigner<identifier>`, or whose cluster id
+      is not that CA's. Independently, each request has a short authentication string (SAS, 16 hex
+      characters of its digest) that witnesses read in the pod and the dealer operator confirms
+      (`--confirm-sas`, or typed at the prompt) before the dealer reads the key (Gate 0).
+  - **Cosigner CLI, offline only, never RPCs:** `share-recipient` mints a one-time X25519 recipient
+    key for a given key id and ceremony and prints the signed request and its SAS;
+    `recipient-sas` recomputes the SAS from the node's sealed recipient file so a witness can check it
+    in an independent session; `import-share` opens the bundle and installs the share after every
+    check (the fingerprint typed, VSS against the commitment, the package interpolating to the group
+    key), with `--dry-run` to run every check and write nothing, and an identical re-import that
+    reports `already-installed`; `abort-import` deletes a pending recipient secret and, with
+    `--yes-delete-installed-share`, an installed share only if it came from this ceremony and was
+    never refreshed. A bundle is sealed to a recipient key bound to node, cluster, key id, ceremony
+    id, group key, fingerprint and package digest, and that key is deleted the moment the share is
+    installed. After an `abort-import` that deleted a share, restart the cosigner before importing
+    under the id again.
+  - **`verify-key`** — checks `KeyStatus` on every node: present everywhere, each node answers as its
+    configured identifier, every group key has the expected fingerprint, one package digest everywhere
+    (recomputed), each node's verifying share is the package's, the package interpolates for `t`, and
+    provenance agrees. `--sign-test` then has the cluster sign with **every** `t`-subset of
+    cosigners (`C(n,t)` signatures, the leader rotating) and verifies each with `verify_strict`
+    under the Canton key, because a public view can be perfect while a node's secret share is wrong.
+  - **Signer RPCs `KeyStatus` and `CeremonySignTest`** (the proto and the driver's generated gRPC
+    Java stubs are updated). `KeyStatus` reports a node's view of a key without secret material.
+    `CeremonySignTest` signs a named quorum over a digest the cosigners compute themselves from the
+    key's provenance, `0x1220 ‖ SHA-256("rutli-verify-key/" ‖ ceremony ‖ key id)`; those bytes cannot
+    be a Canton topology hash, so the RPC cannot be used to sign anything else. It is **rate-limited
+    per key** on the leading node: `ceremony_sign_test_rate_limit_per_min` (default 10; refusals
+    counted in `rutli_ceremony_sign_test_rate_limited_total`), because every signature leaves a
+    single-use nonce marker on disk (`docs/phase-2-frost.md`).
+  - **`operator_allowlist` role** (Helm `operatorAllowlist`). Client certificate CNs that may call
+    `KeyStatus` and `CeremonySignTest` and nothing else: never `Sign`, DKG, `Refresh` or hosted
+    keys. Empty by default (no operator role). `deploy/k8s/job-verify-key.example.yaml` runs
+    `verify-key` as a one-off Job with an operator certificate that exists only for the ceremony.
+  - **Provenance.** Each stored share carries `Share.origin` (`dealer-split`, with the ceremony id
+    and the fingerprint) and a `refresh_count`, inside the sealed file. The daemon warns at every
+    start while a dealt key has never been refreshed; the runbook has the refresh as Gate C, after
+    which the dealt shares and every copy of them no longer combine with the live ones.
+  - **Reserved ids.** DKG refuses every key id containing `frost-import-` (`ALREADY_EXISTS`), before
+    and after an install, so a DKG can never mint or replace an imported key. Imported ids are
+    `<prefix>frost-import-<fingerprint[4..12]>` and route to FROST through the driver's existing
+    `frost-` prefix rule.
+  - **`KeyStore::create` never replaces.** The no-clobber create is now atomic at the file system:
+    `renameat2(RENAME_NOREPLACE)` on Linux/glibc, `renamex_np(RENAME_EXCL)` on macOS, and a
+    hard-link fallback where neither is available, followed by a directory fsync. Used by the share
+    install and every other create-once path.
+  - Verified by the cluster tests in `frost/cosigner/tests/split_ceremony.rs` and `dealer_cli.rs`
+    and by `scripts/e2e-split-ceremony.sh` on a local 3-node mTLS cluster (forged request and wrong
+    SAS refused, operator certificate refused on `Sign` and `Refresh`, restarts, a node down) with the
+    throwaway Canton 3.6.1 namespace key from B1.
+  - Review fixes folded in: request authentication (HIGH-1); `verify-key` signs over every quorum and
+    has an operator role (MEDIUM-1/2); an identical re-import checks the fingerprint and finishes the
+    install (LOW-1); no-replace create and reserved ids (LOW-2/3); dealer secret hygiene and
+    core-handler refusal (LOW-4); `CeremonySignTest` rate limit (NEW-3); stricter chain and identity
+    checks on requests (NEW-4); share sealing only to a verified request (NEW-5); `recipient-sas`
+    for an independent Gate 0 (NEW-2).
+- **`rutli-canton-key` (roadmap B1)** — a new offline crate that parses every form in which an
+  existing Canton node's private key can reach Rütli: stored `SigningPrivateKey` /
+  `EncryptionPrivateKey` rows, `ExportKeyPair` output (plain and password-protected) and PKCS#8
+  PEM/DER, for Ed25519, EC P-256 and RSA-2048. Every parse derives the public key from the private
+  material and checks it against everything the input claims about itself, including the Canton
+  fingerprint. Shared by the split ceremony and `import-key`. Tested against
+  throwaway Canton 3.6.1 key vectors and their generator.
 - **ECIES hosted keys (roadmap Track C, v1.5 of `docs/hosted-keys-design.md`).** The cluster now
   hosts EC P-256 encryption keys (`ec-p256-ecies`) beside RSA-2048 and AES-256-GCM, so a participant
   can keep the ECIES key type every JCE node uses — and the one that can become a threshold key
@@ -52,6 +141,29 @@ All notable changes to Rütli are documented here. Format loosely follows
 ### Changed
 - The driver builds against BouncyCastle 1.85, the version Canton 3.6.1 ships (and, since Canton's
   jar comes first on its classpath, the one the driver already ran on inside a participant).
+
+### Upgrade notes (breaking)
+- **Helm chart: `tls.layout` now defaults to `perNode`.** The cosigner container of each pod sees
+  only `ca.crt` and its own `cosigner<id>.{crt,key}`: a `tls-select` init container copies them from
+  the source Secret(s) into an in-memory volume, and the source volume is mounted into that init
+  container only. `perNode` reads one `kubernetes.io/tls` Secret per node,
+  `rutli-cosigner-tls-<id>` (`tls.crt` / `tls.key`, cert-manager compatible), plus
+  `rutli-cosigner-ca` (`ca.crt`). **An existing install that has only the shared
+  `rutli-cosigner-tls` Secret must create the per-node Secrets before `helm upgrade`**, or the first
+  rolled pod stays in `ContainerCreating` (a missing Secret) with two nodes still signing; the
+  commands are in `deploy/k8s/README.md`, "Migrating from the shared TLS Secret". Or keep the old
+  Secret for now with `--set tls.layout=shared` (the pods still get the init-container split). No
+  certificate changes; copy `ca.crt` byte for byte, because the split ceremony's cluster id is its
+  hash. The raw manifests in `deploy/k8s` use the same layout. Certificates are read at startup:
+  restart the pods after rotating a Secret.
+- **The refresh CronJob (`deploy/k8s/cronjob-refresh.yaml`; the Helm chart has none) now uses the driver certificate, not the shared TLS Secret.** It mounts only
+  `rutli-driver-tls` (a `kubernetes.io/tls` Secret with the driver's cert and key) and the CA, with a
+  new `client-driver.json`. If you run it, create `rutli-driver-tls` before upgrading.
+- **Rolling out ECIES: upgrade every cosigner before any participant is configured for ECIES.** A
+  cosigner older than this release cannot serve an EC key, and a participant whose cluster still has
+  one will not advertise ECIES.
+- The split ceremony needs every cosigner on this release (the `KeyStatus` / `CeremonySignTest` RPCs
+  and the share-delivery commands); `operator_allowlist` is empty unless you set it.
 
 ### Notes
 - Canton's ECIES authenticates the ciphertext but not the IV it prepends, so the first plaintext
@@ -610,6 +722,7 @@ not audited. Do not place production authority keys behind it.
 - HSM backend validated only against SoftHSM.
 - No third-party security audit.
 
+[0.4.0-rc.1]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.1
 [0.3.2]: https://github.com/Stakecraft/rutli/releases/tag/v0.3.2
 [0.3.1]: https://github.com/Stakecraft/rutli/releases/tag/v0.3.1
 [0.3.0]: https://github.com/Stakecraft/rutli/releases/tag/v0.3.0
