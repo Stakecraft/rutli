@@ -11,7 +11,8 @@ public interface CapabilitiesReplyOrBuilder extends
 
   /**
    * <pre>
-   * Spec identifiers this cluster can generate/serve, e.g. "rsa-2048-oaep-sha256", "aes-256-gcm".
+   * Spec identifiers this cluster can generate/serve: "rsa-2048-oaep-sha256", "aes-256-gcm",
+   * "ec-p256-ecies".
    * </pre>
    *
    * <code>repeated string hosted_key_specs = 1;</code>
@@ -21,7 +22,8 @@ public interface CapabilitiesReplyOrBuilder extends
       getHostedKeySpecsList();
   /**
    * <pre>
-   * Spec identifiers this cluster can generate/serve, e.g. "rsa-2048-oaep-sha256", "aes-256-gcm".
+   * Spec identifiers this cluster can generate/serve: "rsa-2048-oaep-sha256", "aes-256-gcm",
+   * "ec-p256-ecies".
    * </pre>
    *
    * <code>repeated string hosted_key_specs = 1;</code>
@@ -30,7 +32,8 @@ public interface CapabilitiesReplyOrBuilder extends
   int getHostedKeySpecsCount();
   /**
    * <pre>
-   * Spec identifiers this cluster can generate/serve, e.g. "rsa-2048-oaep-sha256", "aes-256-gcm".
+   * Spec identifiers this cluster can generate/serve: "rsa-2048-oaep-sha256", "aes-256-gcm",
+   * "ec-p256-ecies".
    * </pre>
    *
    * <code>repeated string hosted_key_specs = 1;</code>
@@ -40,7 +43,8 @@ public interface CapabilitiesReplyOrBuilder extends
   java.lang.String getHostedKeySpecs(int index);
   /**
    * <pre>
-   * Spec identifiers this cluster can generate/serve, e.g. "rsa-2048-oaep-sha256", "aes-256-gcm".
+   * Spec identifiers this cluster can generate/serve: "rsa-2048-oaep-sha256", "aes-256-gcm",
+   * "ec-p256-ecies".
    * </pre>
    *
    * <code>repeated string hosted_key_specs = 1;</code>

@@ -96,7 +96,7 @@ private static final long serialVersionUID = 0L;
   private volatile java.lang.Object spec_ = "";
   /**
    * <pre>
-   * e.g. "rsa-2048-oaep-sha256"
+   * "rsa-2048-oaep-sha256", "aes-256-gcm" or "ec-p256-ecies"
    * </pre>
    *
    * <code>string spec = 2;</code>
@@ -117,7 +117,7 @@ private static final long serialVersionUID = 0L;
   }
   /**
    * <pre>
-   * e.g. "rsa-2048-oaep-sha256"
+   * "rsa-2048-oaep-sha256", "aes-256-gcm" or "ec-p256-ecies"
    * </pre>
    *
    * <code>string spec = 2;</code>
@@ -551,7 +551,7 @@ private static final long serialVersionUID = 0L;
     private java.lang.Object spec_ = "";
     /**
      * <pre>
-     * e.g. "rsa-2048-oaep-sha256"
+     * "rsa-2048-oaep-sha256", "aes-256-gcm" or "ec-p256-ecies"
      * </pre>
      *
      * <code>string spec = 2;</code>
@@ -571,7 +571,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * e.g. "rsa-2048-oaep-sha256"
+     * "rsa-2048-oaep-sha256", "aes-256-gcm" or "ec-p256-ecies"
      * </pre>
      *
      * <code>string spec = 2;</code>
@@ -592,7 +592,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * e.g. "rsa-2048-oaep-sha256"
+     * "rsa-2048-oaep-sha256", "aes-256-gcm" or "ec-p256-ecies"
      * </pre>
      *
      * <code>string spec = 2;</code>
@@ -609,7 +609,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * e.g. "rsa-2048-oaep-sha256"
+     * "rsa-2048-oaep-sha256", "aes-256-gcm" or "ec-p256-ecies"
      * </pre>
      *
      * <code>string spec = 2;</code>
@@ -623,7 +623,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * e.g. "rsa-2048-oaep-sha256"
+     * "rsa-2048-oaep-sha256", "aes-256-gcm" or "ec-p256-ecies"
      * </pre>
      *
      * <code>string spec = 2;</code>

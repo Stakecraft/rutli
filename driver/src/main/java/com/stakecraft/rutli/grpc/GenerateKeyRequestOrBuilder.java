@@ -31,7 +31,7 @@ public interface GenerateKeyRequestOrBuilder extends
 
   /**
    * <pre>
-   * e.g. "rsa-2048-oaep-sha256"
+   * "rsa-2048-oaep-sha256", "aes-256-gcm" or "ec-p256-ecies"
    * </pre>
    *
    * <code>string spec = 2;</code>
@@ -40,7 +40,7 @@ public interface GenerateKeyRequestOrBuilder extends
   java.lang.String getSpec();
   /**
    * <pre>
-   * e.g. "rsa-2048-oaep-sha256"
+   * "rsa-2048-oaep-sha256", "aes-256-gcm" or "ec-p256-ecies"
    * </pre>
    *
    * <code>string spec = 2;</code>

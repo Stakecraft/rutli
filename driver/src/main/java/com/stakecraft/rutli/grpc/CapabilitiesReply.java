@@ -50,7 +50,8 @@ private static final long serialVersionUID = 0L;
       com.google.protobuf.LazyStringArrayList.emptyList();
   /**
    * <pre>
-   * Spec identifiers this cluster can generate/serve, e.g. "rsa-2048-oaep-sha256", "aes-256-gcm".
+   * Spec identifiers this cluster can generate/serve: "rsa-2048-oaep-sha256", "aes-256-gcm",
+   * "ec-p256-ecies".
    * </pre>
    *
    * <code>repeated string hosted_key_specs = 1;</code>
@@ -62,7 +63,8 @@ private static final long serialVersionUID = 0L;
   }
   /**
    * <pre>
-   * Spec identifiers this cluster can generate/serve, e.g. "rsa-2048-oaep-sha256", "aes-256-gcm".
+   * Spec identifiers this cluster can generate/serve: "rsa-2048-oaep-sha256", "aes-256-gcm",
+   * "ec-p256-ecies".
    * </pre>
    *
    * <code>repeated string hosted_key_specs = 1;</code>
@@ -73,7 +75,8 @@ private static final long serialVersionUID = 0L;
   }
   /**
    * <pre>
-   * Spec identifiers this cluster can generate/serve, e.g. "rsa-2048-oaep-sha256", "aes-256-gcm".
+   * Spec identifiers this cluster can generate/serve: "rsa-2048-oaep-sha256", "aes-256-gcm",
+   * "ec-p256-ecies".
    * </pre>
    *
    * <code>repeated string hosted_key_specs = 1;</code>
@@ -85,7 +88,8 @@ private static final long serialVersionUID = 0L;
   }
   /**
    * <pre>
-   * Spec identifiers this cluster can generate/serve, e.g. "rsa-2048-oaep-sha256", "aes-256-gcm".
+   * Spec identifiers this cluster can generate/serve: "rsa-2048-oaep-sha256", "aes-256-gcm",
+   * "ec-p256-ecies".
    * </pre>
    *
    * <code>repeated string hosted_key_specs = 1;</code>
@@ -451,7 +455,8 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * Spec identifiers this cluster can generate/serve, e.g. "rsa-2048-oaep-sha256", "aes-256-gcm".
+     * Spec identifiers this cluster can generate/serve: "rsa-2048-oaep-sha256", "aes-256-gcm",
+     * "ec-p256-ecies".
      * </pre>
      *
      * <code>repeated string hosted_key_specs = 1;</code>
@@ -464,7 +469,8 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * Spec identifiers this cluster can generate/serve, e.g. "rsa-2048-oaep-sha256", "aes-256-gcm".
+     * Spec identifiers this cluster can generate/serve: "rsa-2048-oaep-sha256", "aes-256-gcm",
+     * "ec-p256-ecies".
      * </pre>
      *
      * <code>repeated string hosted_key_specs = 1;</code>
@@ -475,7 +481,8 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * Spec identifiers this cluster can generate/serve, e.g. "rsa-2048-oaep-sha256", "aes-256-gcm".
+     * Spec identifiers this cluster can generate/serve: "rsa-2048-oaep-sha256", "aes-256-gcm",
+     * "ec-p256-ecies".
      * </pre>
      *
      * <code>repeated string hosted_key_specs = 1;</code>
@@ -487,7 +494,8 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * Spec identifiers this cluster can generate/serve, e.g. "rsa-2048-oaep-sha256", "aes-256-gcm".
+     * Spec identifiers this cluster can generate/serve: "rsa-2048-oaep-sha256", "aes-256-gcm",
+     * "ec-p256-ecies".
      * </pre>
      *
      * <code>repeated string hosted_key_specs = 1;</code>
@@ -500,7 +508,8 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * Spec identifiers this cluster can generate/serve, e.g. "rsa-2048-oaep-sha256", "aes-256-gcm".
+     * Spec identifiers this cluster can generate/serve: "rsa-2048-oaep-sha256", "aes-256-gcm",
+     * "ec-p256-ecies".
      * </pre>
      *
      * <code>repeated string hosted_key_specs = 1;</code>
@@ -519,7 +528,8 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * Spec identifiers this cluster can generate/serve, e.g. "rsa-2048-oaep-sha256", "aes-256-gcm".
+     * Spec identifiers this cluster can generate/serve: "rsa-2048-oaep-sha256", "aes-256-gcm",
+     * "ec-p256-ecies".
      * </pre>
      *
      * <code>repeated string hosted_key_specs = 1;</code>
@@ -537,7 +547,8 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * Spec identifiers this cluster can generate/serve, e.g. "rsa-2048-oaep-sha256", "aes-256-gcm".
+     * Spec identifiers this cluster can generate/serve: "rsa-2048-oaep-sha256", "aes-256-gcm",
+     * "ec-p256-ecies".
      * </pre>
      *
      * <code>repeated string hosted_key_specs = 1;</code>
@@ -555,7 +566,8 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * Spec identifiers this cluster can generate/serve, e.g. "rsa-2048-oaep-sha256", "aes-256-gcm".
+     * Spec identifiers this cluster can generate/serve: "rsa-2048-oaep-sha256", "aes-256-gcm",
+     * "ec-p256-ecies".
      * </pre>
      *
      * <code>repeated string hosted_key_specs = 1;</code>
@@ -570,7 +582,8 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * Spec identifiers this cluster can generate/serve, e.g. "rsa-2048-oaep-sha256", "aes-256-gcm".
+     * Spec identifiers this cluster can generate/serve: "rsa-2048-oaep-sha256", "aes-256-gcm",
+     * "ec-p256-ecies".
      * </pre>
      *
      * <code>repeated string hosted_key_specs = 1;</code>
