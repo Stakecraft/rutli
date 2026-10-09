@@ -199,6 +199,24 @@ GENERIC_CONFIG_ERROR(8,0): Cannot convert configuration to a config of class …
 The error names the path but not the accepted values, so pattern-match against pureconfig's
 kebab-casing of the Scala enum rather than against the SPI spelling.
 
+### ECIES instead of RSA
+
+With cosigners that report `ec-p256-ecies` (Track C), the encryption key can be ECIES, Canton's JCE
+default. Change the two encryption lines of `canton-hosted.conf`:
+
+```hocon
+encryption.keys.default       = ec-p-256
+encryption.algorithms.default = ecies-hkdf-hmac-sha-256-aes-128-cbc
+```
+
+The driver then mints a `rutli-enc-…` key with spec `ec-p256-ecies`; the cluster answers only the
+ECDH (`EcdhDerive`) and the driver finishes each decryption with BouncyCastle
+([`docs/hosted-keys.md`](../../docs/hosted-keys.md)). This needs a synchronizer to show anything,
+since a standalone participant decrypts nothing: `scripts/e2e-ecies-hosted.sh` runs the whole thing
+— native cosigners, a sequencer, a mediator and a JCE peer participant, pings both ways — and
+then repeats it with an encryption key imported from a Canton node. Run Canton on an OpenJDK
+(`CANTON_JAVA_HOME`); Oracle's JDK refuses Canton's unsigned BouncyCastle for `Cipher`.
+
 ## Notes
 
 - The embedded `sequencer1` / `mediator1` in `canton.conf` use the default `jce` provider. They're

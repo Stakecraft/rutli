@@ -75,11 +75,36 @@ Rust non-test lines were counted by cutting each file at its first `#[cfg(test)]
 ### Optional addendum: Track C, ECIES hosted keys (v0.5.0)
 
 Hosted EC-P256 keys with an `EcdhDerive` RPC on the cosigner (`aws-lc-rs`), and a driver-side ECIES
-decrypt path (BouncyCastle `IESEngine`, with the shared secret supplied by the cluster). Estimated
-8-11 engineer-days on our side, scheduled to run while the audit is in progress, so it would not exist
-at code freeze. **Question for you:** would you take it as a mid-engagement addendum (we would hand
-over a tagged commit and a delta list), or do you prefer it as a separate follow-up engagement? Please
-price both ways if you can. It is not part of the base quote.
+decrypt path (BouncyCastle `IESEngine`, with the shared secret supplied by the cluster). Still an
+**optional addendum**, not part of the base quote. **Question for you:** would you take it as a
+mid-engagement addendum (we would hand over a tagged commit and a delta list), or do you prefer it as
+a separate follow-up engagement? Please price both ways if you can.
+
+The code now exists (branch `feat/c-ecies-hosted-keys`, on top of B2), so the delta is concrete:
+
+| Area | Files | Reviewable lines |
+|---|---|---|
+| Cosigner: `ec-p256-ecies` spec, keygen, SPKI, `ecdh_p256`, peer-point gate, `validate` | `frost/cosigner/src/hosted.rs` | ~140 (plus ~200 inline tests) |
+| Cosigner: `EcdhDerive` RPC, rate limit, reserved ids | `service.rs`, `node.rs`, `error.rs`, `cosigner.proto` | ~60 |
+| Cosigner: `import-key` of a Canton EC P-256 encryption key (via B1's parser) | `export.rs` (`import_canton`), `main.rs` | ~190 |
+| Driver: ECIES completion in `IESEngine`, spec-driven keygen/public key, routing | `driver/.../backend/CantonEcies.scala`, `FrostBackend.scala` | ~270 |
+
+Where we would like the addendum's attention, in order:
+
+1. **The `IESEngine` composition** (`CantonEcies.decrypt`): the engine is assembled as BouncyCastle's
+   JCE does for `ECIESwithSHA256andAES-CBC`, with the ECDH replaced by an agreement that returns the
+   cluster's `Z` for exactly one point. Is anything in that substitution (field size, `V` handling,
+   the `AsymmetricKeyParameter` placeholder, exception mapping) not equivalent to Canton's own
+   decryptor?
+2. **Peer-point validation and the ECDH oracle.** `EcdhDerive` answers `x(d·V)` for any valid point
+   a driver-certificate holder sends — a static Diffie-Hellman oracle, bounded only by the per-key
+   decryption budget. We believe the uncompressed-only gate plus aws-lc's on-curve check close
+   invalid-curve and small-subgroup attacks, and that the oracle is no stronger than `Decrypt`.
+3. **An upstream property we inherit:** Canton's ECIES MACs the CBC ciphertext but not the IV it
+   prepends, so the first plaintext block is malleable. We match Canton byte for byte rather than
+   diverge; please tell us if you see a way that matters through a KMS.
+4. **Canton-key import:** that the public key the cluster serves is provably the one Canton
+   recorded, and nothing else can be imported as an ECDH key.
 
 ## 4. Threat model highlights and areas we want focus on
 

@@ -1,8 +1,8 @@
 # Cluster-hosted keys — operator guide
 
 The cosigner cluster can hold Canton's **non-FROST** key material as well as the namespace key:
-RSA-2048-OAEP-SHA256 encryption keypairs and AES-256-GCM symmetric keys. A participant configured
-this way needs **no HSM and no local key state**.
+RSA-2048-OAEP-SHA256 and EC P-256 (ECIES) encryption keypairs, and AES-256-GCM symmetric keys. A
+participant configured this way needs **no HSM and no local key state**.
 
 This page is the operational half — when to use it, how to turn it on, how the keys behave, and what
 to do when the alerts fire. The rationale (why threshold RSA is permanently out of scope, why the
@@ -140,6 +140,25 @@ Two deliberate absences:
 
 Keep `delegate = "hsm"` (or `"software"`) if you still need key types the cluster does not serve.
 
+**Which encryption key type Canton mints is Canton's choice**, not the driver's: a KMS participant
+defaults to RSA-2048 (`CryptoProvider.Kms`). To use an ECIES key — the type every JCE participant
+already uses, and the one that can become a threshold key later (section 6) — set it in the
+participant's crypto block. The driver advertises `EcP256` / `EciesHkdfHmacSha256Aes128Cbc` only
+when the cluster reports `ec-p256-ecies` in `Capabilities`, so upgrade every cosigner first.
+
+```hocon
+crypto {
+  provider = kms
+  kms { type = driver, name = "rutli", config = { backend = "frost", frost = { hosted-keys = true, … } } }
+  encryption.keys.default       = ec-p-256
+  encryption.algorithms.default = ecies-hkdf-hmac-sha-256-aes-128-cbc
+}
+```
+
+The Global Synchronizer admits both: Splice SVs run Canton's JCE defaults for static synchronizer
+parameters on every network, which allow `EcP256` and `Rsa2048` (see
+[roadmap-migration.md](roadmap-migration.md), technical notes).
+
 ## 3. Key lifecycle
 
 You rarely drive these RPCs by hand: Canton mints keys through the driver's
@@ -161,6 +180,7 @@ Supported specs:
 | Spec | Use | Shape |
 |---|---|---|
 | `rsa-2048-oaep-sha256` | Canton's asymmetric encryption key (confidential views) | ciphertext exactly 256 bytes in, ≤ 190 bytes plaintext out |
+| `ec-p256-ecies` | The same, as Canton's ECIES (`EciesHkdfHmacSha256Aes128Cbc`) | the cluster answers `EcdhDerive(V)` with `Z`; the driver completes the decryption (below) |
 | `aes-256-gcm` | Canton's symmetric wrapping key | blob is `0x01 ‖ nonce(12) ‖ ciphertext‖tag` (versioned framing) |
 
 **`key_id` is caller-supplied and generation is idempotent.** Repeating the request returns the
@@ -181,6 +201,15 @@ worth knowing:
 - The cluster performs the **whole** RSAES-OAEP-SHA256 decrypt, never returning raw `c^d mod N` for
   the driver to unpad — that would be a textbook Bleichenbacher/Manger oracle. Every decryption
   failure returns the same opaque error for the same reason.
+- **ECIES is split between the cluster and the driver.** Canton's ciphertext is
+  `iv(16) ‖ V(65) ‖ AES-128-CBC ‖ HMAC-SHA256 tag(32)`, at most 256 bytes. The driver checks that
+  shape (and that `V` is an uncompressed point on P-256) before anything is sent, asks the cluster
+  for `Z = x(d·V)` with `EcdhDerive`, and finishes in BouncyCastle's own `IESEngine` — the code
+  Canton's encryptor uses — so no KDF or MAC is reimplemented anywhere. Only the ECDH needs the
+  private key; the rest is public computation. The cluster accepts only a 65-byte uncompressed
+  point and refuses one that is not on the curve, refuses `EcdhDerive` on any key that is not
+  `ec-p256-ecies`, and charges it to the same per-key budget as `Decrypt`: for a recorded
+  ciphertext, `Z` is as good as the plaintext.
 - Decrypt is on Canton's per-transaction hot path, unlike topology signing, so it is deliberately
   **not** gated by [`approval-quorum.md`](approval-quorum.md) and not journalled per operation. Note
   that the driver's audit log, if enabled, does wrap `decryptAsymmetric` — that is a hash-chained
@@ -292,7 +321,8 @@ Two node-specific rules:
 
 Use `backup` for everything routine. Reach for `export` only for the two cases `backup` genuinely
 cannot cover: **recovering after the seal master secret is lost**, and **moving a key to a different
-cluster or KMS**.
+cluster or KMS**. `import-key` has a third use, below: bringing an existing Canton node's ECIES
+encryption key into the cluster.
 
 ```sh
 # Export (node stopped). The passphrase comes from the environment, never the command line.
@@ -331,6 +361,36 @@ Properties worth knowing before you rely on them:
   passphrase — an export sitting on a laptop is a private key sitting on a laptop.
 - **Both operations log at WARN** with the key id. That log line is often the only record that a
   portable copy exists; ship it somewhere you will notice.
+
+#### Importing a Canton node's ECIES key (migration)
+
+A node moving into the cluster ([roadmap-migration.md](roadmap-migration.md)) can keep its
+encryption key instead of rotating it. Export it on the old node (`keys.secret.download`, preview
+commands enabled, preferably with a password), then on one cosigner, stopped:
+
+```sh
+read -rs CANTON_EXPORT_PASSWORD && export CANTON_EXPORT_PASSWORD
+rutli-cosigner --config /etc/rutli/cosigner-1.json import-key \
+  --in /media/offline/participant-encryption.export --passphrase-env CANTON_EXPORT_PASSWORD \
+  --key-id <frost.key-prefix>rutli-enc-imported-1 --expect-fingerprint 1220…
+```
+
+`--expect-fingerprint` is the key's fingerprint as the old node lists it (`keys.secret.list`), not
+read from the file. The import refuses anything but an EC P-256 key whose Canton purpose is
+encryption (a P-256 *signing* key is never made an ECDH key; Ed25519 keys go through the
+[split ceremony](split-ceremony.md); RSA import is roadmap B3), and refuses unless the public key the
+cluster will serve is byte-identical to Canton's encoding — that is what lets the new participant
+register it by id and get the **same fingerprint** back:
+
+```scala
+val key = participant.keys.secret.register_kms_encryption_key("<prefix>rutli-enc-imported-1")
+// key.fingerprint is the old node's encryption key fingerprint
+```
+
+The key id must carry the driver's `rutli-` routing tag behind any `frost.key-prefix`. Start the
+cosigner afterwards; anti-entropy and read-repair spread the key. The exposure caveat of every
+migrated key applies: the old node's database and its backups hold this key in the clear — purge
+them (`b0-cutover-spike.md`, `roadmap-migration.md`).
 
 ### When `rutli_anti_entropy_conflicts_total` increases
 
@@ -387,9 +447,10 @@ What hosted keys are, stated without varnish:
 
 ### Limits worth knowing
 
-Two properties to understand before you rely on hosted keys in production.
+Properties to understand before you rely on hosted keys in production.
 
-- **`Decrypt` is rate-limited per key, on the cosigner** (`hosted_keys.decrypt_rate_limit_per_min`,
+- **`Decrypt` and `EcdhDerive` are rate-limited per key, on the cosigner**, from one shared budget
+  (`hosted_keys.decrypt_rate_limit_per_min`,
   default 6000 — 100/s sustained on a single key). This is the bound on a stolen driver
   certificate: that certificate authorizes `Decrypt`, and retrospective decryption means whoever
   holds it can read everything ever encrypted to that key, so without a ceiling the only limit is
@@ -405,6 +466,16 @@ Two properties to understand before you rely on hosted keys in production.
   decryption is on Canton's per-transaction hot path, so a human gate there would stall the node.
   That is a design choice, not an oversight — but it does mean the audit trail, not an approval
   quorum, is what stands behind a decrypt.
+- **`EcdhDerive` is a static Diffie-Hellman oracle** for whoever holds the driver certificate: it
+  answers `x(d·V)` for any valid point. With points restricted to uncompressed encodings on P-256
+  (prime order, cofactor 1) it leaks nothing about `d` beyond what the answers are, and the known
+  static-DH speed-ups need far more queries than the rate limit allows. It is the same capability
+  `Decrypt` gives for RSA, bounded the same way.
+- **Canton's ECIES does not authenticate its IV.** The HMAC covers the CBC ciphertext, not the IV
+  Canton prepends, so a changed IV changes the first plaintext block without failing the MAC.
+  Canton's own decryptor behaves the same way and the driver matches it exactly; in practice the
+  plaintext is a session key whose use fails authenticated decryption if it was altered. An upstream
+  property, recorded so nobody rediscovers it as a Rütli bug.
 
 Operational consequences worth writing into your runbook:
 
@@ -417,14 +488,14 @@ Operational consequences worth writing into your runbook:
 
 ## 6. What is not hosted yet, and the roadmap
 
-Today the cluster serves `rsa-2048-oaep-sha256` and `aes-256-gcm`. Anything else — EC signing keys
-for a synchronizer that requires ECDSA, EC-P256 encryption keys — still needs an `hsm` or `software`
+Today the cluster serves `rsa-2048-oaep-sha256`, `ec-p256-ecies` and `aes-256-gcm`. Anything else —
+EC signing keys for a synchronizer that requires ECDSA — still needs an `hsm` or `software`
 delegate.
 
 | Phase | Adds | Threshold? |
 |---|---|---|
-| **v1** (now) | hosted RSA-2048 + AES-256-GCM; `delegate = "none"` becomes possible | no — replicated |
-| **v1.5** | `EcdhDerive` + hosted EC-P256 keys; the driver completes ECIES with BouncyCastle | no — replicated |
+| **v1** (shipped) | hosted RSA-2048 + AES-256-GCM; `delegate = "none"` becomes possible | no — replicated |
+| **v1.5** (shipped) | `EcdhDerive` + hosted EC-P256 keys; the driver completes ECIES with BouncyCastle | no — replicated |
 | **v2** | threshold ECIES via `frost-p256` — one stateless round, no nonce hazard | **yes** |
 | **never** | threshold RSA | — |
 
@@ -435,6 +506,9 @@ migration. It also inverts the usual expectation — the scheme Canton's KMS mod
 the one that cannot be thresholded, and the scheme that thresholds cleanly (ECIES over P-256) is one
 a self-hosted KMS can advertise where a cloud KMS cannot.
 
-Two things to verify before betting on v2 for a given deployment, both open in the design record:
-whether the Global Synchronizer's `requiredEncryptionSpecs` admits `EcP256`/ECIES at all, and a
-byte-exact JVM-encrypt → driver-decrypt interop test for BouncyCastle's ECIES framing.
+The two questions the design record left open before ECIES could be relied on are answered: the
+Global Synchronizer admits `EcP256`/ECIES (SV static parameters are Canton's JCE defaults on every
+network), and Canton's ECIES framing interoperates byte for byte — Canton's `JcePureCrypto` encrypts
+and the driver decrypts in the upstream conformance suite (`CONFORMANCE=1`) and on a live 3.6.1
+participant (`scripts/e2e-ecies-hosted.sh`), with a generated key and with a key imported from a
+Canton node.

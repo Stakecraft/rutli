@@ -5,7 +5,41 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
-_Nothing yet._
+### Added
+- **ECIES hosted keys (roadmap Track C, v1.5 of `docs/hosted-keys-design.md`).** The cluster now
+  hosts EC P-256 encryption keys (`ec-p256-ecies`) beside RSA-2048 and AES-256-GCM, so a participant
+  can keep the ECIES key type every JCE node uses — and the one that can become a threshold key
+  later — with no HSM and no local key state.
+  - **Cosigner:** keygen on aws-lc-rs; SPKI byte-identical to Canton's encoding; sealed, replicated,
+    create-once, anti-entropy and portable export like every hosted key. New Signer RPC
+    `EcdhDerive(key_id, peer_point) → Z` (the 32-byte x-coordinate of `d·V`): only a 65-byte
+    uncompressed point on P-256 is accepted, every other spec and every split-ceremony id is
+    refused, and each call is charged to the key's decryption budget (`op="ecdh_derive"` in
+    `rutli_hosted_key_ops_total`). `Capabilities` reports the new spec. There is still no export RPC.
+  - **`import-key` reads a Canton EC P-256 encryption key** (`keys.secret.download` output, plain or
+    password-protected, or a stored row) with `--key-id` and `--expect-fingerprint`, and refuses
+    unless the cluster will serve exactly the public key Canton recorded. A migrating node registers
+    it by id (`register_kms_encryption_key`) and keeps its encryption key fingerprint. Signing,
+    Ed25519, RSA (roadmap B3) and purpose-less PKCS#8 keys are refused.
+  - **Driver:** advertises `EcP256` / `EciesHkdfHmacSha256Aes128Cbc` when the cluster reports
+    `ec-p256-ecies`; `generateEncryptionKeyPair` and `getPublicKey` follow the key's real spec instead
+    of assuming RSA; `decryptAsymmetric` checks Canton's `iv ‖ V ‖ ct ‖ tag` shape (≤ 256 bytes)
+    before any cluster call, gets `Z` from `EcdhDerive` and completes the decryption in
+    BouncyCastle's own `IESEngine`. To use it, set the participant's
+    `crypto.encryption.keys.default = ec-p-256` and
+    `crypto.encryption.algorithms.default = ecies-hkdf-hmac-sha-256-aes-128-cbc`; upgrade every
+    cosigner first.
+  - Verified by the upstream `KmsDriverTest` over the frost backend (`CONFORMANCE=1`), a
+    BouncyCastle differential, invalid-point tests and `scripts/e2e-ecies-hosted.sh` on a real
+    Canton 3.6.1 participant with a generated and a Canton-imported key.
+
+### Changed
+- The driver builds against BouncyCastle 1.85, the version Canton 3.6.1 ships (and, since Canton's
+  jar comes first on its classpath, the one the driver already ran on inside a participant).
+
+### Notes
+- Canton's ECIES authenticates the ciphertext but not the IV it prepends, so the first plaintext
+  block is malleable. The driver matches Canton's decryptor exactly; see `docs/hosted-keys.md` §5.
 
 ## [0.3.2] — 2026-10-09
 
