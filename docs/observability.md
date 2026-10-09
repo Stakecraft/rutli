@@ -133,6 +133,9 @@ sum(rate(rutli_sign_duration_seconds_sum{result="ok"}[1h]))
    Alert on the log, e.g. in Loki:
    `sum(count_over_time({app="canton-participant"} |= "AUDIT decryptAsymmetric" |= "outcome=failed" [10m])) > 0`.
    A trickle is someone sending malformed ciphertexts; anything sustained is a page, as for (5).
+   Audit entries with `ec-failover=` mean a cosigner answered "not found"/UNIMPLEMENTED for an EC
+   key and the driver went to the next one: a cosigner on an old release, or one missing a
+   replica. Either way, find it — it is carrying no ECIES traffic.
 6. **`rutli_key_replicas` below the cluster size** (or `rutli_hosted_keys` differing across
    instances, the same signal seen sideways) — a key exists on fewer nodes than the cluster is
    configured for. Writes commit at `write_quorum` (default 2 of 3) and roll back below it, so a

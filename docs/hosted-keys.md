@@ -134,7 +134,10 @@ Two deliberate absences:
 - **No automatic fallback to the delegate on `NOT_FOUND`.** A fallback would silently re-create split
   custody — some keys in the cluster, some on the host — which is the shape of the August incident.
   Read-repair (section 4) is what makes `NOT_FOUND` authoritative. Endpoint failover stays restricted
-  to `UNAVAILABLE` / `DEADLINE_EXCEEDED`, as for signing.
+  to `UNAVAILABLE` / `DEADLINE_EXCEEDED`, as for signing — with one exception, for EC keys only: a
+  cosigner that predates `ec-p256-ecies` cannot read-repair one, so its "not found" is not
+  authoritative and the driver asks the next cosigner (rollout order, below). Even then it never
+  falls back to the delegate.
 - **No hardcoded spec list.** The driver asks the cluster via `Capabilities` at startup, so adding a
   key type later (section 6) needs no driver release.
 
@@ -156,19 +159,27 @@ skips what it cannot parse, `KeyInfo` says `exists: false`) — the shape that e
    be upgraded, so all of them must also be **up** to create an EC key. RSA/AES writes are
    unchanged and still commit at the write quorum with a node down.
 2. **Then restart the participant with the two lines below.** The driver asks every configured
-   cosigner for `Capabilities` at startup (retrying for up to 30 s) and advertises `EcP256` /
-   `EciesHkdfHmacSha256Aes128Cbc` only if **every one** reports `ec-p256-ecies`. If one is still old,
-   or does not answer within 30 s, ECIES is not advertised and a participant configured for it
-   fails to start, loudly — rather than starting against a cluster where one node would drop its
-   decryptions. The trade-off to know: a participant configured for ECIES cannot (re)start while a
-   cosigner is unreachable. Decryption itself is unaffected by a node being down; only the startup
-   check is. What it looks like (verified on 3.6.1 with one of three cosigners stopped), after the
-   30 s of retries:
-
-   ```
-   WARN  RutliDriver - FROST: could not read capabilities from every cosigner — no answer from 127.0.0.1:19303 (UNAVAILABLE). …
-   ERROR SetupCrypto - Attempting to run Init crypto module failed with The configured default scheme EC-P256 not supported by the KMS: Set(RSA-2048)
-   ```
+   cosigner for `Capabilities` at startup and advertises `EcP256` /
+   `EciesHkdfHmacSha256Aes128Cbc` if **every cosigner that answers** reports `ec-p256-ecies`, and at
+   least a majority of the roster answers (the driver does not know the threshold; for 2-of-3 and
+   3-of-5 the majority is the threshold).
+   - A cosigner that answers **without** it — an older release, or one that does not know
+     `Capabilities` at all — vetoes ECIES: it is not advertised, and a participant configured for it
+     refuses to start with `The configured default scheme EC-P256 not supported by the KMS`.
+     Finish the upgrade.
+   - A cosigner that does **not answer** (down, unreachable) does not veto, so a participant
+     restarts with one node down. The driver retries silent nodes (up to 30 s, cut to 5 s once a
+     majority has answered) and names them at WARN:
+     `FROST: no capabilities answer from <endpoint> (UNAVAILABLE); 2 of 3 answered, a majority.
+     Advertising what every answering cosigner serves: aes-256-gcm, ec-p256-ecies, …`
+     — verified on 3.6.1 with one of three cosigners stopped (`scripts/e2e-ecies-hosted.sh`, phase D).
+   - The residual risk — the silent node is old, and comes back — is covered at run time: for an EC
+     hosted key, an answer that says "I do not have it" (UNIMPLEMENTED or NOT_FOUND from
+     `EcdhDerive`, NOT_FOUND from `PublicKey`, `exists: false` from `KeyInfo`) sends the request to
+     the next cosigner, and that node is not made the preferred leader. The audit entry carries
+     `ec-failover=<from>→<to> reason=…`. RSA, AES and FROST keys keep the old rule: `NOT_FOUND` is
+     authoritative. The driver re-asks `Capabilities` after 60 s while any node was silent, so a
+     returning old node also stops new EC keys being routed to the cluster.
 
 ```hocon
 crypto {

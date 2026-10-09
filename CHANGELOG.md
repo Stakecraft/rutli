@@ -37,9 +37,12 @@ All notable changes to Rütli are documented here. Format loosely follows
     older than this release cannot serve an EC key. `NodeInfo` now reports each node's hosted-key
     specs, and a leader refuses to create an `ec-p256-ecies` key (`FAILED_PRECONDITION`) unless
     every peer reports it and is up. The driver asks every configured cosigner for `Capabilities`
-    (retrying for up to 30 s at startup, re-asking after 60 s if it could not confirm) and
-    advertises ECIES only if every one reports it — so a participant configured for ECIES does not
-    start while a cosigner is old or unreachable. RSA/AES behaviour is unchanged.
+    and advertises ECIES if every cosigner that answers reports it and a majority answers: an old
+    cosigner that answers vetoes it, a silent one does not, so a participant still restarts with
+    one cosigner down (silent nodes are retried for up to 30 s, 5 s once a majority answered, and
+    named at WARN). For an EC hosted key, "not found"/UNIMPLEMENTED answers fail over to the next
+    cosigner without making that node the preferred leader; RSA, AES and FROST keys keep
+    `NOT_FOUND` authoritative.
   - `import-key --key-prefix P` enforces that `--key-id` is `P + "rutli-" + name`; ids containing
     `frost-` or outside `[A-Za-z0-9_-]` are refused.
   - An ECIES failure the cluster cannot see (MAC or padding, in the driver) is noted in the
