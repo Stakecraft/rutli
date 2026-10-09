@@ -162,7 +162,13 @@ skips what it cannot parse, `KeyInfo` says `exists: false`) — the shape that e
    fails to start, loudly — rather than starting against a cluster where one node would drop its
    decryptions. The trade-off to know: a participant configured for ECIES cannot (re)start while a
    cosigner is unreachable. Decryption itself is unaffected by a node being down; only the startup
-   check is.
+   check is. What it looks like (verified on 3.6.1 with one of three cosigners stopped), after the
+   30 s of retries:
+
+   ```
+   WARN  RutliDriver - FROST: could not read capabilities from every cosigner — no answer from 127.0.0.1:19303 (UNAVAILABLE). …
+   ERROR SetupCrypto - Attempting to run Init crypto module failed with The configured default scheme EC-P256 not supported by the KMS: Set(RSA-2048)
+   ```
 
 ```hocon
 crypto {
