@@ -333,12 +333,34 @@ async fn main() -> Result<()> {
 
     // Load mTLS material once (if configured). Plaintext otherwise (dev only).
     let tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose()?;
-    if let Some(t) = &cfg.tls {
-        // How many CA certificates the trust file holds: 2 while a CA rotation's bundle is live.
-        let ca_certs = std::fs::read_to_string(&t.ca_cert)
-            .map(|s| s.matches("-----BEGIN CERTIFICATE-----").count())
-            .unwrap_or(0);
-        tracing::info!(ca_certs, "mutual TLS enabled (cluster CA trust anchor)");
+    if let Some(t) = &tls {
+        // Every anchor of the trust file (2 while a CA rotation's bundle is live), validated by
+        // `tls::load`: CA certificates only, valid now unless tls.allow_expired_ca.
+        tracing::info!(ca_certs = t.anchors.len(), "mutual TLS enabled (cluster CA trust anchors)");
+        for (index, a) in t.anchors.iter().enumerate() {
+            tracing::info!(
+                index,
+                subject = %a.subject,
+                not_after = %a.not_after,
+                sha256 = %a.sha256,
+                "trust anchor"
+            );
+            if !a.valid_now {
+                tracing::warn!(
+                    index,
+                    subject = %a.subject,
+                    "trust anchor is expired or not yet valid, accepted because tls.allow_expired_ca \
+                     is set — finish the CA rotation and remove the flag"
+                );
+            } else if a.days_left < 30 {
+                tracing::warn!(
+                    index,
+                    subject = %a.subject,
+                    days_left = a.days_left,
+                    "trust anchor expires soon — rotate the cluster CA (docs/ca-rotation.md)"
+                );
+            }
+        }
     } else {
         tracing::warn!("running WITHOUT TLS — plaintext gRPC, do not use in production");
     }

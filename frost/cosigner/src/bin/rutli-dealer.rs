@@ -76,7 +76,9 @@ enum Command {
         /// The cluster CA certificate — the exact file the cosigners use (`tls.ca_cert`); during a
         /// CA rotation, the bundle of the old and the new CA. Every request must be signed by the
         /// mTLS key of the cosigner it names, certified by a CA in this file, and its cluster id
-        /// must be the cluster's (see --cluster-id).
+        /// must be the cluster's (see --cluster-id). The file must hold only CA certificates
+        /// that are valid now (the cosigners' rule); each is printed and recorded in
+        /// dealer-record.json, and more than one is warned about.
         #[arg(long, value_name = "FILE")]
         ca_cert: PathBuf,
         /// The cluster id the cosigners are pinned to (`cluster_id` in their config). Without it,
@@ -233,6 +235,23 @@ fn split_key(a: SplitKey) -> Result<()> {
     }
     let ca_pem = std::fs::read(&a.ca_cert)
         .map_err(|e| refuse(format!("--ca-cert {}: {e}", a.ca_cert.display())))?;
+    // The cosigners' trust-file rule (`trust::load_trust_anchors`): only valid CA certificates. A
+    // leaf in the file would let its key holder certify a request for any node.
+    let anchors = rutli_cosigner::trust::load_trust_anchors(&ca_pem, false)
+        .map_err(|e| refuse(format!("--ca-cert {}: {e}", a.ca_cert.display())))?;
+    for (i, anchor) in anchors.iter().enumerate() {
+        println!("trust anchor {i}: {}", anchor.describe());
+    }
+    if anchors.len() > 1 {
+        eprintln!(
+            "rutli-dealer: warning: --ca-cert holds {} CA certificates, and a request certified by \
+             ANY of them verifies. That is right only for a ceremony during a CA rotation's \
+             overlap; afterwards pass the new CA alone (docs/ca-rotation.md, close-out). If the old \
+             CA key may be exposed, only the SAS check stands between a request it minted and a \
+             real share.",
+            anchors.len()
+        );
+    }
     let cluster_id = match &a.cluster_id {
         Some(pinned) => pinned.clone(),
         None => rutli_cosigner::wrap::cluster_id_from_ca(&ca_pem),
@@ -354,6 +373,16 @@ fn split_key(a: SplitKey) -> Result<()> {
         hardening: a.hardening.clone(),
         created_at: rutli_cosigner::hosted::now_secs(),
         dealer_clock_utc: clock,
+        ca_file_sha256: hex::encode(Sha256::digest(&ca_pem)),
+        ca_anchors: anchors
+            .iter()
+            .map(|t| RecordAnchor {
+                subject: t.subject.clone(),
+                not_before: t.not_before.clone(),
+                not_after: t.not_after.clone(),
+                sha256: t.sha256.clone(),
+            })
+            .collect(),
     };
     let record_path = outputs.last().expect("record path");
     write_new(record_path, &serde_json::to_vec_pretty(&record)?)?;
@@ -393,6 +422,19 @@ struct DealerRecord {
     created_at: u64,
     /// The dealer host's clock at start, human-readable — it also decided certificate validity.
     dealer_clock_utc: String,
+    /// SHA-256 of the `--ca-cert` file as given.
+    ca_file_sha256: String,
+    /// The trust anchors of `--ca-cert`, in file order: the CAs a request could be certified by.
+    ca_anchors: Vec<RecordAnchor>,
+}
+
+#[derive(Serialize)]
+struct RecordAnchor {
+    subject: String,
+    not_before: String,
+    not_after: String,
+    /// SHA-256 of the certificate (DER).
+    sha256: String,
 }
 
 #[derive(Serialize)]

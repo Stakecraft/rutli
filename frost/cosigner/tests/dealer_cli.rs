@@ -8,6 +8,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use sha2::Digest;
+
 use rutli_cosigner::request_auth::{self, NodeSigner};
 use rutli_cosigner::seal::Sealer;
 use rutli_cosigner::share_delivery::{
@@ -462,4 +464,67 @@ fn a_rotation_bundle_needs_the_pinned_cluster_id_and_then_accepts_leaves_of_eith
         .output()
         .unwrap();
     refused(&out, "not certified by any");
+}
+
+/// Review M1 / L8: the dealer validates `--ca-cert` with the cosigners' rule before it reads any
+/// request: only valid CA certificates. A cosigner leaf in the file (whose key holder could then
+/// certify a request for any node), a private key pasted into it, or an expired CA is refused; the
+/// anchors are printed and recorded, and a bundle of more than one CA is warned about.
+#[test]
+fn the_dealer_refuses_a_ca_file_that_is_not_only_valid_cas_and_records_the_anchors() {
+    let fp = fingerprint_of("namespace");
+    let ca_file = |c: &Ceremony, pem: &str| std::fs::write(c.tmp.path().join("ca.crt"), pem).unwrap();
+
+    // Node 1's own leaf appended to the CA file: refused before any request is looked at.
+    let c = Ceremony::new();
+    let (leaf, key) = c.pki.leaf_pem("cosigner1", &rcgen::PKCS_ECDSA_P256_SHA256, false);
+    ca_file(&c, &format!("{}{leaf}", c.pki.ca_pem));
+    let cluster = c.read(0).cluster_id;
+    refused(&c.dealer("namespace.export.bin", &fp, &[SWAP, "--cluster-id", &cluster]), "not a CA");
+    assert!(!c.out().exists());
+    // A private key in it: refused, and never echoed.
+    ca_file(&c, &format!("{}{key}", c.pki.ca_pem));
+    let out = c.dealer("namespace.export.bin", &fp, &[SWAP, "--cluster-id", &cluster]);
+    refused(&out, "PRIVATE KEY");
+    let body = key.lines().nth(1).unwrap();
+    assert!(!String::from_utf8_lossy(&out.stderr).contains(body) && !String::from_utf8_lossy(&out.stdout).contains(body));
+    // An expired CA next to the valid one.
+    let expired = TestPki::with_ca(&rcgen::PKCS_ECDSA_P256_SHA256, |p| {
+        p.not_before = rcgen::date_time_ymd(2001, 1, 1);
+        p.not_after = rcgen::date_time_ymd(2002, 1, 1);
+    });
+    ca_file(&c, &pki::bundle(&[&expired, &c.pki]));
+    refused(&c.dealer("namespace.export.bin", &fp, &[SWAP, "--cluster-id", &cluster]), "expired");
+
+    // A single CA: one anchor, printed and recorded, no warning.
+    let c = Ceremony::new();
+    let out = c.dealer("namespace.export.bin", &fp, &[SWAP]);
+    ok(&out);
+    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let sha = hex::encode(sha2::Sha256::digest(
+        rutli_cosigner::trust::load_trust_anchors(c.pki.ca_pem.as_bytes(), false).unwrap()[0].der.as_slice(),
+    ));
+    assert!(stdout.contains("trust anchor 0") && stdout.contains(&sha), "{stdout}");
+    assert!(!stderr.contains("CA certificates"), "{stderr}");
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(c.out().join("dealer-record.json")).unwrap()).unwrap();
+    assert_eq!(record["ca_anchors"].as_array().unwrap().len(), 1);
+    assert_eq!(record["ca_anchors"][0]["sha256"], sha.as_str());
+    assert_eq!(record["ca_anchors"][0]["subject"], "CN=rutli-frost-cluster-ca");
+    assert!(record["ca_anchors"][0]["not_after"].as_str().is_some());
+    assert_eq!(
+        record["ca_file_sha256"],
+        hex::encode(sha2::Sha256::digest(c.pki.ca_pem.as_bytes())).as_str()
+    );
+
+    // A rotation bundle: accepted (with the pin), but warned about, and both anchors recorded.
+    let c = Ceremony::rotated();
+    let pinned = c.read(0).cluster_id;
+    let out = c.dealer("namespace.export.bin", &fp, &[SWAP, "--cluster-id", &pinned]);
+    ok(&out);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("warning") && stderr.contains("2 CA certificates"), "{stderr}");
+    let record: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(c.out().join("dealer-record.json")).unwrap()).unwrap();
+    assert_eq!(record["ca_anchors"].as_array().unwrap().len(), 2);
 }

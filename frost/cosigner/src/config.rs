@@ -137,10 +137,12 @@ pub struct ShareSealConfig {
 }
 
 /// Mutual-TLS material for the cosigner mesh (and the driver→cluster hop). All peers and the driver
-/// present certs signed by the same cluster CA; the CA cert is the single trust anchor.
+/// present certs signed by the cluster CA; the CA file holds the trust anchors.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TlsConfig {
-    /// PEM CA certificate that must sign every peer/client certificate (the trust anchor).
+    /// PEM file of the CA certificate(s) that must sign every peer/client certificate: one CA, or
+    /// during a CA rotation the bundle old + new. Every block must be a currently valid CA
+    /// certificate, or the node refuses to start ([`crate::trust::load_trust_anchors`]).
     pub ca_cert: PathBuf,
     /// PEM certificate this node presents (as server, and as client to peers).
     pub cert: PathBuf,
@@ -149,6 +151,11 @@ pub struct TlsConfig {
     /// Expected TLS server-name (SNI/SAN) when dialing peers. Peer endpoints use `https://`.
     #[serde(default)]
     pub domain: Option<String>,
+    /// Accept an expired or not-yet-valid CA in `ca_cert` (it is still refused if it is not a CA).
+    /// Emergency use only: a rotation away from a CA that has already expired, where the old CA
+    /// must stay in the bundle until every leaf is swapped (docs/ca-rotation.md). Remove it after.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_expired_ca: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -312,6 +319,7 @@ mod tests {
     fn tls() -> TlsConfig {
         TlsConfig {
             ca_cert: "/ca".into(),
+            allow_expired_ca: false,
             cert: "/cert".into(),
             key: "/key".into(),
             domain: Some("rutli-cosigner".into()),

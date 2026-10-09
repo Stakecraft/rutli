@@ -72,6 +72,9 @@ data:
         "ca_cert": "/certs/ca.crt",
         "cert": "/certs/cosigner{{ $id }}.crt",
         "key": "/certs/cosigner{{ $id }}.key",
+        {{- if $.Values.tls.allowExpiredCa }}
+        "allow_expired_ca": true,
+        {{- end }}
         "domain": {{ $domain | quote }}
       },
       "share_seal": { "secret_env": "RUTLI_SEAL_SECRET" },

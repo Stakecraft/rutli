@@ -3,17 +3,19 @@
 
 //! Mutual-TLS material for the cosigner mesh and the driver→cluster hop.
 //!
-//! Every node (and the driver) presents a certificate signed by one cluster CA; that CA is the sole
-//! trust anchor. The server requires a client cert (`client_ca_root`) — i.e. real mTLS, not
+//! Every node (and the driver) presents a certificate signed by the cluster CA; the CA file holds
+//! the trust anchors. The server requires a client cert (`client_ca_root`) — i.e. real mTLS, not
 //! server-only TLS — so a peer or client without a cluster-signed cert cannot even open a channel,
 //! let alone request a signature.
 //!
-//! The CA file may hold **several** CA certificates: tonic's `Certificate::from_pem` loads every
-//! certificate in the PEM as a trust anchor, for both the client (`ca_certificate`) and the server
-//! (`client_ca_root`) side. That is what makes a zero-downtime CA rotation possible
-//! (docs/ca-rotation.md): every node trusts the bundle old+new while leaves are swapped, then the
-//! old CA is dropped (`tests/tls_rotation.rs`). Changing the file's bytes changes the CA-derived
-//! cluster id, so pin `cluster_id` in the config before the first change.
+//! The CA file may hold **several** CA certificates, all of them trust anchors for both the client
+//! (`ca_certificate`) and the server (`client_ca_root`) side. That is what makes a zero-downtime CA
+//! rotation possible (docs/ca-rotation.md): every node trusts the bundle old+new while leaves are
+//! swapped, then the old CA is dropped (`tests/tls_rotation.rs`). rustls makes *every* certificate
+//! it is given an anchor — a leaf or an expired CA included — so [`load`] first validates the file
+//! ([`crate::trust::load_trust_anchors`]: CA certificates only, valid now) and hands tonic exactly
+//! the certificates it validated. Changing the file's bytes changes the CA-derived cluster id, so
+//! pin `cluster_id` in the config before the first change.
 
 use tonic::transport::{Certificate, ClientTlsConfig, Identity, ServerTlsConfig};
 
@@ -37,11 +39,19 @@ pub fn subject_cn(cert: &x509_parser::certificate::X509Certificate<'_>) -> Optio
 pub struct Tls {
     pub client: ClientTlsConfig,
     pub server: ServerTlsConfig,
+    /// The validated trust anchors of `ca_cert`, in file order — for the startup log.
+    pub anchors: Vec<crate::trust::TrustAnchor>,
 }
 
-/// Load the CA + this node's identity from disk and build the client/server TLS configs.
+/// Load the CA + this node's identity from disk and build the client/server TLS configs. Refuses a
+/// CA file that is not exclusively valid CA certificates ([`crate::trust::load_trust_anchors`];
+/// `allow_expired_ca` relaxes only the validity period).
 pub fn load(cfg: &TlsConfig) -> Result<Tls> {
-    let ca = Certificate::from_pem(read_pem(&cfg.ca_cert)?);
+    let anchors = crate::trust::load_trust_anchors(&read_pem(&cfg.ca_cert)?, cfg.allow_expired_ca)
+        .map_err(|e| {
+            crate::DaemonError::Config(format!("tls.ca_cert {}: {e}", cfg.ca_cert.display()))
+        })?;
+    let ca = Certificate::from_pem(crate::trust::to_pem(&anchors));
     let identity = Identity::from_pem(read_pem(&cfg.cert)?, read_pem(&cfg.key)?);
 
     let mut client = ClientTlsConfig::new().ca_certificate(ca.clone()).identity(identity.clone());
@@ -51,7 +61,7 @@ pub fn load(cfg: &TlsConfig) -> Result<Tls> {
 
     let server = ServerTlsConfig::new().identity(identity).client_ca_root(ca);
 
-    Ok(Tls { client, server })
+    Ok(Tls { client, server, anchors })
 }
 
 /// Read a PEM file, reporting *which* file failed and why.
