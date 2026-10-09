@@ -28,7 +28,11 @@ ThisBuild / scalacOptions ++= Seq("-release", "17")
 // modules under release versions — adjust cantonOrg/cantonVersion if resolving from there.
 val cantonOrg       = "com.daml"
 val cantonVersion   = "3.7.0-SNAPSHOT"
-val bouncyCastleVer = "1.78.1"
+// The BouncyCastle Canton 3.6.1 ships (shared_dependencies.json). The release launcher puts
+// Canton's jar ahead of the driver's (bin/canton: `-cp canton.jar:$EXTRA_CLASSPATH`), so at runtime
+// the driver runs on Canton's BouncyCastle whatever version it bundles; testing against the same
+// one matters for the ECIES path, which completes decryption in BouncyCastle's own IESEngine.
+val bouncyCastleVer = "1.85"
 val grpcVersion     = "1.82.1"
 val protobufVersion = "4.29.3"
 
