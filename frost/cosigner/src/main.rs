@@ -546,8 +546,8 @@ async fn verify_key_command(
                 .key_status(KeyStatusRequest { key_id: key_id.to_string() })
                 .await
                 .map(|r| r.into_inner())
-                .map_err(|s| format!("{:?}: {}", s.code(), s.message())),
-            Err(e) => Err(format!("unreachable: {e}")),
+                .map_err(|s| status_text(&s)),
+            Err(e) => Err(format!("unreachable: {}", error_chain(e))),
         };
         views.push(NodeView { identifier: p.identifier, endpoint: p.endpoint.clone(), status });
         clients.push((p.identifier, client));
@@ -571,8 +571,8 @@ async fn verify_key_command(
                             let r = r.into_inner();
                             (r.message, r.signature)
                         })
-                        .map_err(|s| format!("{:?}: {}", s.code(), s.message())),
-                    Err(e) => Err(format!("unreachable: {e}")),
+                        .map_err(|s| status_text(&s)),
+                    Err(e) => Err(format!("unreachable: {}", error_chain(e))),
                 };
                 report.record_signature(leader, &signers, result);
             }
@@ -637,6 +637,33 @@ async fn signer_client(
         ep = ep.tls_config(tls)?;
     }
     Ok(SignerClient::new(ep.connect().await?))
+}
+
+/// A gRPC status for the operator: code, message, and the transport error behind it — a refused
+/// handshake is only "transport error" without its source (`UnknownCA`, `UnknownIssuer`, ...), which
+/// is what the CA rotation's negative control greps for (docs/ca-rotation.md, Phase D).
+fn status_text(s: &tonic::Status) -> String {
+    let mut out = format!("{:?}: {}", s.code(), s.message());
+    append_sources(&mut out, std::error::Error::source(s));
+    out
+}
+
+/// An error and every error behind it, `a: b: c`, skipping a source already in the text.
+fn error_chain(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    append_sources(&mut out, e.source());
+    out
+}
+
+fn append_sources(out: &mut String, mut source: Option<&(dyn std::error::Error + 'static)>) {
+    while let Some(e) = source {
+        let text = e.to_string();
+        if !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        source = e.source();
+    }
 }
 
 /// Back up the (sealed) key-share files from data_dir/keys to `out`. Shares are encrypted at rest
