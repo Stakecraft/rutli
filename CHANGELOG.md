@@ -106,9 +106,14 @@ All notable changes to Rütli are documented here. Format loosely follows
 - **`--any-usage` is removed** from `rutli-dealer split-key` (no runbook used it); use
   `--expect-usage` and `--namespace-fingerprint`. Namespace mode is also stricter than before:
   a key whose usage includes namespace *and more* now needs `--namespace-fingerprint`.
-- Share bundles from this dealer are envelope version 3 (the usage in the AAD). Cosigners still
-  install version 2 bundles (no usage recorded); an older cosigner refuses a version 3 bundle, so
-  run the dealer and the cosigners from the same release.
+- Share bundles are envelope version 3 (the usage in the AAD), and **cosigners refuse version 2
+  bundles from a pre-B6 dealer**: such a dealer could split a namespace key under a
+  `…frost-import-sig-…` id, where an `auto` approval rule for protocol keys would sign for the
+  namespace. Bundles are single-ceremony and dead after install, so only a ceremony in flight across
+  the upgrade is affected: re-run its split with this release's dealer. An older cosigner refuses a
+  version 3 bundle, so run the dealer and the cosigners from the same release.
+- `share-recipient` refuses an import id of no single class (`frost-import-` twice, or a `sig-` /
+  `seqauth-` label with no name after it), which the dealer and `import-share` would refuse later.
 - `import-key` is safe with the cosigner's daemon running: a create race with anti-entropy pulling
   the same key now compares instead of failing (`export::install_imported`); the docs no longer
   require the node to be stopped.
