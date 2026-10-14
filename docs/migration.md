@@ -242,6 +242,23 @@ Splice's `signing` key lists **namespace** among its usages and is **not** the n
 the dealer asks for `--namespace-fingerprint` wherever the usage alone is ambiguous (below). Register Splice's key on the new node
 **without** namespace usage: the new member needs it to sign and to authenticate, not to authorize namespace changes.
 
+### Before the split: the carried key must not sign for a namespace
+
+`--namespace-fingerprint` rules out the **root** namespace key only. A key that is the target of a namespace delegation also
+signs for that namespace, and carried under a protocol id it would escape the approval rule that holds namespace signatures.
+On the old node, for each signing key you mean to carry, list the delegations that name it as their target, in the authorized
+store and on the synchronizer (`SYNC_ID` as in [b0-cutover-spike.md](b0-cutover-spike.md) §1.4):
+
+```scala
+import com.digitalasset.canton.crypto.Fingerprint
+import com.digitalasset.canton.topology.admin.grpc.TopologyStoreId
+val target = Some(Fingerprint.tryFromString(SIG_FP))
+p.topology.namespace_delegations.list(store = TopologyStoreId.Authorized, filterTargetKey = target) ++
+  p.topology.namespace_delegations.list(store = TopologyStoreId.Synchronizer(SYNC_ID), filterTargetKey = target)
+```
+
+Both lists must be empty. **STOP if either is not**: that key is a namespace key in all but name. Do not carry it.
+
 ### One ceremony per signing key
 
 Each carried signing key is its own split ceremony, run in full: [split-ceremony.md](split-ceremony.md) §3–§4, every gate,

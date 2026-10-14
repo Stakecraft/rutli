@@ -245,7 +245,7 @@ sign exactly that quorum, over a digest they compute themselves from the key's p
 `verify_strict` under the Canton key. (That digest is domain-separated from every hash Canton signs:
 Canton hashes `be_i32(HashPurpose.id) ‖ content` (`HashBuilder.scala:192-205`), every purpose Canton
 3.6.1 defines is 1–68, or −1 for test hashes (`HashPurpose.scala:52-123`), and this preimage starts
-with the ASCII bytes `rutl`, which as a purpose would be 1 920 300 396; equal digests would take a
+with the ASCII bytes `rutl`, which as a purpose would be 0x7275746C = 1 920 300 140; equal digests would take a
 SHA-256 collision. The operator role cannot ask for any other message, and cannot `Sign`.)
 
 **Gate B:** `OK`, refresh count 0, digest = `dealer-record.json`, every one of the `C(n,t)` quorums

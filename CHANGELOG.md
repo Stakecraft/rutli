@@ -127,7 +127,13 @@ All notable changes to Rütli are documented here. Format loosely follows
   prints the error chain, e.g. `connection error: received fatal alert: UnknownCA` for a certificate
   the node does not trust — what the CA rotation's negative control checks for (review L2).
 - docs: the `verify-key` sign-test digest is described accurately — domain-separated from every
-  Canton `HashPurpose` (the preimage starts with `rutl`), not "not a topology hash".
+  Canton `HashPurpose` (the preimage starts with `rutl`, 0x7275746C = 1 920 300 140 as a purpose),
+  not "not a topology hash".
+- `HostedKeyStatus` (`verify-hosted`) reports the public key each node's private key derives, EC
+  and RSA, and refuses to answer for an inconsistent key file; a FROST share under the asked id
+  reads absent instead of returning an error. Docs say it is the nodes' self-report.
+- `docs/migration.md` §8: a gate before the split — no namespace delegation may name a carried
+  key as its target (`--namespace-fingerprint` excludes only the root).
 
 ### Upgrade notes (breaking)
 - The first start of this release writes `data_dir/cluster-id` with the id the node already runs
