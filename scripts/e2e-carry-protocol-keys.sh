@@ -12,7 +12,8 @@
 #
 #   1. `signing` {signing, proof-of-ownership} and `sequencer-auth` {sequencer-auth,
 #      proof-of-ownership}: one split ceremony each against the RUNNING daemons, `--expect-usage
-#      protocol`, ids `<prefix>frost-import-sig-<fp8>` and `<prefix>frost-import-seqauth-<fp8>`;
+#      protocol --namespace-fingerprint`, ids `<prefix>frost-import-sig-<fp8>` and
+#      `<prefix>frost-import-seqauth-<fp8>`; a pre-B6-shaped bundle is refused by import-share;
 #      import-share, verify-key --sign-test (operator cert, provenance says "protocol"), refresh,
 #      verify-key again. The dealer refuses the signing key in namespace mode first.
 #   2. `encryption` (ECIES P-256): import-key into node 1 with its daemon RUNNING, then
@@ -152,21 +153,29 @@ carry() { # vector-name  key-id  fingerprint  recorded-usage-json
   done
   sas_list="$(IFS=,; echo "${sas[*]}")"
 
-  step "   ${name}: dealer, --expect-usage protocol"
+  step "   ${name}: dealer, --expect-usage protocol --namespace-fingerprint (as migration.md §8 says)"
   "$DEALER" split-key --in "$VEC/$name.export-pw.bin" --password-env E2E_EXPORT_PASSWORD \
-    --expect-usage protocol --expect-fingerprint "$fp" --key-id "$key_id" --threshold 2 \
+    --expect-usage protocol --expect-fingerprint "$fp" --namespace-fingerprint "$NS_FP" --key-id "$key_id" --threshold 2 \
     --ca-cert "$WORK/certs/ca.crt" --recipient "$WORK/$name-r1.json" --recipient "$WORK/$name-r2.json" \
     --recipient "$WORK/$name-r3.json" --out-dir "$WORK/dealer-$name" --allow-swap --allow-core-handler \
     --confirm-sas "$sas_list" | grep -E "carried for|pkp digest"
-  jq -e --argjson u "$recorded" '.expected_usage == "protocol" and .recorded_usage == $u' \
+  jq -e --argjson u "$recorded" --arg ns "$NS_FP" \
+    '.expected_usage == "protocol" and .recorded_usage == $u and .namespace_fingerprint == $ns' \
     "$WORK/dealer-$name/dealer-record.json" >/dev/null || fail "dealer record: $(cat "$WORK/dealer-$name/dealer-record.json")"
   digest="$(jq -r .pkp_digest "$WORK/dealer-$name/dealer-record.json")"
 
-  step "   ${name}: import-share on every node"
+  step "   ${name}: a pre-B6-shaped bundle is refused, then import-share on every node"
+  jq 'del(.usage) | .wrapped.version = 2' "$WORK/dealer-$name/share-$key_id-node1.json" >"$WORK/$name-pre-b6.json"
+  if cli --config "$WORK/c1.json" import-share --in "$WORK/$name-pre-b6.json" --expect-fingerprint "$fp" \
+    --dry-run >"$WORK/$name-pre-b6.out" 2>&1; then
+    fail "node 1 accepted a pre-B6 bundle"
+  fi
+  grep -q "pre-B6 dealer" "$WORK/$name-pre-b6.out" || fail "pre-B6 bundle refused for the wrong reason: $(cat "$WORK/$name-pre-b6.out")"
   for i in 1 2 3; do
     rep="$(cli --config "$WORK/c$i.json" import-share --in "$WORK/dealer-$name/share-$key_id-node$i.json" \
       --expect-fingerprint "$fp")"
-    jq -e --arg d "$digest" '.outcome == "installed" and .pkp_digest == $d and .carried_usage.expected == "protocol"' \
+    jq -e --arg d "$digest" --arg ns "$NS_FP" '.outcome == "installed" and .pkp_digest == $d
+      and .carried_usage.expected == "protocol" and .carried_usage.namespace_fingerprint == $ns' \
       <<<"$rep" >/dev/null || fail "import on node $i: $rep"
   done
 
@@ -264,7 +273,8 @@ canton {
 EOF
 
 cat >"$WORK/e2e.canton" <<EOF
-import com.digitalasset.canton.crypto.{EncryptionPublicKey, KeyPurpose, SigningKeyUsage, SigningPublicKey}
+import com.digitalasset.canton.crypto.{EncryptionPublicKey, Fingerprint, KeyPurpose, SigningKeyUsage, SigningPublicKey}
+import com.digitalasset.canton.topology.admin.grpc.TopologyStoreId
 
 def check(ok: Boolean, what: String): Unit = if (!ok) { println("E2E-FAIL " + what); sys.exit(1) }
 
@@ -282,6 +292,17 @@ val oldSig = signing0.filter(k => k.usage.contains(SigningKeyUsage.Protocol) && 
 val oldSeq = signing0.filter(k => k.usage.contains(SigningKeyUsage.SequencerAuthentication) && !k.usage.contains(SigningKeyUsage.Protocol) && !k.usage.contains(SigningKeyUsage.Namespace))
 val oldEnc = mine.collect { case k: EncryptionPublicKey => k }
 check(oldSig.size == 1 && oldSeq.size == 1 && oldEnc.size == 1, s"initial keys: signing \${oldSig.size}, seq-auth \${oldSeq.size}, encryption \${oldEnc.size}")
+
+// The runbook's gate before a split (migration.md §8), here on participant1: no namespace delegation
+// in its authorized store or on the synchronizer names a carried key as its target.
+val syncId = participant1.synchronizers.list_connected().head.physicalSynchronizerId.logical
+for (fp <- Seq("$SIG_FP", "$SEQ_FP")) {
+  val target = Some(Fingerprint.tryFromString(fp))
+  val delegations = participant1.topology.namespace_delegations.list(store = TopologyStoreId.Authorized, filterTargetKey = target) ++
+    participant1.topology.namespace_delegations.list(store = TopologyStoreId.Synchronizer(syncId), filterTargetKey = target)
+  check(delegations.isEmpty, s"\$fp is the target of a namespace delegation: \$delegations")
+}
+println("E2E-GATE no namespace delegation targets a carried key")
 
 // Register the carried keys by KMS id, with the usage they had on the old node (never namespace).
 // Canton adds proof-of-ownership to every non-namespace key itself (Signing.scala:943-947, 1336).
