@@ -54,6 +54,11 @@ service Signer {
   rpc EcdhDerive(EcdhDeriveRequest) returns (EcdhDeriveReply);
   rpc SymmetricEncrypt(SymmetricRequest) returns (SymmetricReply);
   rpc SymmetricDecrypt(SymmetricRequest) returns (SymmetricReply);
+  // This node's own copy of one hosted key, public half only, read from its key file — NO
+  // read-repair, so a node that lacks the key says so instead of fetching it. For `rutli-cosigner
+  // verify-hosted`, which asks every node and compares. Callable by the operator role
+  // (operator_allowlist) as well as the driver role, like KeyStatus. The driver does not call it.
+  rpc HostedKeyStatus(HostedKeyStatusRequest) returns (HostedKeyStatusReply);
 }
 
 // Mesh-internal API: cosigner-to-cosigner. All FROST packages are carried as opaque bytes
@@ -267,6 +272,15 @@ message EcdhDeriveReply {
   // Z: the 32-byte big-endian x-coordinate of d·V (BouncyCastle ECDHBasicAgreement, padded to the
   // field size).
   bytes shared_secret = 1;
+}
+
+message HostedKeyStatusRequest { string key_id = 1; }
+message HostedKeyStatusReply {
+  uint32 identifier = 1;     // the answering node's configured identifier
+  bool present = 2;          // false: this node holds no key file under the id
+  string spec = 3;
+  bytes public_key_der = 4;  // X.509 SPKI; empty for symmetric keys
+  uint64 created_at = 5;
 }
 
 message SymmetricRequest {

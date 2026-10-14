@@ -27,9 +27,10 @@ pub struct SignerSvc {
     /// (mTLS still enforced by the transport). See `Config::signer_allowlist`.
     pub allowed_cns: Option<Arc<HashSet<String>>>,
     /// Client-cert CNs of the **operator** role (`Config::operator_allowlist`): permitted the
-    /// read-only `KeyStatus` and the fixed-message `CeremonySignTest` only — never `Sign`, DKG,
-    /// refresh or hosted-key operations — so verifying a split ceremony needs no credential that
-    /// can sign arbitrary digests with a namespace key. `None` = no operator role.
+    /// read-only `KeyStatus` and `HostedKeyStatus` and the fixed-message `CeremonySignTest` only —
+    /// never `Sign`, DKG, refresh or any hosted-key operation — so verifying a split ceremony or an
+    /// imported key needs no credential that can sign arbitrary digests with a namespace key or
+    /// decrypt. `None` = no operator role.
     pub operator_cns: Option<Arc<HashSet<String>>>,
     /// How many cosigners must hold a new hosted key before it is reported created, from
     /// `hosted_keys.write_quorum`. Carried here rather than read from a constant so the configured
@@ -252,6 +253,20 @@ impl Signer for SignerSvc {
         record_ceremony("refresh", result.is_ok());
         let key = result.map_err(Status::from)?;
         Ok(Response::new(pb::RefreshReply { group_verifying_key: key.to_vec() }))
+    }
+
+    // Read-only, public half only, and local: no read-repair, so `verify-hosted` sees which nodes
+    // really hold the key. Driver or operator role, like KeyStatus.
+    async fn hosted_key_status(
+        &self,
+        req: Request<pb::HostedKeyStatusRequest>,
+    ) -> Result<Response<pb::HostedKeyStatusReply>, Status> {
+        self.authorize_operator(&req)?;
+        self.refuse_if_keystore_down()?;
+        let key_id = req.into_inner().key_id;
+        let reply =
+            self.node.blocking(move |n| n.hosted_key_status(&key_id)).await.map_err(Status::from)?;
+        Ok(Response::new(reply))
     }
 
     // -- cluster-hosted (non-FROST) keys --

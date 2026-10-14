@@ -52,7 +52,7 @@ Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org A
 | `signerAllowlist` | `[driver]` | Required under TLS |
 | `clusterId` | `""` | Cluster id pin (16 lowercase hex). Empty = derived from `ca.crt`'s bytes. Set it to the current derived id before changing `ca.crt` — see "Rotating the cluster CA". Never copy it to another cluster |
 | `clusterIdChangeAllowed` | `false` | Let the cosigners start under a different cluster id than the one each recorded in `data_dir/cluster-id`. Deliberate changes only, for one rollout |
-| `operatorAllowlist` | `[]` | Operator role for the split ceremony's `verify-key` (KeyStatus + CeremonySignTest only), e.g. `[operator]` |
+| `operatorAllowlist` | `[]` | Operator role for `verify-key` and `verify-hosted` (KeyStatus + HostedKeyStatus + CeremonySignTest only), e.g. `[operator]` |
 | `hostedKeys.enabled` | `false` | Cluster-hosted RSA/AES keys — replicated whole keys, not threshold shares |
 | `backup.enabled` | `false` | Nightly `backup` via `kubectl exec` inside each cosigner; needs `backup.ship` |
 

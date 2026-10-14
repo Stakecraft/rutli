@@ -35,6 +35,7 @@ pub mod share_import;
 pub mod tls;
 pub mod tls_probe;
 pub mod trust;
+pub mod verify_hosted;
 pub mod verify_key;
 pub mod wrap;
 

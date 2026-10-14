@@ -878,6 +878,27 @@ impl Node {
         self.keystore.load_hosted(key_id)
     }
 
+    /// This node's own copy of hosted key `key_id`, public half only, for `verify-hosted`. Reads
+    /// the key file and nothing else: no read-repair, so an absent key reads `present: false`.
+    pub fn hosted_key_status(&self, key_id: &str) -> Result<crate::pb::HostedKeyStatusReply> {
+        self.hosted_ctx()?;
+        refuse_reserved_for_hosted(key_id)?;
+        let identifier = u32::from(crate::hosted::identifier_index(self.identifier)?);
+        match self.keystore.load_hosted(key_id) {
+            Ok(key) => Ok(crate::pb::HostedKeyStatusReply {
+                identifier,
+                present: true,
+                spec: key.spec.as_str().to_string(),
+                public_key_der: if key.spec.is_asymmetric() { key.public_key_der()? } else { Vec::new() },
+                created_at: key.created_at,
+            }),
+            Err(DaemonError::UnknownKey(_)) => {
+                Ok(crate::pb::HostedKeyStatusReply { identifier, present: false, ..Default::default() })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn hosted_exists(&self, key_id: &str) -> bool {
         self.keystore.exists(key_id) && self.keystore.load_hosted(key_id).is_ok()
     }

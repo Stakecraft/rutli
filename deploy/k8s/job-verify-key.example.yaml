@@ -4,9 +4,9 @@
 # Example: one-off `rutli-cosigner verify-key --sign-test` for the split ceremony
 # (docs/split-ceremony.md, Gates B and C), run in-cluster as the OPERATOR role.
 #
-# The operator certificate (CN `operator`, on operator_allowlist: KeyStatus + CeremonySignTest
-# only) is never part of the standing deployment. Create its Secret for the ceremony, run this Job,
-# read its log, and delete both afterwards:
+# The operator certificate (CN `operator`, on operator_allowlist: KeyStatus + HostedKeyStatus +
+# CeremonySignTest only) is never part of the standing deployment. Create its Secret for the
+# ceremony, run this Job, read its log, and delete both afterwards:
 #
 #   kubectl -n rutli create secret tls rutli-operator-tls --cert=certs/operator.crt --key=certs/operator.key
 #   KEY_ID=frost-import-… FP=1220… envsubst < deploy/k8s/job-verify-key.example.yaml | kubectl apply -f -
