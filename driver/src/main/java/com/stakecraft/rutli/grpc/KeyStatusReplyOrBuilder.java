@@ -144,4 +144,40 @@ public interface KeyStatusReplyOrBuilder extends
    * @return The refreshCount.
    */
   long getRefreshCount();
+
+  /**
+   * <pre>
+   * dealer-split from a B6 dealer only (empty otherwise): what the key was carried for,
+   * "namespace" or "protocol", and its recorded Canton usage, comma-separated as Canton names it
+   * ("" = none recorded, which Canton reads as all; "unknown" = plain PKCS#8).
+   * </pre>
+   *
+   * <code>string carried_for = 12;</code>
+   * @return The carriedFor.
+   */
+  java.lang.String getCarriedFor();
+  /**
+   * <pre>
+   * dealer-split from a B6 dealer only (empty otherwise): what the key was carried for,
+   * "namespace" or "protocol", and its recorded Canton usage, comma-separated as Canton names it
+   * ("" = none recorded, which Canton reads as all; "unknown" = plain PKCS#8).
+   * </pre>
+   *
+   * <code>string carried_for = 12;</code>
+   * @return The bytes for carriedFor.
+   */
+  com.google.protobuf.ByteString
+      getCarriedForBytes();
+
+  /**
+   * <code>string recorded_usage = 13;</code>
+   * @return The recordedUsage.
+   */
+  java.lang.String getRecordedUsage();
+  /**
+   * <code>string recorded_usage = 13;</code>
+   * @return The bytes for recordedUsage.
+   */
+  com.google.protobuf.ByteString
+      getRecordedUsageBytes();
 }

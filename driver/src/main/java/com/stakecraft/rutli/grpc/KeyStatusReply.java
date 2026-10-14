@@ -35,6 +35,8 @@ private static final long serialVersionUID = 0L;
     origin_ = "";
     ceremonyId_ = "";
     cantonFingerprint_ = "";
+    carriedFor_ = "";
+    recordedUsage_ = "";
   }
 
   public static final com.google.protobuf.Descriptors.Descriptor
@@ -307,6 +309,96 @@ private static final long serialVersionUID = 0L;
     return refreshCount_;
   }
 
+  public static final int CARRIED_FOR_FIELD_NUMBER = 12;
+  @SuppressWarnings("serial")
+  private volatile java.lang.Object carriedFor_ = "";
+  /**
+   * <pre>
+   * dealer-split from a B6 dealer only (empty otherwise): what the key was carried for,
+   * "namespace" or "protocol", and its recorded Canton usage, comma-separated as Canton names it
+   * ("" = none recorded, which Canton reads as all; "unknown" = plain PKCS#8).
+   * </pre>
+   *
+   * <code>string carried_for = 12;</code>
+   * @return The carriedFor.
+   */
+  @java.lang.Override
+  public java.lang.String getCarriedFor() {
+    java.lang.Object ref = carriedFor_;
+    if (ref instanceof java.lang.String) {
+      return (java.lang.String) ref;
+    } else {
+      com.google.protobuf.ByteString bs = 
+          (com.google.protobuf.ByteString) ref;
+      java.lang.String s = bs.toStringUtf8();
+      carriedFor_ = s;
+      return s;
+    }
+  }
+  /**
+   * <pre>
+   * dealer-split from a B6 dealer only (empty otherwise): what the key was carried for,
+   * "namespace" or "protocol", and its recorded Canton usage, comma-separated as Canton names it
+   * ("" = none recorded, which Canton reads as all; "unknown" = plain PKCS#8).
+   * </pre>
+   *
+   * <code>string carried_for = 12;</code>
+   * @return The bytes for carriedFor.
+   */
+  @java.lang.Override
+  public com.google.protobuf.ByteString
+      getCarriedForBytes() {
+    java.lang.Object ref = carriedFor_;
+    if (ref instanceof java.lang.String) {
+      com.google.protobuf.ByteString b = 
+          com.google.protobuf.ByteString.copyFromUtf8(
+              (java.lang.String) ref);
+      carriedFor_ = b;
+      return b;
+    } else {
+      return (com.google.protobuf.ByteString) ref;
+    }
+  }
+
+  public static final int RECORDED_USAGE_FIELD_NUMBER = 13;
+  @SuppressWarnings("serial")
+  private volatile java.lang.Object recordedUsage_ = "";
+  /**
+   * <code>string recorded_usage = 13;</code>
+   * @return The recordedUsage.
+   */
+  @java.lang.Override
+  public java.lang.String getRecordedUsage() {
+    java.lang.Object ref = recordedUsage_;
+    if (ref instanceof java.lang.String) {
+      return (java.lang.String) ref;
+    } else {
+      com.google.protobuf.ByteString bs = 
+          (com.google.protobuf.ByteString) ref;
+      java.lang.String s = bs.toStringUtf8();
+      recordedUsage_ = s;
+      return s;
+    }
+  }
+  /**
+   * <code>string recorded_usage = 13;</code>
+   * @return The bytes for recordedUsage.
+   */
+  @java.lang.Override
+  public com.google.protobuf.ByteString
+      getRecordedUsageBytes() {
+    java.lang.Object ref = recordedUsage_;
+    if (ref instanceof java.lang.String) {
+      com.google.protobuf.ByteString b = 
+          com.google.protobuf.ByteString.copyFromUtf8(
+              (java.lang.String) ref);
+      recordedUsage_ = b;
+      return b;
+    } else {
+      return (com.google.protobuf.ByteString) ref;
+    }
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -353,6 +445,12 @@ private static final long serialVersionUID = 0L;
     }
     if (refreshCount_ != 0L) {
       output.writeUInt64(11, refreshCount_);
+    }
+    if (!com.google.protobuf.GeneratedMessage.isStringEmpty(carriedFor_)) {
+      com.google.protobuf.GeneratedMessage.writeString(output, 12, carriedFor_);
+    }
+    if (!com.google.protobuf.GeneratedMessage.isStringEmpty(recordedUsage_)) {
+      com.google.protobuf.GeneratedMessage.writeString(output, 13, recordedUsage_);
     }
     getUnknownFields().writeTo(output);
   }
@@ -404,6 +502,12 @@ private static final long serialVersionUID = 0L;
       size += com.google.protobuf.CodedOutputStream
         .computeUInt64Size(11, refreshCount_);
     }
+    if (!com.google.protobuf.GeneratedMessage.isStringEmpty(carriedFor_)) {
+      size += com.google.protobuf.GeneratedMessage.computeStringSize(12, carriedFor_);
+    }
+    if (!com.google.protobuf.GeneratedMessage.isStringEmpty(recordedUsage_)) {
+      size += com.google.protobuf.GeneratedMessage.computeStringSize(13, recordedUsage_);
+    }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
     return size;
@@ -441,6 +545,10 @@ private static final long serialVersionUID = 0L;
         != other.getInstalledAt()) return false;
     if (getRefreshCount()
         != other.getRefreshCount()) return false;
+    if (!getCarriedFor()
+        .equals(other.getCarriedFor())) return false;
+    if (!getRecordedUsage()
+        .equals(other.getRecordedUsage())) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -476,6 +584,10 @@ private static final long serialVersionUID = 0L;
     hash = (37 * hash) + REFRESH_COUNT_FIELD_NUMBER;
     hash = (53 * hash) + com.google.protobuf.Internal.hashLong(
         getRefreshCount());
+    hash = (37 * hash) + CARRIED_FOR_FIELD_NUMBER;
+    hash = (53 * hash) + getCarriedFor().hashCode();
+    hash = (37 * hash) + RECORDED_USAGE_FIELD_NUMBER;
+    hash = (53 * hash) + getRecordedUsage().hashCode();
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -618,6 +730,8 @@ private static final long serialVersionUID = 0L;
       cantonFingerprint_ = "";
       installedAt_ = 0L;
       refreshCount_ = 0L;
+      carriedFor_ = "";
+      recordedUsage_ = "";
       return this;
     }
 
@@ -684,6 +798,12 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000400) != 0)) {
         result.refreshCount_ = refreshCount_;
       }
+      if (((from_bitField0_ & 0x00000800) != 0)) {
+        result.carriedFor_ = carriedFor_;
+      }
+      if (((from_bitField0_ & 0x00001000) != 0)) {
+        result.recordedUsage_ = recordedUsage_;
+      }
     }
 
     @java.lang.Override
@@ -736,6 +856,16 @@ private static final long serialVersionUID = 0L;
       }
       if (other.getRefreshCount() != 0L) {
         setRefreshCount(other.getRefreshCount());
+      }
+      if (!other.getCarriedFor().isEmpty()) {
+        carriedFor_ = other.carriedFor_;
+        bitField0_ |= 0x00000800;
+        onChanged();
+      }
+      if (!other.getRecordedUsage().isEmpty()) {
+        recordedUsage_ = other.recordedUsage_;
+        bitField0_ |= 0x00001000;
+        onChanged();
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -818,6 +948,16 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000400;
               break;
             } // case 88
+            case 98: {
+              carriedFor_ = input.readStringRequireUtf8();
+              bitField0_ |= 0x00000800;
+              break;
+            } // case 98
+            case 106: {
+              recordedUsage_ = input.readStringRequireUtf8();
+              bitField0_ |= 0x00001000;
+              break;
+            } // case 106
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -1447,6 +1587,180 @@ private static final long serialVersionUID = 0L;
     public Builder clearRefreshCount() {
       bitField0_ = (bitField0_ & ~0x00000400);
       refreshCount_ = 0L;
+      onChanged();
+      return this;
+    }
+
+    private java.lang.Object carriedFor_ = "";
+    /**
+     * <pre>
+     * dealer-split from a B6 dealer only (empty otherwise): what the key was carried for,
+     * "namespace" or "protocol", and its recorded Canton usage, comma-separated as Canton names it
+     * ("" = none recorded, which Canton reads as all; "unknown" = plain PKCS#8).
+     * </pre>
+     *
+     * <code>string carried_for = 12;</code>
+     * @return The carriedFor.
+     */
+    public java.lang.String getCarriedFor() {
+      java.lang.Object ref = carriedFor_;
+      if (!(ref instanceof java.lang.String)) {
+        com.google.protobuf.ByteString bs =
+            (com.google.protobuf.ByteString) ref;
+        java.lang.String s = bs.toStringUtf8();
+        carriedFor_ = s;
+        return s;
+      } else {
+        return (java.lang.String) ref;
+      }
+    }
+    /**
+     * <pre>
+     * dealer-split from a B6 dealer only (empty otherwise): what the key was carried for,
+     * "namespace" or "protocol", and its recorded Canton usage, comma-separated as Canton names it
+     * ("" = none recorded, which Canton reads as all; "unknown" = plain PKCS#8).
+     * </pre>
+     *
+     * <code>string carried_for = 12;</code>
+     * @return The bytes for carriedFor.
+     */
+    public com.google.protobuf.ByteString
+        getCarriedForBytes() {
+      java.lang.Object ref = carriedFor_;
+      if (ref instanceof String) {
+        com.google.protobuf.ByteString b = 
+            com.google.protobuf.ByteString.copyFromUtf8(
+                (java.lang.String) ref);
+        carriedFor_ = b;
+        return b;
+      } else {
+        return (com.google.protobuf.ByteString) ref;
+      }
+    }
+    /**
+     * <pre>
+     * dealer-split from a B6 dealer only (empty otherwise): what the key was carried for,
+     * "namespace" or "protocol", and its recorded Canton usage, comma-separated as Canton names it
+     * ("" = none recorded, which Canton reads as all; "unknown" = plain PKCS#8).
+     * </pre>
+     *
+     * <code>string carried_for = 12;</code>
+     * @param value The carriedFor to set.
+     * @return This builder for chaining.
+     */
+    public Builder setCarriedFor(
+        java.lang.String value) {
+      if (value == null) { throw new NullPointerException(); }
+      carriedFor_ = value;
+      bitField0_ |= 0x00000800;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * dealer-split from a B6 dealer only (empty otherwise): what the key was carried for,
+     * "namespace" or "protocol", and its recorded Canton usage, comma-separated as Canton names it
+     * ("" = none recorded, which Canton reads as all; "unknown" = plain PKCS#8).
+     * </pre>
+     *
+     * <code>string carried_for = 12;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearCarriedFor() {
+      carriedFor_ = getDefaultInstance().getCarriedFor();
+      bitField0_ = (bitField0_ & ~0x00000800);
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * dealer-split from a B6 dealer only (empty otherwise): what the key was carried for,
+     * "namespace" or "protocol", and its recorded Canton usage, comma-separated as Canton names it
+     * ("" = none recorded, which Canton reads as all; "unknown" = plain PKCS#8).
+     * </pre>
+     *
+     * <code>string carried_for = 12;</code>
+     * @param value The bytes for carriedFor to set.
+     * @return This builder for chaining.
+     */
+    public Builder setCarriedForBytes(
+        com.google.protobuf.ByteString value) {
+      if (value == null) { throw new NullPointerException(); }
+      checkByteStringIsUtf8(value);
+      carriedFor_ = value;
+      bitField0_ |= 0x00000800;
+      onChanged();
+      return this;
+    }
+
+    private java.lang.Object recordedUsage_ = "";
+    /**
+     * <code>string recorded_usage = 13;</code>
+     * @return The recordedUsage.
+     */
+    public java.lang.String getRecordedUsage() {
+      java.lang.Object ref = recordedUsage_;
+      if (!(ref instanceof java.lang.String)) {
+        com.google.protobuf.ByteString bs =
+            (com.google.protobuf.ByteString) ref;
+        java.lang.String s = bs.toStringUtf8();
+        recordedUsage_ = s;
+        return s;
+      } else {
+        return (java.lang.String) ref;
+      }
+    }
+    /**
+     * <code>string recorded_usage = 13;</code>
+     * @return The bytes for recordedUsage.
+     */
+    public com.google.protobuf.ByteString
+        getRecordedUsageBytes() {
+      java.lang.Object ref = recordedUsage_;
+      if (ref instanceof String) {
+        com.google.protobuf.ByteString b = 
+            com.google.protobuf.ByteString.copyFromUtf8(
+                (java.lang.String) ref);
+        recordedUsage_ = b;
+        return b;
+      } else {
+        return (com.google.protobuf.ByteString) ref;
+      }
+    }
+    /**
+     * <code>string recorded_usage = 13;</code>
+     * @param value The recordedUsage to set.
+     * @return This builder for chaining.
+     */
+    public Builder setRecordedUsage(
+        java.lang.String value) {
+      if (value == null) { throw new NullPointerException(); }
+      recordedUsage_ = value;
+      bitField0_ |= 0x00001000;
+      onChanged();
+      return this;
+    }
+    /**
+     * <code>string recorded_usage = 13;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearRecordedUsage() {
+      recordedUsage_ = getDefaultInstance().getRecordedUsage();
+      bitField0_ = (bitField0_ & ~0x00001000);
+      onChanged();
+      return this;
+    }
+    /**
+     * <code>string recorded_usage = 13;</code>
+     * @param value The bytes for recordedUsage to set.
+     * @return This builder for chaining.
+     */
+    public Builder setRecordedUsageBytes(
+        com.google.protobuf.ByteString value) {
+      if (value == null) { throw new NullPointerException(); }
+      checkByteStringIsUtf8(value);
+      recordedUsage_ = value;
+      bitField0_ |= 0x00001000;
       onChanged();
       return this;
     }
