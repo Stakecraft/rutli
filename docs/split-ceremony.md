@@ -3,8 +3,14 @@
 **Status:** shipped in v0.4.0 (milestone B2 of [roadmap-migration.md](roadmap-migration.md)).
 **Scope:** one existing Canton **Ed25519** key — in practice the namespace key — becomes a `t`-of-`n`
 FROST key in a Rütli cluster with the **same public key and fingerprint**, so the namespace and every
-party ID under it survive. The Canton side of a migration (new participant UID in the same namespace,
-party move) is the B0 shape ([b0-cutover-spike.md](b0-cutover-spike.md)); the full rehearsed
+party ID under it survive. The same ceremony can carry a protocol signing or sequencer-authentication
+key (`rutli-dealer split-key --expect-usage protocol`, ids `<prefix>frost-import-sig-…` /
+`…-seqauth-…`, roadmap B6); that is possible and discouraged, see [migration.md](migration.md) §8.
+The default, `--expect-usage namespace`, takes a key whose recorded usage is namespace alone, and
+asks for `--namespace-fingerprint` (the old node's namespace, from its UID) wherever the usage alone
+cannot tell the namespace key from another key, such as a Splice `signing` key, whose usage
+`SigningKeyUsage.All` includes namespace. The Canton side of a migration (new participant UID in
+the same namespace, party move) is the B0 shape ([b0-cutover-spike.md](b0-cutover-spike.md)); the full rehearsed
 procedure is B4 (`docs/migration.md`).
 
 **Read this first.** A key born by DKG ([key-ceremony.md](key-ceremony.md)) never exists whole. A
@@ -36,8 +42,10 @@ secret. A person who holds the key file must never also hold `t` seal secrets.
 - **Offline only.** `share-recipient`, `import-share` and `abort-import` are CLI commands, never RPCs.
   `rutli-dealer` is a separate binary that is not in the cosigner image.
 - **The dealer splits only the key you name.** `--expect-fingerprint` is mandatory; a key with a
-  different fingerprint, a non-Ed25519 key, or (without `--any-usage`) a key without `namespace`
-  usage is refused. Before writing anything it proves: group key == the key's public key byte for
+  different fingerprint, a non-Ed25519 key, or a key whose usage does not match `--expect-usage`
+  (default `namespace`: usage namespace alone, or `--namespace-fingerprint` equal to the key) is
+  refused, as is an id of the other mode's class (`…frost-import-sig-…` / `…-seqauth-…` are
+  protocol ids). Before writing anything it proves: group key == the key's public key byte for
   byte; every share passes VSS with `min_signers == t`; every `t`-subset reconstructs the key and
   produces a signature `verify_strict` accepts (`frost/core/src/dealer.rs`).
 - **Each share reaches one node.** It is sealed to a one-time X25519 key that node minted for this
@@ -234,8 +242,11 @@ then has the cluster sign with **every `t`-subset** of cosigners — `C(n,t)` si
 2-of-3, `{1,2}`, `{1,3}`, `{2,3}`, the leader rotating — through `CeremonySignTest`: the cosigners
 sign exactly that quorum, over a digest they compute themselves from the key's provenance,
 `0x1220 ‖ SHA-256("rutli-verify-key/" ‖ CEREMONY ‖ KEY_ID)`, and verify-key checks each with
-`verify_strict` under the Canton key. (Those bytes cannot be a Canton topology hash: Canton's begin
-with a 4-byte hash purpose. The operator role cannot ask for any other message, and cannot `Sign`.)
+`verify_strict` under the Canton key. (That digest is domain-separated from every hash Canton signs:
+Canton hashes `be_i32(HashPurpose.id) ‖ content` (`HashBuilder.scala:192-205`), every purpose Canton
+3.6.1 defines is 1–68, or −1 for test hashes (`HashPurpose.scala:52-123`), and this preimage starts
+with the ASCII bytes `rutl`, which as a purpose would be 1 920 300 396; equal digests would take a
+SHA-256 collision. The operator role cannot ask for any other message, and cannot `Sign`.)
 
 **Gate B:** `OK`, refresh count 0, digest = `dealer-record.json`, every one of the `C(n,t)` quorums
 verified.

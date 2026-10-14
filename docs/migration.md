@@ -26,7 +26,7 @@ What stays and what changes:
 | Namespace (`1220…` fingerprint) | **unchanged**: the same key, now held as FROST shares |
 | Party IDs (`<hint>::<namespace>`), wallet balance, `ValidatorLicense` | **unchanged** |
 | Participant ID (`PAR::<id>::<namespace>`) | **new**. A participant UID that was ever onboarded cannot onboard again, so the node is rebuilt as a new member and the parties move to it |
-| Signing key, encryption key | **new**: FROST DKG signing key, cluster-hosted ECIES (or RSA) encryption key. The old ones are not carried |
+| Signing key, encryption key | **new**: FROST DKG signing key, cluster-hosted ECIES (or RSA) encryption key. The old ones are not carried (they can be, and should not be: §8) |
 | Purchased extra traffic of the old member | **lost** (stranded on the offboarded member). Top-up buys new traffic |
 | Contracts | Splice re-imports the party's ACS from Scan. Contracts **not shared with the DSO** are not in that import (see Limitations) |
 | The old participant | **offboarded for good** at the point of no return. It can never rejoin |
@@ -204,12 +204,139 @@ participant again.
 - **ECIES** needs every cosigner upgraded and up when the key is created. RSA does not, and remains available.
 - **Cluster residue:** imported and DKG keys cannot be deleted from the cluster (by design). A failed attempt leaves its ids behind.
 
-## 8. What to send us (pilots)
+## 8. Carrying the signing and encryption keys (discouraged)
+
+The procedure above carries **only the namespace key** and gives the new participant fresh signing and encryption keys
+(Step 5.2). Rütli can also carry the old node's protocol signing, sequencer-authentication and encryption keys
+(roadmap B6). It is possible because nothing in Canton stops it: `RegisterKmsSigningKey` checks only the key spec, and a new
+member may list fingerprints that an offboarded member's OTK listed too (B0 did exactly that). **Do not do it unless something
+outside Canton pins those fingerprints and cannot be changed in time.**
+
+### Why not
+
+- **These keys rotate; the namespace key does not.** That is the only reason the namespace key is carried at all. A signing
+  or encryption key is replaced with one OTK update, at any time.
+- **Carrying them buys no continuity.** The participant UID is new and its OTK is new anyway (Step 5.3). Nothing on the
+  synchronizer refers to the old keys except the OTK of the member being offboarded.
+- **It carries the exposure with them.** Every pre-migration copy (`common_crypto_private_keys`, its WAL and replicas, every
+  `pg_dumpall`, every version in the backup bucket, the export file) can then act as the **new** member. A signing key authenticates
+  to the sequencer and signs confirmations in its name; the encryption key decrypts **every future view** sent to it, by anyone who
+  holds an old backup and can read the ciphertexts the sequencers store and deliver. Destruction (Step 8 of §4) then protects a
+  live identity, not a retired one, and nothing proves it complete.
+- **A hosted ECIES key is a whole key, replicated to all `n` cosigners** ([hosted-keys.md](hosted-keys.md)), not a threshold
+  key. Carrying it adds `n` more places to the old ones.
+- **"Carry, then rotate" ends where a fresh key starts.** After the rotation the carried key is out of the OTK, which is where
+  Step 5.2 starts; in between it was exposed.
+
+### Which keys exist
+
+Print them on the old node, with usage (the B0 snippet, [b0-cutover-spike.md](b0-cutover-spike.md) §1.4):
+
+| Node | Signing keys | Encryption |
+|---|---|---|
+| Canton auto-init | `namespace` {namespace}; `signing` {signing, proof-of-ownership}; `sequencer-auth` {sequencer-auth, proof-of-ownership} | `encryption` |
+| Splice validator (`NodeInitializer.scala:69-73`) | `namespace` {namespace}; **one** `signing` key with `SigningKeyUsage.All` = {namespace, sequencer-auth, signing, proof-of-ownership} | `encryption` |
+
+Splice's `signing` key lists **namespace** among its usages and is **not** the namespace key: the namespace is the fingerprint after
+`::` in the node's UID, and that is the key named `namespace`. A legacy key with an empty usage list counts as `All` too. This is why
+the dealer asks for `--namespace-fingerprint` wherever the usage alone is ambiguous (below). Register Splice's key on the new node
+**without** namespace usage: the new member needs it to sign and to authenticate, not to authorize namespace changes.
+
+### One ceremony per signing key
+
+Each carried signing key is its own split ceremony, run in full: [split-ceremony.md](split-ceremony.md) §3–§4, every gate,
+founding backups, then a refresh. Canton auto-init has two (`signing`, `sequencer-auth`), Splice one (`signing`). Export each like the
+namespace key (§4 Step 2) and give each its own `CEREMONY`. The dealer is told what the key is for:
+
+```sh
+rutli-dealer split-key --in signing.export --password-env EXPORT_PW \
+  --expect-usage protocol --expect-fingerprint "$SIG_FP" \
+  --key-id "${PREFIX}frost-import-sig-${SIG_FP:4:8}" \
+  --namespace-fingerprint "$NS_FP" \
+  --threshold 2 --ca-cert ca.crt --recipient r1.json --recipient r2.json --recipient r3.json --out-dir out/
+```
+
+Pass `--namespace-fingerprint` in protocol mode every time: Splice's key cannot be split without it, and for a Canton key it is a
+free check that the key you carry is not the root.
+
+| `--expect-usage` | The key's recorded usage must | Id | `--namespace-fingerprint` |
+|---|---|---|---|
+| `namespace` (default) | be exactly {namespace} | `${PREFIX}frost-import-<name>` | required if the usage has more than namespace, is empty (= all) or unknown (plain PKCS#8); must **equal** the key's fingerprint |
+| `protocol` | include signing or sequencer-auth; plain PKCS#8 is refused | `…frost-import-sig-<name>` if it includes signing, else `…frost-import-seqauth-<name>` | required if the usage includes namespace (Splice, legacy keys); must **differ** from the key's fingerprint |
+
+Each mode refuses the other's ids before any secret is read, and a given `--namespace-fingerprint` is always checked.
+`dealer-record.json` records `expected_usage`, `recorded_usage` and `namespace_fingerprint`. The share bundles carry the same
+usage under their AAD (envelope version 3), `import-share` re-checks it against the id, and `verify-key` prints it
+(`carried-for protocol`) and requires every node to agree. Use the dealer and cosigners of one release: an older cosigner
+refuses a version 3 bundle.
+
+The encryption key is not a ceremony: `import-key` it into one cosigner (its daemon may be running), then check it with
+`verify-hosted` before registering it ([hosted-keys.md](hosted-keys.md), "Importing a Canton node's ECIES key"). Only an EC P-256
+encryption key can be carried; RSA import is not supported (B3 was dropped), so an RSA node gets a fresh key.
+
+### Ids and the approval-rule pitfall
+
+| Key | Id |
+|---|---|
+| namespace | `${PREFIX}frost-import-${NS_FP:4:8}` |
+| protocol signing (Splice: the one `signing` key) | `${PREFIX}frost-import-sig-${SIG_FP:4:8}` |
+| sequencer authentication (Canton only) | `${PREFIX}frost-import-seqauth-${SEQ_FP:4:8}` |
+| encryption | `${PREFIX}rutli-enc-imported-${ENC_FP:4:8}` |
+
+Approval rules match key-id **prefixes**, first match wins ([approval-quorum.md](approval-quorum.md)). The natural rule for an
+imported namespace key, `key-id-prefix = "${PREFIX}frost-import-"`, also matches the `-sig-` and `-seqauth-` ids: every confirmation
+and every sequencer authentication would wait for human approvals, and the participant stalls. Either name the namespace id exactly,
+or put `auto` rules for the protocol ids first:
+
+```hocon
+rules = [
+  { key-id-prefix = "acme1-frost-import-sig-",     mode = "auto" },
+  { key-id-prefix = "acme1-frost-import-seqauth-", mode = "auto" },
+  { key-id-prefix = "acme1-frost-import-",         mode = "quorum", threshold = 2 }
+]
+```
+
+The reverse mistake is worse: never let a broad `auto` rule match the namespace id.
+
+### Register them on the new participant
+
+Instead of Step 5.2, register each carried key by id with the usage it had, **minus namespace**. Canton adds proof-of-ownership
+to every non-namespace key itself (`Signing.scala:943-947, 1336`), which the key needs to sign the OTK that lists it
+(`TopologyManager.scala:1315-1318`). Each must return the old fingerprint; otherwise STOP and roll back.
+
+```scala
+import com.digitalasset.canton.crypto.SigningKeyUsage
+// Canton auto-init: two keys
+val sig = p.keys.secret.register_kms_signing_key(SIG_ID, SigningKeyUsage.ProtocolWithProofOfOwnership, "signing")
+val seq = p.keys.secret.register_kms_signing_key(SEQ_ID, SigningKeyUsage.SequencerAuthenticationOnly, "sequencer-auth")
+// Splice: one key, All without Namespace
+val sig = p.keys.secret.register_kms_signing_key(SIG_ID,
+  Set(SigningKeyUsage.Protocol, SigningKeyUsage.SequencerAuthentication), "signing")
+val enc = p.keys.secret.register_kms_encryption_key(ENC_ID, "encryption")
+```
+
+The OTK of Step 5.3 then lists these keys, and the dump Secret of Step 6.1 lists their ids.
+
+### Refresh, verify, destroy
+
+- **One refresh CronJob per FROST id**: the namespace id and each carried signing id ([deploy/k8s/cronjob-refresh.yaml](../deploy/k8s/cronjob-refresh.yaml)
+  takes one `KEY_ID`; copy it per id and stagger the schedules). The hosted encryption key has no shares to refresh.
+- `verify-key --sign-test` per signing id after every refresh; `verify-hosted` for the encryption key after every cosigner restore.
+- Step 7 adds: the driver audit shows `sign keyId=…frost-import-sig-…` (and `…-seqauth-…`) `outcome=ok` and ECIES decryptions with
+  the carried encryption key.
+- Step 8 is unchanged in scope, since the old database held these keys anyway, but it is now the only thing between an old backup
+  and the live member.
+
+Rehearsed end to end on Canton 3.6.1 by `scripts/e2e-carry-protocol-keys.sh`: both protocol keys split against running cosigners,
+the encryption key imported into a running cosigner, all three registered with the old fingerprints, the OTK rotated onto them,
+pings both ways, and a reconnect that authenticates to the sequencer with the carried key.
+
+## 9. What to send us (pilots)
 
 The ceremony record and the destruction record from [split-ceremony.md](split-ceremony.md) §8, the verification table from Step 7,
 the time each step took, and anything in this runbook that did not match what you saw.
 
-## 9. Lessons from the B4 rehearsal (2026-10-14)
+## 10. Lessons from the B4 rehearsal (2026-10-14)
 
 The rehearsal moved a scratch JCE validator into the soak cluster (`v0.4.0-rc.1`): party IDs unchanged, ACS 5 → 6 with no
 commitment mismatch, tap and transfers in both directions, ECIES decrypting live. Everything below cost time or failed on the
