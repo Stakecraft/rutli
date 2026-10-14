@@ -151,7 +151,8 @@ pub struct ImportReport {
 /// secret. Checks, in order:
 ///
 /// 1. format: bundle kind, version, spec, envelope version 3 with its carried usage (a pre-B6
-///    bundle is refused); the usage matches the id's class (`carry::check_carried_id`);
+///    bundle is refused); the dealer's carry rules hold for the usage, the id and the bundle's
+///    fingerprint (`carry::check_carried_id`);
 /// 2. `recipient` is this node's identifier;
 /// 3. `cluster_id` is this node's (derived from its CA certificate);
 /// 4. if the key is already installed: an identical re-import (same ceremony, same package digest,
@@ -185,7 +186,7 @@ pub fn import_share(
         )));
     }
     let usage = bundle.carried_usage()?;
-    crate::carry::check_carried_id(&bundle.key_id, usage)?;
+    crate::carry::check_carried_id(&bundle.key_id, &bundle.canton_fingerprint, usage)?;
     // 2–3. This node, this cluster.
     if bundle.recipient != ctx.identifier {
         return Err(ceremony(format!(
@@ -545,7 +546,11 @@ mod tests {
     }
 
     fn usage() -> crate::carry::CarriedUsage {
-        crate::carry::CarriedUsage { expected: "namespace".into(), recorded: Some(vec!["namespace".into()]) }
+        crate::carry::CarriedUsage {
+            expected: "namespace".into(),
+            recorded: Some(vec!["namespace".into()]),
+            namespace_fingerprint: None,
+        }
     }
 
     fn deal(requests: &[RecipientRequest]) -> (Vec<ShareBundle>, PublicKeyPackage) {
@@ -618,8 +623,25 @@ mod tests {
         assert!(share_delivery::recipient_path(&nodes[0].ctx.data_dir, KEY).unwrap().exists(), "nothing consumed");
 
         let mut protocol = bundles[1].clone();
-        protocol.usage = Some(crate::carry::CarriedUsage { expected: "protocol".into(), recorded: None });
+        let carried = |expected: &str, recorded: &[&str], ns: Option<String>| crate::carry::CarriedUsage {
+            expected: expected.into(),
+            recorded: Some(recorded.iter().map(|s| s.to_string()).collect()),
+            namespace_fingerprint: ns,
+        };
+        protocol.usage = Some(carried("protocol", &["signing"], None));
         assert_ceremony_err(nodes[1].import(&protocol, true), "namespace-style id");
+        // A modified dealer's bundle the real one would refuse: refused here too, before decryption.
+        // All usage, no namespace acknowledgement (could be a Splice signing key, not the root):
+        let all = ["namespace", "proof-of-ownership", "sequencer-auth", "signing"];
+        let mut b = bundles[1].clone();
+        b.usage = Some(carried("namespace", &all, None));
+        assert_ceremony_err(nodes[1].import(&b, true), "--namespace-fingerprint");
+        // ... and an acknowledgement naming another key than this bundle's.
+        b.usage = Some(carried("namespace", &all, Some(format!("1220{}", "ab".repeat(32)))));
+        assert_ceremony_err(nodes[1].import(&b, true), "is not the namespace");
+        // A malformed acknowledgement.
+        b.usage = Some(carried("namespace", &["namespace"], Some("1220AB".into())));
+        assert_ceremony_err(nodes[1].import(&b, true), "not a 1220");
     }
 
     /// Review NEW-2: a witness can re-derive the SAS from the node's own sealed state, in a session

@@ -52,13 +52,16 @@ All notable changes to Rütli are documented here. Format loosely follows
     namespace, such as a Splice validator's `signing` key (`SigningKeyUsage.All`) — and must equal
     the key's fingerprint in namespace mode, differ from it in protocol mode.
   - Protocol keys have their own ids, `<prefix>frost-import-sig-<name>` (usage includes signing)
-    and `<prefix>frost-import-seqauth-<name>`, so an approval rule on the namespace id never holds
-    them. Each mode refuses the other's ids before any secret is read.
-  - The carried usage is recorded in `dealer-record.json` (`expected_usage`, `recorded_usage`,
-    `namespace_fingerprint`), travels in each share bundle bound into the envelope's AAD (envelope
-    version 3), is re-checked against the id by `import-share`, kept in the share's provenance
-    across refreshes, reported by `KeyStatus` (`carried_for`, `recorded_usage`) and compared across
-    nodes by `verify-key`.
+    and `<prefix>frost-import-seqauth-<name>`, so approval rules can tell them from the namespace
+    key (a rule on the bare `<prefix>frost-import-` prefix still matches all three; see
+    `docs/migration.md` §8). Each mode refuses the other's ids before any secret is read.
+  - The carried usage and the `--namespace-fingerprint` acknowledgement are recorded in
+    `dealer-record.json` (`expected_usage`, `recorded_usage`, `namespace_fingerprint`) and travel in
+    each share bundle, bound into the envelope's AAD (envelope version 3). `import-share` re-applies
+    every dealer rule to them — usage for the mode, the acknowledgement against the bundle's own
+    Canton fingerprint, the id's class and label — so a modified dealer cannot produce a bundle the
+    real one would refuse. Kept in the share's provenance across refreshes, reported by `KeyStatus`
+    (`carried_for`, `recorded_usage`) and compared across nodes by `verify-key`.
   - `rutli-cosigner verify-hosted --key-id --expect-fingerprint`: every node holds the hosted key
     (its own copy, new `HostedKeyStatus` RPC, no read-repair), with a byte-identical SPKI whose
     Canton fingerprint is the expected one. Public values only; the operator role may call it.

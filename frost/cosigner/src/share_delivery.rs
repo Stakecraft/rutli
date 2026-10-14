@@ -394,7 +394,7 @@ pub fn seal_share(
     usage: &crate::carry::CarriedUsage,
 ) -> Result<ShareBundle> {
     request.validate()?;
-    crate::carry::check_carried_id(&request.key_id, usage)?;
+    crate::carry::check_carried_id(&request.key_id, canton_fingerprint, usage)?;
     if *share.identifier() != ident(request.identifier)? {
         return Err(DaemonError::Ceremony(format!(
             "share is not for node {}",
@@ -472,9 +472,10 @@ impl ShareBundle {
                 self.kind, self.v, self.spec
             )));
         }
-        // A protocol key never lands under a namespace id, nor the other way round (carry.rs) —
-        // whatever the dealer that made the bundle checked.
-        crate::carry::check_carried_id(&self.key_id, self.carried_usage()?)?;
+        // The dealer's carry rules, again, whatever dealer made the bundle (carry.rs): a protocol
+        // key never under a namespace id or the other way round, and the namespace acknowledgement
+        // checked against this bundle's own fingerprint.
+        crate::carry::check_carried_id(&self.key_id, &self.canton_fingerprint, self.carried_usage()?)?;
         let mismatch = |what: &str, got: &dyn std::fmt::Debug, want: &dyn std::fmt::Debug| {
             Err(DaemonError::Ceremony(format!(
                 "bundle {what} is {got:?}, this node expects {want:?}"
@@ -730,7 +731,11 @@ mod tests {
     }
 
     fn namespace_usage() -> crate::carry::CarriedUsage {
-        crate::carry::CarriedUsage { expected: "namespace".into(), recorded: Some(vec!["namespace".into()]) }
+        crate::carry::CarriedUsage {
+            expected: "namespace".into(),
+            recorded: Some(vec!["namespace".into()]),
+            namespace_fingerprint: None,
+        }
     }
 
     fn nodes() -> Vec<Node> {
@@ -820,11 +825,19 @@ mod tests {
         let state = nodes[0].state().unwrap();
         assert_eq!(bundles[0].wrapped.version, SHARE_WRAP_VERSION);
 
-        // Relabelled usage, consistent with the namespace id: only the AEAD can tell.
+        // Relabelled usage that passes every carry rule for this bundle: only the AEAD can tell.
+        let own = Some(bundles[0].canton_fingerprint.clone());
+        let usage = |recorded: Option<&[&str]>, namespace_fingerprint: Option<String>| CarriedUsage {
+            expected: "namespace".into(),
+            recorded: recorded.map(|r| r.iter().map(|s| s.to_string()).collect()),
+            namespace_fingerprint,
+        };
         for usage in [
-            CarriedUsage { expected: "namespace".into(), recorded: Some(vec![]) },
-            CarriedUsage { expected: "namespace".into(), recorded: None },
-            CarriedUsage { expected: "namespace".into(), recorded: Some(vec!["namespace".into(), "signing".into()]) },
+            usage(Some(&["identity-delegation", "namespace"]), None),
+            usage(Some(&["namespace"]), own.clone()),
+            usage(Some(&[]), own.clone()),
+            usage(None, own.clone()),
+            usage(Some(&["namespace", "signing"]), own.clone()),
         ] {
             let mut b = bundles[0].clone();
             b.usage = Some(usage);
@@ -838,7 +851,11 @@ mod tests {
         assert!(b.open(&state).unwrap_err().to_string().contains("pre-B6 dealer"));
         // Protocol usage under a namespace id: refused before decryption, whatever sealed it.
         let mut b = bundles[0].clone();
-        b.usage = Some(CarriedUsage { expected: "protocol".into(), recorded: Some(vec!["signing".into()]) });
+        b.usage = Some(CarriedUsage {
+            expected: "protocol".into(),
+            recorded: Some(vec!["signing".into()]),
+            namespace_fingerprint: None,
+        });
         assert!(b.open(&state).unwrap_err().to_string().contains("namespace-style id"));
         // The dealer side refuses to seal it in the first place.
         let fp = bundles[0].canton_fingerprint.clone();

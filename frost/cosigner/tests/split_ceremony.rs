@@ -113,6 +113,7 @@ fn ceremony(root: &Path) -> (Vec<Site>, Vec<ShareBundle>, [u8; 32], String) {
             let usage = rutli_cosigner::carry::CarriedUsage {
                 expected: "namespace".into(),
                 recorded: Some(vec!["namespace".into()]),
+                namespace_fingerprint: None,
             };
             share_delivery::seal_share(&verified, s, &pkp, &fingerprint, &usage).unwrap()
         })

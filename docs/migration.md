@@ -265,9 +265,11 @@ free check that the key you carry is not the root.
 | `protocol` | include signing or sequencer-auth; plain PKCS#8 is refused | `…frost-import-sig-<name>` if it includes signing, else `…frost-import-seqauth-<name>` | required if the usage includes namespace (Splice, legacy keys); must **differ** from the key's fingerprint |
 
 Each mode refuses the other's ids before any secret is read, and a given `--namespace-fingerprint` is always checked.
-`dealer-record.json` records `expected_usage`, `recorded_usage` and `namespace_fingerprint`. The share bundles carry the same
-usage under their AAD (envelope version 3), `import-share` re-checks it against the id, and `verify-key` prints it
-(`carried-for protocol`) and requires every node to agree. Use the dealer and cosigners of one release: an older cosigner
+`dealer-record.json` records `expected_usage`, `recorded_usage` and `namespace_fingerprint`. The share bundles carry all three
+under their AAD (envelope version 3). `import-share` re-applies every rule of the table above to them: the usage for the mode,
+`--namespace-fingerprint` against the bundle's own Canton fingerprint (which must be the group key's and your
+`--expect-fingerprint`), and the id's class and label. `verify-key` prints the mode and usage (`carried-for protocol`) and
+requires every node to agree. Use the dealer and cosigners of one release: an older cosigner
 refuses a version 3 bundle, and this release's cosigners refuse a pre-B6 (version 2) bundle.
 
 The encryption key is not a ceremony: `import-key` it into one cosigner (its daemon may be running), then check it with

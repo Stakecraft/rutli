@@ -628,6 +628,9 @@ fn every_usage_and_id_mismatch_is_refused() {
     // And the same ceremony, done right.
     ok(&run(with_ns(&ns)));
     assert_eq!(c.record()["namespace_fingerprint"], ns.as_str());
+    // The acknowledgement travels in each bundle, under its AAD, for the cosigners to re-check.
+    assert_eq!(c.bundle(1).usage.unwrap().namespace_fingerprint.as_deref(), Some(ns.as_str()));
+    c.assert_reconstructs(&sig);
 }
 
 /// `common_crypto_private_keys.data` of a vector's Ed25519 key with the given usage list (protobuf
