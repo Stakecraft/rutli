@@ -288,7 +288,7 @@ pub struct CantonImport {
 /// - only an EC P-256 key whose Canton purpose is *encryption* is accepted (`ec-p256-ecies`). A
 ///   P-256 *signing* key is refused (the cluster never turns a signing key into an ECDH oracle), as
 ///   is plain PKCS#8, which carries no purpose. Ed25519 keys go through the split ceremony, and
-///   RSA-2048 import is milestone B3 — both refused here with a pointer;
+///   RSA-2048 import is not supported (roadmap B3 was dropped) — both refused here with a pointer;
 /// - the key's Canton fingerprint must equal `expect_fingerprint`, which the operator copies from
 ///   the old node (`keys.secret.list`), not from the file;
 /// - the SPKI DER this cluster will serve must equal the SPKI Canton derives for the key
@@ -339,8 +339,9 @@ pub fn import_canton(
         }
         (KeySpec::Rsa2048, _, _) => {
             return Err(refuse(
-                "RSA-2048 import is not supported yet (roadmap milestone B3); only EC P-256 \
-                 encryption keys are"
+                "RSA-2048 import is not supported (roadmap B3 was dropped: the encryption key need \
+                 not be carried); give the new participant a fresh encryption key — only an EC \
+                 P-256 encryption key can be imported"
                     .into(),
             ))
         }

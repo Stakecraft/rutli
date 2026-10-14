@@ -418,7 +418,7 @@ fn canton_import_refuses_every_key_that_is_not_the_expected_ecies_key() {
         &fingerprint_of("extra-ecp256-signing"),
     );
     assert!(e.contains("signing key"), "{e}");
-    // Ed25519 goes through the split ceremony; RSA is milestone B3.
+    // Ed25519 goes through the split ceremony; RSA is not imported at all (B3 dropped).
     let e = refused(&read("namespace.export.bin"), None, &fingerprint_of("namespace"));
     assert!(e.contains("split ceremony"), "{e}");
     let e = refused(
@@ -426,7 +426,7 @@ fn canton_import_refuses_every_key_that_is_not_the_expected_ecies_key() {
         None,
         &fingerprint_of("extra-rsa2048-encryption"),
     );
-    assert!(e.contains("B3"), "{e}");
+    assert!(e.contains("RSA-2048 import is not supported") && e.contains("fresh encryption key"), "{e}");
     // Password handling is the parser's: required when protected, refused when not, checked.
     assert!(refused(&read("encryption.export-pw.bin"), None, &fp).contains("password"));
     assert!(refused(&read("encryption.export-pw.bin"), Some(b"wrong password"), &fp).contains("password"));
