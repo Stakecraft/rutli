@@ -1,7 +1,8 @@
 # Migrating an existing Canton validator into Rütli
 
-**Status:** first draft, 2026-10-09. It becomes final after the DevNet rehearsal ([b4-rehearsal.md](b4-rehearsal.md), roadmap B4).
-Until then, treat every step as unproven where the rehearsal has not run it.
+**Status:** draft, corrected after the DevNet rehearsal of 2026-10-14 ([b4-rehearsal.md](b4-rehearsal.md), roadmap B4; results in the
+[soak log](soak-2026-10-devnet.md)). The cutover and verification ran green; destruction (Step 8) has not run yet, so treat
+Step 8 as unproven. The corrections are folded in below and listed in "Lessons from the B4 rehearsal".
 **Applies to:** Splice 0.9.x validators on Canton 3.6.x whose keys are held by Canton itself (JCE, keys in Postgres),
 moving into a Rütli cluster ≥ 0.4.0.
 **Audience:** the operator of the existing validator, and the operator of the Rütli cluster, if that is someone else.
@@ -111,7 +112,8 @@ a bundle that fails authentication. Treat them as attacks** (split-ceremony.md �
 
 ### Step 4: new participant on a fresh database
 
-1. Put the driver jar and its TLS material where the participant mounts them [4.0].
+1. Put the driver jar and its TLS material where the participant mounts them [4.0]. `kubectl cp` keeps your laptop's uid, so
+   `chown` the files to the participant uid (1001) in the pod afterwards (Lessons e).
 2. Stop the validator app, disconnect the old participant, export a reference ACS, stop the old participant. Check that **zero** old
    participant pods remain [4.3–4.5].
 3. Start the participant on `NEW_DB` with the Rütli KMS block. Use `frost.key-prefix = PREFIX`, `delegate = "none"`, and
@@ -124,11 +126,16 @@ a bundle that fails authentication. Treat them as attacks** (split-ceremony.md �
 
 1. **Register the namespace key by id:** `register_kms_signing_key(KEY_ID, Set(Namespace), "namespace")`. It **must** return `NS_FP`.
    Otherwise STOP and roll back [4.8].
-2. **Fresh keys:** `generate_signing_key("signing", {Protocol, SequencerAuthentication, ProofOfOwnership}, Some(EcCurve25519))`
+2. **Fresh keys:** `generate_signing_key("signing", <USAGE>, Some(EcCurve25519))`
    (a FROST DKG, id `${PREFIX}frost-signing`) and `generate_encryption_key("encryption", Some(EcP256))` (cluster-hosted) [4.8].
+   `<USAGE>` is `SigningKeyUsage.ProtocolWithProofOfOwnership ++ SigningKeyUsage.SequencerAuthenticationOnly`;
+   `SigningKeyUsage.ProofOfOwnership` itself is not accessible from the console (Lessons a).
 3. `init_id_from_uid(NEW_ID::NS_FP)`, import the old node's authorized-store identity snapshot (namespace delegation + OTK), then
    propose the new OTK **without** `signedBy` (Canton adds the proof-of-ownership signatures) [4.9].
-4. `connect_by_config(<old connection config>)`. On a busy network, expect 10–30 min while the new member downloads the topology state [4.10].
+4. `connect_by_config(<old connection config>)`. The sequencer connections of the old node's config are saved and restored through
+   reflection (Lessons a). If validation fails because some of the sequencers are down, retry with
+   `validation = SequencerConnectionValidation.Active` (the admin-data type, Lessons b). On a busy network, expect 10–30 min while the
+   new member downloads the topology state [4.10].
 
 Until here the old participant still owns the party, and rollback is a Helm rollback to the old databases (§6).
 
@@ -139,6 +146,8 @@ Until here the old participant still owns the party, and rollback is a Helm roll
    initialise a node that is not initialised yet. Yours is initialised by hand, and the party migrator reads only the old id.
 2. **Gate.** Re-check every item [4.12]. Then upgrade the validator with `nodeIdentifier: NEW_ID`,
    `participantIdentitiesDumpImport: {secretName, newParticipantIdentifier: NEW_ID}`, `migrateValidatorParty: true` and `NEW_VDB` [4.13].
+   Run `helm upgrade --dry-run=server` first. If anything ever `kubectl patch`ed the Deployment, Helm 4 stops with field-manager
+   conflicts, and the upgrade needs `--force-conflicts` (Lessons c). Find that out before the PNR, not after.
 3. Watch the log. **`Preparing to remove domain trust certificate because we will be migrating <HINT>::…` is the point of no
    return.** Before it, any error, `Uploading node keys`, `Node has no identity` or `need to be rotated` → scale the validator
    to 0 at once and roll back. After it, fix forward only.
@@ -148,13 +157,15 @@ Until here the old participant still owns the party, and rollback is a Helm roll
 
 Party ID unchanged. The party is hosted only on `PAR::NEW_ID::NS_FP`; the old trust certificate is gone. The ACS diff is explained:
 everything missing is either archived after the stop or not shared with the DSO. No ACS commitment mismatch over two intervals.
-Wallet balance unchanged; a transfer out and a transfer in succeed; top-up buys traffic. No sign errors and no ECIES failures in the
+Wallet balance unchanged (write the baseline down before the cutover); a transfer out and a transfer in succeed, through the
+wallet UI (Lessons j, k); top-up buys traffic. No sign errors and no ECIES failures in the
 driver audit [5.1]. Observe for at least 24 h.
 
 ### Step 8: destroy every old copy (only after Step 7 is green)
 
 For each location in your inventory: act, keep before/after evidence, fill in the destruction record ([split-ceremony.md](split-ceremony.md) §8)
 [5.4].
+- **Local files:** on macOS use `/bin/rm -P`, not a bare `rm` (Lessons f).
 - **Database:** `DROP DATABASE OLD_DB` (it holds the old namespace, signing and encryption keys). Let the WAL recycle; drop replicas and PITR base backups.
 - **Logical dumps:** delete every dump taken while `OLD_DB` existed. Your backup schedule keeps adding copies until the DROP, so drop early.
 - **Object storage:** delete every **version and delete marker**, not just the current objects. If object lock is on, record the retention end date.
@@ -197,3 +208,48 @@ participant again.
 
 The ceremony record and the destruction record from [split-ceremony.md](split-ceremony.md) §8, the verification table from Step 7,
 the time each step took, and anything in this runbook that did not match what you saw.
+
+## 9. Lessons from the B4 rehearsal (2026-10-14)
+
+The rehearsal moved a scratch JCE validator into the soak cluster (`v0.4.0-rc.1`): party IDs unchanged, ACS 5 → 6 with no
+commitment mismatch, tap and transfers in both directions, ECIES decrypting live. Everything below cost time or failed on the
+first try. Apply it.
+
+a. **Console visibility.** `admin.api.client.data.SequencerConnections.toInternal/fromInternal` are `private[canton]`, and so is
+   `SigningKeyUsage.ProofOfOwnership`. Persist the old node's sequencer connections through reflection (14 sequencers round-tripped, equal
+   to the original), and build the signing usage from the public aliases:
+
+   ```scala
+   val toInt = (s: com.digitalasset.canton.admin.api.client.data.SequencerConnections) => s.getClass.getMethod("toInternal").invoke(s).asInstanceOf[com.digitalasset.canton.sequencing.SequencerConnections]
+   val fromInt = (i: com.digitalasset.canton.sequencing.SequencerConnections) => { val o = com.digitalasset.canton.admin.api.client.data.SequencerConnections; o.getClass.getMethod("fromInternal", classOf[com.digitalasset.canton.sequencing.SequencerConnections]).invoke(o, i).asInstanceOf[com.digitalasset.canton.admin.api.client.data.SequencerConnections] }
+   // save: toInt(syncCfg.sequencerConnections).toByteArray(ProtocolVersion.v35)
+   // restore: fromInt(SequencerConnections.fromTrustedByteArray(bytes).fold(e => sys.error(e.toString), identity))
+   p.keys.secret.generate_signing_key("signing", SigningKeyUsage.ProtocolWithProofOfOwnership ++ SigningKeyUsage.SequencerAuthenticationOnly, Some(SigningKeySpec.EcCurve25519))
+   ```
+
+   The same usage set goes into `register_kms_signing_key`. Export the identity snapshot with `protocolVersion = Some("35")`.
+b. **`connect_by_config(…, validation = SequencerConnectionValidation.Active)`** takes the admin-data type
+   (`com.digitalasset.canton.admin.api.client.data`), not the one in `sequencing`.
+c. **Helm 4 uses server-side apply.** An earlier `kubectl patch` of the Deployment (we patched probes) makes `helm upgrade` fail with
+   field-manager conflicts. Dry-run with `--dry-run=server`, then upgrade with `--force-conflicts`.
+d. **A `kubectl port-forward` bound to a replaced pod dies on the first request.** Run it in a restart loop and retry the console
+   command; a dropped forward changes nothing on the node.
+e. **`kubectl cp` preserves the laptop uid.** `chown` the jar and certificates to the participant uid (1001), and check that the state
+   volume is writable, before the first start.
+f. **macOS:** GNU coreutils `rm` can shadow `/bin/rm`, which has `-P`. Use `/bin/rm -P` for shredding. On APFS and SSD that is still
+   not provable erasure.
+g. **`parties.list(filterParticipant = …)` scans the whole synchronizer** on DevNet and takes minutes. Prefer `ledger_api.parties.list()`
+   on the node.
+h. **`synchronizer_trust_certificates.list(filterUid = …)` matches the exact UID**, not a prefix.
+i. **Removing the old member's OTK needs `force = ForceFlags(ForceFlag.AlienMember)`**; without it the console answers
+   `TOPOLOGY_DANGEROUS_COMMAND_REQUIRES_FORCE_ALIEN_MEMBER`. The namespace key signs the removal through FROST.
+j. **Wallet API with the validator's M2M token** answers `No wallet found for user …@clients`. Use the wallet UI user. The M2M app
+   also needs a client grant for the Validator API audience (a gap on the NAAS side).
+k. **The Splice wallet UI Tap amount is in USD**, not CC (10 USD gave +85.667 CC).
+l. **Compile every console Scala block against the target Canton console before the cutover.** That pass caught four errors (the usage set
+   of a and its two other uses, and the validation type of b) and flagged the ping timeout, all of which would otherwise have surfaced
+   inside the outage window. The private `toInternal` of a was hit live, before the compile pass existed.
+
+Timing: the B4 wallet was down about 52 min (validator stopped 16:14:52, party hosted on the new member 17:07:04); the new member
+was connected and healthy within about 12 min of its trust certificate (16:30:45, healthy by 16:43). The party was hosted 2 min after the PNR.
+A backup job that cannot reach S3 still leaves local dumps, and those hold the old keys: put them on the destruction list.
