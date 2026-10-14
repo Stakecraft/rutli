@@ -439,8 +439,11 @@ rutli-cosigner --config <operator config> verify-hosted \
   --key-id <frost.key-prefix>rutli-enc-imported-1 --expect-fingerprint 1220…
 ```
 
-It asks each node for its **own** copy (`HostedKeyStatus`, no read-repair), and fails unless all
-`n` hold it, the SPKI is byte-identical everywhere and its Canton fingerprint is the expected one.
+It asks each node for its **own** copy (`HostedKeyStatus`, no read-repair; each node reports the
+public key its private key derives, and refuses to answer for an inconsistent key file), and fails
+unless all `n` hold it, the SPKI is byte-identical everywhere and its Canton fingerprint is the
+expected one. These are the nodes' own reports: they catch replication gaps and divergent copies on
+honest nodes, not a compromised node that lies about what it holds.
 
 **Why importing next to a running daemon is safe.** The import is the key store's create-once
 write, the same one `import-share` uses inside a live pod: a sealed temp file, fsynced, moved into
@@ -469,8 +472,10 @@ decrypt already-recorded traffic.
    that key yet. Both copies are evidence, and one of them may be the only thing that can read
    traffic already on the wire.
 3. Establish which copy is live: `verify-hosted --key-id <id> --expect-fingerprint <fp>`, with the
-   fingerprint the participant actually publishes in its Canton topology, lists each node's copy and
-   names the nodes that disagree.
+   fingerprint the participant actually publishes in its Canton topology, lists what each node
+   reports for its copy (the public key its private key derives) and names the nodes that disagree.
+   It is each node's self-report: a node that is itself compromised can report anything, so treat
+   its answer as a claim to check, not as evidence.
 4. Work backwards to the cause before repairing. In rough order of likelihood: a restore of a stale
    or foreign backup onto one node; nodes brought up with different seal master secrets; a key id
    reused after a delete that did not reach every node; or genuine tampering. Treat the last

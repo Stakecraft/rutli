@@ -499,6 +499,45 @@ async fn verify_hosted_sees_each_nodes_own_copy_and_the_canton_fingerprint() {
     assert!(r.problems.iter().any(|p| p.contains("2 different public keys")), "{:?}", r.problems);
     assert!(r.problems.iter().any(|p| p.starts_with("node 3: its public key has Canton fingerprint")));
 
+    // A FROST share under an id reads as absent, not as an error: the reply never tells which ids
+    // hold shares.
+    let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&[5u8; 32], &[1, 2, 3], T).unwrap();
+    let share = rutli_cosigner::keystore::Share {
+        key_package: frost_ed25519::keys::KeyPackage::try_from(shares[0].clone()).unwrap(),
+        public_key_package: pkp,
+        origin: None,
+    };
+    let node1_store = || {
+        KeyStore::open_with_sealer(tmp.path().join("node-1"), Some(Arc::new(Sealer::from_master_secret(MASTER, 1))))
+            .unwrap()
+    };
+    node1_store().create("frost-participant1-namespace", &share).unwrap();
+    let reply = signer(&nodes[0], &peers, 0)
+        .hosted_key_status(Request::new(pb::HostedKeyStatusRequest { key_id: "frost-participant1-namespace".into() }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(!reply.present && reply.public_key_der.is_empty());
+
+    // A key file whose stored public half is not its private key's (EC and RSA): an error, never
+    // `present` — the node reports what its private key derives.
+    for spec in [HostedSpec::EcP256, HostedSpec::Rsa2048] {
+        let mut forged = HostedKey::generate(spec, 1).unwrap();
+        forged.public_der = HostedKey::generate(spec, 1).unwrap().public_der.clone();
+        let id = format!("rutli-enc-forged-{}", spec.as_str());
+        node1_store().create_hosted(&id, &forged).unwrap();
+        let e = signer(&nodes[0], &peers, 0)
+            .hosted_key_status(Request::new(pb::HostedKeyStatusRequest { key_id: id.clone() }))
+            .await
+            .unwrap_err();
+        assert!(e.message().contains("inconsistent"), "{spec:?}: {e:?}");
+        let r = check_hosted_views(&id, &fp, &[1, 2, 3], &hosted_views(&nodes, &peers, &id).await);
+        assert!(r.problems.iter().any(|p| p.starts_with("node 1:") && p.contains("inconsistent")), "{:?}", r.problems);
+        // A consistent key reports its derived SPKI.
+        let honest = HostedKey::generate(spec, 1).unwrap();
+        assert_eq!(honest.derived_public_key_der().unwrap(), honest.public_key_der().unwrap());
+    }
+
     // Ids reserved for the split ceremony are never hosted keys.
     let e = signer(&nodes[0], &peers, 0)
         .hosted_key_status(Request::new(pb::HostedKeyStatusRequest { key_id: "frost-import-sig-x".into() }))
