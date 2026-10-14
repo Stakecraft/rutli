@@ -512,6 +512,37 @@ public final class SignerGrpc {
     return getSymmetricDecryptMethod;
   }
 
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.HostedKeyStatusRequest,
+      com.stakecraft.rutli.grpc.HostedKeyStatusReply> getHostedKeyStatusMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "HostedKeyStatus",
+      requestType = com.stakecraft.rutli.grpc.HostedKeyStatusRequest.class,
+      responseType = com.stakecraft.rutli.grpc.HostedKeyStatusReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.HostedKeyStatusRequest,
+      com.stakecraft.rutli.grpc.HostedKeyStatusReply> getHostedKeyStatusMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.HostedKeyStatusRequest, com.stakecraft.rutli.grpc.HostedKeyStatusReply> getHostedKeyStatusMethod;
+    if ((getHostedKeyStatusMethod = SignerGrpc.getHostedKeyStatusMethod) == null) {
+      synchronized (SignerGrpc.class) {
+        if ((getHostedKeyStatusMethod = SignerGrpc.getHostedKeyStatusMethod) == null) {
+          SignerGrpc.getHostedKeyStatusMethod = getHostedKeyStatusMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.HostedKeyStatusRequest, com.stakecraft.rutli.grpc.HostedKeyStatusReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "HostedKeyStatus"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.HostedKeyStatusRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.HostedKeyStatusReply.getDefaultInstance()))
+              .setSchemaDescriptor(new SignerMethodDescriptorSupplier("HostedKeyStatus"))
+              .build();
+        }
+      }
+    }
+    return getHostedKeyStatusMethod;
+  }
+
   /**
    * Creates a new async stub that supports all call types for the service
    */
@@ -727,6 +758,19 @@ public final class SignerGrpc {
         io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.SymmetricReply> responseObserver) {
       io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getSymmetricDecryptMethod(), responseObserver);
     }
+
+    /**
+     * <pre>
+     * This node's own copy of one hosted key, public half only, read from its key file — NO
+     * read-repair, so a node that lacks the key says so instead of fetching it. For `rutli-cosigner
+     * verify-hosted`, which asks every node and compares. Callable by the operator role
+     * (operator_allowlist) as well as the driver role, like KeyStatus. The driver does not call it.
+     * </pre>
+     */
+    default void hostedKeyStatus(com.stakecraft.rutli.grpc.HostedKeyStatusRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.HostedKeyStatusReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getHostedKeyStatusMethod(), responseObserver);
+    }
   }
 
   /**
@@ -928,6 +972,20 @@ public final class SignerGrpc {
       io.grpc.stub.ClientCalls.asyncUnaryCall(
           getChannel().newCall(getSymmetricDecryptMethod(), getCallOptions()), request, responseObserver);
     }
+
+    /**
+     * <pre>
+     * This node's own copy of one hosted key, public half only, read from its key file — NO
+     * read-repair, so a node that lacks the key says so instead of fetching it. For `rutli-cosigner
+     * verify-hosted`, which asks every node and compares. Callable by the operator role
+     * (operator_allowlist) as well as the driver role, like KeyStatus. The driver does not call it.
+     * </pre>
+     */
+    public void hostedKeyStatus(com.stakecraft.rutli.grpc.HostedKeyStatusRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.HostedKeyStatusReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getHostedKeyStatusMethod(), getCallOptions()), request, responseObserver);
+    }
   }
 
   /**
@@ -1098,6 +1156,19 @@ public final class SignerGrpc {
       return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
           getChannel(), getSymmetricDecryptMethod(), getCallOptions(), request);
     }
+
+    /**
+     * <pre>
+     * This node's own copy of one hosted key, public half only, read from its key file — NO
+     * read-repair, so a node that lacks the key says so instead of fetching it. For `rutli-cosigner
+     * verify-hosted`, which asks every node and compares. Callable by the operator role
+     * (operator_allowlist) as well as the driver role, like KeyStatus. The driver does not call it.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.HostedKeyStatusReply hostedKeyStatus(com.stakecraft.rutli.grpc.HostedKeyStatusRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getHostedKeyStatusMethod(), getCallOptions(), request);
+    }
   }
 
   /**
@@ -1267,6 +1338,19 @@ public final class SignerGrpc {
     public com.stakecraft.rutli.grpc.SymmetricReply symmetricDecrypt(com.stakecraft.rutli.grpc.SymmetricRequest request) {
       return io.grpc.stub.ClientCalls.blockingUnaryCall(
           getChannel(), getSymmetricDecryptMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * This node's own copy of one hosted key, public half only, read from its key file — NO
+     * read-repair, so a node that lacks the key says so instead of fetching it. For `rutli-cosigner
+     * verify-hosted`, which asks every node and compares. Callable by the operator role
+     * (operator_allowlist) as well as the driver role, like KeyStatus. The driver does not call it.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.HostedKeyStatusReply hostedKeyStatus(com.stakecraft.rutli.grpc.HostedKeyStatusRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getHostedKeyStatusMethod(), getCallOptions(), request);
     }
   }
 
@@ -1454,6 +1538,20 @@ public final class SignerGrpc {
       return io.grpc.stub.ClientCalls.futureUnaryCall(
           getChannel().newCall(getSymmetricDecryptMethod(), getCallOptions()), request);
     }
+
+    /**
+     * <pre>
+     * This node's own copy of one hosted key, public half only, read from its key file — NO
+     * read-repair, so a node that lacks the key says so instead of fetching it. For `rutli-cosigner
+     * verify-hosted`, which asks every node and compares. Callable by the operator role
+     * (operator_allowlist) as well as the driver role, like KeyStatus. The driver does not call it.
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.HostedKeyStatusReply> hostedKeyStatus(
+        com.stakecraft.rutli.grpc.HostedKeyStatusRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getHostedKeyStatusMethod(), getCallOptions()), request);
+    }
   }
 
   private static final int METHODID_HEALTH = 0;
@@ -1472,6 +1570,7 @@ public final class SignerGrpc {
   private static final int METHODID_ECDH_DERIVE = 13;
   private static final int METHODID_SYMMETRIC_ENCRYPT = 14;
   private static final int METHODID_SYMMETRIC_DECRYPT = 15;
+  private static final int METHODID_HOSTED_KEY_STATUS = 16;
 
   private static final class MethodHandlers<Req, Resp> implements
       io.grpc.stub.ServerCalls.UnaryMethod<Req, Resp>,
@@ -1553,6 +1652,10 @@ public final class SignerGrpc {
         case METHODID_SYMMETRIC_DECRYPT:
           serviceImpl.symmetricDecrypt((com.stakecraft.rutli.grpc.SymmetricRequest) request,
               (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.SymmetricReply>) responseObserver);
+          break;
+        case METHODID_HOSTED_KEY_STATUS:
+          serviceImpl.hostedKeyStatus((com.stakecraft.rutli.grpc.HostedKeyStatusRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.HostedKeyStatusReply>) responseObserver);
           break;
         default:
           throw new AssertionError();
@@ -1684,6 +1787,13 @@ public final class SignerGrpc {
               com.stakecraft.rutli.grpc.SymmetricRequest,
               com.stakecraft.rutli.grpc.SymmetricReply>(
                 service, METHODID_SYMMETRIC_DECRYPT)))
+        .addMethod(
+          getHostedKeyStatusMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.HostedKeyStatusRequest,
+              com.stakecraft.rutli.grpc.HostedKeyStatusReply>(
+                service, METHODID_HOSTED_KEY_STATUS)))
         .build();
   }
 
@@ -1748,6 +1858,7 @@ public final class SignerGrpc {
               .addMethod(getEcdhDeriveMethod())
               .addMethod(getSymmetricEncryptMethod())
               .addMethod(getSymmetricDecryptMethod())
+              .addMethod(getHostedKeyStatusMethod())
               .build();
         }
       }
