@@ -3,7 +3,8 @@
 
 //! The `rutli-dealer` binary end to end, on B1's real Canton 3.6.1 key vectors: what it writes,
 //! that every bundle opens on its node only, and every refusal the runbook relies on — including
-//! requests that were not minted by the node they name (review HIGH-1).
+//! requests that were not minted by the node they name (review HIGH-1), and B6's usage rules
+//! (`--expect-usage`, `--namespace-fingerprint`, protocol key ids).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -54,6 +55,8 @@ fn sealer(node: u16) -> Sealer {
 
 struct Ceremony {
     tmp: tempfile::TempDir,
+    /// The key id every request was made for.
+    key: String,
     pki: TestPki,
     signers: Vec<NodeSigner>,
     requests: Vec<PathBuf>,
@@ -65,10 +68,15 @@ impl Ceremony {
     /// Three nodes of one TLS cluster run share-recipient (via the library) and drop their signed
     /// requests in `requests/`.
     fn new() -> Self {
+        Self::for_key(KEY)
+    }
+
+    /// As [`Ceremony::new`], for another import id.
+    fn for_key(key: &str) -> Self {
         let pki = TestPki::new();
         let signers: Vec<NodeSigner> = (1..=3u16).map(|i| pki.signer(&format!("cosigner{i}"))).collect();
         let (ca_pem, cluster) = (pki.ca_pem.clone(), pki.cluster_id());
-        Self::build(pki, signers, &ca_pem, &cluster)
+        Self::build(pki, signers, &ca_pem, &cluster, key)
     }
 
     /// Mid CA rotation (docs/ca-rotation.md): the cosigners are pinned to the old CA's derived
@@ -79,10 +87,10 @@ impl Ceremony {
         let new = TestPki::new();
         let signers = vec![old.signer("cosigner1"), new.signer("cosigner2"), new.signer("cosigner3")];
         let bundle = pki::bundle(&[&old, &new]);
-        Self::build(new, signers, &bundle, &old.cluster_id())
+        Self::build(new, signers, &bundle, &old.cluster_id(), KEY)
     }
 
-    fn build(pki: TestPki, signers: Vec<NodeSigner>, ca_pem: &str, cluster: &str) -> Self {
+    fn build(pki: TestPki, signers: Vec<NodeSigner>, ca_pem: &str, cluster: &str, key: &str) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("requests")).unwrap();
         std::fs::write(tmp.path().join("ca.crt"), ca_pem).unwrap();
@@ -93,7 +101,7 @@ impl Ceremony {
                 &tmp.path().join(format!("node{id}")),
                 &sealer(id),
                 &signers[usize::from(id) - 1],
-                template(id, cluster),
+                template(id, cluster, key),
                 false,
             )
             .unwrap();
@@ -102,7 +110,7 @@ impl Ceremony {
             std::fs::write(&path, serde_json::to_vec_pretty(&r).unwrap()).unwrap();
             requests.push(path);
         }
-        Self { tmp, pki, signers, requests, sas }
+        Self { tmp, key: key.to_string(), pki, signers, requests, sas }
     }
 
     fn out(&self) -> PathBuf {
@@ -150,27 +158,49 @@ impl Ceremony {
 
     /// The dealer on a vector, with the SAS the witnesses read in the pods.
     fn dealer(&self, input: &str, fingerprint: &str, extra: &[&str]) -> std::process::Output {
+        self.dealer_on(&vectors().join(input), fingerprint, extra)
+    }
+
+    /// The dealer on any key file, for this ceremony's key id.
+    fn dealer_on(&self, input: &Path, fingerprint: &str, extra: &[&str]) -> std::process::Output {
         let sas = self.sas.join(",");
-        self.cmd(&vectors().join(input), fingerprint, KEY, Some(&sas)).args(extra).output().unwrap()
+        self.cmd(input, fingerprint, &self.key, Some(&sas)).args(extra).output().unwrap()
     }
 
     fn bundle(&self, node: u16) -> ShareBundle {
-        let path = self.out().join(format!("share-{KEY}-node{node}.json"));
+        let path = self.out().join(format!("share-{}-node{node}.json", self.key));
         serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
     }
 
     fn state(&self, node: u16) -> share_delivery::RecipientState {
-        share_delivery::load_recipient(&self.tmp.path().join(format!("node{node}")), &sealer(node), KEY)
+        share_delivery::load_recipient(&self.tmp.path().join(format!("node{node}")), &sealer(node), &self.key)
             .unwrap()
+    }
+
+    fn record(&self) -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(self.out().join("dealer-record.json")).unwrap()).unwrap()
+    }
+
+    /// Two opened shares reconstruct the key with Canton fingerprint `fp`.
+    fn assert_reconstructs(&self, fp: &str) {
+        let kps: Vec<_> = [1u16, 2]
+            .iter()
+            .map(|&n| {
+                frost_ed25519::keys::KeyPackage::try_from(self.bundle(n).open(&self.state(n)).unwrap()).unwrap()
+            })
+            .collect();
+        let key = frost_ed25519::keys::reconstruct(&kps).unwrap();
+        let group = frost_ed25519::VerifyingKey::from(&key).serialize().unwrap();
+        assert_eq!(share_delivery::ed25519_fingerprint(&group.try_into().unwrap()), fp);
     }
 }
 
-fn template(identifier: u16, cluster: &str) -> RecipientRequest {
+fn template(identifier: u16, cluster: &str, key: &str) -> RecipientRequest {
     RecipientRequest {
         v: RECIPIENT_VERSION,
         kind: RECIPIENT_KIND.into(),
         ceremony_id: CEREMONY.into(),
-        key_id: KEY.into(),
+        key_id: key.into(),
         cluster_id: cluster.into(),
         identifier,
         threshold: 2,
@@ -221,6 +251,9 @@ fn split_key_writes_one_sealed_bundle_per_node_and_a_public_record() {
         serde_json::from_slice(&std::fs::read(c.out().join("dealer-record.json")).unwrap()).unwrap();
     assert_eq!(record["canton_fingerprint"], fp.as_str());
     assert_eq!(record["key_id"], KEY);
+    assert_eq!(record["expected_usage"], "namespace");
+    assert_eq!(record["recorded_usage"], serde_json::json!(["namespace"]));
+    assert!(record["namespace_fingerprint"].is_null());
     assert_eq!(record["roster"], serde_json::json!([1, 2, 3]));
     assert_eq!(record["dealer_binary_sha256"].as_str().unwrap().len(), 64);
     assert_eq!(record["recipients"][1]["sas"], c.sas[1].as_str());
@@ -284,11 +317,11 @@ fn the_wrong_key_a_non_namespace_key_and_a_missing_password_are_refused() {
     let other = fingerprint_of("signing");
     refused(&c.dealer("namespace.export-pw.bin", &other, &["--password-env", PASSWORD_ENV, SWAP]), "not the expected");
 
-    // A protocol signing key: refused without --any-usage, accepted with it.
+    // A protocol signing key is not a namespace key (B6: --expect-usage protocol, its own ids).
     let signing = fingerprint_of("signing");
-    refused(&c.dealer("signing.export.bin", &signing, &[SWAP]), "namespace");
+    refused(&c.dealer("signing.export.bin", &signing, &[SWAP]), "does not include namespace");
     // Not Ed25519 at all.
-    refused(&c.dealer("encryption.export.bin", &fingerprint_of("encryption"), &[SWAP, "--any-usage"]), "Ed25519");
+    refused(&c.dealer("encryption.export.bin", &fingerprint_of("encryption"), &[SWAP]), "Ed25519");
 
     // Password-protected without a password, and a password env that is not set.
     refused(&c.dealer("namespace.export-pw.bin", &ns, &[SWAP]), "password");
@@ -298,7 +331,9 @@ fn the_wrong_key_a_non_namespace_key_and_a_missing_password_are_refused() {
     refused(&c.dealer("namespace.export.bin", "1220abc", &[SWAP]), "fingerprint");
     assert!(!c.out().exists(), "no refusal may leave output behind");
 
-    ok(&c.dealer("signing.export.bin", &signing, &[SWAP, "--any-usage"]));
+    // The retired --any-usage is gone: an unknown flag, not a silent pass.
+    refused(&c.dealer("signing.export.bin", &signing, &[SWAP, "--any-usage"]), "--any-usage");
+    ok(&c.dealer("namespace.export.bin", &ns, &[SWAP]));
 }
 
 #[test]
@@ -527,4 +562,143 @@ fn the_dealer_refuses_a_ca_file_that_is_not_only_valid_cas_and_records_the_ancho
     let record: serde_json::Value =
         serde_json::from_slice(&std::fs::read(c.out().join("dealer-record.json")).unwrap()).unwrap();
     assert_eq!(record["ca_anchors"].as_array().unwrap().len(), 2);
+}
+
+// ── B6: carrying protocol keys ─────────────────────────────────────────────────────────────────
+
+/// `<marker><label><first 8 hex of the fingerprint>`, as the runbook names them.
+fn import_id(label: &str, fp: &str) -> String {
+    format!("frost-import-{label}{}", &fp[..8])
+}
+
+#[test]
+fn protocol_keys_split_under_protocol_ids_and_the_record_says_what_they_are() {
+    for (name, label, recorded) in [
+        ("signing", "sig-", ["proof-of-ownership", "signing"]),
+        ("sequencer-auth", "seqauth-", ["proof-of-ownership", "sequencer-auth"]),
+    ] {
+        let fp = fingerprint_of(name);
+        let c = Ceremony::for_key(&import_id(label, &fp));
+        let args = ["--password-env", PASSWORD_ENV, "--expect-usage", "protocol", SWAP];
+        let out = c.dealer(&format!("{name}.export-pw.bin"), &fp, &args);
+        ok(&out);
+        assert!(String::from_utf8_lossy(&out.stdout).contains("carried for:   protocol"), "{name}");
+        let record = c.record();
+        assert_eq!(record["key_id"], c.key.as_str());
+        assert_eq!(record["expected_usage"], "protocol");
+        assert_eq!(record["recorded_usage"], serde_json::json!(recorded));
+        c.assert_reconstructs(&fp);
+    }
+}
+
+#[test]
+fn every_usage_and_id_mismatch_is_refused() {
+    let (ns, sig, seq) = (fingerprint_of("namespace"), fingerprint_of("signing"), fingerprint_of("sequencer-auth"));
+    let protocol = ["--expect-usage", "protocol", SWAP];
+
+    // A namespace key carried as a protocol key, under a protocol id.
+    let c = Ceremony::for_key(&import_id("sig-", &ns));
+    refused(&c.dealer("namespace.export.bin", &ns, &protocol), "neither signing (protocol) nor sequencer-auth");
+    // Namespace mode refuses a protocol id before reading any key (no password is asked for).
+    refused(&c.dealer("namespace.export-pw.bin", &ns, &[SWAP]), "protocol key id");
+    // A protocol key under a namespace-style id: refused before reading the key, too.
+    let c = Ceremony::for_key(&import_id("", &sig));
+    refused(&c.dealer("signing.export-pw.bin", &sig, &protocol), "namespace-style id");
+    // ... and as a namespace key.
+    refused(&c.dealer("signing.export.bin", &sig, &[SWAP]), "does not include namespace");
+    // The protocol signing key under the sequencer-auth label, and the other way round.
+    let c = Ceremony::for_key(&import_id("seqauth-", &sig));
+    refused(&c.dealer("signing.export.bin", &sig, &protocol), "names a sequencer-authentication key");
+    let c = Ceremony::for_key(&import_id("sig-", &seq));
+    refused(&c.dealer("sequencer-auth.export.bin", &seq, &protocol), "names a protocol signing key");
+    // A label with no name after it, and an unknown mode.
+    let c = Ceremony::for_key("frost-import-sig-");
+    refused(&c.dealer("signing.export.bin", &sig, &protocol), "not an import id");
+    let c = Ceremony::for_key(&import_id("sig-", &sig));
+    refused(&c.dealer("signing.export.bin", &sig, &["--expect-usage", "root", SWAP]), "root");
+    // The right key, but the operator's namespace says it is the root: never under a protocol id.
+    let with_ns = |ns: &str| ["--expect-usage", "protocol", "--namespace-fingerprint", ns, SWAP].map(String::from);
+    let run = |args: [String; 5]| c.dealer("signing.export.bin", &sig, &args.each_ref().map(String::as_str));
+    refused(&run(with_ns(&sig)), "IS the namespace");
+    refused(&run(with_ns("1220ab")), "not a 1220");
+    assert!(!c.out().exists(), "no refusal may leave output behind");
+    // And the same ceremony, done right.
+    ok(&run(with_ns(&ns)));
+    assert_eq!(c.record()["namespace_fingerprint"], ns.as_str());
+}
+
+/// `common_crypto_private_keys.data` of a vector's Ed25519 key with the given usage list (protobuf
+/// enum values), for keys Canton 3.6.1 does not generate by default: Splice's `All`, a legacy
+/// empty list.
+fn stored_with_usage(name: &str, usage: &[u8]) -> Vec<u8> {
+    fn len(field: u8, data: &[u8]) -> Vec<u8> {
+        assert!(data.len() < 1 << 14);
+        let n = data.len();
+        let varint = if n < 128 { vec![n as u8] } else { vec![(n & 0x7f) as u8 | 0x80, (n >> 7) as u8] };
+        [&[field << 3 | 2][..], &varint, data].concat()
+    }
+    let fp = fingerprint_of(name);
+    let seed = hex::decode(seed_hex(&format!("{name}.export.bin"))).unwrap();
+    // RFC 8410 PKCS#8 for Ed25519 (CryptoKeyFormat 5).
+    let pkcs8 = [hex::decode("302e020100300506032b657004220420").unwrap(), seed].concat();
+    let mut msg = [len(1, fp.as_bytes()), vec![2 << 3, 5], len(3, &pkcs8)].concat();
+    if !usage.is_empty() {
+        msg.extend(len(5, usage));
+    }
+    msg.extend([6 << 3, 1]); // key_spec EC-Curve25519
+    [len(1, &msg), vec![2 << 3, 30]].concat() // UntypedVersionedMessage, version 30
+}
+
+#[test]
+fn an_all_usage_key_is_only_carried_with_the_namespace_the_operator_read() {
+    let (ns, sig) = (fingerprint_of("namespace"), fingerprint_of("signing"));
+    let tmp = tempfile::tempdir().unwrap();
+    let file = |name: &str, usage: &[u8]| {
+        let path = tmp.path().join(format!("{name}-{}.stored.bin", usage.len()));
+        std::fs::write(&path, stored_with_usage(name, usage)).unwrap();
+        path
+    };
+    let all: &[u8] = &[1, 3, 4, 5];
+    let all_names = ["namespace", "proof-of-ownership", "sequencer-auth", "signing"];
+
+    // Splice's `signing` key: usage All, namespace included, but not the namespace key.
+    let splice_signing = file("signing", all);
+    let c = Ceremony::for_key(&import_id("", &sig));
+    refused(&c.dealer_on(&splice_signing, &sig, &[SWAP]), "--namespace-fingerprint");
+    refused(&c.dealer_on(&splice_signing, &sig, &["--namespace-fingerprint", &ns, SWAP]), "is not the namespace");
+    let c = Ceremony::for_key(&import_id("sig-", &sig));
+    refused(&c.dealer_on(&splice_signing, &sig, &["--expect-usage", "protocol", SWAP]), "namespace included");
+    let protocol_ns = |ns: &str| ["--expect-usage", "protocol", "--namespace-fingerprint", ns, SWAP].map(String::from);
+    let run = |args: [String; 5]| c.dealer_on(&splice_signing, &sig, &args.each_ref().map(String::as_str));
+    refused(&run(protocol_ns(&sig)), "IS the namespace");
+    assert!(!c.out().exists());
+    // Carried as what it is used for, its namespace confirmed to be another key.
+    ok(&run(protocol_ns(&ns)));
+    let record = c.record();
+    assert_eq!(record["recorded_usage"], serde_json::json!(all_names));
+    assert_eq!(record["namespace_fingerprint"], ns.as_str());
+    c.assert_reconstructs(&sig);
+
+    // A root key that signs everything (a hand-initialised node), and a legacy key with no usage
+    // list (Canton reads it as All): namespace mode needs the namespace to be this very key.
+    for usage in [all, &[][..]] {
+        let root = file("namespace", usage);
+        let c = Ceremony::new();
+        refused(&c.dealer_on(&root, &ns, &[SWAP]), "--namespace-fingerprint");
+        ok(&c.dealer_on(&root, &ns, &["--namespace-fingerprint", &ns, SWAP]));
+        let expected: &[&str] = if usage.is_empty() { &[] } else { &all_names };
+        assert_eq!(c.record()["recorded_usage"], serde_json::json!(expected));
+    }
+
+    // Plain PKCS#8 has no Canton usage: namespace mode only with the namespace confirmed, never
+    // protocol mode.
+    let pkcs8 = tmp.path().join("namespace.pk8");
+    let seed = hex::decode(seed_hex("namespace.export.bin")).unwrap();
+    std::fs::write(&pkcs8, [hex::decode("302e020100300506032b657004220420").unwrap(), seed].concat()).unwrap();
+    let c = Ceremony::new();
+    refused(&c.dealer_on(&pkcs8, &ns, &[SWAP]), "--namespace-fingerprint");
+    ok(&c.dealer_on(&pkcs8, &ns, &["--namespace-fingerprint", &ns, SWAP]));
+    assert!(c.record()["recorded_usage"].is_null());
+    let c = Ceremony::for_key(&import_id("sig-", &ns));
+    refused(&c.dealer_on(&pkcs8, &ns, &["--expect-usage", "protocol", SWAP]), "PKCS#8");
 }

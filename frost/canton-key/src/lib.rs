@@ -196,6 +196,36 @@ impl SigningKeyUsage {
             other => return Err(Error::Unsupported(format!("signing key usage {other}"))),
         })
     }
+
+    /// Canton's `SigningKeyUsage.All` (`Signing.scala:757-763`): what Canton reads a signing key
+    /// with an empty usage list as (`fromProtoListWithDefaultV30`, `Signing.scala:874-888`).
+    pub const ALL: [Self; 4] =
+        [Self::Namespace, Self::SequencerAuthentication, Self::Protocol, Self::ProofOfOwnership];
+
+    /// Canton's name for the usage (`SigningKeyUsage.identifier`, `Signing.scala:816-845`), as the
+    /// console prints it. `IdentityDelegation` has none left in Canton; this one is ours.
+    pub fn identifier(&self) -> &'static str {
+        match self {
+            Self::Namespace => "namespace",
+            Self::IdentityDelegation => "identity-delegation",
+            Self::SequencerAuthentication => "sequencer-auth",
+            Self::Protocol => "signing",
+            Self::ProofOfOwnership => "proof-of-ownership",
+        }
+    }
+
+    /// The inverse of [`SigningKeyUsage::identifier`].
+    pub fn from_identifier(s: &str) -> Option<Self> {
+        [
+            Self::Namespace,
+            Self::IdentityDelegation,
+            Self::SequencerAuthentication,
+            Self::Protocol,
+            Self::ProofOfOwnership,
+        ]
+        .into_iter()
+        .find(|u| u.identifier() == s)
+    }
 }
 
 /// The `CryptoKeyFormat` the private key bytes were labelled with.
