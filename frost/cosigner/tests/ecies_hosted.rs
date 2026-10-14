@@ -507,6 +507,90 @@ async fn verify_hosted_sees_each_nodes_own_copy_and_the_canton_fingerprint() {
     assert_eq!(e.code(), Code::AlreadyExists);
 }
 
+/// B6 D2: `import-key` into a node whose daemon is running. The CLI writes through its own key
+/// store handle on the daemon's directory while the daemon's anti-entropy pulls the same id from a
+/// peer that was imported first: one create wins, the other compares — every time, both succeed,
+/// and nothing is ever overwritten. Then the running node serves it and pushes it on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn import_key_into_a_running_node_races_safely_with_anti_entropy() {
+    use rutli_cosigner::export::{install_imported, Installed};
+    let fp = fingerprint_of("encryption");
+    let id = "rutli-enc-imported-1220afe2";
+    let key = rutli_cosigner::export::import_canton(&read("encryption.export.bin"), None, &fp, 1).unwrap().key;
+    // What the CLI opens: the same directory and seal secret as node 1's daemon, a separate handle.
+    let cli_store = |tmp: &tempfile::TempDir| {
+        let sealer = Arc::new(Sealer::from_master_secret(MASTER, 1));
+        KeyStore::open_with_sealer(tmp.path().join("node-1"), Some(sealer)).unwrap()
+    };
+
+    let mut outcomes = std::collections::BTreeMap::new();
+    for _ in 0..25 {
+        let tmp = tempfile::tempdir().unwrap();
+        let (nodes, _) = hosted_cluster(&tmp);
+        nodes[1].hosted_store(id, &key).unwrap(); // imported on node 2 first
+        let store = cli_store(&tmp);
+        let k = key.clone();
+        let cli = tokio::task::spawn_blocking(move || install_imported(&store, id, &k));
+        let view = view_of(&nodes, 0);
+        let (sweep, cli) = tokio::join!(anti_entropy_sweep(&nodes[0], &view), cli);
+        sweep.unwrap();
+        *outcomes.entry(format!("{:?}", cli.unwrap().unwrap())).or_insert(0) += 1;
+        assert_eq!(nodes[0].hosted_load(id).unwrap().private_der, key.private_der);
+    }
+    // Which side wins is up to the scheduler; both outcomes are success.
+    assert_eq!(outcomes.values().sum::<i32>(), 25, "{outcomes:?}");
+
+    // The CLI losing the race, deterministically: the daemon's create lands between the CLI's
+    // existence check and its own create (the key store's IO hook fires before each touch).
+    for (daemon_key, wins) in [(key.clone(), true), (HostedKey::generate(HostedSpec::EcP256, 1).unwrap(), false)] {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let tmp = tempfile::tempdir().unwrap();
+        let (nodes, _) = hosted_cluster(&tmp);
+        let touches = Arc::new(AtomicUsize::new(0));
+        let (node, theirs, seen) = (nodes[0].clone(), daemon_key.clone(), touches.clone());
+        let hook: rutli_cosigner::keystore::IoHook = Arc::new(move |p: &Path| {
+            if p.file_name().is_some_and(|f| f == format!("{id}.json").as_str()) && seen.fetch_add(1, Ordering::SeqCst) == 1 {
+                node.hosted_store(id, &theirs).unwrap();
+            }
+        });
+        let outcome = install_imported(&cli_store(&tmp).with_io_hook(hook), id, &key);
+        assert!(touches.load(Ordering::SeqCst) >= 2, "the hook never fired between check and create");
+        if wins {
+            assert_eq!(outcome.unwrap(), Installed::AlreadyPresent);
+        } else {
+            assert!(matches!(outcome, Err(rutli_cosigner::DaemonError::KeyExists(_))), "{outcome:?}");
+        }
+        // Either way the daemon's copy stands.
+        assert_eq!(nodes[0].hosted_load(id).unwrap().private_der, daemon_key.private_der);
+    }
+
+    // Other material under the id, against the running node's copy: refused, nothing replaced.
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = hosted_cluster(&tmp);
+    let store = cli_store(&tmp);
+    assert_eq!(install_imported(&store, id, &key).unwrap(), Installed::Created);
+    let other = HostedKey::generate(HostedSpec::EcP256, 1).unwrap();
+    assert!(matches!(install_imported(&store, id, &other), Err(rutli_cosigner::DaemonError::KeyExists(_))));
+    assert_eq!(install_imported(&store, id, &key).unwrap(), Installed::AlreadyPresent);
+    assert!(matches!(
+        install_imported(&store, "frost-import-sig-x", &key),
+        Err(rutli_cosigner::DaemonError::ReservedKeyId(_))
+    ));
+
+    // The running node serves the key it did not write itself, and anti-entropy pushes it on.
+    let canton_pub = rutli_canton_key::parse_public_key(&read("encryption.pub.bin")).unwrap();
+    let served = signer(&nodes[0], &peers, 0)
+        .public_key(Request::new(pb::PublicKeyRequest { key_id: id.into() }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(served.public_key_der, canton_pub.public.spki_der());
+    let (_, pushed) = anti_entropy_sweep(&nodes[0], &peers).await.unwrap();
+    assert_eq!(pushed, 2);
+    let views = hosted_views(&nodes, &peers, id).await;
+    assert!(rutli_cosigner::verify_hosted::check_hosted_views(id, &fp, &[1, 2, 3], &views).ok);
+}
+
 // ── the import-key CLI ─────────────────────────────────────────────────────────────────────────
 
 const SEAL_ENV: &str = "RUTLI_TEST_SEAL_SECRET";

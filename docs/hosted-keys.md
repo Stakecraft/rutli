@@ -366,8 +366,8 @@ rutli-cosigner --config /etc/rutli/cosigner-1.json export-key \
   --key-id rutli-enc-participant1-encryption-… \
   --out /media/offline/rutli-enc.export --passphrase-env EXPORT_PASS
 
-# Import into a different cluster (node stopped). Start the daemon afterwards; anti-entropy
-# replicates the key to the rest of that cluster on its own.
+# Import into a different cluster (daemon running or stopped, see "Why importing next to a running
+# daemon is safe" below); anti-entropy replicates the key to the rest of that cluster on its own.
 rutli-cosigner --config /etc/rutli/cosigner-1.json import-key \
   --in /media/offline/rutli-enc.export --passphrase-env EXPORT_PASS
 ```
@@ -400,8 +400,10 @@ Properties worth knowing before you rely on them:
 #### Importing a Canton node's ECIES key (migration)
 
 A node moving into the cluster ([roadmap-migration.md](roadmap-migration.md)) can keep its
-encryption key instead of rotating it. Export it on the old node (`keys.secret.download`, preview
-commands enabled, preferably with a password), then on one cosigner, stopped:
+encryption key instead of rotating it — discouraged, see [migration.md](migration.md), "Carrying
+the signing and encryption keys". Export it on the old node (`keys.secret.download`, preview
+commands enabled, preferably with a password), then on one cosigner. Its daemon may be running
+(`kubectl exec` into the pod, the export copied onto a tmpfs and deleted afterwards) or stopped:
 
 ```sh
 read -rs CANTON_EXPORT_PASSWORD && export CANTON_EXPORT_PASSWORD
@@ -426,9 +428,32 @@ The key id must be one the driver routes to hosted keys: `<frost.key-prefix>rutl
 `[A-Za-z0-9_-]`, never containing `frost-`. Pass the participant's prefix as `--key-prefix` to have
 it enforced (otherwise the inferred prefix is printed for you to check). Import into a cluster whose
 cosigners are all upgraded (rollout order above): anti-entropy cannot push an EC key to an older
-node, and the driver will not advertise ECIES while one remains. Start the cosigner afterwards; anti-entropy and read-repair spread the key. The exposure caveat of every
-migrated key applies: the old node's database and its backups hold this key in the clear — purge
-them (`b0-cutover-spike.md`, `roadmap-migration.md`).
+node, and the driver will not advertise ECIES while one remains. Anti-entropy and read-repair
+spread the key (within one `hosted_keys.anti_entropy_interval_secs` of a running daemon, or once a
+stopped one starts). Then, before registering it, check that every node holds it and serves
+Canton's key — operator certificate, public values only:
+
+```sh
+rutli-cosigner --config <operator config> verify-hosted \
+  --key-id <frost.key-prefix>rutli-enc-imported-1 --expect-fingerprint 1220…
+```
+
+It asks each node for its **own** copy (`HostedKeyStatus`, no read-repair), and fails unless all
+`n` hold it, the SPKI is byte-identical everywhere and its Canton fingerprint is the expected one.
+
+**Why importing next to a running daemon is safe.** The import is the key store's create-once
+write, the same one `import-share` uses inside a live pod: a sealed temp file, fsynced, moved into
+place with a no-replace rename (or link), then a directory fsync. The daemon sees either no file or
+the whole sealed file, never a partial one, and nothing is ever replaced. The daemon keeps no
+in-memory copy of hosted keys — every serve, listing and repair reads the file — so the key is
+served from the next request on. The one concurrent writer is the daemon itself, pulling the same
+id from a peer where it was imported first: exactly one create wins and the other compares,
+identical material being a no-op on either side and different material a conflict on either side,
+never an overwrite (`export::install_imported`; pinned by the test
+`import_key_into_a_running_node_races_safely_with_anti_entropy`, both interleavings).
+
+The exposure caveat of every migrated key applies: the old node's database and its backups hold
+this key in the clear — purge them (`b0-cutover-spike.md`, `roadmap-migration.md`).
 
 ### When `rutli_anti_entropy_conflicts_total` increases
 
@@ -442,8 +467,9 @@ decrypt already-recorded traffic.
 2. Change nothing. Do not delete either copy, do not restore "a good backup" over one, do not rotate
    that key yet. Both copies are evidence, and one of them may be the only thing that can read
    traffic already on the wire.
-3. Establish which copy is live: compare each node's `PublicKey` for that id against the public key
-   the participant actually publishes in its Canton topology.
+3. Establish which copy is live: `verify-hosted --key-id <id> --expect-fingerprint <fp>`, with the
+   fingerprint the participant actually publishes in its Canton topology, lists each node's copy and
+   names the nodes that disagree.
 4. Work backwards to the cause before repairing. In rough order of likelihood: a restore of a stale
    or foreign backup onto one node; nodes brought up with different seal master secrets; a key id
    reused after a delete that did not reach every node; or genuine tampering. Treat the last
