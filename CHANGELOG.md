@@ -41,6 +41,30 @@ All notable changes to Rütli are documented here. Format loosely follows
   - The hosted-key anti-entropy sweep no longer skips an unreachable peer silently: it logs
     `anti-entropy: cannot list keys on peer` at WARN with the peer and the error (e.g. an mTLS
     `UnknownIssuer` during a rotation), once per peer per sweep.
+- **Carrying the protocol signing and encryption keys (roadmap B6) — possible, and discouraged.**
+  Runbook: `docs/migration.md` §8, which says why (these keys rotate, the new member's OTK is new
+  anyway, and every pre-migration copy would then sign and decrypt as the new member).
+  - `rutli-dealer split-key --expect-usage namespace|protocol` (default `namespace`). Namespace
+    mode takes a key whose recorded usage is namespace alone; protocol mode needs signing or
+    sequencer-auth and Canton metadata (no plain PKCS#8). `--namespace-fingerprint`, the old node's
+    namespace read from its UID, is required wherever the usage alone is ambiguous — a namespace
+    key with more usages, an empty (= all) or unknown usage, and a protocol key whose usage includes
+    namespace, such as a Splice validator's `signing` key (`SigningKeyUsage.All`) — and must equal
+    the key's fingerprint in namespace mode, differ from it in protocol mode.
+  - Protocol keys have their own ids, `<prefix>frost-import-sig-<name>` (usage includes signing)
+    and `<prefix>frost-import-seqauth-<name>`, so an approval rule on the namespace id never holds
+    them. Each mode refuses the other's ids before any secret is read.
+  - The carried usage is recorded in `dealer-record.json` (`expected_usage`, `recorded_usage`,
+    `namespace_fingerprint`), travels in each share bundle bound into the envelope's AAD (envelope
+    version 3), is re-checked against the id by `import-share`, kept in the share's provenance
+    across refreshes, reported by `KeyStatus` (`carried_for`, `recorded_usage`) and compared across
+    nodes by `verify-key`.
+  - `rutli-cosigner verify-hosted --key-id --expect-fingerprint`: every node holds the hosted key
+    (its own copy, new `HostedKeyStatus` RPC, no read-repair), with a byte-identical SPKI whose
+    Canton fingerprint is the expected one. Public values only; the operator role may call it.
+  - `scripts/e2e-carry-protocol-keys.sh`: on Canton 3.6.1, both protocol keys split against running
+    cosigners and the ECIES key imported into a running cosigner, registered with the old
+    fingerprints, the OTK rotated onto them, pings, and sequencer authentication with the carried key.
 
 ### Security
 - **Trust files hold CA certificates only (review M1).** rustls made every certificate in
@@ -78,10 +102,24 @@ All notable changes to Rütli are documented here. Format loosely follows
   copy `clusterId` to another cluster (a new cluster leaves it empty, review L7) and to upgrade with
   saved values.
 
+### Changed
+- **`--any-usage` is removed** from `rutli-dealer split-key` (no runbook used it); use
+  `--expect-usage` and `--namespace-fingerprint`. Namespace mode is also stricter than before:
+  a key whose usage includes namespace *and more* now needs `--namespace-fingerprint`.
+- Share bundles from this dealer are envelope version 3 (the usage in the AAD). Cosigners still
+  install version 2 bundles (no usage recorded); an older cosigner refuses a version 3 bundle, so
+  run the dealer and the cosigners from the same release.
+- `import-key` is safe with the cosigner's daemon running: a create race with anti-entropy pulling
+  the same key now compares instead of failing (`export::install_imported`); the docs no longer
+  require the node to be stopped.
+- The RSA import refusal no longer points at roadmap B3, which was dropped.
+
 ### Fixed
 - `verify-key` printed an unreachable node as `Unknown: transport error`, dropping the reason. It now
   prints the error chain, e.g. `connection error: received fatal alert: UnknownCA` for a certificate
   the node does not trust — what the CA rotation's negative control checks for (review L2).
+- docs: the `verify-key` sign-test digest is described accurately — domain-separated from every
+  Canton `HashPurpose` (the preimage starts with `rutl`), not "not a topology hash".
 
 ### Upgrade notes (breaking)
 - The first start of this release writes `data_dir/cluster-id` with the id the node already runs
