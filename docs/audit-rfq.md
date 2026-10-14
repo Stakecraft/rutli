@@ -2,9 +2,10 @@
 
 > **Template note (delete before sending).** This is one generic RFQ, sent unchanged to Least
 > Authority, Trail of Bits, NCC Group and Kudelski Security. Fill the `<PLACEHOLDERS>` and resolve
-> every `TODO(verify)` before it goes out. Drafted 2026-10-08 from the repo state at v0.3.1 plus
-> `docs/roadmap-migration.md`; line counts below were measured on that tree and must be re-measured
-> at code freeze. Companion brief for the auditors: [audit-prep.md](audit-prep.md).
+> every `TODO(owner)` (questions only the maintainers can answer) before it goes out. Drafted
+> 2026-10-08; facts verified against the repository on 2026-10-14 at `v0.4.0-rc.1` (commit `903d318`).
+> Line counts below were measured on that tree (without B6) and must be re-measured at code freeze.
+> Companion brief for the auditors: [audit-prep.md](audit-prep.md).
 
 **From:** Stakecraft, maintainers of Rütli. **Contact:** `<NAME>, <EMAIL>`
 **Reply requested by:** `<REPLY_BY_DATE>`. **Desired start:** 2026-11-17 (fixed date).
@@ -28,68 +29,62 @@ behind it until an external review completes.
 ## 2. Scope (in)
 
 Repository state to review: tag `v0.4.0`, target ~2026-11-14, which is also our code freeze. Nothing
-else lands in the audited surface after it except audit fixes.
+else lands in the audited surface after it except audit fixes. The release candidate `v0.4.0-rc.1`
+(tagged 2026-10-09) already contains the split ceremony (B2), the Canton key parser (B1) and the
+ECIES hosted keys (Track C); it is available now for orientation and pre-reading. Between the
+candidate and `v0.4.0` we expect only milestone B6 (row g), review fixes and documentation.
 
 | # | Component | Includes | Where |
 |---|---|---|---|
 | a | **FROST-ed25519 cosigner cluster** | DKG; t-of-n signing (two rounds); crash-safe nonce guard; proactive refresh; share repair; share sealing at rest (AES-256-GCM, per-node keys derived from an operator secret); mutual TLS and the `signer_allowlist` / `peer_allowlist` role split; per-key ceremony guards and cluster-wide signing fence; create-once guard | `frost/core`, `frost/cosigner` |
-| b | **Cluster-hosted keys** | Replicated whole keys (RSA-2048-OAEP via `aws-lc-rs`, AES-256-GCM); per-recipient wrapping (ephemeral X25519, HKDF-SHA256, AES-256-GCM, AAD-bound); write quorum, anti-entropy, read-repair; offline passphrase-encrypted export/import; per-key decrypt rate limit | `frost/cosigner` (`hosted`, `wrap`, `export`, `ratelimit`, `peer`) |
-| c | **JVM KMS driver** | Key-id routing (`frost-` / `rutli-` prefixes, `frost.key-prefix`); `FrostBackend` gRPC client with failover rules; M-of-N approval gate and policy; hash-chained audit log; signing journal; Canton 34-byte digest handling | `driver/src/main` |
-| d | **Split ceremony (milestone B2)** | Frozen with v0.4.0. Offline dealer binary `rutli-dealer` splits an existing Canton Ed25519 namespace key into t-of-n FROST shares via `frost_ed25519::keys::split`, using RFC 8032 seed-to-scalar conversion (ed25519-dalek's SHA-512, clamp, reduce mod l); before writing anything it proves group key == Canton key, VSS, `min_signers`, every t-subset reconstructs and signs (`verify_strict`). Each share is sealed to a one-time per-ceremony X25519 recipient key the node minted (`share-recipient`; the hosted-key envelope construction with extra AAD fields, not the static distribution key); every request is signed with the node's mTLS key and verified by the dealer to the cluster CA and the `cosigner<N>` CN, plus a human-confirmed SAS. `import-share` (offline CLI) checks bundle vs node, config and expected fingerprint, VSS, package interpolation, then a no-clobber create (`renameat2(RENAME_NOREPLACE)` / `link(2)`); `abort-import`; DKG and hosted keys refuse `frost-import-` ids; read-only `KeyStatus` and fixed-message `CeremonySignTest` RPCs for an `operator_allowlist` role, and `verify-key` (cross-node digest agreement, every t-subset signs); then `Refresh`. Process hardening of the dealer (core dumps, ptrace, core handlers, mlock, swap). Includes the Canton key parser (B1) it depends on | `frost/core/src/dealer.rs`; `frost/cosigner/src/{share_delivery,share_import,request_auth,verify_key,wrap}.rs`, `src/bin/rutli-dealer.rs`; `frost/canton-key`; runbook [split-ceremony.md](split-ceremony.md) |
+| b | **Cluster-hosted keys** | Replicated whole keys (RSA-2048-OAEP via `aws-lc-rs`, AES-256-GCM, and EC-P256 ECIES keys, see row g); per-recipient wrapping (ephemeral X25519, HKDF-SHA256, AES-256-GCM, AAD-bound); write quorum, anti-entropy, read-repair; offline passphrase-encrypted export/import; per-key decrypt rate limit | `frost/cosigner` (`hosted`, `wrap`, `export`, `ratelimit`, `peer`) |
+| c | **JVM KMS driver** | Key-id routing (`frost-` / `rutli-` prefixes, `frost.key-prefix`); `FrostBackend` gRPC client with failover rules; M-of-N approval gate and policy; hash-chained audit log; signing journal; Canton 34-byte digest handling; ECIES completion for hosted EC keys (`CantonEcies`) | `driver/src/main` |
+| d | **Split ceremony (milestone B2)** | In `v0.4.0-rc.1`; frozen with v0.4.0 (B6 touches its usage guard, row h). Offline dealer binary `rutli-dealer` splits an existing Canton Ed25519 namespace key into t-of-n FROST shares via `frost_ed25519::keys::split`, using RFC 8032 seed-to-scalar conversion (ed25519-dalek's SHA-512, clamp, reduce mod l); before writing anything it proves group key == Canton key, VSS, `min_signers`, every t-subset reconstructs and signs (`verify_strict`). Each share is sealed to a one-time per-ceremony X25519 recipient key the node minted (`share-recipient`; the hosted-key envelope construction with extra AAD fields, not the static distribution key); every request is signed with the node's mTLS key and verified by the dealer to the cluster CA and the `cosigner<N>` CN, plus a human-confirmed SAS. `import-share` (offline CLI) checks bundle vs node, config and expected fingerprint, VSS, package interpolation, then a no-clobber create (`renameat2(RENAME_NOREPLACE)` / `link(2)`); `abort-import`; DKG and hosted keys refuse `frost-import-` ids; read-only `KeyStatus` and fixed-message `CeremonySignTest` RPCs for an `operator_allowlist` role, and `verify-key` (cross-node digest agreement, every t-subset signs); then `Refresh`. Process hardening of the dealer (core dumps, ptrace, core handlers, mlock, swap). Includes the Canton key parser (B1) it depends on | `frost/core/src/dealer.rs`; `frost/cosigner/src/{share_delivery,share_import,request_auth,verify_key,wrap}.rs`, `src/bin/rutli-dealer.rs`; `frost/canton-key`; runbook [split-ceremony.md](split-ceremony.md) |
 | e | **Deployment artifacts** (secondary) | Helm chart, Kubernetes manifests (StatefulSet, NetworkPolicy, PDB, backup/refresh CronJobs), Docker Compose TLS config, cert generation script | `deploy/helm`, `deploy/k8s`, `deploy/frost`, `scripts/` |
-| f | **Operational runbooks** (procedural review) | Key ceremony, split ceremony (incl. destruction of the whole key), DR/backup/restore, approval quorum, and the migration runbook (`docs/migration.md`, written in B4) | `docs/key-ceremony.md`, `docs/split-ceremony.md`, `docs/disaster-recovery.md`, `docs/approval-quorum.md` |
+| f | **Operational runbooks** (procedural review) | Key ceremony, split ceremony (incl. destruction of the whole key), DR/backup/restore, approval quorum, and the pilot migration runbook (`docs/migration.md`), whose steps were exercised in the DevNet B4 cutover rehearsal on 2026-10-14 | `docs/key-ceremony.md`, `docs/split-ceremony.md`, `docs/disaster-recovery.md`, `docs/approval-quorum.md`, `docs/migration.md` |
+| g | **ECIES hosted keys (Track C)** | Merged and part of `v0.4.0` (in `v0.4.0-rc.1`); no longer a separate release or optional addendum. Hosted EC-P256 keys with an `EcdhDerive` RPC on the cosigner (`aws-lc-rs`) and a driver-side ECIES decrypt path (BouncyCastle `IESEngine`, shared secret supplied by the cluster); `import-key` of a Canton EC P-256 encryption key via the B1 parser. Details and our focus questions in section 2.1 | `frost/cosigner/src/{hosted,export,service,node}.rs`, `cosigner.proto`; `driver/.../backend/{CantonEcies,FrostBackend}.scala` |
+| h | **Optional carry of protocol signing and ECIES encryption keys (milestone B6)** | **In progress** on branch `feat/b6-carry-protocol-keys`; lands before the audit code freeze (`v0.4.0`). A discouraged path: the recommended migration carries only the namespace key and gives the new node fresh keys. It touches the offline dealer's usage guard (`rutli-dealer --expect-usage`), adds a `rutli-cosigner verify-hosted` RPC/CLI, and docs. Size to be given with the freeze commit | `frost/core/src/dealer.rs`, `frost/cosigner/src/bin/rutli-dealer.rs`, `frost/cosigner` (`verify-hosted`), `docs/` |
 
 ### Approximate size
 
-Measured with `wc -l` (physical lines, including comments and blanks; no `tokei`/`cloc` run).
-Tests, generated code and build output are excluded from the "reviewable" column and listed separately.
+Measured on 2026-10-14 at `v0.4.0-rc.1` (`903d318`) with `wc -l` (physical lines, including comments and
+blanks; `tokei` was not used). Rust non-test lines were counted by cutting each file at its first
+`#[cfg(test)]`. Tests, generated code and build output are excluded from the "reviewable" column and
+listed separately. B2 and Track C code is already included in the crate rows. B6 is not yet counted.
 
 | Component | Reviewable lines | Excluded (not counted) |
 |---|---|---|
-| `frost/core` (Rust, crypto core) | ~560 | ~430 integration tests |
-| `frost/cosigner` (Rust daemon, `src/`, test modules inside `src/` removed) | ~5,540 | ~990 inline unit tests, ~1,940 integration tests |
-| `frost/cosigner/proto/cosigner.proto` | ~260 | |
-| `driver/src/main/scala` (JVM driver, hand-written) | ~2,815 | ~1,990 tests; 109 checked-in grpc-java generated files under `driver/src/main/java` |
-| `deploy/helm`, `deploy/k8s` (YAML) | ~1,400 | |
-| Runbooks and design docs | ~2,300 (`key-ceremony`, `disaster-recovery`, `approval-quorum`, `hosted-keys*`, `phase-2-frost`, `architecture`) | |
-| Split ceremony (B2): `dealer.rs`, `share_delivery.rs`, `share_import.rs`, `verify_key.rs`, `rutli-dealer` | ~2,130 (plus ~300 changed lines in `wrap`, `keystore`, `node`, `service`, `main`) | ~1,200 inline unit tests, ~670 integration tests, e2e script |
-| Canton key parser (B1): `frost/canton-key` | ~1,490 | ~600 vector tests, test vectors |
+| `frost/core` (Rust, crypto core, includes `dealer.rs`) | ~960 | ~430 integration tests, ~280 inline unit tests |
+| `frost/cosigner` (Rust daemon and `rutli-dealer`, `src/`) | ~9,520 | ~2,330 inline unit tests, ~3,750 integration tests |
+| `frost/canton-key` (B1, Canton key parser) | ~1,490 | ~110 inline unit tests, ~600 vector tests, test vectors |
+| `frost/cosigner/proto/cosigner.proto` | ~330 | |
+| `driver/src/main/scala` (JVM driver, hand-written, 18 files) | ~3,310 | ~3,190 tests; 121 checked-in grpc-java generated files under `driver/src/main/java` |
+| `deploy/helm`, `deploy/k8s` (YAML) | ~1,570 | |
+| Runbooks and design docs | ~3,090 (`key-ceremony`, `disaster-recovery`, `approval-quorum`, `hosted-keys*`, `phase-2-frost`, `architecture`, `split-ceremony`, `migration`) | |
 
-Rough total: ~12,600 lines of Rust and Scala (B1 and B2 included), plus ~1,400 lines of
-deployment YAML. B1/B2 sizes measured on the B2 branch before code freeze; recount at the tag.
-Rust non-test lines were counted by cutting each file at its first `#[cfg(test)]`.
+Of the cosigner and core rows, the split ceremony (B2) accounts for ~2,850 lines (`dealer.rs`,
+`share_delivery.rs`, `share_import.rs`, `verify_key.rs`, `request_auth.rs`, `rutli-dealer`), plus
+changes in `wrap`, `keystore`, `node`, `service` and `main`. Track C (ECIES) added about 1,350 lines
+across 11 files, inline tests included, in the 24 commits since its first commit (`e09d07f`),
+mostly `FrostBackend.scala`, `CantonEcies.scala`, `hosted.rs` and `export.rs`.
 
-## 3. Out of scope
+Rough total: ~15,600 lines of Rust, protobuf and Scala (B1, B2 and Track C included), plus ~1,570
+lines of deployment YAML. Recount at the tag.
 
-- **Upstream `frost-ed25519` crate internals.** The ZF FROST implementation has already been audited
-  by NCC Group and Least Authority (TODO(verify): confirm the exact audits and report dates before
-  citing them to those two firms). We do want our *usage* of it reviewed: nonce handling, DKG and
-  refresh orchestration, identifier and threshold parameters, serialization at our boundaries.
-- Canton and Splice themselves (validator business logic, topology semantics).
-- Other third-party dependencies beyond their configuration and use by us (tonic, `aws-lc-rs`,
-  BouncyCastle). Please flag known-vulnerable versions you notice.
-- The HSM (PKCS#11) and `software` backends are development/legacy delegates. TODO(verify): confirm
-  with the maintainers whether `HsmBackend` should be explicitly excluded or reviewed lightly.
-- Threshold ECDSA (Phase 4) and the networked share-repair ceremony: not shipped.
+### 2.1 ECIES hosted keys (Track C): detail and where we want attention
 
-### Optional addendum: Track C, ECIES hosted keys (v0.5.0)
+Track C is merged and ships in `v0.4.0` (it is in `v0.4.0-rc.1`); it is part of the base scope, not a
+separate release. If you can, show it as a separate line item in your quote so we can see its weight.
+What it added, measured as lines added in the Track C commits (inline tests included):
 
-Hosted EC-P256 keys with an `EcdhDerive` RPC on the cosigner (`aws-lc-rs`), and a driver-side ECIES
-decrypt path (BouncyCastle `IESEngine`, with the shared secret supplied by the cluster). Still an
-**optional addendum**, not part of the base quote. **Question for you:** would you take it as a
-mid-engagement addendum (we would hand over a tagged commit and a delta list), or do you prefer it as
-a separate follow-up engagement? Please price both ways if you can.
-
-The code now exists (branch `feat/c-ecies-hosted-keys`, on top of B2), so the delta is concrete:
-
-| Area | Files | Reviewable lines |
+| Area | Files | Added lines |
 |---|---|---|
-| Cosigner: `ec-p256-ecies` spec, keygen, SPKI, `ecdh_p256`, peer-point gate, `validate` | `frost/cosigner/src/hosted.rs` | ~140 (plus ~200 inline tests) |
-| Cosigner: `EcdhDerive` RPC, rate limit, reserved ids | `service.rs`, `node.rs`, `error.rs`, `cosigner.proto` | ~60 |
-| Cosigner: `import-key` of a Canton EC P-256 encryption key (via B1's parser) | `export.rs` (`import_canton`), `main.rs` | ~190 |
-| Driver: ECIES completion in `IESEngine`, spec-driven keygen/public key, routing | `driver/.../backend/CantonEcies.scala`, `FrostBackend.scala` | ~270 |
+| Cosigner: `ec-p256-ecies` spec, keygen, SPKI, `ecdh_p256`, peer-point gate, `validate` | `frost/cosigner/src/hosted.rs` | ~350 (about 140 non-test) |
+| Cosigner: `EcdhDerive` RPC, rate limit, reserved ids, capability gating | `service.rs`, `node.rs`, `error.rs`, `peer.rs`, `orchestrator.rs`, `cosigner.proto` | ~160 |
+| Cosigner: `import-key` of a Canton EC P-256 encryption key (via B1's parser) | `export.rs` (`import_canton`), `main.rs` | ~300 |
+| Driver: ECIES completion in `IESEngine`, spec-driven keygen/public key, routing, gating | `driver/.../backend/CantonEcies.scala`, `FrostBackend.scala` | ~540 |
 
-Where we would like the addendum's attention, in order:
+Where we would like attention, in order:
 
 1. **The `IESEngine` composition** (`CantonEcies.decrypt`): the engine is assembled as BouncyCastle's
    JCE does for `ECIESwithSHA256andAES-CBC`, with the ECDH replaced by an agreement that returns the
@@ -105,6 +100,33 @@ Where we would like the addendum's attention, in order:
    diverge; please tell us if you see a way that matters through a KMS.
 4. **Canton-key import:** that the public key the cluster serves is provably the one Canton
    recorded, and nothing else can be imported as an ECDH key.
+5. **Mixed-version clusters.** The driver enables ECIES only when every cosigner advertises
+   `ec-p256-ecies` in its capabilities, and a leader refuses to create an EC key unless all peers
+   serve it; EC operations fail over past an old node. Please check that a rolling upgrade cannot end
+   with a key that only some nodes can serve, or an ECIES decrypt silently routed to the wrong place.
+
+## 3. Out of scope
+
+- **Upstream `frost-ed25519` crate internals.** The Zcash Foundation FROST implementation has been
+  independently assessed: NCC Group published a public report on it in October 2023 (reviewed
+  release v0.6.0; the retest confirmed all findings fixed). We pin the 2.x line (`frost-ed25519` 2.2.0
+  in `Cargo.lock`), which is newer than the reviewed release. TODO(owner): our docs also cite Least
+  Authority as an auditor of the ZF crate. The only Least Authority work we can find concerns the
+  FROST demo server and client, not the crate. Confirm the exact Least Authority report and date
+  before naming it to that firm, or drop it. We do want our *usage* of the crate reviewed: nonce
+  handling, DKG and refresh orchestration, identifier and threshold parameters, serialization at our
+  boundaries.
+- Canton and Splice themselves (validator business logic, topology semantics).
+- Other third-party dependencies beyond their configuration and use by us (tonic, `aws-lc-rs`,
+  BouncyCastle). Please flag known-vulnerable versions you notice.
+- The HSM (PKCS#11) and `software` backends (`HsmBackend.scala`, ~400 lines; `SoftwareBackend.scala`
+  and `SoftKeyStore.scala`, ~460 lines) are delegates for non-FROST keys. The shape we deploy
+  and soak is `delegate = "none"` with cluster-hosted keys, which uses neither. Our architecture doc
+  still calls the HSM delegate "fully supported" and the README says it is verified only on SoftHSM.
+  TODO(owner): decide whether `HsmBackend` is explicitly excluded or reviewed lightly (for example
+  only the backend routing and the delegate selection in `RutliDriver`), and align
+  `docs/architecture.md` with the answer.
+- Threshold ECDSA (Phase 4) and the networked share-repair ceremony: not shipped.
 
 ## 4. Threat model highlights and areas we want focus on
 
@@ -121,13 +143,14 @@ Each item below comes from our own design docs (`audit-prep.md`, `phase-2-frost.
 | **Compromised driver host** | An attacker on the Canton host holds the driver's client certificate. Bounds we claim: it can request signatures (subject to approval gate and journal, which run on the same host and can be bypassed by not using the driver), and `Decrypt` is rate-limited on the cosigner. It must not reach key material or nonce state. |
 | **Approval bypass** | M-of-N Ed25519 approval over a per-request random id; each approver counted once; fail-closed on timeout. It covers `sign`, deliberately not `Decrypt`. Approval is over key and opaque digest only, not transaction content (Canton does not pass more). |
 | **Seed-to-scalar trap (split ceremony)** | `SigningKey::deserialize` takes a scalar but Canton exports an RFC 8032 seed. A wrong conversion signs under a different key. We assert group key == Canton public key before any write; we want the conversion, the assertion, dealer memory handling, and key-destruction steps reviewed. |
+| **Carrying protocol keys (B6, in progress)** | Carrying a node's protocol signing and ECIES encryption keys into the cluster is a discouraged path (fresh keys are the default); it depends on the dealer's usage guard (`--expect-usage`) refusing a key of the wrong usage, and on `verify-hosted` proving what the cluster serves. We want that guard and the verification reviewed for ways to carry the wrong key, or to leave a plaintext copy behind unnoticed. Details follow with the freeze commit. |
 | **Share delivery (split ceremony)** | Two directions. *Forged requests* (an attacker substituting recipient keys gets real shares): requests are signed by the node's mTLS key and verified to the cluster CA with a CN → identifier rule, backed by a witnessed SAS; we want the X.509 path verification (`request_auth.rs`, aws-lc-rs over x509-parser, no webpki), the identity rule and the canonical encoding reviewed. *Forged bundles*: sealing to a public key gives confidentiality, not sender authentication; we rely on the install-time checks (expected fingerprint, VSS, package interpolation, own verifying share) and on `verify-key`'s cross-node digest comparison and every-quorum signing to make a forged or mixed bundle fail. Also: the AAD binding, recipient-secret lifetime and deletion, the operator role's reach (`CeremonySignTest`), and the reserved-id / no-clobber install races. |
-| **Rollback / stale state** | Restoring a stale backup can resurrect a deleted hosted key (documented hazard, `disaster-recovery.md` section 3c); anti-entropy treats a missing key as something to repair. TODO(verify): whether replay of an old sealed share or nonce store after a refresh is covered by any control; ask maintainers before sending, and say so here if it is an open question. |
+| **Rollback / stale state** | Restoring a stale backup can resurrect a deleted hosted key (documented hazard, `disaster-recovery.md` section 3c); anti-entropy treats a missing key as something to repair. For FROST keys: round-1 nonces live only in RAM under a fresh random session id, and the on-disk single-use markers are keyed by that id (`nonce_store.rs`), so restoring or losing an old nonce store cannot cause nonce reuse. A node restored from a pre-refresh backup holds a stale share; the leader's aggregation verifies every signature share and attributes a bad one (`session.rs`), so it cannot produce a wrong signature, but we have **no explicit epoch or version check** that keeps such a node from taking part (the `refresh_count` in a share's provenance is informational and exists only for dealt keys). Treat this as an open question for you: is replay of an old sealed share or backup after a refresh covered, or does it need a control? |
 | **Hosted-key wrapping and replication** | Per-recipient wrap with a recipient key derived (never stored) from the cluster master secret; AAD binds cluster id, key id, spec and recipient; replication never touches FROST shares (stated invariant); conflicting commitments for one id are a hard error, never auto-reconciled. |
 | **Key-id handling** | Ids are opaque strings to cosigners; the driver derives them deterministically from Canton key names and applies `frost.key-prefix`. On a shared cluster a prefix is a namespace, not an authorization boundary: any driver cert can address any id. Look for prefix collisions, routing confusion between `frost-` / `rutli-` / delegate, and approval rules that match on a prefix that omits `key-prefix`. |
 | **Audit log and journal integrity** | Hash-chained, fsynced write-ahead audit log; fails closed if a successful operation cannot be logged. The signing journal detects replays but cannot see height or round. |
 | **Hosted-key side channels and exposure** | RSA decrypt performs full OAEP (no raw `c^d mod N` oracle) on `aws-lc-rs`, avoiding the pure-Rust `rsa` crate (RUSTSEC-2023-0071). Please check the cosigner-side error and timing behavior of `Decrypt`. |
-| **Operational procedure** | Are the key ceremony, DR, and (once written) migration runbooks sound? In particular the destruction of the whole key after a split, and the exposure of plaintext keys in old database backups. |
+| **Operational procedure** | Are the key ceremony, DR and migration runbooks sound? In particular the destruction of the whole key after a split, and the exposure of plaintext keys in old database backups. |
 
 Known and accepted limits (so you do not spend time on them): the namespace key is non-rotatable;
 an imported (migrated) key is weaker than a DKG key because it once existed whole; hosted keys have
@@ -139,8 +162,8 @@ no forward secrecy; seal-secret protection is software, not HSM or enclave.
 |---|---|
 | Start | **2026-11-17, fixed.** We will accept a later date only if stated up front; the project's 1.0 date moves with it. |
 | Duration | 2-3 weeks; tell us what you can cover in each. |
-| Code freeze | `v0.4.0`, target ~2026-11-14, which includes the split ceremony. Only audit fixes land afterwards. Freeze date is a target and may slip a few days; we will give you the commit hash on the day. |
-| Our availability | One maintainer engineer, available during the engagement for questions (ECIES work runs in parallel unless you advise otherwise). Walkthrough on request. |
+| Code freeze | `v0.4.0`, target ~2026-11-14, which includes the split ceremony, the ECIES hosted keys and milestone B6. Only audit fixes land afterwards. Freeze date is a target and may slip a few days; we will give you the commit hash on the day. |
+| Our availability | One maintainer engineer, available during the engagement for questions. No feature work lands in the audited surface after the freeze. Walkthrough on request. |
 | Deliverables | Written report with findings and severity ratings; per-finding recommendations; executive summary suitable for publication. |
 | Retest | Verification of our fixes against the findings is included in the quote. State how it is scheduled and whether there is a time or finding cap. |
 | Publication | The project is open source, and we expect the final report to be public (after fixes). Please state your publication policy and any embargo or redaction terms. |
@@ -153,12 +176,12 @@ no forward secrecy; seal-secret protection is software, not HSM or enclave.
 4. Your track record with threshold-signature, MPC or FROST audits (named reports, if public).
 5. Retest terms: scope, timing, cost.
 6. Publication terms: whether you publish, our ability to publish, embargo and redaction handling.
-7. Whether the ECIES addendum (section 3) is feasible mid-engagement, and the price either way.
+7. The weight of the ECIES hosted keys (section 2.1) and of milestone B6 as separate line items in your quote, if you can show them.
 8. Any information you need from us before quoting (access, build instructions, a call).
 
 ## 7. Materials we provide
 
-- **Repository:** `<REPO_URL>` (public). Tag `v0.4.0` will be cut at code freeze.
+- **Repository:** `<REPO_URL>` (public). Tag `v0.4.0-rc.1` (2026-10-09, commit `903d318`) exists now; tag `v0.4.0` will be cut at code freeze.
 - **Design and operator docs** (relative to the repository root):
   - [README.md](../README.md), [SECURITY.md](../SECURITY.md), [CHANGELOG.md](../CHANGELOG.md)
   - [docs/audit-prep.md](audit-prep.md): engagement brief and evidence index
@@ -167,19 +190,28 @@ no forward secrecy; seal-secret protection is software, not HSM or enclave.
   - [docs/wire-contract.md](wire-contract.md): exactly what Canton sends the driver
   - [docs/approval-quorum.md](approval-quorum.md), [docs/key-ceremony.md](key-ceremony.md)
   - [docs/disaster-recovery.md](disaster-recovery.md), [docs/key-rotation.md](key-rotation.md)
-  - [docs/roadmap-migration.md](roadmap-migration.md): split ceremony (B2) design and risks
+  - [docs/roadmap-migration.md](roadmap-migration.md): split ceremony (B2) design and risks, milestone status
+  - [docs/migration.md](migration.md): pilot migration runbook, exercised in the 2026-10-14 DevNet rehearsal
   - [docs/split-ceremony.md](split-ceremony.md): split ceremony runbook, records and destruction
   - [docs/testnet-soak.md](testnet-soak.md), [docs/soak-2026-10-devnet.md](soak-2026-10-devnet.md)
 - **Tests and CI:** `cd frost && cargo test && cargo clippy --all-targets -- -D warnings`;
   `sbt driver/test`; TLS compose smoke (`scripts/ci-frost-tls-smoke.sh`); the driver passes the
   upstream Canton KMS driver conformance suite.
 - **Environment:** on request, a walkthrough of our DevNet soak cluster (3 cosigners backing a
-  Splice DevNet validator), with its dashboards and failure drills. TODO(verify): confirm that
-  access (read-only dashboard or live demo) is acceptable to expose to outside reviewers.
+  Splice DevNet validator), with its dashboards and failure drills. The DevNet B4 cutover rehearsal
+  (an existing JCE validator moved into the cluster with its namespace and party IDs unchanged) ran
+  green on 2026-10-14; the soak log is [docs/soak-2026-10-devnet.md](soak-2026-10-devnet.md).
+  TODO(owner): is a read-only dashboard view or a live demo of the DevNet cluster acceptable to
+  expose to outside reviewers? Our dashboard is behind StakeCraft SSO and the cluster is shared with
+  other DevNet validators; decide which of the two, if any, we offer, and delete this line if none.
 - **Build prerequisites:** JDK 17, sbt, Rust, Docker, Canton 3.6.1 release (KMS API jars are not on
-  Maven Central; `scripts/publish-canton-deps.sh` handles it). TODO(verify): the README names Canton
-  3.6.1 as the build target, while the end-to-end runs it describes were on 3.5.6; confirm what
-  version the audited commit is verified against.
+  Maven Central; `scripts/publish-canton-deps.sh` handles it). The audited commit is built and
+  tested against Canton **v3.6.1**: `build.sbt` and the CI `CANTON_TAG`, the upstream driver
+  conformance suite, the ECIES end-to-end script (`scripts/e2e-ecies-hosted.sh`, a live 3.6.1
+  participant), and the DevNet soak and B4 rehearsal (Splice 0.9.0, Canton 3.6.1). The earlier
+  end-to-end runs in the docs (July and August 2026) were on Canton 3.5.6; the KMS driver SPI is
+  byte-identical between 3.5.6 and 3.6.1 (`build.sbt`), but we do not claim 3.5.6 for the audited
+  commit.
 
 ## 8. Contact
 
