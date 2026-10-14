@@ -318,7 +318,7 @@ async fn dkg_refuses_ids_reserved_for_imported_keys_on_every_path() {
 #[tokio::test]
 async fn refresh_carries_a_dealt_keys_origin_and_counts_refreshes() {
     use rutli_cosigner::keystore::{KeyOrigin, Share, ORIGIN_DEALER_SPLIT};
-    const IMPORTED: &str = "frost-import-refresh";
+    const IMPORTED: &str = "frost-import-sig-refresh";
     let tmp = tempfile::tempdir().unwrap();
     let seed = [11u8; 32];
     let (shares, pkp) =
@@ -329,6 +329,11 @@ async fn refresh_carries_a_dealt_keys_origin_and_counts_refreshes() {
         canton_fingerprint: "1220".into(),
         installed_at: 1,
         refresh_count: 0,
+        // A carried protocol key (B6): what it was carried for survives every refresh too.
+        carried_usage: Some(rutli_cosigner::carry::CarriedUsage {
+            expected: "protocol".into(),
+            recorded: Some(vec!["proof-of-ownership".into(), "signing".into()]),
+        }),
     };
     for (i, s) in shares.iter().enumerate() {
         let ks = KeyStore::open(tmp.path().join(format!("node-{}", i + 1))).unwrap();

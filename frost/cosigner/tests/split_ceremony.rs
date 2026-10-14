@@ -110,7 +110,11 @@ fn ceremony(root: &Path) -> (Vec<Site>, Vec<ShareBundle>, [u8; 32], String) {
             // What the dealer does first: verify the request to the cluster CA.
             let verified =
                 rutli_cosigner::request_auth::verify_request(r, pki::shared().ca_pem.as_bytes()).unwrap();
-            share_delivery::seal_share(&verified, s, &pkp, &fingerprint).unwrap()
+            let usage = rutli_cosigner::carry::CarriedUsage {
+                expected: "namespace".into(),
+                recorded: Some(vec!["namespace".into()]),
+            };
+            share_delivery::seal_share(&verified, s, &pkp, &fingerprint, Some(&usage)).unwrap()
         })
         .collect();
     (sites, bundles, public, fingerprint)

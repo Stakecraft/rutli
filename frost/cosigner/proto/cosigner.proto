@@ -137,6 +137,11 @@ message KeyStatusReply {
   string canton_fingerprint = 9;   // dealer-split only
   uint64 installed_at = 10;        // dealer-split only, seconds since the Unix epoch
   uint64 refresh_count = 11;       // dealer-split only: refreshes since install
+  // dealer-split from a B6 dealer only (empty otherwise): what the key was carried for,
+  // "namespace" or "protocol", and its recorded Canton usage, comma-separated as Canton names it
+  // ("" = none recorded, which Canton reads as all; "unknown" = plain PKCS#8).
+  string carried_for = 12;
+  string recorded_usage = 13;
 }
 
 message RefreshPart1Request {

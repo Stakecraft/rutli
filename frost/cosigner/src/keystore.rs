@@ -46,6 +46,10 @@ pub struct KeyOrigin {
     /// with the live shares. The daemon warns about such keys at startup.
     #[serde(default)]
     pub refresh_count: u64,
+    /// What the key was carried for and its recorded Canton usage, from the dealer's bundle (B6).
+    /// `None` for a key installed from a B2 bundle, which did not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub carried_usage: Option<crate::carry::CarriedUsage>,
 }
 
 pub const ORIGIN_DEALER_SPLIT: &str = "dealer-split";
@@ -678,6 +682,7 @@ mod tests {
             canton_fingerprint: "1220ab".into(),
             installed_at: 1,
             refresh_count: 0,
+            carried_usage: None,
         }
     }
 

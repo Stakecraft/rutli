@@ -356,7 +356,7 @@ fn split_key(a: SplitKey) -> Result<()> {
     let sealed: Result<Vec<_>> = requests
         .iter()
         .zip(&shares)
-        .map(|(r, s)| share_delivery::seal_share(r, s, &pkp, &fingerprint))
+        .map(|(r, s)| share_delivery::seal_share(r, s, &pkp, &fingerprint, Some(&carried)))
         .collect();
     for s in shares.iter_mut() {
         s.zeroize();
