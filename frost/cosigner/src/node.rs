@@ -349,6 +349,13 @@ impl Node {
             reply.canton_fingerprint = o.canton_fingerprint.clone();
             reply.installed_at = o.installed_at;
             reply.refresh_count = o.refresh_count;
+            if let Some(u) = &o.carried_usage {
+                reply.carried_for = u.expected.clone();
+                reply.recorded_usage = match &u.recorded {
+                    Some(list) => list.join(","),
+                    None => "unknown".into(),
+                };
+            }
         }
         Ok(reply)
     }

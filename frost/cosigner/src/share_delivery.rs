@@ -15,8 +15,9 @@
 //! 2. **Share bundle** (`rutli-dealer split-key`). For each request the dealer seals the node's
 //!    [`SecretShare`] to `recipient_pub` ([`seal_share`]) with [`crate::wrap::seal_to`], under an
 //!    AAD that binds the recipient, cluster, key id, spec, ceremony id, group key, Canton
-//!    fingerprint and public-key-package digest. The [`ShareBundle`] carries the public key
-//!    package in clear so it can be checked before anything is decrypted.
+//!    fingerprint, public-key-package digest and — since B6 — what the key is carried for
+//!    ([`crate::carry::CarriedUsage`]). The [`ShareBundle`] carries the public key package in
+//!    clear so it can be checked before anything is decrypted.
 //! 3. **Install** (`rutli-cosigner import-share`) opens the bundle with the stored secret
 //!    ([`ShareBundle::open`]) and deletes the secret once the share is installed. A bundle is then
 //!    undecryptable by anyone, including the node itself — replay after install is impossible.
@@ -80,8 +81,11 @@ pub const RECIPIENT_VERSION: u8 = 1;
 pub const BUNDLE_KIND: &str = "rutli-frost-share";
 pub const BUNDLE_VERSION: u8 = 1;
 /// Envelope version of a share bundle. Version 1 is the hosted-key envelope; 2 is the same
-/// construction with the split ceremony's extra AAD fields ([`share_aad`]).
-pub const SHARE_WRAP_VERSION: u32 = 2;
+/// construction with the split ceremony's extra AAD fields ([`share_aad`]); 3 (B6) adds the
+/// bundle's [`ShareBundle::usage`] to them. What this dealer writes.
+pub const SHARE_WRAP_VERSION: u32 = 3;
+/// A B2 bundle: no `usage`, AAD without it. Still installed (its provenance then records no usage).
+pub const SHARE_WRAP_VERSION_NO_USAGE: u32 = 2;
 
 const SECRET_KIND: &str = "rutli-share-recipient-secret";
 
@@ -339,12 +343,20 @@ pub struct ShareBundle {
     pub public_key_package: PublicKeyPackage,
     /// Hex SHA-256 of the package's canonical serialization ([`rutli_frost_core::dealer::pkp_digest`]).
     pub pkp_digest: String,
+    /// What the dealer was told the key is for and what Canton recorded about it (B6). Present
+    /// exactly in envelope version [`SHARE_WRAP_VERSION`], and bound into its AAD.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::carry::CarriedUsage>,
     pub wrapped: BundleEnvelope,
 }
 
 /// The share envelope's AAD: the hosted-key fields (cluster, key id, spec, recipient) plus
 /// `ceremony_id`, the raw 32-byte group key, the Canton fingerprint string and the raw 32-byte
-/// package digest — each length-prefixed (see [`crate::wrap::aad`]).
+/// package digest, then (envelope version 3) the two [`crate::carry::CarriedUsage::aad_fields`] —
+/// each length-prefixed (see [`crate::wrap::aad`]). A version 3 AAD is the version 2 AAD plus two
+/// more fields, so the two never coincide: stripping `usage` from a version 3 bundle (and calling it
+/// version 2) changes the AAD and fails authentication, as does relabelling it.
+#[allow(clippy::too_many_arguments)]
 pub fn share_aad(
     recipient: u16,
     cluster_id: &str,
@@ -353,19 +365,24 @@ pub fn share_aad(
     group_verifying_key: &[u8; 32],
     canton_fingerprint: &str,
     pkp_digest: &[u8; 32],
+    usage: Option<&crate::carry::CarriedUsage>,
 ) -> Vec<u8> {
-    wrap::aad(
-        cluster_id,
-        key_id,
-        SHARE_SPEC,
-        recipient,
-        &[
-            ceremony_id.as_bytes(),
-            group_verifying_key,
-            canton_fingerprint.as_bytes(),
-            pkp_digest,
-        ],
-    )
+    let usage_fields = usage.map(|u| u.aad_fields());
+    let mut extra: Vec<&[u8]> =
+        vec![ceremony_id.as_bytes(), group_verifying_key, canton_fingerprint.as_bytes(), pkp_digest];
+    if let Some(fields) = &usage_fields {
+        extra.extend(fields.iter().map(Vec::as_slice));
+    }
+    wrap::aad(cluster_id, key_id, SHARE_SPEC, recipient, &extra)
+}
+
+/// The envelope version a bundle with (or without) `usage` must have.
+pub fn share_wrap_version(has_usage: bool) -> u32 {
+    if has_usage {
+        SHARE_WRAP_VERSION
+    } else {
+        SHARE_WRAP_VERSION_NO_USAGE
+    }
 }
 
 /// The Canton fingerprint of an Ed25519 group key.
@@ -375,14 +392,19 @@ pub fn ed25519_fingerprint(group_verifying_key: &[u8; 32]) -> String {
 
 /// Seal `share` for the node that published `request` (dealer side). Takes only a
 /// [`crate::request_auth::VerifiedRequest`]: a share can never be sealed to a request whose
-/// signature, chain, identity and cluster were not checked.
+/// signature, chain, identity and cluster were not checked. With `usage` (the dealer always passes
+/// it) the bundle is envelope version 3; without, a B2-shaped version 2 bundle.
 pub fn seal_share(
     request: &crate::request_auth::VerifiedRequest,
     share: &SecretShare,
     pkp: &PublicKeyPackage,
     canton_fingerprint: &str,
+    usage: Option<&crate::carry::CarriedUsage>,
 ) -> Result<ShareBundle> {
     request.validate()?;
+    if let Some(u) = usage {
+        crate::carry::check_carried_id(&request.key_id, u)?;
+    }
     if *share.identifier() != ident(request.identifier)? {
         return Err(DaemonError::Ceremony(format!(
             "share is not for node {}",
@@ -399,6 +421,7 @@ pub fn seal_share(
         &group,
         canton_fingerprint,
         &digest,
+        usage,
     );
     let plain = to_json_zeroizing(share)?;
     let (epk, ct) = wrap::seal_to(&request.public_key()?, &plain, &aad)?;
@@ -417,10 +440,11 @@ pub fn seal_share(
         group_verifying_key: hex::encode(group),
         public_key_package: pkp.clone(),
         pkp_digest: hex::encode(digest),
+        usage: usage.cloned(),
         wrapped: BundleEnvelope {
             epk: hex::encode(epk),
             ct: hex::encode(ct),
-            version: SHARE_WRAP_VERSION,
+            version: share_wrap_version(usage.is_some()),
         },
     })
 }
@@ -441,11 +465,18 @@ impl ShareBundle {
                 self.kind, self.v, self.spec
             )));
         }
-        if self.wrapped.version != SHARE_WRAP_VERSION {
+        if self.wrapped.version != share_wrap_version(self.usage.is_some()) {
             return Err(DaemonError::Ceremony(format!(
-                "unsupported share envelope version {} (this node speaks {SHARE_WRAP_VERSION})",
-                self.wrapped.version
+                "unsupported share envelope version {} for a bundle {} usage (this node speaks \
+                 {SHARE_WRAP_VERSION_NO_USAGE} without, {SHARE_WRAP_VERSION} with)",
+                self.wrapped.version,
+                if self.usage.is_some() { "with" } else { "without" }
             )));
+        }
+        // A protocol key never lands under a namespace id, nor the other way round (carry.rs) —
+        // whatever the dealer that made the bundle checked.
+        if let Some(u) = &self.usage {
+            crate::carry::check_carried_id(&self.key_id, u)?;
         }
         let mismatch = |what: &str, got: &dyn std::fmt::Debug, want: &dyn std::fmt::Debug| {
             Err(DaemonError::Ceremony(format!(
@@ -518,6 +549,7 @@ impl ShareBundle {
             &self.group_key()?,
             &self.canton_fingerprint,
             &hex32(&self.pkp_digest, "pkp_digest")?,
+            self.usage.as_ref(),
         );
         let w = Wrapped {
             recipient: self.recipient,
@@ -695,9 +727,13 @@ mod tests {
         let bundles = nodes
             .iter()
             .zip(&shares)
-            .map(|(n, s)| seal_share(&verified(&n.request), s, &pkp, &fp).unwrap())
+            .map(|(n, s)| seal_share(&verified(&n.request), s, &pkp, &fp, Some(&namespace_usage())).unwrap())
             .collect();
         (bundles, pkp, shares)
+    }
+
+    fn namespace_usage() -> crate::carry::CarriedUsage {
+        crate::carry::CarriedUsage { expected: "namespace".into(), recorded: Some(vec!["namespace".into()]) }
     }
 
     fn nodes() -> Vec<Node> {
@@ -780,6 +816,45 @@ mod tests {
     }
 
     #[test]
+    fn the_carried_usage_is_bound_and_a_b2_bundle_still_opens() {
+        use crate::carry::CarriedUsage;
+        let nodes = nodes();
+        let (bundles, pkp, shares) = deal(&nodes);
+        let state = nodes[0].state().unwrap();
+        assert_eq!(bundles[0].wrapped.version, SHARE_WRAP_VERSION);
+
+        // Relabelled usage, consistent with the namespace id: only the AEAD can tell.
+        for usage in [
+            CarriedUsage { expected: "namespace".into(), recorded: Some(vec![]) },
+            CarriedUsage { expected: "namespace".into(), recorded: None },
+            CarriedUsage { expected: "namespace".into(), recorded: Some(vec!["namespace".into(), "signing".into()]) },
+        ] {
+            let mut b = bundles[0].clone();
+            b.usage = Some(usage);
+            b.check_against(&state.request).expect("public parts are consistent");
+            assert!(b.open(&state).unwrap_err().to_string().contains("authentication"));
+        }
+        // Stripped and downgraded to a B2 envelope: the AAD loses two fields, the AEAD notices.
+        let mut b = bundles[0].clone();
+        b.usage = None;
+        b.wrapped.version = SHARE_WRAP_VERSION_NO_USAGE;
+        assert!(b.open(&state).unwrap_err().to_string().contains("authentication"));
+        // Protocol usage under a namespace id: refused before decryption, whatever sealed it.
+        let mut b = bundles[0].clone();
+        b.usage = Some(CarriedUsage { expected: "protocol".into(), recorded: Some(vec!["signing".into()]) });
+        assert!(b.open(&state).unwrap_err().to_string().contains("namespace-style id"));
+        // The dealer side refuses to seal it in the first place.
+        let fp = bundles[0].canton_fingerprint.clone();
+        assert!(seal_share(&verified(&nodes[0].request), &shares[0], &pkp, &fp, b.usage.as_ref()).is_err());
+
+        // A B2 bundle (no usage, envelope version 2) still opens.
+        let b2 = seal_share(&verified(&nodes[0].request), &shares[0], &pkp, &fp, None).unwrap();
+        assert_eq!((b2.wrapped.version, b2.usage.is_none()), (SHARE_WRAP_VERSION_NO_USAGE, true));
+        assert!(!serde_json::to_string(&b2).unwrap().contains("usage"), "B2 bundles keep their shape");
+        assert_eq!(b2.open(&state).unwrap(), shares[0]);
+    }
+
+    #[test]
     fn a_tampered_ciphertext_is_refused() {
         let nodes = nodes();
         let (bundles, _, _) = deal(&nodes);
@@ -801,6 +876,13 @@ mod tests {
         assert!(b.open(&state).is_err());
         let mut b = bundles[0].clone();
         b.wrapped.version = SHARE_WRAP_VERSION + 1;
+        assert!(b.open(&state).is_err());
+        // A version 3 envelope must carry usage, a version 2 one must not.
+        let mut b = bundles[0].clone();
+        b.usage = None;
+        assert!(b.open(&state).unwrap_err().to_string().contains("envelope version"));
+        let mut b = bundles[0].clone();
+        b.wrapped.version = SHARE_WRAP_VERSION_NO_USAGE;
         assert!(b.open(&state).is_err());
         let mut b = bundles[0].clone();
         b.wrapped.version = crate::wrap::WRAP_VERSION; // a hosted-key envelope version

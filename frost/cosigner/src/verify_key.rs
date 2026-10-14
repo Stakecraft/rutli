@@ -14,7 +14,7 @@
 //! - each node's own verifying share is the package's entry for it — a node whose secret share
 //!   does not match the package would make every signature it joins fail;
 //! - the package interpolates: every `t`-subset of verifying shares yields the group key;
-//! - provenance agrees (origin, ceremony id, refresh count).
+//! - provenance agrees (origin, ceremony id, refresh count, and what the key was carried for).
 //!
 //! A public view can be perfect while a node's *secret* share is wrong, so with `--sign-test` the
 //! command then has the cluster sign with **every `t`-subset** of cosigners in turn
@@ -57,6 +57,9 @@ pub struct NodeRow {
     pub origin: String,
     pub ceremony_id: String,
     pub refresh_count: u64,
+    /// `namespace` / `protocol` for a key from a B6 dealer, empty otherwise.
+    pub carried_for: String,
+    pub recorded_usage: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -81,6 +84,8 @@ pub struct VerifyReport {
     pub origin: Option<String>,
     pub ceremony_id: Option<String>,
     pub refresh_count: Option<u64>,
+    pub carried_for: Option<String>,
+    pub recorded_usage: Option<String>,
     pub nodes: Vec<NodeRow>,
     pub sign_test: Vec<SignRow>,
 }
@@ -200,6 +205,8 @@ pub fn check_views(
             origin: String::new(),
             ceremony_id: String::new(),
             refresh_count: 0,
+            carried_for: String::new(),
+            recorded_usage: String::new(),
         };
         match &v.status {
             Err(e) => {
@@ -211,7 +218,15 @@ pub fn check_views(
                 row.origin = s.origin.clone();
                 row.ceremony_id = s.ceremony_id.clone();
                 row.refresh_count = s.refresh_count;
-                provenance.insert((s.origin.clone(), s.ceremony_id.clone(), s.refresh_count));
+                row.carried_for = s.carried_for.clone();
+                row.recorded_usage = s.recorded_usage.clone();
+                provenance.insert((
+                    s.origin.clone(),
+                    s.ceremony_id.clone(),
+                    s.refresh_count,
+                    s.carried_for.clone(),
+                    s.recorded_usage.clone(),
+                ));
                 if let Err(e) = check_one(v.identifier, s, expected_fingerprint, roster, threshold, &mut row) {
                     problems.push(format!("node {}: {e}", v.identifier));
                 }
@@ -228,12 +243,16 @@ pub fn check_views(
         ));
     }
     if provenance.len() > 1 {
-        problems.push(format!("nodes disagree on provenance (origin, ceremony, refreshes): {provenance:?}"));
+        problems.push(format!(
+            "nodes disagree on provenance (origin, ceremony, refreshes, carried for, usage): {provenance:?}"
+        ));
     }
     let single = |set: &BTreeSet<String>| (set.len() == 1).then(|| set.iter().next().cloned()).flatten();
-    let (origin, ceremony_id, refresh_count) = match provenance.iter().next() {
-        Some((o, c, r)) if provenance.len() == 1 => (Some(o.clone()), Some(c.clone()), Some(*r)),
-        _ => (None, None, None),
+    let (origin, ceremony_id, refresh_count, carried_for, recorded_usage) = match provenance.iter().next() {
+        Some((o, c, r, f, u)) if provenance.len() == 1 => {
+            (Some(o.clone()), Some(c.clone()), Some(*r), Some(f.clone()), Some(u.clone()))
+        }
+        _ => (None, None, None, None, None),
     };
     VerifyReport {
         key_id: key_id.into(),
@@ -246,6 +265,8 @@ pub fn check_views(
         origin,
         ceremony_id,
         refresh_count,
+        carried_for,
+        recorded_usage,
         nodes: rows,
         sign_test: Vec::new(),
     }
@@ -337,6 +358,8 @@ mod tests {
                         canton_fingerprint: fp.clone(),
                         installed_at: 1,
                         refresh_count: 0,
+                        carried_for: "namespace".into(),
+                        recorded_usage: "namespace".into(),
                     }),
                 }
             })
@@ -351,6 +374,7 @@ mod tests {
         assert!(r.ok, "{:?}", r.problems);
         assert!(r.agreed_group_key().is_some());
         assert_eq!(r.refresh_count, Some(0));
+        assert_eq!((r.carried_for.as_deref(), r.recorded_usage.as_deref()), (Some("namespace"), Some("namespace")));
     }
 
     #[test]
@@ -384,6 +408,11 @@ mod tests {
         let (mut v, _) = views([1u8; 32]);
         v[0].status.as_mut().unwrap().refresh_count = 1;
         assert!(!check_views(KEY, &fp, &[1, 2, 3], 2, &v).ok);
+        // ... or on what the key was carried for.
+        let (mut v, _) = views([1u8; 32]);
+        v[2].status.as_mut().unwrap().carried_for = "protocol".into();
+        let r = check_views(KEY, &fp, &[1, 2, 3], 2, &v);
+        assert!(r.problems.iter().any(|p| p.contains("carried for")), "{:?}", r.problems);
         // Wrong configured threshold.
         let (v, _) = views([1u8; 32]);
         assert!(!check_views(KEY, &fp, &[1, 2, 3], 3, &v).ok);

@@ -593,7 +593,7 @@ async fn verify_key_command(
             match &n.error {
                 Some(e) => println!("  node {} {}: {e}", n.identifier, n.endpoint),
                 None => println!(
-                    "  node {} {}: fp {} digest {} own-share {} origin {} ceremony {:?} refreshes {}",
+                    "  node {} {}: fp {} digest {} own-share {} origin {} ceremony {:?} refreshes {}{}",
                     n.identifier,
                     n.endpoint,
                     n.fingerprint,
@@ -601,7 +601,12 @@ async fn verify_key_command(
                     if n.own_share_in_package { "ok" } else { "MISMATCH" },
                     n.origin,
                     n.ceremony_id,
-                    n.refresh_count
+                    n.refresh_count,
+                    if n.carried_for.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" carried-for {} usage {:?}", n.carried_for, n.recorded_usage)
+                    }
                 ),
             }
         }

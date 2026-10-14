@@ -24,7 +24,7 @@ use crate::keystore::{KeyOrigin, KeyStore, Record, Share, ORIGIN_DEALER_SPLIT};
 use crate::seal::Sealer;
 use crate::share_delivery::{
     self, RecipientRequest, ShareBundle, BUNDLE_KIND, BUNDLE_VERSION, RECIPIENT_KIND,
-    RECIPIENT_VERSION, SHARE_SPEC, SHARE_WRAP_VERSION,
+    RECIPIENT_VERSION, SHARE_SPEC,
 };
 use crate::{DaemonError, Result};
 
@@ -129,6 +129,8 @@ pub struct ImportReport {
     pub pkp_digest: String,
     pub threshold: u16,
     pub max_signers: u16,
+    /// What the key is carried for and its recorded Canton usage (B6); `null` from a B2 bundle.
+    pub carried_usage: Option<crate::carry::CarriedUsage>,
     /// `dry-run` (checked, nothing written), `installed`, or `already-installed` (an identical
     /// re-import: same ceremony, same package; nothing changed).
     pub outcome: &'static str,
@@ -138,7 +140,8 @@ pub struct ImportReport {
 /// expected Canton fingerprint, then install it with a no-clobber create and delete the recipient
 /// secret. Checks, in order:
 ///
-/// 1. format: bundle kind, version, spec, envelope version;
+/// 1. format: bundle kind, version, spec, envelope version (3 with `usage`, 2 without); a
+///    carried usage matches the id's class (`carry::check_carried_id`);
 /// 2. `recipient` is this node's identifier;
 /// 3. `cluster_id` is this node's (derived from its CA certificate);
 /// 4. if the key is already installed: an identical re-import (same ceremony, same package digest,
@@ -165,12 +168,20 @@ pub fn import_share(
     if bundle.kind != BUNDLE_KIND
         || bundle.v != BUNDLE_VERSION
         || bundle.spec != SHARE_SPEC
-        || bundle.wrapped.version != SHARE_WRAP_VERSION
+        || bundle.wrapped.version != share_delivery::share_wrap_version(bundle.usage.is_some())
     {
         return Err(ceremony(format!(
-            "not a v{BUNDLE_VERSION} {BUNDLE_KIND} bundle (kind {:?}, v {}, spec {:?}, envelope v{})",
-            bundle.kind, bundle.v, bundle.spec, bundle.wrapped.version
+            "not a v{BUNDLE_VERSION} {BUNDLE_KIND} bundle (kind {:?}, v {}, spec {:?}, envelope v{}, \
+             usage {})",
+            bundle.kind,
+            bundle.v,
+            bundle.spec,
+            bundle.wrapped.version,
+            if bundle.usage.is_some() { "present" } else { "absent" }
         )));
+    }
+    if let Some(usage) = &bundle.usage {
+        crate::carry::check_carried_id(&bundle.key_id, usage)?;
     }
     // 2–3. This node, this cluster.
     if bundle.recipient != ctx.identifier {
@@ -272,6 +283,7 @@ pub fn import_share(
         pkp_digest: bundle.pkp_digest.clone(),
         threshold: ctx.threshold,
         max_signers: ctx.max_signers,
+        carried_usage: bundle.usage.clone(),
         outcome: if dry_run { "dry-run" } else { "installed" },
     };
     if dry_run {
@@ -287,6 +299,7 @@ pub fn import_share(
             canton_fingerprint: fingerprint,
             installed_at: crate::hosted::now_secs(),
             refresh_count: 0,
+            carried_usage: bundle.usage.clone(),
         }),
     };
     keystore.create(&bundle.key_id, &share)?;
@@ -319,6 +332,7 @@ fn already_installed(
         && origin.ceremony_id == bundle.ceremony_id
         && origin.refresh_count == 0
         && digest == bundle.pkp_digest
+        && origin.carried_usage == bundle.usage
         && *share.key_package.identifier() == ctx.me()?;
     if !identical {
         return Err(exists());
@@ -348,6 +362,7 @@ fn already_installed(
         pkp_digest: digest,
         threshold: *share.key_package.min_signers(),
         max_signers: share.public_key_package.verifying_shares().len() as u16,
+        carried_usage: origin.carried_usage.clone(),
         outcome: "already-installed",
     })
 }
@@ -526,7 +541,18 @@ mod tests {
         share_delivery::ed25519_fingerprint(&rutli_frost_core::dealer::public_key_from_seed(&SEED))
     }
 
+    fn usage() -> crate::carry::CarriedUsage {
+        crate::carry::CarriedUsage { expected: "namespace".into(), recorded: Some(vec!["namespace".into()]) }
+    }
+
     fn deal(requests: &[RecipientRequest]) -> (Vec<ShareBundle>, PublicKeyPackage) {
+        deal_with(requests, Some(&usage()))
+    }
+
+    fn deal_with(
+        requests: &[RecipientRequest],
+        usage: Option<&crate::carry::CarriedUsage>,
+    ) -> (Vec<ShareBundle>, PublicKeyPackage) {
         let ids: Vec<u16> = requests.iter().map(|r| r.identifier).collect();
         let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&SEED, &ids, 2).unwrap();
         let bundles = requests
@@ -535,7 +561,7 @@ mod tests {
             .map(|(r, s)| {
                 let ca = crate::test_pki::shared().ca_pem.as_bytes();
                 let verified = crate::request_auth::verify_request(r, ca).unwrap();
-                share_delivery::seal_share(&verified, s, &pkp, &fingerprint()).unwrap()
+                share_delivery::seal_share(&verified, s, &pkp, &fingerprint(), usage).unwrap()
             })
             .collect();
         (bundles, pkp)
@@ -571,10 +597,29 @@ mod tests {
         let installed = n.keystore.load(KEY).unwrap();
         let origin = installed.origin.unwrap();
         assert_eq!((origin.ceremony_id.as_str(), origin.refresh_count), (CEREMONY, 0));
+        assert_eq!((origin.carried_usage.as_ref(), done.carried_usage.as_ref()), (Some(&usage()), Some(&usage())));
         assert!(!share_delivery::recipient_path(&n.ctx.data_dir, KEY).unwrap().exists());
 
         // Identical re-import: no-op success (the bundle can no longer be opened, and need not be).
-        assert_eq!(n.import(&bundles[0], false).unwrap().outcome, "already-installed");
+        let again = n.import(&bundles[0], false).unwrap();
+        assert_eq!((again.outcome, again.carried_usage), ("already-installed", Some(usage())));
+    }
+
+    /// A bundle from a B2 dealer (no usage, envelope version 2) installs; its provenance says
+    /// nothing about usage. A B6 bundle's usage must match the id's class.
+    #[test]
+    fn a_b2_bundle_installs_without_usage_and_a_misclassified_usage_is_refused() {
+        let nodes: Vec<TestNode> = (1..=3).map(TestNode::new).collect();
+        let requests: Vec<RecipientRequest> = nodes.iter().map(|n| n.recipient()).collect();
+        let (bundles, _) = deal_with(&requests, None);
+        let done = nodes[0].import(&bundles[0], false).unwrap();
+        assert_eq!((done.outcome, done.carried_usage), ("installed", None));
+        assert_eq!(nodes[0].keystore.load(KEY).unwrap().origin.unwrap().carried_usage, None);
+
+        let mut protocol = bundles[1].clone();
+        protocol.usage = Some(crate::carry::CarriedUsage { expected: "protocol".into(), recorded: None });
+        protocol.wrapped.version = share_delivery::SHARE_WRAP_VERSION;
+        assert_ceremony_err(nodes[1].import(&protocol, true), "namespace-style id");
     }
 
     /// Review NEW-2: a witness can re-derive the SAS from the node's own sealed state, in a session

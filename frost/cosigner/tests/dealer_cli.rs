@@ -587,6 +587,9 @@ fn protocol_keys_split_under_protocol_ids_and_the_record_says_what_they_are() {
         assert_eq!(record["key_id"], c.key.as_str());
         assert_eq!(record["expected_usage"], "protocol");
         assert_eq!(record["recorded_usage"], serde_json::json!(recorded));
+        // The bundles say so too, under the envelope's AAD; the node records it at install.
+        let usage = c.bundle(1).usage.expect("a B6 bundle carries its usage");
+        assert_eq!((usage.expected.as_str(), usage.recorded), ("protocol", Some(recorded.map(String::from).to_vec())));
         c.assert_reconstructs(&fp);
     }
 }
