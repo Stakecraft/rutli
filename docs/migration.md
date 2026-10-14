@@ -315,7 +315,8 @@ rules = [
 ]
 ```
 
-The reverse mistake is worse: never let a broad `auto` rule match the namespace id.
+The driver logs a WARN at startup for every quorum rule on `…frost-import-` that would hold a `-sig-` or `-seqauth-` id.
+The reverse mistake is worse, and nothing warns about it: never let a broad `auto` rule match the namespace id.
 
 ### Register them on the new participant
 

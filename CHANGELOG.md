@@ -132,6 +132,8 @@ All notable changes to Rütli are documented here. Format loosely follows
 - `HostedKeyStatus` (`verify-hosted`) reports the public key each node's private key derives, EC
   and RSA, and refuses to answer for an inconsistent key file; a FROST share under the asked id
   reads absent instead of returning an error. Docs say it is the nodes' self-report.
+- The driver logs a startup WARN for each approval quorum rule on `<p>frost-import-` that would
+  also hold carried protocol keys (`<p>frost-import-sig-…` / `…-seqauth-…`).
 - `docs/migration.md` §8: a gate before the split — no namespace delegation may name a carried
   key as its target (`--namespace-fingerprint` excludes only the root).
 
