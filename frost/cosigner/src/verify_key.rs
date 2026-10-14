@@ -27,9 +27,9 @@
 //! else), never chosen by the caller, and domain-separated from every hash Canton builds. Canton
 //! hashes `be_i32(HashPurpose.id) ‖ content` (`HashBuilder.scala:192-205`), and every purpose
 //! Canton 3.6.1 defines is 1–68, or −1 for test hashes (`HashPurpose.scala:52-123`); this
-//! preimage starts with the ASCII bytes `rutl`, which as a purpose would be 1 920 300 396. Equal
-//! digests would take a SHA-256 collision. That is what lets the **operator** role
-//! (`operator_allowlist`) run it without a credential that can `Sign`.
+//! preimage starts with the ASCII bytes `rutl`, which as a purpose would be 0x7275746C =
+//! 1 920 300 140. Equal digests would take a SHA-256 collision. That is what lets the **operator**
+//! role (`operator_allowlist`) run it without a credential that can `Sign`.
 
 use std::collections::BTreeSet;
 
