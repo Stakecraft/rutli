@@ -333,6 +333,7 @@ async fn refresh_carries_a_dealt_keys_origin_and_counts_refreshes() {
         carried_usage: Some(rutli_cosigner::carry::CarriedUsage {
             expected: "protocol".into(),
             recorded: Some(vec!["proof-of-ownership".into(), "signing".into()]),
+            namespace_fingerprint: Some(format!("1220{}", "cd".repeat(32))),
         }),
     };
     for (i, s) in shares.iter().enumerate() {

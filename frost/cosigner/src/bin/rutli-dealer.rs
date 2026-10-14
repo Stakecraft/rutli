@@ -36,7 +36,7 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use rutli_canton_key::{KeySpec, PrivateKeyMaterial, Source};
-use rutli_cosigner::carry::{self, CarriedFor, CarriedUsage};
+use rutli_cosigner::carry::{self, CarriedFor};
 use rutli_cosigner::request_auth::VerifiedRequest;
 use rutli_cosigner::share_delivery::{self, RecipientRequest};
 use rutli_cosigner::{DaemonError, Result};
@@ -243,10 +243,7 @@ fn split_key(a: SplitKey) -> Result<()> {
     }
     // The id must be of the class the operator says the key is, before any secret is read.
     let expect_usage = CarriedFor::parse(&a.expect_usage)?;
-    carry::check_carried_id(
-        &a.key_id,
-        &CarriedUsage { expected: expect_usage.as_str().into(), recorded: None },
-    )?;
+    carry::check_id_class(&a.key_id, expect_usage)?;
     let expect = a.expect_fingerprint.trim().to_string();
     if !(expect.len() == 68 && expect.starts_with("1220") && expect.chars().all(|c| c.is_ascii_hexdigit())) {
         return Err(refuse(format!("--expect-fingerprint {expect:?} is not a 1220… Canton fingerprint")));
@@ -381,7 +378,7 @@ fn split_key(a: SplitKey) -> Result<()> {
         canton_fingerprint: fingerprint.clone(),
         expected_usage: carried.expected.clone(),
         recorded_usage: carried.recorded.clone(),
-        namespace_fingerprint: a.namespace_fingerprint.as_deref().map(|s| s.trim().to_ascii_lowercase()),
+        namespace_fingerprint: carried.namespace_fingerprint.clone(),
         group_verifying_key: hex::encode(group),
         public_key_package: pkp.clone(),
         pkp_digest: hex::encode(rutli_frost_core::dealer::pkp_digest(&pkp)?),

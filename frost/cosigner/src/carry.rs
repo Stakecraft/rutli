@@ -19,8 +19,9 @@
 //!   key keeps `<prefix>frost-import-<name>`. A protocol key under a namespace-style id (or the
 //!   other way round) would be held by — or escape — the wrong rule.
 //!
-//! [`check_dealer_usage`] is the dealer's rule set; [`check_carried_id`] is the subset a cosigner
-//! re-checks at `import-share` from the bundle's authenticated [`CarriedUsage`].
+//! [`check_carried_id`] is the one rule set: the dealer applies it ([`check_dealer_usage`]) and every
+//! cosigner applies it again at `import-share`, from the bundle's authenticated [`CarriedUsage`]
+//! and Canton fingerprint.
 
 use std::collections::BTreeSet;
 
@@ -90,8 +91,11 @@ pub fn import_id_class(key_id: &str) -> Option<ImportIdClass> {
     })
 }
 
-/// What the dealer was told a key is for and what Canton recorded about it. Travels inside the
-/// share bundle, bound into the envelope's AAD, and lands in the installed share's provenance.
+/// What the dealer was told a key is for, what Canton recorded about it, and the operator's
+/// acknowledgement of the namespace. Travels inside the share bundle, bound into the envelope's AAD,
+/// and lands in the installed share's provenance. Every rule the dealer applies to it is
+/// re-applied by each cosigner at install ([`check_carried_id`]), against the bundle's own Canton
+/// fingerprint: a modified dealer cannot produce an installable bundle the real one would refuse.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CarriedUsage {
@@ -101,16 +105,24 @@ pub struct CarriedUsage {
     /// sorted. Empty: a legacy key with no usage list, which Canton reads as `All`. `None`: the
     /// input carried no Canton metadata (plain PKCS#8).
     pub recorded: Option<Vec<String>>,
+    /// `--namespace-fingerprint` as given (trimmed, lower case): the old node's namespace as the
+    /// operator read it from its UID. `None` when not given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespace_fingerprint: Option<String>,
 }
 
 impl CarriedUsage {
-    /// The two AAD fields this adds to a share envelope (length-prefixed by the caller).
-    pub fn aad_fields(&self) -> [Vec<u8>; 2] {
+    /// The three AAD fields this adds to a share envelope (each length-prefixed by the caller).
+    pub fn aad_fields(&self) -> [Vec<u8>; 3] {
         let recorded = match &self.recorded {
             Some(list) => format!("recorded:{}", list.join(",")),
             None => "unknown".to_string(),
         };
-        [self.expected.as_bytes().to_vec(), recorded.into_bytes()]
+        let namespace = match &self.namespace_fingerprint {
+            Some(fp) => format!("namespace:{fp}"),
+            None => "none".to_string(),
+        };
+        [self.expected.as_bytes().to_vec(), recorded.into_bytes(), namespace.into_bytes()]
     }
 
     /// The usage Canton acts on: the recorded list without the retired `identity-delegation`
@@ -143,24 +155,13 @@ fn names(set: &BTreeSet<SigningKeyUsage>) -> String {
     set.iter().map(|u| u.identifier()).collect::<Vec<_>>().join(",")
 }
 
-/// The dealer's usage rules (`split-key --expect-usage`). `recorded` is the key's usage list from
-/// its Canton container, `None` for plain PKCS#8; `namespace_fingerprint` is the old node's
-/// namespace (`--namespace-fingerprint`, the part after `::` in its UID), the operator's
-/// acknowledgement wherever the usage alone is ambiguous.
-///
-/// - **namespace**: the key's effective usage must include `namespace`. Exactly `{namespace}` is
-///   the plain case. Anything else — extra usages (Splice's `signing` key, a hand-initialised node,
-///   a legacy key with no usage list) or no Canton metadata at all — is accepted only with
-///   `--namespace-fingerprint` equal to the key's own fingerprint: the operator has read the
-///   node's UID and this key *is* its root.
-/// - **protocol**: plain PKCS#8 is refused (a protocol key's usage must be known); the effective
-///   usage must include `signing` (protocol) or `sequencer-auth`. If it also includes `namespace`
-///   (Splice's `All` key, a legacy key), `--namespace-fingerprint` is required and must *differ*
-///   from the key's fingerprint: carrying the namespace root under a protocol id would put it
-///   outside the approval rule that holds namespace signatures.
-///
-/// In both modes a given `--namespace-fingerprint` is always checked, required or not; and the id
-/// must be of the mode's class ([`check_carried_id`]).
+fn is_fingerprint(s: &str) -> bool {
+    s.len() == 68 && s.starts_with("1220") && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// The dealer's usage rules (`split-key --expect-usage`): builds the [`CarriedUsage`] from the
+/// key's usage list (`recorded`, `None` for plain PKCS#8) and `--namespace-fingerprint`, then
+/// applies [`check_carried_id`] — the very rules every cosigner re-applies at install.
 pub fn check_dealer_usage(
     expect: CarriedFor,
     key_id: &str,
@@ -176,24 +177,78 @@ pub fn check_dealer_usage(
             v.dedup();
             v
         }),
+        // Normalised so that an upper-cased copy of the key's own fingerprint cannot pass protocol
+        // mode's "differs" check, and so that the AAD binds one spelling.
+        namespace_fingerprint: namespace_fingerprint.map(|s| s.trim().to_ascii_lowercase()),
     };
-    let effective = recorded.map(effective_usage);
-    let shown = match (&effective, recorded) {
+    check_carried_id(key_id, key_fingerprint, &carried)?;
+    Ok(carried)
+}
+
+/// The id class `expect` requires, checked from the id alone — before the dealer reads any secret.
+pub fn check_id_class(key_id: &str, expect: CarriedFor) -> Result<ImportIdClass> {
+    let class = import_id_class(key_id).ok_or_else(|| {
+        refuse(format!(
+            "{key_id:?} is not an import id with one `{IMPORT_MARKER}` and a name after it \
+             (<prefix>{IMPORT_MARKER}<name>, <prefix>{IMPORT_MARKER}{PROTOCOL_LABEL}<name>, \
+             <prefix>{IMPORT_MARKER}{SEQAUTH_LABEL}<name>)"
+        ))
+    })?;
+    match (expect, class) {
+        (CarriedFor::Namespace, ImportIdClass::Namespace) => Ok(class),
+        (CarriedFor::Namespace, _) => Err(refuse(format!(
+            "{key_id} is a protocol key id (`{IMPORT_MARKER}{PROTOCOL_LABEL}` / \
+             `{IMPORT_MARKER}{SEQAUTH_LABEL}`); a namespace key keeps <prefix>{IMPORT_MARKER}<name>"
+        ))),
+        (CarriedFor::Protocol, ImportIdClass::Namespace) => Err(refuse(format!(
+            "{key_id} is a namespace-style id; a protocol key is carried as \
+             <prefix>{IMPORT_MARKER}{PROTOCOL_LABEL}<name> (protocol signing) or \
+             <prefix>{IMPORT_MARKER}{SEQAUTH_LABEL}<name> (sequencer authentication), so that an \
+             approval rule naming the namespace id never holds — or releases — the wrong key"
+        ))),
+        (CarriedFor::Protocol, _) => Ok(class),
+    }
+}
+
+/// The carry rules, applied by the dealer and again by every cosigner at install, against the key's
+/// Canton fingerprint (`key_fingerprint`; at install, the bundle's, which `import-share` checks is
+/// its group key's and the operator's `--expect-fingerprint`). The namespace acknowledgement is
+/// `carried.namespace_fingerprint`, the old node's namespace read from its UID.
+///
+/// - **namespace**: the key's effective usage must include `namespace`. Exactly `{namespace}`
+///   (recorded, not an empty list) is the plain case. Anything else — extra usages (Splice's
+///   `signing` key, a hand-initialised node), a legacy empty list, or no Canton metadata — needs
+///   the namespace fingerprint, equal to the key's own: this key *is* the root.
+/// - **protocol**: the usage must be known (no plain PKCS#8) and include `signing` (protocol) or
+///   `sequencer-auth`. If it also includes `namespace` (Splice's `All` key, a legacy key), the
+///   namespace fingerprint is required and must *differ* from the key's.
+/// - A given namespace fingerprint is always checked; the id must be of the mode's class
+///   ([`check_id_class`]); a protocol id's label must match the usage: `sig-` when it includes
+///   `signing`, `seqauth-` for `sequencer-auth` without `signing`.
+///
+/// **What this does not exclude.** The namespace fingerprint rules out the *root* namespace key
+/// only. A key that is the target of a namespace delegation also signs for the namespace; whether
+/// the carried key is one is a topology question the runbook answers before the split
+/// (docs/migration.md §8, "Before the split").
+pub fn check_carried_id(key_id: &str, key_fingerprint: &str, carried: &CarriedUsage) -> Result<()> {
+    let expect = CarriedFor::parse(&carried.expected)?;
+    let effective = carried.effective()?;
+    let shown = match (&effective, carried.recorded.as_deref()) {
         (None, _) => "unknown (plain PKCS#8 carries no Canton usage)".to_string(),
         (Some(e), Some([])) => format!("none recorded, which Canton reads as all ({})", names(e)),
         (Some(e), _) => names(e),
     };
-    // Compared case-insensitively: an upper-cased copy of the key's own fingerprint must not pass
-    // protocol mode's "differs" check.
-    let ns = namespace_fingerprint.map(|s| s.trim().to_ascii_lowercase());
-    let key_fingerprint = key_fingerprint.to_ascii_lowercase();
-    if let Some(ns) = &ns {
-        if !(ns.len() == 68 && ns.starts_with("1220") && ns.chars().all(|c| c.is_ascii_hexdigit())) {
-            return Err(refuse(format!("--namespace-fingerprint {ns:?} is not a 1220… Canton fingerprint")));
+    let key_fingerprint = key_fingerprint.trim().to_ascii_lowercase();
+    let ns = carried.namespace_fingerprint.as_deref();
+    if let Some(ns) = ns {
+        if !is_fingerprint(ns) || ns != ns.to_ascii_lowercase() {
+            return Err(refuse(format!(
+                "--namespace-fingerprint {ns:?} is not a 1220… Canton fingerprint (lower case)"
+            )));
         }
     }
     let has = |u: SigningKeyUsage| effective.as_ref().is_some_and(|e| e.contains(&u));
-    let verdict = match expect {
+    match expect {
         CarriedFor::Namespace => {
             if effective.is_some() && !has(SigningKeyUsage::Namespace) {
                 return Err(refuse(format!(
@@ -202,22 +257,26 @@ pub fn check_dealer_usage(
                 )));
             }
             let plain = effective.as_ref().is_some_and(|e| e.len() == 1)
-                && recorded.is_some_and(|r| !r.is_empty());
-            match ns.as_deref() {
-                Some(ns) if ns != key_fingerprint => Err(refuse(format!(
-                    "this key ({key_fingerprint}) is not the namespace {ns} — wrong key file. (A \
-                     Splice validator's `signing` key has usage {}, namespace included, but its \
-                     namespace key is the one named `namespace`.)",
-                    names(&SigningKeyUsage::ALL.into_iter().collect())
-                ))),
-                Some(_) => Ok(()),
-                None if plain => Ok(()),
-                None => Err(refuse(format!(
-                    "the key's usage is {shown}, not namespace alone, so the usage does not show \
-                     it is the namespace key (a Splice validator's `signing` key also includes \
-                     namespace). Read the old node's UID (`<name>::<namespace>`) and pass \
-                     --namespace-fingerprint <namespace>; it must equal this key's fingerprint"
-                ))),
+                && carried.recorded.as_ref().is_some_and(|r| !r.is_empty());
+            match ns {
+                Some(ns) if ns != key_fingerprint => {
+                    return Err(refuse(format!(
+                        "this key ({key_fingerprint}) is not the namespace {ns} — wrong key file. \
+                         (A Splice validator's `signing` key has usage {}, namespace included, but \
+                         its namespace key is the one named `namespace`.)",
+                        names(&SigningKeyUsage::ALL.into_iter().collect())
+                    )))
+                }
+                None if !plain => {
+                    return Err(refuse(format!(
+                        "the key's usage is {shown}, not namespace alone, so the usage does not \
+                         show it is the namespace key (a Splice validator's `signing` key also \
+                         includes namespace). Read the old node's UID (`<name>::<namespace>`) and \
+                         pass --namespace-fingerprint <namespace>; it must equal this key's \
+                         fingerprint"
+                    )))
+                }
+                _ => {}
             }
         }
         CarriedFor::Protocol => {
@@ -234,72 +293,40 @@ pub fn check_dealer_usage(
                      sequencer-auth — not a protocol key"
                 )));
             }
-            match ns.as_deref() {
-                Some(ns) if ns == key_fingerprint => Err(refuse(format!(
-                    "this key IS the namespace {ns} — the namespace key is carried with \
-                     --expect-usage namespace under a namespace id, never as a protocol key"
-                ))),
-                None if effective.contains(&SigningKeyUsage::Namespace) => Err(refuse(format!(
-                    "the key's usage is {shown}, namespace included, so the usage does not rule \
-                     out that this is the namespace key. Read the old node's UID \
-                     (`<name>::<namespace>`) and pass --namespace-fingerprint <namespace>; it \
-                     must differ from this key's fingerprint"
-                ))),
-                _ => Ok(()),
+            match ns {
+                Some(ns) if ns == key_fingerprint => {
+                    return Err(refuse(format!(
+                        "this key IS the namespace {ns} — the namespace key is carried with \
+                         --expect-usage namespace under a namespace id, never as a protocol key"
+                    )))
+                }
+                None if effective.contains(&SigningKeyUsage::Namespace) => {
+                    return Err(refuse(format!(
+                        "the key's usage is {shown}, namespace included, so the usage does not \
+                         rule out that this is the namespace key. Read the old node's UID \
+                         (`<name>::<namespace>`) and pass --namespace-fingerprint <namespace>; it \
+                         must differ from this key's fingerprint"
+                    )))
+                }
+                _ => {}
             }
         }
-    };
-    verdict?;
-    check_carried_id(key_id, &carried)?;
-    Ok(carried)
-}
-
-/// The id/usage consistency both sides enforce: a namespace key under a namespace-style id, a
-/// protocol key under `…frost-import-sig-…` (its usage includes `signing`) or
-/// `…frost-import-seqauth-…` (`sequencer-auth` without `signing`). Where the recorded usage is
-/// unknown only the class is checked.
-pub fn check_carried_id(key_id: &str, carried: &CarriedUsage) -> Result<()> {
-    let expect = CarriedFor::parse(&carried.expected)?;
-    let class = import_id_class(key_id).ok_or_else(|| {
-        refuse(format!(
-            "{key_id:?} is not an import id with one `{IMPORT_MARKER}` and a name after it \
-             (<prefix>{IMPORT_MARKER}<name>, <prefix>{IMPORT_MARKER}{PROTOCOL_LABEL}<name>, \
-             <prefix>{IMPORT_MARKER}{SEQAUTH_LABEL}<name>)"
-        ))
-    })?;
-    let effective = carried.effective()?;
-    let has = |u: SigningKeyUsage| effective.as_ref().is_some_and(|e| e.contains(&u));
-    match (expect, class) {
-        (CarriedFor::Namespace, ImportIdClass::Namespace) => Ok(()),
-        (CarriedFor::Namespace, _) => Err(refuse(format!(
-            "{key_id} is a protocol key id (`{IMPORT_MARKER}{PROTOCOL_LABEL}` / \
-             `{IMPORT_MARKER}{SEQAUTH_LABEL}`); a namespace key keeps <prefix>{IMPORT_MARKER}<name>"
+    }
+    match check_id_class(key_id, expect)? {
+        ImportIdClass::ProtocolSigning if !has(SigningKeyUsage::Protocol) => Err(refuse(format!(
+            "{key_id} names a protocol signing key, but the key's usage does not include signing — \
+             use <prefix>{IMPORT_MARKER}{SEQAUTH_LABEL}<name>"
         ))),
-        (CarriedFor::Protocol, ImportIdClass::Namespace) => Err(refuse(format!(
-            "{key_id} is a namespace-style id; a protocol key is carried as \
-             <prefix>{IMPORT_MARKER}{PROTOCOL_LABEL}<name> (protocol signing) or \
-             <prefix>{IMPORT_MARKER}{SEQAUTH_LABEL}<name> (sequencer authentication), so an \
-             approval rule on the namespace id never holds — or releases — the wrong key"
-        ))),
-        (CarriedFor::Protocol, ImportIdClass::ProtocolSigning) => {
-            if effective.is_some() && !has(SigningKeyUsage::Protocol) {
-                return Err(refuse(format!(
-                    "{key_id} names a protocol signing key, but the key's usage does not include \
-                     signing — use <prefix>{IMPORT_MARKER}{SEQAUTH_LABEL}<name>"
-                )));
-            }
-            Ok(())
+        ImportIdClass::SequencerAuth
+            if has(SigningKeyUsage::Protocol) || !has(SigningKeyUsage::SequencerAuthentication) =>
+        {
+            Err(refuse(format!(
+                "{key_id} names a sequencer-authentication key, but the key's usage is not \
+                 sequencer-auth without signing — a key that signs protocol messages uses \
+                 <prefix>{IMPORT_MARKER}{PROTOCOL_LABEL}<name>"
+            )))
         }
-        (CarriedFor::Protocol, ImportIdClass::SequencerAuth) => {
-            if effective.is_some() && (has(SigningKeyUsage::Protocol) || !has(SigningKeyUsage::SequencerAuthentication)) {
-                return Err(refuse(format!(
-                    "{key_id} names a sequencer-authentication key, but the key's usage is not \
-                     sequencer-auth without signing — a key that signs protocol messages uses \
-                     <prefix>{IMPORT_MARKER}{PROTOCOL_LABEL}<name>"
-                )));
-            }
-            Ok(())
-        }
+        _ => Ok(()),
     }
 }
 
@@ -406,23 +433,50 @@ mod tests {
     }
 
     #[test]
-    fn the_cosigner_side_check_follows_the_bundle_and_aad_fields_differ() {
-        let c = |expected: &str, recorded: Option<&[&str]>| CarriedUsage {
+    fn the_cosigner_side_check_is_the_dealers_and_aad_fields_differ() {
+        let c = |expected: &str, recorded: Option<&[&str]>, ns: Option<&str>| CarriedUsage {
             expected: expected.into(),
             recorded: recorded.map(|r| r.iter().map(|s| s.to_string()).collect()),
+            namespace_fingerprint: ns.map(String::from),
         };
-        check_carried_id("frost-import-x", &c("namespace", Some(&["namespace"]))).unwrap();
-        check_carried_id("frost-import-sig-x", &c("protocol", Some(&["proof-of-ownership", "signing"]))).unwrap();
-        check_carried_id("frost-import-seqauth-x", &c("protocol", None)).unwrap();
-        assert!(check_carried_id("frost-import-x", &c("protocol", Some(&["signing"]))).is_err());
-        assert!(check_carried_id("frost-import-sig-x", &c("namespace", Some(&["namespace"]))).is_err());
-        assert!(check_carried_id("frost-import-x", &c("root", None)).is_err());
-        assert!(check_carried_id("frost-import-sig-x", &c("protocol", Some(&["bogus"]))).is_err());
+        let all: &[&str] = &["namespace", "proof-of-ownership", "sequencer-auth", "signing"];
+        check_carried_id("frost-import-x", FP, &c("namespace", Some(&["namespace"]), None)).unwrap();
+        check_carried_id("frost-import-sig-x", FP, &c("protocol", Some(&["proof-of-ownership", "signing"]), None)).unwrap();
+        check_carried_id("frost-import-sig-x", FP, &c("protocol", Some(all), Some(NS))).unwrap();
+        check_carried_id("frost-import-x", FP, &c("namespace", Some(all), Some(FP))).unwrap();
+        check_carried_id("frost-import-x", FP, &c("namespace", None, Some(FP))).unwrap();
+
+        // What a modified dealer could write, and the real one would refuse: refused here too.
+        for (id, carried, needle) in [
+            ("frost-import-seqauth-x", c("protocol", None, Some(NS)), "PKCS#8"),
+            ("frost-import-x", c("namespace", Some(all), None), "--namespace-fingerprint"),
+            ("frost-import-x", c("namespace", Some(&[]), None), "--namespace-fingerprint"),
+            ("frost-import-x", c("namespace", None, None), "--namespace-fingerprint"),
+            ("frost-import-x", c("namespace", Some(all), Some(NS)), "is not the namespace"),
+            ("frost-import-x", c("namespace", Some(&["signing"]), Some(FP)), "does not include namespace"),
+            ("frost-import-sig-x", c("protocol", Some(all), None), "namespace included"),
+            ("frost-import-sig-x", c("protocol", Some(all), Some(FP)), "IS the namespace"),
+            ("frost-import-sig-x", c("protocol", Some(&["proof-of-ownership"]), None), "neither signing"),
+            ("frost-import-x", c("protocol", Some(&["signing"]), None), "namespace-style id"),
+            ("frost-import-sig-x", c("namespace", Some(&["namespace"]), None), "protocol key id"),
+            ("frost-import-x", c("namespace", Some(&["namespace"]), Some("1220AB")), "not a 1220"),
+            ("frost-import-x", c("namespace", Some(&["namespace"]), Some(&FP.to_uppercase())), "lower case"),
+            ("frost-import-x", c("root", None, None), "neither namespace nor protocol"),
+            ("frost-import-sig-x", c("protocol", Some(&["bogus"]), None), "unknown Canton key usage"),
+        ] {
+            let e = check_carried_id(id, FP, &carried).unwrap_err().to_string();
+            assert!(e.contains(needle), "{id} {carried:?}: expected {needle:?} in {e}");
+        }
+        // The key's fingerprint is compared case-insensitively.
+        check_carried_id("frost-import-x", &FP.to_uppercase(), &c("namespace", Some(all), Some(FP))).unwrap();
 
         let fields = |u: &CarriedUsage| u.aad_fields();
-        let known_empty = c("namespace", Some(&[]));
-        let unknown = c("namespace", None);
+        let known_empty = c("namespace", Some(&[]), None);
+        let unknown = c("namespace", None, None);
         assert_ne!(fields(&known_empty), fields(&unknown), "empty (= all) and unknown must not collide");
-        assert_ne!(fields(&c("namespace", Some(&["namespace"]))), fields(&c("protocol", Some(&["namespace"]))));
+        let ns_only = c("namespace", Some(&["namespace"]), None);
+        assert_ne!(fields(&ns_only), fields(&c("protocol", Some(&["namespace"]), None)));
+        assert_ne!(fields(&ns_only), fields(&c("namespace", Some(&["namespace"]), Some(FP))), "the acknowledgement is bound");
+        assert_ne!(fields(&c("namespace", None, Some(FP))), fields(&c("namespace", None, Some(NS))));
     }
 }
