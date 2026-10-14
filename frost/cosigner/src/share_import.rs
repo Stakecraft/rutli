@@ -65,8 +65,9 @@ impl NodeContext {
 
 /// `share-recipient`: mint this node's recipient keypair for `key_id` in ceremony `ceremony_id`
 /// and return the public request for the dealer, signed with this node's mTLS identity (`signer`,
-/// see [`crate::request_auth`]). Refuses an id that is not an import id, a key that already exists
-/// here, and a pending recipient unless `replace`.
+/// see [`crate::request_auth`]). Refuses an id that is not an import id of one class
+/// ([`crate::carry::import_id_class`]: one `frost-import-` marker, a name after any `sig-` /
+/// `seqauth-` label), a key that already exists here, and a pending recipient unless `replace`.
 pub fn share_recipient(
     ctx: &NodeContext,
     keystore: &KeyStore,
@@ -77,6 +78,15 @@ pub fn share_recipient(
     replace: bool,
 ) -> Result<RecipientRequest> {
     check_import_id(key_id)?;
+    // The dealer and import-share classify the id; an id they would refuse is refused here, before
+    // a ceremony is started for it.
+    if crate::carry::import_id_class(key_id).is_none() {
+        return Err(ceremony(format!(
+            "{key_id:?} is not an import id of one class: use <prefix>frost-import-<name> (namespace), \
+             <prefix>frost-import-sig-<name> or <prefix>frost-import-seqauth-<name> (protocol), with \
+             `frost-import-` exactly once"
+        )));
+    }
     share_delivery::validate_ceremony_id(ceremony_id)?;
     if key_present(keystore, key_id)? {
         return Err(DaemonError::KeyExists(key_id.to_string()));
@@ -140,8 +150,8 @@ pub struct ImportReport {
 /// expected Canton fingerprint, then install it with a no-clobber create and delete the recipient
 /// secret. Checks, in order:
 ///
-/// 1. format: bundle kind, version, spec, envelope version (3 with `usage`, 2 without); a
-///    carried usage matches the id's class (`carry::check_carried_id`);
+/// 1. format: bundle kind, version, spec, envelope version 3 with its carried usage (a pre-B6
+///    bundle is refused); the usage matches the id's class (`carry::check_carried_id`);
 /// 2. `recipient` is this node's identifier;
 /// 3. `cluster_id` is this node's (derived from its CA certificate);
 /// 4. if the key is already installed: an identical re-import (same ceremony, same package digest,
@@ -168,21 +178,14 @@ pub fn import_share(
     if bundle.kind != BUNDLE_KIND
         || bundle.v != BUNDLE_VERSION
         || bundle.spec != SHARE_SPEC
-        || bundle.wrapped.version != share_delivery::share_wrap_version(bundle.usage.is_some())
     {
         return Err(ceremony(format!(
-            "not a v{BUNDLE_VERSION} {BUNDLE_KIND} bundle (kind {:?}, v {}, spec {:?}, envelope v{}, \
-             usage {})",
-            bundle.kind,
-            bundle.v,
-            bundle.spec,
-            bundle.wrapped.version,
-            if bundle.usage.is_some() { "present" } else { "absent" }
+            "not a v{BUNDLE_VERSION} {BUNDLE_KIND} bundle (kind {:?}, v {}, spec {:?})",
+            bundle.kind, bundle.v, bundle.spec
         )));
     }
-    if let Some(usage) = &bundle.usage {
-        crate::carry::check_carried_id(&bundle.key_id, usage)?;
-    }
+    let usage = bundle.carried_usage()?;
+    crate::carry::check_carried_id(&bundle.key_id, usage)?;
     // 2–3. This node, this cluster.
     if bundle.recipient != ctx.identifier {
         return Err(ceremony(format!(
@@ -546,13 +549,6 @@ mod tests {
     }
 
     fn deal(requests: &[RecipientRequest]) -> (Vec<ShareBundle>, PublicKeyPackage) {
-        deal_with(requests, Some(&usage()))
-    }
-
-    fn deal_with(
-        requests: &[RecipientRequest],
-        usage: Option<&crate::carry::CarriedUsage>,
-    ) -> (Vec<ShareBundle>, PublicKeyPackage) {
         let ids: Vec<u16> = requests.iter().map(|r| r.identifier).collect();
         let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&SEED, &ids, 2).unwrap();
         let bundles = requests
@@ -561,7 +557,7 @@ mod tests {
             .map(|(r, s)| {
                 let ca = crate::test_pki::shared().ca_pem.as_bytes();
                 let verified = crate::request_auth::verify_request(r, ca).unwrap();
-                share_delivery::seal_share(&verified, s, &pkp, &fingerprint(), usage).unwrap()
+                share_delivery::seal_share(&verified, s, &pkp, &fingerprint(), &usage()).unwrap()
             })
             .collect();
         (bundles, pkp)
@@ -605,20 +601,24 @@ mod tests {
         assert_eq!((again.outcome, again.carried_usage), ("already-installed", Some(usage())));
     }
 
-    /// A bundle from a B2 dealer (no usage, envelope version 2) installs; its provenance says
-    /// nothing about usage. A B6 bundle's usage must match the id's class.
+    /// A bundle from a pre-B6 dealer (no usage, envelope version 2) is refused, dry run or not: such
+    /// a dealer could have put a namespace key under a protocol id. A B6 bundle's usage must match
+    /// the id's class.
     #[test]
-    fn a_b2_bundle_installs_without_usage_and_a_misclassified_usage_is_refused() {
-        let nodes: Vec<TestNode> = (1..=3).map(TestNode::new).collect();
-        let requests: Vec<RecipientRequest> = nodes.iter().map(|n| n.recipient()).collect();
-        let (bundles, _) = deal_with(&requests, None);
-        let done = nodes[0].import(&bundles[0], false).unwrap();
-        assert_eq!((done.outcome, done.carried_usage), ("installed", None));
-        assert_eq!(nodes[0].keystore.load(KEY).unwrap().origin.unwrap().carried_usage, None);
+    fn a_pre_b6_bundle_and_a_misclassified_usage_are_refused() {
+        let (nodes, bundles) = three();
+        for (usage, version) in [(None, share_delivery::PRE_B6_SHARE_WRAP_VERSION), (None, share_delivery::SHARE_WRAP_VERSION)] {
+            let mut b2 = bundles[0].clone();
+            (b2.usage, b2.wrapped.version) = (usage, version);
+            for dry_run in [true, false] {
+                assert_ceremony_err(nodes[0].import(&b2, dry_run), "pre-B6 dealer");
+            }
+        }
+        assert!(!nodes[0].keystore.exists(KEY));
+        assert!(share_delivery::recipient_path(&nodes[0].ctx.data_dir, KEY).unwrap().exists(), "nothing consumed");
 
         let mut protocol = bundles[1].clone();
         protocol.usage = Some(crate::carry::CarriedUsage { expected: "protocol".into(), recorded: None });
-        protocol.wrapped.version = share_delivery::SHARE_WRAP_VERSION;
         assert_ceremony_err(nodes[1].import(&protocol, true), "namespace-style id");
     }
 
@@ -736,6 +736,11 @@ mod tests {
         let n = TestNode::new(1);
         let r = share_recipient(&n.ctx, &n.keystore, &n.sealer, &n.signer, "frost-namespace", CEREMONY, false);
         assert!(r.is_err());
+        // Import-shaped, but of no single class: the dealer and import-share would refuse it.
+        for unclassified in ["frost-import-frost-import-sig-x", "frost-import-sig-", "frost-import-seqauth-"] {
+            let r = share_recipient(&n.ctx, &n.keystore, &n.sealer, &n.signer, unclassified, CEREMONY, false);
+            assert!(r.unwrap_err().to_string().contains("one class"), "{unclassified}");
+        }
         n.recipient();
         assert!(share_recipient(&n.ctx, &n.keystore, &n.sealer, &n.signer, KEY, CEREMONY, false).is_err());
         share_recipient(&n.ctx, &n.keystore, &n.sealer, &n.signer, KEY, CEREMONY, true).unwrap();

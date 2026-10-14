@@ -114,7 +114,7 @@ fn ceremony(root: &Path) -> (Vec<Site>, Vec<ShareBundle>, [u8; 32], String) {
                 expected: "namespace".into(),
                 recorded: Some(vec!["namespace".into()]),
             };
-            share_delivery::seal_share(&verified, s, &pkp, &fingerprint, Some(&usage)).unwrap()
+            share_delivery::seal_share(&verified, s, &pkp, &fingerprint, &usage).unwrap()
         })
         .collect();
     (sites, bundles, public, fingerprint)
