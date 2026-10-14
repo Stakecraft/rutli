@@ -35,7 +35,8 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
-use rutli_canton_key::{KeySpec, PrivateKeyMaterial, SigningKeyUsage};
+use rutli_canton_key::{KeySpec, PrivateKeyMaterial, Source};
+use rutli_cosigner::carry::{self, CarriedFor, CarriedUsage};
 use rutli_cosigner::request_auth::VerifiedRequest;
 use rutli_cosigner::share_delivery::{self, RecipientRequest};
 use rutli_cosigner::{DaemonError, Result};
@@ -50,6 +51,10 @@ struct Args {
 #[derive(Subcommand)]
 enum Command {
     /// Split an existing Canton Ed25519 key into FROST shares sealed to each cosigner.
+    ///
+    /// By default the key must be a namespace key (`--expect-usage namespace`). Carrying a
+    /// protocol signing or sequencer-authentication key is possible and discouraged
+    /// (`--expect-usage protocol`, docs/migration.md "Carrying the signing and encryption keys").
     SplitKey {
         /// The key: a `common_crypto_private_keys.data` value (binary, or hex with --stored-hex),
         /// `ExportKeyPair` output (plain or password-protected), or PKCS#8 PEM/DER.
@@ -64,9 +69,23 @@ enum Command {
         /// The key's Canton fingerprint (`1220…`), taken from the old node, e.g. its namespace.
         #[arg(long)]
         expect_fingerprint: String,
-        /// The imported key's id in the cluster: `<prefix>frost-import-<name>`.
+        /// The imported key's id in the cluster: `<prefix>frost-import-<name>` for the namespace
+        /// key; `<prefix>frost-import-sig-<name>` (protocol signing) or
+        /// `<prefix>frost-import-seqauth-<name>` (sequencer authentication) for a protocol key.
         #[arg(long)]
         key_id: String,
+        /// What the key is carried for. `namespace`: its recorded Canton usage must be namespace
+        /// alone (or see --namespace-fingerprint). `protocol`: it must include signing or
+        /// sequencer-auth, under a `…frost-import-sig-…` / `…frost-import-seqauth-…` id.
+        #[arg(long, default_value = "namespace", value_parser = ["namespace", "protocol"])]
+        expect_usage: String,
+        /// The old node's namespace, read from its UID (`<name>::<namespace>`). Required where the
+        /// usage alone cannot tell the namespace key from another key — a namespace key with more
+        /// usages than namespace (a Splice `signing` key has all of them) or plain PKCS#8, and a
+        /// protocol key whose usage includes namespace. It must equal the key's fingerprint for
+        /// `--expect-usage namespace` and differ from it for `protocol`; checked whenever given.
+        #[arg(long)]
+        namespace_fingerprint: Option<String>,
         /// Signing threshold t. Must equal every recipient's.
         #[arg(long)]
         threshold: u16,
@@ -95,10 +114,6 @@ enum Command {
         /// output files are never overwritten.
         #[arg(long)]
         out_dir: PathBuf,
-        /// Accept a key whose recorded usage does not include `namespace` (or has none, e.g.
-        /// PKCS#8). Without it only namespace keys are split.
-        #[arg(long)]
-        any_usage: bool,
         /// Run even though swap is enabled (or cannot be checked on this OS). The key could be
         /// paged to disk.
         #[arg(long)]
@@ -127,7 +142,8 @@ fn main() {
             cluster_id,
             confirm_sas,
             out_dir,
-            any_usage,
+            expect_usage,
+            namespace_fingerprint,
             allow_swap,
             allow_core_handler,
         } => split_key(SplitKey {
@@ -142,7 +158,8 @@ fn main() {
             cluster_id,
             confirm_sas,
             out_dir,
-            any_usage,
+            expect_usage,
+            namespace_fingerprint,
             allow_swap,
             allow_core_handler,
             hardening,
@@ -167,7 +184,8 @@ struct SplitKey {
     cluster_id: Option<String>,
     confirm_sas: Option<String>,
     out_dir: PathBuf,
-    any_usage: bool,
+    expect_usage: String,
+    namespace_fingerprint: Option<String>,
     allow_swap: bool,
     allow_core_handler: bool,
     hardening: Hardening,
@@ -223,6 +241,12 @@ fn split_key(a: SplitKey) -> Result<()> {
             a.key_id
         )));
     }
+    // The id must be of the class the operator says the key is, before any secret is read.
+    let expect_usage = CarriedFor::parse(&a.expect_usage)?;
+    carry::check_carried_id(
+        &a.key_id,
+        &CarriedUsage { expected: expect_usage.as_str().into(), recorded: None },
+    )?;
     let expect = a.expect_fingerprint.trim().to_string();
     if !(expect.len() == 68 && expect.starts_with("1220") && expect.chars().all(|c| c.is_ascii_hexdigit())) {
         return Err(refuse(format!("--expect-fingerprint {expect:?} is not a 1220… Canton fingerprint")));
@@ -311,13 +335,16 @@ fn split_key(a: SplitKey) -> Result<()> {
             "this key's fingerprint is {fingerprint}, not the expected {expect} — wrong key file"
         )));
     }
-    if !key.usage.contains(&SigningKeyUsage::Namespace) && !a.any_usage {
-        return Err(refuse(format!(
-            "the key's recorded usage is {:?}, which does not include namespace — pass --any-usage \
-             if you really mean to import a non-namespace key",
-            key.usage
-        )));
-    }
+    // What the key is for (carry.rs): Canton's recorded usage where the container has one (plain
+    // PKCS#8 has none), and the old node's namespace wherever the usage alone is ambiguous.
+    let recorded = (!matches!(key.source, Source::Pkcs8 { .. })).then_some(key.usage.as_slice());
+    let carried = carry::check_dealer_usage(
+        expect_usage,
+        &a.key_id,
+        &fingerprint,
+        recorded,
+        a.namespace_fingerprint.as_deref(),
+    )?;
     let PrivateKeyMaterial::Ed25519 { seed } = &key.material else {
         return Err(refuse("not an Ed25519 key".into()));
     };
@@ -352,6 +379,9 @@ fn split_key(a: SplitKey) -> Result<()> {
         max_signers: first.max_signers,
         roster: roster.clone(),
         canton_fingerprint: fingerprint.clone(),
+        expected_usage: carried.expected.clone(),
+        recorded_usage: carried.recorded.clone(),
+        namespace_fingerprint: a.namespace_fingerprint.as_deref().map(|s| s.trim().to_ascii_lowercase()),
         group_verifying_key: hex::encode(group),
         public_key_package: pkp.clone(),
         pkp_digest: hex::encode(rutli_frost_core::dealer::pkp_digest(&pkp)?),
@@ -389,6 +419,15 @@ fn split_key(a: SplitKey) -> Result<()> {
 
     println!("split {} into {}-of-{} for cluster {}", fingerprint, a.threshold, roster.len(), first.cluster_id);
     println!("  key id:        {}", a.key_id);
+    println!(
+        "  carried for:   {} (recorded usage: {})",
+        carried.expected,
+        match &carried.recorded {
+            Some(r) if r.is_empty() => "none, read by Canton as all".to_string(),
+            Some(r) => r.join(","),
+            None => "unknown, plain PKCS#8".to_string(),
+        }
+    );
     println!("  ceremony:      {}", first.ceremony_id);
     println!("  group key:     {}", record.group_verifying_key);
     println!("  pkp digest:    {}", record.pkp_digest);
@@ -411,6 +450,13 @@ struct DealerRecord {
     max_signers: u16,
     roster: Vec<u16>,
     canton_fingerprint: String,
+    /// `--expect-usage`: `namespace` or `protocol`.
+    expected_usage: String,
+    /// The key's recorded Canton usage (`[]`: none recorded, which Canton reads as all; `null`:
+    /// plain PKCS#8, no Canton metadata).
+    recorded_usage: Option<Vec<String>>,
+    /// `--namespace-fingerprint`, when given: the old node's namespace as the operator read it.
+    namespace_fingerprint: Option<String>,
     group_verifying_key: String,
     public_key_package: frost_ed25519::keys::PublicKeyPackage,
     pkp_digest: String,
