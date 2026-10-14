@@ -7,7 +7,7 @@
 //!
 //! The command asks each node for [`crate::pb::HostedKeyStatusReply`] — its own key file, public
 //! half only, with no read-repair (a node that lacks the key says so) — and [`check_hosted_views`]
-//! verifies, independently of what any node claims:
+//! cross-checks the answers:
 //!
 //! - every node of the roster answers, as the identifier it is configured as, and holds the key;
 //! - every node serves the same spec and a byte-identical public key (SPKI DER);
@@ -15,9 +15,15 @@
 //!   fingerprint the participant will compute when it registers the key by KMS id
 //!   (`RegisterKmsEncryptionKey`), and the one the old node's topology published.
 //!
-//! For an EC or RSA key the public key determines the private one, so a byte-identical SPKI on
-//! every node also means every node decrypts with the same key; a node that held different
+//! Each node reports the public key its private key derives, and refuses to answer for a key file
+//! whose stored public half disagrees ([`crate::hosted::HostedKey::derived_public_key_der`]). For
+//! an EC or RSA key the public key determines the private one, so on honest nodes a byte-identical
+//! SPKI everywhere means every node decrypts with the same key, and a node that holds different
 //! material under the id (anti-entropy refuses to merge such a conflict) shows up as a mismatch.
+//!
+//! **What it cannot catch: a compromised node.** Every answer is that node's self-report; a node
+//! whose software or host is under someone else's control can report whatever public key it likes,
+//! whatever it holds. This verifies the honest cluster's state, not an adversary's.
 //! Public values only: the operator role (`operator_allowlist`) can run it.
 
 use std::collections::{BTreeMap, BTreeSet};

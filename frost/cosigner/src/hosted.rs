@@ -278,6 +278,37 @@ impl HostedKey {
             .map_err(|e| DaemonError::Config(format!("corrupt stored public key: {e}")))
     }
 
+    /// The public key **derived from the private key** (X.509 SPKI DER), and checked to equal the
+    /// stored `public_der`: what `verify-hosted` reports, so a node cannot report a public key its
+    /// private key does not have. EC P-256 through [`HostedKey::validate`]; RSA re-derived from its
+    /// PKCS#8. Symmetric keys have none.
+    pub fn derived_public_key_der(&self) -> Result<Vec<u8>> {
+        let stored = self.public_key_der()?;
+        let derived = match self.spec {
+            HostedSpec::EcP256 => ec_spki(&self.ec_private_key()?)?,
+            HostedSpec::Rsa2048 => {
+                let sk = PrivateDecryptingKey::from_pkcs8(&self.private_bytes()?)
+                    .map_err(|e| DaemonError::Config(format!("stored RSA key is unusable: {e}")))?;
+                let pk = sk.public_key().clone();
+                AsDer::<PublicKeyX509Der>::as_der(&pk)
+                    .map_err(|e| DaemonError::Config(format!("RSA public encode failed: {e}")))?
+                    .as_ref()
+                    .to_vec()
+            }
+            HostedSpec::Aes256Gcm => {
+                return Err(DaemonError::Config("aes-256-gcm has no public key".into()))
+            }
+        };
+        if derived != stored {
+            return Err(DaemonError::Config(format!(
+                "{} key material is inconsistent: the stored public key is not the one the private \
+                 key derives",
+                self.spec.as_str()
+            )));
+        }
+        Ok(derived)
+    }
+
     fn private_bytes(&self) -> Result<Zeroizing<Vec<u8>>> {
         Ok(Zeroizing::new(hex::decode(&self.private_der).map_err(|e| {
             DaemonError::Config(format!("corrupt stored private key material: {e}"))

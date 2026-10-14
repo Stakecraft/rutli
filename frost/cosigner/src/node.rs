@@ -879,22 +879,24 @@ impl Node {
     }
 
     /// This node's own copy of hosted key `key_id`, public half only, for `verify-hosted`. Reads
-    /// the key file and nothing else: no read-repair, so an absent key reads `present: false`.
+    /// the key file and nothing else: no read-repair, so an absent key reads `present: false` — and
+    /// so does a FROST share under the id, so that the reply never tells which ids hold shares. The
+    /// public key is the one the private key derives ([`crate::hosted::HostedKey::derived_public_key_der`]);
+    /// a key file whose stored public half disagrees is an error, never `present`.
     pub fn hosted_key_status(&self, key_id: &str) -> Result<crate::pb::HostedKeyStatusReply> {
         self.hosted_ctx()?;
         refuse_reserved_for_hosted(key_id)?;
         let identifier = u32::from(crate::hosted::identifier_index(self.identifier)?);
-        match self.keystore.load_hosted(key_id) {
-            Ok(key) => Ok(crate::pb::HostedKeyStatusReply {
+        let absent = crate::pb::HostedKeyStatusReply { identifier, present: false, ..Default::default() };
+        match self.keystore.load_record(key_id) {
+            Ok(crate::keystore::Record::Hosted(key)) => Ok(crate::pb::HostedKeyStatusReply {
                 identifier,
                 present: true,
                 spec: key.spec.as_str().to_string(),
-                public_key_der: if key.spec.is_asymmetric() { key.public_key_der()? } else { Vec::new() },
+                public_key_der: if key.spec.is_asymmetric() { key.derived_public_key_der()? } else { Vec::new() },
                 created_at: key.created_at,
             }),
-            Err(DaemonError::UnknownKey(_)) => {
-                Ok(crate::pb::HostedKeyStatusReply { identifier, present: false, ..Default::default() })
-            }
+            Ok(crate::keystore::Record::Frost(_)) | Err(DaemonError::UnknownKey(_)) => Ok(absent),
             Err(e) => Err(e),
         }
     }
