@@ -415,7 +415,8 @@ rutli-cosigner --config /etc/rutli/cosigner-1.json import-key \
 `--expect-fingerprint` is the key's fingerprint as the old node lists it (`keys.secret.list`), not
 read from the file. The import refuses anything but an EC P-256 key whose Canton purpose is
 encryption (a P-256 *signing* key is never made an ECDH key; Ed25519 keys go through the
-[split ceremony](split-ceremony.md); RSA import is roadmap B3), and refuses unless the public key the
+[split ceremony](split-ceremony.md); RSA import is not supported, roadmap B3 was dropped), and refuses
+unless the public key the
 cluster will serve is byte-identical to Canton's encoding — that is what lets the new participant
 register it by id and get the **same fingerprint** back:
 
