@@ -26,6 +26,11 @@ import scala.concurrent.duration._
   * @param timeout    How long a gated `sign` waits for a quorum before failing.
   * @param pollInterval How often the gate rescans the approvals directory.
   */
+object ApprovalPolicy {
+  private val ImportMarker = "frost-import-"
+  private val ProtocolLabels = List("sig-", "seqauth-")
+}
+
 final case class ApprovalPolicy(
     rules: List[ApprovalRule],
     approvers: List[Approver],
@@ -42,6 +47,24 @@ final case class ApprovalPolicy(
     }
 
   def approverById(id: String): Option[Approver] = approvers.find(_.id == id)
+
+  /** Quorum rules that would also hold a carried protocol key (roadmap B6, docs/migration.md §8).
+    * A rule on `<p>frost-import-`, the natural one for an imported namespace key, matches the
+    * protocol ids `<p>frost-import-sig-…` and `<p>frost-import-seqauth-…` too, unless an earlier
+    * rule takes them: every confirmation and every sequencer authentication would then wait for
+    * approvals. One warning per such rule and label, for the driver to log at startup. */
+  def carriedProtocolKeyWarnings: List[String] =
+    rules.filter(r => r.mode == "quorum" && r.keyIdPrefix.endsWith(ApprovalPolicy.ImportMarker)).flatMap { r =>
+      ApprovalPolicy.ProtocolLabels.flatMap { label =>
+        val probe = s"${r.keyIdPrefix}${label}probe"
+        thresholdFor(probe).map { _ =>
+          s"approval rule key-id-prefix=\"${r.keyIdPrefix}\" (quorum) also holds carried protocol keys " +
+            s"\"${r.keyIdPrefix}$label…\": every signature with them would wait for approvals. Put an " +
+            s"auto rule for \"${r.keyIdPrefix}$label\" before it, or name the namespace key id exactly " +
+            "(docs/migration.md §8)"
+        }
+      }
+    }
 
   require(
     rules.forall(r => r.mode != "quorum" || (r.threshold >= 1 && r.threshold <= approvers.size)),

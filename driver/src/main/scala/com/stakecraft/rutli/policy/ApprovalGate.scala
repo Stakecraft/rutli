@@ -50,6 +50,7 @@ final class FileApprovalGate(policy: ApprovalPolicy, logger: Logger)(implicit ec
   private val approvalsDir = Paths.get(policy.inboxDir, "approvals")
   Files.createDirectories(pendingDir)
   Files.createDirectories(approvalsDir)
+  policy.carriedProtocolKeyWarnings.foreach(w => logger.warn(w))
 
   override def authorize(keyId: String, data: Array[Byte]): Future[Unit] =
     policy.thresholdFor(keyId) match {

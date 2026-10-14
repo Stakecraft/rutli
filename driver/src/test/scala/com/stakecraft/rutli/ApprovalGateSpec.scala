@@ -58,6 +58,33 @@ class ApprovalGateSpec extends AnyWordSpec with Matchers {
       pollInterval = 50.millis,
     )
 
+  "ApprovalPolicy" should {
+
+    "warn when a quorum rule on <p>frost-import- would also hold carried protocol keys (B6)" in {
+      val approvers = List(approver("a", approverKeypair()))
+      def rules(rs: ApprovalRule*) = ApprovalPolicy(rs.toList, approvers, newInbox())
+      val namespaceRule = ApprovalRule("acme1-frost-import-", "quorum", 1)
+
+      val bare = rules(namespaceRule).carriedProtocolKeyWarnings
+      bare should have size 2
+      bare.foreach(_ should include("acme1-frost-import-"))
+      bare.exists(_.contains("acme1-frost-import-sig-")) shouldBe true
+      bare.exists(_.contains("acme1-frost-import-seqauth-")) shouldBe true
+
+      // The documented fix: auto rules for the protocol ids first.
+      rules(
+        ApprovalRule("acme1-frost-import-sig-", "auto"),
+        ApprovalRule("acme1-frost-import-seqauth-", "auto"),
+        namespaceRule,
+      ).carriedProtocolKeyWarnings shouldBe empty
+      // Half fixed: one warning left.
+      rules(ApprovalRule("acme1-frost-import-sig-", "auto"), namespaceRule).carriedProtocolKeyWarnings should have size 1
+      // Naming the namespace id exactly, or an auto rule, holds nothing it should not.
+      rules(ApprovalRule("acme1-frost-import-cb0e86a9", "quorum", 1)).carriedProtocolKeyWarnings shouldBe empty
+      rules(ApprovalRule("acme1-frost-import-", "auto")).carriedProtocolKeyWarnings shouldBe empty
+    }
+  }
+
   "FileApprovalGate" should {
 
     "auto-approve keys that match no rule" in {
