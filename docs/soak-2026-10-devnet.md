@@ -112,6 +112,40 @@ existing nodes ([b0-cutover-spike.md](b0-cutover-spike.md), [roadmap-migration.m
 - Gaps: participant stdout runs at DEBUG and rotated within minutes, so the per-sign driver audit for the
   window survives only in the driver's file audit log; one SV sequencer (C7) flapped throughout (not ours).
 
+**Planned event: B4 cutover rehearsal, 2026-10-14 16:14 → 17:11 UTC (B4 wallet down ~52 min). Soak participant unaffected.**
+Runbook: [b4-rehearsal.md](b4-rehearsal.md); pilot runbook: [migration.md](migration.md). Verification G1–G7 is green; the
+verdict is **GO pending** (destruction and teardown below are still open).
+- Source: scratch JCE validator `stakecraft-rutli-b4-1::122017bc…c859` (`NS_FP` = the part after `::`), one hosted party,
+  `ACS_COUNT_PRE=5`. Pre-cutover `pg_dumpall` at 16:09 (820 MB, local only, see Gaps).
+- Export: ExportKeyPair with password (Phase 2 of the plan).
+- Split ceremony `b4-2026-10-13`: KEY_ID `b4-frost-import-17bc38d7`; dealer on the operator laptop (macOS, `--allow-swap`; DevNet relaxation, not air-gapped); Gate 0 SAS ×3; Gate B (3 quorums) ✓; refresh → Gate C ✓
+  (pkp digest `4253c1a7…` → `c726bdad…`, group key unchanged).
+- Cutover: validator stopped 16:14:52 (`T_START`), old participant disconnected and stopped, `T_STOP` 16:22:53 (`END_OLD` 988392).
+  New participant `participant_b4`, driver 0.4.0-rc.1 loaded 16:25:03. G1 `b4-frost-import-17bc38d7` → `NS_FP` ✓.
+  Fresh keys `b4-frost-signing` (FROST DKG) + `b4-rutli-enc-encryption-be578c92-…` (EC-P256, ECIES). `init_id`
+  `PAR::stakecraft-rutli-b4-1-mig::122017bc…c859` 16:29:42; trust certificate 16:30:45, connected and healthy by 16:43 (G3).
+  G2b: ECIES ping to the soak participant took 14 s, `decryptAsymmetric` ok, ecies failures 0.
+- PNR 17:05:01 (an earlier attempt before the PNR failed on Helm 4 server-side-apply conflicts with `kubectl patch` probes;
+  fixed with `--force-conflicts`). Old trust certificate removed 17:07:01, party hosted on `-mig` 17:07:04, ACS import
+  complete 17:07:13, primary party set 17:07:14. Validator normalised (helm rev 5, already onboarded, no re-migration), dump
+  Secret deleted, dump JSON shredded, `pg_dumpall` CronJob resumed.
+- G4: the party is hosted only on `-mig` (Submission, serial 3), old trust certificate gone, 3 keys, all KMS. G5: ACS 5 → 6
+  (+1 `ValidatorRewardCoupon`, the rest identical), 38 commitments persisted over 60 min, **0 mismatches**.
+  G6: balance after migration 234.8027 CC; wallet-UI Tap of 10 USD = +85.667 CC, transfer out of 5 CC to the soak validator
+  and in of 2 CC both accepted. G7: `decryptAsymmetric` ok during a real transfer, ecies failures 0, B4 driver audit non-ok 0
+  (signing ok 92 at the first check); soak participant 0 rutli WARN/ERROR over 3 h.
+- Old member's OTK removed (serial 2 Remove, signed by the namespace key via FROST); it needed
+  `force = ForceFlags(ForceFlag.AlienMember)`.
+- Destruction (5.4): **pending**, not before 2026-10-15 17:11Z, after GO and two green `soak-check` runs.
+- Teardown (`destroy.sh`, S3 prefix purge, offboarding the `-mig` member): **pending**.
+- `soak-check` outcomes after the event: **pending**. Today's 08:00Z run, before the cutover, failed on sign p99 latency
+  (1.75 s) with 0 errors; it is not caused by B4.
+- Gaps: the 4-hourly `pg_dumpall` CronJob in the B4 namespace fails its S3 upload (`InvalidAccessKeyId`: the namespace's
+  `aws-credentials` Secret holds a key that no longer exists). Operator decision: local dump only for the scratch namespace;
+  the dumps hold the old JCE key rows and are on the destruction list. The wallet API with the validator M2M token returns
+  `No wallet found`, so G6 used the wallet UI; the M2M app also lacks a client grant for the Validator API audience.
+- Deltas to the pilot runbook: [migration.md](migration.md), "Lessons from the B4 rehearsal (2026-10-14)".
+
 ## Drill calendar
 
 | Week | Drill | Status |
