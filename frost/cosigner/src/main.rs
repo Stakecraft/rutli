@@ -164,8 +164,9 @@ enum Command {
     /// Check that every cosigner in the roster holds a consistent share of a FROST key with the
     /// expected Canton fingerprint; with --sign-test (imported keys), also that EVERY t-subset of
     /// cosigners signs the ceremony test digest, verified under it. Runs against the live cluster
-    /// with an operator certificate (`operator_allowlist`: KeyStatus + CeremonySignTest only, no
-    /// Sign); the driver certificate also works. Exits non-zero on any problem.
+    /// with an operator certificate (`operator_allowlist`: KeyStatus, HostedKeyStatus and
+    /// CeremonySignTest only, no Sign); the driver certificate also works. Exits non-zero on any
+    /// problem.
     VerifyKey {
         #[arg(long)]
         key_id: String,
@@ -175,6 +176,23 @@ enum Command {
         /// Have every node lead one signature over a domain-separated test digest.
         #[arg(long)]
         sign_test: bool,
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check that every cosigner in the roster holds the same cluster-hosted key — present on each
+    /// node (no read-repair), byte-identical public key — and that its Canton fingerprint is the
+    /// expected one. Run after `import-key` and before registering the key with the participant.
+    /// Public values only: the operator certificate (`operator_allowlist`) suffices; the driver
+    /// certificate also works. Exits non-zero on any problem.
+    VerifyHosted {
+        /// The hosted key, e.g. `<frost.key-prefix>rutli-enc-imported-1220afe2`.
+        #[arg(long)]
+        key_id: String,
+        /// The Canton fingerprint (`1220…`) the key must have, taken from the old node
+        /// (`keys.secret.list`), not from the cluster.
+        #[arg(long)]
+        expect_fingerprint: String,
         /// Print the report as JSON.
         #[arg(long)]
         json: bool,
@@ -222,6 +240,9 @@ async fn main() -> Result<()> {
         }
         Some(Command::VerifyKey { key_id, expect_fingerprint, sign_test, json }) => {
             return verify_key_command(&cfg, &key_id, &expect_fingerprint, sign_test, json).await
+        }
+        Some(Command::VerifyHosted { key_id, expect_fingerprint, json }) => {
+            return verify_hosted_command(&cfg, &key_id, &expect_fingerprint, json).await
         }
         Some(Command::Health) => health_command(&cfg),
         _ => {}
@@ -416,7 +437,7 @@ async fn main() -> Result<()> {
         Arc::new(v.iter().cloned().collect::<std::collections::HashSet<String>>())
     });
     if let Some(cns) = &operator_cns {
-        tracing::info!(?cns, "operator role: KeyStatus and CeremonySignTest only");
+        tracing::info!(?cns, "operator role: KeyStatus, HostedKeyStatus and CeremonySignTest only");
     }
 
     // Anti-entropy: pull hosted keys this node lacks and push ones a peer lacks. This is what
@@ -626,6 +647,59 @@ async fn verify_key_command(
         Ok(())
     } else {
         Err(DaemonError::Ceremony(format!("verify-key: {} problem(s)", report.problems.len())))
+    }
+}
+
+/// Operator command: ask every cosigner for its own copy of hosted key `key_id` and check the
+/// cluster serves one key with the expected Canton fingerprint. See
+/// [`rutli_cosigner::verify_hosted`].
+async fn verify_hosted_command(cfg: &Config, key_id: &str, expect_fingerprint: &str, json: bool) -> Result<()> {
+    use rutli_cosigner::pb::HostedKeyStatusRequest;
+    use rutli_cosigner::verify_hosted::{check_hosted_views, HostedView};
+
+    let client_tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose()?.map(|t| t.client);
+    let mut peers = cfg.peers.clone();
+    peers.sort_by_key(|p| p.identifier);
+    let roster: Vec<u16> = peers.iter().map(|p| p.identifier).collect();
+    let mut views = Vec::new();
+    for p in &peers {
+        let status = match signer_client(&p.endpoint, client_tls.clone()).await {
+            Ok(mut c) => c
+                .hosted_key_status(HostedKeyStatusRequest { key_id: key_id.to_string() })
+                .await
+                .map(|r| r.into_inner())
+                .map_err(|s| format!("{:?}: {}", s.code(), s.message())),
+            Err(e) => Err(format!("unreachable: {e}")),
+        };
+        views.push(HostedView { identifier: p.identifier, endpoint: p.endpoint.clone(), status });
+    }
+    let report = check_hosted_views(key_id, expect_fingerprint, &roster, &views);
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!("verify-hosted {key_id} — expected {}", report.expected_fingerprint);
+        for n in &report.nodes {
+            match &n.error {
+                Some(e) => println!("  node {} {}: {e}", n.identifier, n.endpoint),
+                None => println!(
+                    "  node {} {}: {} fp {} created_at {}",
+                    n.identifier, n.endpoint, n.spec, n.fingerprint, n.created_at
+                ),
+            }
+        }
+        if let Some(der) = &report.public_key_der {
+            println!("  public key (SPKI) {der}");
+        }
+        for p in &report.problems {
+            println!("  PROBLEM: {p}");
+        }
+        println!("{}", if report.ok { "OK" } else { "FAILED" });
+    }
+    if report.ok {
+        Ok(())
+    } else {
+        Err(DaemonError::Config(format!("verify-hosted: {} problem(s)", report.problems.len())))
     }
 }
 

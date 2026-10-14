@@ -8,7 +8,9 @@
 //! - the `EcdhDerive` RPC's guards, called on the service itself: reserved ids, malformed and
 //!   off-curve points, non-EC keys, the per-key decryption budget, read-repair;
 //! - the portable export round trip, and `import-key` of B1's real Canton 3.6.1 ECIES encryption
-//!   key — library and CLI — including every refusal the migration runbook relies on.
+//!   key — library and CLI — including every refusal the migration runbook relies on;
+//! - `verify-hosted` (B6): each node's own copy, no read-repair, one SPKI with the expected Canton
+//!   fingerprint everywhere.
 
 // tonic::Status is large by value (see the crate root); the RPC helper returns it as the service does.
 #![allow(clippy::result_large_err)]
@@ -439,6 +441,72 @@ fn canton_import_refuses_every_key_that_is_not_the_expected_ecies_key() {
     assert!(refused(b"\x0a\x03abc", None, &fp).contains("cannot read"));
 }
 
+// ── verify-hosted ──────────────────────────────────────────────────────────────────────────────
+
+/// Every node's own `HostedKeyStatus`, as `verify-hosted` collects it.
+async fn hosted_views(nodes: &[Arc<Node>], peers: &Peers, key_id: &str) -> Vec<rutli_cosigner::verify_hosted::HostedView> {
+    let mut views = Vec::new();
+    for (i, n) in nodes.iter().enumerate() {
+        let status = signer(n, peers, 0)
+            .hosted_key_status(Request::new(pb::HostedKeyStatusRequest { key_id: key_id.into() }))
+            .await
+            .map(|r| r.into_inner())
+            .map_err(|s| format!("{:?}: {}", s.code(), s.message()));
+        views.push(rutli_cosigner::verify_hosted::HostedView {
+            identifier: i as u16 + 1,
+            endpoint: format!("local{}", i + 1),
+            status,
+        });
+    }
+    views
+}
+
+/// B6 D2: an imported Canton key is on every node, byte-identical, with the old node's fingerprint
+/// — and `HostedKeyStatus` reports each node's own copy, never a read-repaired one.
+#[tokio::test]
+async fn verify_hosted_sees_each_nodes_own_copy_and_the_canton_fingerprint() {
+    use rutli_cosigner::verify_hosted::check_hosted_views;
+    let fp = fingerprint_of("encryption");
+    let id = "rutli-enc-imported-1220afe2";
+    let imported = rutli_cosigner::export::import_canton(&read("encryption.export.bin"), None, &fp, 1).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = hosted_cluster(&tmp);
+    nodes[0].hosted_store(id, &imported.key).unwrap();
+
+    // Only node 1 holds it. Asking node 2 does not repair it there.
+    let r = check_hosted_views(id, &fp, &[1, 2, 3], &hosted_views(&nodes, &peers, id).await);
+    assert!(!r.ok);
+    assert!(r.problems.iter().any(|p| p == "node 2: does not hold the key"), "{:?}", r.problems);
+    assert!(!nodes[1].hosted_exists(id), "HostedKeyStatus must not read-repair");
+
+    // Anti-entropy pushes it everywhere; now the cluster agrees on Canton's key.
+    anti_entropy_sweep(&nodes[0], &peers).await.unwrap();
+    let r = check_hosted_views(id, &fp, &[1, 2, 3], &hosted_views(&nodes, &peers, id).await);
+    assert!(r.ok, "{:?}", r.problems);
+    let canton_pub = rutli_canton_key::parse_public_key(&read("encryption.pub.bin")).unwrap();
+    assert_eq!(r.public_key_der, Some(hex::encode(canton_pub.public.spki_der())));
+    // ... but not the key some other fingerprint names.
+    assert!(!check_hosted_views(id, &fingerprint_of("namespace"), &[1, 2, 3], &hosted_views(&nodes, &peers, id).await).ok);
+
+    // A node that holds other material under the id (a second import of the wrong file before the
+    // sweep): anti-entropy refuses to merge, verify-hosted names it.
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = hosted_cluster(&tmp);
+    nodes[0].hosted_store(id, &imported.key).unwrap();
+    nodes[2].hosted_store(id, &HostedKey::generate(HostedSpec::EcP256, 1).unwrap()).unwrap();
+    anti_entropy_sweep(&nodes[0], &peers).await.unwrap();
+    let r = check_hosted_views(id, &fp, &[1, 2, 3], &hosted_views(&nodes, &peers, id).await);
+    assert!(r.problems.iter().any(|p| p.contains("2 different public keys")), "{:?}", r.problems);
+    assert!(r.problems.iter().any(|p| p.starts_with("node 3: its public key has Canton fingerprint")));
+
+    // Ids reserved for the split ceremony are never hosted keys.
+    let e = signer(&nodes[0], &peers, 0)
+        .hosted_key_status(Request::new(pb::HostedKeyStatusRequest { key_id: "frost-import-sig-x".into() }))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code(), Code::AlreadyExists);
+}
+
 // ── the import-key CLI ─────────────────────────────────────────────────────────────────────────
 
 const SEAL_ENV: &str = "RUTLI_TEST_SEAL_SECRET";
@@ -542,4 +610,19 @@ fn import_key_cli_installs_a_canton_ecies_key_once() {
     // A Rütli artifact carries its own id: the Canton-only flags are refused for it.
     let (ok, out) = import_key(&cfg, &["--in", artifact.to_str().unwrap(), "--key-id", "rutli-x"]);
     assert!(!ok && out.contains("carries its own key id"), "{out}");
+}
+
+#[test]
+fn verify_hosted_cli_fails_loudly_when_nodes_cannot_be_asked() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = cli_config(tmp.path());
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_rutli-cosigner"))
+        .args(["--config", cfg.to_str().unwrap(), "verify-hosted", "--key-id", "rutli-enc-x"])
+        .args(["--expect-fingerprint", &fingerprint_of("encryption")])
+        .env_remove("RUTLI_COSIGNER_CONFIG")
+        .output()
+        .unwrap();
+    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("node 1 http://127.0.0.1:1: unreachable") && text.contains("FAILED"), "{text}");
 }

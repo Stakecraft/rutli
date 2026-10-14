@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Generate a mutual-TLS trust domain for a FROST cluster: one cluster CA, a cert per cosigner, and
-# a client cert for the driver and one for the operator (split ceremony verify-key: KeyStatus and
-# CeremonySignTest only, via operator_allowlist). Every cert is signed by the CA (the sole trust
+# a client cert for the driver and one for the operator (verify-key and verify-hosted: KeyStatus,
+# HostedKeyStatus and CeremonySignTest only, via operator_allowlist). Every cert is signed by the CA (the sole trust
 # anchor). Cosigner certs carry a SAN of `cosignerN` and `127.0.0.1` so they work in Docker and
 # locally, and the CN `cosignerN` (N = the node's configured identifier) — the identity the Peer
 # API's FetchKey and the split ceremony's request signatures rely on.
