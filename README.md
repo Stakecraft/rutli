@@ -84,10 +84,10 @@ not the past. Threshold RSA is permanently out of scope; the reasoning, and the 
 ## Features
 
 - **Plugs into unmodified Canton** — implements the official KMS Driver SPI; passes the upstream
-  conformance suite. Verified end-to-end on a real Canton 3.5.6 node.
+  conformance suite. Verified end-to-end on a real Canton 3.6.1 node.
 - **Threshold signing (FROST-ed25519)** — DKG, two-round signing, standard RFC 8032 output,
   crash-safe single-use nonce guard.
-- **Backends** — `software` (testing), `hsm` (PKCS#11, verified on SoftHSM) and `frost` (the MPC
+- **Backends** — `software` (testing), `hsm` (PKCS#11, experimental: verified on SoftHSM only) and `frost` (the MPC
   cluster), which routes non-FROST keys to a delegate: `hsm`, `software`, or `none` — no delegate at
   all, which requires cluster-hosted keys (below).
 - **Cluster-hosted keys** — RSA-2048-OAEP encryption and AES-256-GCM symmetric keys held by the

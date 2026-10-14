@@ -53,7 +53,7 @@ Two different protections now share one cluster, and the difference is not cosme
 key is a real `t`-of-`n` FROST share set — no node ever holds it. The hosted keys (`rutli-…`) are
 **whole keys replicated to every cosigner**, sealed at rest per node, and any single node can serve
 a decrypt: that is replication, not MPC. What it buys is covered below. The HSM delegate remains
-fully supported for both classes; with hosted keys enabled, `delegate = "none"` also becomes
+available for both classes but is experimental (verified on SoftHSM only, outside the audit scope); with hosted keys enabled, `delegate = "none"` also becomes
 reachable — no HSM, and no key material on the participant host at all.
 
 Everything runs inside the **operator-controlled environment**. The MPC cluster is `t`-of-`n`
@@ -131,7 +131,7 @@ compromised or crashed client can stall signing but never touches key material o
 
 | Canton key | Algo (format) | Backend | Why |
 |---|---|---|---|
-| Namespace / identity root | Ed25519 (`concat`, raw 64-byte R‖S) | **FROST-ed25519** (ZF `frost-ed25519`) | RFC 9591; emits standard RFC 8032 sig Canton verifies natively. Audited (NCC + Least Authority). The one key where "no node holds the whole secret" clearly earns MPC. |
+| Namespace / identity root | Ed25519 (`concat`, raw 64-byte R‖S) | **FROST-ed25519** (ZF `frost-ed25519`) | RFC 9591; emits standard RFC 8032 sig Canton verifies natively. Audited by NCC Group (public report, Oct 2023, v0.6.0; we pin 2.2.0). The one key where "no node holds the whole secret" clearly earns MPC. |
 | Protocol / sequencer auth | ECDSA P-256/P-384 (`der`) | **DKLS23** (Silence Labs) or HSM | OT-based, avoids the Paillier/TSSHOCK class that broke GG18/GG20/CGGMP. ToB-audited. **Pin DKLS23, not DKLS24** (2026 OT-count caveat). Confirm P-384 instantiation. |
 | Asymmetric encryption | RSA-2048-OAEP-SHA256 (Canton's KMS-mode default) | **Cluster-hosted (replicated, sealed)** or HSM delegate | **Not threshold — and for RSA that is permanent, not a roadmap item.** No Rust implementation of threshold RSA decryption exists (crates.io sweep found none; Shoup's construction lives in Go/C++/Java), and RUSTSEC-2023-0071 (Marvin timing side-channel, still unpatched in 2026) rules out the pure-Rust `rsa` crate for a network-facing decryptor — so the cluster holds a whole key and decrypts with `aws-lc-rs`. It performs the *full* OAEP decrypt: returning raw `c^d mod N` would hand the driver a Manger/Bleichenbacher oracle. |
 | Asymmetric encryption (roadmap) | ECIES-P256 (`EciesHkdfHmacSha256Aes128Cbc`) | Cluster-hosted whole key (v1.5) → **threshold `frost-p256`** (v2) | ECDH *is* thresholdable where RSA is not: each node returns `λᵢ·dᵢ·R` and the leader adds the points — one round, stateless, no nonce hazard. Both versions share one wire contract (`EcdhDerive`), so promoting to real threshold is a server-side change. Gated on the synchronizer's `requiredEncryptionSpecs` admitting `EcP256`. |

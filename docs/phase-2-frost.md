@@ -101,8 +101,8 @@ From `docs/wire-contract.md` (captured live):
 
 ## Crypto core
 
-- **Library:** Zcash Foundation `frost-ed25519` (RFC 9591, MIT/Apache, audited by NCC Group +
-  Least Authority). Emits canonical RFC 8032 signatures — format-identical to single-signer Ed25519
+- **Library:** Zcash Foundation `frost-ed25519` (RFC 9591, MIT/Apache, assessed by NCC Group, public
+  report Oct 2023 on v0.6.0; we pin 2.2.0). Emits canonical RFC 8032 signatures — format-identical to single-signer Ed25519
   (not value-identical: the FROST nonce is random, RFC 8032's is derived from the message), which is
   exactly what Phase 0 proved Canton accepts.
 - **Rust**, because the audited FROST implementations are Rust. The `FrostBackend` (Scala, in the
