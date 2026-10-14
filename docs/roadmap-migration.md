@@ -99,7 +99,7 @@ engineering work is not the long pole; the audit's external lead time is. So:
 
 1. **Book the audit now** (week 1), for a start right after v0.4.0. Scope: FROST cluster, hosted
    keys, driver, **plus the split ceremony (B2)**, so the migration path is audited, not bolted on.
-   Candidates with threshold-signature track record: Least Authority (audited ZF FROST),
+   Candidates with threshold-signature track record: Least Authority,
    Trail of Bits, NCC Group, Kudelski. Ask for a 2–3 week engagement with a fixed start date.
 2. **Track B to v0.4.0** is the pre-audit code freeze target. Nothing else lands in the audited
    surface after it except audit fixes.

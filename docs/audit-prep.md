@@ -15,7 +15,7 @@ Status: **pre-production, not yet audited**. Use this as the engagement brief an
 
 ## Out of scope (unless requested)
 
-- Upstream `frost-ed25519` math (cite NCC / Least Authority audits of Zcash FROST)
+- Upstream `frost-ed25519` math (cite the NCC Group assessment of Zcash FROST, Oct 2023, v0.6.0)
 - Canton itself / Splice validator business logic
 - Threshold ECDSA (Phase 4 — not shipped)
 - Networked RTS repair ceremony (primitive only; DR is backup/restore)

@@ -110,10 +110,7 @@ Where we would like attention, in order:
 - **Upstream `frost-ed25519` crate internals.** The Zcash Foundation FROST implementation has been
   independently assessed: NCC Group published a public report on it in October 2023 (reviewed
   release v0.6.0; the retest confirmed all findings fixed). We pin the 2.x line (`frost-ed25519` 2.2.0
-  in `Cargo.lock`), which is newer than the reviewed release. TODO(owner): our docs also cite Least
-  Authority as an auditor of the ZF crate. The only Least Authority work we can find concerns the
-  FROST demo server and client, not the crate. Confirm the exact Least Authority report and date
-  before naming it to that firm, or drop it. We do want our *usage* of the crate reviewed: nonce
+  in `Cargo.lock`), which is newer than the reviewed release. We do want our *usage* of the crate reviewed: nonce
   handling, DKG and refresh orchestration, identifier and threshold parameters, serialization at our
   boundaries.
 - Canton and Splice themselves (validator business logic, topology semantics).
@@ -121,11 +118,9 @@ Where we would like attention, in order:
   BouncyCastle). Please flag known-vulnerable versions you notice.
 - The HSM (PKCS#11) and `software` backends (`HsmBackend.scala`, ~400 lines; `SoftwareBackend.scala`
   and `SoftKeyStore.scala`, ~460 lines) are delegates for non-FROST keys. The shape we deploy
-  and soak is `delegate = "none"` with cluster-hosted keys, which uses neither. Our architecture doc
-  still calls the HSM delegate "fully supported" and the README says it is verified only on SoftHSM.
-  TODO(owner): decide whether `HsmBackend` is explicitly excluded or reviewed lightly (for example
-  only the backend routing and the delegate selection in `RutliDriver`), and align
-  `docs/architecture.md` with the answer.
+  and soak is `delegate = "none"` with cluster-hosted keys, which uses neither. The HSM delegate is
+  experimental (verified on SoftHSM only) and explicitly excluded; the `software` backend is for
+  testing only.
 - Threshold ECDSA (Phase 4) and the networked share-repair ceremony: not shipped.
 
 ## 4. Threat model highlights and areas we want focus on
@@ -181,7 +176,7 @@ no forward secrecy; seal-secret protection is software, not HSM or enclave.
 
 ## 7. Materials we provide
 
-- **Repository:** `<REPO_URL>` (public). Tag `v0.4.0-rc.1` (2026-10-09, commit `903d318`) exists now; tag `v0.4.0` will be cut at code freeze.
+- **Repository:** `https://github.com/Stakecraft/rutli` (public). Tag `v0.4.0-rc.1` (2026-10-09, commit `903d318`) exists now; tag `v0.4.0` will be cut at code freeze.
 - **Design and operator docs** (relative to the repository root):
   - [README.md](../README.md), [SECURITY.md](../SECURITY.md), [CHANGELOG.md](../CHANGELOG.md)
   - [docs/audit-prep.md](audit-prep.md): engagement brief and evidence index
@@ -197,13 +192,12 @@ no forward secrecy; seal-secret protection is software, not HSM or enclave.
 - **Tests and CI:** `cd frost && cargo test && cargo clippy --all-targets -- -D warnings`;
   `sbt driver/test`; TLS compose smoke (`scripts/ci-frost-tls-smoke.sh`); the driver passes the
   upstream Canton KMS driver conformance suite.
-- **Environment:** on request, a walkthrough of our DevNet soak cluster (3 cosigners backing a
-  Splice DevNet validator), with its dashboards and failure drills. The DevNet B4 cutover rehearsal
+- **Environment:** an evidence pack from our DevNet soak (3 cosigners backing a Splice DevNet
+  validator): the soak log, the B0/B4 runbooks and their evidence (driver audit logs, hashes,
+  timings), and dashboard exports; a live demo over video call on request. We do not grant access
+  to the cluster itself (it is shared with other DevNet validators). The DevNet B4 cutover rehearsal
   (an existing JCE validator moved into the cluster with its namespace and party IDs unchanged) ran
   green on 2026-10-14; the soak log is [docs/soak-2026-10-devnet.md](soak-2026-10-devnet.md).
-  TODO(owner): is a read-only dashboard view or a live demo of the DevNet cluster acceptable to
-  expose to outside reviewers? Our dashboard is behind StakeCraft SSO and the cluster is shared with
-  other DevNet validators; decide which of the two, if any, we offer, and delete this line if none.
 - **Build prerequisites:** JDK 17, sbt, Rust, Docker, Canton 3.6.1 release (KMS API jars are not on
   Maven Central; `scripts/publish-canton-deps.sh` handles it). The audited commit is built and
   tested against Canton **v3.6.1**: `build.sbt` and the CI `CANTON_TAG`, the upstream driver
