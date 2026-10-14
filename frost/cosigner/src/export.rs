@@ -368,6 +368,66 @@ pub fn import_canton(
     Ok(CantonImport { key, fingerprint })
 }
 
+/// What [`install_imported`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Installed {
+    Created,
+    /// The id already held this very key (a re-run, or anti-entropy delivered the copy imported on
+    /// another node first). Nothing was written.
+    AlreadyPresent,
+}
+
+/// Write an imported hosted key into this node's key store: create-once, never an overwrite. The
+/// id must not be reserved for the split ceremony; an existing key under it must be this very key
+/// (same spec and material), else [`DaemonError::KeyExists`] — hosted keys are create-once
+/// immutable, and Canton rotates by minting a new id.
+///
+/// **Safe against a running daemon on the same key store** (`kubectl exec` into the pod), for the
+/// same reasons `import-share` is:
+///
+/// - the write is the key store's create ([`KeyStore::create_hosted`]): a sealed temp, fsynced,
+///   moved into place with a no-replace rename (or link), then a directory fsync. The daemon sees
+///   either no file or the whole sealed file — never a partial one — and nothing is ever replaced;
+/// - the daemon holds no in-memory copy of hosted keys: every serve, anti-entropy listing and
+///   read-repair reads the file, so the new key is served from the next request on;
+/// - the daemon may create the same id at the same moment, pulling the copy imported on another
+///   node (anti-entropy, read-repair). Exactly one create wins and the loser compares: identical
+///   material is a no-op on either side ([`Installed::AlreadyPresent`] here, an idempotent store
+///   there); different material is a conflict on either side, never an overwrite, and
+///   `verify-hosted` names the nodes that disagree.
+///
+/// [`KeyStore::create_hosted`]: crate::keystore::KeyStore::create_hosted
+pub fn install_imported(
+    keystore: &crate::keystore::KeyStore,
+    key_id: &str,
+    key: &HostedKey,
+) -> Result<Installed> {
+    if crate::share_delivery::is_reserved_for_import(key_id) {
+        return Err(DaemonError::ReservedKeyId(key_id.to_string()));
+    }
+    let compare = || -> Result<Installed> {
+        // load_hosted refuses a FROST share under the id: never "identical" to a hosted key.
+        let existing = keystore.load_hosted(key_id)?;
+        if existing.spec != key.spec || existing.private_der != key.private_der {
+            return Err(DaemonError::KeyExists(format!(
+                "{key_id} already exists on this node with different material — refusing to \
+                 overwrite. Rotate to a new key id instead."
+            )));
+        }
+        Ok(Installed::AlreadyPresent)
+    };
+    if keystore.exists(key_id) {
+        return compare();
+    }
+    // create, not save: a file that appeared since the check (anti-entropy's pull of the same key,
+    // an installed share) is never replaced; it is compared like any existing one.
+    match keystore.create_hosted(key_id, key) {
+        Ok(()) => Ok(Installed::Created),
+        Err(DaemonError::KeyExists(_)) => compare(),
+        Err(e) => Err(e),
+    }
+}
+
 fn aad(key_id: &str, spec: &str) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"rutli-export-v1");

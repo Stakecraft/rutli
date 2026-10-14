@@ -72,13 +72,15 @@ enum Command {
         #[arg(long)]
         unsafe_plaintext: bool,
     },
-    /// Import a cluster-hosted key from an export artifact. Run with the node stopped.
+    /// Import a cluster-hosted key from an export artifact. Safe with this node's daemon running
+    /// (e.g. `kubectl exec` into the pod) or stopped.
     ///
     /// Reads either a Rütli `export-key` artifact (JSON) or an existing Canton node's EC P-256
     /// encryption key — `ExportKeyPair` / `keys.secret.download` output, plain or
     /// password-protected — which migrates the node without rotating its encryption key. A Canton
-    /// key needs --key-id and --expect-fingerprint. The key is written to this node only; once the
-    /// daemon starts, anti-entropy replicates it to the rest of the cluster.
+    /// key needs --key-id and --expect-fingerprint. The key is written to this node only (create-
+    /// once, never an overwrite); anti-entropy replicates it to the rest of the cluster within one
+    /// `hosted_keys.anti_entropy_interval_secs` of a running daemon. Check with `verify-hosted`.
     ImportKey {
         /// The export artifact to read.
         #[arg(long, value_name = "FILE")]
@@ -1138,24 +1140,13 @@ fn import_key_command(
 
     // Hosted keys are create-once-immutable: a key id maps to one key forever, because Canton
     // rotates by minting a new id. Overwriting could destroy material the cluster already
-    // committed to, so refuse unless it is byte-identical.
-    if rutli_cosigner::share_delivery::is_reserved_for_import(&key_id) {
-        return Err(DaemonError::ReservedKeyId(key_id));
-    }
-    if keystore.exists(&key_id) {
-        let existing = keystore.load_hosted(&key_id)?;
-        if existing.spec != key.spec || existing.private_der != key.private_der {
-            return Err(DaemonError::KeyExists(format!(
-                "{key_id} already exists on this node with different material — refusing to \
-                 overwrite. Rotate to a new key id instead."
-            )));
-        }
+    // committed to, so refuse unless it is byte-identical. Safe against a running daemon — see
+    // export::install_imported.
+    use rutli_cosigner::export::Installed;
+    if rutli_cosigner::export::install_imported(&keystore, &key_id, &key)? == Installed::AlreadyPresent {
         println!("{key_id} is already present here and identical — nothing to do");
         return Ok(());
     }
-
-    // create, not save: never replaces a file that appeared meanwhile (e.g. an installed share).
-    keystore.create_hosted(&key_id, &key)?;
     tracing::warn!(
         key_id = %key_id,
         path = %input.display(),
@@ -1163,8 +1154,8 @@ fn import_key_command(
         "IMPORTED a cluster-hosted key"
     );
     println!(
-        "imported {key_id} ({}) from {origin} — start the daemon; anti-entropy will replicate it \
-         to the cluster",
+        "imported {key_id} ({}) from {origin} — anti-entropy replicates it to the cluster (within \
+         one interval of a running daemon, or once it starts); then run verify-hosted",
         key.spec.as_str()
     );
     Ok(())
