@@ -54,7 +54,8 @@ Common to both variants:
 
 #### 2a: In place (same database, same participant UID)
 
-**Status: hypothesis, targeted for v0.4.0.** Milestone B8 rehearses it on DevNet (planned for the week of
+**Status: hypothesis, targeted for v0.4.0.** Needs a release candidate with B6 and the C2 fixes (rc.2) on the
+cosigners first: rc.1 cosigners refuse the B6 bundle format. Milestone B8 rehearses it on DevNet (planned for the week of
 2026-10-19). Not yet run. Decided 2026-10-15: 2a ships in v0.4.0, before the audit, so the auditors review it.
 
 *Mechanics.* Independently checked against the Canton 3.6.1 source by two reviewers (Opus and Codex), who agree:
@@ -74,7 +75,13 @@ Common to both variants:
    auto-connect disabled.
 4. Register every key by KMS id with the exact name and usage. Assert the fingerprints are unchanged. Then reconnect.
 5. Verify.
-6. Per the client's choice, rotate signing and encryption keys on the same node with `rotate_kms_node_key`.
+6. Per the client's choice, rotate signing and encryption keys on the same node (generate the new key through the
+   driver, then `owner_to_key_mappings.rotate_key`; `rotate_kms_node_key` does not fit keys that Canton generates in
+   Rütli).
+
+   In place, Splice's signing key must be registered with its recorded usage, which is `All` and includes
+   namespace: the public-key store compares usage and name exactly. It carries no namespace authority (no delegation
+   points at it), but rotating the signing key removes it, so in 2a the signing rotation is recommended.
 7. Remove the old JCE rows with SQL while the node is stopped. **Never** `keys.secret.delete`: under KMS it deletes the
    key in the KMS.
 
@@ -86,8 +93,11 @@ network already knows.
 externally added proof-of-ownership signatures on the OTK update, so the old signing and encryption keys never enter
 Rütli. **Unverified** and more complex.
 
-*Rollback.* Until step 7: switch the provider back to `jce` and restart; the JCE rows are untouched. After step 7:
-restore from the backup. There is no point of no return.
+*Rollback.* Two boundaries instead of one point of no return. Until the first rotation onto a Rütli-born key (RB1),
+switch the provider back to `jce` and restart: the JCE rows are untouched and the network still knows only the old
+keys. Between RB1 and the SQL cleanup (RB2), rolling back means rotating the OTK back to the carried keys first. After
+RB2, only a restore from backup. No step removes the participant from the network, unlike 2b's trust-certificate
+removal.
 
 *Support caveat.* Digital Asset documents migration to external key storage via a **new** participant. In-place is
 technically possible but **not a DA-documented procedure**. It is a support risk for clients under a DA support
@@ -120,7 +130,7 @@ Today 2b mints fresh signing and encryption keys. With B6 the same client choice
 | External parties | Unchanged | Unhosted; separate DA recovery |
 | dApp data (non-DSO contracts) | Unchanged | Lost |
 | Wallet end-users | Unchanged | Must re-onboard in the UI |
-| Point of no return | None (rollback until the old JCE rows are removed) | Removal of the old trust certificate |
+| Point of no return | None; two rollback boundaries (first rotation, SQL cleanup) | Removal of the old trust certificate |
 | Downtime | One restart cycle plus verification (**unproven**) | Wallet about 1 h |
 | DA documentation status | Not a DA-documented procedure | The documented shape (new participant) |
 | Maturity | Hypothesis; B8 pending | Proven twice (B0, B4) |
