@@ -238,8 +238,10 @@ Print them on the old node, with usage (the B0 snippet, [b0-cutover-spike.md](b0
 | Splice validator (`NodeInitializer.scala:69-73`) | `namespace` {namespace}; **one** `signing` key with `SigningKeyUsage.All` = {namespace, sequencer-auth, signing, proof-of-ownership} | `encryption` |
 
 Splice's `signing` key lists **namespace** among its usages and is **not** the namespace key: the namespace is the fingerprint after
-`::` in the node's UID, and that is the key named `namespace`. A legacy key with an empty usage list counts as `All` too. This is why
-the dealer asks for `--namespace-fingerprint` wherever the usage alone is ambiguous (below). Register Splice's key on the new node
+`::` in the node's UID, and that is the key named `namespace`. A legacy key with an empty usage list counts as `All` too. The usage is also
+**advisory**: it is unsigned metadata in the export file or database row, which anyone who could alter the file could relabel.
+The namespace from the UID is the real discriminator, which is why the dealer always asks for `--namespace-fingerprint` in
+protocol mode, and in namespace mode wherever the usage is not namespace alone (below). Register Splice's key on the new node
 **without** namespace usage: the new member needs it to sign and to authenticate, not to authorize namespace changes.
 
 ### Before the split: the carried key must not sign for a namespace
@@ -273,13 +275,13 @@ rutli-dealer split-key --in signing.export --password-env EXPORT_PW \
   --threshold 2 --ca-cert ca.crt --recipient r1.json --recipient r2.json --recipient r3.json --out-dir out/
 ```
 
-Pass `--namespace-fingerprint` in protocol mode every time: Splice's key cannot be split without it, and for a Canton key it is a
-free check that the key you carry is not the root.
+`--namespace-fingerprint` is mandatory in protocol mode, for Canton and Splice keys alike: it is what proves the key you carry is
+not the root, since the usage list in the file is not signed.
 
 | `--expect-usage` | The key's recorded usage must | Id | `--namespace-fingerprint` |
 |---|---|---|---|
 | `namespace` (default) | be exactly {namespace} | `${PREFIX}frost-import-<name>` | required if the usage has more than namespace, is empty (= all) or unknown (plain PKCS#8); must **equal** the key's fingerprint |
-| `protocol` | include signing or sequencer-auth; plain PKCS#8 is refused | `…frost-import-sig-<name>` if it includes signing, else `…frost-import-seqauth-<name>` | required if the usage includes namespace (Splice, legacy keys); must **differ** from the key's fingerprint |
+| `protocol` | include signing or sequencer-auth; plain PKCS#8 is refused | `…frost-import-sig-<name>` if it includes signing, else `…frost-import-seqauth-<name>` | **always** required (the usage is unsigned metadata); must **differ** from the key's fingerprint |
 
 Each mode refuses the other's ids before any secret is read, and a given `--namespace-fingerprint` is always checked.
 `dealer-record.json` records `expected_usage`, `recorded_usage` and `namespace_fingerprint`. The share bundles carry all three

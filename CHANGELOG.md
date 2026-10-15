@@ -47,10 +47,11 @@ All notable changes to Rütli are documented here. Format loosely follows
   - `rutli-dealer split-key --expect-usage namespace|protocol` (default `namespace`). Namespace
     mode takes a key whose recorded usage is namespace alone; protocol mode needs signing or
     sequencer-auth and Canton metadata (no plain PKCS#8). `--namespace-fingerprint`, the old node's
-    namespace read from its UID, is required wherever the usage alone is ambiguous — a namespace
-    key with more usages, an empty (= all) or unknown usage, and a protocol key whose usage includes
-    namespace, such as a Splice validator's `signing` key (`SigningKeyUsage.All`) — and must equal
-    the key's fingerprint in namespace mode, differ from it in protocol mode.
+    namespace read from its UID, is **always** required in protocol mode and must differ from the
+    key's fingerprint — the recorded usage is unsigned metadata in the key file and cannot rule out
+    a relabelled namespace key. In namespace mode it is required wherever the usage is not namespace
+    alone — extra usages (a Splice validator's `signing` key has `SigningKeyUsage.All`), an empty
+    (= all) or unknown usage — and must equal the key's fingerprint.
   - Protocol keys have their own ids, `<prefix>frost-import-sig-<name>` (usage includes signing)
     and `<prefix>frost-import-seqauth-<name>`, so approval rules can tell them from the namespace
     key (a rule on the bare `<prefix>frost-import-` prefix still matches all three; see

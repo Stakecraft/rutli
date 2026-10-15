@@ -854,7 +854,7 @@ mod tests {
         b.usage = Some(CarriedUsage {
             expected: "protocol".into(),
             recorded: Some(vec!["signing".into()]),
-            namespace_fingerprint: None,
+            namespace_fingerprint: Some(format!("1220{}", "ab".repeat(32))),
         });
         assert!(b.open(&state).unwrap_err().to_string().contains("namespace-style id"));
         // The dealer side refuses to seal it in the first place.
