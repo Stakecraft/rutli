@@ -135,7 +135,12 @@ sum(rate(rutli_sign_duration_seconds_sum{result="ok"}[1h]))
    A trickle is someone sending malformed ciphertexts; anything sustained is a page, as for (5).
    Audit entries with `ec-failover=` mean a cosigner answered "not found"/UNIMPLEMENTED for an EC
    key and the driver went to the next one: a cosigner on an old release, or one missing a
-   replica. Either way, find it — it is carrying no ECIES traffic.
+   replica. Either way, find it — it is carrying no ECIES traffic. `reason=ECIES_AFTER_ECDH` means
+   that cosigner's shared secret did not open the ciphertext. On a decrypt that then **succeeded**
+   via another node, that cosigner holds wrong EC material under the key id (stale or corrupt
+   replica) — investigate it as for `rutli_anti_entropy_conflicts_total`. On a decrypt that failed
+   anyway (`ecies-failure=after-ecdh`), every node's secret was refused: the ciphertext is the
+   suspect, and it cost one `EcdhDerive` per cosigner.
 6. **`rutli_key_replicas` below the cluster size** (or `rutli_hosted_keys` differing across
    instances, the same signal seen sideways) — a key exists on fewer nodes than the cluster is
    configured for. Writes commit at `write_quorum` (default 2 of 3) and roll back below it, so a

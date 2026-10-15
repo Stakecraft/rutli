@@ -214,12 +214,17 @@ class FrostBackend(
     * `acceptAfterStale` decides whether an answer found after a stale one is used. For a key the
     * driver has not seen yet it is "only if the answer says the key is EC": for any other key type,
     * the first node's NOT_FOUND / does-not-exist stays the answer, exactly as without this path, so
-    * FROST/RSA/AES semantics are unchanged. If every node is stale, the first stale answer stands. */
+    * FROST/RSA/AES semantics are unchanged. If every node is stale, the first stale answer stands.
+    *
+    * `staleAnswer` names a stale *answer* (a `Right`) for the WARN and the `ec-failover` note: its
+    * reason code and what it may mean. A stale status is named by its gRPC code. Each endpoint is
+    * asked at most once, so one call costs at most n cosigner round trips. */
   private def withEcFailover[A](
       what: String,
       notes: AuditNotes,
       stale: Either[StatusRuntimeException, A] => Boolean,
       acceptAfterStale: A => Boolean,
+      staleAnswer: A => (String, String),
   )(op: SignerGrpc.SignerBlockingStub => A): A = {
     val n = channels.size
     val start = preferred.get
@@ -240,14 +245,11 @@ class FrostBackend(
             case None => settle(firstStale.getOrElse(outcome))
           }
         case o if stale(o) =>
-          val reason = o.fold(_.getStatus.getCode.toString, _ => "NOT_FOUND")
+          val (reason, meaning) = o.fold(e => (e.getStatus.getCode.toString, MayBeOld), staleAnswer)
           val first = firstStale.orElse(Some(o))
           next match {
             case Some(to) =>
-              logger.warn(
-                s"FROST: $what via ${endpoints(i)} answered $reason for an EC hosted key — that cosigner may " +
-                  s"predate ec-p256-ecies or lack the key; asking $to"
-              )
+              logger.warn(s"FROST: $what via ${endpoints(i)} answered $reason for an EC hosted key — $meaning; asking $to")
               notes.add(s"ec-failover=${endpoints(i)}→$to reason=$reason")
               attempt(k + 1, first)
             case None => settle(first.get)
@@ -267,10 +269,13 @@ class FrostBackend(
       what: String,
       stale: Either[StatusRuntimeException, A] => Boolean,
       acceptAfterStale: A => Boolean,
+      staleAnswer: A => (String, String) = (_: A) => ("NOT_FOUND", MayBeOld),
   )(op: SignerGrpc.SignerBlockingStub => A): Future[A] = {
     val notes = currentNotes.get
-    Future(blocking(withEcFailover(what, notes, stale, acceptAfterStale)(op)))
+    Future(blocking(withEcFailover(what, notes, stale, acceptAfterStale, staleAnswer)(op)))
   }
+
+  private final val MayBeOld = "that cosigner may predate ec-p256-ecies or lack the key"
 
   /** Whether `keyId` is, or for all the driver knows may be, an EC hosted key. */
   private def mayBeEc(keyId: String): Boolean =
@@ -548,7 +553,18 @@ class FrostBackend(
   /** ECIES for a hosted P-256 key: the cluster does the ECDH, BouncyCastle's `IESEngine` the rest
     * ([[CantonEcies]]). The blob is checked against Canton's exact shape before anything is sent, so
     * a malformed ciphertext costs no cluster call and no decryption budget. `EcdhDerive` is
-    * re-issuable like `Decrypt` (it is a pure function of key and point), hence [[isLeaderSick]]. */
+    * re-issuable like `Decrypt` (it is a pure function of key and point), hence [[isLeaderSick]].
+    *
+    * A cosigner's `EcdhDerive` only counts as served once its Z has opened the ciphertext (MAC and
+    * padding). One holding stale or corrupt EC material under the right id answers a well-formed,
+    * wrong Z; it must not become the preferred leader on that answer, or every later decrypt would
+    * lead from it and fail (Codex review of C2). So the ECDH *and* the local decrypt run per
+    * cosigner inside [[withEcFailover]], and a Z that does not open the blob is a stale answer: the
+    * next cosigner is asked (`ec-failover=… reason=ECIES_AFTER_ECDH`), the node that gave it is not
+    * preferred, and the failure surfaces only when no cosigner's Z opens the blob. A forged
+    * ciphertext therefore costs at most one `EcdhDerive` per roster entry, each charged to that
+    * node's rate limit — n calls, never unbounded. `RESOURCE_EXHAUSTED` (the rate limit) is a real
+    * answer and is surfaced at once, never routed around. */
   private def decryptEcies(ciphertext: Array[Byte], keyId: String): Future[Array[Byte]] = {
     // The cluster cannot see the MAC/padding outcome — its metrics count every EcdhDerive that
     // produced a Z as ok. So a failure here is noted in this operation's audit entry
@@ -565,29 +581,49 @@ class FrostBackend(
           .setKeyId(keyId)
           .setPeerPoint(ByteString.copyFrom(parsed.ephemeralPoint))
           .build()
-        // A cosigner that predates EcdhDerive answers UNIMPLEMENTED, one that lacks the key NOT_FOUND:
-        // ask the next one (withEcFailover). Every other status behaves as for Decrypt.
-        clusterCallEc[EcdhDeriveReply](
+        def oldOrMissing(e: StatusRuntimeException) =
+          e.getStatus.getCode == Status.Code.UNIMPLEMENTED || e.getStatus.getCode == Status.Code.NOT_FOUND
+        // The first Z that did not open the blob. If the call then settles on an older node's "not
+        // found", some cosigner did hold the key, and the ECIES failure is the truer answer.
+        val badZ = new java.util.concurrent.atomic.AtomicReference[CantonEcies.EciesException]()
+        def failedAfterEcdh(e: CantonEcies.EciesException): scala.util.Failure[Array[Byte]] = {
+          notes.add("ecies-failure=after-ecdh")
+          logger.warn(
+            s"FROST: ECIES decryption failed after a successful EcdhDerive for $keyId, with the shared secret of " +
+              "every cosigner that produced one (MAC, padding or a wrong shared secret) — a forged or corrupted " +
+              "ciphertext, or cosigners answering with the wrong key"
+          )
+          scala.util.Failure(e)
+        }
+        // A cosigner that predates EcdhDerive answers UNIMPLEMENTED, one that lacks the key NOT_FOUND,
+        // one with the wrong key a Z that does not open the blob: ask the next one (withEcFailover).
+        // Every other status behaves as for Decrypt — RESOURCE_EXHAUSTED included.
+        clusterCallEc[Either[CantonEcies.EciesException, Array[Byte]]](
           "ecdhDerive",
           {
-            case Left(e) => e.getStatus.getCode == Status.Code.UNIMPLEMENTED || e.getStatus.getCode == Status.Code.NOT_FOUND
-            case Right(_) => false
+            case Left(e)       => oldOrMissing(e)
+            case Right(opened) => opened.isLeft
           },
           _ => true,
-        )(_.ecdhDerive(req)).map { reply =>
+          _ => ("ECIES_AFTER_ECDH", "its shared secret did not open the ciphertext (wrong key material, or a forged blob)"),
+        ) { stub =>
+          val reply = stub.ecdhDerive(req)
           // The JVM cannot promise this is the only copy of Z: the protobuf ByteString holds one
-          // that cannot be wiped, and the GC may have moved either. Wiping ours is best-effort.
+          // that cannot be wiped, and the GC may have moved either. Wiping ours is best-effort, and
+          // done here, for every cosigner's Z, whatever the outcome.
           val z = reply.getSharedSecret.toByteArray
-          try CantonEcies.decrypt(parsed, z)
+          try Right(CantonEcies.decrypt(parsed, z))
           catch {
             case e: CantonEcies.EciesException =>
-              notes.add("ecies-failure=after-ecdh")
-              logger.warn(
-                s"FROST: ECIES decryption failed after a successful EcdhDerive for $keyId (MAC, padding or a " +
-                  "wrong shared secret) — a forged or corrupted ciphertext, or a cosigner answering with the wrong key"
-              )
-              throw e
+              badZ.compareAndSet(null, e)
+              Left(e)
           } finally java.util.Arrays.fill(z, 0.toByte)
+        }.transform {
+          case scala.util.Success(Right(plaintext)) => scala.util.Success(plaintext)
+          case scala.util.Success(Left(e))          => failedAfterEcdh(e)
+          case scala.util.Failure(e: StatusRuntimeException) if oldOrMissing(e) && badZ.get != null =>
+            failedAfterEcdh(badZ.get)
+          case scala.util.Failure(e) => scala.util.Failure(e)
         }
     }
   }
