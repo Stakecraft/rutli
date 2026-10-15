@@ -12,6 +12,13 @@
 //! stole the certificate can simply not use the driver. A limit is only meaningful on the cosigner,
 //! which is what this is.
 //!
+//! The buckets are **per node**: cosigners share no limiter state, so a certificate holder who
+//! calls every node gets `n ×` the configured budget per key. That is documented rather than
+//! engineered away — a distributed limiter would put a consensus round on Canton's decrypt hot
+//! path, and dividing a cluster budget by `n` here would starve the driver, which sends all of a
+//! key's traffic to one preferred leader. Operators size the per-node value accordingly
+//! (`docs/hosted-keys.md` §2 and §5).
+//!
 //! It is deliberately **not** a load shaper. The default ceiling is far above what a Canton
 //! participant does on one key, so in normal operation it never engages; its jobs are to cap an
 //! attacker's throughput and — via [`crate::metrics::DECRYPT_RATE_LIMITED`] and the near-limit

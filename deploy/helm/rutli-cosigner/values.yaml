@@ -89,6 +89,10 @@ hostedKeys:
   # Ceiling on decryptions per key per minute, enforced by the cosigner (0 disables). This is the
   # bound on a stolen driver certificate, which can otherwise bulk-decrypt recorded traffic at line
   # rate. The default is ~100/s sustained on one key — far above real Canton traffic.
+  # PER NODE: every cosigner enforces it independently (no shared state), so a stolen certificate
+  # that calls every pod directly gets replicaCount x this budget per key (default 3 x 6000). The
+  # driver sends a key's traffic to one leader at a time, so this must still cover the full
+  # legitimate rate on one node: set it to cluster_budget / replicaCount, keeping it above that peak.
   decryptRateLimitPerMin: 6000
 
 persistence:

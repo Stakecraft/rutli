@@ -392,7 +392,11 @@ async fn main() -> Result<()> {
              bulk-decrypt recorded traffic at line rate; set hosted_keys.decrypt_rate_limit_per_min"
         );
     } else {
-        tracing::info!(per_key_per_min = decrypt_limit, "hosted-key decryption rate limit active");
+        tracing::info!(
+            per_key_per_min = decrypt_limit,
+            "hosted-key decryption rate limit active — per key, on this node only; the cluster-wide \
+             ceiling is this times the number of cosigners"
+        );
     }
     let decrypt_limiter = Arc::new(rutli_cosigner::ratelimit::DecryptRateLimiter::new(decrypt_limit));
     if cfg.ceremony_sign_test_rate_limit_per_min == 0 {

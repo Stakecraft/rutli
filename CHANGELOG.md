@@ -18,6 +18,16 @@ All notable changes to Rütli are documented here. Format loosely follows
   `RESOURCE_EXHAUSTED` is still surfaced at once, never failed over. Each cosigner's shared secret
   is wiped on every path. No key-extraction impact.
 
+### Documented
+- **`hosted_keys.decrypt_rate_limit_per_min` is per node, not per cluster** (Codex review of C2,
+  medium). Each cosigner keeps its own buckets, so a stolen driver certificate that calls every
+  node gets n × the budget per key (18 000/min on 3 nodes at the default). Now stated in the config
+  doc, the Helm values, `docs/hosted-keys.md` §2 (new table row + sizing: `cluster_budget / n`,
+  still above the legitimate per-key peak on one node, since the driver routes a key's traffic to
+  one leader), §5, the alert text and the startup log line. Behaviour is unchanged: no
+  distributed limiter and no cluster-budget setting (dividing on every node would cut legitimate
+  headroom n-fold under one-leader routing).
+
 ## [0.4.0-rc.1] — 2026-10-09
 
 _Release candidate, pre-audit: for soak and review, not for production key custody._

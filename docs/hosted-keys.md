@@ -70,6 +70,19 @@ ConfigMap already carry it):
 | `enabled` | `false` | Off unless set. Absent block = no hosted keys, no replication, no sweep. |
 | `write_quorum` | `2` | How many cosigners must hold a new key before it is reported created. |
 | `anti_entropy_interval_secs` | `300` | Reconciliation cadence (floor 10s). |
+| `decrypt_rate_limit_per_min` | `6000` | Decryptions (`Decrypt`, `EcdhDerive`, `SymmetricDecrypt`) per key per minute, **on this node** (`0` disables). See below. |
+
+**The decryption rate limit is per node, not per cluster.** Each cosigner enforces
+`decrypt_rate_limit_per_min` with its own buckets; nodes share no limiter state. A stolen driver
+certificate that calls every cosigner directly therefore gets **n ×** the configured budget per key
+(18 000/min on a 3-node cluster at the default). The driver, by contrast, sends a key's traffic to
+one preferred leader at a time, so the value must cover the **full** legitimate rate on a single
+node. To size it: pick the cluster-wide ceiling you are willing to grant an attacker, set
+`decrypt_rate_limit_per_min = cluster_budget / n`, and confirm that still clears your legitimate
+per-key peak with headroom (the "approaching its rate limit" warning tells you when it does not). A
+cluster-wide limiter was considered and not built: it would put a cross-node round trip on Canton's
+decrypt hot path, and simply dividing a cluster budget by n on every node would cut legitimate
+headroom n-fold because of that one-leader routing.
 
 **`share_seal` is mandatory.** Config validation refuses to start a node with
 `hosted_keys.enabled` and no `share_seal`: a hosted key is a *whole private key*, and one sitting
@@ -496,9 +509,10 @@ What hosted keys are, stated without varnish:
 
 Properties to understand before you rely on hosted keys in production.
 
-- **`Decrypt` and `EcdhDerive` are rate-limited per key, on the cosigner**, from one shared budget
+- **`Decrypt` and `EcdhDerive` are rate-limited per key, on each cosigner**, from one shared budget
   (`hosted_keys.decrypt_rate_limit_per_min`,
-  default 6000 — 100/s sustained on a single key). This is the bound on a stolen driver
+  default 6000 — 100/s sustained on a single key). The budget is **per node**: an attacker who
+  calls every cosigner gets n × it (section 2 says how to size it). This is the bound on a stolen driver
   certificate: that certificate authorizes `Decrypt`, and retrospective decryption means whoever
   holds it can read everything ever encrypted to that key, so without a ceiling the only limit is
   how fast the cluster answers. The limiter has to live here rather than in the driver's signing

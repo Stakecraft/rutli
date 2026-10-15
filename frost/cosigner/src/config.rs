@@ -90,6 +90,13 @@ pub struct HostedKeysConfig {
     /// The default is deliberately far above real traffic (100/s sustained on a single key), so it
     /// caps bulk exfiltration without shaping normal load. Raise it if a legitimate node warns that
     /// it is approaching the ceiling; the warning fires well before requests start failing.
+    ///
+    /// **Per node, not per cluster.** Each cosigner keeps its own buckets and nodes share no limiter
+    /// state, so a holder of the driver certificate who calls every node directly gets `n` times
+    /// this budget per key (n = cosigners serving hosted keys). The driver itself sends a key's
+    /// traffic to one preferred leader at a time, so this value must cover the full legitimate rate
+    /// on one node. Size it as `cluster_budget / n`, and check that this still clears the legitimate
+    /// peak with headroom; the effective cluster-wide ceiling is `n ×` this value.
     #[serde(default = "default_decrypt_rate_limit")]
     pub decrypt_rate_limit_per_min: u32,
 }
