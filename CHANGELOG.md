@@ -135,6 +135,11 @@ All notable changes to Rütli are documented here. Format loosely follows
   reads absent instead of returning an error. Docs say it is the nodes' self-report.
 - The driver logs a startup WARN for each approval quorum rule on `<p>frost-import-` that would
   also hold carried protocol keys (`<p>frost-import-sig-…` / `…-seqauth-…`).
+- Operator-supplied fingerprints (`--expect-fingerprint`, `--namespace-fingerprint`) are
+  normalised once (trimmed, lower case, `1220` + 64 hex checked) by the dealer, `import-share`,
+  `verify-key`, `verify-hosted` and `import-key`; an upper-case paste no longer refuses the right key.
+- Key-store files are written `0600` and the key directory is `0700` whatever the umask, also with
+  sealing off.
 - `docs/migration.md` §8: a gate before the split — no namespace delegation may name a carried
   key as its target (`--namespace-fingerprint` excludes only the root).
 
