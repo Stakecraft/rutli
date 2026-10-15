@@ -102,15 +102,30 @@ fn verify_key_reports_the_tls_alert_when_a_node_refuses_an_old_ca_certificate() 
             .unwrap();
         (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned())
     };
-    // The old-CA operator leaf, trusting the bundle (so the client side accepts the server).
-    let (ok, refused) = verify(&config(dir, port, "client-old", "bundle.crt", "old-operator"));
-    // The new-CA operator leaf gets through TLS (the key is simply absent).
+    let node_line = |out: &str| out.lines().find(|l| l.starts_with("  node 1 ")).unwrap_or_default().to_string();
+    // The old-CA operator leaf, trusting the bundle (so the client side accepts the server). In
+    // TLS 1.3 the node's alert races the client's first request, and the RPC error alone said
+    // "connection closed" / "broken pipe" in about half the runs; the TLS probe must make the alert
+    // show every time, so ask several times.
+    let old = config(dir, port, "client-old", "bundle.crt", "old-operator");
+    for _ in 0..5 {
+        let (ok, refused) = verify(&old);
+        assert!(!ok);
+        let line = node_line(&refused);
+        eprintln!("refused: {line}");
+        assert!(line.contains("UnknownCA"), "the TLS alert must be in the output: {refused}");
+    }
+    // The new-CA operator leaf gets through TLS (the key is simply absent): no probe detail.
     let (_, through) = verify(&config(dir, port, "client-new", "bundle.crt", "new-operator"));
     let _ = node.kill();
     let _ = node.wait();
-
-    assert!(!ok);
-    let line = refused.lines().find(|l| l.starts_with("  node 1 ")).unwrap_or_default();
-    assert!(line.contains("UnknownCA"), "the TLS alert must be in the output: {refused}");
     assert!(through.contains("unknown key id") && !through.contains("UnknownCA"), "{through}");
+    assert!(!through.contains("TLS probe"), "{through}");
+
+    // A node that is down is reported as unreachable, with no TLS detail made up for it.
+    let (ok, down) = verify(&old);
+    let line = node_line(&down);
+    eprintln!("down: {line}");
+    assert!(!ok);
+    assert!(line.contains("unreachable") && !line.contains("TLS probe") && !line.contains("UnknownCA"), "{down}");
 }

@@ -83,6 +83,18 @@ fn tls_files(dir: &Path, name: &str, issuer: &Ca, cn: &str, trust: &[&Ca]) -> Tl
 /// `NodeInfo`. Returns the identifier node 1 reported, or the failure (its `Debug`, which carries
 /// the TLS alert).
 async fn node_info(dir: &Path, server: &TlsConfig, client: &TlsConfig) -> Result<u16, String> {
+    let (endpoint, serving) = serve(dir, server).await;
+    let client_tls = rutli_cosigner::tls::load(client).unwrap();
+    let peer =
+        GrpcPeer::connect_lazy(Identifier::try_from(1u16).unwrap(), &endpoint, Some(client_tls.client)).unwrap();
+    let result = peer.node_info().await.map(|(id, _)| id).map_err(|e| format!("{e:?}"));
+    serving.abort();
+    result
+}
+
+/// Node 1 serving the Peer API with `server`'s TLS on 127.0.0.1: its endpoint, and the task to
+/// abort.
+async fn serve(dir: &Path, server: &TlsConfig) -> (String, tokio::task::JoinHandle<()>) {
     let sealer = Arc::new(Sealer::from_master_secret(MASTER, 1));
     let ks = KeyStore::open_with_sealer(dir.join("node-1"), Some(sealer)).unwrap();
     let node = Arc::new(
@@ -94,7 +106,6 @@ async fn node_info(dir: &Path, server: &TlsConfig, client: &TlsConfig) -> Result
     let svc = PeerSvc { node, allowed_cns: Some(peer_cns) };
 
     let server_tls = rutli_cosigner::tls::load(server).unwrap();
-    let client_tls = rutli_cosigner::tls::load(client).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let endpoint = format!("https://{}", listener.local_addr().unwrap());
     let serving = tokio::spawn(async move {
@@ -105,12 +116,37 @@ async fn node_info(dir: &Path, server: &TlsConfig, client: &TlsConfig) -> Result
             .serve_with_incoming(TcpListenerStream::new(listener))
             .await;
     });
+    (endpoint, serving)
+}
 
-    let peer =
-        GrpcPeer::connect_lazy(Identifier::try_from(1u16).unwrap(), &endpoint, Some(client_tls.client)).unwrap();
-    let result = peer.node_info().await.map(|(id, _)| id).map_err(|e| format!("{e:?}"));
+/// `verify-key`'s TLS probe (Phase D's negative control): the node's refusal is reported every
+/// time, with no race against a request (there is none), and a node that accepts the client — or
+/// is not there — yields nothing.
+#[tokio::test]
+async fn the_tls_probe_reports_how_a_node_refuses_a_client_and_nothing_otherwise() {
+    use rutli_cosigner::tls_probe::TlsProbe;
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let (old, new) = (Ca::new("old-ca"), Ca::new("new-ca"));
+    // Phase D: the node trusts only the new CA.
+    let s = tls_files(dir, "s", &new, "cosigner1", &[&new]);
+    let (endpoint, serving) = serve(dir, &s).await;
+
+    let old_client = TlsProbe::new(&tls_files(dir, "c-old", &old, "operator", &[&old, &new])).unwrap();
+    for _ in 0..20 {
+        let r = old_client.refusal(&endpoint).await;
+        assert!(r.as_deref().is_some_and(|r| r.contains("received fatal alert: UnknownCA")), "{r:?}");
+    }
+    let new_client = TlsProbe::new(&tls_files(dir, "c-new", &new, "operator", &[&old, &new])).unwrap();
+    assert_eq!(new_client.refusal(&endpoint).await, None, "an accepted client is not refused");
+    // The client side refusing the node (it trusts only the old CA) is a handshake failure.
+    let old_trust = TlsProbe::new(&tls_files(dir, "c-oldtrust", &old, "operator", &[&old])).unwrap();
+    let r = old_trust.refusal(&endpoint).await;
+    assert!(r.as_deref().is_some_and(|r| r.contains("handshake failed") && r.contains("UnknownIssuer")), "{r:?}");
+
     serving.abort();
-    result
+    let _ = serving.await;
+    assert_eq!(old_client.refusal(&endpoint).await, None, "a node that is down has no TLS detail");
 }
 
 #[tokio::test]
