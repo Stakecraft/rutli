@@ -532,6 +532,7 @@ async fn verify_key_command(
     use rutli_cosigner::verify_key::{check_views, sign_test_plan, NodeView};
 
     let client_tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose()?.map(|t| t.client);
+    let probe = cfg.tls.as_ref().map(rutli_cosigner::tls_probe::TlsProbe::new).transpose()?;
     let mut peers = cfg.peers.clone();
     peers.sort_by_key(|p| p.identifier);
     let roster: Vec<u16> = peers.iter().map(|p| p.identifier).collect();
@@ -541,13 +542,11 @@ async fn verify_key_command(
     for p in &peers {
         let client = signer_client(&p.endpoint, client_tls.clone()).await;
         let status = match &client {
-            Ok(c) => c
-                .clone()
-                .key_status(KeyStatusRequest { key_id: key_id.to_string() })
-                .await
-                .map(|r| r.into_inner())
-                .map_err(|s| status_text(&s)),
-            Err(e) => Err(format!("unreachable: {}", error_chain(e))),
+            Ok(c) => match c.clone().key_status(KeyStatusRequest { key_id: key_id.to_string() }).await {
+                Ok(r) => Ok(r.into_inner()),
+                Err(s) => Err(explain_status(&s, probe.as_ref(), &p.endpoint).await),
+            },
+            Err(e) => Err(explain_unreachable(e, probe.as_ref(), &p.endpoint).await),
         };
         views.push(NodeView { identifier: p.identifier, endpoint: p.endpoint.clone(), status });
         clients.push((p.identifier, client));
@@ -558,21 +557,26 @@ async fn verify_key_command(
         if report.ok {
             // Every t-subset, leader rotating: every share and every possible quorum is exercised.
             let clients: std::collections::BTreeMap<u16, _> = clients.into_iter().collect();
+            let endpoints: std::collections::BTreeMap<u16, &str> =
+                peers.iter().map(|p| (p.identifier, p.endpoint.as_str())).collect();
             for (leader, signers) in sign_test_plan(&roster, cfg.threshold) {
+                let endpoint = endpoints[&leader];
                 let result = match &clients[&leader] {
-                    Ok(c) => c
+                    Ok(c) => match c
                         .clone()
                         .ceremony_sign_test(CeremonySignTestRequest {
                             key_id: key_id.to_string(),
                             signers: signers.iter().map(|&s| u32::from(s)).collect(),
                         })
                         .await
-                        .map(|r| {
+                    {
+                        Ok(r) => {
                             let r = r.into_inner();
-                            (r.message, r.signature)
-                        })
-                        .map_err(|s| status_text(&s)),
-                    Err(e) => Err(format!("unreachable: {}", error_chain(e))),
+                            Ok((r.message, r.signature))
+                        }
+                        Err(s) => Err(explain_status(&s, probe.as_ref(), endpoint).await),
+                    },
+                    Err(e) => Err(explain_unreachable(e, probe.as_ref(), endpoint).await),
                 };
                 report.record_signature(leader, &signers, result);
             }
@@ -646,6 +650,53 @@ fn status_text(s: &tonic::Status) -> String {
     let mut out = format!("{:?}: {}", s.code(), s.message());
     append_sources(&mut out, std::error::Error::source(s));
     out
+}
+
+/// [`status_text`], plus — for a transport failure (a status with an error behind it; a status the
+/// node *sent* has none) — how the node refuses this client at the TLS layer, if it does. The RPC
+/// error alone may say only "connection closed" or "broken pipe" where the node sent `UnknownCA`
+/// (a TLS 1.3 race, see [`rutli_cosigner::tls_probe`]).
+async fn explain_status(
+    s: &tonic::Status,
+    probe: Option<&rutli_cosigner::tls_probe::TlsProbe>,
+    endpoint: &str,
+) -> String {
+    let text = status_text(s);
+    if std::error::Error::source(s).is_none() {
+        return text;
+    }
+    with_tls_refusal(text, probe, endpoint).await
+}
+
+/// `unreachable: …` for a failed connect, plus the node's TLS refusal if it gives one.
+async fn explain_unreachable(
+    e: &DaemonError,
+    probe: Option<&rutli_cosigner::tls_probe::TlsProbe>,
+    endpoint: &str,
+) -> String {
+    let text = format!("unreachable: {}", error_chain(e));
+    match e {
+        DaemonError::Transport(_) => with_tls_refusal(text, probe, endpoint).await,
+        _ => text,
+    }
+}
+
+async fn with_tls_refusal(
+    text: String,
+    probe: Option<&rutli_cosigner::tls_probe::TlsProbe>,
+    endpoint: &str,
+) -> String {
+    // The RPC already carried the alert: nothing to add.
+    if text.contains("fatal alert") {
+        return text;
+    }
+    match probe {
+        Some(p) => match p.refusal(endpoint).await {
+            Some(r) => format!("{text} (TLS probe: {r})"),
+            None => text,
+        },
+        None => text,
+    }
 }
 
 /// An error and every error behind it, `a: b: c`, skipping a source already in the text.

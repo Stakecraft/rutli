@@ -49,6 +49,9 @@ libc = { workspace = true }
 ed25519-dalek = { workspace = true }
 # PEM bodies of the mTLS cert/key that sign split-ceremony recipient requests (request_auth.rs).
 base64 = { workspace = true }
+# verify-key's TLS probe (tls_probe.rs).
+tokio-rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }
