@@ -674,8 +674,8 @@ async fn verify_hosted_command(cfg: &Config, key_id: &str, expect_fingerprint: &
                 .hosted_key_status(HostedKeyStatusRequest { key_id: key_id.to_string() })
                 .await
                 .map(|r| r.into_inner())
-                .map_err(|s| format!("{:?}: {}", s.code(), s.message())),
-            Err(e) => Err(format!("unreachable: {e}")),
+                .map_err(|s| status_text(&s)),
+            Err(e) => Err(format!("unreachable: {}", error_chain(&e))),
         };
         views.push(HostedView { identifier: p.identifier, endpoint: p.endpoint.clone(), status });
     }
