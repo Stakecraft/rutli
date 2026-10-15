@@ -1,5 +1,7 @@
 # Roadmap: migrating existing Canton nodes into Rütli
 
+> This is the detailed Track B record; the current roadmap is [roadmap.md](roadmap.md).
+
 **Status:** draft, 2026-10-08. **Owner:** Alex, with Claude as orchestrator; one engineer, sequential. **Goal:** show that a Splice validator that exists
 today, with its keys in Postgres, can move its identity into a Rütli cluster without changing its
 namespace or any party ID.
