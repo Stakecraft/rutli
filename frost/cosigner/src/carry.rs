@@ -179,7 +179,12 @@ pub fn check_dealer_usage(
         }),
         // Normalised so that an upper-cased copy of the key's own fingerprint cannot pass protocol
         // mode's "differs" check, and so that the AAD binds one spelling.
-        namespace_fingerprint: namespace_fingerprint.map(|s| s.trim().to_ascii_lowercase()),
+        namespace_fingerprint: namespace_fingerprint
+            .map(|s| {
+                crate::share_delivery::canonical_fingerprint(s)
+                    .map_err(|e| refuse(format!("--namespace-fingerprint: {e}")))
+            })
+            .transpose()?,
     };
     check_carried_id(key_id, key_fingerprint, &carried)?;
     Ok(carried)

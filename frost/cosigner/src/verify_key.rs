@@ -186,6 +186,15 @@ pub fn check_views(
     views: &[NodeView],
 ) -> VerifyReport {
     let mut problems = Vec::new();
+    // Canonical (trimmed, lower case) like every fingerprint computed here; a malformed one is a
+    // problem of its own and matches nothing.
+    let expected_fingerprint = match crate::share_delivery::canonical_fingerprint(expected_fingerprint) {
+        Ok(fp) => fp,
+        Err(e) => {
+            problems.push(format!("--expect-fingerprint: {e}"));
+            expected_fingerprint.trim().to_string()
+        }
+    };
     let mut rows = Vec::new();
     let expected_ids: BTreeSet<u16> = roster.iter().copied().collect();
     let seen_ids: BTreeSet<u16> = views.iter().map(|v| v.identifier).collect();
@@ -230,7 +239,7 @@ pub fn check_views(
                     s.carried_for.clone(),
                     s.recorded_usage.clone(),
                 ));
-                if let Err(e) = check_one(v.identifier, s, expected_fingerprint, roster, threshold, &mut row) {
+                if let Err(e) = check_one(v.identifier, s, &expected_fingerprint, roster, threshold, &mut row) {
                     problems.push(format!("node {}: {e}", v.identifier));
                 }
                 digests.insert(row.pkp_digest.clone());
@@ -259,7 +268,7 @@ pub fn check_views(
     };
     VerifyReport {
         key_id: key_id.into(),
-        expected_fingerprint: expected_fingerprint.into(),
+        expected_fingerprint,
         ok: problems.is_empty(),
         problems,
         group_verifying_key: single(&groups),
@@ -378,6 +387,12 @@ mod tests {
         assert!(r.agreed_group_key().is_some());
         assert_eq!(r.refresh_count, Some(0));
         assert_eq!((r.carried_for.as_deref(), r.recorded_usage.as_deref()), (Some("namespace"), Some("namespace")));
+        // The operator's fingerprint is compared in canonical form (Codex L2).
+        let r = check_views(KEY, &format!(" {} ", fp.to_uppercase()), &[1, 2, 3], 2, &v);
+        assert!(r.ok, "{:?}", r.problems);
+        assert_eq!(r.expected_fingerprint, fp);
+        let r = check_views(KEY, "1220zz", &[1, 2, 3], 2, &v);
+        assert!(!r.ok && r.problems.iter().any(|p| p.contains("not a 1220")), "{:?}", r.problems);
     }
 
     #[test]

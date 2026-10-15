@@ -293,6 +293,17 @@ fn split_key_writes_one_sealed_bundle_per_node_and_a_public_record() {
     refused(&c.dealer("namespace.export-pw.bin", &fp, &["--password-env", PASSWORD_ENV, SWAP]), "exists");
 }
 
+/// Codex L2: the expected fingerprint is compared in canonical form, so the operator may paste it
+/// in upper case; a malformed one is refused before anything is read.
+#[test]
+fn an_upper_case_expected_fingerprint_is_the_same_fingerprint() {
+    let fp = fingerprint_of("namespace");
+    let c = Ceremony::new();
+    refused(&c.dealer("namespace.export.bin", "1220zz", &[SWAP]), "not a 1220");
+    ok(&c.dealer("namespace.export.bin", &format!(" {} ", fp.to_uppercase()), &[SWAP]));
+    assert_eq!(c.record()["canton_fingerprint"], fp.as_str());
+}
+
 #[test]
 fn stored_rows_work_in_binary_and_as_psql_hex() {
     let fp = fingerprint_of("namespace");

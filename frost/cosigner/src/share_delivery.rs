@@ -377,6 +377,19 @@ pub fn share_aad(
     wrap::aad(cluster_id, key_id, SHARE_SPEC, recipient, &extra)
 }
 
+/// An operator-supplied Canton fingerprint in its canonical form: trimmed, lower case, and checked
+/// to be `1220` + 64 hex digits. Every `--expect-fingerprint` / `--namespace-fingerprint` goes
+/// through this once, at the command boundary, so comparisons are always canonical-to-canonical
+/// (the fingerprints this crate computes are lower case).
+pub fn canonical_fingerprint(input: &str) -> Result<String> {
+    let fp = input.trim().to_ascii_lowercase();
+    if fp.len() == 68 && fp.starts_with("1220") && fp.chars().all(|c| c.is_ascii_hexdigit()) {
+        Ok(fp)
+    } else {
+        Err(DaemonError::Ceremony(format!("{input:?} is not a 1220… Canton fingerprint (68 hex digits)")))
+    }
+}
+
 /// The Canton fingerprint of an Ed25519 group key.
 pub fn ed25519_fingerprint(group_verifying_key: &[u8; 32]) -> String {
     rutli_canton_key::fingerprint(&rutli_canton_key::PublicKey::Ed25519(*group_verifying_key))
