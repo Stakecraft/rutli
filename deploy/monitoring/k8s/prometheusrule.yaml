@@ -191,7 +191,7 @@ spec:
       annotations:
         summary: "R\xFCtli is refusing hosted-key decryptions on {{ $labels.instance }} (rate limit)"
         description: "{{ $labels.instance }} has refused hosted-key decryptions for at least 5 minutes\
-          \ because a key hit hosted_keys.decrypt_rate_limit_per_min (default 6000/min per key). In normal\
+          \ because a key hit hosted_keys.decrypt_rate_limit_per_min (default 6000/min per key, enforced per node). In normal\
           \ operation this counter never moves: the default is ~100 decryptions per second sustained on\
           \ a SINGLE key, far above what a Canton participant does. Two readings. (1) Legitimate growth\
           \ \u2014 the cosigner logs 'approaching its rate limit' with the key id before it starts refusing,\
