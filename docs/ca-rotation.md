@@ -535,6 +535,15 @@ vk old-driver > $R/neg.txt 2>&1; rc=$?; cat $R/neg.txt     # no pipe: $rc is ver
 A binary older than that prints only `transport error`, and this check STOPs; use the release's
 binary (4.2).
 
+In TLS 1.3 the node's alert races the client's first request, so the RPC error itself may read
+`connection closed` or `broken pipe` instead of the alert. `verify-key` then probes the node with a
+bare handshake and appends what the node answered, e.g. `… connection closed (TLS probe: refused
+after the handshake: received fatal alert: UnknownCA)`; the grep above matches either form. A line
+with `connection closed` and **no** `(TLS probe: …)` means the probe got no refusal: the node
+accepted the certificate or did not answer. That is a STOP: the node is down or still trusts the
+old CA. Check it with `vk op-new` and the node's logs before going on. Binaries without the probe
+print the bare `connection closed` about half the time: re-run, or use the release's binary.
+
 On `shared`, the Secret still carries the old `driver.crt`/`driver.key`. The cosigners never used
 them. After confirming nothing else reads them (the NAAS `rutli-prereqs.sh` copied them once into
 the PVC bundle), remove them:
