@@ -175,6 +175,8 @@ pub fn import_share(
     expect_fingerprint: &str,
     dry_run: bool,
 ) -> Result<ImportReport> {
+    let expect_fingerprint = share_delivery::canonical_fingerprint(expect_fingerprint)?;
+    let expect_fingerprint = expect_fingerprint.as_str();
     // 1. Format.
     if bundle.kind != BUNDLE_KIND
         || bundle.v != BUNDLE_VERSION
@@ -591,6 +593,12 @@ mod tests {
         assert!(!n.keystore.exists(KEY));
         assert!(share_delivery::recipient_path(&n.ctx.data_dir, KEY).unwrap().exists());
 
+        // An upper-case (or padded) --expect-fingerprint is the same fingerprint (Codex L2); a
+        // malformed one is refused as such.
+        let upper = format!(" {} ", fingerprint().to_uppercase());
+        let dry = import_share(&n.ctx, &n.keystore, &n.sealer, &bundles[0], &upper, true).unwrap();
+        assert_eq!((dry.outcome, dry.canton_fingerprint.as_str()), ("dry-run", fingerprint().as_str()));
+        assert_ceremony_err(import_share(&n.ctx, &n.keystore, &n.sealer, &bundles[0], "1220ab", true), "not a 1220");
         let done = n.import(&bundles[0], false).unwrap();
         assert_eq!(done.outcome, "installed");
         assert_eq!(done.canton_fingerprint, fingerprint());

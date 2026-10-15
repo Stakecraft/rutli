@@ -73,11 +73,14 @@ pub fn check_hosted_views(
     roster: &[u16],
     views: &[HostedView],
 ) -> HostedReport {
-    let expected = expected_fingerprint.trim().to_ascii_lowercase();
     let mut problems = Vec::new();
-    if !(expected.len() == 68 && expected.starts_with("1220") && expected.chars().all(|c| c.is_ascii_hexdigit())) {
-        problems.push(format!("--expect-fingerprint {expected:?} is not a 1220… Canton fingerprint"));
-    }
+    let expected = match crate::share_delivery::canonical_fingerprint(expected_fingerprint) {
+        Ok(fp) => fp,
+        Err(e) => {
+            problems.push(format!("--expect-fingerprint: {e}"));
+            expected_fingerprint.trim().to_string()
+        }
+    };
     let expected_ids: BTreeSet<u16> = roster.iter().copied().collect();
     let seen_ids: BTreeSet<u16> = views.iter().map(|v| v.identifier).collect();
     if seen_ids != expected_ids || views.len() != roster.len() {

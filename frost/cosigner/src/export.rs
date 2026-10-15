@@ -302,7 +302,8 @@ pub fn import_canton(
     use rutli_canton_key::{KeyPurpose, KeySpec, PrivateKeyMaterial, Source};
 
     let refuse = |msg: String| DaemonError::Config(format!("Canton key import: {msg}"));
-    let expect = expect_fingerprint.trim().to_ascii_lowercase();
+    let expect = crate::share_delivery::canonical_fingerprint(expect_fingerprint)
+        .map_err(|e| refuse(format!("--expect-fingerprint: {e}")))?;
     let parsed = rutli_canton_key::parse(input, password)
         .map_err(|e| refuse(format!("cannot read the key: {e}")))?;
 

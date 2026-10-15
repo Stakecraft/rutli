@@ -245,10 +245,8 @@ fn split_key(a: SplitKey) -> Result<()> {
     // The id must be of the class the operator says the key is, before any secret is read.
     let expect_usage = CarriedFor::parse(&a.expect_usage)?;
     carry::check_id_class(&a.key_id, expect_usage)?;
-    let expect = a.expect_fingerprint.trim().to_string();
-    if !(expect.len() == 68 && expect.starts_with("1220") && expect.chars().all(|c| c.is_ascii_hexdigit())) {
-        return Err(refuse(format!("--expect-fingerprint {expect:?} is not a 1220… Canton fingerprint")));
-    }
+    let expect = share_delivery::canonical_fingerprint(&a.expect_fingerprint)
+        .map_err(|e| refuse(format!("--expect-fingerprint: {e}")))?;
     if let Some(id) = &a.cluster_id {
         rutli_cosigner::wrap::check_cluster_id(id).map_err(|e| match e {
             DaemonError::Config(msg) => refuse(format!("--cluster-id: {msg}")),
@@ -328,7 +326,7 @@ fn split_key(a: SplitKey) -> Result<()> {
         )));
     }
     let fingerprint = key.fingerprint();
-    if fingerprint != expect || key.canton_id.as_ref().is_some_and(|id| *id != expect) {
+    if fingerprint != expect || key.canton_id.as_ref().is_some_and(|id| id.to_ascii_lowercase() != expect) {
         return Err(refuse(format!(
             "this key's fingerprint is {fingerprint}, not the expected {expect} — wrong key file"
         )));
