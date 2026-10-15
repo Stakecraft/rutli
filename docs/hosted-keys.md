@@ -180,6 +180,15 @@ skips what it cannot parse, `KeyInfo` says `exists: false`) — the shape that e
      `ec-failover=<from>→<to> reason=…`. RSA, AES and FROST keys keep the old rule: `NOT_FOUND` is
      authoritative. The driver re-asks `Capabilities` after 60 s while any node was silent, so a
      returning old node also stops new EC keys being routed to the cluster.
+   - The same goes for a cosigner that holds the key id but **wrong EC material** (a stale or
+     corrupt replica): its `EcdhDerive` succeeds with a well-formed but wrong shared secret, and the
+     driver's MAC/padding check fails. An `EcdhDerive` only counts once its shared secret has
+     opened the ciphertext, so the driver then asks the next cosigner (`ec-failover=… reason=
+     ECIES_AFTER_ECDH`) and does not make the bad node the preferred leader; the decrypt fails
+     (`ecies-failure=after-ecdh`) only if no cosigner's shared secret opens it. The cost of that,
+     for a genuinely forged ciphertext, is bounded: at most **one `EcdhDerive` per roster entry**
+     (n calls, never a retry loop), each charged to that node's decryption rate limit (section 5).
+     A rate-limit refusal (`RESOURCE_EXHAUSTED`) is never routed around: it is surfaced at once.
 
 ```hocon
 crypto {
