@@ -220,8 +220,11 @@ pub fn check_id_class(key_id: &str, expect: CarriedFor) -> Result<ImportIdClass>
 ///   `signing` key, a hand-initialised node), a legacy empty list, or no Canton metadata — needs
 ///   the namespace fingerprint, equal to the key's own: this key *is* the root.
 /// - **protocol**: the usage must be known (no plain PKCS#8) and include `signing` (protocol) or
-///   `sequencer-auth`. If it also includes `namespace` (Splice's `All` key, a legacy key), the
-///   namespace fingerprint is required and must *differ* from the key's.
+///   `sequencer-auth`, and the namespace fingerprint is **always** required and must *differ* from
+///   the key's. The recorded usage is advisory: it is unsigned metadata in the export (or the
+///   database row), so a namespace key whose container was altered or mislabelled to say
+///   `[signing]` would otherwise pass. The namespace read from the node's UID is the discriminator;
+///   the usage only picks the mode, the label and the operator's prompts.
 /// - A given namespace fingerprint is always checked; the id must be of the mode's class
 ///   ([`check_id_class`]); a protocol id's label must match the usage: `sig-` when it includes
 ///   `signing`, `seqauth-` for `sequencer-auth` without `signing`.
@@ -300,12 +303,18 @@ pub fn check_carried_id(key_id: &str, key_fingerprint: &str, carried: &CarriedUs
                          --expect-usage namespace under a namespace id, never as a protocol key"
                     )))
                 }
-                None if effective.contains(&SigningKeyUsage::Namespace) => {
+                None => {
+                    let why = if effective.contains(&SigningKeyUsage::Namespace) {
+                        "includes namespace"
+                    } else {
+                        "is unsigned metadata in the key file"
+                    };
                     return Err(refuse(format!(
-                        "the key's usage is {shown}, namespace included, so the usage does not \
-                         rule out that this is the namespace key. Read the old node's UID \
-                         (`<name>::<namespace>`) and pass --namespace-fingerprint <namespace>; it \
-                         must differ from this key's fingerprint"
+                        "protocol mode needs --namespace-fingerprint: the key's recorded usage \
+                         ({shown}) {why}, so it cannot rule out that this is the namespace key. \
+                         Read the old node's UID (`<name>::<namespace>`) and pass \
+                         --namespace-fingerprint <namespace>; it must differ from this key's \
+                         fingerprint"
                     )))
                 }
                 _ => {}
@@ -403,14 +412,22 @@ mod tests {
         let sig = "frost-import-sig-1220f2bd";
         let seq = "frost-import-seqauth-1220e158";
         // Canton auto-init's two keys.
-        check(CarriedFor::Protocol, sig, Some(&[Protocol, ProofOfOwnership]), None).unwrap();
-        let c = check(CarriedFor::Protocol, seq, Some(&[SequencerAuthentication, ProofOfOwnership]), None).unwrap();
+        check(CarriedFor::Protocol, sig, Some(&[Protocol, ProofOfOwnership]), Some(NS)).unwrap();
+        let c = check(CarriedFor::Protocol, seq, Some(&[SequencerAuthentication, ProofOfOwnership]), Some(NS)).unwrap();
+        // The recorded usage is unsigned metadata: protocol mode always needs the namespace, even
+        // for a key whose usage says nothing about namespace (it could be a relabelled root).
+        let e = check(CarriedFor::Protocol, sig, Some(&[Protocol, ProofOfOwnership]), None).unwrap_err();
+        assert!(e.to_string().contains("unsigned metadata"), "{e}");
+        for own in [FP.to_string(), FP.to_uppercase()] {
+            let e = check(CarriedFor::Protocol, sig, Some(&[Protocol]), Some(&own)).unwrap_err();
+            assert!(e.to_string().contains("IS the namespace"), "{e}");
+        }
         assert_eq!(c.recorded, Some(vec!["proof-of-ownership".into(), "sequencer-auth".into()]));
         // Swapped labels.
-        assert!(check(CarriedFor::Protocol, seq, Some(&[Protocol, ProofOfOwnership]), None).is_err());
-        assert!(check(CarriedFor::Protocol, sig, Some(&[SequencerAuthentication, ProofOfOwnership]), None).is_err());
+        assert!(check(CarriedFor::Protocol, seq, Some(&[Protocol, ProofOfOwnership]), Some(NS)).is_err());
+        assert!(check(CarriedFor::Protocol, sig, Some(&[SequencerAuthentication, ProofOfOwnership]), Some(NS)).is_err());
         // Never under a namespace-style id.
-        let e = check(CarriedFor::Protocol, "frost-import-1220f2bd", Some(&[Protocol]), None).unwrap_err();
+        let e = check(CarriedFor::Protocol, "frost-import-1220f2bd", Some(&[Protocol]), Some(NS)).unwrap_err();
         assert!(e.to_string().contains("namespace-style id"), "{e}");
         // Not a protocol key, or usage unknown.
         assert!(check(CarriedFor::Protocol, sig, Some(&[Namespace]), None).is_err());
@@ -421,7 +438,7 @@ mod tests {
         let all = [Namespace, SequencerAuthentication, Protocol, ProofOfOwnership];
         for usage in [&all[..], &[][..]] {
             let e = check(CarriedFor::Protocol, sig, Some(usage), None).unwrap_err();
-            assert!(e.to_string().contains("--namespace-fingerprint"), "{e}");
+            assert!(e.to_string().contains("includes namespace"), "{e}");
             for own in [FP.to_string(), FP.to_uppercase()] {
                 let e = check(CarriedFor::Protocol, sig, Some(usage), Some(&own)).unwrap_err();
                 assert!(e.to_string().contains("IS the namespace"), "{e}");
@@ -441,7 +458,7 @@ mod tests {
         };
         let all: &[&str] = &["namespace", "proof-of-ownership", "sequencer-auth", "signing"];
         check_carried_id("frost-import-x", FP, &c("namespace", Some(&["namespace"]), None)).unwrap();
-        check_carried_id("frost-import-sig-x", FP, &c("protocol", Some(&["proof-of-ownership", "signing"]), None)).unwrap();
+        check_carried_id("frost-import-sig-x", FP, &c("protocol", Some(&["proof-of-ownership", "signing"]), Some(NS))).unwrap();
         check_carried_id("frost-import-sig-x", FP, &c("protocol", Some(all), Some(NS))).unwrap();
         check_carried_id("frost-import-x", FP, &c("namespace", Some(all), Some(FP))).unwrap();
         check_carried_id("frost-import-x", FP, &c("namespace", None, Some(FP))).unwrap();
@@ -454,15 +471,16 @@ mod tests {
             ("frost-import-x", c("namespace", None, None), "--namespace-fingerprint"),
             ("frost-import-x", c("namespace", Some(all), Some(NS)), "is not the namespace"),
             ("frost-import-x", c("namespace", Some(&["signing"]), Some(FP)), "does not include namespace"),
-            ("frost-import-sig-x", c("protocol", Some(all), None), "namespace included"),
+            ("frost-import-sig-x", c("protocol", Some(all), None), "includes namespace"),
+            ("frost-import-sig-x", c("protocol", Some(&["signing"]), None), "unsigned metadata"),
             ("frost-import-sig-x", c("protocol", Some(all), Some(FP)), "IS the namespace"),
-            ("frost-import-sig-x", c("protocol", Some(&["proof-of-ownership"]), None), "neither signing"),
-            ("frost-import-x", c("protocol", Some(&["signing"]), None), "namespace-style id"),
+            ("frost-import-sig-x", c("protocol", Some(&["proof-of-ownership"]), Some(NS)), "neither signing"),
+            ("frost-import-x", c("protocol", Some(&["signing"]), Some(NS)), "namespace-style id"),
             ("frost-import-sig-x", c("namespace", Some(&["namespace"]), None), "protocol key id"),
             ("frost-import-x", c("namespace", Some(&["namespace"]), Some("1220AB")), "not a 1220"),
             ("frost-import-x", c("namespace", Some(&["namespace"]), Some(&FP.to_uppercase())), "lower case"),
             ("frost-import-x", c("root", None, None), "neither namespace nor protocol"),
-            ("frost-import-sig-x", c("protocol", Some(&["bogus"]), None), "unknown Canton key usage"),
+            ("frost-import-sig-x", c("protocol", Some(&["bogus"]), Some(NS)), "unknown Canton key usage"),
         ] {
             let e = check_carried_id(id, FP, &carried).unwrap_err().to_string();
             assert!(e.contains(needle), "{id} {carried:?}: expected {needle:?} in {e}");

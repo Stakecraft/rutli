@@ -578,8 +578,11 @@ fn protocol_keys_split_under_protocol_ids_and_the_record_says_what_they_are() {
         ("sequencer-auth", "seqauth-", ["proof-of-ownership", "sequencer-auth"]),
     ] {
         let fp = fingerprint_of(name);
+        let ns = fingerprint_of("namespace");
         let c = Ceremony::for_key(&import_id(label, &fp));
-        let args = ["--password-env", PASSWORD_ENV, "--expect-usage", "protocol", SWAP];
+        // Protocol mode always needs the old node's namespace.
+        refused(&c.dealer(&format!("{name}.export.bin"), &fp, &["--expect-usage", "protocol", SWAP]), "unsigned metadata");
+        let args = ["--password-env", PASSWORD_ENV, "--expect-usage", "protocol", "--namespace-fingerprint", &ns, SWAP];
         let out = c.dealer(&format!("{name}.export-pw.bin"), &fp, &args);
         ok(&out);
         assert!(String::from_utf8_lossy(&out.stdout).contains("carried for:   protocol"), "{name}");
@@ -597,7 +600,7 @@ fn protocol_keys_split_under_protocol_ids_and_the_record_says_what_they_are() {
 #[test]
 fn every_usage_and_id_mismatch_is_refused() {
     let (ns, sig, seq) = (fingerprint_of("namespace"), fingerprint_of("signing"), fingerprint_of("sequencer-auth"));
-    let protocol = ["--expect-usage", "protocol", SWAP];
+    let protocol = ["--expect-usage", "protocol", "--namespace-fingerprint", &ns, SWAP];
 
     // A namespace key carried as a protocol key, under a protocol id.
     let c = Ceremony::for_key(&import_id("sig-", &ns));
@@ -673,7 +676,7 @@ fn an_all_usage_key_is_only_carried_with_the_namespace_the_operator_read() {
     refused(&c.dealer_on(&splice_signing, &sig, &[SWAP]), "--namespace-fingerprint");
     refused(&c.dealer_on(&splice_signing, &sig, &["--namespace-fingerprint", &ns, SWAP]), "is not the namespace");
     let c = Ceremony::for_key(&import_id("sig-", &sig));
-    refused(&c.dealer_on(&splice_signing, &sig, &["--expect-usage", "protocol", SWAP]), "namespace included");
+    refused(&c.dealer_on(&splice_signing, &sig, &["--expect-usage", "protocol", SWAP]), "includes namespace");
     let protocol_ns = |ns: &str| ["--expect-usage", "protocol", "--namespace-fingerprint", ns, SWAP].map(String::from);
     let run = |args: [String; 5]| c.dealer_on(&splice_signing, &sig, &args.each_ref().map(String::as_str));
     refused(&run(protocol_ns(&sig)), "IS the namespace");
@@ -684,6 +687,15 @@ fn an_all_usage_key_is_only_carried_with_the_namespace_the_operator_read() {
     assert_eq!(record["recorded_usage"], serde_json::json!(all_names));
     assert_eq!(record["namespace_fingerprint"], ns.as_str());
     c.assert_reconstructs(&sig);
+
+    // Review (Codex) M1: the usage list is unsigned metadata. A namespace key whose container was
+    // relabelled to say [signing] is refused in protocol mode: the namespace is always required,
+    // and the operator's UID says it is this key.
+    let relabelled_root = file("namespace", &[4]);
+    let c = Ceremony::for_key(&import_id("sig-", &ns));
+    refused(&c.dealer_on(&relabelled_root, &ns, &["--expect-usage", "protocol", SWAP]), "unsigned metadata");
+    refused(&c.dealer_on(&relabelled_root, &ns, &["--expect-usage", "protocol", "--namespace-fingerprint", &ns, SWAP]), "IS the namespace");
+    assert!(!c.out().exists());
 
     // A root key that signs everything (a hand-initialised node), and a legacy key with no usage
     // list (Canton reads it as All): namespace mode needs the namespace to be this very key.

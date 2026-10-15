@@ -9,7 +9,8 @@ key (`rutli-dealer split-key --expect-usage protocol`, ids `<prefix>frost-import
 The default, `--expect-usage namespace`, takes a key whose recorded usage is namespace alone, and
 asks for `--namespace-fingerprint` (the old node's namespace, from its UID) wherever the usage alone
 cannot tell the namespace key from another key, such as a Splice `signing` key, whose usage
-`SigningKeyUsage.All` includes namespace. The Canton side of a migration (new participant UID in
+`SigningKeyUsage.All` includes namespace; protocol mode always asks for it, since the recorded usage
+is unsigned metadata. The Canton side of a migration (new participant UID in
 the same namespace, party move) is the B0 shape ([b0-cutover-spike.md](b0-cutover-spike.md)); the full rehearsed
 procedure is B4 (`docs/migration.md`).
 

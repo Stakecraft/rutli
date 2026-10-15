@@ -628,7 +628,7 @@ mod tests {
             recorded: Some(recorded.iter().map(|s| s.to_string()).collect()),
             namespace_fingerprint: ns,
         };
-        protocol.usage = Some(carried("protocol", &["signing"], None));
+        protocol.usage = Some(carried("protocol", &["signing"], Some(format!("1220{}", "ab".repeat(32)))));
         assert_ceremony_err(nodes[1].import(&protocol, true), "namespace-style id");
         // A modified dealer's bundle the real one would refuse: refused here too, before decryption.
         // All usage, no namespace acknowledgement (could be a Splice signing key, not the root):

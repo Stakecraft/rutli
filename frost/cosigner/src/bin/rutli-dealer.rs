@@ -79,11 +79,12 @@ enum Command {
         /// sequencer-auth, under a `…frost-import-sig-…` / `…frost-import-seqauth-…` id.
         #[arg(long, default_value = "namespace", value_parser = ["namespace", "protocol"])]
         expect_usage: String,
-        /// The old node's namespace, read from its UID (`<name>::<namespace>`). Required where the
-        /// usage alone cannot tell the namespace key from another key — a namespace key with more
-        /// usages than namespace (a Splice `signing` key has all of them) or plain PKCS#8, and a
-        /// protocol key whose usage includes namespace. It must equal the key's fingerprint for
-        /// `--expect-usage namespace` and differ from it for `protocol`; checked whenever given.
+        /// The old node's namespace, read from its UID (`<name>::<namespace>`). Always required for
+        /// `--expect-usage protocol`, where it must differ from the key's fingerprint: the key's
+        /// recorded usage is unsigned metadata and cannot rule out the namespace key. For
+        /// `namespace`, required where the usage is not namespace alone (a Splice `signing` key has
+        /// all usages, an empty list reads as all, plain PKCS#8 has none) and must equal the key's
+        /// fingerprint. Checked whenever given.
         #[arg(long)]
         namespace_fingerprint: Option<String>,
         /// Signing threshold t. Must equal every recipient's.
