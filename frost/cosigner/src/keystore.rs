@@ -93,9 +93,21 @@ impl KeyStore {
     /// Open the store with optional share sealing. With a sealer, every write is encrypted
     /// (AES-256-GCM envelope). Call [`reseal_plaintext_shares`] after open to migrate any legacy
     /// plaintext files immediately. Without a sealer, reading a sealed share fails loudly.
+    ///
+    /// The directory is made owner-only (`0700`) if it is not already, and every key file is
+    /// written `0600` ([`private_file`]) — sealed or not: an unsealed (dev) store holds plaintext
+    /// shares, and the process umask must never decide who can read them.
     pub fn open_with_sealer(dir: impl Into<PathBuf>, sealer: Option<Arc<Sealer>>) -> Result<Self> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dir)?.permissions().mode();
+            if mode & 0o077 != 0 {
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
+            }
+        }
         Ok(Self { dir, sealer, io_hook: None })
     }
 
@@ -214,7 +226,7 @@ impl KeyStore {
         // A dotfile: never a key file (ids are [A-Za-z0-9_-]+), skipped by backup and the probe.
         let tmp = self.dir.join(format!("{CREATE_TMP_PREFIX}{key_id}-{}.tmp", uuid::Uuid::new_v4()));
         {
-            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+            let mut f = private_file(&tmp, true)?;
             f.write_all(&bytes)?;
             f.sync_all()?;
         }
@@ -305,7 +317,7 @@ impl KeyStore {
         // survives power loss as durably as the nonce store (which already fsyncs). Without this a
         // crash right after DKG could lose the just-generated share while peers kept theirs.
         {
-            let mut f = std::fs::File::create(&tmp)?;
+            let mut f = private_file(&tmp, false)?;
             f.write_all(&bytes)?;
             f.sync_all()?;
         }
@@ -605,10 +617,64 @@ fn sweep_stale_probe(path: &Path) {
     }
 }
 
+/// Open a key-store file for writing, owner-only (`0600`) before any byte lands, whatever the
+/// umask. `create_new`: fail if it exists (the create-once temps); otherwise create or truncate (the
+/// save temp), and re-apply `0600` in case a leftover file had another mode. The final key file is
+/// this temp renamed, so it keeps the mode.
+fn private_file(path: &Path, create_new: bool) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true);
+    if create_new {
+        opts.create_new(true);
+    } else {
+        opts.create(true).truncate(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let f = opts.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(f)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::hosted::{HostedKey, HostedSpec};
+
+    /// Codex L3: key files are 0600 and the directory 0700 even with sealing off and a permissive
+    /// directory to start from — through create (DKG, import-share, hosted create) and save
+    /// (refresh, hosted save), including over a leftover temp with another mode.
+    #[cfg(unix)]
+    #[test]
+    fn key_files_are_owner_only_even_unsealed() {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("keys");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let ks = store(&tmp, false);
+        assert_eq!(mode(&dir), 0o700);
+
+        ks.create("frost-a", &dealt_share(None)).unwrap();
+        let leftover = dir.join("frost-b.json.tmp");
+        std::fs::write(&leftover, b"stale").unwrap();
+        std::fs::set_permissions(&leftover, std::fs::Permissions::from_mode(0o644)).unwrap();
+        ks.save("frost-b", &dealt_share(None)).unwrap();
+        let key = HostedKey::generate(HostedSpec::EcP256, 1).unwrap();
+        ks.create_hosted("rutli-c", &key).unwrap();
+        ks.save_hosted("rutli-d", &key).unwrap();
+        for f in ["frost-a", "frost-b", "rutli-c", "rutli-d"] {
+            assert_eq!(mode(&dir.join(format!("{f}.json"))), 0o600, "{f}");
+        }
+    }
 
     fn store(tmp: &tempfile::TempDir, sealed: bool) -> KeyStore {
         let sealer = sealed
