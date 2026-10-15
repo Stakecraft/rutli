@@ -70,7 +70,7 @@ pub fn load(cfg: &TlsConfig) -> Result<Tls> {
 /// most common cause is a bind-mounted cert directory whose files are owned by the host user and
 /// mode 0600, while the cosigner runs as uid 10001 (Docker Desktop on macOS masks host ownership,
 /// so this only bites on Linux). Say so, with the path.
-fn read_pem(path: &std::path::Path) -> crate::Result<Vec<u8>> {
+pub(crate) fn read_pem(path: &std::path::Path) -> crate::Result<Vec<u8>> {
     std::fs::read(path).map_err(|e| {
         let hint = if e.kind() == std::io::ErrorKind::PermissionDenied {
             " — the cosigner runs as uid 10001; a bind-mounted cert file owned by another user \
