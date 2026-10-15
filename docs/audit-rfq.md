@@ -32,7 +32,8 @@ Repository state to review: tag `v0.4.0`, target ~2026-11-14, which is also our 
 else lands in the audited surface after it except audit fixes. The release candidate `v0.4.0-rc.1`
 (tagged 2026-10-09) already contains the split ceremony (B2), the Canton key parser (B1) and the
 ECIES hosted keys (Track C); it is available now for orientation and pre-reading. Between the
-candidate and `v0.4.0` we expect only milestone B6 (row g), review fixes and documentation.
+candidate and `v0.4.0` we expect milestone B6 (row h), the in-place migration procedure (row i),
+review fixes and documentation.
 
 | # | Component | Includes | Where |
 |---|---|---|---|
@@ -44,6 +45,7 @@ candidate and `v0.4.0` we expect only milestone B6 (row g), review fixes and doc
 | f | **Operational runbooks** (procedural review) | Key ceremony, split ceremony (incl. destruction of the whole key), DR/backup/restore, approval quorum, and the pilot migration runbook (`docs/migration.md`), whose steps were exercised in the DevNet B4 cutover rehearsal on 2026-10-14 | `docs/key-ceremony.md`, `docs/split-ceremony.md`, `docs/disaster-recovery.md`, `docs/approval-quorum.md`, `docs/migration.md` |
 | g | **ECIES hosted keys (Track C)** | Merged and part of `v0.4.0` (in `v0.4.0-rc.1`); no longer a separate release or optional addendum. Hosted EC-P256 keys with an `EcdhDerive` RPC on the cosigner (`aws-lc-rs`) and a driver-side ECIES decrypt path (BouncyCastle `IESEngine`, shared secret supplied by the cluster); `import-key` of a Canton EC P-256 encryption key via the B1 parser. Details and our focus questions in section 2.1 | `frost/cosigner/src/{hosted,export,service,node}.rs`, `cosigner.proto`; `driver/.../backend/{CantonEcies,FrostBackend}.scala` |
 | h | **Optional carry of protocol signing and ECIES encryption keys (milestone B6)** | **In progress** on branch `feat/b6-carry-protocol-keys`; lands before the audit code freeze (`v0.4.0`). A discouraged path: the recommended migration carries only the namespace key and gives the new node fresh keys. It touches the offline dealer's usage guard (`rutli-dealer --expect-usage`), adds a `rutli-cosigner verify-hosted` RPC/CLI, and docs. Size to be given with the freeze commit | `frost/core/src/dealer.rs`, `frost/cosigner/src/bin/rutli-dealer.rs`, `frost/cosigner` (`verify-hosted`), `docs/` |
+| i | **In-place migration of an existing node (Flow 2a)** | Procedure, targeted for `v0.4.0` after a DevNet rehearsal (milestone B8). The existing participant keeps its database and UID: all its active keys are carried into the cluster with their fingerprints (namespace via the split ceremony, protocol signing and ECIES via B6), the node is restarted with `crypto.provider = kms`, the keys are registered by KMS id before it reconnects, then rotated per the operator's choice and the old plaintext rows removed. Mostly runbook and Canton console steps, little new code; not a procedure Digital Asset documents. We want the sequence, the rollback story and the residue reviewed. |
 
 ### Approximate size
 

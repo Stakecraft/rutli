@@ -54,7 +54,8 @@ Common to both variants:
 
 #### 2a: In place (same database, same participant UID)
 
-**Status: hypothesis.** Milestone B8 rehearses it on DevNet. Not yet run.
+**Status: hypothesis, targeted for v0.4.0.** Milestone B8 rehearses it on DevNet (planned for the week of
+2026-10-19). Not yet run. Decided 2026-10-15: 2a ships in v0.4.0, before the audit, so the auditors review it.
 
 *Mechanics.* Independently checked against the Canton 3.6.1 source by two reviewers (Opus and Codex), who agree:
 
@@ -154,7 +155,7 @@ namespace and signing keys are threshold keys; the encryption key is not.
 | B5 | Docs fix (stale "unsupported" claims, exposure caveat) | Done |
 | B6 | Optional carry of signing and ECIES keys | In review: PR #23 (Opus and Codex reviews addressed) |
 | B7 | 2b rehearsal with wallet end-users: verify re-onboarding keeps their parties and balances | New, proposed |
-| B8 | In-place rehearsal (2a), both sub-approaches, on a fresh scratch JCE validator on DevNet | New |
+| B8 | In-place rehearsal (2a), carry-first sequence, on a fresh scratch JCE validator on DevNet | Planned, week of 2026-10-19; gates v0.4.0 |
 | C1 to C3 | ECIES hosted keys | Done; shipped in v0.4.0-rc.1. Codex review found two availability fixes, in PR #24 |
 | CA rotation | Pin plus runbook | In review: PR #19 |
 
@@ -168,8 +169,8 @@ Track A (soak and hardening) continues on `stakecraft-devnet-rutli-01`; exit cri
 | When | What |
 |---|---|
 | 2026-10-09 | v0.4.0-rc.1 tagged |
-| ≈ 2026-11-14 | **v0.4.0 = audit code freeze:** Flow 1, Flow 2b, B2, B6, ECIES, C2 fixes, CA rotation |
-| After B8 | **v0.5.0:** Flow 2a, or an audit addendum if the auditor agrees. The freeze does not wait for it |
+| ≈ 2026-11-14 | **v0.4.0 = audit code freeze:** Flow 1, Flow 2a (after B8), Flow 2b, B2, B6, ECIES, C2 fixes, CA rotation |
+| Later | Pre-rotate alternative for 2a (research), if B8 shows it is worth it |
 | Day v0.4.0 is tagged | Splice TestNet validator run starts; at least 4 weeks clean before 1.0 |
 | ≈ 2026-12-19 | **1.0**, only if an auditor starts ≈ 2026-11-17 |
 
@@ -182,5 +183,5 @@ Track A (soak and hardening) continues on `stakecraft-devnet-rutli-01`; exit cri
 ## Open decisions
 
 - Auditor choice and earliest start date; this sets the 1.0 date.
-- Whether 2a ships as v0.5.0 or as an audit addendum (depends on the auditor).
+- If B8 is not green by early November: ship v0.4.0 with 2a marked experimental, or slip the freeze.
 - Whether the pre-rotate alternative is worth pursuing after B8, or the carry-first path is enough.
