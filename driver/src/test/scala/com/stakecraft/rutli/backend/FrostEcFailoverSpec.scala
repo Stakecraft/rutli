@@ -167,6 +167,138 @@ class FrostEcFailoverSpec extends AnyWordSpec with Matchers {
     }
   }
 
+  /** A cosigner whose decryption budget for every key is spent. */
+  private final class RateLimited extends CryptoFakeCluster {
+    override def ecdhDerive(req: EcdhDeriveRequest, obs: StreamObserver[EcdhDeriveReply]): Unit = {
+      ecdhCalls.incrementAndGet()
+      obs.onError(Status.RESOURCE_EXHAUSTED.withDescription("hosted-key decryption rate limit").asRuntimeException())
+    }
+  }
+
+  /** Backends over an arbitrary roster, in the order given (the first one leads a fresh backend). */
+  private final class Roster(services: Seq[io.grpc.BindableService]) extends AutoCloseable {
+    private val names = services.map(_ => InProcessServerBuilder.generateName())
+    private val servers = names.zip(services).map { case (n, s) =>
+      InProcessServerBuilder.forName(n).directExecutor().addService(s).build().start()
+    }
+    val backend: FrostBackend =
+      new FrostBackend(names, new NoDelegateBackend, logger, None, 10.seconds, hostedKeys = true) {
+        override protected def buildChannel(endpoint: String): io.grpc.ManagedChannel =
+          InProcessChannelBuilder.forName(endpoint).directExecutor().build()
+      }
+    override def close(): Unit = { backend.close(); servers.foreach(_.shutdownNow()) }
+  }
+  private def withRoster[A](services: io.grpc.BindableService*)(body: Roster => A): A = {
+    val r = new Roster(services); try body(r) finally r.close()
+  }
+
+  private def p256(): java.security.KeyPair = {
+    val g = KeyPairGenerator.getInstance("EC")
+    g.initialize(new ECGenParameterSpec("secp256r1"))
+    g.generateKeyPair()
+  }
+
+  /** `count` cosigners that hold `id`; those listed in `wrong` hold a different P-256 key under it
+    * (stale or corrupt material): they answer EcdhDerive with a well-formed, wrong Z. */
+  private def replicas(id: String, kp: java.security.KeyPair, count: Int, wrong: Set[Int]): Seq[CryptoFakeCluster] =
+    (0 until count).map { i =>
+      val c = new CryptoFakeCluster; c.putEcKey(id, if (wrong(i)) p256() else kp); c
+    }
+
+  private def decryptWithNotes(b: FrostBackend, blob: Array[Byte], id: String): (scala.util.Try[Array[Byte]], String) = {
+    val notes = new com.stakecraft.rutli.audit.AuditNotes()
+    val out = scala.util.Try(await(b.withAuditNotes(notes)(b.decryptAsymmetric(blob, id, Ecies))))
+    (out, notes.render)
+  }
+
+  "an EC hosted key behind a cosigner with the wrong key material" should {
+
+    "fail over past a wrong Z, and not make that cosigner the preferred leader" in {
+      val kp = p256()
+      val Seq(bad, good) = replicas("rutli-enc-ec", kp, 2, wrong = Set(0))
+      withRoster(bad, good) { r =>
+        val msg = "past the stale replica".getBytes
+        val (out, notes) = decryptWithNotes(r.backend, cantonEncrypt(kp.getPublic, msg), "rutli-enc-ec")
+        out.get shouldBe msg
+        notes should include("reason=ECIES_AFTER_ECDH")
+        notes should include("ec-failover=")
+        notes should not include "ecies-failure="
+        bad.ecdhCalls.get shouldBe 1
+        good.ecdhCalls.get shouldBe 1
+
+        // Later decrypts lead from the node that opened the blob: the bad one is not asked again.
+        (1 to 3).foreach { _ =>
+          await(r.backend.decryptAsymmetric(cantonEncrypt(kp.getPublic, msg), "rutli-enc-ec", Ecies)) shouldBe msg
+        }
+        bad.ecdhCalls.get shouldBe 1
+        good.ecdhCalls.get shouldBe 4
+      }
+    }
+
+    "fail with the ECIES error once every cosigner's Z fails, asking each exactly once" in {
+      val kp = p256()
+      val all = replicas("rutli-enc-ec", kp, 3, wrong = Set(0, 1, 2))
+      withRoster(all: _*) { r =>
+        val (out, notes) = decryptWithNotes(r.backend, cantonEncrypt(kp.getPublic, "x".getBytes), "rutli-enc-ec")
+        an[CantonEcies.EciesException] should be thrownBy out.get
+        notes should include("ecies-failure=after-ecdh")
+        "reason=ECIES_AFTER_ECDH".r.findAllMatchIn(notes).size shouldBe 2
+        all.map(_.ecdhCalls.get) shouldBe Seq(1, 1, 1)
+      }
+    }
+
+    "bound a forged ciphertext on a healthy cluster to one EcdhDerive per cosigner" in {
+      val kp = p256()
+      val all = replicas("rutli-enc-ec", kp, 3, wrong = Set.empty)
+      withRoster(all: _*) { r =>
+        val blob = cantonEncrypt(kp.getPublic, "x".getBytes)
+        blob(blob.length - 1) = (blob(blob.length - 1) ^ 1).toByte // tag
+        val (out, notes) = decryptWithNotes(r.backend, blob, "rutli-enc-ec")
+        an[CantonEcies.EciesException] should be thrownBy out.get
+        notes should include("ecies-failure=after-ecdh")
+        all.map(_.ecdhCalls.get) shouldBe Seq(1, 1, 1)
+      }
+    }
+
+    "surface a rate limit at once, with no failover" in {
+      val kp = p256()
+      val limited = new RateLimited; limited.putEcKey("rutli-enc-ec", kp)
+      val good = new CryptoFakeCluster; good.putEcKey("rutli-enc-ec", kp)
+      withRoster(limited, good) { r =>
+        val (out, notes) = decryptWithNotes(r.backend, cantonEncrypt(kp.getPublic, "x".getBytes), "rutli-enc-ec")
+        code(out.get) shouldBe Status.Code.RESOURCE_EXHAUSTED
+        notes should not include "failover="
+        limited.ecdhCalls.get shouldBe 1
+        good.ecdhCalls.get shouldBe 0
+      }
+    }
+
+    "surface a rate limit met after a wrong Z, not route around it" in {
+      val kp = p256()
+      val bad = new CryptoFakeCluster; bad.putEcKey("rutli-enc-ec", p256())
+      val limited = new RateLimited; limited.putEcKey("rutli-enc-ec", kp)
+      val good = new CryptoFakeCluster; good.putEcKey("rutli-enc-ec", kp)
+      withRoster(bad, limited, good) { r =>
+        val (out, _) = decryptWithNotes(r.backend, cantonEncrypt(kp.getPublic, "x".getBytes), "rutli-enc-ec")
+        code(out.get) shouldBe Status.Code.RESOURCE_EXHAUSTED
+        good.ecdhCalls.get shouldBe 0
+      }
+    }
+  }
+
+  "a forged ciphertext behind an old cosigner" should {
+    "still fail as ECIES, not as the old node's UNIMPLEMENTED" in withRig { r =>
+      val kp = r.ecKey("rutli-enc-ec")
+      val b = r.backend()
+      val blob = cantonEncrypt(kp.getPublic, "x".getBytes)
+      blob(blob.length - 1) = (blob(blob.length - 1) ^ 1).toByte
+      // Roster [old, current]: old says UNIMPLEMENTED, current's Z fails the MAC; that is the answer.
+      an[CantonEcies.EciesException] should be thrownBy await(b.decryptAsymmetric(blob, "rutli-enc-ec", Ecies))
+      r.old.ecdhCalls.get shouldBe 1
+      r.current.ecdhCalls.get shouldBe 1
+    }
+  }
+
   "an RSA hosted key" should {
 
     "keep NOT_FOUND authoritative once the driver knows the key is RSA" in withRig { r =>

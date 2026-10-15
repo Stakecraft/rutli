@@ -5,7 +5,18 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **ECIES now fails over past a cosigner that answers `EcdhDerive` with the wrong shared secret**
+  (Codex review of C2, medium, availability). The driver made an endpoint the preferred leader as
+  soon as its `EcdhDerive` RPC succeeded, before the local MAC/padding check — so one cosigner with
+  stale or corrupt EC material under the right key id failed every ECIES decrypt that led from it,
+  and stayed preferred. An `EcdhDerive` now counts only once its shared secret opens the ciphertext;
+  otherwise the next cosigner is asked (`ec-failover=… reason=ECIES_AFTER_ECDH` in the audit entry,
+  WARN in the log), the bad node is not made preferred, and the decrypt fails
+  (`ecies-failure=after-ecdh`) only if no cosigner's secret opens it. A forged ciphertext costs at
+  most one `EcdhDerive` per roster entry, each charged to that node's rate limit;
+  `RESOURCE_EXHAUSTED` is still surfaced at once, never failed over. Each cosigner's shared secret
+  is wiped on every path. No key-extraction impact.
 
 ## [0.4.0-rc.1] — 2026-10-09
 
