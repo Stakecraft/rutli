@@ -44,6 +44,9 @@ trap cleanup EXIT
 echo "==> Generating mTLS certs"
 rm -rf "$CERTS"
 scripts/gen-frost-certs.sh 3 "$CERTS"
+# Resolve the path now: gen-frost-certs.sh creates the directory 0700 (umask 077), and after the chown
+# below the runner user can no longer enter it.
+CERTS_ABS="$(cd "$CERTS" && pwd)"
 
 # The cosigner containers run as uid 10001. On Linux the bind-mounted certs keep the runner's
 # ownership, so the 0600 keys are unreadable in-container (macOS Docker masks this, which is why
@@ -70,7 +73,6 @@ echo "==> Building and starting TLS cosigner cluster"
 # Proto is mounted (no gRPC reflection on the cosigner).
 GRPC_IMG=fullstorydev/grpcurl:v1.9.3
 NETWORK="$("${COMPOSE[@]}" ps -q cosigner1 | xargs docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}')"
-CERTS_ABS="$(cd "$CERTS" && pwd)"
 PROTO_ABS="$(cd frost/cosigner/proto && pwd)"
 grpc() {
   docker run --rm --network "$NETWORK" \
