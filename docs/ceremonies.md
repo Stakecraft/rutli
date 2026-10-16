@@ -90,6 +90,12 @@ Shares of different sharings never combine, so signing is epoch-aware (audit H1,
   sharing that is not older than the leader's, the leader is the odd one out and answers
   UNAVAILABLE so the driver fails over to a node on the cluster's sharing. When no subset can
   sign, the answer is UNAVAILABLE (`could not reach signing threshold`).
+* **Session binding.** Round 1 also declares the message and the attempt's signer set; each node
+  binds its nonces to them (and to the key). A round 2 for that session with another message,
+  another commitment set, or the node's own round-1 commitment altered is refused
+  (FAILED_PRECONDITION) **before** the nonce marker burns, and the session's nonces are dropped,
+  so no share is ever released for it. Signing intents (audit C2) bind into the same hook. A
+  leader that predates binding declares nothing, and nothing beyond frost's own checks applies.
 
 ### Idempotent DKG
 

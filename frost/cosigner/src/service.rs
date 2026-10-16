@@ -581,7 +581,17 @@ impl Peer for PeerSvc {
             32 => Some((r.epoch, <[u8; 32]>::try_from(r.pkp_digest.as_slice()).expect("32 bytes"))),
             n => return Err(Status::invalid_argument(format!("pkp_digest must be 32 bytes, got {n}"))),
         };
-        let ctx = crate::node::Round1Ctx { leader_view };
+        // Empty message / signer set: a leader that predates session binding (not checked).
+        let signers = r
+            .signers
+            .iter()
+            .map(|&s| u16::try_from(s).map_err(|_| Status::invalid_argument("signer id out of range")))
+            .collect::<Result<Vec<u16>, _>>()?;
+        let ctx = crate::node::Round1Ctx {
+            leader_view,
+            message: (!r.message.is_empty()).then(|| r.message.clone()),
+            signers: (!signers.is_empty()).then_some(signers),
+        };
         let commitments = self
             .node
             .blocking(move |n| n.sign_round1(&r.key_id, &r.session_id, &ctx))

@@ -421,6 +421,8 @@ impl PeerApi for GrpcPeer {
                 session_id: session_id.into(),
                 epoch: ctx.leader_view.map(|v| v.0).unwrap_or(0),
                 pkp_digest: ctx.leader_view.map(|v| v.1.to_vec()).unwrap_or_default(),
+                message: ctx.message.clone().unwrap_or_default(),
+                signers: ctx.signers.iter().flatten().map(|&i| u32::from(i)).collect(),
             })
             .await
             .map_err(|s| crate::DaemonError::from_peer_status(s, key_id, ctx.leader_view))?

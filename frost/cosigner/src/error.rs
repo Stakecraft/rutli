@@ -203,6 +203,11 @@ impl From<DaemonError> for tonic::Status {
             DaemonError::Config(_) | DaemonError::Ceremony(_) | DaemonError::CeremonyRefused(_) => {
                 tonic::Status::failed_precondition(e.to_string())
             }
+            // A round 2 that does not match its session's round-1 binding, or a binding round 1
+            // cannot honour: the caller's request is wrong, retrying it elsewhere does not help.
+            DaemonError::Core(
+                rutli_frost_core::CoreError::BindingMismatch { .. } | rutli_frost_core::CoreError::InvalidBinding(_),
+            ) => tonic::Status::failed_precondition(e.to_string()),
             // ALREADY_EXISTS, like a DKG over an existing key: the id is taken — by the import
             // mechanism, whether or not the share has been installed yet.
             DaemonError::ReservedKeyId(_) => tonic::Status::already_exists(e.to_string()),

@@ -57,6 +57,16 @@ pub enum CoreError {
     #[error("round1 called twice for in-flight session {0} — use a fresh session id")]
     DuplicateSession(String),
 
+    /// Round 2 for a session does not match what its round 1 was bound to (key, message, signer
+    /// set, this cosigner's own commitment, or — later — the signing intent). Refused before the
+    /// nonce marker burns; the session's nonces are dropped, so no share is ever released for it.
+    #[error("round 2 for session {session} does not match its round-1 binding: {what}")]
+    BindingMismatch { session: String, what: &'static str },
+
+    /// A round-1 binding that cannot be honoured (a malformed message or signer set).
+    #[error("invalid session binding: {0}")]
+    InvalidBinding(String),
+
     #[error("ceremony called out of order: {0}")]
     InvalidCeremonyState(&'static str),
 

@@ -54,4 +54,35 @@ public interface SignRound1RequestOrBuilder extends
    * @return The pkpDigest.
    */
   com.google.protobuf.ByteString getPkpDigest();
+
+  /**
+   * <pre>
+   * Session binding: the message this session will sign (Canton's 34-byte digest) and the signer
+   * set of this attempt (configured identifiers). The node binds its round-1 nonces to them, and
+   * refuses a round 2 for the session with another message, another commitment set or its own
+   * commitment altered — before burning the nonce marker. Empty/absent from a leader that predates
+   * session binding: not checked.
+   * </pre>
+   *
+   * <code>bytes message = 7;</code>
+   * @return The message.
+   */
+  com.google.protobuf.ByteString getMessage();
+
+  /**
+   * <code>repeated uint32 signers = 8;</code>
+   * @return A list containing the signers.
+   */
+  java.util.List<java.lang.Integer> getSignersList();
+  /**
+   * <code>repeated uint32 signers = 8;</code>
+   * @return The count of signers.
+   */
+  int getSignersCount();
+  /**
+   * <code>repeated uint32 signers = 8;</code>
+   * @param index The index of the element to return.
+   * @return The signers at the given index.
+   */
+  int getSigners(int index);
 }
