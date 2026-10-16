@@ -145,9 +145,15 @@ pub fn lock_poison_recoveries() -> u64 {
     LOCK_POISON_RECOVERIES.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Max lifetime of an un-completed round-1 session before it is pruned. Comfortably longer than any
-/// real sign round-trip; a leader that hasn't finished by then has abandoned the session.
-const PENDING_TTL: Duration = Duration::from_secs(5 * 60);
+/// Max lifetime of an un-completed round-1 session: pruned after it, and refused at round 2 past it.
+/// Comfortably longer than any real sign round-trip; a leader that hasn't finished by then has
+/// abandoned the session.
+pub const PENDING_TTL: Duration = Duration::from_secs(5 * 60);
+
+/// How long a burned-session marker is kept before it may be pruned
+/// ([`NonceStore::prune_older_than`], which proves why that is safe): the pending TTL plus a
+/// margin of twice as much again.
+pub const MARKER_RETENTION: Duration = Duration::from_secs(3 * PENDING_TTL.as_secs());
 
 impl Cosigner {
     pub fn new(
@@ -247,6 +253,11 @@ impl Cosigner {
             .pending()
             .remove(session_id)
             .ok_or_else(|| CoreError::UnknownSession(session_id.to_string()))?;
+        // An entry past the TTL is dead even if no sweep removed it yet: the marker-pruning proof
+        // (NonceStore::prune_older_than) relies on no nonce older than PENDING_TTL ever signing.
+        if p.started.elapsed() >= PENDING_TTL {
+            return Err(CoreError::UnknownSession(format!("{session_id} (expired)")));
+        }
         let mismatch = |what| CoreError::BindingMismatch { session: session_id.to_string(), what };
         p.binding.check(key_id, message, commitments, intent_digest).map_err(mismatch)?;
         if commitments.get(&self.identifier()) != Some(&p.commitments) {
@@ -309,6 +320,24 @@ mod tests {
         let (shares, pkp) = crate::dealer::split_ed25519_seed(&[5; 32], &[1, 2, 3], 2).unwrap();
         let kp = frost::keys::KeyPackage::try_from(shares[0].clone()).unwrap();
         Cosigner::new(kp, pkp, NonceStore::open(dir).unwrap())
+    }
+
+    /// A session past the pending TTL never signs, even before a sweep removed it — the marker
+    /// pruning proof (`NonceStore::prune_older_than`) depends on it.
+    #[test]
+    fn round2_refuses_a_session_older_than_the_pending_ttl_without_burning() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = cosigner(tmp.path());
+        let mine = c.round1("old", SessionBinding::new("k")).unwrap();
+        let Some(long_ago) = Instant::now().checked_sub(PENDING_TTL + Duration::from_secs(1)) else {
+            return; // monotonic clock too close to its origin to backdate
+        };
+        c.pending.lock().unwrap().get_mut("old").unwrap().started = long_ago;
+        let commitments = BTreeMap::from([(c.identifier(), mine)]);
+        let err = c.round2("old", "k", &[0; 34], &commitments, None).unwrap_err();
+        assert!(matches!(err, CoreError::UnknownSession(ref s) if s.contains("expired")), "{err:?}");
+        assert!(!c.nonce_store.is_consumed("old").unwrap(), "an expired session is not burned");
+        assert_eq!(c.pending_count(), 0);
     }
 
     /// Audit L3: a panic while the session map is held must not take the cosigner down with it.

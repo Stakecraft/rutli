@@ -49,6 +49,11 @@ pub const SIGN_RETRIES: &str = "rutli_sign_retries_total";
 /// Signature shares that failed verification at aggregation (attributed to a cosigner and routed
 /// around). Any increase means a cosigner returned a bad share: alert on it.
 pub const INVALID_SIGNATURE_SHARES: &str = "rutli_invalid_signature_shares_total";
+/// Burned-session nonce markers removed past their retention (audit L4).
+pub const NONCE_MARKERS_PRUNED: &str = "rutli_nonce_markers_pruned_total";
+/// Burned-session nonce markers on this node after the last prune pass, all keys. Each costs an
+/// inode on the key volume; it stays bounded by the sign rate over the retention window.
+pub const NONCE_MARKERS: &str = "rutli_nonce_markers";
 /// Locks recovered after a panicking request poisoned them (audit L3), by `lock`. The node kept
 /// serving; the panic itself is a bug — alert on any increase and report it.
 pub const LOCK_POISON_RECOVERIES: &str = "rutli_lock_poison_recoveries_total";
@@ -137,6 +142,7 @@ fn prime() {
     metrics::counter!(EPOCH_CHECK_SKIPPED).absolute(0);
     metrics::counter!(SIGN_RETRIES).absolute(0);
     metrics::counter!(INVALID_SIGNATURE_SHARES).absolute(0);
+    metrics::counter!(NONCE_MARKERS_PRUNED).absolute(0);
     metrics::counter!(ANTI_ENTROPY_REPAIRS).absolute(0);
     metrics::counter!(ANTI_ENTROPY_CONFLICTS).absolute(0);
     metrics::gauge!(HOSTED_KEYS).set(0.0);
@@ -163,6 +169,8 @@ pub fn describe() {
     describe_gauge!(STALE_SHARE, "1 while this node's share of the key is stale (refuses to sign), else 0");
     describe_counter!(SIGN_RETRIES, "Sign attempts beyond the first (a t-subset failed; retried with another)");
     describe_counter!(INVALID_SIGNATURE_SHARES, "Signature shares that failed verification at aggregation");
+    describe_counter!(NONCE_MARKERS_PRUNED, "Burned-session nonce markers removed past their retention");
+    describe_gauge!(NONCE_MARKERS, "Burned-session nonce markers on this node after the last prune pass");
     describe_counter!(LOCK_POISON_RECOVERIES, "Locks recovered after a panicking request poisoned them, by lock");
     describe_counter!(SIGN_ABORTS, "Aborted in-flight sign sessions (one per given-up signature)");
     describe_gauge!(PENDING_SIGN_SESSIONS, "In-flight round-1 sign sessions held on this node");

@@ -549,6 +549,8 @@ async fn main() -> Result<()> {
     // Stale-share check (audit M1): compare this node's sharing of every FROST key with the peers'
     // now and every few minutes; a share found behind is refused for signing until current.
     rutli_cosigner::epoch_check::spawn(node.clone());
+    // Burned-session nonce markers past their retention (audit L4): now and every 10 minutes.
+    Node::spawn_nonce_pruner(node.clone());
 
     let allowed_cns = cfg.signer_allowlist.as_ref().map(|v| {
         Arc::new(v.iter().cloned().collect::<std::collections::HashSet<String>>())

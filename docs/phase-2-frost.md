@@ -232,16 +232,22 @@ is *the* FROST footgun. Mitigations, all mandatory:
 - Enforce canonical encoding of the group public key and `R` at the boundary.
 - Lean on the audited ZF crate's nonce API rather than hand-rolling.
 
-**Known limitation (follow-up, deliberately not changed before the audit): nonce markers are never
-pruned.** Every round 2 writes one small fsynced marker file under `data_dir/keys/<key>.nonces/`
-and nothing ever deletes them, because the marker *is* the single-use guarantee and pruning it
-safely needs a design of its own (e.g. epoch-scoped session ids). So anything that can make a node
-sign grows that directory without bound: the driver role through `Sign` (normal traffic does this
-slowly), and — since the split ceremony — the operator role through `CeremonySignTest`, which is
-therefore rate-limited per key (`ceremony_sign_test_rate_limit_per_min`, default 10/min per
-leading node; metric `rutli_ceremony_sign_test_rate_limited_total`). The limit is per leader, so
-the worst case is about `n × limit` sign tests per minute across the cluster. Watch the data
-volume's usage and inode count (observability.md); a pruning scheme is tracked for after the audit.
+**Nonce markers are pruned after 15 minutes (audit L4).** Every round 2 writes one small fsynced
+marker file under `data_dir/keys/<key>.nonces/`. A marker only matters while some in-flight
+round-1 nonces for its session could still sign, and round 2 refuses any session older than the
+5-minute pending TTL; so each node removes markers older than three times that
+(`MARKER_RETENTION`), at startup and every 10 minutes, at most 10 000 per pass, with one directory
+fsync per pass (`rutli_nonce_markers_pruned_total`, gauge `rutli_nonce_markers`). The full argument
+is on `NonceStore::prune_older_than`; in short, nonces live only in RAM and are used at most once
+regardless, and a session id seen again after its marker is gone only ever gets *fresh* nonces. The
+first prune leaves `.signed` in the key's marker directory so `discard-partial-key` still knows the
+key signed there. The marker count is now bounded by the sign rate over 15 minutes; the operator
+role's `CeremonySignTest` stays rate-limited per key (`ceremony_sign_test_rate_limit_per_min`,
+default 10/min per leading node; metric `rutli_ceremony_sign_test_rate_limited_total`), and a
+cosigner-side limit on `Sign` arrives with signing intents (audit C2). Markers never protected
+against a memory snapshot of a running cosigner being cloned (audit L7): each clone holds its own
+copy of the in-flight nonces, and with a snapshotted volume its own markers — never snapshot or
+live-migrate a running cosigner.
 
 ## Cluster-hosted keys (non-FROST material in the same cluster)
 
