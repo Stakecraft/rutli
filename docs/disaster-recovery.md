@@ -49,9 +49,12 @@ rutli-cosigner --config /etc/rutli/cosigner-2.json restore --from /secure/backup
 
 A backup holds the node's sealed key files (`keys/*.json`) and, since 0.4.0-rc.2, its **sign
 journals** (`journal/<key>/*.jsonl`): the node's own record of every signature share it released,
-which `rutli-cosigner audit-cross-check` compares with the driver's audit log. Never the seal bundle
-and never the TLS key. `restore` restores key files only; a journal in the backup is evidence, never
-copied back over a live journal.
+which `rutli-cosigner audit-cross-check` compares with the driver's audit log, and the break-glass
+"cleared delete intent" markers (`.cleared/<key>.<intent digest>`, audit F7). Never the seal bundle
+and never the TLS key. `restore` restores key files and merges the `.cleared/` markers (it adds
+missing ones, never removes one — without them a node restored after `hosted-undelete` would accept
+the cleared tombstone again from a peer); a journal in the backup is evidence, never copied back over
+a live journal.
 
 **What `restore` checks** (audit M1, `rutli_cosigner::restore`). It verifies **every** file in the
 backup before it writes anything, and one refusal writes nothing:

@@ -83,6 +83,37 @@ for i in 1 2 3; do
 done
 ```
 
+**Before a batch C (0.4.0) image: measure each key's sign rate** (audit F8). Batch C cosigners
+enforce a per-key sign rate limit **by default — 300/min and 20 000/day per key, per node** — and a
+refusal (RESOURCE_EXHAUSTED) is **final**: the driver does not fail over on it and Canton sees the
+sign fail. Protocol keys sign at transaction rate. Without signing intents (an rc.2 driver, or a
+driver that has not learned the cluster id yet) every t-subset retry or failover is a separate
+charge. So count each key's busiest minute and busiest day from a copy of the driver's audit log
+(read-only, before the upgrade):
+
+```sh
+kubectl -n $PNS cp $PPOD:/rutli-state/audit.jsonl $D/audit.jsonl
+jq -r 'select(.op == "sign") | [(.detail | capture("keyId=(?<k>[^ ]+)").k), .ts[0:16], .ts[0:10]] | @tsv' \
+  $D/audit.jsonl > $D/signs.tsv
+awk -F'\t' '{ m[$1 FS $2]++; d[$1 FS $3]++ }
+  END { for (k in m) { split(k, a, FS); if (m[k] > pm[a[1]]) pm[a[1]] = m[k] }
+        for (k in d) { split(k, a, FS); if (d[k] > pd[a[1]]) pd[a[1]] = d[k] }
+        for (k in pm) printf "%-60s busiest minute %6d   busiest day %8d\n", k, pm[k], pd[k] }' $D/signs.tsv
+```
+
+Each line is one driver call; a node is charged at most once per call with intents, and up to once
+per attempt without them (count `failover=` notes in the same log, or double the numbers). Any key
+within a factor of 3 of 300/min or 20 000/day — or growing towards it — gets a `rate_limits` rule
+**before** the batch C upgrade, identical on every node, e.g. in `deploy/soak/cosigner-values.yaml`:
+
+```yaml
+signingPolicy:
+  rate_limits:   # the FIRST matching prefix wins: the namespace key's rule goes first
+    - { key_id_prefix: "<prefix>frost-namespace", per_min: 10, per_day: 200 }
+    - { key_id_prefix: "<prefix>frost-", per_min: 3000, per_day: 500000 }   # protocol keys
+``` After the upgrade watch
+`rutli_sign_rate_limited_total` on every node: it must stay 0.
+
 ## 2. Driver pre-check: the participant's state parses under fail-closed recovery (read-only)
 
 Copy the driver's audit log and signing journal out of the participant (paths as in its `config`:

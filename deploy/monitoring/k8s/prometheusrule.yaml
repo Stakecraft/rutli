@@ -142,6 +142,34 @@ spec:
           \ so no bad signature was returned \u2014 but a correct cosigner never produces an invalid share:\
           \ suspect a corrupted share file or a compromised node. The leader's log names the cosigner\
           \ (`a cosigner returned an invalid signature share`)."
+    - alert: RutliCeremonySplit
+      expr: max by (instance) (rutli_ceremonies_split) > 0 or increase(rutli_ceremony_equivocations_total[1h])
+        > 0
+      for: 0m
+      labels:
+        severity: critical
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }}: a DKG/refresh was resolved differently on\
+          \ different nodes"
+        description: "{{ $labels.instance }} aborted a ceremony that a peer reports COMMITTED with the\
+          \ same outcome, or saw COMMITTED and ABORTED reported for one ceremony. With crash faults this\
+          \ is impossible: a cosigner equivocated (audit F3). The aborted node keeps its staged share\
+          \ quarantined. Signing continues where a quorum shares a sharing, now with less margin. Identify\
+          \ the suspect node, then on the aborted node (daemon stopped) `rutli-cosigner ceremony recover-commit\
+          \ --ceremony-id <id>` \u2014 docs/ceremonies.md, \"A split ceremony\"."
+    - alert: RutliCeremonyUnknownFlood
+      expr: increase(rutli_ceremony_unknown_refused_total[15m]) > 0
+      for: 0m
+      labels:
+        severity: warning
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }} refused no-votes for unknown ceremonies (cap\
+          \ reached)"
+        description: 'A peer asked {{ $labels.instance }} about more made-up ceremony ids (or opened more
+          orphaned sessions) than the caps allow (audit F2). The node refuses instead of writing more
+          records, which is safe, but a legitimate peer asking about a ceremony this node really lost
+          now waits instead of aborting. The log line `refusing to record another no-vote` names the asking
+          peer: treat it as misbehaving.'
     - alert: RutliSignJournalErrors
       expr: increase(rutli_sign_journal_errors_total[10m]) > 0
       for: 0m

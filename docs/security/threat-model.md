@@ -59,7 +59,8 @@ substitute for that.
 - equivocate round 1 — every delivery carries the sender's digest of the round-1 map, so showing
   nodes different maps makes all of them abort;
 - commit mixed epochs or wedge a key id — commit needs every node's durable yes-vote, confirmed
-  directly between nodes (H1/M5);
+  directly between nodes (H1/M5; the guarantee holds for crash faults — a lying *participant* is
+  below);
 - obtain a signature over a digest of its choosing — every participant verifies a driver-signed
   intent for exactly that digest before it commits to a nonce, binds the session to it, and
   re-checks it before it releases its share (C2);
@@ -82,6 +83,19 @@ refuse or corrupt its own contributions (routed around by t-subset retry, flagge
 `RutliInvalidSignatureShare`), re-use an intent it has seen for another signature over the *same*
 digest within its validity (harmless, capped by `max_shares_per_request`), and refuse to propagate
 tombstones (its own copy of a deleted key stays readable to it — it already had it).
+
+It can also **split a DKG or refresh it takes part in** (audit F3): ceremony votes are reported
+unsigned, so it can tell one honest node STAGED and the other ABORTED; one commits, the other aborts,
+and every signature then needs the liar (a refresh meant to evict it does not). With n = 3, f = 1
+this is not preventable without Byzantine agreement — **a documented residual for n = 3: an
+availability attack, never a key compromise**. It is detected (`rutli_ceremony_equivocations_total`,
+`RutliCeremonySplit`) and recoverable: the aborted node's staged share is quarantined, and
+`ceremony recover-commit` commits it once a peer proves the sharing committed and live
+(`docs/ceremonies.md`). It can make each peer write at most a bounded number of no-vote records by
+asking about made-up ceremony ids (F2), stall a key's signing for up to the 15-minute orphan timeout
+at a time by fencing it for a refresh it leads (any peer may lead one; renewable — a residual,
+visible as fenced-key refusals), and open at most 1024 waiting sign sessions per key (round 1 is
+refused beyond).
 
 ### Holder of the driver certificate and key (bypassing the driver)
 
@@ -158,7 +172,11 @@ Intents carry `issued_at`/`not_after`. A node whose clock is off by more than
 `signing_policy.clock_skew_secs` (default 120 s) refuses every intent — fail closed: an outage of
 that node, never a bypass (`RutliSignPolicyRefusals{reason="expiry"}`). Tombstones propagated by
 anti-entropy ignore expiry by design (the delete was valid when made) but still refuse an intent
-issued in the future. Keep NTP healthy on the participant and every cosigner.
+issued in the future, a tombstone whose deletion time lies outside its intent's validity window, and
+an intent issued before this node last saw its signer's delete capability change (audit F7: an
+intent refused when made — the driver signs one for every Canton `deleteKey` — cannot be replayed
+into a delete once the role is granted later; `data_dir/delete-policy.json`). Keep NTP healthy on
+the participant and every cosigner.
 
 ### Stale backups, snapshot rollbacks, planted files (audit M1, M4)
 
@@ -168,6 +186,13 @@ epoch, another sharing, or a hosted key over its tombstone even with `--force`, 
 break-glass. A key file renamed to another id, copied from another node or cluster, or of another
 kind fails its v2 header check; a plaintext file under sealing stops the daemon. A genuine older
 file of the same key and node (a rollback) passes the AEAD — the epoch checks are what catch it.
+
+**M4 is closed only once `keyfile.accept_v1: false` on every node** (audit F10). Until then any v1
+file sealed under the node's DEK is accepted (only its in-plaintext key id and the FROST identifier
+check limit swaps), and even with v2 a rollback to an older genuine file of the same key and node is
+accepted — including a tombstone swapped back for the hosted-key file it replaced, which resurrects
+a deleted key for anyone with write access to the volume (the restore path refuses that; a raw file
+copy does not).
 
 ### Earlier releases: DKG and refresh output is leader-exposed (decision P9)
 
@@ -190,3 +215,6 @@ keys stay test material.
 - Deletion is not erasure: tombstones retain material for the grace period by design, and old
   backups keep every key they captured until the DEK that sealed them is dropped.
 - Keys from earlier releases are leader-exposed (P9).
+- One Byzantine cosigner can split a DKG/refresh (n = 3, f = 1): availability, detected and
+  operator-recoverable, never the key (F3).
+- Until `keyfile.accept_v1: false`, v1 key files and same-key rollbacks are accepted (F10).

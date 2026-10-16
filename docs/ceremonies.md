@@ -39,14 +39,34 @@ ABORTED before answering, so its answer can never change later. A session orphan
 15-minute orphan timeout (its leader is gone) does the same. The leader's `CeremonyAbort` drops
 only in-memory sessions; it is never evidence for a STAGED node.
 
+Those no-votes are **bounded** (audit F2), because any mesh peer can ask about made-up ids: at most
+256 per asking peer (its certificate CN) and 1024 in total for unknown ids, 1024 for failed or
+orphaned sessions, and at most 64 sessions in memory. Beyond a cap the node **refuses**
+(RESOURCE_EXHAUSTED, `rutli_ceremony_unknown_refused_total`): it records and answers nothing. That
+keeps the commit rule safe — a node answers ABORTED only from a durable record and never starts that
+id again; a refusal is no vote, the asker treats it as unknown and waits (it never commits without
+this node's yes-vote, and never aborts on a refusal), and the node may still take part in that id
+later without contradicting anything it said. The cost is liveness only, and only once a peer
+spent its quota: a STAGED node asking about a ceremony another node really lost waits (or uses
+`--assume-lost`) instead of aborting. Unknown-id no-votes are garbage-collected after 30 days.
+
 What a malicious leader can and cannot do:
 
 * It never holds a round-2 package (no peer API returns one), so it cannot reconstruct the key.
 * Showing nodes different round-1 maps makes their digests differ; every honest node refuses at
   part 3. Substituting a node's own package is caught by that node at part 2.
-* It cannot make one node commit while another aborts: commit needs every node's own durable
-  yes-vote, confirmed node to node.
+* It cannot make one node commit while another aborts **as the leader**: commit needs every node's
+  own durable yes-vote, confirmed node to node.
 * It can still refuse to finish (denial of service), as any participant can.
+
+**"No two nodes resolve one ceremony differently" holds for crash faults** — nodes that crash,
+restart, lose messages or are unreachable. It does **not** hold against a *participant* that lies
+about its own vote (audit F3): votes are reported unsigned, so a Byzantine cosigner can answer
+STAGED to one honest node and ABORTED to the other. The first commits, the second aborts, and the
+two can no longer sign together — every signature then needs the liar, and the refresh did not
+evict its share. With n = 3, f = 1 this cannot be prevented without Byzantine agreement; it is a
+documented residual that costs **availability, never the key** (no node ever holds shares of a
+sharing it should not). It is detected and recoverable instead — see [Split ceremonies](#a-split-ceremony-byzantine-cosigner).
 
 The mesh must not run through a TLS-terminating proxy (Istio/Linkerd sidecars in mTLS-terminating
 mode): round-2 packages are protected by the node-to-node TLS session only.
@@ -124,9 +144,21 @@ While a node is STAGED it keeps signing with the old share. Metrics:
 
 * `rutli_ceremonies_staged` — STAGED votes not yet resolved on this node. Alert if > 0 for more
   than a few minutes: a peer is unreachable or a session is orphaned.
-* `rutli_ceremony_resolutions_total{result="committed|aborted"}`.
+* `rutli_ceremony_resolutions_total{result="committed|aborted|recovered"}`.
+* `rutli_ceremonies_split` — ceremonies this node aborted while a peer reports them COMMITTED with
+  this node's outcome (alert `RutliCeremonySplit`, critical).
+* `rutli_ceremony_equivocations_total` — COMMITTED and ABORTED reported for one ceremony.
+* `rutli_ceremony_unknown_refused_total`, `rutli_ceremony_unknown_no_votes` — the no-vote caps above.
 
-Records of settled ceremonies (every peer seen terminal) are deleted after 30 days.
+An abort that contradicts a peer's yes-vote (one peer ABORTED, another STAGED/COMMITTED for this
+node's outcome) is applied only after the votes are gathered again 2 s later (audit F3). With crash
+faults that merely delays the abort. Every resolver abort **quarantines** the staged share instead
+of deleting it (the record says `"quarantined": true`): it is deleted once every peer is seen in a
+terminal state with nobody COMMITTED for this outcome — then no honest node can commit it any more —
+or after 7 days without a split.
+
+Records of settled ceremonies (every peer seen terminal) are deleted after 30 days; a record whose
+share is still quarantined is kept.
 
 ## Operator procedures
 
@@ -158,6 +190,41 @@ included), otherwise aborts (nobody reachable committed, and the lost node's sha
 roster node not named must answer. **Never name a node that may come back**: if it had committed,
 it would hold a share nobody else can combine with. Rebuild a lost node by restoring its backup or
 re-enrolling it, not by bringing back an old disk after this.
+
+### A split ceremony (Byzantine cosigner)
+
+Alert `RutliCeremonySplit` / log `SPLIT: this node aborted a ceremony a peer reports COMMITTED`: this
+node aborted ceremony `<id>` while a peer committed it with this node's outcome. With crash faults
+that is impossible (a node commits only after every yes-vote, and a node that voted yes then never
+sees a no-vote), so **a cosigner equivocated**. With three nodes the suspect is one of the two
+peers: the one that reported ABORTED to this node (most likely — it told the committed node STAGED),
+or the one reporting COMMITTED (if it lies about having committed). Compare both peers' logs, their
+records (`keys/.ceremonies/<id>.json`) and `verify-key` before acting. Signing continues where a
+quorum shares a sharing; until recovered, every signature needs the node(s) on the committed
+sharing.
+
+Recover on the aborted node, daemon stopped:
+
+```
+rutli-cosigner --config node.json ceremony recover-commit --ceremony-id <id>
+```
+
+It commits the quarantined staged share and records COMMITTED (`"recovered": true`) only if some
+peer reports the ceremony COMMITTED with exactly this node's outcome **and** holds that sharing live
+(`Peer.KeyEpoch`: the new epoch and PKP digest), no peer reports a yes-vote for another outcome, and
+the normal commit rules hold (a refresh replaces exactly the sharing it started from). This is
+key-safe: an honest COMMITTED node committed only after confirming every node's yes-vote for that
+outcome, so it is a complete sharing of the same group key. A *lying* COMMITTED report could at
+worst move this node onto a sharing the other honest node does not hold — availability, as before
+— so confirm the committed node is not the suspect first. Then run `verify-key`, and replace the
+compromised node (re-enrol it, then refresh).
+
+If the share should not be recovered (the committed node is the suspect, or the key will be rebuilt
+anyway), drop it and clear the alert:
+
+```
+rutli-cosigner --config node.json ceremony drop-quarantine --ceremony-id <id>
+```
 
 ### A legacy partial DKG key (from before protocol 2)
 
