@@ -214,6 +214,18 @@ hostedKeys:
   # node). Required with enabled=true. A migrated install takes the value `seal split-legacy`
   # prints; a new cluster generates one: openssl rand -hex 32.
   commitmentKey: ""
+  # Deletes (audit M2). A delete replaces the key with a tombstone on every node, authorized by a
+  # delete intent signed by a client CN listed here (its own role: the driver certificate cannot
+  # delete unless listed). Empty = hosted keys cannot be deleted. Never a cosigner CN. Requires
+  # every cosigner to run this release before any delete (older nodes ignore tombstones).
+  deleteAllowlist: []
+  # Optional key-id prefixes per delete CN, e.g. { operator: ["participant1-"] }.
+  deleteAcl: {}
+  # Distinct signingPolicy.approvers that must approve a delete (rutli-approve, same inbox format).
+  # 0 = none; at least 1 is recommended in production.
+  deleteApprovalThreshold: 0
+  # How long a deleted key's material stays sealed in its tombstone for `hosted-undelete`.
+  deleteGraceSecs: 604800
 
 persistence:
   size: 1Gi

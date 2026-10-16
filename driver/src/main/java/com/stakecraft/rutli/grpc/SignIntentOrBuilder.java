@@ -41,7 +41,7 @@ public interface SignIntentOrBuilder extends
 
   /**
    * <pre>
-   * "sign"
+   * "sign" | "delete-key"
    * </pre>
    *
    * <code>string purpose = 3;</code>
@@ -50,7 +50,7 @@ public interface SignIntentOrBuilder extends
   java.lang.String getPurpose();
   /**
    * <pre>
-   * "sign"
+   * "sign" | "delete-key"
    * </pre>
    *
    * <code>string purpose = 3;</code>
@@ -73,7 +73,8 @@ public interface SignIntentOrBuilder extends
 
   /**
    * <pre>
-   * exactly the 34-byte Canton digest the signature is over
+   * "sign": exactly the 34-byte Canton digest the signature is over. "delete-key": the 32 bytes
+   * SHA-256("rutli-delete-key-v1&#92;n" ‖ key_id) (approvals are over this digest, like a sign's).
    * </pre>
    *
    * <code>bytes digest = 5;</code>

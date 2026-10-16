@@ -20,4 +20,34 @@ public interface DeleteKeyRequestOrBuilder extends
    */
   com.google.protobuf.ByteString
       getKeyIdBytes();
+
+  /**
+   * <pre>
+   * Required: purpose "delete-key", signed by the calling client, whose CN must be on every node's
+   * hosted_keys.delete_allowlist (with its delete_acl and delete_approval_threshold).
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 2;</code>
+   * @return Whether the intent field is set.
+   */
+  boolean hasIntent();
+  /**
+   * <pre>
+   * Required: purpose "delete-key", signed by the calling client, whose CN must be on every node's
+   * hosted_keys.delete_allowlist (with its delete_acl and delete_approval_threshold).
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 2;</code>
+   * @return The intent.
+   */
+  com.stakecraft.rutli.grpc.SignedIntent getIntent();
+  /**
+   * <pre>
+   * Required: purpose "delete-key", signed by the calling client, whose CN must be on every node's
+   * hosted_keys.delete_allowlist (with its delete_acl and delete_approval_threshold).
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 2;</code>
+   */
+  com.stakecraft.rutli.grpc.SignedIntentOrBuilder getIntentOrBuilder();
 }

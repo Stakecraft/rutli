@@ -61,6 +61,16 @@ pub const SIGNER_ACL_ABSENT: &str = "rutli_signer_acl_absent_total";
 pub const SIGN_JOURNAL_ENTRIES: &str = "rutli_sign_journal_entries_total";
 /// Sign journal failures (corrupt on open, append failed): the share was refused.
 pub const SIGN_JOURNAL_ERRORS: &str = "rutli_sign_journal_errors_total";
+/// Counter, label `reason`: hosted-key delete intents this node refused (audit M2) — on DeleteKey,
+/// on a peer's PurgeKey, and on a tombstone a peer propagated in anti-entropy. A forged or
+/// unauthorized tombstone shows up here.
+pub const DELETE_INTENT_REFUSALS: &str = "rutli_delete_intent_refusals_total";
+/// Counter, label `how` (deleted|converted|recorded): tombstones this node wrote — a delete it
+/// took part in, a live copy a peer's tombstone converted, a tombstone recorded for a key it lacked.
+pub const HOSTED_TOMBSTONES_WRITTEN: &str = "rutli_hosted_tombstones_written_total";
+/// Gauge: tombstones on this node (deleted hosted keys), and how many still retain material for
+/// undelete (`retained="true"`).
+pub const HOSTED_TOMBSTONES: &str = "rutli_hosted_tombstones";
 pub const SIGN_RETRIES: &str = "rutli_sign_retries_total";
 /// Signature shares that failed verification at aggregation (attributed to a cosigner and routed
 /// around). Any increase means a cosigner returned a bad share: alert on it.

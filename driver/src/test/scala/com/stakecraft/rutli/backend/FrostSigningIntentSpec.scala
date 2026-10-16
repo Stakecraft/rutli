@@ -65,6 +65,11 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
     * and fails the first `failSigns` of them with UNAVAILABLE. */
   private final class Recorder(clusterId: String, failSigns: Int = 0) extends SignerGrpc.SignerImplBase {
     val signs = new ConcurrentLinkedQueue[SignRequest]()
+    val deletes = new ConcurrentLinkedQueue[DeleteKeyRequest]()
+    override def deleteKey(req: DeleteKeyRequest, obs: StreamObserver[DeleteKeyReply]): Unit = {
+      deletes.add(req)
+      obs.onNext(DeleteKeyReply.newBuilder().setDeleted(true).setTombstones(3).build()); obs.onCompleted()
+    }
     private val failed = new AtomicInteger(0)
     override def capabilities(req: CapabilitiesRequest, obs: StreamObserver[CapabilitiesReply]): Unit = {
       obs.onNext(CapabilitiesReply.newBuilder().setClusterId(clusterId).build()); obs.onCompleted()
@@ -191,6 +196,30 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
         Await.result(pinned.sign(Digest, Key, SigningAlgoSpec.Ed25519), 20.seconds)
         decode(rec2.signs.asScala.toList.loneElement.getIntent).getClusterId shouldBe "pinnedcluster000"
       } finally pinned.close()
+    }
+  }
+
+  "FrostBackend.deleteKey" should {
+    "carry a delete intent (purpose delete-key, the delete digest), signed with the driver's mTLS key" in {
+      val rec = new Recorder(Cluster)
+      val b = backend(Seq(serve("cosigner1", rec) -> "cosigner1"))
+      try {
+        Await.result(b.deleteKey("rutli-enc-1"), 20.seconds)
+        val req = rec.deletes.asScala.toList.loneElement
+        req.getKeyId shouldBe "rutli-enc-1"
+        verifies(req.getIntent) shouldBe true
+        val i = decode(req.getIntent)
+        i.getPurpose shouldBe "delete-key"
+        i.getClusterId shouldBe Cluster
+        i.getKeyId shouldBe "rutli-enc-1"
+        i.getDigest.toByteArray shouldBe FrostIntentSigner.deleteDigest("rutli-enc-1")
+        i.getRequestId.size shouldBe 16
+      } finally b.close()
+    }
+
+    "compute the delete digest exactly as the cosigners do (golden vector shared with intent.rs)" in {
+      hex(FrostIntentSigner.deleteDigest("participant1-rutli-enc-golden")) shouldBe
+        "10e118018ec6f17f27279a2c5030ae03c65ade57a2174b5f097cb4a5d00c3877"
     }
   }
 

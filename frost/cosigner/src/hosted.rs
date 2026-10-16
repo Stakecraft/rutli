@@ -131,6 +131,62 @@ pub struct HostedKey {
     pub private_der: String,
     #[serde(default)]
     pub public_der: String,
+    /// Set by `rutli-cosigner hosted-undelete` (Unix ms): a tombstone whose delete intent was
+    /// issued before this no longer beats this copy (audit M2), so an undeleted key is not
+    /// re-deleted by the very tombstone it was restored from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub undeleted_at_ms: Option<u64>,
+}
+
+impl HostedKey {
+    /// The time a delete intent must postdate to beat this copy (Unix ms): its creation, or its
+    /// undelete.
+    pub fn live_since_ms(&self) -> u64 {
+        self.created_at.saturating_mul(1000).max(self.undeleted_at_ms.unwrap_or(0))
+    }
+}
+
+/// A deleted hosted key (audit M2): what replaces its key file on every node. Permanent — hosted
+/// key ids are create-once and never reused (short of `rutli-cosigner hosted-clear-tombstone`,
+/// agreed on every node). Sealed like any key file; within the grace period it still holds the
+/// key's material (`retained`) for undelete, and a sweep drops that afterwards.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Tombstone {
+    pub key_id: String,
+    /// The deleted key's spec and creation time, when this node held it ("" / 0 otherwise).
+    #[serde(default)]
+    pub spec: String,
+    #[serde(default)]
+    pub created_at: u64,
+    /// Hex commitment of the deleted key's material (as in `ListKeys`), when known.
+    #[serde(default)]
+    pub commitment: String,
+    /// When this node recorded the tombstone, and until when it keeps `retained` (Unix ms).
+    pub deleted_at_ms: u64,
+    pub purge_after_ms: u64,
+    /// The authorizing delete intent: a serialized `SignedIntent`, hex. Every node that accepts
+    /// the tombstone from a peer verifies it.
+    pub delete_intent: String,
+    /// The key's material, until `purge_after_ms`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retained: Option<HostedKey>,
+}
+
+impl Tombstone {
+    /// The delete intent, decoded.
+    pub fn intent(&self) -> Result<crate::pb::SignedIntent> {
+        use prost::Message;
+        let bytes = hex::decode(&self.delete_intent)
+            .map_err(|_| DaemonError::KeyFile(format!("tombstone {}: delete intent is not hex", self.key_id)))?;
+        crate::pb::SignedIntent::decode(bytes.as_slice())
+            .map_err(|e| DaemonError::KeyFile(format!("tombstone {}: delete intent does not decode: {e}", self.key_id)))
+    }
+
+    /// SHA-256 of the delete intent's intent bytes ([`crate::intent::intent_digest`]): what a v2
+    /// header records for a tombstone.
+    pub fn intent_digest(&self) -> Result<[u8; 32]> {
+        Ok(crate::intent::intent_digest(&self.intent()?))
+    }
 }
 
 /// Wipe the hex private material when a key goes out of scope, so the many short-lived copies a
@@ -162,6 +218,7 @@ impl HostedKey {
                     created_at: now_secs,
                     private_der: hex::encode(pkcs8.as_ref()),
                     public_der: hex::encode(spki.as_ref()),
+                    undeleted_at_ms: None,
                 })
             }
             HostedSpec::EcP256 => {
@@ -178,6 +235,7 @@ impl HostedKey {
                     created_at: now_secs,
                     private_der: hex::encode(key.as_ref()),
                     public_der: String::new(),
+                    undeleted_at_ms: None,
                 })
             }
         }
@@ -201,6 +259,7 @@ impl HostedKey {
             created_at: now_secs,
             private_der: hex::encode(pkcs8.as_ref()),
             public_der: hex::encode(spki),
+            undeleted_at_ms: None,
         })
     }
 

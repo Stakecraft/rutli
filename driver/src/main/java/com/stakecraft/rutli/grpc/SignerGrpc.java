@@ -714,6 +714,15 @@ public final class SignerGrpc {
     }
 
     /**
+     * <pre>
+     * Delete a hosted key (audit M2): replaces it with a durable TOMBSTONE on every node, which wins
+     * over any live copy in anti-entropy, so a node that was down cannot resurrect it. Requires a
+     * signed delete intent (SignedIntent, purpose "delete-key") from a client on every node's
+     * hosted_keys.delete_allowlist — a separate role: the driver certificate cannot delete unless an
+     * operator lists it. Each node verifies the intent itself. The material stays sealed inside the
+     * tombstone for hosted_keys.delete_grace_secs (default 7 days), for `rutli-cosigner
+     * hosted-undelete`; the id is never reused.
+     * </pre>
      */
     default void deleteKey(com.stakecraft.rutli.grpc.DeleteKeyRequest request,
         io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DeleteKeyReply> responseObserver) {
@@ -923,6 +932,15 @@ public final class SignerGrpc {
     }
 
     /**
+     * <pre>
+     * Delete a hosted key (audit M2): replaces it with a durable TOMBSTONE on every node, which wins
+     * over any live copy in anti-entropy, so a node that was down cannot resurrect it. Requires a
+     * signed delete intent (SignedIntent, purpose "delete-key") from a client on every node's
+     * hosted_keys.delete_allowlist — a separate role: the driver certificate cannot delete unless an
+     * operator lists it. Each node verifies the intent itself. The material stays sealed inside the
+     * tombstone for hosted_keys.delete_grace_secs (default 7 days), for `rutli-cosigner
+     * hosted-undelete`; the id is never reused.
+     * </pre>
      */
     public void deleteKey(com.stakecraft.rutli.grpc.DeleteKeyRequest request,
         io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DeleteKeyReply> responseObserver) {
@@ -1112,6 +1130,15 @@ public final class SignerGrpc {
     }
 
     /**
+     * <pre>
+     * Delete a hosted key (audit M2): replaces it with a durable TOMBSTONE on every node, which wins
+     * over any live copy in anti-entropy, so a node that was down cannot resurrect it. Requires a
+     * signed delete intent (SignedIntent, purpose "delete-key") from a client on every node's
+     * hosted_keys.delete_allowlist — a separate role: the driver certificate cannot delete unless an
+     * operator lists it. Each node verifies the intent itself. The material stays sealed inside the
+     * tombstone for hosted_keys.delete_grace_secs (default 7 days), for `rutli-cosigner
+     * hosted-undelete`; the id is never reused.
+     * </pre>
      */
     public com.stakecraft.rutli.grpc.DeleteKeyReply deleteKey(com.stakecraft.rutli.grpc.DeleteKeyRequest request) throws io.grpc.StatusException {
       return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
@@ -1295,6 +1322,15 @@ public final class SignerGrpc {
     }
 
     /**
+     * <pre>
+     * Delete a hosted key (audit M2): replaces it with a durable TOMBSTONE on every node, which wins
+     * over any live copy in anti-entropy, so a node that was down cannot resurrect it. Requires a
+     * signed delete intent (SignedIntent, purpose "delete-key") from a client on every node's
+     * hosted_keys.delete_allowlist — a separate role: the driver certificate cannot delete unless an
+     * operator lists it. Each node verifies the intent itself. The material stays sealed inside the
+     * tombstone for hosted_keys.delete_grace_secs (default 7 days), for `rutli-cosigner
+     * hosted-undelete`; the id is never reused.
+     * </pre>
      */
     public com.stakecraft.rutli.grpc.DeleteKeyReply deleteKey(com.stakecraft.rutli.grpc.DeleteKeyRequest request) {
       return io.grpc.stub.ClientCalls.blockingUnaryCall(
@@ -1489,6 +1525,15 @@ public final class SignerGrpc {
     }
 
     /**
+     * <pre>
+     * Delete a hosted key (audit M2): replaces it with a durable TOMBSTONE on every node, which wins
+     * over any live copy in anti-entropy, so a node that was down cannot resurrect it. Requires a
+     * signed delete intent (SignedIntent, purpose "delete-key") from a client on every node's
+     * hosted_keys.delete_allowlist — a separate role: the driver certificate cannot delete unless an
+     * operator lists it. Each node verifies the intent itself. The material stays sealed inside the
+     * tombstone for hosted_keys.delete_grace_secs (default 7 days), for `rutli-cosigner
+     * hosted-undelete`; the id is never reused.
+     * </pre>
      */
     public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.DeleteKeyReply> deleteKey(
         com.stakecraft.rutli.grpc.DeleteKeyRequest request) {

@@ -69,10 +69,26 @@ pub trait PeerApi: Send + Sync {
     ) -> Result<Vec<u8>>;
     /// Pull a hosted key from this peer, wrapped to the caller.
     async fn fetch_key(&self, key_id: &str) -> Result<(String, Vec<u8>, crate::wrap::Wrapped)>;
-    /// This peer's hosted-key inventory: (key_id, spec, commitment).
+    /// This peer's live hosted keys: (key_id, spec, commitment). Tombstones excluded.
     async fn list_keys(&self) -> Result<Vec<(String, String, Vec<u8>)>>;
-    /// Delete a hosted key on this peer.
+    /// This peer's full inventory for anti-entropy: live keys and tombstones (audit M2). The
+    /// default — a peer that cannot report tombstones — lists its live keys only.
+    async fn list_inventory(&self) -> Result<Vec<pb::KeyManifest>> {
+        Ok(self
+            .list_keys()
+            .await?
+            .into_iter()
+            .map(|(key_id, spec, commitment)| pb::KeyManifest { key_id, spec, commitment, ..Default::default() })
+            .collect())
+    }
+    /// Roll back a key this peer created in genkey ceremony `ceremony_id` (a generation below its
+    /// write quorum, still fenced). Anything else is refused by the peer.
     async fn purge_key(&self, ceremony_id: &str, key_id: &str) -> Result<bool>;
+    /// Delete a hosted key on this peer by a client's delete intent, which the peer verifies itself
+    /// and records as a tombstone. `true`: it held the key live.
+    async fn delete_key(&self, _ceremony_id: &str, _key_id: &str, _intent: &pb::SignedIntent) -> Result<bool> {
+        Err(unsupported("hosted-key tombstones"))
+    }
 
     // -- two-phase ceremonies --
 
@@ -252,10 +268,10 @@ impl PeerApi for LocalPeer {
     ) -> Result<Vec<u8>> {
         let spec = crate::hosted::HostedSpec::parse(spec)?;
         let key = self.node.hosted_unwrap(key_id, spec, wrapped)?; // crypto only, no IO
-        let key_id = key_id.to_owned();
+        let (key_id, ceremony_id) = (key_id.to_owned(), _ceremony_id.to_owned());
         self.node
             .blocking(move |n| {
-                n.hosted_store(&key_id, &key)?;
+                n.hosted_store_for(&key_id, &key, Some(&ceremony_id))?;
                 n.hosted_commitment(&key)
             })
             .await
@@ -294,9 +310,23 @@ impl PeerApi for LocalPeer {
             .await
     }
 
-    async fn purge_key(&self, _ceremony_id: &str, key_id: &str) -> Result<bool> {
-        let key_id = key_id.to_owned();
-        self.node.blocking(move |n| n.hosted_delete(&key_id)).await
+    async fn list_inventory(&self) -> Result<Vec<pb::KeyManifest>> {
+        self.node.blocking(|n| n.hosted_manifest()).await
+    }
+
+    async fn purge_key(&self, ceremony_id: &str, key_id: &str) -> Result<bool> {
+        let (ceremony_id, key_id) = (ceremony_id.to_owned(), key_id.to_owned());
+        self.node.blocking(move |n| n.hosted_rollback_purge(&ceremony_id, &key_id)).await
+    }
+
+    async fn delete_key(&self, _ceremony_id: &str, key_id: &str, intent: &pb::SignedIntent) -> Result<bool> {
+        let (key_id, intent) = (key_id.to_owned(), intent.clone());
+        self.node
+            .blocking(move |n| {
+                n.hosted_apply_tombstone(&key_id, &intent, crate::intent::Expiry::Enforce, None)
+                    .map(|o| o == crate::node::TombstoneOutcome::Converted)
+            })
+            .await
     }
 
     async fn key_epoch(&self, key_id: &str) -> Result<pb::KeyEpochReply> {
@@ -551,7 +581,11 @@ impl PeerApi for GrpcPeer {
 
     async fn list_keys(&self) -> Result<Vec<(String, String, Vec<u8>)>> {
         let reply = self.client.clone().list_keys(pb::ListKeysRequest {}).await?.into_inner();
-        Ok(reply.keys.into_iter().map(|k| (k.key_id, k.spec, k.commitment)).collect())
+        Ok(reply.keys.into_iter().filter(|k| !k.tombstone).map(|k| (k.key_id, k.spec, k.commitment)).collect())
+    }
+
+    async fn list_inventory(&self) -> Result<Vec<pb::KeyManifest>> {
+        Ok(self.client.clone().list_keys(pb::ListKeysRequest {}).await?.into_inner().keys)
     }
 
     async fn purge_key(&self, ceremony_id: &str, key_id: &str) -> Result<bool> {
@@ -561,6 +595,21 @@ impl PeerApi for GrpcPeer {
             .purge_key(pb::PurgeKeyRequest {
                 ceremony_id: ceremony_id.into(),
                 key_id: key_id.into(),
+                intent: None,
+            })
+            .await?
+            .into_inner();
+        Ok(reply.deleted)
+    }
+
+    async fn delete_key(&self, ceremony_id: &str, key_id: &str, intent: &pb::SignedIntent) -> Result<bool> {
+        let reply = self
+            .client
+            .clone()
+            .purge_key(pb::PurgeKeyRequest {
+                ceremony_id: ceremony_id.into(),
+                key_id: key_id.into(),
+                intent: Some(intent.clone()),
             })
             .await?
             .into_inner();

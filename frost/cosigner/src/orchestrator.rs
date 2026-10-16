@@ -15,6 +15,7 @@ use frost::Identifier;
 use crate::ceremony_record::Phase;
 use crate::node::{CeremonyKind, Node};
 use crate::peer::PeerApi;
+use crate::pb;
 use crate::{DaemonError, Result};
 
 pub type Peers = Vec<Arc<dyn PeerApi>>;
@@ -854,8 +855,8 @@ async fn generate_hosted_fenced(
             })
             .await
             .map_err(|e| DaemonError::Config(format!("key generation task failed: {e}")))??;
-            let (id, stored) = (key_id.to_owned(), key.clone());
-            node.blocking(move |n| n.hosted_store(&id, &stored)).await?;
+            let (id, stored, ceremony) = (key_id.to_owned(), key.clone(), ceremony_id.to_owned());
+            node.blocking(move |n| n.hosted_store_for(&id, &stored, Some(&ceremony))).await?;
             (key, true)
         }
     };
@@ -877,12 +878,18 @@ async fn generate_hosted_fenced(
         }
     }
 
-    if replicas < write_quorum {
+    // A peer holding a tombstone for the id (audit M2) means the id was deleted: generating it
+    // again needs the tombstone cleared on EVERY node first, so one refusal stops the generation.
+    let tombstoned_somewhere = failures.iter().any(|e| e.to_string().contains("is tombstoned"));
+    if replicas < write_quorum || tombstoned_somewhere {
         // Below quorum the key is not durable enough to hand out: a single node holding the only
         // copy is exactly the failure this feature exists to prevent. Roll back so the id stays
-        // free for a clean retry.
+        // free for a clean retry. Each node removes only a key it created in this generation.
         for p in peers {
             let _ = p.purge_key(ceremony_id, key_id).await;
+        }
+        if tombstoned_somewhere {
+            return Err(crate::node::tombstoned(key_id));
         }
         return Err(DaemonError::ThresholdNotMet { needed: write_quorum, got: replicas });
     }
@@ -944,22 +951,56 @@ async fn release_fences(fenced: &[&Arc<dyn PeerApi>], ceremony_id: &str, key_id:
     }
 }
 
-/// Delete a hosted key across the cluster. Best-effort per peer; reports how many confirmed.
-pub async fn delete_hosted_key(peers: &Peers, key_id: &str) -> Result<bool> {
+/// Delete a hosted key across the cluster (audit M2): every node verifies the client's delete
+/// intent itself and replaces the key with a tombstone. Fenced like a generation, so a concurrent
+/// generate cannot interleave. A node that is down gets the tombstone from anti-entropy (a valid
+/// tombstone beats a key), so this succeeds once `write_quorum` nodes hold it. Returns (whether
+/// any node held the key live, how many nodes hold the tombstone).
+pub async fn delete_hosted_key(
+    peers: &Peers,
+    key_id: &str,
+    intent: &pb::SignedIntent,
+    write_quorum: usize,
+) -> Result<(bool, usize)> {
     let ceremony_id = new_id("delkey");
-    let mut deleted_anywhere = false;
+    let mut fenced: Vec<&Arc<dyn PeerApi>> = Vec::new();
     for p in peers {
-        match p.purge_key(&ceremony_id, key_id).await {
-            Ok(d) => deleted_anywhere |= d,
+        match p.ceremony_fence(&ceremony_id, key_id, "delkey").await {
+            Ok(()) => fenced.push(p),
+            Err(e) if is_unreachable(&e) => {
+                tracing::warn!(peer = ?p.identifier(), key_id, error = %e, "cosigner unreachable while fencing a hosted-key delete; anti-entropy will bring it the tombstone");
+            }
             Err(e) => {
-                // Best effort by design: a node that is down keeps its copy until anti-entropy
-                // reconciles the tombstone, which is why delete is documented as "the key stops
-                // being served", not "the bytes are gone".
-                tracing::warn!(peer = ?p.identifier(), key_id, error = %e, "hosted key delete failed on peer");
+                release_fences(&fenced, &ceremony_id, key_id).await;
+                return Err(e);
             }
         }
     }
-    Ok(deleted_anywhere)
+    let (mut deleted_anywhere, mut tombstones, mut refusal) = (false, 0usize, None);
+    for p in &fenced {
+        match p.delete_key(&ceremony_id, key_id, intent).await {
+            Ok(converted) => {
+                deleted_anywhere |= converted;
+                tombstones += 1;
+            }
+            Err(e) => {
+                tracing::warn!(peer = ?p.identifier(), key_id, error = %e, "hosted key delete refused or failed on peer");
+                if refusal.is_none() && !is_unreachable(&e) {
+                    refusal = Some(e);
+                }
+            }
+        }
+    }
+    release_fences(&fenced, &ceremony_id, key_id).await;
+    if tombstones < write_quorum {
+        // A node's refusal (an invalid intent, a role it does not grant) is the answer, not "too
+        // few nodes"; tombstones already written stay and propagate.
+        return Err(refusal.unwrap_or(DaemonError::ThresholdNotMet { needed: write_quorum, got: tombstones }));
+    }
+    if tombstones < peers.len() {
+        tracing::warn!(key_id, tombstones, expected = peers.len(), "hosted key delete reached only some nodes — anti-entropy propagates the tombstone");
+    }
+    Ok((deleted_anywhere, tombstones))
 }
 
 /// How many cosigners currently hold `key_id` (for reporting and the replica alert).
@@ -984,6 +1025,11 @@ pub async fn repair_hosted_key(node: &Arc<Node>, peers: &Peers, key_id: &str) ->
     if hosted_exists(node, key_id).await? {
         return Ok(true);
     }
+    // A deleted key is never pulled back (audit M2): its tombstone answers NOT_FOUND.
+    let id = key_id.to_owned();
+    if node.blocking(move |n| n.hosted_tombstoned(&id)).await? {
+        return Ok(false);
+    }
     for p in peers {
         if p.identifier() == node.identifier {
             continue;
@@ -1005,11 +1051,18 @@ pub async fn repair_hosted_key(node: &Arc<Node>, peers: &Peers, key_id: &str) ->
     Ok(false)
 }
 
-/// One anti-entropy sweep: pull anything this node is missing, and push anything a peer is missing.
+/// One anti-entropy sweep: apply peers' tombstones, pull anything this node is missing, and push
+/// anything a peer is missing.
 ///
 /// Pushing is what heals an under-quorum write; pulling is what heals a node restored from a stale
 /// backup. Applies to hosted keys ONLY — a FROST share must never be copied between nodes, since
 /// two nodes holding the same share silently breaks the threshold.
+///
+/// Tombstones first (audit M2): a peer's tombstone whose delete intent verifies here converts this
+/// node's live copy (or is recorded where the key is absent), so a node that was down during a
+/// delete, or was restored from an old backup, never pushes the deleted key back. A tombstone that
+/// does not verify is refused and counted (`rutli_delete_intent_refusals_total`). Nothing is pushed
+/// to a peer that holds a tombstone for the id, and nothing tombstoned here is pulled.
 pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<(usize, usize)> {
     if !node.hosted_enabled() {
         return Ok((0, 0));
@@ -1017,6 +1070,54 @@ pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<(usiz
     // A store that failed its readiness probe is not reconciled against: nothing could be pulled
     // into it, and its listing is not to be trusted.
     node.refuse_if_keystore_down()?;
+
+    // Every peer's inventory first, so tombstones from anyone apply before anything is pushed.
+    let mut inventories: Vec<(&Arc<dyn PeerApi>, Vec<pb::KeyManifest>)> = Vec::new();
+    for p in peers {
+        if p.identifier() == node.identifier {
+            continue;
+        }
+        // Never skip a peer silently: an unreachable peer — e.g. an mTLS UnknownIssuer while the
+        // cluster CA is being rotated (docs/ca-rotation.md) — is exactly what an operator must see.
+        // With hosted keys on, every node sweeps every peer each interval, so this line covers
+        // every directed mesh link.
+        match p.list_inventory().await {
+            Ok(inv) => inventories.push((p, inv)),
+            Err(e) => tracing::warn!(peer = ?p.identifier(), error = %e, "anti-entropy: cannot list keys on peer"),
+        }
+    }
+
+    let mut tombstoned = 0usize;
+    for (p, inv) in &inventories {
+        for t in inv.iter().filter(|m| m.tombstone) {
+            let intent = match <pb::SignedIntent as prost::Message>::decode(t.delete_intent.as_slice()) {
+                Ok(i) => i,
+                Err(e) => {
+                    crate::intent::refused_delete("malformed", format!("peer tombstone for {}: {e}", t.key_id));
+                    continue;
+                }
+            };
+            let info = crate::node::DeletedKeyInfo { spec: t.spec.clone(), created_at: t.created_at, commitment: t.commitment.clone() };
+            let id = t.key_id.clone();
+            match node
+                .blocking(move |n| n.hosted_apply_tombstone(&id, &intent, crate::intent::Expiry::Ignore, Some(&info)))
+                .await
+            {
+                Ok(crate::node::TombstoneOutcome::Already) => {}
+                Ok(outcome) => {
+                    tombstoned += 1;
+                    tracing::warn!(key_id = %t.key_id, from = ?p.identifier(), ?outcome, "anti-entropy: applied a peer's tombstone");
+                }
+                Err(e) => tracing::error!(
+                    key_id = %t.key_id,
+                    peer = ?p.identifier(),
+                    error = %e,
+                    "anti-entropy: REFUSED a peer's tombstone — this node keeps what it holds"
+                ),
+            }
+        }
+    }
+
     let mine: std::collections::HashSet<String> =
         node.blocking(|n| n.hosted_list()).await?.into_iter().collect();
     let (mut pulled, mut pushed) = (0usize, 0usize);
@@ -1026,36 +1127,23 @@ pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<(usiz
     let mut replicas: std::collections::HashMap<String, usize> =
         mine.iter().map(|k| (k.clone(), 1usize)).collect();
 
-    for p in peers {
-        if p.identifier() == node.identifier {
-            continue;
-        }
-        // Never skip a peer silently: an unreachable peer — e.g. an mTLS UnknownIssuer while the
-        // cluster CA is being rotated (docs/ca-rotation.md) — is exactly what an operator must see.
-        // With hosted keys on, every node sweeps every peer each interval, so this line covers
-        // every directed mesh link.
-        let theirs = match p.list_keys().await {
-            Ok(theirs) => theirs,
-            Err(e) => {
-                tracing::warn!(peer = ?p.identifier(), error = %e, "anti-entropy: cannot list keys on peer");
-                continue;
-            }
-        };
-        let their_ids: std::collections::HashSet<String> =
-            theirs.iter().map(|(id, _, _)| id.clone()).collect();
-        for id in &their_ids {
-            *replicas.entry(id.clone()).or_insert(0) += 1;
+    for (p, inv) in &inventories {
+        let theirs: Vec<&pb::KeyManifest> = inv.iter().filter(|m| !m.tombstone).collect();
+        // Ids the peer holds in any form: never push to it what it holds or deleted.
+        let their_ids: std::collections::HashSet<String> = inv.iter().map(|m| m.key_id.clone()).collect();
+        for m in &theirs {
+            *replicas.entry(m.key_id.clone()).or_insert(0) += 1;
         }
 
         // Divergence on a shared key is a hard error, never a merge: hosted keys are
         // create-once-immutable, so two different materials under one id means something is wrong
         // that a sweep must not paper over.
-        for (key_id, _spec, commitment) in &theirs {
-            if let Ok(local) = hosted_load(node, key_id).await {
-                if node.hosted_commitment(&local)? != *commitment {
+        for m in &theirs {
+            if let Ok(local) = hosted_load(node, &m.key_id).await {
+                if node.hosted_commitment(&local)? != m.commitment {
                     metrics::counter!(crate::metrics::ANTI_ENTROPY_CONFLICTS).increment(1);
                     tracing::error!(
-                        key_id,
+                        key_id = %m.key_id,
                         peer = ?p.identifier(),
                         "hosted key CONFLICT: this node and the peer hold different material \
                          under the same key id — refusing to reconcile automatically"
@@ -1064,8 +1152,8 @@ pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<(usiz
             }
         }
 
-        for (key_id, _, _) in &theirs {
-            if !mine.contains(key_id) && repair_hosted_key(node, peers, key_id).await.unwrap_or(false) {
+        for m in &theirs {
+            if !mine.contains(&m.key_id) && repair_hosted_key(node, peers, &m.key_id).await.unwrap_or(false) {
                 pulled += 1;
             }
         }
@@ -1088,15 +1176,29 @@ pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<(usiz
     if pulled + pushed > 0 {
         metrics::counter!(crate::metrics::ANTI_ENTROPY_REPAIRS).increment((pulled + pushed) as u64);
     }
+    // The grace period of every tombstone: drop retained material past it.
+    if let Err(e) = node.blocking(|n| n.hosted_purge_expired(crate::intent::now_ms())).await {
+        tracing::warn!(error = %e, "could not drop expired tombstone material");
+    }
+    if tombstoned > 0 {
+        tracing::info!(tombstoned, "anti-entropy applied tombstones");
+    }
     // Recount after repair so the gauge reflects the healed state, not the state that triggered it.
     let healed: std::collections::HashSet<String> =
         node.blocking(|n| n.hosted_list()).await?.into_iter().collect();
     for id in &healed {
         replicas.entry(id.clone()).or_insert(1);
     }
+    // Ids deleted since the sweep began are no longer replicas of anything.
+    replicas.retain(|id, _| healed.contains(id) || !mine.contains(id));
     metrics::gauge!(crate::metrics::HOSTED_KEYS).set(healed.len() as f64);
     metrics::gauge!(crate::metrics::KEY_REPLICAS)
         .set(replicas.values().copied().min().map(|m| m as f64).unwrap_or(f64::NAN));
+    if let Ok(ts) = node.blocking(|n| n.hosted_tombstones()).await {
+        let retained = ts.iter().filter(|t| t.retained.is_some()).count();
+        metrics::gauge!(crate::metrics::HOSTED_TOMBSTONES, "retained" => "true").set(retained as f64);
+        metrics::gauge!(crate::metrics::HOSTED_TOMBSTONES, "retained" => "false").set((ts.len() - retained) as f64);
+    }
     Ok((pulled, pushed))
 }
 

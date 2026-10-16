@@ -30,6 +30,7 @@ private static final long serialVersionUID = 0L;
     keyId_ = "";
     spec_ = "";
     commitment_ = com.google.protobuf.ByteString.EMPTY;
+    deleteIntent_ = com.google.protobuf.ByteString.EMPTY;
   }
 
   public static final com.google.protobuf.Descriptors.Descriptor
@@ -150,6 +151,49 @@ private static final long serialVersionUID = 0L;
     return commitment_;
   }
 
+  public static final int TOMBSTONE_FIELD_NUMBER = 5;
+  private boolean tombstone_ = false;
+  /**
+   * <pre>
+   * A deleted key (audit M2): this node holds its tombstone, not the key. A valid tombstone wins
+   * over a live copy: the receiving node verifies delete_intent itself (signature, delete role,
+   * ACL, approvals — not its expiry) before it converts its copy or records the tombstone.
+   * </pre>
+   *
+   * <code>bool tombstone = 5;</code>
+   * @return The tombstone.
+   */
+  @java.lang.Override
+  public boolean getTombstone() {
+    return tombstone_;
+  }
+
+  public static final int DELETE_INTENT_FIELD_NUMBER = 6;
+  private com.google.protobuf.ByteString deleteIntent_ = com.google.protobuf.ByteString.EMPTY;
+  /**
+   * <pre>
+   * serialized SignedIntent
+   * </pre>
+   *
+   * <code>bytes delete_intent = 6;</code>
+   * @return The deleteIntent.
+   */
+  @java.lang.Override
+  public com.google.protobuf.ByteString getDeleteIntent() {
+    return deleteIntent_;
+  }
+
+  public static final int DELETED_AT_MS_FIELD_NUMBER = 7;
+  private long deletedAtMs_ = 0L;
+  /**
+   * <code>uint64 deleted_at_ms = 7;</code>
+   * @return The deletedAtMs.
+   */
+  @java.lang.Override
+  public long getDeletedAtMs() {
+    return deletedAtMs_;
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -176,6 +220,15 @@ private static final long serialVersionUID = 0L;
     if (!commitment_.isEmpty()) {
       output.writeBytes(4, commitment_);
     }
+    if (tombstone_ != false) {
+      output.writeBool(5, tombstone_);
+    }
+    if (!deleteIntent_.isEmpty()) {
+      output.writeBytes(6, deleteIntent_);
+    }
+    if (deletedAtMs_ != 0L) {
+      output.writeUInt64(7, deletedAtMs_);
+    }
     getUnknownFields().writeTo(output);
   }
 
@@ -198,6 +251,18 @@ private static final long serialVersionUID = 0L;
     if (!commitment_.isEmpty()) {
       size += com.google.protobuf.CodedOutputStream
         .computeBytesSize(4, commitment_);
+    }
+    if (tombstone_ != false) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeBoolSize(5, tombstone_);
+    }
+    if (!deleteIntent_.isEmpty()) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeBytesSize(6, deleteIntent_);
+    }
+    if (deletedAtMs_ != 0L) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeUInt64Size(7, deletedAtMs_);
     }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
@@ -222,6 +287,12 @@ private static final long serialVersionUID = 0L;
         != other.getCreatedAt()) return false;
     if (!getCommitment()
         .equals(other.getCommitment())) return false;
+    if (getTombstone()
+        != other.getTombstone()) return false;
+    if (!getDeleteIntent()
+        .equals(other.getDeleteIntent())) return false;
+    if (getDeletedAtMs()
+        != other.getDeletedAtMs()) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -242,6 +313,14 @@ private static final long serialVersionUID = 0L;
         getCreatedAt());
     hash = (37 * hash) + COMMITMENT_FIELD_NUMBER;
     hash = (53 * hash) + getCommitment().hashCode();
+    hash = (37 * hash) + TOMBSTONE_FIELD_NUMBER;
+    hash = (53 * hash) + com.google.protobuf.Internal.hashBoolean(
+        getTombstone());
+    hash = (37 * hash) + DELETE_INTENT_FIELD_NUMBER;
+    hash = (53 * hash) + getDeleteIntent().hashCode();
+    hash = (37 * hash) + DELETED_AT_MS_FIELD_NUMBER;
+    hash = (53 * hash) + com.google.protobuf.Internal.hashLong(
+        getDeletedAtMs());
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -377,6 +456,9 @@ private static final long serialVersionUID = 0L;
       spec_ = "";
       createdAt_ = 0L;
       commitment_ = com.google.protobuf.ByteString.EMPTY;
+      tombstone_ = false;
+      deleteIntent_ = com.google.protobuf.ByteString.EMPTY;
+      deletedAtMs_ = 0L;
       return this;
     }
 
@@ -422,6 +504,15 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000008) != 0)) {
         result.commitment_ = commitment_;
       }
+      if (((from_bitField0_ & 0x00000010) != 0)) {
+        result.tombstone_ = tombstone_;
+      }
+      if (((from_bitField0_ & 0x00000020) != 0)) {
+        result.deleteIntent_ = deleteIntent_;
+      }
+      if (((from_bitField0_ & 0x00000040) != 0)) {
+        result.deletedAtMs_ = deletedAtMs_;
+      }
     }
 
     @java.lang.Override
@@ -451,6 +542,15 @@ private static final long serialVersionUID = 0L;
       }
       if (other.getCommitment() != com.google.protobuf.ByteString.EMPTY) {
         setCommitment(other.getCommitment());
+      }
+      if (other.getTombstone() != false) {
+        setTombstone(other.getTombstone());
+      }
+      if (other.getDeleteIntent() != com.google.protobuf.ByteString.EMPTY) {
+        setDeleteIntent(other.getDeleteIntent());
+      }
+      if (other.getDeletedAtMs() != 0L) {
+        setDeletedAtMs(other.getDeletedAtMs());
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -498,6 +598,21 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000008;
               break;
             } // case 34
+            case 40: {
+              tombstone_ = input.readBool();
+              bitField0_ |= 0x00000010;
+              break;
+            } // case 40
+            case 50: {
+              deleteIntent_ = input.readBytes();
+              bitField0_ |= 0x00000020;
+              break;
+            } // case 50
+            case 56: {
+              deletedAtMs_ = input.readUInt64();
+              bitField0_ |= 0x00000040;
+              break;
+            } // case 56
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -734,6 +849,132 @@ private static final long serialVersionUID = 0L;
     public Builder clearCommitment() {
       bitField0_ = (bitField0_ & ~0x00000008);
       commitment_ = getDefaultInstance().getCommitment();
+      onChanged();
+      return this;
+    }
+
+    private boolean tombstone_ ;
+    /**
+     * <pre>
+     * A deleted key (audit M2): this node holds its tombstone, not the key. A valid tombstone wins
+     * over a live copy: the receiving node verifies delete_intent itself (signature, delete role,
+     * ACL, approvals — not its expiry) before it converts its copy or records the tombstone.
+     * </pre>
+     *
+     * <code>bool tombstone = 5;</code>
+     * @return The tombstone.
+     */
+    @java.lang.Override
+    public boolean getTombstone() {
+      return tombstone_;
+    }
+    /**
+     * <pre>
+     * A deleted key (audit M2): this node holds its tombstone, not the key. A valid tombstone wins
+     * over a live copy: the receiving node verifies delete_intent itself (signature, delete role,
+     * ACL, approvals — not its expiry) before it converts its copy or records the tombstone.
+     * </pre>
+     *
+     * <code>bool tombstone = 5;</code>
+     * @param value The tombstone to set.
+     * @return This builder for chaining.
+     */
+    public Builder setTombstone(boolean value) {
+
+      tombstone_ = value;
+      bitField0_ |= 0x00000010;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * A deleted key (audit M2): this node holds its tombstone, not the key. A valid tombstone wins
+     * over a live copy: the receiving node verifies delete_intent itself (signature, delete role,
+     * ACL, approvals — not its expiry) before it converts its copy or records the tombstone.
+     * </pre>
+     *
+     * <code>bool tombstone = 5;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearTombstone() {
+      bitField0_ = (bitField0_ & ~0x00000010);
+      tombstone_ = false;
+      onChanged();
+      return this;
+    }
+
+    private com.google.protobuf.ByteString deleteIntent_ = com.google.protobuf.ByteString.EMPTY;
+    /**
+     * <pre>
+     * serialized SignedIntent
+     * </pre>
+     *
+     * <code>bytes delete_intent = 6;</code>
+     * @return The deleteIntent.
+     */
+    @java.lang.Override
+    public com.google.protobuf.ByteString getDeleteIntent() {
+      return deleteIntent_;
+    }
+    /**
+     * <pre>
+     * serialized SignedIntent
+     * </pre>
+     *
+     * <code>bytes delete_intent = 6;</code>
+     * @param value The deleteIntent to set.
+     * @return This builder for chaining.
+     */
+    public Builder setDeleteIntent(com.google.protobuf.ByteString value) {
+      if (value == null) { throw new NullPointerException(); }
+      deleteIntent_ = value;
+      bitField0_ |= 0x00000020;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * serialized SignedIntent
+     * </pre>
+     *
+     * <code>bytes delete_intent = 6;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearDeleteIntent() {
+      bitField0_ = (bitField0_ & ~0x00000020);
+      deleteIntent_ = getDefaultInstance().getDeleteIntent();
+      onChanged();
+      return this;
+    }
+
+    private long deletedAtMs_ ;
+    /**
+     * <code>uint64 deleted_at_ms = 7;</code>
+     * @return The deletedAtMs.
+     */
+    @java.lang.Override
+    public long getDeletedAtMs() {
+      return deletedAtMs_;
+    }
+    /**
+     * <code>uint64 deleted_at_ms = 7;</code>
+     * @param value The deletedAtMs to set.
+     * @return This builder for chaining.
+     */
+    public Builder setDeletedAtMs(long value) {
+
+      deletedAtMs_ = value;
+      bitField0_ |= 0x00000040;
+      onChanged();
+      return this;
+    }
+    /**
+     * <code>uint64 deleted_at_ms = 7;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearDeletedAtMs() {
+      bitField0_ = (bitField0_ & ~0x00000040);
+      deletedAtMs_ = 0L;
       onChanged();
       return this;
     }

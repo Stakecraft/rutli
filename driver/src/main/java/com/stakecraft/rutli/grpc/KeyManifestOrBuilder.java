@@ -49,4 +49,32 @@ public interface KeyManifestOrBuilder extends
    * @return The commitment.
    */
   com.google.protobuf.ByteString getCommitment();
+
+  /**
+   * <pre>
+   * A deleted key (audit M2): this node holds its tombstone, not the key. A valid tombstone wins
+   * over a live copy: the receiving node verifies delete_intent itself (signature, delete role,
+   * ACL, approvals — not its expiry) before it converts its copy or records the tombstone.
+   * </pre>
+   *
+   * <code>bool tombstone = 5;</code>
+   * @return The tombstone.
+   */
+  boolean getTombstone();
+
+  /**
+   * <pre>
+   * serialized SignedIntent
+   * </pre>
+   *
+   * <code>bytes delete_intent = 6;</code>
+   * @return The deleteIntent.
+   */
+  com.google.protobuf.ByteString getDeleteIntent();
+
+  /**
+   * <code>uint64 deleted_at_ms = 7;</code>
+   * @return The deletedAtMs.
+   */
+  long getDeletedAtMs();
 }

@@ -72,7 +72,36 @@ final class FrostIntentSigner private (
         b.addApprovals(IntentApproval.newBuilder().setApproverId(id).setSignature(ByteString.copyFrom(sig)))
       }
     }
-    val intent = b.build().toByteArray
+    signBytes(b.build().toByteArray)
+  }
+
+  /** Sign a hosted-key delete intent (audit M2) for `keyId`: purpose `delete-key`, digest
+    * SHA-256("rutli-delete-key-v1\n" ‖ keyId). The cosigners honour it only if this certificate's
+    * CN is on their `hosted_keys.delete_allowlist` — by default it is not, so the driver cannot
+    * delete hosted keys unless an operator grants it the delete role. */
+  def signDelete(
+      clusterId: String,
+      keyId: String,
+      requestId: Array[Byte],
+      nowMillis: Long,
+      lifetimeMillis: Long,
+  ): SignedIntent =
+    signBytes(
+      SignIntent
+        .newBuilder()
+        .setVersion(Version)
+        .setClusterId(clusterId)
+        .setPurpose(PurposeDeleteKey)
+        .setKeyId(keyId)
+        .setDigest(ByteString.copyFrom(deleteDigest(keyId)))
+        .setRequestId(ByteString.copyFrom(requestId))
+        .setIssuedAtMs(nowMillis)
+        .setNotAfterMs(nowMillis + lifetimeMillis)
+        .build()
+        .toByteArray
+    )
+
+  private def signBytes(intent: Array[Byte]): SignedIntent = {
     val s = Signature.getInstance(jcaAlg)
     s.initSign(key)
     s.update(Context)
@@ -94,6 +123,15 @@ object FrostIntentSigner {
   val Context: Array[Byte] = "rutli-intent-v1\n".getBytes(UTF_8)
   val Version = 1
   val PurposeSign = "sign"
+  val PurposeDeleteKey = "delete-key"
+
+  /** The digest a delete intent carries, as the cosigners compute it (`intent::delete_digest`). */
+  def deleteDigest(keyId: String): Array[Byte] = {
+    val md = java.security.MessageDigest.getInstance("SHA-256")
+    md.update("rutli-delete-key-v1\n".getBytes(UTF_8))
+    md.update(keyId.getBytes(UTF_8))
+    md.digest()
+  }
   val RequestIdBytes = 16
 
   private val rng = new SecureRandom()

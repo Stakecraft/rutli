@@ -143,6 +143,41 @@ pub struct Node {
     /// Set when hosted (non-FROST) keys are enabled: this node's derived wrapping key plus the
     /// cluster identity envelopes are bound to. `None` disables every hosted-key operation.
     hosted: Option<HostedCtx>,
+    /// Hosted keys this node created under a genkey ceremony (key id -> ceremony id): the only keys
+    /// a PurgeKey without a delete intent may remove — the rollback of a generation that missed its
+    /// write quorum, while that generation still holds the fence (audit M2).
+    hosted_created_in: Mutex<std::collections::HashMap<String, String>>,
+    /// `hosted_keys.delete_grace_secs`: how long a tombstone retains the deleted key's material.
+    delete_grace: Duration,
+}
+
+/// What a node holds under a hosted key id.
+pub enum HostedState {
+    Absent,
+    Live(Box<crate::hosted::HostedKey>),
+    Tombstone(Box<crate::hosted::Tombstone>),
+    /// A FROST share — never a hosted key, never tombstoned.
+    Frost,
+}
+
+/// What applying a tombstone did on this node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TombstoneOutcome {
+    /// This node held the key live: it is now a tombstone (material retained for the grace period).
+    Converted,
+    /// This node did not hold the key: the tombstone is recorded, so the key can never arrive.
+    Recorded,
+    /// Already tombstoned here (or the intent was cleared by break-glass): nothing changed.
+    Already,
+}
+
+/// What a peer's tombstone manifest says about the deleted key, recorded with the tombstone on a
+/// node that never held it.
+#[derive(Clone, Debug, Default)]
+pub struct DeletedKeyInfo {
+    pub spec: String,
+    pub created_at: u64,
+    pub commitment: Vec<u8>,
 }
 
 /// What a node needs to take part in hosted-key replication, built from its seal keys and config
@@ -218,6 +253,8 @@ impl Node {
             book: Mutex::new(CeremonyBook { sessions: Default::default(), records }),
             mesh: std::sync::OnceLock::new(),
             hosted: None,
+            hosted_created_in: Mutex::new(Default::default()),
+            delete_grace: Duration::from_secs(crate::config::DEFAULT_DELETE_GRACE_SECS),
         };
         if let Err(e) = node.recover_ceremonies() {
             tracing::error!(error = %e, "ceremony recovery at startup failed");
@@ -336,7 +373,7 @@ impl Node {
                 reply.group_verifying_key = group_verifying_key_bytes(&share.public_key_package)?.to_vec();
                 reply.origin = share.origin.as_ref().map(|o| o.kind.clone()).unwrap_or_else(|| "dkg".into());
             }
-            Ok(crate::keystore::Record::Hosted(_)) => {
+            Ok(crate::keystore::Record::Hosted(_)) | Ok(crate::keystore::Record::Tombstone(_)) => {
                 reply.present = true;
                 reply.origin = "hosted".into();
             }
@@ -449,6 +486,11 @@ impl Node {
     /// Roll back a fence taken by [`ceremony_fence`] (partial cluster fence / aborted ceremony).
     pub fn ceremony_release(&self, ceremony_id: &str, key_id: &str) {
         self.release_ceremony(key_id, ceremony_id);
+        // Past its fence a generation can no longer be rolled back.
+        let mut created = crate::sync::recover(&self.hosted_created_in, "hosted_created_in");
+        if created.get(key_id).is_some_and(|c| c == ceremony_id) {
+            created.remove(key_id);
+        }
     }
 
     // -- locks (audit L3: a panicking request must not take the node down; see crate::sync) --
@@ -1917,6 +1959,15 @@ pub struct StagedOutcome {
 }
 
 /// Hosted keys may never live under an id reserved for the split ceremony (`…frost-import-…`).
+/// The refusal for a write under a tombstoned id: ALREADY_EXISTS, naming the break-glass.
+pub(crate) fn tombstoned(key_id: &str) -> DaemonError {
+    DaemonError::KeyExists(format!(
+        "{key_id} is tombstoned (deleted): hosted key ids are never reused — undelete it \
+         (rutli-cosigner hosted-undelete, within the grace period), or clear the tombstone on EVERY \
+         node (rutli-cosigner hosted-clear-tombstone) before generating it again"
+    ))
+}
+
 pub(crate) fn refuse_reserved_for_hosted(key_id: &str) -> Result<()> {
     if crate::share_delivery::is_reserved_for_import(key_id) {
         return Err(DaemonError::ReservedKeyId(key_id.to_string()));
@@ -2033,7 +2084,10 @@ impl Node {
         if !self.keystore.exists(key_id) {
             return Ok(None);
         }
-        let existing = self.keystore.load_hosted(key_id)?;
+        let existing = match self.hosted_state(key_id)? {
+            HostedState::Tombstone(_) => return Err(tombstoned(key_id)),
+            _ => self.keystore.load_hosted(key_id)?,
+        };
         if existing.spec != spec {
             return Err(DaemonError::KeyExists(format!(
                 "{key_id} already exists with spec {} (requested {})",
@@ -2059,6 +2113,9 @@ impl Node {
         self.hosted_ctx()?;
         refuse_reserved_for_hosted(key_id)?;
         if self.keystore.exists(key_id) {
+            if let HostedState::Tombstone(_) = self.hosted_state(key_id)? {
+                return Err(tombstoned(key_id));
+            }
             let existing = self.keystore.load_hosted(key_id)?;
             if existing.spec != spec {
                 return Err(DaemonError::KeyExists(format!(
@@ -2077,6 +2134,12 @@ impl Node {
 
     /// Store a hosted key received from a peer (already unwrapped and verified).
     pub fn hosted_store(&self, key_id: &str, key: &crate::hosted::HostedKey) -> Result<()> {
+        self.hosted_store_for(key_id, key, None)
+    }
+
+    /// [`Node::hosted_store`], noting the genkey ceremony that created it here (`created_by`), so
+    /// that generation — and only it, while it holds its fence — may roll it back.
+    pub fn hosted_store_for(&self, key_id: &str, key: &crate::hosted::HostedKey, created_by: Option<&str>) -> Result<()> {
         self.hosted_ctx()?;
         // A peer may never push a hosted key under an id reserved for the split ceremony: it would
         // squat on an import, or (with a rename-based write) replace an installed share.
@@ -2084,8 +2147,16 @@ impl Node {
         // Create-once-immutable: a key id maps to one key forever. Canton rotates by minting a new
         // id plus a topology transaction, so a differing replica is a genuine conflict — never a
         // merge. Overwriting here could silently destroy the material peers already committed to.
+        // A tombstoned id stays deleted: nothing ever overwrites a tombstone (audit M2).
         let identical_or_conflict = |node: &Node| -> Result<()> {
-            let existing = node.keystore.load_hosted(key_id)?;
+            let existing = match node.hosted_state(key_id)? {
+                HostedState::Tombstone(_) => return Err(tombstoned(key_id)),
+                HostedState::Live(k) => k,
+                HostedState::Frost => {
+                    return Err(DaemonError::KeyExists(format!("{key_id} is a FROST share here")))
+                }
+                HostedState::Absent => return Err(DaemonError::UnknownKey(key_id.to_string())),
+            };
             if node.hosted_commitment(&existing)? != node.hosted_commitment(key)? {
                 return Err(DaemonError::KeyExists(format!(
                     "{key_id} already exists here with different material — refusing to overwrite"
@@ -2096,12 +2167,204 @@ impl Node {
         if self.keystore.exists(key_id) {
             return identical_or_conflict(self);
         }
-        // create, not save: a file that appeared since the check (a racing push, a FROST share) is
-        // never renamed over; it is compared like any existing one.
+        // create, not save: a file that appeared since the check (a racing push, a FROST share, a
+        // tombstone) is never renamed over; it is compared like any existing one.
         match self.keystore.create_hosted(key_id, key) {
             Err(DaemonError::KeyExists(_)) => identical_or_conflict(self),
+            Ok(()) => {
+                if let Some(c) = created_by {
+                    crate::sync::recover(&self.hosted_created_in, "hosted_created_in")
+                        .insert(key_id.to_string(), c.to_string());
+                }
+                Ok(())
+            }
             other => other,
         }
+    }
+
+    /// What this node holds under `key_id`.
+    pub fn hosted_state(&self, key_id: &str) -> Result<HostedState> {
+        Ok(match self.keystore.load_record(key_id) {
+            Ok(crate::keystore::Record::Hosted(k)) => HostedState::Live(k),
+            Ok(crate::keystore::Record::Tombstone(t)) => HostedState::Tombstone(t),
+            Ok(crate::keystore::Record::Frost(_)) => HostedState::Frost,
+            Err(DaemonError::UnknownKey(_)) => HostedState::Absent,
+            Err(e) => return Err(e),
+        })
+    }
+
+    /// Whether `key_id` is tombstoned on this node.
+    pub fn hosted_tombstoned(&self, key_id: &str) -> Result<bool> {
+        Ok(self.keystore.exists(key_id) && matches!(self.hosted_state(key_id)?, HostedState::Tombstone(_)))
+    }
+
+    /// How long a tombstone keeps the deleted key's material (`hosted_keys.delete_grace_secs`).
+    pub fn with_delete_grace(mut self, grace: Duration) -> Self {
+        self.delete_grace = grace;
+        self
+    }
+
+    /// Delete hosted key `key_id` on this node by the client's delete intent (audit M2): verify it
+    /// here — whoever forwarded it — and replace the key with a tombstone that retains its material
+    /// for the grace period; on a node that lacks the key, record the tombstone so the key can never
+    /// arrive. `expiry`: [`crate::intent::Expiry::Enforce`] for a live delete (DeleteKey, PurgeKey),
+    /// `Ignore` for a tombstone a peer propagates. A tombstone never applies to a copy created or
+    /// undeleted after its intent was issued.
+    pub fn hosted_apply_tombstone(
+        &self,
+        key_id: &str,
+        intent: &crate::pb::SignedIntent,
+        expiry: crate::intent::Expiry,
+        known: Option<&DeletedKeyInfo>,
+    ) -> Result<TombstoneOutcome> {
+        use prost::Message;
+        self.hosted_ctx()?;
+        refuse_reserved_for_hosted(key_id)?;
+        let verifier = self.sign_guard.as_ref().map(|g| g.verifier().clone()).ok_or_else(|| {
+            crate::intent::refused_delete(
+                "disabled",
+                "this node verifies no delete intents (no signing policy / TLS) — hosted-key deletes are disabled".into(),
+            )
+        })?;
+        let now = crate::intent::now_ms();
+        let v = verifier.verify_delete(intent, key_id, now, expiry)?;
+        if self.keystore.is_cleared(key_id, &v.digest)? {
+            return Ok(TombstoneOutcome::Already);
+        }
+        let grace_ms = u64::try_from(self.delete_grace.as_millis()).unwrap_or(u64::MAX);
+        let tombstone = |info: DeletedKeyInfo, retained: Option<crate::hosted::HostedKey>| crate::hosted::Tombstone {
+            key_id: key_id.to_string(),
+            spec: info.spec,
+            created_at: info.created_at,
+            commitment: hex::encode(info.commitment),
+            deleted_at_ms: now,
+            purge_after_ms: now.saturating_add(grace_ms),
+            delete_intent: hex::encode(intent.encode_to_vec()),
+            retained: if grace_ms == 0 { None } else { retained },
+        };
+        for _ in 0..3 {
+            match self.hosted_state(key_id)? {
+                HostedState::Tombstone(_) => return Ok(TombstoneOutcome::Already),
+                HostedState::Frost => {
+                    return Err(DaemonError::Config(format!(
+                        "{key_id} is a FROST share — a delete intent never touches one"
+                    )))
+                }
+                HostedState::Live(k) => {
+                    if v.issued_at_ms.saturating_add(verifier.skew_ms()) < k.live_since_ms() {
+                        return Err(crate::intent::refused_delete(
+                            "stale",
+                            format!(
+                                "the delete intent for {key_id} was issued before this copy was created or \
+                                 undeleted — not applied to it"
+                            ),
+                        ));
+                    }
+                    let info = DeletedKeyInfo {
+                        spec: k.spec.as_str().to_string(),
+                        created_at: k.created_at,
+                        commitment: self.hosted_commitment(&k)?,
+                    };
+                    self.keystore.save_tombstone(key_id, &tombstone(info, Some(*k)))?;
+                    metrics::counter!(crate::metrics::HOSTED_TOMBSTONES_WRITTEN, "how" => "converted").increment(1);
+                    tracing::warn!(key_id, signer = %v.signer_cn, "hosted key deleted: replaced by a tombstone");
+                    return Ok(TombstoneOutcome::Converted);
+                }
+                HostedState::Absent => {
+                    match self.keystore.create_tombstone(key_id, &tombstone(known.cloned().unwrap_or_default(), None)) {
+                        Ok(()) => {
+                            metrics::counter!(crate::metrics::HOSTED_TOMBSTONES_WRITTEN, "how" => "recorded").increment(1);
+                            tracing::info!(key_id, signer = %v.signer_cn, "tombstone recorded for a hosted key this node does not hold");
+                            return Ok(TombstoneOutcome::Recorded);
+                        }
+                        // Something arrived meanwhile (a racing push): read it again and decide.
+                        Err(DaemonError::KeyExists(_)) => continue,
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+        }
+        Err(DaemonError::Config(format!("{key_id}: the key file kept changing while it was being tombstoned")))
+    }
+
+    /// PurgeKey without a delete intent: the rollback of a key this node created in genkey
+    /// ceremony `ceremony_id`, which still holds this node's fence for the key — a generation that
+    /// missed its write quorum. Anything else is refused: no peer and no leader can physically
+    /// remove a key otherwise (audit M2).
+    pub fn hosted_rollback_purge(&self, ceremony_id: &str, key_id: &str) -> Result<bool> {
+        self.hosted_ctx()?;
+        let fenced = self.guards().get(key_id).is_some_and(|g| g.owner == ceremony_id && g.kind == "genkey");
+        let created_here = crate::sync::recover(&self.hosted_created_in, "hosted_created_in")
+            .get(key_id)
+            .is_some_and(|c| c == ceremony_id);
+        if !(fenced && created_here) {
+            return Err(crate::intent::refused_delete(
+                "rollback",
+                format!(
+                    "PurgeKey for {key_id} carries no delete intent, and it is not the rollback of a key this \
+                     node created in the same, still-fenced generation — refused"
+                ),
+            ));
+        }
+        match self.hosted_state(key_id)? {
+            HostedState::Live(_) => {
+                self.keystore.delete(key_id)?;
+                crate::sync::recover(&self.hosted_created_in, "hosted_created_in").remove(key_id);
+                Ok(true)
+            }
+            HostedState::Absent => Ok(false),
+            _ => Err(DaemonError::Config(format!("{key_id} is no longer the key this generation created"))),
+        }
+    }
+
+    /// This node's hosted-key inventory as `ListKeys` reports it: every live key and every
+    /// tombstone (with its delete intent, for the receiving node to verify).
+    pub fn hosted_manifest(&self) -> Result<Vec<crate::pb::KeyManifest>> {
+        let mut keys = Vec::new();
+        for key_id in self.hosted_list()? {
+            let key = self.hosted_load(&key_id)?;
+            keys.push(crate::pb::KeyManifest {
+                key_id,
+                spec: key.spec.as_str().to_string(),
+                created_at: key.created_at,
+                commitment: self.hosted_commitment(&key)?,
+                ..Default::default()
+            });
+        }
+        for t in self.hosted_tombstones()? {
+            use prost::Message;
+            keys.push(crate::pb::KeyManifest {
+                commitment: hex::decode(&t.commitment).unwrap_or_default(),
+                delete_intent: t.intent()?.encode_to_vec(),
+                tombstone: true,
+                deleted_at_ms: t.deleted_at_ms,
+                spec: t.spec,
+                created_at: t.created_at,
+                key_id: t.key_id,
+            });
+        }
+        Ok(keys)
+    }
+
+    /// Every tombstone on this node.
+    pub fn hosted_tombstones(&self) -> Result<Vec<crate::hosted::Tombstone>> {
+        self.hosted_ctx()?;
+        self.keystore.list_tombstones()
+    }
+
+    /// Drop the retained material of every tombstone past its grace period. Returns how many.
+    pub fn hosted_purge_expired(&self, now_ms: u64) -> Result<usize> {
+        self.hosted_ctx()?;
+        let mut n = 0;
+        for mut t in self.keystore.list_tombstones()? {
+            if t.retained.is_some() && now_ms > t.purge_after_ms {
+                t.retained = None;
+                self.keystore.save_tombstone(&t.key_id.clone(), &t)?;
+                tracing::info!(key_id = %t.key_id, "grace period over: a deleted key's retained material dropped");
+                n += 1;
+            }
+        }
+        Ok(n)
     }
 
     pub fn hosted_load(&self, key_id: &str) -> Result<crate::hosted::HostedKey> {
@@ -2127,7 +2390,9 @@ impl Node {
                 public_key_der: if key.spec.is_asymmetric() { key.derived_public_key_der()? } else { Vec::new() },
                 created_at: key.created_at,
             }),
-            Ok(crate::keystore::Record::Frost(_)) | Err(DaemonError::UnknownKey(_)) => Ok(absent),
+            Ok(crate::keystore::Record::Frost(_))
+            | Ok(crate::keystore::Record::Tombstone(_))
+            | Err(DaemonError::UnknownKey(_)) => Ok(absent),
             Err(e) => Err(e),
         }
     }
@@ -2139,18 +2404,6 @@ impl Node {
     pub fn hosted_list(&self) -> Result<Vec<String>> {
         self.hosted_ctx()?;
         self.keystore.list_hosted()
-    }
-
-    pub fn hosted_delete(&self, key_id: &str) -> Result<bool> {
-        self.hosted_ctx()?;
-        if !self.keystore.exists(key_id) {
-            return Ok(false);
-        }
-        // Refuse to route a FROST share through the hosted delete path: namespace keys are
-        // non-rotatable and deleting one destroys the node's identity.
-        self.keystore.load_hosted(key_id)?;
-        self.keystore.delete(key_id)?;
-        Ok(true)
     }
 
     /// Keyed digest of a key's material: lets two nodes agree they hold the *same* key without

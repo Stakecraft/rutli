@@ -209,6 +209,48 @@ enum Command {
         #[command(subcommand)]
         command: SealCommand,
     },
+    /// Delete a cluster-hosted key (audit M2) with a delete intent signed by THIS config's TLS
+    /// certificate, which must be on every node's hosted_keys.delete_allowlist. Every node
+    /// verifies it and replaces the key with a tombstone; the material stays sealed inside it for
+    /// hosted_keys.delete_grace_secs (`hosted-undelete`). With --approvals-inbox, first collects
+    /// approvals through the same inbox `rutli-approve` serves (for delete_approval_threshold).
+    DeleteHostedKey {
+        #[arg(long)]
+        key_id: String,
+        /// Signer endpoint (default: the first roster peer).
+        #[arg(long)]
+        target: Option<String>,
+        /// TLS server name the target must present (default: that peer's `tls_server_name`).
+        #[arg(long)]
+        tls_server_name: Option<String>,
+        /// The approval inbox (`<dir>/pending`, `<dir>/approvals`) to collect approvals in.
+        #[arg(long)]
+        approvals_inbox: Option<std::path::PathBuf>,
+        /// How many distinct approvals to wait for (the nodes' delete_approval_threshold).
+        #[arg(long, default_value_t = 0)]
+        approvals: usize,
+        /// How long to wait for the approvals.
+        #[arg(long, default_value_t = 900)]
+        approval_timeout_secs: u64,
+    },
+    /// Undo a hosted-key delete on THIS node (daemon stopped): restore the material its tombstone
+    /// retains (within hosted_keys.delete_grace_secs). Run it on every node, then `verify-hosted`:
+    /// a node still holding the tombstone answers NOT_FOUND for the key.
+    HostedUndelete {
+        #[arg(long)]
+        key_id: String,
+    },
+    /// BREAK-GLASS (daemon stopped): remove a hosted key's tombstone on THIS node so the id can be
+    /// generated again, and ignore its delete intent from peers from now on. Refused while the
+    /// tombstone still retains material. Must be run on EVERY node before the id is generated
+    /// again — a node that still holds the tombstone refuses the new key, and the generation fails.
+    HostedClearTombstone {
+        #[arg(long)]
+        key_id: String,
+        /// Repeat the key id to confirm.
+        #[arg(long)]
+        confirm_key_id: String,
+    },
     /// Key-file format (audit M4): inspect this node's key files, migrate them to format v2,
     /// downgrade them to v1 for a rollback, seal a genuine plaintext file. Everything but `status`
     /// runs with this node's daemon STOPPED (the instance lock is taken).
@@ -414,6 +456,29 @@ async fn main() -> Result<()> {
             return discard_partial_key_command(&cfg, &key_id, &confirm_group_key).await
         }
         Some(Command::Keyfile { command }) => return keyfile_command(&cfg, command),
+        Some(Command::DeleteHostedKey {
+            key_id,
+            target,
+            tls_server_name,
+            approvals_inbox,
+            approvals,
+            approval_timeout_secs,
+        }) => {
+            return delete_hosted_key_command(
+                &cfg,
+                &key_id,
+                target,
+                tls_server_name,
+                approvals_inbox.as_deref(),
+                approvals,
+                std::time::Duration::from_secs(approval_timeout_secs),
+            )
+            .await
+        }
+        Some(Command::HostedUndelete { key_id }) => return hosted_undelete_command(&cfg, &key_id),
+        Some(Command::HostedClearTombstone { key_id, confirm_key_id }) => {
+            return hosted_clear_tombstone_command(&cfg, &key_id, &confirm_key_id)
+        }
         _ => {}
     }
     tracing::info!(identifier = cfg.identifier, listen = %cfg.listen, "starting cosigner");
@@ -606,13 +671,36 @@ async fn main() -> Result<()> {
             Some(t) => std::fs::read(&t.ca_cert)?,
             None => Vec::new(),
         };
-        let verifier = rutli_cosigner::intent::IntentVerifier::new(
+        let mut verifier = rutli_cosigner::intent::IntentVerifier::new(
             ca_pem,
             cfg.tls.as_ref().is_some_and(|t| t.allow_expired_ca),
             cluster_id.clone(),
             cfg.signer_allowlist.clone().unwrap_or_default(),
             policy,
         )?;
+        if let Some(h) = cfg.hosted_keys.as_ref().filter(|h| h.enabled) {
+            verifier = verifier.with_delete_policy(rutli_cosigner::intent::DeletePolicy::from_config(h));
+            if h.delete_allowlist.is_empty() {
+                tracing::info!(
+                    "hosted-key deletes are disabled (hosted_keys.delete_allowlist is empty): DeleteKey is \
+                     refused and peers' tombstones are not accepted"
+                );
+            } else {
+                tracing::info!(
+                    deleters = ?h.delete_allowlist,
+                    acl_entries = h.delete_acl.len(),
+                    approvals = h.delete_approval_threshold,
+                    grace_secs = h.delete_grace_secs,
+                    "hosted-key delete role: tombstones need a delete intent signed by one of these CNs"
+                );
+                if h.delete_approval_threshold == 0 {
+                    tracing::warn!(
+                        "hosted_keys.delete_approval_threshold is 0: one delete-role certificate alone can \
+                         delete a hosted key (recoverable for delete_grace_secs) — require approvals in production"
+                    );
+                }
+            }
+        }
         let journal = rutli_cosigner::journal::SignJournal::open(
             cfg.data_dir.join("journal"),
             cfg.identifier,
@@ -665,6 +753,9 @@ async fn main() -> Result<()> {
         // by their pinned distribution keys (bundle) or derived ones (legacy master), never by a
         // master held here.
         node = node.with_hosted_keyring(keys.hosted_keyring(&cfg)?, cluster_id.clone())?;
+        if let Some(h) = &cfg.hosted_keys {
+            node = node.with_delete_grace(std::time::Duration::from_secs(h.delete_grace_secs));
+        }
         tracing::info!(
             "cluster-hosted keys enabled (RSA-2048 and EC P-256 encryption, AES-256-GCM symmetric)"
         );
@@ -1442,6 +1533,176 @@ fn seal_command(command: SealCommand) -> Result<()> {
     Ok(())
 }
 
+/// `delete-hosted-key`: see [`Command::DeleteHostedKey`].
+async fn delete_hosted_key_command(
+    cfg: &Config,
+    key_id: &str,
+    target: Option<String>,
+    tls_server_name: Option<String>,
+    inbox: Option<&std::path::Path>,
+    approvals: usize,
+    approval_timeout: std::time::Duration,
+) -> Result<()> {
+    use rutli_cosigner::pb;
+    let tls_cfg = cfg.tls.as_ref().ok_or_else(|| {
+        DaemonError::Config("delete-hosted-key needs tls: the delete intent is signed with tls.cert / tls.key".into())
+    })?;
+    let signer = rutli_cosigner::request_auth::NodeSigner::from_files(&tls_cfg.cert, &tls_cfg.key)?;
+    let peer = match &target {
+        Some(t) => cfg.peers.iter().find(|p| p.endpoint.trim_end_matches('/') == t.trim_end_matches('/')),
+        None => cfg.peers.first(),
+    };
+    let endpoint = target.clone().or_else(|| peer.map(|p| p.endpoint.clone())).ok_or_else(|| {
+        DaemonError::Config("no target endpoint".into())
+    })?;
+    let name = tls_server_name.or_else(|| peer.map(|p| p.server_name())).or_else(|| tls_cfg.domain.clone()).ok_or_else(
+        || DaemonError::Config(format!("{endpoint} is not a roster endpoint: pass --tls-server-name")),
+    )?;
+    let tls = rutli_cosigner::tls::load(tls_cfg)?;
+    let mut client = signer_client(&endpoint, Some(tls.client_for(&name))).await?;
+    let cluster_id = client.capabilities(pb::CapabilitiesRequest {}).await?.into_inner().cluster_id;
+    if cluster_id.is_empty() {
+        return Err(DaemonError::Config(format!("{endpoint} reports no cluster id — a cosigner older than intents")));
+    }
+    let digest = rutli_cosigner::intent::delete_digest(key_id);
+    let (nonce, collected) = match inbox {
+        Some(dir) if approvals > 0 => collect_delete_approvals(dir, key_id, &digest, approvals, approval_timeout)?,
+        _ => (Vec::new(), Vec::new()),
+    };
+    let now = rutli_cosigner::intent::now_ms();
+    let mut request_id = [0u8; 16];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut request_id);
+    let intent = pb::SignIntent {
+        version: rutli_cosigner::intent::INTENT_VERSION,
+        cluster_id,
+        purpose: rutli_cosigner::intent::PURPOSE_DELETE_KEY.into(),
+        key_id: key_id.into(),
+        digest: digest.to_vec(),
+        request_id: request_id.to_vec(),
+        issued_at_ms: now,
+        not_after_ms: now + 120_000,
+        approval_nonce: nonce,
+        approvals: collected,
+    };
+    let signed = rutli_cosigner::intent::sign_intent(&signer, &intent)?;
+    let reply = client
+        .delete_key(pb::DeleteKeyRequest { key_id: key_id.into(), intent: Some(signed) })
+        .await
+        .map_err(|s| DaemonError::Config(format!("DeleteKey refused: {}", status_text(&s))))?
+        .into_inner();
+    println!(
+        "{key_id}: {} — tombstoned on {} node(s); anti-entropy brings it to the rest. The material \
+         stays sealed in the tombstones for hosted_keys.delete_grace_secs (rutli-cosigner hosted-undelete).",
+        if reply.deleted { "deleted" } else { "already deleted / not held" },
+        reply.tombstones
+    );
+    Ok(())
+}
+
+/// Collect `threshold` approvals of a delete through a `rutli-approve` inbox: write the pending
+/// request (the same flat JSON the driver's approval gate writes, over the delete digest) and wait
+/// for `<inbox>/approvals/<requestId>.<approver>.sig`. Returns the nonce and the approvals.
+fn collect_delete_approvals(
+    inbox: &std::path::Path,
+    key_id: &str,
+    delete_digest: &[u8; 32],
+    threshold: usize,
+    timeout: std::time::Duration,
+) -> Result<(Vec<u8>, Vec<rutli_cosigner::pb::IntentApproval>)> {
+    use base64::Engine;
+    use sha2::Digest;
+    let mut nonce = [0u8; 16];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
+    let request_id = rutli_cosigner::intent::approval_request_id(key_id, delete_digest, &nonce);
+    let (pending, approvals_dir) = (inbox.join("pending"), inbox.join("approvals"));
+    std::fs::create_dir_all(&pending)?;
+    std::fs::create_dir_all(&approvals_dir)?;
+    let op_digest = hex::encode(sha2::Sha256::digest(delete_digest));
+    let json = serde_json::json!({
+        "requestId": request_id, "keyId": key_id, "digest": op_digest, "nonce": hex::encode(nonce),
+        "ts": rutli_cosigner::intent::now_ms(), "operation": "delete-hosted-key",
+    });
+    let file = pending.join(format!("{request_id}.json"));
+    std::fs::write(&file, serde_json::to_vec(&json)?)?;
+    println!(
+        "waiting for {threshold} approval(s) of DELETE {key_id}: request {request_id} in {} — approvers run \
+         `ApproveCli approve --inbox {} --request {request_id}` (its digest is SHA-256 of the delete digest)",
+        file.display(),
+        inbox.display()
+    );
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let mut found: std::collections::BTreeMap<String, Vec<u8>> = Default::default();
+        for entry in std::fs::read_dir(&approvals_dir)? {
+            let path = entry?.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+            if !name.starts_with(&format!("{request_id}.")) || !name.ends_with(".sig") {
+                continue;
+            }
+            let Ok(v) = serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path)?) else { continue };
+            let (Some(id), Some(rid), Some(sig)) = (v["approverId"].as_str(), v["requestId"].as_str(), v["signature"].as_str())
+            else {
+                continue;
+            };
+            if rid != request_id {
+                continue;
+            }
+            if let Ok(sig) = base64::engine::general_purpose::STANDARD.decode(sig) {
+                found.insert(id.to_string(), sig);
+            }
+        }
+        if found.len() >= threshold {
+            let _ = std::fs::remove_file(&file);
+            return Ok((
+                nonce.to_vec(),
+                found
+                    .into_iter()
+                    .map(|(approver_id, signature)| rutli_cosigner::pb::IntentApproval { approver_id, signature })
+                    .collect(),
+            ));
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = std::fs::remove_file(&file);
+            return Err(DaemonError::Config(format!(
+                "delete of {key_id}: {} of {threshold} approvals within {timeout:?}",
+                found.len()
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+}
+
+/// `hosted-undelete`: see [`Command::HostedUndelete`].
+fn hosted_undelete_command(cfg: &Config, key_id: &str) -> Result<()> {
+    let _lock = rutli_cosigner::instance_lock::InstanceLock::acquire(&cfg.data_dir)?;
+    let keystore = offline_keystore(cfg)?;
+    let key = keystore.undelete(key_id, rutli_cosigner::intent::now_ms())?;
+    println!(
+        "{key_id} undeleted on node {} (spec {}). Undelete it on EVERY node, then check with verify-hosted; \
+         the old delete intent no longer applies to it.",
+        cfg.identifier,
+        key.spec.as_str()
+    );
+    Ok(())
+}
+
+/// `hosted-clear-tombstone`: see [`Command::HostedClearTombstone`].
+fn hosted_clear_tombstone_command(cfg: &Config, key_id: &str, confirm: &str) -> Result<()> {
+    if key_id != confirm {
+        return Err(DaemonError::Config("--confirm-key-id must repeat --key-id".into()));
+    }
+    let _lock = rutli_cosigner::instance_lock::InstanceLock::acquire(&cfg.data_dir)?;
+    let keystore = offline_keystore(cfg)?;
+    let t = keystore.clear_tombstone(key_id)?;
+    tracing::warn!(key_id, deleted_at_ms = t.deleted_at_ms, "BREAK-GLASS: tombstone cleared");
+    println!(
+        "{key_id}: tombstone cleared on node {} (its delete intent is now ignored here). Clear it on EVERY \
+         node before generating the id again.",
+        cfg.identifier
+    );
+    Ok(())
+}
+
 /// `keyfile …`: see [`KeyfileCommand`].
 fn keyfile_command(cfg: &Config, command: KeyfileCommand) -> Result<()> {
     use rutli_cosigner::seal::DekUse;
@@ -1520,6 +1781,14 @@ fn keyfile_command(cfg: &Config, command: KeyfileCommand) -> Result<()> {
                 n += 1;
             }
             println!("re-sealed {n} key file(s) as format v{version} under DEK {}", sealer.current_dek_id());
+            let tombstones = keystore.list_tombstones()?.len();
+            if version == 1 && tombstones > 0 {
+                println!(
+                    "{tombstones} tombstone(s) of deleted hosted keys: a release before tombstones reads each as \
+                     an unreadable file — it serves nothing for the id, but it no longer blocks the key from \
+                     coming back from a node that still holds it. Downgrade every node, or none."
+                );
+            }
             if version == 1 && cfg.keyfile.write_version == 2 {
                 println!(
                     "keyfile.write_version is still 2 here: set it to 1 before starting this release \
@@ -1546,6 +1815,9 @@ fn keyfile_command(cfg: &Config, command: KeyfileCommand) -> Result<()> {
                     k.spec.as_str(),
                     hex::encode(rutli_cosigner::keystore::hosted_header_digest(&k))
                 ),
+                Ok(rutli_cosigner::keystore::Record::Tombstone(t)) => {
+                    format!("tombstone of a deleted hosted key, deleted at {} ms", t.deleted_at_ms)
+                }
                 Err(e) => return Err(e),
             };
             match confirm {

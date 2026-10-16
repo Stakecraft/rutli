@@ -49,12 +49,58 @@ use crate::{DaemonError, Result};
 pub const INTENT_CONTEXT: &[u8] = b"rutli-intent-v1\n";
 pub const INTENT_VERSION: u32 = 1;
 pub const PURPOSE_SIGN: &str = "sign";
+/// A hosted-key delete (audit M2): the intent names the key, its digest is [`delete_digest`].
+pub const PURPOSE_DELETE_KEY: &str = "delete-key";
+/// Domain separation of a delete intent's digest.
+pub const DELETE_DIGEST_CONTEXT: &[u8] = b"rutli-delete-key-v1\n";
 /// Sign round 1 for the split ceremony's `CeremonySignTest` (no intent; the node's own test digest).
 pub const PURPOSE_SIGN_TEST: &str = "sign-test";
 pub const REQUEST_ID_LEN: usize = 16;
 /// Far above a real intent (a few hundred bytes plus approvals), small enough to bound the work a
 /// hostile caller can make a node do before anything is verified.
 pub const MAX_INTENT_BYTES: usize = 16 * 1024;
+
+/// The digest a delete intent for `key_id` carries (and approvals of it are over):
+/// SHA-256("rutli-delete-key-v1\n" ‖ key_id).
+pub fn delete_digest(key_id: &str) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(DELETE_DIGEST_CONTEXT);
+    h.update(key_id.as_bytes());
+    h.finalize().into()
+}
+
+/// Whether a check of an intent's validity window applies in full ([`Expiry::Enforce`]: a live
+/// request) or only its sanity ([`Expiry::Ignore`]: a tombstone a peer propagates days later,
+/// whose intent expired long ago but was valid when the delete happened).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Expiry {
+    Enforce,
+    Ignore,
+}
+
+/// Who may delete hosted keys (`hosted_keys.delete_*`): a role of its own, so the driver
+/// certificate cannot delete unless an operator lists it.
+#[derive(Clone, Debug, Default)]
+pub struct DeletePolicy {
+    /// `hosted_keys.delete_allowlist`. Empty: deletes are disabled.
+    pub allowlist: HashSet<String>,
+    /// `hosted_keys.delete_acl`: key-id prefixes per CN. A CN without an entry may delete any
+    /// hosted key.
+    pub acl: HashMap<String, Vec<String>>,
+    /// `hosted_keys.delete_approval_threshold`: distinct `signing_policy.approvers` that must have
+    /// approved the delete (0 = none).
+    pub approval_threshold: u32,
+}
+
+impl DeletePolicy {
+    pub fn from_config(h: &crate::config::HostedKeysConfig) -> Self {
+        Self {
+            allowlist: h.delete_allowlist.iter().cloned().collect(),
+            acl: h.delete_acl.clone().into_iter().collect(),
+            approval_threshold: h.delete_approval_threshold,
+        }
+    }
+}
 
 /// SHA-256 of the serialized intent: what round 1 binds the session to and round 2 presents.
 pub fn intent_digest(signed: &pb::SignedIntent) -> [u8; 32] {
@@ -155,6 +201,7 @@ pub struct IntentVerifier {
     skew_ms: u64,
     approvers: HashMap<String, [u8; 32]>,
     policy: SigningPolicyConfig,
+    delete: DeletePolicy,
 }
 
 impl IntentVerifier {
@@ -193,7 +240,29 @@ impl IntentVerifier {
             skew_ms: policy.clock_skew_secs.saturating_mul(1000),
             approvers,
             policy: policy.clone(),
+            delete: DeletePolicy::default(),
         })
+    }
+
+    /// Who may delete hosted keys ([`DeletePolicy`]).
+    pub fn with_delete_policy(mut self, delete: DeletePolicy) -> Self {
+        self.delete = delete;
+        self
+    }
+
+    /// Whether any client may delete hosted keys here.
+    pub fn deletes_enabled(&self) -> bool {
+        !self.delete.allowlist.is_empty()
+    }
+
+    /// Is `cn` on the delete role?
+    pub fn may_delete(&self, cn: &str) -> bool {
+        self.delete.allowlist.contains(cn)
+    }
+
+    /// The clock skew allowance, in milliseconds.
+    pub fn skew_ms(&self) -> u64 {
+        self.skew_ms
     }
 
     pub fn cluster_id(&self) -> &str {
@@ -241,48 +310,141 @@ impl IntentVerifier {
         }
     }
 
-    /// Verify `signed` for a signature with `key_id` at `now_ms` (Unix epoch milliseconds). Every
-    /// failure is [`DaemonError::PolicyRefused`].
-    pub fn verify(&self, signed: &pb::SignedIntent, key_id: &str, now_ms: u64) -> Result<VerifiedIntent> {
+    /// Who signed `signed`, checked: a client certificate of this cluster, its CN accepted by
+    /// `role` (`Err` names why not), its key pinned if the CN is, and the signature over exactly
+    /// the intent bytes. Then the decoded intent, of this version and cluster.
+    fn verify_signer(
+        &self,
+        signed: &pb::SignedIntent,
+        role: impl Fn(&str) -> std::result::Result<(), String>,
+        refuse: fn(&'static str, String) -> DaemonError,
+    ) -> Result<(String, [u8; 32], pb::SignIntent)> {
         if signed.intent.is_empty() || signed.intent.len() > MAX_INTENT_BYTES {
-            return Err(refused("malformed", format!("intent of {} bytes", signed.intent.len())));
+            return Err(refuse("malformed", format!("intent of {} bytes", signed.intent.len())));
         }
-        // 1. Who signed it: a client certificate of this cluster on the signer allowlist.
         let leaf = crate::request_auth::verify_chain(&signed.signer_chain, &self.ca_pem, self.allow_expired_ca)
-            .map_err(|e| refused("certificate", format!("certificate: {e}")))?;
+            .map_err(|e| refuse("certificate", format!("certificate: {e}")))?;
         if leaf.client_auth == Some(false) {
-            return Err(refused(
+            return Err(refuse(
                 "certificate",
                 "the signing certificate's extendedKeyUsage lacks clientAuth".into(),
             ));
         }
-        let cn = leaf.cn.clone().ok_or_else(|| refused("certificate", "the signing certificate has no CN".into()))?;
-        if !self.signers.contains(&cn) {
-            return Err(refused(
-                "signer",
-                format!("signed by {cn:?}, which is not on this node's signer_allowlist"),
-            ));
-        }
+        let cn = leaf.cn.clone().ok_or_else(|| refuse("certificate", "the signing certificate has no CN".into()))?;
+        role(&cn).map_err(|why| refuse("signer", why))?;
         self.check_pin(&cn, &leaf.spki_sha256)?;
-        // 2. The signature, over exactly these bytes.
         let mut msg = Vec::with_capacity(INTENT_CONTEXT.len() + signed.intent.len());
         msg.extend_from_slice(INTENT_CONTEXT);
         msg.extend_from_slice(&signed.intent);
         leaf.verify(&signed.signature_alg, &msg, &signed.signature)
-            .map_err(|e| refused("signature", e.replace("{signer}", &format!("by {cn:?}"))))?;
-
-        // 3. What it authorizes.
+            .map_err(|e| refuse("signature", e.replace("{signer}", &format!("by {cn:?}"))))?;
         let intent = pb::SignIntent::decode(signed.intent.as_slice())
-            .map_err(|e| refused("malformed", format!("intent does not decode: {e}")))?;
+            .map_err(|e| refuse("malformed", format!("intent does not decode: {e}")))?;
         if intent.version != INTENT_VERSION {
-            return Err(refused("malformed", format!("intent version {} (this node knows 1)", intent.version)));
+            return Err(refuse("malformed", format!("intent version {} (this node knows 1)", intent.version)));
         }
         if intent.cluster_id != self.cluster_id {
-            return Err(refused(
+            return Err(refuse(
                 "cluster",
                 format!("intent is for cluster {:?}, this is {}", intent.cluster_id, self.cluster_id),
             ));
         }
+        Ok((cn, leaf.spki_sha256, intent))
+    }
+
+    /// Verify a hosted-key delete intent for `key_id` at `now_ms` (audit M2): signed by a client on
+    /// the delete role (`hosted_keys.delete_allowlist`, never merely the signer role), for this
+    /// cluster, purpose `delete-key`, this key and its [`delete_digest`], within its validity
+    /// (unless [`Expiry::Ignore`]: a propagated tombstone), the delete ACL, and the delete
+    /// approvals. Every failure is [`DaemonError::PolicyRefused`].
+    pub fn verify_delete(&self, signed: &pb::SignedIntent, key_id: &str, now_ms: u64, expiry: Expiry) -> Result<VerifiedIntent> {
+        if !self.deletes_enabled() {
+            return Err(refused_delete(
+                "disabled",
+                "hosted-key deletes are disabled on this node (hosted_keys.delete_allowlist is empty)".into(),
+            ));
+        }
+        let (cn, spki, intent) = self.verify_signer(
+            signed,
+            |cn| {
+                if self.may_delete(cn) {
+                    Ok(())
+                } else {
+                    Err(format!("signed by {cn:?}, which is not on this node's hosted_keys.delete_allowlist"))
+                }
+            },
+            refused_delete,
+        )?;
+        if intent.purpose != PURPOSE_DELETE_KEY {
+            return Err(refused_delete("purpose", format!("intent purpose {:?}, expected \"delete-key\"", intent.purpose)));
+        }
+        if intent.key_id != key_id {
+            return Err(refused_delete("key", format!("intent deletes {}, not {key_id}", intent.key_id)));
+        }
+        if intent.digest != delete_digest(key_id) {
+            return Err(refused_delete("malformed", "intent digest is not the delete digest of the key".into()));
+        }
+        let request_id: [u8; REQUEST_ID_LEN] = intent
+            .request_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| refused_delete("malformed", format!("request id of {} bytes", intent.request_id.len())))?;
+        match expiry {
+            Expiry::Enforce => self.check_times_with(intent.issued_at_ms, intent.not_after_ms, now_ms, refused_delete)?,
+            // Long expired is fine for a propagated tombstone; a validity window that was never
+            // acceptable, or an issue time in the future, is not.
+            Expiry::Ignore => {
+                if intent.not_after_ms < intent.issued_at_ms
+                    || intent.not_after_ms - intent.issued_at_ms > self.max_lifetime_ms
+                    || intent.issued_at_ms > now_ms.saturating_add(self.skew_ms)
+                {
+                    return Err(refused_delete("expiry", "the intent's validity window is not acceptable".into()));
+                }
+            }
+        }
+        match self.delete.acl.get(&cn) {
+            Some(prefixes) if !prefixes.iter().any(|p| key_id.starts_with(p.as_str())) => {
+                return Err(refused_delete(
+                    "acl",
+                    format!("client {cn:?} may not delete {key_id} (hosted_keys.delete_acl)"),
+                ))
+            }
+            _ => {}
+        }
+        let approvers = match self.delete.approval_threshold {
+            0 => Vec::new(),
+            t => self.count_approvals(&intent, t, refused_delete)?,
+        };
+        Ok(VerifiedIntent {
+            digest: intent_digest(signed),
+            key_id: intent.key_id,
+            message: intent.digest,
+            request_id,
+            signer_cn: cn,
+            signer_spki_sha256: spki,
+            issued_at_ms: intent.issued_at_ms,
+            not_after_ms: intent.not_after_ms,
+            approvers,
+        })
+    }
+
+    /// Verify `signed` for a signature with `key_id` at `now_ms` (Unix epoch milliseconds). Every
+    /// failure is [`DaemonError::PolicyRefused`].
+    pub fn verify(&self, signed: &pb::SignedIntent, key_id: &str, now_ms: u64) -> Result<VerifiedIntent> {
+        // 1–2. Who signed it (a client certificate of this cluster on the signer allowlist) and
+        // the signature, over exactly these bytes; version and cluster.
+        let (cn, spki, intent) = self.verify_signer(
+            signed,
+            |cn| {
+                if self.signers.contains(cn) {
+                    Ok(())
+                } else {
+                    Err(format!("signed by {cn:?}, which is not on this node's signer_allowlist"))
+                }
+            },
+            refused,
+        )?;
+        // 3. What it authorizes.
         if intent.purpose != PURPOSE_SIGN {
             return Err(refused("purpose", format!("intent purpose {:?}, expected \"sign\"", intent.purpose)));
         }
@@ -304,7 +466,7 @@ impl IntentVerifier {
         // 6. Approvals, for a gated key.
         let approvers = match self.policy.approval_threshold_for(key_id) {
             None => Vec::new(),
-            Some(threshold) => self.count_approvals(&intent, threshold)?,
+            Some(threshold) => self.count_approvals(&intent, threshold, refused)?,
         };
         Ok(VerifiedIntent {
             digest: intent_digest(signed),
@@ -312,7 +474,7 @@ impl IntentVerifier {
             message: intent.digest,
             request_id,
             signer_cn: cn,
-            signer_spki_sha256: leaf.spki_sha256,
+            signer_spki_sha256: spki,
             issued_at_ms: intent.issued_at_ms,
             not_after_ms: intent.not_after_ms,
             approvers,
@@ -325,6 +487,16 @@ impl IntentVerifier {
     }
 
     fn check_times(&self, issued_at_ms: u64, not_after_ms: u64, now_ms: u64) -> Result<()> {
+        self.check_times_with(issued_at_ms, not_after_ms, now_ms, refused)
+    }
+
+    fn check_times_with(
+        &self,
+        issued_at_ms: u64,
+        not_after_ms: u64,
+        now_ms: u64,
+        refused: fn(&'static str, String) -> DaemonError,
+    ) -> Result<()> {
         if not_after_ms < issued_at_ms || not_after_ms - issued_at_ms > self.max_lifetime_ms {
             return Err(refused(
                 "expiry",
@@ -356,7 +528,12 @@ impl IntentVerifier {
 
     /// The distinct configured approvers with a valid signature over the intent's approval request
     /// id; refused below `threshold`.
-    fn count_approvals(&self, intent: &pb::SignIntent, threshold: u32) -> Result<Vec<String>> {
+    fn count_approvals(
+        &self,
+        intent: &pb::SignIntent,
+        threshold: u32,
+        refused: fn(&'static str, String) -> DaemonError,
+    ) -> Result<Vec<String>> {
         let request_id = approval_request_id(&intent.key_id, &intent.digest, &intent.approval_nonce);
         let mut valid: Vec<String> = intent
             .approvals
@@ -375,7 +552,7 @@ impl IntentVerifier {
                 "approval",
                 format!(
                     "approval required: key {} needs {threshold} approval(s) by distinct configured \
-                     approvers (signing_policy.rules), the intent carries {} valid",
+                     approvers (signing_policy.rules, hosted_keys.delete_approval_threshold), the intent carries {} valid",
                     intent.key_id,
                     valid.len()
                 ),
@@ -389,6 +566,12 @@ impl IntentVerifier {
 pub fn refused(reason: &'static str, msg: String) -> DaemonError {
     metrics::counter!(crate::metrics::SIGN_POLICY_REFUSALS, "reason" => reason).increment(1);
     DaemonError::PolicyRefused(format!("signing intent refused: {msg}"))
+}
+
+/// A delete-intent refusal, counted by reason (`rutli_delete_intent_refusals_total`).
+pub fn refused_delete(reason: &'static str, msg: String) -> DaemonError {
+    metrics::counter!(crate::metrics::DELETE_INTENT_REFUSALS, "reason" => reason).increment(1);
+    DaemonError::PolicyRefused(format!("delete intent refused: {msg}"))
 }
 
 /// Now, in Unix epoch milliseconds.
@@ -416,4 +599,13 @@ mod tests {
 
     /// The vector both test trees pin (see the test above).
     pub const GOLDEN_REQUEST_ID: &str = "e51b7d9a70d36a6b10e31ab7cf1da987175195c3862bf25f43f2a33a27a096cf";
+
+    /// Parity with the driver's `FrostIntentSigner.deleteDigest` (FrostSigningIntentSpec pins it).
+    #[test]
+    fn the_delete_digest_matches_the_drivers_golden_vector() {
+        assert_eq!(
+            hex::encode(delete_digest("participant1-rutli-enc-golden")),
+            "10e118018ec6f17f27279a2c5030ae03c65ade57a2174b5f097cb4a5d00c3877"
+        );
+    }
 }
