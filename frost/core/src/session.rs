@@ -136,6 +136,15 @@ pub struct Cosigner {
     pending: Mutex<BTreeMap<String, Pending>>,
 }
 
+/// How many times a [`Cosigner`]'s in-flight session map was recovered after a holder panicked
+/// (its sessions dropped), process-wide. The daemon exports it as a metric.
+static LOCK_POISON_RECOVERIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// See [`LOCK_POISON_RECOVERIES`].
+pub fn lock_poison_recoveries() -> u64 {
+    LOCK_POISON_RECOVERIES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Max lifetime of an un-completed round-1 session before it is pruned. Comfortably longer than any
 /// real sign round-trip; a leader that hasn't finished by then has abandoned the session.
 const PENDING_TTL: Duration = Duration::from_secs(5 * 60);
@@ -147,6 +156,25 @@ impl Cosigner {
         nonce_store: NonceStore,
     ) -> Self {
         Self { key_package, public_key_package, nonce_store, pending: Mutex::new(BTreeMap::new()) }
+    }
+
+    /// The in-flight session map, recovered if a holder panicked (audit L3).
+    ///
+    /// Every critical section on this map is a single std map operation (or frost's nonce
+    /// generation, which panics only if the OS RNG fails), so a panicking holder leaves the map
+    /// structurally valid — but rather than trust an entry such a holder may have been inserting or
+    /// taking, recovery **drops every in-flight session**: discarding never-used nonces is always
+    /// safe (those sessions fail round 2 with an unknown session and the leader retries with fresh
+    /// ones), and the burned-session markers on disk, the single-use guarantee, are untouched. The
+    /// cosigner keeps serving new sessions instead of every later call panicking on the poison.
+    fn pending(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Pending>> {
+        self.pending.lock().unwrap_or_else(|poisoned| {
+            let mut map = poisoned.into_inner();
+            map.clear();
+            self.pending.clear_poison();
+            LOCK_POISON_RECOVERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            map
+        })
     }
 
     pub fn identifier(&self) -> Identifier {
@@ -182,7 +210,7 @@ impl Cosigner {
         if self.nonce_store.is_consumed(session_id)? {
             return Err(CoreError::NonceReuse(session_id.to_string()));
         }
-        let mut pending = self.pending.lock().expect("pending lock");
+        let mut pending = self.pending();
         // Prune orphaned sessions so pending can't grow without bound.
         pending.retain(|_, p| p.started.elapsed() < PENDING_TTL);
         // Refuse to overwrite live nonces for an in-flight session id — a duplicate round1 (replay
@@ -216,9 +244,7 @@ impl Cosigner {
         intent_digest: Option<&[u8; 32]>,
     ) -> Result<SignatureShare> {
         let p = self
-            .pending
-            .lock()
-            .expect("pending lock")
+            .pending()
             .remove(session_id)
             .ok_or_else(|| CoreError::UnknownSession(session_id.to_string()))?;
         let mismatch = |what| CoreError::BindingMismatch { session: session_id.to_string(), what };
@@ -241,14 +267,14 @@ impl Cosigner {
     /// Abort an in-flight session (leader gave up / peer timeout). Frees the RAM nonces; the
     /// session id itself stays usable only if round 2 never ran.
     pub fn abort(&self, session_id: &str) {
-        self.pending.lock().expect("pending lock").remove(session_id);
+        self.pending().remove(session_id);
     }
 
     /// Drop in-flight sessions older than the pending TTL — the same sweep `round1` runs on every
     /// call, for a node that is not getting round-1 calls (e.g. one refusing them while its key
     /// store is down). Returns how many were dropped.
     pub fn prune_expired(&self) -> usize {
-        let mut pending = self.pending.lock().expect("pending lock");
+        let mut pending = self.pending();
         let before = pending.len();
         pending.retain(|_, p| p.started.elapsed() < PENDING_TTL);
         before - pending.len()
@@ -256,7 +282,7 @@ impl Cosigner {
 
     /// Number of in-flight (round-1, not yet round-2) sessions. For observability/tests.
     pub fn pending_count(&self) -> usize {
-        self.pending.lock().expect("pending lock").len()
+        self.pending().len()
     }
 }
 
@@ -273,4 +299,45 @@ pub fn aggregate(
     let signature = frost::aggregate(&signing_package, shares, public_key_package)?;
     let bytes = signature.serialize()?;
     Ok(<[u8; 64]>::try_from(bytes.as_slice()).expect("ed25519 signature is 64 bytes"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cosigner(dir: &std::path::Path) -> Cosigner {
+        let (shares, pkp) = crate::dealer::split_ed25519_seed(&[5; 32], &[1, 2, 3], 2).unwrap();
+        let kp = frost::keys::KeyPackage::try_from(shares[0].clone()).unwrap();
+        Cosigner::new(kp, pkp, NonceStore::open(dir).unwrap())
+    }
+
+    /// Audit L3: a panic while the session map is held must not take the cosigner down with it.
+    #[test]
+    fn a_panicking_holder_of_the_session_map_drops_in_flight_sessions_and_the_cosigner_serves_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = cosigner(tmp.path());
+        c.round1("in-flight", SessionBinding::new("k")).unwrap();
+        let before = lock_poison_recoveries();
+
+        let panicked = std::thread::scope(|s| {
+            s.spawn(|| {
+                let _held = c.pending.lock().unwrap();
+                panic!("test: panic while holding the session map");
+            })
+            .join()
+        });
+        assert!(panicked.is_err() && c.pending.is_poisoned());
+
+        // The next caller recovers: the in-flight session is dropped (fail closed), a new one works.
+        assert_eq!(c.pending_count(), 0);
+        assert!(!c.pending.is_poisoned());
+        assert!(lock_poison_recoveries() > before);
+        c.round1("after", SessionBinding::new("k")).unwrap();
+        assert_eq!(c.pending_count(), 1);
+        let commitments = BTreeMap::new();
+        assert!(matches!(
+            c.round2("in-flight", "k", &[0; 34], &commitments, None),
+            Err(CoreError::UnknownSession(_))
+        ));
+    }
 }

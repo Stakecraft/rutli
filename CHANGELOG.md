@@ -54,6 +54,14 @@ key-file v2 and restore — see the warnings below.
   sharing fails over (UNAVAILABLE). New metrics: `rutli_epoch_mismatch_total`,
   `rutli_epoch_check_skipped_total`, `rutli_stale_share`, `rutli_sign_retries_total`,
   `rutli_invalid_signature_shares_total`.
+- **A panicking request no longer takes a whole cosigner down (audit L3).** Every lock in
+  `frost/core` and the cosigner recovers from poisoning instead of making every later call panic:
+  state that stays consistent is kept (ceremony guards, stale marks, rate-limit buckets), state that
+  may be mid-update is reset (a cosigner's in-flight signing sessions and the loaded-key cache are
+  dropped; ceremony votes are reloaded from disk and in-memory ceremony sessions dropped, as after a
+  restart). Each recovery is logged and counted in `rutli_lock_poison_recoveries_total{lock}`
+  (alert `RutliLockPoisonRecovered`). The key cache is no longer held while a cosigner's session
+  lock is taken.
 - **Signing sessions are bound at round 1** (groundwork for signing intents, audit C2). The leader
   declares the message and the signer set in `SignRound1`; each cosigner binds its nonces to them
   and to the key, and refuses a round 2 with another message, another commitment set, or its own
