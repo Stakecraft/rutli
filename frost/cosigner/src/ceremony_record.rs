@@ -281,6 +281,59 @@ impl CeremonyRecords {
     }
 }
 
+/// Where a ceremony stands on one node, as `Peer.CeremonyStatus` reports it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Phase {
+    /// The session is still in memory (before this node's part 3).
+    InProgress,
+    Staged,
+    Committed,
+    Aborted,
+}
+
+impl Phase {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Phase::InProgress => "in progress",
+            Phase::Staged => "staged",
+            Phase::Committed => "committed",
+            Phase::Aborted => "aborted",
+        }
+    }
+}
+
+/// One node's answer about one ceremony: its phase and, for a yes-vote, the outcome voted for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StatusInfo {
+    pub phase: Phase,
+    pub outcome: Option<Outcome>,
+}
+
+impl StatusInfo {
+    pub fn in_progress() -> Self {
+        Self { phase: Phase::InProgress, outcome: None }
+    }
+
+    pub fn from_record(r: &CeremonyRecord) -> Self {
+        match r.state {
+            RecordState::Staged => Self { phase: Phase::Staged, outcome: Some(r.outcome()) },
+            RecordState::Committed => Self { phase: Phase::Committed, outcome: Some(r.outcome()) },
+            RecordState::Aborted => Self { phase: Phase::Aborted, outcome: None },
+        }
+    }
+
+    /// How the resolver counts this answer.
+    pub fn report(&self) -> PeerReport {
+        match (self.phase, &self.outcome) {
+            (Phase::InProgress, _) => PeerReport::InProgress,
+            (Phase::Aborted, _) => PeerReport::Aborted,
+            (Phase::Staged, Some(o)) => PeerReport::Staged(o.clone()),
+            (Phase::Committed, Some(o)) => PeerReport::Committed(o.clone()),
+            (p, None) => PeerReport::Unknown(format!("{} without an outcome", p.as_str())),
+        }
+    }
+}
+
 /// What a peer reports about a ceremony (the `CeremonyStatus` peer RPC).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PeerReport {

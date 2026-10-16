@@ -16,7 +16,8 @@ use frost::round1::SigningCommitments;
 use frost::round2::SignatureShare;
 use frost::Identifier;
 
-use crate::node::Node;
+use crate::ceremony_record::{Outcome, Phase, StatusInfo};
+use crate::node::{CeremonyKind, Node};
 use crate::pb::peer_client::PeerClient;
 use crate::pb;
 use crate::Result;
@@ -101,6 +102,36 @@ pub trait PeerApi: Send + Sync {
     async fn key_epoch(&self, _key_id: &str) -> Result<pb::KeyEpochReply> {
         Err(crate::DaemonError::Config("this peer does not report key epochs".into()))
     }
+    /// The DKG/refresh fence ([`Node::ceremony_begin`]): the per-key guard plus the two-phase
+    /// rules; `expect` is the leader's view of the sharing a refresh starts from.
+    async fn ceremony_begin(
+        &self,
+        _ceremony_id: &str,
+        _key_id: &str,
+        _kind: CeremonyKind,
+        _expect: Option<(u64, [u8; 32])>,
+    ) -> Result<()> {
+        Err(unsupported("two-phase ceremonies"))
+    }
+    /// Ask this peer to resolve a ceremony it staged now (`Peer.CeremonyCommit`): it confirms with
+    /// every roster node directly and commits or aborts on its own evidence, never on the
+    /// caller's word. Returns where the ceremony stands there afterwards.
+    async fn ceremony_commit(&self, _ceremony_id: &str) -> Result<StatusInfo> {
+        Err(unsupported("two-phase ceremonies"))
+    }
+    /// This peer's vote on a ceremony (`Peer.CeremonyStatus`).
+    async fn ceremony_status(&self, _ceremony_id: &str) -> Result<StatusInfo> {
+        Err(unsupported("two-phase ceremonies"))
+    }
+    /// Drop this peer's in-memory session for a ceremony (`Peer.CeremonyAbort`). A recorded vote is
+    /// returned unchanged.
+    async fn ceremony_abort(&self, _ceremony_id: &str) -> Result<StatusInfo> {
+        Err(unsupported("two-phase ceremonies"))
+    }
+}
+
+fn unsupported(what: &str) -> crate::DaemonError {
+    crate::DaemonError::CeremonyRefused(format!("this peer does not support {what}"))
 }
 
 /// This node, called in-process.
@@ -129,6 +160,21 @@ impl LocalPeer {
         self.caller = Some(caller);
         self
     }
+}
+
+/// Wire an in-process cluster's mesh: each node reaches every other through a [`LocalPeer`]
+/// acting on its behalf — what the daemon does with gRPC peers. Nodes that already have a mesh are
+/// left alone. Tests and tools only.
+pub fn wire_local_mesh(nodes: &[Arc<Node>]) -> Result<()> {
+    for me in nodes.iter().filter(|n| !n.has_mesh()) {
+        let mesh: Vec<Arc<dyn PeerApi>> = nodes
+            .iter()
+            .filter(|n| !Arc::ptr_eq(n, me))
+            .map(|n| Arc::new(LocalPeer::new(n.clone()).on_behalf_of(me.clone())) as Arc<dyn PeerApi>)
+            .collect();
+        me.set_mesh(mesh)?;
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -181,7 +227,9 @@ impl PeerApi for LocalPeer {
     ) -> Result<[u8; 32]> {
         let dkg_id = dkg_id.to_owned();
         let (round1_map, round2_for_me) = (round1_map.clone(), round2_for_me.clone());
-        self.node.blocking(move |n| n.dkg_part3(&dkg_id, &round1_map, &round2_for_me)).await
+        let outcome =
+            self.node.blocking(move |n| n.dkg_part3(&dkg_id, &round1_map, &round2_for_me)).await?;
+        Ok(outcome.group_key)
     }
 
     async fn refresh_part1(&self, refresh_id: &str, key_id: &str) -> Result<round1::Package> {
@@ -203,7 +251,9 @@ impl PeerApi for LocalPeer {
     ) -> Result<[u8; 32]> {
         let refresh_id = refresh_id.to_owned();
         let (round1_map, round2_for_me) = (round1_map.clone(), round2_for_me.clone());
-        self.node.blocking(move |n| n.refresh_part3(&refresh_id, &round1_map, &round2_for_me)).await
+        let outcome =
+            self.node.blocking(move |n| n.refresh_part3(&refresh_id, &round1_map, &round2_for_me)).await?;
+        Ok(outcome.group_key)
     }
 
     async fn node_info(&self) -> Result<(u16, [u8; 32])> {
@@ -274,6 +324,31 @@ impl PeerApi for LocalPeer {
     async fn key_epoch(&self, key_id: &str) -> Result<pb::KeyEpochReply> {
         let key_id = key_id.to_owned();
         self.node.blocking(move |n| n.key_epoch(&key_id)).await
+    }
+
+    async fn ceremony_begin(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        kind: CeremonyKind,
+        expect: Option<(u64, [u8; 32])>,
+    ) -> Result<()> {
+        let (ceremony_id, key_id) = (ceremony_id.to_owned(), key_id.to_owned());
+        self.node.blocking(move |n| n.ceremony_begin(&ceremony_id, &key_id, kind, expect)).await
+    }
+
+    async fn ceremony_commit(&self, ceremony_id: &str) -> Result<StatusInfo> {
+        crate::ceremony::resolve(&self.node, ceremony_id).await
+    }
+
+    async fn ceremony_status(&self, ceremony_id: &str) -> Result<StatusInfo> {
+        let ceremony_id = ceremony_id.to_owned();
+        self.node.blocking(move |n| n.ceremony_status(&ceremony_id)).await
+    }
+
+    async fn ceremony_abort(&self, ceremony_id: &str) -> Result<StatusInfo> {
+        let ceremony_id = ceremony_id.to_owned();
+        self.node.blocking(move |n| n.ceremony_abort(&ceremony_id)).await
     }
 }
 
@@ -369,6 +444,7 @@ impl PeerApi for GrpcPeer {
                 ceremony_id: ceremony_id.into(),
                 key_id: key_id.into(),
                 kind: kind.into(),
+                ..Default::default()
             })
             .await?;
         Ok(())
@@ -554,6 +630,100 @@ impl PeerApi for GrpcPeer {
     async fn key_epoch(&self, key_id: &str) -> Result<pb::KeyEpochReply> {
         Ok(self.client.clone().key_epoch(pb::KeyEpochRequest { key_id: key_id.into() }).await?.into_inner())
     }
+
+    async fn ceremony_begin(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        kind: CeremonyKind,
+        expect: Option<(u64, [u8; 32])>,
+    ) -> Result<()> {
+        self.client
+            .clone()
+            .ceremony_fence(pb::CeremonyFenceRequest {
+                ceremony_id: ceremony_id.into(),
+                key_id: key_id.into(),
+                kind: kind.as_str().into(),
+                expected_epoch: expect.map(|e| e.0).unwrap_or(0),
+                expected_pkp_digest: expect.map(|e| e.1.to_vec()).unwrap_or_default(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn ceremony_commit(&self, ceremony_id: &str) -> Result<StatusInfo> {
+        let reply = self
+            .client
+            .clone()
+            .ceremony_commit(pb::CeremonyCommitRequest { ceremony_id: ceremony_id.into() })
+            .await?
+            .into_inner();
+        status_from_pb(&reply)
+    }
+
+    async fn ceremony_status(&self, ceremony_id: &str) -> Result<StatusInfo> {
+        let reply = self
+            .client
+            .clone()
+            .ceremony_status(pb::CeremonyStatusRequest { ceremony_id: ceremony_id.into() })
+            .await?
+            .into_inner();
+        status_from_pb(&reply)
+    }
+
+    async fn ceremony_abort(&self, ceremony_id: &str) -> Result<StatusInfo> {
+        let reply = self
+            .client
+            .clone()
+            .ceremony_abort(pb::CeremonyAbortRequest { ceremony_id: ceremony_id.into() })
+            .await?
+            .into_inner();
+        status_from_pb(&reply)
+    }
+}
+
+/// [`StatusInfo`] on the wire.
+pub fn status_to_pb(info: &StatusInfo) -> pb::CeremonyStatusReply {
+    let state = match info.phase {
+        Phase::InProgress => pb::CeremonyState::InProgress,
+        Phase::Staged => pb::CeremonyState::Staged,
+        Phase::Committed => pb::CeremonyState::Committed,
+        Phase::Aborted => pb::CeremonyState::Aborted,
+    };
+    let mut reply = pb::CeremonyStatusReply { state: state as i32, ..Default::default() };
+    if let Some(o) = &info.outcome {
+        reply.key_id = o.key_id.clone();
+        reply.kind = o.kind.clone();
+        reply.new_epoch = o.new_epoch;
+        reply.new_pkp_digest = hex::decode(&o.new_pkp_digest).unwrap_or_default();
+        reply.round1_digest = hex::decode(&o.round1_digest).unwrap_or_default();
+    }
+    reply
+}
+
+/// A peer's `CeremonyStatusReply`. An unknown or unspecified state is an error (never read as a
+/// vote either way).
+pub fn status_from_pb(reply: &pb::CeremonyStatusReply) -> Result<StatusInfo> {
+    let phase = match pb::CeremonyState::try_from(reply.state) {
+        Ok(pb::CeremonyState::InProgress) => Phase::InProgress,
+        Ok(pb::CeremonyState::Staged) => Phase::Staged,
+        Ok(pb::CeremonyState::Committed) => Phase::Committed,
+        Ok(pb::CeremonyState::Aborted) => Phase::Aborted,
+        _ => {
+            return Err(crate::DaemonError::Disagreement(format!(
+                "peer reported an unknown ceremony state {}",
+                reply.state
+            )))
+        }
+    };
+    let outcome = matches!(phase, Phase::Staged | Phase::Committed).then(|| Outcome {
+        key_id: reply.key_id.clone(),
+        kind: reply.kind.clone(),
+        new_epoch: reply.new_epoch,
+        new_pkp_digest: hex::encode(&reply.new_pkp_digest),
+        round1_digest: hex::encode(&reply.round1_digest),
+    });
+    Ok(StatusInfo { phase, outcome })
 }
 
 pub fn to_pb_wrapped(w: &crate::wrap::Wrapped) -> pb::WrappedKey {

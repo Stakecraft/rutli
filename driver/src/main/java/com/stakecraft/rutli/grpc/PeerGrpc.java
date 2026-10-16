@@ -543,6 +543,99 @@ public final class PeerGrpc {
     return getKeyEpochMethod;
   }
 
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyCommitRequest,
+      com.stakecraft.rutli.grpc.CeremonyStatusReply> getCeremonyCommitMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "CeremonyCommit",
+      requestType = com.stakecraft.rutli.grpc.CeremonyCommitRequest.class,
+      responseType = com.stakecraft.rutli.grpc.CeremonyStatusReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyCommitRequest,
+      com.stakecraft.rutli.grpc.CeremonyStatusReply> getCeremonyCommitMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyCommitRequest, com.stakecraft.rutli.grpc.CeremonyStatusReply> getCeremonyCommitMethod;
+    if ((getCeremonyCommitMethod = PeerGrpc.getCeremonyCommitMethod) == null) {
+      synchronized (PeerGrpc.class) {
+        if ((getCeremonyCommitMethod = PeerGrpc.getCeremonyCommitMethod) == null) {
+          PeerGrpc.getCeremonyCommitMethod = getCeremonyCommitMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.CeremonyCommitRequest, com.stakecraft.rutli.grpc.CeremonyStatusReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "CeremonyCommit"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.CeremonyCommitRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.CeremonyStatusReply.getDefaultInstance()))
+              .setSchemaDescriptor(new PeerMethodDescriptorSupplier("CeremonyCommit"))
+              .build();
+        }
+      }
+    }
+    return getCeremonyCommitMethod;
+  }
+
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyStatusRequest,
+      com.stakecraft.rutli.grpc.CeremonyStatusReply> getCeremonyStatusMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "CeremonyStatus",
+      requestType = com.stakecraft.rutli.grpc.CeremonyStatusRequest.class,
+      responseType = com.stakecraft.rutli.grpc.CeremonyStatusReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyStatusRequest,
+      com.stakecraft.rutli.grpc.CeremonyStatusReply> getCeremonyStatusMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyStatusRequest, com.stakecraft.rutli.grpc.CeremonyStatusReply> getCeremonyStatusMethod;
+    if ((getCeremonyStatusMethod = PeerGrpc.getCeremonyStatusMethod) == null) {
+      synchronized (PeerGrpc.class) {
+        if ((getCeremonyStatusMethod = PeerGrpc.getCeremonyStatusMethod) == null) {
+          PeerGrpc.getCeremonyStatusMethod = getCeremonyStatusMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.CeremonyStatusRequest, com.stakecraft.rutli.grpc.CeremonyStatusReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "CeremonyStatus"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.CeremonyStatusRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.CeremonyStatusReply.getDefaultInstance()))
+              .setSchemaDescriptor(new PeerMethodDescriptorSupplier("CeremonyStatus"))
+              .build();
+        }
+      }
+    }
+    return getCeremonyStatusMethod;
+  }
+
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyAbortRequest,
+      com.stakecraft.rutli.grpc.CeremonyStatusReply> getCeremonyAbortMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "CeremonyAbort",
+      requestType = com.stakecraft.rutli.grpc.CeremonyAbortRequest.class,
+      responseType = com.stakecraft.rutli.grpc.CeremonyStatusReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyAbortRequest,
+      com.stakecraft.rutli.grpc.CeremonyStatusReply> getCeremonyAbortMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyAbortRequest, com.stakecraft.rutli.grpc.CeremonyStatusReply> getCeremonyAbortMethod;
+    if ((getCeremonyAbortMethod = PeerGrpc.getCeremonyAbortMethod) == null) {
+      synchronized (PeerGrpc.class) {
+        if ((getCeremonyAbortMethod = PeerGrpc.getCeremonyAbortMethod) == null) {
+          PeerGrpc.getCeremonyAbortMethod = getCeremonyAbortMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.CeremonyAbortRequest, com.stakecraft.rutli.grpc.CeremonyStatusReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "CeremonyAbort"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.CeremonyAbortRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.CeremonyStatusReply.getDefaultInstance()))
+              .setSchemaDescriptor(new PeerMethodDescriptorSupplier("CeremonyAbort"))
+              .build();
+        }
+      }
+    }
+    return getCeremonyAbortMethod;
+  }
+
   /**
    * Creates a new async stub that supports all call types for the service
    */
@@ -760,6 +853,41 @@ public final class PeerGrpc {
         io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.KeyEpochReply> responseObserver) {
       io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getKeyEpochMethod(), responseObserver);
     }
+
+    /**
+     * <pre>
+     * Resolve a ceremony this node STAGED, now: it asks every roster node for its vote DIRECTLY and
+     * commits only if all of them hold a yes-vote for the same outcome, aborts only on a no-vote or a
+     * divergent one, else stays STAGED (its background resolver keeps asking). The caller's word is
+     * never evidence. Returns where the ceremony stands on this node afterwards.
+     * </pre>
+     */
+    default void ceremonyCommit(com.stakecraft.rutli.grpc.CeremonyCommitRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyStatusReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getCeremonyCommitMethod(), responseObserver);
+    }
+
+    /**
+     * <pre>
+     * This node's vote on a ceremony. A node with neither a session nor a record durably votes
+     * ABORTED before it answers, so an answer never changes later.
+     * </pre>
+     */
+    default void ceremonyStatus(com.stakecraft.rutli.grpc.CeremonyStatusRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyStatusReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getCeremonyStatusMethod(), responseObserver);
+    }
+
+    /**
+     * <pre>
+     * The leader gives up: drops this node's in-memory session (recording ABORTED). A recorded vote
+     * (STAGED included) is returned unchanged.
+     * </pre>
+     */
+    default void ceremonyAbort(com.stakecraft.rutli.grpc.CeremonyAbortRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyStatusReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getCeremonyAbortMethod(), responseObserver);
+    }
   }
 
   /**
@@ -964,6 +1092,44 @@ public final class PeerGrpc {
       io.grpc.stub.ClientCalls.asyncUnaryCall(
           getChannel().newCall(getKeyEpochMethod(), getCallOptions()), request, responseObserver);
     }
+
+    /**
+     * <pre>
+     * Resolve a ceremony this node STAGED, now: it asks every roster node for its vote DIRECTLY and
+     * commits only if all of them hold a yes-vote for the same outcome, aborts only on a no-vote or a
+     * divergent one, else stays STAGED (its background resolver keeps asking). The caller's word is
+     * never evidence. Returns where the ceremony stands on this node afterwards.
+     * </pre>
+     */
+    public void ceremonyCommit(com.stakecraft.rutli.grpc.CeremonyCommitRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyStatusReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getCeremonyCommitMethod(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     * <pre>
+     * This node's vote on a ceremony. A node with neither a session nor a record durably votes
+     * ABORTED before it answers, so an answer never changes later.
+     * </pre>
+     */
+    public void ceremonyStatus(com.stakecraft.rutli.grpc.CeremonyStatusRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyStatusReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getCeremonyStatusMethod(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     * <pre>
+     * The leader gives up: drops this node's in-memory session (recording ABORTED). A recorded vote
+     * (STAGED included) is returned unchanged.
+     * </pre>
+     */
+    public void ceremonyAbort(com.stakecraft.rutli.grpc.CeremonyAbortRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyStatusReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getCeremonyAbortMethod(), getCallOptions()), request, responseObserver);
+    }
   }
 
   /**
@@ -1136,6 +1302,41 @@ public final class PeerGrpc {
       return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
           getChannel(), getKeyEpochMethod(), getCallOptions(), request);
     }
+
+    /**
+     * <pre>
+     * Resolve a ceremony this node STAGED, now: it asks every roster node for its vote DIRECTLY and
+     * commits only if all of them hold a yes-vote for the same outcome, aborts only on a no-vote or a
+     * divergent one, else stays STAGED (its background resolver keeps asking). The caller's word is
+     * never evidence. Returns where the ceremony stands on this node afterwards.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.CeremonyStatusReply ceremonyCommit(com.stakecraft.rutli.grpc.CeremonyCommitRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getCeremonyCommitMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * This node's vote on a ceremony. A node with neither a session nor a record durably votes
+     * ABORTED before it answers, so an answer never changes later.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.CeremonyStatusReply ceremonyStatus(com.stakecraft.rutli.grpc.CeremonyStatusRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getCeremonyStatusMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * The leader gives up: drops this node's in-memory session (recording ABORTED). A recorded vote
+     * (STAGED included) is returned unchanged.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.CeremonyStatusReply ceremonyAbort(com.stakecraft.rutli.grpc.CeremonyAbortRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getCeremonyAbortMethod(), getCallOptions(), request);
+    }
   }
 
   /**
@@ -1307,6 +1508,41 @@ public final class PeerGrpc {
     public com.stakecraft.rutli.grpc.KeyEpochReply keyEpoch(com.stakecraft.rutli.grpc.KeyEpochRequest request) {
       return io.grpc.stub.ClientCalls.blockingUnaryCall(
           getChannel(), getKeyEpochMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * Resolve a ceremony this node STAGED, now: it asks every roster node for its vote DIRECTLY and
+     * commits only if all of them hold a yes-vote for the same outcome, aborts only on a no-vote or a
+     * divergent one, else stays STAGED (its background resolver keeps asking). The caller's word is
+     * never evidence. Returns where the ceremony stands on this node afterwards.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.CeremonyStatusReply ceremonyCommit(com.stakecraft.rutli.grpc.CeremonyCommitRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getCeremonyCommitMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * This node's vote on a ceremony. A node with neither a session nor a record durably votes
+     * ABORTED before it answers, so an answer never changes later.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.CeremonyStatusReply ceremonyStatus(com.stakecraft.rutli.grpc.CeremonyStatusRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getCeremonyStatusMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * The leader gives up: drops this node's in-memory session (recording ABORTED). A recorded vote
+     * (STAGED included) is returned unchanged.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.CeremonyStatusReply ceremonyAbort(com.stakecraft.rutli.grpc.CeremonyAbortRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getCeremonyAbortMethod(), getCallOptions(), request);
     }
   }
 
@@ -1497,6 +1733,44 @@ public final class PeerGrpc {
       return io.grpc.stub.ClientCalls.futureUnaryCall(
           getChannel().newCall(getKeyEpochMethod(), getCallOptions()), request);
     }
+
+    /**
+     * <pre>
+     * Resolve a ceremony this node STAGED, now: it asks every roster node for its vote DIRECTLY and
+     * commits only if all of them hold a yes-vote for the same outcome, aborts only on a no-vote or a
+     * divergent one, else stays STAGED (its background resolver keeps asking). The caller's word is
+     * never evidence. Returns where the ceremony stands on this node afterwards.
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.CeremonyStatusReply> ceremonyCommit(
+        com.stakecraft.rutli.grpc.CeremonyCommitRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getCeremonyCommitMethod(), getCallOptions()), request);
+    }
+
+    /**
+     * <pre>
+     * This node's vote on a ceremony. A node with neither a session nor a record durably votes
+     * ABORTED before it answers, so an answer never changes later.
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.CeremonyStatusReply> ceremonyStatus(
+        com.stakecraft.rutli.grpc.CeremonyStatusRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getCeremonyStatusMethod(), getCallOptions()), request);
+    }
+
+    /**
+     * <pre>
+     * The leader gives up: drops this node's in-memory session (recording ABORTED). A recorded vote
+     * (STAGED included) is returned unchanged.
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.CeremonyStatusReply> ceremonyAbort(
+        com.stakecraft.rutli.grpc.CeremonyAbortRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getCeremonyAbortMethod(), getCallOptions()), request);
+    }
   }
 
   private static final int METHODID_SIGN_ROUND1 = 0;
@@ -1516,6 +1790,9 @@ public final class PeerGrpc {
   private static final int METHODID_PURGE_KEY = 14;
   private static final int METHODID_NODE_INFO = 15;
   private static final int METHODID_KEY_EPOCH = 16;
+  private static final int METHODID_CEREMONY_COMMIT = 17;
+  private static final int METHODID_CEREMONY_STATUS = 18;
+  private static final int METHODID_CEREMONY_ABORT = 19;
 
   private static final class MethodHandlers<Req, Resp> implements
       io.grpc.stub.ServerCalls.UnaryMethod<Req, Resp>,
@@ -1601,6 +1878,18 @@ public final class PeerGrpc {
         case METHODID_KEY_EPOCH:
           serviceImpl.keyEpoch((com.stakecraft.rutli.grpc.KeyEpochRequest) request,
               (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.KeyEpochReply>) responseObserver);
+          break;
+        case METHODID_CEREMONY_COMMIT:
+          serviceImpl.ceremonyCommit((com.stakecraft.rutli.grpc.CeremonyCommitRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyStatusReply>) responseObserver);
+          break;
+        case METHODID_CEREMONY_STATUS:
+          serviceImpl.ceremonyStatus((com.stakecraft.rutli.grpc.CeremonyStatusRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyStatusReply>) responseObserver);
+          break;
+        case METHODID_CEREMONY_ABORT:
+          serviceImpl.ceremonyAbort((com.stakecraft.rutli.grpc.CeremonyAbortRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyStatusReply>) responseObserver);
           break;
         default:
           throw new AssertionError();
@@ -1739,6 +2028,27 @@ public final class PeerGrpc {
               com.stakecraft.rutli.grpc.KeyEpochRequest,
               com.stakecraft.rutli.grpc.KeyEpochReply>(
                 service, METHODID_KEY_EPOCH)))
+        .addMethod(
+          getCeremonyCommitMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.CeremonyCommitRequest,
+              com.stakecraft.rutli.grpc.CeremonyStatusReply>(
+                service, METHODID_CEREMONY_COMMIT)))
+        .addMethod(
+          getCeremonyStatusMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.CeremonyStatusRequest,
+              com.stakecraft.rutli.grpc.CeremonyStatusReply>(
+                service, METHODID_CEREMONY_STATUS)))
+        .addMethod(
+          getCeremonyAbortMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.CeremonyAbortRequest,
+              com.stakecraft.rutli.grpc.CeremonyStatusReply>(
+                service, METHODID_CEREMONY_ABORT)))
         .build();
   }
 
@@ -1804,6 +2114,9 @@ public final class PeerGrpc {
               .addMethod(getPurgeKeyMethod())
               .addMethod(getNodeInfoMethod())
               .addMethod(getKeyEpochMethod())
+              .addMethod(getCeremonyCommitMethod())
+              .addMethod(getCeremonyStatusMethod())
+              .addMethod(getCeremonyAbortMethod())
               .build();
         }
       }

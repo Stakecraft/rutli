@@ -89,6 +89,12 @@ pub enum DaemonError {
     #[error("cluster disagreement: {0}")]
     Disagreement(String),
 
+    /// A DKG/refresh refused before or during the ceremony for a reason the operator must fix
+    /// (mixed epochs, a staged ceremony not yet resolved, a mixed-version cluster, a legacy partial
+    /// key). FAILED_PRECONDITION: retrying elsewhere does not help.
+    #[error("ceremony refused: {0}")]
+    CeremonyRefused(String),
+
     /// A split-ceremony step (share-recipient, import-share, abort-import, verify-key) refused.
     /// Never carries key material.
     #[error("split ceremony: {0}")]
@@ -111,7 +117,7 @@ impl From<DaemonError> for tonic::Status {
             DaemonError::ThresholdNotMet { .. } | DaemonError::NotServing(_) => {
                 tonic::Status::unavailable(e.to_string())
             }
-            DaemonError::Config(_) | DaemonError::Ceremony(_) => {
+            DaemonError::Config(_) | DaemonError::Ceremony(_) | DaemonError::CeremonyRefused(_) => {
                 tonic::Status::failed_precondition(e.to_string())
             }
             // ALREADY_EXISTS, like a DKG over an existing key: the id is taken — by the import

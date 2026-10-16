@@ -150,6 +150,7 @@ fn a_store_call_parked_on_a_hung_volume_does_not_freeze_health_or_other_keys() {
         .collect();
     let peers: Peers =
         nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
     let group_a = rt.block_on(run_dkg(&peers, "a")).unwrap();
     rt.block_on(run_dkg(&peers, "b")).unwrap();
 

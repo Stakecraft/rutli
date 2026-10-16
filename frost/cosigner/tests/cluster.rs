@@ -28,6 +28,7 @@ fn cluster(tmp: &tempfile::TempDir) -> (Vec<Arc<Node>>, Peers) {
     }
     let peers: Peers =
         nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
     (nodes, peers)
 }
 
@@ -217,6 +218,7 @@ async fn sealed_shares_are_encrypted_at_rest_and_reload_with_the_right_key() {
     }
     let peers: Peers =
         nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
     let group_key = run_dkg(&peers, KEY_ID).await.unwrap();
 
     // On-disk file must be a sealed envelope, not plaintext frost JSON.
@@ -237,6 +239,7 @@ async fn sealed_shares_are_encrypted_at_rest_and_reload_with_the_right_key() {
     }
     let peers2: Peers =
         reloaded.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    rutli_cosigner::peer::wire_local_mesh(&reloaded).unwrap();
     let message = canton_digest(b"sealed shares");
     let sig = sign(&reloaded[0], &peers2, KEY_ID, &message).await.unwrap();
     let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
@@ -271,6 +274,7 @@ async fn shares_sealed_under_the_legacy_master_sign_after_switching_to_split_bun
     }
     let peers: Peers =
         nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
     let group_key = run_dkg(&peers, KEY_ID).await.unwrap();
     let before: Vec<Vec<u8>> = (1..=N)
         .map(|i| std::fs::read(tmp.path().join(format!("node-{i}")).join(format!("{KEY_ID}.json"))).unwrap())
@@ -321,6 +325,7 @@ async fn shares_persist_across_node_reload() {
     }
     let peers2: Peers =
         reloaded.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    rutli_cosigner::peer::wire_local_mesh(&reloaded).unwrap();
 
     for n in &reloaded {
         assert_eq!(n.group_key(KEY_ID).unwrap(), group_key);
@@ -349,13 +354,17 @@ async fn dkg_refuses_a_concurrent_ceremony_for_the_same_key() {
 async fn dkg_refuses_when_the_key_already_exists() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = cluster(&tmp);
-    run_dkg(&peers, KEY_ID).await.unwrap(); // provision the key
+    let group_key = run_dkg(&peers, KEY_ID).await.unwrap(); // provision the key
+    let share_file = tmp.path().join("node-1").join(format!("{KEY_ID}.json"));
+    let before = std::fs::read(&share_file).unwrap();
 
     // A fresh DKG against a provisioned key is refused — re-DKG would destroy the (non-rotatable) key.
     let err = nodes[0].dkg_part1("ceremony-new", KEY_ID).unwrap_err();
     assert!(matches!(err, DaemonError::KeyExists(_)), "got {err:?}");
-    // A full orchestrated re-DKG fails rather than overwriting.
-    assert!(run_dkg(&peers, KEY_ID).await.is_err(), "second DKG must fail, not overwrite");
+    // A full orchestrated re-DKG is idempotent (M5: Canton retries a deterministic key id after a
+    // timeout): it returns the committed key and rewrites nothing. It used to fail.
+    assert_eq!(run_dkg(&peers, KEY_ID).await.unwrap(), group_key);
+    assert_eq!(std::fs::read(&share_file).unwrap(), before, "a retried DKG never overwrites");
 
     // The original key still signs and verifies.
     let msg = canton_digest(b"after refused re-dkg");
@@ -460,6 +469,7 @@ fn cluster_fast_orphan(tmp: &tempfile::TempDir) -> (Vec<Arc<Node>>, Peers) {
     }
     let peers: Peers =
         nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
     (nodes, peers)
 }
 
@@ -708,6 +718,7 @@ async fn a_threshold_shortfall_after_round1_aborts_the_lone_commitment() {
 
 /// Fresh all-real peer set over the same nodes (each call makes new LocalPeers; nodes are shared).
 fn nodes_peers(nodes: &[Arc<Node>]) -> Peers {
+    rutli_cosigner::peer::wire_local_mesh(nodes).unwrap();
     nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect()
 }
 
@@ -766,6 +777,7 @@ fn hosted_cluster(tmp: &tempfile::TempDir) -> (Vec<Arc<Node>>, Peers) {
     }
     let peers: Peers =
         nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
     (nodes, peers)
 }
 
