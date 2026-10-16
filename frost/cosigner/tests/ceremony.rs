@@ -896,7 +896,9 @@ async fn a_round2_delivery_is_bound_to_its_real_sender_and_recipient() {
 
 #[tokio::test]
 async fn a_leader_dying_before_every_part3_leaves_one_staged_node_that_aborts_on_orphans() {
-    let rig = Rig::with_orphan_timeout(std::time::Duration::from_millis(300));
+    // Generous enough that parts 1–3 (fsyncing on slow CI disks) finish before anything orphans.
+    let orphan_timeout = std::time::Duration::from_secs(3);
+    let rig = Rig::with_orphan_timeout(orphan_timeout);
     let group = run_dkg(&rig.peers, KEY).await.unwrap();
     let before = rig.digests();
     let ceremony_id = "refresh-leader-died";
@@ -918,7 +920,7 @@ async fn a_leader_dying_before_every_part3_leaves_one_staged_node_that_aborts_on
     resolve_pending(&rig.nodes[0]).await;
     assert_eq!(rig.nodes[0].ceremony_record(ceremony_id).unwrap().state, RecordState::Staged, "2 and 3 in progress");
     // Past the orphan timeout nodes 2 and 3 vote no when asked, and node 1 aborts on it.
-    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    tokio::time::sleep(orphan_timeout + std::time::Duration::from_millis(250)).await;
     resolve_pending(&rig.nodes[0]).await;
     assert_aborted_everywhere(&rig, ceremony_id);
     assert_eq!(rig.digests(), before);
@@ -1026,15 +1028,21 @@ async fn a_flood_of_unknown_ceremony_ids_is_bounded_per_peer_and_in_total() {
 /// refused past [`rutli_cosigner::node::MAX_CEREMONY_SESSIONS`], and orphans make room.
 #[tokio::test]
 async fn ceremony_sessions_in_memory_are_bounded() {
-    let rig = Rig::with_orphan_timeout(std::time::Duration::from_millis(200));
+    // The timeout must outlast filling the table (each part 1 fsyncs; slow CI disks take tens of
+    // milliseconds per call), or the first sessions orphan and make room before the cap is probed.
+    let orphan_timeout = std::time::Duration::from_secs(5);
+    let rig = Rig::with_orphan_timeout(orphan_timeout);
     let n = &rig.nodes[0];
     let max = rutli_cosigner::node::MAX_CEREMONY_SESSIONS;
+    let started = std::time::Instant::now();
     for i in 0..max {
         n.dkg_part1(&format!("dkg-flood-{i}"), &format!("frost-flood-{i}")).unwrap();
     }
-    assert!(matches!(n.dkg_part1("dkg-flood-x", "frost-flood-x"), Err(DaemonError::NotServing(_))));
+    let refused = n.dkg_part1("dkg-flood-x", "frost-flood-x");
+    assert!(started.elapsed() < orphan_timeout, "filling the table outlasted the orphan timeout; raise it");
+    assert!(matches!(refused, Err(DaemonError::NotServing(_))), "{refused:?}");
     // Past the orphan timeout the orphans are dropped (each with a no-vote) to make room.
-    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    tokio::time::sleep(orphan_timeout.saturating_sub(started.elapsed()) + std::time::Duration::from_millis(250)).await;
     n.dkg_part1("dkg-flood-x", "frost-flood-x").unwrap();
     assert_eq!(n.ceremony_record("dkg-flood-0").unwrap().state, RecordState::Aborted);
     // Their guards went with them: a ceremony on one of those keys runs.
