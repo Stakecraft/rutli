@@ -3,7 +3,11 @@
 
 package com.stakecraft.rutli.audit
 
+import com.stakecraft.rutli.util.DirSync
+import org.slf4j.LoggerFactory
+
 import java.io.{File, FileOutputStream}
+import java.nio.file.Files
 import java.nio.charset.StandardCharsets.UTF_8
 import java.security.MessageDigest
 import java.time.Instant
@@ -19,8 +23,12 @@ import scala.util.Using
   * trust in the operator's log pipeline required.
   *
   * Durability: each entry is written and fsynced before the operation's result is returned to the
-  * caller, and the chain head is recovered from the file on restart, so the chain continues
-  * seamlessly across process restarts. Signing is low-frequency (topology changes), so the fsync
+  * caller (and the parent directory is fsynced when the file is first created), and the chain head
+  * is recovered from the file on restart, so the chain continues seamlessly across process
+  * restarts. On open the whole chain is re-verified; the one thing tolerated is a torn final line
+  * (a crash mid-append, no trailing newline, never fsynced, never acknowledged), which is truncated
+  * with a loud warning. Anything else — a malformed line elsewhere, a chain break — refuses to
+  * start rather than silently forking the chain. Signing is low-frequency (topology changes), so the fsync
   * cost is irrelevant.
   *
   * This is an integrity log, not a confidentiality mechanism: entries contain operation metadata
@@ -53,24 +61,59 @@ object HashChainedAuditLog {
 
   val GenesisHash: String = "0" * 64
 
-  /** Open (creating or resuming) the log at `path`. On resume the chain head is recovered from the
-    * last line; a corrupt tail fails fast rather than silently forking the chain. */
+  private val logger = LoggerFactory.getLogger(classOf[HashChainedAuditLog])
+
+  /** Open (creating or resuming) the log at `path`. On resume the whole chain is verified and the
+    * head recovered from the last line. A torn final line — no trailing newline and unparseable,
+    * i.e. a crash mid-append whose fsync never returned — is truncated with a WARN; a malformed
+    * line anywhere else, or a hash-chain break, fails fast rather than silently forking the chain. */
   def open(path: String): HashChainedAuditLog = {
     val file = new File(path)
-    Option(file.getParentFile).foreach(_.mkdirs())
-    if (!file.exists() || file.length() == 0) new HashChainedAuditLog(file, GenesisHash, 0L)
-    else {
-      val last = Using.resource(Source.fromFile(file, "UTF-8"))(_.getLines().foldLeft("")((_, l) => l))
-      val f = parse(last).getOrElse(
-        throw new IllegalStateException(s"audit log $path has a corrupt final line; refusing to append")
-      )
-      new HashChainedAuditLog(file, f.hash, f.seq)
+    Option(file.getAbsoluteFile.getParentFile).foreach(_.mkdirs())
+    val created = !file.exists()
+    val log =
+      if (created || file.length() == 0) new HashChainedAuditLog(file, GenesisHash, 0L)
+      else {
+        dropTornTail(file)
+        val (count, head) = verifyChain(path).fold(
+          broken =>
+            throw new IllegalStateException(
+              s"audit log $path is corrupt or its hash chain is broken at entry $broken; refusing to append"
+            ),
+          identity,
+        )
+        new HashChainedAuditLog(file, head, count)
+      }
+    // The log file now exists; make its directory entry durable, or a crash can lose the whole log.
+    if (created) DirSync.fsync(file.getAbsoluteFile.toPath.getParent)
+    log
+  }
+
+  /** Truncate a torn final line (no trailing newline, unparseable) in place. A final line that
+    * lacks its newline but parses is a complete entry: it is kept and its newline restored, so the
+    * next append does not fuse onto it. */
+  private def dropTornTail(file: File): Unit = {
+    val bytes = Files.readAllBytes(file.toPath)
+    if (bytes.nonEmpty && bytes.last != '\n'.toByte) {
+      val cut = bytes.lastIndexOf('\n'.toByte) + 1
+      val tail = new String(bytes, cut, bytes.length - cut, UTF_8)
+      val ch = java.nio.channels.FileChannel.open(file.toPath, java.nio.file.StandardOpenOption.WRITE)
+      try
+        if (parse(tail).isEmpty) {
+          logger.warn(
+            s"AUDIT LOG TORN TAIL: ${file.getPath} ends with an incomplete line (${bytes.length - cut} bytes, " +
+              "no trailing newline) — a crash mid-append; truncating it. Its entry was never fsynced, so no " +
+              "operation result was released for it."
+          )
+          ch.truncate(cut.toLong)
+        } else ch.write(java.nio.ByteBuffer.wrap(Array('\n'.toByte)), bytes.length.toLong)
+      finally { ch.force(true); ch.close() }
     }
   }
 
-  /** Offline verification: recompute the whole chain. Returns the number of valid entries, or the
-    * 1-based sequence number of the first broken entry as a Left. */
-  def verify(path: String): Either[Long, Long] = {
+  /** The chain check shared by [[open]] and [[verify]]: the entry count and head hash, or the
+    * 1-based sequence number of the first broken entry. */
+  private def verifyChain(path: String): Either[Long, (Long, String)] = {
     var prev = GenesisHash
     var count = 0L
     Using.resource(Source.fromFile(path, "UTF-8")) { src =>
@@ -85,8 +128,12 @@ object HashChainedAuditLog {
         }
       }
     }
-    Right(count)
+    Right((count, prev))
   }
+
+  /** Offline verification: recompute the whole chain. Returns the number of valid entries, or the
+    * 1-based sequence number of the first broken entry as a Left. */
+  def verify(path: String): Either[Long, Long] = verifyChain(path).map(_._1)
 
   // -- wire format (flat JSON object, stable field order; strings JSON-escaped) --
 

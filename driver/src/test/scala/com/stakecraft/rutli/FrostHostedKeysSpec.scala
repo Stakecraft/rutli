@@ -40,8 +40,8 @@ class FrostHostedKeysSpec extends AnyWordSpec with Matchers {
     private val keys = mutable.Map.empty[String, String] // key id -> spec
     val frostKeys: mutable.Set[String] = mutable.Set.empty
     // A genuine Ed25519 public key (raw 32 bytes): the driver re-parses what the cluster returns.
-    private val groupVerifyingKey: Array[Byte] =
-      java.security.KeyPairGenerator.getInstance("Ed25519").generateKeyPair().getPublic.getEncoded.takeRight(32)
+    private val groupKeyPair = java.security.KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+    private val groupVerifyingKey: Array[Byte] = groupKeyPair.getPublic.getEncoded.takeRight(32)
 
     override def dkg(req: DkgRequest, obs: StreamObserver[DkgReply]): Unit = {
       calls += s"dkg:${req.getKeyId}"
@@ -58,7 +58,10 @@ class FrostHostedKeysSpec extends AnyWordSpec with Matchers {
       calls += s"sign:${req.getKeyId}"
       if (!frostKeys.contains(req.getKeyId)) obs.onError(Status.NOT_FOUND.asRuntimeException())
       else {
-        obs.onNext(SignReply.newBuilder().setSignature(ByteString.copyFrom(new Array[Byte](64))).build())
+        // A real signature: the driver verifies every one against the group key it pinned.
+        val signer = java.security.Signature.getInstance("Ed25519")
+        signer.initSign(groupKeyPair.getPrivate); signer.update(req.getMessage.toByteArray)
+        obs.onNext(SignReply.newBuilder().setSignature(ByteString.copyFrom(signer.sign())).build())
         obs.onCompleted()
       }
     }
@@ -345,7 +348,8 @@ class FrostHostedKeysSpec extends AnyWordSpec with Matchers {
         fake.calls should contain("sign:soak1-frost-namespace")
         await(backend.getPublicKey(keyId)).spec shouldBe SigningKeySpec.EcCurve25519
         await(backend.keyExistsAndIsActive(keyId))
-        fake.calls.count(_ == "groupKey:soak1-frost-namespace") shouldBe 2
+        // DKG (agreement query), getPublicKey (re-ask against the pin) and keyExists; sign uses the pin.
+        fake.calls.count(_ == "groupKey:soak1-frost-namespace") shouldBe 3
         // Still the non-rotatable namespace key: not deletable via the API, prefixed or not.
         intercept[UnsupportedOperationException](await(backend.deleteKey(keyId)))
       }

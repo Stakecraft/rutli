@@ -62,7 +62,7 @@ final class FileApprovalGate(policy: ApprovalPolicy, logger: Logger)(implicit ec
     Future {
       val opDigest = sha256(data)
       val nonce = randomBytes(16)
-      val requestId = hex(sha256(concat(keyId.getBytes(UTF_8), opDigest, nonce)))
+      val requestId = requestIdFor(keyId, opDigest, nonce)
       writePending(requestId, keyId, opDigest, nonce)
       logger.info(
         s"APPROVAL required: key=$keyId request=$requestId threshold=$threshold — awaiting approvers"
@@ -125,6 +125,11 @@ object FileApprovalGate {
   def sha256(bytes: Array[Byte]): Array[Byte] = MessageDigest.getInstance("SHA-256").digest(bytes)
 
   def hex(bytes: Array[Byte]): String = bytes.map("%02x".format(_)).mkString
+
+  /** What an approver signs: `hex(SHA-256(keyId ‖ opDigest ‖ nonce))`. One definition, shared by
+    * the gate and the approver CLI, so the CLI can recompute it from the fields it displays. */
+  def requestIdFor(keyId: String, opDigest: Array[Byte], nonce: Array[Byte]): String =
+    hex(sha256(concat(keyId.getBytes(UTF_8), opDigest, nonce)))
 
   def verifyEd25519(pub: java.security.PublicKey, msg: Array[Byte], sig: Array[Byte]): Boolean =
     Try {

@@ -19,6 +19,10 @@ gated key without a fresh, cryptographically-attributable human quorum).
 - Each approver holds an **Ed25519 keypair**; only the public keys go in the policy.
 - A gated `sign` writes a pending request with a **random per-request nonce**, so its request id is
   unique and an approval can never be replayed onto another request.
+- The request id is `hex(SHA-256(keyId ‖ digest ‖ nonce))`. `ApproveCli` **recomputes it from the
+  keyId, digest and nonce it displays** and refuses to sign (exit 1) if it does not match, so a
+  tampered pending file cannot make an approver sign an id bound to a different digest than the one
+  shown.
 - An approval is an **Ed25519 signature over the request id** by an approver key. The driver verifies
   every signature against the configured keys and counts **each approver at most once** — separation
   of duties is cryptographic, not advisory.

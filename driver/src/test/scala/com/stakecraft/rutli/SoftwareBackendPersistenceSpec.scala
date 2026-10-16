@@ -82,6 +82,18 @@ class SoftwareBackendPersistenceSpec extends AnyWordSpec with Matchers {
       an[Exception] should be thrownBy await(b.keyExistsAndIsActive(id))
     }
 
+    "fail key creation when the directory fsync fails, instead of reporting the key as created (RUTLI-06)" in {
+      val dir = Files.createTempDirectory("rutli-softkeys")
+      val failing = new SoftKeyStore(dir, "s".getBytes, _ => throw new java.io.IOException("fsync dir: EIO"))
+      val backend = new SoftwareBackend(Some(failing))
+      val ex = the[java.io.IOException] thrownBy
+        await(backend.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")))
+      ex.getMessage should include("EIO")
+      an[java.io.IOException] should be thrownBy
+        await(backend.generateEncryptionKeyPair(EncryptionKeySpec.Rsa2048, None))
+      an[java.io.IOException] should be thrownBy await(backend.generateSymmetricKey(None))
+    }
+
     "keep heap-only behavior when persistence is not configured" in {
       val a = new SoftwareBackend()
       val id = await(a.generateEncryptionKeyPair(EncryptionKeySpec.Rsa2048, None))

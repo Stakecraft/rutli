@@ -24,7 +24,8 @@ import scala.util.Using
   *   # one-time: mint an approver key; add the printed public key to the policy `approvers` list
   *   java -cp rutli-driver.jar com.stakecraft.rutli.policy.ApproveCli keygen alice
   *
-  *   # authorize: sign pending requests in the inbox with alice's key
+  *   # authorize: sign pending requests in the inbox with alice's key. Each request's id is
+  *   # recomputed from the displayed keyId/digest/nonce first; a mismatch is refused, not signed.
   *   java -cp rutli-driver.jar com.stakecraft.rutli.policy.ApproveCli approve \
   *     --inbox /var/rutli/approvals --id alice --key alice.key [--request <id> | --all]
   * }}}
@@ -58,21 +59,39 @@ object ApproveCli {
     val inbox = opts.getOrElse("inbox", fail("--inbox required"))
     val id = opts.getOrElse("id", fail("--id required"))
     val key = loadPrivateKey(Paths.get(opts.getOrElse("key", fail("--key required"))))
+    if (opts.get("request").isEmpty && !opts.contains("all")) fail("pass --request <id> or --all")
+    val result = approveInbox(inbox, id, key, opts.get("request"))
+    if (result.refused.nonEmpty) {
+      Console.err.println(s"REFUSED ${result.refused.size} request(s) whose requestId does not match their fields")
+      sys.exit(1)
+    }
+  }
+
+  /** Outcome of [[approveInbox]]: the request ids signed, and the pending files refused. */
+  final case class ApproveResult(approved: Vector[String], refused: Vector[Path])
+
+  /** Sign pending requests in `inbox` (just `only`, or all of them). Before signing, the requestId
+    * is RECOMPUTED from the displayed fields — `SHA-256(keyId ‖ digest ‖ nonce)`, exactly as the
+    * gate derives it — and a request whose id does not match is refused, never signed. The inbox is
+    * a shared writable directory: without this check, anyone who can write it could show an
+    * approver one digest while the id they sign is bound to another. */
+  def approveInbox(inbox: String, id: String, key: java.security.PrivateKey, only: Option[String]): ApproveResult = {
     val pendingDir = Paths.get(inbox, "pending")
     val approvalsDir = Paths.get(inbox, "approvals")
     Files.createDirectories(approvalsDir)
 
     val requests: Vector[Path] =
-      opts.get("request") match {
+      only match {
         case Some(r) => Vector(pendingDir.resolve(s"$r.json")).filter(Files.exists(_))
-        case None if opts.contains("all") =>
+        case None =>
           Using(Files.list(pendingDir))(_.iterator().asScala.filter(_.toString.endsWith(".json")).toVector)
             .getOrElse(Vector.empty)
-        case None => fail("pass --request <id> or --all")
       }
 
-    if (requests.isEmpty) { println("no matching pending requests"); return }
+    if (requests.isEmpty) { println("no matching pending requests"); return ApproveResult(Vector.empty, Vector.empty) }
 
+    val approved = Vector.newBuilder[String]
+    val refused = Vector.newBuilder[Path]
     requests.foreach { reqFile =>
       val json = Files.readString(reqFile)
       val requestId = field(json, "requestId")
@@ -88,25 +107,54 @@ object ApproveCli {
       println(s"  digest    = $digest   (SHA-256 of the bytes Canton asked to sign)")
       println(s"  nonce     = $nonce")
       println(s"  ts        = $ts")
-      val sig = Signature.getInstance("Ed25519")
-      sig.initSign(key)
-      sig.update(requestId.getBytes(UTF_8))
-      val sigB64 = Base64.getEncoder.encodeToString(sig.sign())
-      val approval =
-        s"""{"approverId":"$id","requestId":"$requestId","signature":"$sigB64"}"""
-      val out = approvalsDir.resolve(s"$requestId.$id.sig")
-      Files.write(out, approval.getBytes(UTF_8))
-      println(s"approved $requestId (key=$keyId digest=${digest.take(16)}…) -> $out")
+      if (!requestIdMatches(requestId, keyId, digest, nonce)) {
+        Console.err.println(
+          s"REFUSING $reqFile: requestId does not equal SHA-256(keyId ‖ digest ‖ nonce) of the fields shown " +
+            "above — the file was tampered with or is malformed. Not signing."
+        )
+        refused += reqFile
+      } else {
+        val sig = Signature.getInstance("Ed25519")
+        sig.initSign(key)
+        sig.update(requestId.getBytes(UTF_8))
+        val sigB64 = Base64.getEncoder.encodeToString(sig.sign())
+        val approval =
+          s"""{"approverId":"$id","requestId":"$requestId","signature":"$sigB64"}"""
+        // requestId is verified 64 lowercase hex above, so it is safe in a file name.
+        val out = approvalsDir.resolve(s"$requestId.$id.sig")
+        Files.write(out, approval.getBytes(UTF_8))
+        println(s"approved $requestId (key=$keyId digest=${digest.take(16)}…) -> $out")
+        approved += requestId
+      }
     }
+    ApproveResult(approved.result(), refused.result())
   }
+
+  /** True iff `requestId` is exactly what the gate derives from these fields. */
+  def requestIdMatches(requestId: String, keyId: String, digestHex: String, nonceHex: String): Boolean =
+    HexRe(32).matches(digestHex) && HexRe(16).matches(nonceHex) &&
+      requestId == FileApprovalGate.requestIdFor(keyId, unhex(digestHex), unhex(nonceHex))
+
+  private case class HexRe(bytes: Int) {
+    private val re = s"[0-9a-f]{${bytes * 2}}".r
+    def matches(s: String): Boolean = re.pattern.matcher(s).matches()
+  }
+
+  private def unhex(s: String): Array[Byte] =
+    s.grouped(2).map(Integer.parseInt(_, 16).toByte).toArray
 
   private def loadPrivateKey(path: Path): java.security.PrivateKey = {
     val der = Base64.getDecoder.decode(Files.readAllBytes(path))
     KeyFactory.getInstance("Ed25519").generatePrivate(new PKCS8EncodedKeySpec(der))
   }
 
+  // Reads a string field of the flat pending JSON, undoing the gate's `esc` (a backslash escapes
+  // the next character), so a keyId containing a quote or backslash round-trips into the hash.
   private def field(json: String, name: String): String =
-    s"""\"$name\":\"(.*?)\"""".r.findFirstMatchIn(json).map(_.group(1)).getOrElse("")
+    raw""""$name":"((?:[^"\\]|\\.)*)"""".r
+      .findFirstMatchIn(json)
+      .map(m => """\\(.)""".r.replaceAllIn(m.group(1), x => scala.util.matching.Regex.quoteReplacement(x.group(1))))
+      .getOrElse("")
 
   private def parseOpts(args: Array[String]): Map[String, String] = {
     val m = scala.collection.mutable.Map.empty[String, String]
