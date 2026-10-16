@@ -5,10 +5,24 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
-Includes audit remediation, batches A and B (target: 0.4.0-rc.2). Batch C (confidential and two-phase
-DKG/refresh, cosigner-enforced signing intents, epochs) is still to come — see the warnings below.
+## [0.4.0-rc.2] — 2026-10-16
+
+_Release candidate, pre-audit: for soak and review, not for production key custody._
+
+Highlights: internal security audit remediation, batches A and B (driver pins and verifies FROST group
+keys and signatures; cosigner config validation, single-instance lock, RWOP volumes; per-node seal
+bundles and the `perNode` Helm topology; backup sidecar instead of exec RBAC; per-peer TLS server
+names). Optional carry of the protocol signing and ECIES keys (roadmap B6: `rutli-dealer split-key
+--expect-usage`, envelope v3 — pre-B6 bundles are refused — and `rutli-cosigner verify-hosted`); ECIES
+failover past a cosigner with the wrong shared secret, and the per-node decrypt rate limit documented
+(C2); a `verify-key` TLS probe; zero-downtime CA rotation with the `cluster_id` pin; the roadmap's two
+flows. **Batch C (confidential and two-phase DKG/refresh, cosigner-enforced signing intents, epochs) is
+still to come — see the warnings below; keys born or refreshed on this release are leader-exposed.**
 
 ### Upgrade notes (operators must act or know)
+- **Run the dealer and the cosigners from the same release.** rc.1 cosigners refuse version 3 share
+  bundles (what rc.2's `rutli-dealer` writes), and rc.2 cosigners refuse version 2 bundles (rc.1's
+  dealer). A split ceremony in flight across the upgrade is re-run with the new dealer.
 - **Do not run `refresh` until batch C ships.** A refresh still relays every round-2 package
   through the leader (audit C1), and one interrupted between nodes can leave mixed share epochs
   (H1). Nothing in this release changes that; leave any refresh CronJob disabled.
@@ -977,6 +991,7 @@ not audited. Do not place production authority keys behind it.
 - HSM backend validated only against SoftHSM.
 - No third-party security audit.
 
+[0.4.0-rc.2]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.2
 [0.4.0-rc.1]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.1
 [0.3.2]: https://github.com/Stakecraft/rutli/releases/tag/v0.3.2
 [0.3.1]: https://github.com/Stakecraft/rutli/releases/tag/v0.3.1
