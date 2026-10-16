@@ -98,6 +98,12 @@ service Peer {
   rpc PurgeKey(PurgeKeyRequest) returns (PurgeKeyReply);
   // This node's identifier and X25519 distribution public key (for wrapping hosted keys to it).
   rpc NodeInfo(NodeInfoRequest) returns (NodeInfoReply);
+
+  // --- two-phase ceremonies (DKG/refresh) ---
+  // This node's committed epoch and PKP digest for one FROST key, and whether a ceremony for it is
+  // staged here. Public values only. The leader asks every node before a DKG (idempotent retry)
+  // or a refresh (every node must be on the same sharing).
+  rpc KeyEpoch(KeyEpochRequest) returns (KeyEpochReply);
 }
 
 message HealthRequest {}
@@ -147,6 +153,9 @@ message KeyStatusReply {
   // ("" = none recorded, which Canton reads as all; "unknown" = plain PKCS#8).
   string carried_for = 12;
   string recorded_usage = 13;
+  // Which sharing this node holds: 1 after DKG, +1 per committed refresh; 0 for a share written
+  // before epochs existed or installed by the split ceremony. Nodes must agree.
+  uint64 epoch = 14;
 }
 
 message RefreshPart1Request {
@@ -342,4 +351,19 @@ message NodeInfoReply {
   // cosigner older than ec-p256-ecies, or with hosted keys off: a leader refuses to create a key of
   // a spec some peer does not report, so a mixed-version cluster never holds one.
   repeated string hosted_key_specs = 3;
+}
+
+// ── two-phase ceremonies (mesh only) ───────────────────────────────────────────────────────────
+
+message KeyEpochRequest { string key_id = 1; }
+message KeyEpochReply {
+  bool present = 1;              // a committed key file exists under key_id
+  uint64 epoch = 2;              // FROST shares only
+  bytes pkp_digest = 3;          // SHA-256 of the canonical public key package
+  bytes group_verifying_key = 4; // 32-byte RFC 8032 Ed25519 key
+  string origin = 5;             // "dkg", "dealer-split", or "hosted" (not a FROST share)
+  bool staged = 6;               // a ceremony for key_id is STAGED here (yes-vote, not resolved)
+  string staged_ceremony_id = 7;
+  uint64 staged_new_epoch = 8;
+  bytes staged_new_pkp_digest = 9;
 }

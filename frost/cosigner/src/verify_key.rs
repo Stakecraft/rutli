@@ -63,6 +63,8 @@ pub struct NodeRow {
     /// `namespace` / `protocol` for a key from a B6 dealer, empty otherwise.
     pub carried_for: String,
     pub recorded_usage: String,
+    /// The sharing this node holds (1 after DKG, +1 per refresh; 0 = pre-epoch or dealt).
+    pub epoch: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -89,6 +91,8 @@ pub struct VerifyReport {
     pub refresh_count: Option<u64>,
     pub carried_for: Option<String>,
     pub recorded_usage: Option<String>,
+    /// The epoch every node reports, when they agree.
+    pub epoch: Option<u64>,
     pub nodes: Vec<NodeRow>,
     pub sign_test: Vec<SignRow>,
 }
@@ -205,6 +209,7 @@ pub fn check_views(
     let mut digests = BTreeSet::new();
     let mut groups = BTreeSet::new();
     let mut provenance = BTreeSet::new();
+    let mut epochs = BTreeSet::new();
     for v in views {
         let mut row = NodeRow {
             identifier: v.identifier,
@@ -219,6 +224,7 @@ pub fn check_views(
             refresh_count: 0,
             carried_for: String::new(),
             recorded_usage: String::new(),
+            epoch: 0,
         };
         match &v.status {
             Err(e) => {
@@ -232,6 +238,8 @@ pub fn check_views(
                 row.refresh_count = s.refresh_count;
                 row.carried_for = s.carried_for.clone();
                 row.recorded_usage = s.recorded_usage.clone();
+                row.epoch = s.epoch;
+                epochs.insert(s.epoch);
                 provenance.insert((
                     s.origin.clone(),
                     s.ceremony_id.clone(),
@@ -253,6 +261,9 @@ pub fn check_views(
             "nodes hold {} different public key packages — the sharing is inconsistent",
             digests.len()
         ));
+    }
+    if epochs.len() > 1 {
+        problems.push(format!("nodes are on different epochs {epochs:?} — mixed sharings never combine"));
     }
     if provenance.len() > 1 {
         problems.push(format!(
@@ -279,6 +290,7 @@ pub fn check_views(
         refresh_count,
         carried_for,
         recorded_usage,
+        epoch: (epochs.len() == 1).then(|| epochs.iter().next().copied()).flatten(),
         nodes: rows,
         sign_test: Vec::new(),
     }
@@ -372,6 +384,7 @@ mod tests {
                         refresh_count: 0,
                         carried_for: "namespace".into(),
                         recorded_usage: "namespace".into(),
+                        epoch: 0,
                     }),
                 }
             })

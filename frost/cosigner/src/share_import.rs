@@ -307,6 +307,10 @@ pub fn import_share(
             refresh_count: 0,
             carried_usage: bundle.usage.clone(),
         }),
+        // Every node installs the same dealt sharing, so they agree on epoch 0 (as every share
+        // written before epochs existed does); the first refresh moves them to 1 together.
+        epoch: 0,
+        key_id: bundle.key_id.clone(),
     };
     keystore.create(&bundle.key_id, &share)?;
     // Installed: the bundle must now be dead. If this fails the share is still installed — say so;

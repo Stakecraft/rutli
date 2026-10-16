@@ -821,6 +821,17 @@ impl Peer for PeerSvc {
             hosted_key_specs: self.node.hosted_specs(),
         }))
     }
+
+    async fn key_epoch(
+        &self,
+        req: Request<pb::KeyEpochRequest>,
+    ) -> Result<Response<pb::KeyEpochReply>, Status> {
+        self.authorize(&req)?;
+        self.node.refuse_if_keystore_down().map_err(Status::from)?;
+        let key_id = req.into_inner().key_id;
+        let reply = self.node.blocking(move |n| n.key_epoch(&key_id)).await.map_err(Status::from)?;
+        Ok(Response::new(reply))
+    }
 }
 
 fn json<T: serde::Serialize>(v: &T) -> Result<Vec<u8>, Status> {

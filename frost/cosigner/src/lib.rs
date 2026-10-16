@@ -15,6 +15,7 @@
 #![allow(clippy::result_large_err)]
 
 pub mod carry;
+pub mod ceremony_record;
 pub mod cluster_identity;
 pub mod config;
 pub mod error;
