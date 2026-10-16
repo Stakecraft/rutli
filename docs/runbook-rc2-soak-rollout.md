@@ -64,7 +64,7 @@ helm template rutli deploy/helm/rutli-cosigner -n rutli \
 diff <(grep -v '^#' $D/live.yaml) <(grep -v '^#' $D/rc2.yaml)
 ```
 
-Expected differences: the image (`0.4.0-rc.1@sha256:16b7a0…` → rc.2 digest, in both the
+Expected differences: the image (`0.4.0-rc.1@sha256:16b7a0…` → `0.4.0-rc.2@sha256:dfb5c8…`, in both the
 `tls-select` init container and the cosigner container) and the chart/app version labels
 (`helm.sh/chart`, `app.kubernetes.io/version`). Anything else — a new StatefulSet, a changed
 `volumeClaimTemplates`, a PVC, a ConfigMap change — means the values are wrong: stop.
