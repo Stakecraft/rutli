@@ -318,7 +318,10 @@ delete pushed the key back to everyone at its next anti-entropy sweep.
   delete-hosted-key --key-id <id>`; with `--approvals-inbox <dir> --approvals <n>` it first writes a
   pending request into the same inbox `ApproveCli approve` serves and waits for `n` approvals. The
   driver signs a delete intent for Canton's `deleteKey` too (no approvals: if the cosigners require
-  them, Canton's delete fails and the operator command is the way).
+  them, Canton's delete fails and the operator command is the way). Both paths are tested: the
+  operator command with an approval inbox over mTLS (`frost/cosigner/tests/tombstones.rs`), and
+  Canton 3.6.1's `keys.secret.delete` through the driver, with key-file v2 only, by
+  `KEYFILE_V2_DELETES=1 scripts/e2e-ecies-hosted.sh` (phase E).
 - **Default-deny does not break normal Canton operation** (audit F9). Canton 3.6 calls
   `KmsDriver.deleteKey` only from `KmsCryptoPrivateStore.removePrivateKey`, which only the operator
   console command `keys.secret.delete` reaches (`GrpcVaultService`); key rotation never deletes.
