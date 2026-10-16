@@ -3,6 +3,7 @@
 
 package com.stakecraft.rutli.backend
 
+import com.stakecraft.rutli.util.DirSync
 import org.bouncycastle.crypto.digests.SHA256Digest
 import org.bouncycastle.crypto.generators.HKDFBytesGenerator
 import org.bouncycastle.crypto.params.HKDFParameters
@@ -24,9 +25,15 @@ import scala.util.Using
   * X.509 / raw key bytes, base64).
   *
   * Writes are atomic (temp file + move) and fsynced (file, then directory) — a half-written key
-  * file after a crash must never exist, because a lost encryption key is unrecoverable.
+  * file after a crash must never exist, because a lost encryption key is unrecoverable. A failed
+  * directory fsync fails the `put` (see [[DirSync]]): the caller must not treat the key as created.
   */
-final class SoftKeyStore(dir: Path, masterSecret: Array[Byte]) {
+final class SoftKeyStore(
+    dir: Path,
+    masterSecret: Array[Byte],
+    // Overridable so tests can inject a failing directory fsync; production always uses DirSync.
+    fsyncDir: Path => Unit = DirSync.fsync,
+) {
 
   import SoftKeyStore._
 
@@ -106,9 +113,4 @@ object SoftKeyStore {
 
   private def fsync(p: Path): Unit =
     Using.resource(java.nio.channels.FileChannel.open(p, StandardOpenOption.READ))(_.force(true))
-
-  private def fsyncDir(dir: Path): Unit =
-    // Directory fsync is best-effort on non-POSIX filesystems.
-    try Using.resource(java.nio.channels.FileChannel.open(dir, StandardOpenOption.READ))(_.force(true))
-    catch { case _: Exception => () }
 }

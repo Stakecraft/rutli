@@ -27,6 +27,8 @@ import com.stakecraft.rutli.grpc.{
 import com.stakecraft.rutli.audit.AuditNotes
 import io.grpc.netty.shaded.io.grpc.netty.{GrpcSslContexts, NettyChannelBuilder}
 import io.grpc.{ManagedChannel, ManagedChannelBuilder, Status, StatusRuntimeException}
+import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
+import org.bouncycastle.crypto.signers.Ed25519Signer
 import org.slf4j.Logger
 
 import java.io.File
@@ -76,6 +78,14 @@ import scala.concurrent.{ExecutionContext, Future, blocking}
   * endpoint last served a request leads the next one, so once a node is found sick later calls do
   * not each pay a failed attempt against it. This removes the single-leader availability gap
   * without any cross-node consensus — FROST sessions are independent, so no Raft log is needed.
+  *
+  * '''Trust in the group key (audit H2):''' no single cosigner is believed about the namespace key.
+  * `getPublicKey` (and the DKG reply) asks EVERY configured endpoint for the group key and needs at
+  * least two identical answers and no disagreeing one; the agreed key is then pinned per key id in
+  * memory, later `getPublicKey` calls re-ask and fail on any cosigner that now answers differently,
+  * and every signature `sign` returns is verified (Ed25519, strict) against the pinned key before
+  * it leaves the driver. A roster of exactly one endpoint (a dev setup) cannot agree with anyone,
+  * so there one answer suffices — production rosters have several cosigners.
   */
 class FrostBackend(
     endpoints: Seq[String],
@@ -120,6 +130,105 @@ class FrostBackend(
   }
 
   private val channels: Vector[ManagedChannel] = endpoints.toVector.map(buildChannel)
+
+  /** Group keys (raw 32-byte Ed25519) agreed across the roster and pinned in memory, per key id.
+    * A pinned key never changes for the life of the process: the namespace key is non-rotatable. */
+  private val pinnedKeys = new java.util.concurrent.ConcurrentHashMap[String, ByteString]()
+
+  /** Answers needed to believe a group key: two identical ones, or the lone endpoint of a
+    * single-endpoint (dev) roster, which has nobody to agree with. */
+  private val requiredAgreement: Int = if (channels.size == 1) 1 else 2
+
+  /** Ask every endpoint (in parallel) for `keyId`'s group key and settle on the agreed one.
+    *
+    * Fails with a non-retryable [[KmsDriverException]] on ANY disagreement, naming the endpoints
+    * and what each said — one compromised or stale cosigner must be loud, not outvoted. Fails
+    * retryable (availability, not trust) when fewer than `requiredAgreement` endpoints answered;
+    * when none did, the endpoints' own error is rethrown (e.g. NOT_FOUND for an unknown key).
+    * An endpoint that cannot answer is logged at WARN and simply not counted. */
+  private def queryGroupKey(keyId: String): Future[ByteString] = {
+    val req = GroupKeyRequest.newBuilder().setKeyId(keyId).build()
+    Future
+      .traverse(channels.indices.toVector) { i =>
+        Future(blocking {
+          try Right(endpoints(i) -> stubFor(channels(i)).groupKey(req).getGroupVerifyingKey)
+          catch { case e: StatusRuntimeException => Left(endpoints(i) -> e) }
+        })
+      }
+      .map { results =>
+        val answers = results.collect { case Right(a) => a }
+        val errors = results.collect { case Left(e) => e }
+        errors.foreach { case (ep, e) =>
+          logger.warn(s"FROST: groupKey for $keyId via $ep did not answer (${e.getStatus.getCode}); not counted")
+        }
+        agreeOnGroupKey(keyId, answers, errors.map(_._2))
+      }
+  }
+
+  private def agreeOnGroupKey(
+      keyId: String,
+      answers: Seq[(String, ByteString)],
+      errors: Seq[StatusRuntimeException],
+  ): ByteString = {
+    val distinct = answers.map(_._2).distinct
+    val pinned = Option(pinnedKeys.get(keyId))
+    pinned.foreach { p =>
+      // Already pinned: the pin is authoritative, and any answer that differs from it is an error.
+      val wrong = answers.filter(_._2 != p)
+      if (wrong.nonEmpty) {
+        val detail = wrong.map { case (ep, k) => s"$ep=${hexOf(k)}" }.mkString(", ")
+        logger.error(s"FROST: cosigner(s) answer a group key for $keyId that differs from the pin ${hexOf(p)}: $detail")
+        throw KmsDriverException(
+          new SecurityException(s"group key for $keyId differs from the pinned ${hexOf(p)}: $detail"),
+          retryable = false,
+        )
+      }
+    }
+    if (pinned.isDefined) return pinned.get
+    if (distinct.size > 1) {
+      val detail = answers.map { case (ep, k) => s"$ep=${hexOf(k)}" }.mkString(", ")
+      logger.error(s"FROST: cosigners DISAGREE on the group key of $keyId: $detail")
+      throw KmsDriverException(
+        new SecurityException(s"cosigners disagree on the group key of $keyId: $detail"),
+        retryable = false,
+      )
+    }
+    if (answers.isEmpty && errors.nonEmpty) throw errors.last
+    if (answers.size < requiredAgreement)
+      throw KmsDriverException(
+        new IllegalStateException(
+          s"only ${answers.size} of ${channels.size} cosigners answered for the group key of $keyId; " +
+            s"$requiredAgreement identical answers are needed before it is trusted"
+        ),
+        retryable = true,
+      )
+    val key = distinct.head
+    require(key.size == 32, s"expected 32-byte Ed25519 group key, got ${key.size}")
+    key
+  }
+
+  /** Pin `key` as `keyId`'s group key (the first pin wins); fails on a conflicting later one. */
+  private def pin(keyId: String, key: ByteString): ByteString = {
+    if (!isValidEd25519Key(key.toByteArray))
+      throw KmsDriverException(
+        new SecurityException(s"group key for $keyId is not a valid Ed25519 public key (${hexOf(key)})"),
+        retryable = false,
+      )
+    val prior = pinnedKeys.putIfAbsent(keyId, key)
+    if (prior != null && prior != key)
+      throw KmsDriverException(
+        new SecurityException(
+          s"group key for $keyId changed: pinned ${hexOf(prior)}, a cosigner now answers ${hexOf(key)}"
+        ),
+        retryable = false,
+      )
+    if (prior == null) logger.info(s"FROST: pinned group key for $keyId = ${hexOf(key)}")
+    key
+  }
+
+  /** The agreed group key of `keyId`, pinned: the pin if there is one, otherwise a fresh agreement. */
+  private def pinnedGroupKey(keyId: String): Future[ByteString] =
+    Option(pinnedKeys.get(keyId)).fold(queryGroupKey(keyId).map(pin(keyId, _)))(Future.successful)
 
   /** Build the gRPC channel for one endpoint. Overridable so tests can substitute an in-process
     * channel without standing up a TLS listener. */
@@ -471,7 +580,22 @@ class FrostBackend(
       // in-flight DKG must not be run a second time against another leader — nor on a leader-side
       // INTERNAL, which may have failed part-way through the ceremony.
       clusterCall("dkg", connectionRefused)(_.dkg(DkgRequest.newBuilder().setKeyId(keyId).build()))
-        .map(_ => keyId)
+        .flatMap { reply =>
+          // The leader's reply is one cosigner's word: the new key is believed only once every
+          // endpoint that answers agrees on it, and it must be the key the leader reported.
+          queryGroupKey(keyId).map { agreed =>
+            if (reply.getGroupVerifyingKey != agreed)
+              throw KmsDriverException(
+                new SecurityException(
+                  s"DKG for $keyId: the leader reported group key ${hexOf(reply.getGroupVerifyingKey)} but the " +
+                    s"cosigners agree on ${hexOf(agreed)}"
+                ),
+                retryable = false,
+              )
+            pin(keyId, agreed)
+            keyId
+          }
+        }
     case other => delegate.generateSigningKeyPair(other, keyName)
   }
 
@@ -521,13 +645,32 @@ class FrostBackend(
     if (ids.isFrost(keyId))
       precondition(algo == SigningAlgoSpec.Ed25519, s"FROST keys sign Ed25519 only, got $algo") {
         val req = SignRequest.newBuilder().setKeyId(keyId).setMessage(ByteString.copyFrom(data)).build()
-        // Re-issuing through another leader opens a fresh session with fresh nonces; the sick
-        // leader's session is abandoned and its nonces are burnt by the cosigners (AbortSign, or the
-        // pending-session TTL), never reused — see isLeaderSick.
-        clusterCall("sign", isLeaderSick)(_.sign(req)).map { reply =>
-          val sig = reply.getSignature.toByteArray
-          require(sig.length == 64, s"expected 64-byte Ed25519 signature, got ${sig.length}")
-          sig
+        // Captured here, synchronously: the binding is thread-local and the flatMap below runs on a
+        // pool thread (see clusterCall).
+        val notes = currentNotes.get
+        // Pin the group key first (no-op once pinned), so a signature is never produced for a key
+        // the cluster has not agreed on.
+        pinnedGroupKey(keyId).flatMap { groupKey =>
+          // Re-issuing through another leader opens a fresh session with fresh nonces; the sick
+          // leader's session is abandoned and its nonces are burnt by the cosigners (AbortSign, or the
+          // pending-session TTL), never reused — see isLeaderSick.
+          Future(blocking(withFailover("sign", isLeaderSick, notes)(_.sign(req)))).map { reply =>
+            val sig = reply.getSignature.toByteArray
+            require(sig.length == 64, s"expected 64-byte Ed25519 signature, got ${sig.length}")
+            // Never release a signature the pinned group key does not verify — a wrong-key or
+            // garbage signature from a faulty or malicious leader stops here, not at Canton.
+            if (!verifyEd25519(groupKey.toByteArray, data, sig)) {
+              logger.error(s"FROST: signature for $keyId did NOT verify against the pinned group key; withheld")
+              notes.add("sig-verify=failed")
+              throw KmsDriverException(
+                new SecurityException(
+                  s"FROST signature for $keyId does not verify against the pinned group key; withheld"
+                ),
+                retryable = false,
+              )
+            }
+            sig
+          }
         }
       }
     else delegate.sign(data, keyId, algo)
@@ -647,12 +790,11 @@ class FrostBackend(
 
   override def getPublicKey(keyId: String): Future[PublicKey] =
     if (ids.isFrost(keyId)) {
-      val req = GroupKeyRequest.newBuilder().setKeyId(keyId).build()
-      clusterCall("groupKey", isLeaderSick)(_.groupKey(req)).map { reply =>
-        val raw = reply.getGroupVerifyingKey.toByteArray
-        require(raw.length == 32, s"expected 32-byte Ed25519 group key, got ${raw.length}")
-        PublicKey(ed25519Spki(raw), SigningKeySpec.EcCurve25519)
-      }
+      // Always asks the whole roster, even once pinned: a cosigner that now answers differently
+      // from the pin is an error, not something to be quietly outvoted.
+      queryGroupKey(keyId).map(agreed =>
+        PublicKey(ed25519Spki(pin(keyId, agreed).toByteArray), SigningKeySpec.EcCurve25519)
+      )
     } else if (ids.isHosted(keyId)) {
       val req = PublicKeyRequest.newBuilder().setKeyId(keyId).build()
       // The cluster returns X.509 SubjectPublicKeyInfo DER — exactly what Canton's PublicKey wants —
@@ -838,6 +980,23 @@ object FrostBackend {
     * re-run against another leader is exactly what the ceremony guard exists to refuse. */
   private def connectionRefused(status: Status): Boolean =
     status.getCode == Status.Code.UNAVAILABLE
+
+  private def hexOf(b: ByteString): String = b.toByteArray.map("%02x".format(_)).mkString
+
+  /** A well-formed, canonical, non-small-order Ed25519 point: what a group key must be. */
+  private def isValidEd25519Key(raw: Array[Byte]): Boolean =
+    raw.length == 32 && org.bouncycastle.math.ec.rfc8032.Ed25519.validatePublicKeyFull(raw, 0)
+
+  /** Strict Ed25519 (RFC 8032) verification with BouncyCastle: rejects a non-canonical S, an
+    * undecodable R or key, and any wrong length — never throws, returns false. */
+  private[backend] def verifyEd25519(rawKey: Array[Byte], msg: Array[Byte], sig: Array[Byte]): Boolean =
+    sig.length == 64 && isValidEd25519Key(rawKey) &&
+      (try {
+        val v = new Ed25519Signer()
+        v.init(false, new Ed25519PublicKeyParameters(rawKey, 0))
+        v.update(msg, 0, msg.length)
+        v.verifySignature(sig)
+      } catch { case _: Exception => false })
 
   /** Wrap a raw 32-byte Ed25519 public key in DER X.509 SubjectPublicKeyInfo — what Canton expects
     * from getPublicKey. The 12-byte prefix is the fixed Ed25519 SPKI header (SEQUENCE, alg OID

@@ -179,6 +179,60 @@ class ApprovalGateSpec extends AnyWordSpec with Matchers {
     }
   }
 
+  "ApproveCli" should {
+
+    def pendingFile(inbox: String): Path =
+      Files.list(Paths.get(inbox, "pending")).iterator().asScala.find(_.toString.endsWith(".json")).get
+    def sigFiles(inbox: String): Vector[Path] =
+      Files.list(Paths.get(inbox, "approvals")).iterator().asScala.toVector
+
+    "recompute the requestId, sign an untampered request, and the gate accepts it (M7)" in {
+      val inbox = newInbox()
+      val a = approverKeypair()
+      val gate = new FileApprovalGate(policy(inbox, List(approver("alice", a)), 1, 10.seconds), logger)
+
+      val f = gate.authorize("frost-ns", "digest".getBytes)
+      eventually(pendingExists(inbox))
+      val res = ApproveCli.approveInbox(inbox, "alice", a.getPrivate, None)
+      res.approved.size shouldBe 1
+      res.refused shouldBe empty
+      Await.result(f, 5.seconds) shouldBe (())
+    }
+
+    "refuse to sign a pending file whose displayed digest was swapped (M7)" in {
+      val inbox = newInbox()
+      val a = approverKeypair()
+      val gate = new FileApprovalGate(policy(inbox, List(approver("alice", a)), 1, 1500.millis), logger)
+
+      val f = gate.authorize("frost-ns", "the real operation".getBytes)
+      eventually(pendingExists(inbox))
+      // Someone with write access to the inbox shows the approver a digest they expect, while the
+      // requestId (what would be signed) stays bound to the real one.
+      val file = pendingFile(inbox)
+      val json = Files.readString(file)
+      val shown = FileApprovalGate.hex(FileApprovalGate.sha256("what the approver expects".getBytes))
+      Files.writeString(file, "\"digest\":\"[0-9a-f]+\"".r.replaceAllIn(json, "\"digest\":\"" + shown + "\""))
+
+      val res = ApproveCli.approveInbox(inbox, "alice", a.getPrivate, None)
+      res.approved shouldBe empty
+      res.refused should have size 1
+      sigFiles(inbox) shouldBe empty
+      the[Exception] thrownBy Await.result(f, 5.seconds) // never approved, so the gate times out
+    }
+
+    "refuse a swapped keyId or nonce, and a requestId that is not a hash at all (M7)" in {
+      val digestHex = FileApprovalGate.hex(FileApprovalGate.sha256("op".getBytes))
+      val nonce = Array.fill(16)(3.toByte)
+      val id = FileApprovalGate.requestIdFor("frost-ns", FileApprovalGate.sha256("op".getBytes), nonce)
+      val nonceHex = FileApprovalGate.hex(nonce)
+      ApproveCli.requestIdMatches(id, "frost-ns", digestHex, nonceHex) shouldBe true
+      ApproveCli.requestIdMatches(id, "frost-other", digestHex, nonceHex) shouldBe false
+      ApproveCli.requestIdMatches(id, "frost-ns", digestHex, "00" * 16) shouldBe false
+      ApproveCli.requestIdMatches("../../etc/passwd", "frost-ns", digestHex, nonceHex) shouldBe false
+      ApproveCli.requestIdMatches(id, "frost-ns", "zz", nonceHex) shouldBe false
+    }
+  }
+
   private def pendingExists(inbox: String): Boolean = {
     val p = Paths.get(inbox, "pending")
     Files.isDirectory(p) && Files.list(p).iterator().asScala.exists(_.toString.endsWith(".json"))

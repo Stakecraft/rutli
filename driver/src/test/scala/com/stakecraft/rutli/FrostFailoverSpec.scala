@@ -37,17 +37,18 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
 
   private val PermissionDenied = Status.INTERNAL.withDescription("io: Permission denied (os error 13)")
 
-  /** A valid 32-byte Ed25519 public key, so the driver's SPKI re-parse accepts it. */
-  private val GroupVerifyingKey: Array[Byte] = {
-    val spki = KeyPairGenerator.getInstance("Ed25519").generateKeyPair().getPublic.getEncoded
-    spki.takeRight(32)
+  /** The cluster's Ed25519 key: the driver pins its public half and verifies every signature. */
+  private val GroupKeyPair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+  private val GroupVerifyingKey: Array[Byte] = GroupKeyPair.getPublic.getEncoded.takeRight(32)
+
+  private def groupSign(msg: Array[Byte]): Array[Byte] = {
+    val s = java.security.Signature.getInstance("Ed25519")
+    s.initSign(GroupKeyPair.getPrivate); s.update(msg); s.sign()
   }
 
   /** One fake cosigner: per-RPC call counters and a switchable failure per RPC (`None` = serve). */
   private final class FakeCosigner(index: Int) extends SignerGrpc.SignerImplBase {
     val name: String = s"rutli-cosigner-$index-${InProcessServerBuilder.generateName()}"
-    /** This cosigner's signature: 64 bytes of its own index, so a test can tell who signed. */
-    val signature: Array[Byte] = Array.fill(64)(index.toByte)
 
     val signCalls = new AtomicInteger
     val dkgCalls = new AtomicInteger
@@ -67,7 +68,9 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
 
     override def sign(req: SignRequest, obs: StreamObserver[SignReply]): Unit = {
       signCalls.incrementAndGet()
-      answer(signFails, obs)(SignReply.newBuilder().setSignature(ByteString.copyFrom(signature)).build())
+      answer(signFails, obs)(
+        SignReply.newBuilder().setSignature(ByteString.copyFrom(groupSign(req.getMessage.toByteArray))).build()
+      )
     }
 
     override def dkg(req: DkgRequest, obs: StreamObserver[DkgReply]): Unit = {
@@ -121,6 +124,9 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
   }
 
   private val Digest = Array.fill(34)(7.toByte)
+  /** What every healthy cosigner returns for `Digest` (Ed25519 is deterministic). Who served is
+    * asserted through the per-cosigner call counters instead. */
+  private lazy val Signed = groupSign(Digest)
 
   private def signNoted(backend: FrostBackend, notes: AuditNotes): Array[Byte] =
     await(backend.withAuditNotes(notes)(backend.sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519)))
@@ -131,7 +137,7 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
       withCluster(2) { case (backend, Seq(a, b)) =>
         a.signFails = Some(PermissionDenied)
         val notes = new AuditNotes
-        signNoted(backend, notes) shouldBe b.signature
+        signNoted(backend, notes) shouldBe Signed
         a.signCalls.get shouldBe 1
         b.signCalls.get shouldBe 1
         notes.render shouldBe s"failover=${a.name}→${b.name} reason=INTERNAL"
@@ -141,10 +147,10 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
     "lead from the last healthy cosigner afterwards, without re-trying the sick one" in {
       withCluster(2) { case (backend, Seq(a, b)) =>
         a.signFails = Some(PermissionDenied)
-        signNoted(backend, new AuditNotes) shouldBe b.signature
+        signNoted(backend, new AuditNotes) shouldBe Signed
 
         val second = new AuditNotes
-        signNoted(backend, second) shouldBe b.signature
+        signNoted(backend, second) shouldBe Signed
         a.signCalls.get shouldBe 1 // not contacted again
         b.signCalls.get shouldBe 2
         second.isEmpty shouldBe true
@@ -196,24 +202,27 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
 
             // The node answered, so it is still the preferred leader.
             a.signFails = None
-            signNoted(backend, new AuditNotes) shouldBe a.signature
+            signNoted(backend, new AuditNotes) shouldBe Signed
             a.signCalls.get shouldBe 2
             b.signCalls.get shouldBe 0
           }
         }
     }
 
-    "fail getPublicKey and keyExistsAndIsActive over on UNKNOWN" in {
-      withCluster(2) { case (backend, Seq(a, b)) =>
+    "serve getPublicKey from the cosigners that answer when one is UNKNOWN, and fail keyExistsAndIsActive over" in {
+      // getPublicKey asks the whole roster for agreement (two identical answers needed), so a sick
+      // node is simply not counted; keyExistsAndIsActive is a plain failover read.
+      withCluster(3) { case (backend, Seq(a, b, _)) =>
         a.groupKeyFails = Some(Status.UNKNOWN.withDescription("handler panicked"))
-        val notes = new AuditNotes
-        val pk = await(backend.withAuditNotes(notes)(backend.getPublicKey("frost-ns")))
+        val pk = await(backend.getPublicKey("frost-ns"))
         pk.spec shouldBe SigningKeySpec.EcCurve25519
         pk.key.takeRight(32) shouldBe GroupVerifyingKey
-        notes.render shouldBe s"failover=${a.name}→${b.name} reason=UNKNOWN"
-
-        await(backend.keyExistsAndIsActive("frost-ns"))
         a.groupKeyCalls.get shouldBe 1
+
+        val notes = new AuditNotes
+        await(backend.withAuditNotes(notes)(backend.keyExistsAndIsActive("frost-ns")))
+        notes.render shouldBe s"failover=${a.name}→${b.name} reason=UNKNOWN"
+        a.groupKeyCalls.get shouldBe 2
         b.groupKeyCalls.get shouldBe 2
       }
     }
@@ -238,12 +247,12 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
         // Move the preferred leader to C...
         a.signFails = Some(Status.UNAVAILABLE)
         b.signFails = Some(Status.UNAVAILABLE)
-        signNoted(backend, new AuditNotes) shouldBe c.signature
+        signNoted(backend, new AuditNotes) shouldBe Signed
         // ...then make C sick: the next leader tried is A (ring order), not B.
         a.signFails = None
         c.signFails = Some(PermissionDenied)
         val notes = new AuditNotes
-        signNoted(backend, notes) shouldBe a.signature
+        signNoted(backend, notes) shouldBe Signed
         notes.render shouldBe s"failover=${c.name}→${a.name} reason=INTERNAL"
         b.signCalls.get shouldBe 1
       }
@@ -267,7 +276,7 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
     "still fail over when the caller supplies no audit notes" in {
       withCluster(2) { case (backend, Seq(a, b)) =>
         a.signFails = Some(PermissionDenied)
-        await(backend.sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519)) shouldBe b.signature
+        await(backend.sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519)) shouldBe Signed
       }
     }
   }
@@ -314,7 +323,7 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
         b.dkgCalls.get shouldBe 0
         c.dkgCalls.get shouldBe 0
 
-        await(driver.sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519)(ctx)) shouldBe b.signature
+        await(driver.sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519)(ctx)) shouldBe Signed
 
         val dkgEntry = sink.entries.collectFirst { case ("generateSigningKeyPair", d) => d }.get
         dkgEntry should include("outcome=failed")

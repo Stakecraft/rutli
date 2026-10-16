@@ -468,7 +468,13 @@ from replicated to threshold is a server-side change plus a config flag, not an 
 ## Lifecycle
 
 - **DKG** at namespace-key creation (`generateSigningKeyPair` for the namespace key routes to the
-  cluster; the driver returns a `keyId` naming the group key).
+  cluster; the driver returns a `keyId` naming the group key). The driver does not believe one
+  cosigner about that key: after DKG, and at `getPublicKey`, it asks every configured endpoint for
+  the group key, needs at least two identical answers and no disagreeing one (a lone endpoint, a dev
+  roster, needs one), and pins the result per key id in memory; a cosigner that later answers
+  differently is an error. Every threshold signature is verified (Ed25519, strict) against the pinned
+  key before the driver returns it, so a wrong-key or garbage signature is withheld, not handed to
+  Canton.
 - **Proactive refresh:** periodically re-randomize shares, same public key — an attacker must breach
   `t` cosigners within one epoch; old stolen shares become useless.
 - **DR:** encrypted per-share backups (fast node replacement) + a cold Shamir backup held by

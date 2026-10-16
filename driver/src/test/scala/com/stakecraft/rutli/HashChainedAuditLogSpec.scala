@@ -73,6 +73,76 @@ class HashChainedAuditLogSpec extends AnyWordSpec with Matchers {
       HashChainedAuditLog.verify(path.toString) shouldBe Right(2L)
     }
 
+    "truncate a torn final line on open, with the chain intact up to it (L1)" in {
+      val path = tmpLog()
+      val log = HashChainedAuditLog.open(path.toString)
+      (1 to 3).foreach(i => log.append("op", s"entry $i"))
+      log.close()
+      // A crash mid-append: half an entry, no trailing newline.
+      Files.write(path, """{"seq":4,"ts":"2026-01-01T00:00:00Z","op":"op","det""".getBytes, java.nio.file.StandardOpenOption.APPEND)
+
+      val resumed = HashChainedAuditLog.open(path.toString) // must not throw
+      resumed.append("op", "entry 4 again")
+      resumed.close()
+      HashChainedAuditLog.verify(path.toString) shouldBe Right(4L)
+    }
+
+    "keep a complete final entry that merely lacks its newline, and not fuse the next one onto it (L1)" in {
+      val path = tmpLog()
+      val log = HashChainedAuditLog.open(path.toString)
+      (1 to 2).foreach(i => log.append("op", s"entry $i"))
+      log.close()
+      val bytes = Files.readAllBytes(path)
+      Files.write(path, bytes.dropRight(1)) // strip the final newline only
+
+      val resumed = HashChainedAuditLog.open(path.toString)
+      resumed.append("op", "entry 3")
+      resumed.close()
+      HashChainedAuditLog.verify(path.toString) shouldBe Right(3L)
+    }
+
+    "still refuse to start on a malformed line that is not the torn tail (L1)" in {
+      val path = tmpLog()
+      val log = HashChainedAuditLog.open(path.toString)
+      (1 to 3).foreach(i => log.append("op", s"entry $i"))
+      log.close()
+      val lines = Files.readAllLines(path).asScala.toVector
+      Files.write(path, (lines.updated(1, "garbage").mkString("\n") + "\n").getBytes)
+
+      an[IllegalStateException] should be thrownBy HashChainedAuditLog.open(path.toString)
+    }
+
+    "still refuse to start on a malformed final line that DID end with a newline (L1)" in {
+      val path = tmpLog()
+      val log = HashChainedAuditLog.open(path.toString)
+      log.append("op", "entry 1")
+      log.close()
+      Files.write(path, "garbage\n".getBytes, java.nio.file.StandardOpenOption.APPEND)
+
+      an[IllegalStateException] should be thrownBy HashChainedAuditLog.open(path.toString)
+    }
+
+    "still refuse to start on a hash-chain break in an earlier entry (L1)" in {
+      val path = tmpLog()
+      val log = HashChainedAuditLog.open(path.toString)
+      (1 to 4).foreach(i => log.append("op", s"entry $i"))
+      log.close()
+      val lines = Files.readAllLines(path).asScala.toVector
+      // Entry 2's detail is edited (valid JSON shape, wrong hash); the tail entry is untouched, so
+      // only a full-chain check on open can notice.
+      Files.write(path, (lines.updated(1, lines(1).replace("entry 2", "entry X")).mkString("\n") + "\n").getBytes)
+
+      an[IllegalStateException] should be thrownBy HashChainedAuditLog.open(path.toString)
+    }
+
+    "create the log (and its parent directory) when absent" in {
+      val path = Files.createTempDirectory("rutli-audit").resolve("nested/dir/audit.jsonl")
+      val log = HashChainedAuditLog.open(path.toString) // fsyncs the parent directory on create
+      log.append("op", "first")
+      log.close()
+      HashChainedAuditLog.verify(path.toString) shouldBe Right(1L)
+    }
+
     "record driver operations end-to-end and verify" in {
       implicit val ec: ExecutionContext = ExecutionContext.global
       val path = tmpLog()

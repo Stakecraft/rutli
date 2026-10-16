@@ -47,7 +47,14 @@ class FrostTlsTrustBundleSpec extends AnyWordSpec with Matchers with BeforeAndAf
 
   private val Domain = "rutli-cosigner"
   private val Digest = Array.fill(34)(7.toByte)
-  private val Signature = Array.fill(64)(9.toByte)
+  /** The cluster's Ed25519 key. The driver pins the group key it agrees on and verifies every
+    * signature against it before returning one (audit H2), so the fake cosigner signs for real. */
+  private val GroupKeyPair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+  private val GroupVerifyingKey: Array[Byte] = GroupKeyPair.getPublic.getEncoded.takeRight(32)
+  private val Signature: Array[Byte] = {
+    val s = java.security.Signature.getInstance("Ed25519")
+    s.initSign(GroupKeyPair.getPrivate); s.update(Digest); s.sign()
+  }
 
   private val dir: Path = Files.createTempDirectory("rutli-tls-bundle")
 
@@ -120,6 +127,11 @@ class FrostTlsTrustBundleSpec extends AnyWordSpec with Matchers with BeforeAndAf
   // --- the fake cosigner behind a real TLS listener -------------------------------------------
 
   private final class Signer extends SignerGrpc.SignerImplBase {
+    override def groupKey(req: GroupKeyRequest, obs: StreamObserver[GroupKeyReply]): Unit = {
+      obs.onNext(GroupKeyReply.newBuilder().setGroupVerifyingKey(ByteString.copyFrom(GroupVerifyingKey)).build())
+      obs.onCompleted()
+    }
+
     override def sign(req: SignRequest, obs: StreamObserver[SignReply]): Unit = {
       obs.onNext(SignReply.newBuilder().setSignature(ByteString.copyFrom(Signature)).build())
       obs.onCompleted()
