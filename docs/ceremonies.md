@@ -131,7 +131,9 @@ Records of settled ceremonies (every peer seen terminal) are deleted after 30 da
 ## Operator procedures
 
 All of these run on one node with **its daemon stopped** (they take the instance lock) and talk to
-the other cosigners over the mesh with that node's certificate (`--config` = the node's config).
+the other cosigners over the mesh with that node's certificate (`--config` = the node's config). On
+Kubernetes (Helm `topology: perNode`), set `maintenanceNodes: [<id>]`: that node's cosigner
+container then idles without a daemon, and the commands run with `kubectl exec <pod> -c cosigner`.
 
 ### Resolve now
 

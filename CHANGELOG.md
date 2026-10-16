@@ -7,11 +7,70 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 Builds on 0.4.0-rc.2. Audit remediation batch C phase 1: confidential, two-phase DKG/refresh with
 share epochs (audit C1, H1, M5), batch C phase 2: sign-time epoch checks, stale-share detection and
-quorum retry (H1, M1), and batch C phase 3: cosigner-enforced signing intents, approvals, rate
-limits and sign journals (C2) with the audit cross-check. Still to come in batch C: key-file v2,
-authorized hosted-key deletes and restore — see the warnings below.
+quorum retry (H1, M1), batch C phase 3: cosigner-enforced signing intents, approvals, rate limits
+and sign journals (C2) with the audit cross-check, and batch C phase 4: key-file format v2 with
+bound headers and DEK rotation (M4), authorized hosted-key tombstones (M2), an epoch-checked atomic
+restore (M1), and the threat model (`docs/security/threat-model.md`). Batch C is complete.
+
+### Rollout order across batch C (phases 1–4)
+
+Every step on **every** node before the next; a flag is only as strong as the most lenient node a
+quorum can reach. Pause the refresh CronJob and onboarding DKGs from step 1 until step 2 is done.
+
+1. **Upgrade every cosigner** (rolling restart, defaults unchanged). Signing keeps working across
+   versions; DKG/refresh are refused until every node reports ceremony protocol 2; this release
+   reads v1 and v2 key files and still writes v1; hosted-key deletes stay disabled (empty
+   `hosted_keys.delete_allowlist`).
+2. **Check the cluster is uniform** (every node `ceremony_protocol` 2, `rutli_ceremonies_staged` 0)
+   before any ceremony. Then, if you want, one refresh per key to exercise the two-phase commit —
+   and, for dealt keys, to re-isolate shares (keys generated or refreshed on an earlier release stay
+   leader-exposed, decision P9).
+3. **Upgrade the driver** (participant restart): it signs intents for every sign and delete.
+4. **Policy, identical everywhere:** approval rules/approvers matching the driver's, `signer_acl`,
+   `signer_pins`, rate-limit rules, the refresher certificate for the refresh job.
+5. **Flip the switches on every node** (rolling restart): `signing_policy.require_intent: true`,
+   `signer_acl_required: true`, `signer_may_refresh: false`, `require_epoch_match: true`.
+6. **Key-file v2:** set `keyfile.cluster_uuid` (one lowercase UUID for the whole cluster, recorded,
+   never changed) on every node, then `keyfile.write_version: 2` (each node re-seals its files as v2
+   at start; check `rutli_keyfiles{format="v1"}` = 0 or `rutli-cosigner keyfile status`). From here a
+   rollback to an older release needs `keyfile downgrade` on each node first. `keyfile.accept_v1:
+   false` once no rollback is wanted.
+7. **DEK rotation, per node** (`seal rotate-dek` → new Secret → restart → `keyfile status` shows no
+   previous-DEK file → backup → `seal drop-previous` → restart; `docs/disaster-recovery.md` §3h).
+8. **Retire the legacy seal master** (clusters that came from `secret_env`): it stays escrowed
+   offline until every node finished step 7 and every backup sealed under a master-derived DEK has
+   aged out, then it is destroyed (decision P1).
+9. **Deletes, if wanted:** `hosted_keys.delete_allowlist` (a delete-role CN, never a cosigner; the
+   driver's CN only if Canton must delete), `delete_approval_threshold` ≥ 1 for production, the same
+   on every node — only once every node runs this release (older nodes ignore tombstones).
 
 ### Upgrade notes (operators must act or know)
+- **Plaintext key files now stop the daemon when sealing is on (audit M4).** Earlier releases read
+  a plaintext key file under sealing and re-sealed it at start as if it were genuine; now the
+  cosigner refuses to start and names every such file. Before upgrading, check `keys/` holds no
+  plaintext file (`rutli-cosigner keyfile status` on the new binary, offline; or every
+  `keys/*.json` starts with `{"v":1,"sealed":true`). A genuine one is sealed offline with
+  `rutli-cosigner keyfile migrate-plaintext --key-id <id>` (shows the key, asks for a confirmation
+  code). Every load now also checks a file against its name: a share whose sealed plaintext names
+  another key id, or belongs to another FROST identifier, is refused.
+- **Key-file format v2 is opt-in** (`keyfile.write_version: 2`, needs `keyfile.cluster_uuid`), so a
+  rollback stays possible until you switch; `keyfile downgrade` undoes it. The daemon re-seals at
+  start every file under a previous DEK of its seal bundle and, when writing v2, every v1 file.
+- **Hosted-key deletes need the new delete role and a signed delete intent (audit M2).** By default
+  (`hosted_keys.delete_allowlist` empty) `DeleteKey` is refused (PERMISSION_DENIED), including
+  Canton's `deleteKey` through the driver. A delete is now a tombstone kept on every node, with the
+  material retained for `delete_grace_secs` (7 days). Do not enable deletes before every cosigner
+  runs this release. A `PurgeKey` without a delete intent is only a write-quorum rollback.
+- **`restore` takes the instance lock and refuses rollbacks (audit M1).** Run it with the daemon
+  stopped — on Kubernetes with `maintenanceNodes: [<id>]` (perNode topology), not with `kubectl exec`
+  next to a running daemon. `--force` no longer replaces a newer live share with an older one; the
+  per-key break-glass is printed in the refusal. `docs/disaster-recovery.md` §1.
+- **Backups include the sign journals** (sidecar and `rutli-cosigner backup`); the tar layout now has
+  the key files at the top and `journal/` beside them. `restore --from` the extracted directory as
+  before.
+- **Never snapshot, clone or live-migrate a running cosigner VM or container, and run no
+  TLS-terminating service mesh between cosigners** (`docs/security/threat-model.md`: audit L7,
+  decision P3). Both expose key material; neither is detectable from inside the process.
 - **Signing intents (audit C2): cosigners first, then the driver, then switch enforcement on.** This
   release's cosigners verify a driver-signed intent when one is present and accept a sign without
   one (counted in `rutli_sign_intent_absent_total`); this release's driver signs one for every FROST
@@ -69,6 +128,33 @@ authorized hosted-key deletes and restore — see the warnings below.
   `rutli-cosigner discard-partial-key` (`docs/ceremonies.md`).
 
 ### Security
+- **Key-file format v2 (audit M4).** Sealed key files gain a clear header `{fmt, cluster, node,
+  key_id, kind, epoch, digest, dek_id}` bound as AES-GCM associated data (fixed binary encoding). A
+  load checks it against `keyfile.cluster_uuid` (a new configured identity — never the CA-derived
+  cluster id, which a CA rotation changes), the node, the file name and the expected kind before it
+  decrypts, picks the DEK by id, and checks the plaintext against it (key id, a share's epoch and PKP
+  digest, its FROST identifier). Renamed, cross-node, cross-cluster and kind-confused files are
+  refused; covers committed and staged shares, hosted keys, tombstones and split-ceremony recipient
+  secrets. Plaintext under sealing is refused. Tools: `keyfile status|migrate|downgrade|
+  migrate-plaintext`, `seal rotate-dek|drop-previous`; metric `rutli_keyfiles{format,dek}`.
+- **Authorized hosted-key tombstones (audit M2).** `DeleteKey` needs a `SignedIntent` with purpose
+  `delete-key` from the delete role (`hosted_keys.delete_allowlist`, optional `delete_acl` and
+  `delete_approval_threshold`), verified by every node; the key becomes a sealed tombstone that
+  retains its material for the grace period (`hosted-undelete`), answers NOT_FOUND, is never
+  overwritten, travels in `ListKeys` and beats a live copy in anti-entropy (verified, expiry
+  ignored), so a stale node or a restore cannot resurrect a deleted key. A tombstoned id is not
+  regenerated without `hosted-clear-tombstone` on every node. `PurgeKey` without an intent only
+  rolls back a key the node created in the same still-fenced generation. New: `delete-hosted-key`
+  (with approvals through the `rutli-approve` inbox), driver delete intents, metrics
+  `rutli_delete_intent_refusals_total{reason}`, `rutli_hosted_tombstones_written_total{how}`,
+  `rutli_hosted_tombstones{retained}`.
+- **Epoch-checked, atomic restore (audit M1).** Instance lock; every backup file verified like a live
+  key file before anything is written (one refusal writes nothing); never an older epoch, another
+  sharing, other hosted material or a key over its tombstone — not even with `--force` — short of a
+  per-key break-glass naming the exact backup; staged copy, then per-file atomic renames; a
+  break-glass restore is caught by the stale-share check at the next start.
+- **Deploy policy:** the backup sidecar may not mount the node's TLS key nor mount the data volume
+  writable (`scripts/check-deploy-policy.sh` rules 4–5, with negative checks in CI).
 - **Cosigner-enforced signing policy (audit C2).** Every FROST sign carries a `SignedIntent` the
   driver signs with its mTLS leaf key (`"rutli-intent-v1\n" ‖ SignIntent`: cluster id, key, the
   34-byte digest, a 16-byte request id, issued/not-after, approval nonce and approver signatures).
@@ -159,6 +245,17 @@ authorized hosted-key deletes and restore — see the warnings below.
   flag a mix.
 
 ### Added
+- **`docs/security/threat-model.md`**: the post-remediation capabilities of a compromised leader, a
+  single cosigner, the driver, refresher, operator and delete-role certificates, the backup path,
+  cluster-admin (single trust domain, P10), a TLS-terminating mesh (P3), VM/container memory
+  snapshots (L7), clock skew, stale backups, and keys from earlier releases (P9).
+- **Alerts** (`deploy/monitoring`): `RutliSignJournalErrors`, `RutliSignPolicyRefusals`,
+  `RutliSignIntentAbsent`, `RutliSignRateLimited`, `RutliSignerAclAbsent`, `RutliDeleteIntentRefused`,
+  `RutliHostedKeyDeleted`, `RutliKeyFilesUnopenable`, `RutliKeyFileMigrationPending`; the metrics
+  are documented in `docs/observability.md`.
+- **Helm:** `keyfile` (rendered verbatim), `hostedKeys.deleteAllowlist / deleteAcl /
+  deleteApprovalThreshold / deleteGraceSecs`, and `maintenanceNodes` (perNode: those nodes' cosigner
+  container runs no daemon, for the offline commands that take the instance lock).
 - **Ceremony operator tools (`docs/ceremonies.md`)**, each run with the node's daemon stopped:
   `rutli-cosigner ceremony resolve --ceremony-id <id>` resolves a staged ceremony now, and with
   `--assume-lost <ids>` is the break-glass for a permanently lost node (commit if a reachable node
