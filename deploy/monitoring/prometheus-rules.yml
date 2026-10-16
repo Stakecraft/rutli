@@ -19,6 +19,7 @@
 #   rutli_epoch_mismatch_total                                       counter
 #   rutli_epoch_check_skipped_total                                  counter
 #   rutli_stale_share{key=...}                                       gauge (0|1)
+#   rutli_lock_poison_recoveries_total{lock=...}                     counter
 #   rutli_pending_sign_sessions                                      gauge
 #   rutli_keystore_unreadable                                        gauge (0|1)
 #   rutli_hosted_keys                                                gauge
@@ -147,6 +148,15 @@ groups:
         annotations:
           summary: "Rütli leader {{ $labels.instance }} received an invalid signature share"
           description: "A cosigner returned a signature share that failed verification when {{ $labels.instance }} aggregated a signature. The leader excluded that cosigner and retried with another quorum, so no bad signature was returned — but a correct cosigner never produces an invalid share: suspect a corrupted share file or a compromised node. The leader's log names the cosigner (`a cosigner returned an invalid signature share`)."
+
+      - alert: RutliLockPoisonRecovered
+        expr: increase(rutli_lock_poison_recoveries_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} recovered from a panic holding {{ $labels.lock }}"
+          description: "A request panicked on {{ $labels.instance }} while holding the {{ $labels.lock }} lock. The node recovered the lock and keeps serving (in-flight signing sessions or the key cache may have been dropped, ceremony votes reloaded from disk), but a panic is a bug: find it in the cosigner log just before 'recovered a lock poisoned by a panicking request' and report it."
 
       - alert: RutliHostedKeyConflict
         expr: increase(rutli_anti_entropy_conflicts_total[1h]) > 0

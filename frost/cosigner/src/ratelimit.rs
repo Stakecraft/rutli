@@ -114,7 +114,7 @@ impl DecryptRateLimiter {
         let capacity = self.per_minute as f64;
         let per_sec = capacity / 60.0;
 
-        let mut buckets = self.buckets.lock().expect("rate limiter lock");
+        let mut buckets = self.buckets();
         if !buckets.contains_key(key_id) && buckets.len() >= self.max_tracked {
             // Idle buckets are equivalent to no bucket: drop them, then see if there is room.
             buckets.retain(|_, b| {
@@ -174,7 +174,14 @@ impl DecryptRateLimiter {
 
     /// Number of keys currently tracked (for tests/observability).
     pub fn tracked_keys(&self) -> usize {
-        self.buckets.lock().expect("rate limiter lock").len()
+        self.buckets().len()
+    }
+
+    /// The buckets, **kept** as they are if a holder panicked (audit L3): every field of a bucket
+    /// is plain data written with single assignments, so a bucket is at worst one refill or one
+    /// token off — harmless for a rate limit, and better than every later check panicking.
+    fn buckets(&self) -> std::sync::MutexGuard<'_, HashMap<String, Bucket>> {
+        crate::sync::recover(&self.buckets, "rate_limiter")
     }
 }
 
@@ -322,5 +329,19 @@ mod tests {
         for _ in 0..1000 {
             rl.check_at("rutli-enc-1", t0).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod poison_tests {
+    use super::*;
+
+    #[test]
+    fn a_panicking_holder_does_not_break_the_limiter() {
+        let l = DecryptRateLimiter::new(60);
+        l.check("k").unwrap();
+        crate::sync::poison(&l.buckets);
+        l.check("k").unwrap();
+        assert_eq!(l.tracked_keys(), 1);
     }
 }

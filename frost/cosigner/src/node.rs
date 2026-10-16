@@ -224,7 +224,7 @@ impl Node {
     ///   outcome the node crashed between promoting it and recording COMMITTED, so the record is
     ///   completed; anything else is reported and left STAGED for an operator.
     pub fn recover_ceremonies(&self) -> Result<()> {
-        let mut book = self.book.lock().expect("ceremony lock");
+        let mut book = self.book()?;
         let records = &mut book.records;
         for (key_id, ceremony_id) in self.keystore.list_staged()? {
             let voted_yes = records
@@ -280,13 +280,15 @@ impl Node {
     }
 
     /// This node's record for `ceremony_id`, if it has voted in it.
+    /// `None` also when the ceremony state cannot be read (see [`Node::book`]); callers then go
+    /// through a path that reports the error.
     pub fn ceremony_record(&self, ceremony_id: &str) -> Option<CeremonyRecord> {
-        self.book.lock().expect("ceremony lock").records.get(ceremony_id).cloned()
+        self.book().ok()?.records.get(ceremony_id).cloned()
     }
 
     /// Every ceremony record this node holds.
     pub fn all_records(&self) -> Vec<CeremonyRecord> {
-        self.book.lock().expect("ceremony lock").records.values().cloned().collect()
+        self.book().map(|b| b.records.values().cloned().collect()).unwrap_or_default()
     }
 
     /// Staged share files on disk, as `(key_id, ceremony_id)`.
@@ -300,15 +302,15 @@ impl Node {
     }
 
     /// Every ceremony this node has voted yes on and not yet resolved.
+    /// Empty when the ceremony state cannot be read (see [`Node::book`]): the resolver skips a
+    /// pass, and every operation that must not miss a staged ceremony reads it through
+    /// [`Node::book`] itself and fails instead.
     pub fn staged_records(&self) -> Vec<CeremonyRecord> {
-        self.book
-            .lock()
-            .expect("ceremony lock")
-            .records
-            .values()
-            .filter(|r| r.state == RecordState::Staged)
-            .cloned()
-            .collect()
+        self.staged_records_checked().unwrap_or_default()
+    }
+
+    fn staged_records_checked(&self) -> Result<Vec<CeremonyRecord>> {
+        Ok(self.book()?.records.values().filter(|r| r.state == RecordState::Staged).cloned().collect())
     }
 
     /// This node's view of key `key_id` for ceremony decisions: its committed share's epoch, PKP
@@ -335,7 +337,7 @@ impl Node {
             reply.stale = true;
             reply.stale_reason = mark.reason;
         }
-        if let Some(r) = self.staged_records().into_iter().find(|r| r.key_id == key_id) {
+        if let Some(r) = self.staged_records_checked()?.into_iter().find(|r| r.key_id == key_id) {
             reply.staged = true;
             reply.staged_ceremony_id = r.ceremony_id;
             reply.staged_new_epoch = r.new_epoch;
@@ -350,7 +352,7 @@ impl Node {
     /// drops that old ceremony's leftover session state so its stale part2/part3 cannot proceed.
     fn acquire_ceremony(&self, key_id: &str, owner: &str, kind: &'static str) -> Result<()> {
         let preempted: Option<String> = {
-            let mut guards = self.ceremonies.lock().expect("ceremonies lock");
+            let mut guards = self.guards();
             let preempted = match guards.get(key_id) {
                 Some(cur) if cur.owner != owner => {
                     if cur.started.elapsed() < self.ceremony_orphan_timeout {
@@ -373,14 +375,14 @@ impl Node {
         if let Some(stale) = preempted {
             // Its session is dropped; this node's vote on it is no (recorded the first time anyone
             // asks — see `ceremony_status`).
-            self.book.lock().expect("ceremony lock").sessions.remove(&stale);
+            self.book()?.sessions.remove(&stale);
         }
         Ok(())
     }
 
     /// Release the guard for `key_id` iff `owner` still holds it.
     fn release_ceremony(&self, key_id: &str, owner: &str) {
-        let mut guards = self.ceremonies.lock().expect("ceremonies lock");
+        let mut guards = self.guards();
         if guards.get(key_id).map(|c| c.owner == owner).unwrap_or(false) {
             guards.remove(key_id);
         }
@@ -390,7 +392,7 @@ impl Node {
     /// (its guard taken by a newer one after the orphan timeout) must NOT persist — this is the
     /// load-bearing safety check against a stale leader clobbering/splitting shares on refresh.
     fn assert_owns(&self, key_id: &str, owner: &str) -> Result<()> {
-        let guards = self.ceremonies.lock().expect("ceremonies lock");
+        let guards = self.guards();
         match guards.get(key_id) {
             Some(g) if g.owner == owner => Ok(()),
             _ => Err(DaemonError::CeremonySuperseded {
@@ -402,7 +404,7 @@ impl Node {
 
     /// Whether a DKG/refresh ceremony currently holds `key_id` (used to fence signing).
     fn ceremony_active(&self, key_id: &str) -> Option<&'static str> {
-        self.ceremonies.lock().expect("ceremonies lock").get(key_id).map(|g| g.kind)
+        self.guards().get(key_id).map(|g| g.kind)
     }
 
     /// Cluster-wide fence step: take the per-key guard *before* DKG/refresh crypto so every peer
@@ -439,6 +441,55 @@ impl Node {
         self.release_ceremony(key_id, ceremony_id);
     }
 
+    // -- locks (audit L3: a panicking request must not take the node down; see crate::sync) --
+
+    /// The loaded-key cache. On poison it is **emptied**: it is only a cache of what is on disk,
+    /// reloaded on the next use; dropping an entry drops that cosigner's in-flight nonces (those
+    /// sessions fail at round 2 and the leader retries) and never a burned-session marker. A cosigner
+    /// still referenced by an in-flight call keeps working on its own; a second instance for the
+    /// same key shares the on-disk markers, so a session still yields at most one share.
+    fn cache(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, CachedKey>> {
+        crate::sync::recover_reset(&self.cosigners, "key_cache", |m| m.clear())
+    }
+
+    /// The per-key ceremony guards, **kept** as they are on poison: each critical section is one
+    /// map lookup/insert/remove, so the map is consistent. A guard a panicking ceremony left behind
+    /// fails closed: signing for that key stays fenced until the ceremony releases it or the orphan
+    /// timeout preempts it — the same as a leader that crashed mid-ceremony.
+    fn guards(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, CeremonyGuard>> {
+        crate::sync::recover(&self.ceremonies, "ceremony_guards")
+    }
+
+    /// The stale marks, **kept** on poison: every change is one insert or remove, so a mark is
+    /// either set or not; keeping them fails closed, and the next epoch check recomputes every one.
+    fn stale_marks(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, StaleMark>> {
+        crate::sync::recover(&self.stale, "stale_marks")
+    }
+
+    /// The ceremony book (sessions and the cache of durable votes). A holder may have panicked
+    /// between writing a vote to disk and caching it, so on poison the book is **rebuilt** the way a
+    /// restart would: votes reloaded from `keys/.ceremonies/`, in-memory sessions dropped (this node
+    /// then votes no on them, as after a restart). If the votes cannot be reloaded the operation
+    /// fails (closed) and the lock stays poisoned, so the next caller tries again; signing does not
+    /// use the book and is unaffected.
+    fn book(&self) -> Result<std::sync::MutexGuard<'_, CeremonyBook>> {
+        match self.book.lock() {
+            Ok(book) => Ok(book),
+            Err(poisoned) => {
+                let records = self.record_store.load_all().map_err(|e| {
+                    tracing::error!(error = %e, "the ceremony lock was poisoned and the votes cannot be reloaded");
+                    e
+                })?;
+                let mut book = poisoned.into_inner();
+                book.records = records.into_iter().map(|r| (r.ceremony_id.clone(), r)).collect();
+                book.sessions.clear();
+                crate::sync::note("ceremony_book", "reloaded");
+                self.book.clear_poison();
+                Ok(book)
+            }
+        }
+    }
+
     /// Load (and cache) this node's cosigner state for `key_id`.
     fn cosigner(&self, key_id: &str) -> Result<Arc<Cosigner>> {
         Ok(self.cached(key_id)?.cosigner)
@@ -447,7 +498,7 @@ impl Node {
     /// Load (and cache) this node's signing state for `key_id`, with the sharing it belongs to.
     fn cached(&self, key_id: &str) -> Result<CachedKey> {
         {
-            let map = self.cosigners.lock().expect("cosigners lock");
+            let map = self.cache();
             if let Some(c) = map.get(key_id) {
                 return Ok(c.clone());
             }
@@ -459,9 +510,7 @@ impl Node {
             cosigner: Arc::new(Cosigner::new(share.key_package, share.public_key_package, nonce_store)),
             view,
         };
-        self.cosigners
-            .lock()
-            .expect("cosigners lock")
+        self.cache()
             .insert(key_id.to_string(), cached.clone());
         Ok(cached)
     }
@@ -480,13 +529,13 @@ impl Node {
 
     /// This node's stale mark for `key_id`, if its epoch check found the share stale.
     pub fn stale_mark(&self, key_id: &str) -> Option<StaleMark> {
-        self.stale.lock().expect("stale lock").get(key_id).cloned()
+        self.stale_marks().get(key_id).cloned()
     }
 
     /// Record the epoch check's verdict for `key_id`: `Some` marks the share stale (round 1 and
     /// leading refused), `None` clears a mark. Keeps `rutli_stale_share{key}` in step.
     pub fn set_stale(&self, key_id: &str, mark: Option<StaleMark>) {
-        let mut stale = self.stale.lock().expect("stale lock");
+        let mut stale = self.stale_marks();
         let changed = match &mark {
             Some(m) => stale.insert(key_id.to_string(), m.clone()).as_ref() != Some(m),
             None => stale.remove(key_id).is_some(),
@@ -511,9 +560,8 @@ impl Node {
     /// The newest epoch a COMMITTED ceremony record of this node says `key_id` reached, if any.
     /// A live share older than that was rolled back under the node (a restore from an old backup).
     pub fn committed_epoch(&self, key_id: &str) -> Option<u64> {
-        self.book
-            .lock()
-            .expect("ceremony lock")
+        self.book()
+            .ok()?
             .records
             .values()
             .filter(|r| r.key_id == key_id && r.state == RecordState::Committed)
@@ -758,7 +806,7 @@ impl Node {
     /// `session_id` instead of letting them linger until the pending-TTL sweep. No-op if this node
     /// never held nonces for it (cosigner not cached, or round2 already burned the session).
     pub fn abort_sign(&self, key_id: &str, session_id: &str) {
-        let cached = self.cosigners.lock().expect("cosigners lock").get(key_id).cloned();
+        let cached = self.cache().get(key_id).cloned();
         if let Some(c) = cached {
             c.cosigner.abort(session_id);
         }
@@ -768,33 +816,42 @@ impl Node {
     /// In-flight (round-1, not yet round-2) sign sessions currently held for `key_id`; 0 if the
     /// cosigner isn't cached. For observability and abort/TTL tests.
     pub fn pending_sign_count(&self, key_id: &str) -> usize {
-        self.cosigners
-            .lock()
-            .expect("cosigners lock")
-            .get(key_id)
-            .map(|c| c.cosigner.pending_count())
-            .unwrap_or(0)
+        let cached = self.cache().get(key_id).map(|c| c.cosigner.clone());
+        cached.map(|c| c.pending_count()).unwrap_or(0)
+    }
+
+    /// Every cached cosigner, taken out of the cache lock so a cosigner's own session lock is
+    /// never acquired while the cache lock is held (audit L3: no nested locking).
+    fn cached_cosigners(&self) -> Vec<Arc<Cosigner>> {
+        self.cache().values().map(|c| c.cosigner.clone()).collect()
     }
 
     /// Drop in-flight sign sessions past their TTL on every cached key (see
     /// [`crate::health::spawn_monitor`]), and refresh the pending gauge.
     pub fn prune_expired_sign_sessions(&self) {
-        let pruned: usize = self
-            .cosigners
-            .lock()
-            .expect("cosigners lock")
-            .values()
-            .map(|c| c.cosigner.prune_expired())
-            .sum();
+        let pruned: usize = self.cached_cosigners().iter().map(|c| c.prune_expired()).sum();
         if pruned > 0 {
             tracing::debug!(pruned, "dropped expired in-flight sign sessions");
+        }
+        // frost/core cannot log or export metrics; publish its session-map recoveries here.
+        static SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let recovered = rutli_frost_core::session::lock_poison_recoveries();
+        let before = SEEN.swap(recovered, std::sync::atomic::Ordering::Relaxed);
+        if recovered > before {
+            metrics::counter!(crate::metrics::LOCK_POISON_RECOVERIES, "lock" => "sign_sessions")
+                .increment(recovered - before);
+            tracing::error!(
+                recoveries = recovered - before,
+                "recovered a signing session map poisoned by a panicking request — its in-flight \
+                 sessions were dropped and the node keeps serving; the panic is a bug to report"
+            );
         }
         self.update_pending_gauge();
     }
 
     /// In-flight sign sessions across all cached keys on this node.
     pub fn pending_sign_total(&self) -> usize {
-        self.cosigners.lock().expect("cosigners lock").values().map(|c| c.cosigner.pending_count()).sum()
+        self.cached_cosigners().iter().map(|c| c.pending_count()).sum()
     }
 
     /// Keep the pending-sessions gauge in step after any round1/round2/abort. No-op without an
@@ -889,7 +946,7 @@ impl Node {
     }
 
     fn refuse_if_staged(&self, key_id: &str) -> Result<()> {
-        let book = self.book.lock().expect("ceremony lock");
+        let book = self.book()?;
         if let Some(r) =
             book.records.values().find(|r| r.state == RecordState::Staged && r.key_id == key_id)
         {
@@ -938,7 +995,7 @@ impl Node {
                 return Err(e);
             }
         };
-        let mut book = self.book.lock().expect("ceremony lock");
+        let mut book = self.book()?;
         // A ceremony id is used once per node: a node that already voted on it (or answered for
         // it as unknown, which is a no-vote) never starts it again.
         if book.sessions.contains_key(ceremony_id) {
@@ -1036,7 +1093,7 @@ impl Node {
         round1_map: &BTreeMap<Identifier, round1::Package>,
     ) -> Result<([u8; 32], BTreeMap<u16, round2::Package>)> {
         let (key_id, kind, roster, old, own) = {
-            let book = self.book.lock().expect("ceremony lock");
+            let book = self.book()?;
             let s = book.sessions.get(ceremony_id).ok_or_else(|| DaemonError::UnknownDkg(ceremony_id.into()))?;
             if s.part2.is_some() {
                 return Err(DaemonError::CeremonyRefused(format!("ceremony {ceremony_id}: part 2 already ran")));
@@ -1074,7 +1131,7 @@ impl Node {
             let digest = crate::ceremony::round1_digest(&ctx, round1_map)?;
             let others = without_self(round1_map, self.identifier);
             let packages = {
-                let mut book = self.book.lock().expect("ceremony lock");
+                let mut book = self.book()?;
                 let s = book
                     .sessions
                     .get_mut(ceremony_id)
@@ -1123,7 +1180,7 @@ impl Node {
         if from == me {
             return Err(DaemonError::CeremonyRefused("a node never delivers to itself".into()));
         }
-        let mut book = self.book.lock().expect("ceremony lock");
+        let mut book = self.book()?;
         let s = book.sessions.get_mut(ceremony_id).ok_or_else(|| DaemonError::UnknownDkg(ceremony_id.into()))?;
         if !s.roster.contains(&from) {
             return Err(DaemonError::CeremonyRefused(format!(
@@ -1154,7 +1211,7 @@ impl Node {
     /// stage the new share and vote yes ([`Node::finish_session`]). Any mismatch votes no.
     pub fn ceremony_part3(&self, ceremony_id: &str, leader_digest: &[u8; 32]) -> Result<StagedOutcome> {
         let (key_id, kind, roster, old, digest, round1_map, inbox) = {
-            let book = self.book.lock().expect("ceremony lock");
+            let book = self.book()?;
             let s = book.sessions.get(ceremony_id).ok_or_else(|| DaemonError::UnknownDkg(ceremony_id.into()))?;
             let p2 = s
                 .part2
@@ -1220,12 +1277,14 @@ impl Node {
     /// Drop a failed session and vote no on it. Best effort on the vote: a peer asking later gets
     /// the same answer from [`Node::ceremony_status`].
     fn fail_session(&self, ceremony_id: &str, key_id: &str, reason: &str) {
-        {
-            let mut book = self.book.lock().expect("ceremony lock");
-            book.sessions.remove(ceremony_id);
-            if let Err(e) = self.record_abort_locked(&mut book, ceremony_id, reason) {
-                tracing::warn!(ceremony_id, error = %e, "could not record an aborted ceremony");
+        match self.book() {
+            Ok(mut book) => {
+                book.sessions.remove(ceremony_id);
+                if let Err(e) = self.record_abort_locked(&mut book, ceremony_id, reason) {
+                    tracing::warn!(ceremony_id, error = %e, "could not record an aborted ceremony");
+                }
             }
+            Err(e) => tracing::warn!(ceremony_id, error = %e, "could not record an aborted ceremony"),
         }
         self.release_ceremony(key_id, ceremony_id);
     }
@@ -1242,7 +1301,7 @@ impl Node {
         finish: impl FnOnce(&str, Participant) -> Result<(Share, Option<KeyVersion>)>,
     ) -> Result<StagedOutcome> {
         let (key_id, participant) = {
-            let mut book = self.book.lock().expect("ceremony lock");
+            let mut book = self.book()?;
             let session = match book.sessions.get_mut(ceremony_id) {
                 Some(s) if s.kind == kind => s,
                 _ => return Err(DaemonError::UnknownDkg(ceremony_id.into())),
@@ -1303,7 +1362,7 @@ impl Node {
             created_ms: now,
             updated_ms: now,
         };
-        let mut book = self.book.lock().expect("ceremony lock");
+        let mut book = self.book()?;
         // `write` refuses if a vote already exists (a no-vote recorded meanwhile stays a no-vote).
         self.record_store.write(book.records.get(ceremony_id), &rec)?;
         book.records.insert(ceremony_id.to_string(), rec);
@@ -1393,7 +1452,7 @@ impl Node {
         crate::keystore::validate_ceremony_id(ceremony_id)?;
         let mut release = None;
         let info = {
-            let mut book = self.book.lock().expect("ceremony lock");
+            let mut book = self.book()?;
             if let Some(r) = book.records.get(ceremony_id) {
                 return Ok(StatusInfo::from_record(r));
             }
@@ -1427,7 +1486,7 @@ impl Node {
         crate::keystore::validate_ceremony_id(ceremony_id)?;
         let mut release = None;
         let info = {
-            let mut book = self.book.lock().expect("ceremony lock");
+            let mut book = self.book()?;
             if let Some(r) = book.records.get(ceremony_id) {
                 return Ok(StatusInfo::from_record(r));
             }
@@ -1450,7 +1509,7 @@ impl Node {
     /// record COMMITTED) or abort (delete it, then record ABORTED). A record that is not STAGED is
     /// returned unchanged — resolution is idempotent and a terminal vote never changes.
     pub fn apply_resolution(&self, ceremony_id: &str, decision: &Decision) -> Result<StatusInfo> {
-        let mut book = self.book.lock().expect("ceremony lock");
+        let mut book = self.book()?;
         let rec = book
             .records
             .get(ceremony_id)
@@ -1482,7 +1541,7 @@ impl Node {
         if state == RecordState::Committed {
             // The next sign loads the committed share, which is newer than anything a stale mark
             // was measured against.
-            self.cosigners.lock().expect("cosigners lock").remove(&rec.key_id);
+            self.cache().remove(&rec.key_id);
             if self.stale_mark(&rec.key_id).is_some() {
                 self.set_stale(&rec.key_id, None);
             }
@@ -1544,13 +1603,11 @@ impl Node {
     }
 
     /// Whether this node has a staged or committed ceremony record for `key_id`.
+    /// `true` (fail closed: the caller refuses to discard) when the ceremony state cannot be read.
     pub fn has_ceremony_for(&self, key_id: &str) -> bool {
-        self.book
-            .lock()
-            .expect("ceremony lock")
-            .records
-            .values()
-            .any(|r| r.key_id == key_id && r.state != RecordState::Aborted)
+        self.book()
+            .map(|b| b.records.values().any(|r| r.key_id == key_id && r.state != RecordState::Aborted))
+            .unwrap_or(true)
     }
 
     /// Delete this node's file for `key_id` and its (empty) nonce directory — the last step of
@@ -1568,26 +1625,27 @@ impl Node {
         if nonces.try_exists()? {
             std::fs::remove_dir(&nonces)?;
         }
-        self.cosigners.lock().expect("cosigners lock").remove(key_id);
+        self.cache().remove(key_id);
         tracing::warn!(key_id, "discarded this node's file for a legacy partial DKG key");
         Ok(())
     }
 
     /// Terminal records not yet known to be settled on every peer.
     pub fn unsettled_records(&self) -> Vec<CeremonyRecord> {
-        self.book
-            .lock()
-            .expect("ceremony lock")
-            .records
-            .values()
-            .filter(|r| r.is_terminal() && !r.peers_settled && !r.roster.is_empty())
-            .cloned()
-            .collect()
+        self.book()
+            .map(|b| {
+                b.records
+                    .values()
+                    .filter(|r| r.is_terminal() && !r.peers_settled && !r.roster.is_empty())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// Note that every peer has resolved `ceremony_id` too.
     pub fn mark_settled(&self, ceremony_id: &str) -> Result<()> {
-        let mut book = self.book.lock().expect("ceremony lock");
+        let mut book = self.book()?;
         let Some(rec) = book.records.get(ceremony_id).cloned() else { return Ok(()) };
         if !rec.is_terminal() || rec.peers_settled {
             return Ok(());
@@ -1602,7 +1660,7 @@ impl Node {
     /// ones, and no-votes that never named a roster (unknown ids). Returns how many.
     pub fn gc_records(&self, older_than: Duration) -> Result<usize> {
         let cutoff = crate::ceremony_record::now_ms().saturating_sub(older_than.as_millis() as u64);
-        let mut book = self.book.lock().expect("ceremony lock");
+        let mut book = self.book()?;
         let old: Vec<String> = book
             .records
             .values()
@@ -2033,5 +2091,54 @@ impl Node {
 
     pub fn hosted_decrypt_symmetric(&self, key_id: &str, data: &[u8]) -> Result<Vec<u8>> {
         Ok(self.hosted_load(key_id)?.decrypt_symmetric(data)?.to_vec())
+    }
+}
+
+#[cfg(test)]
+mod poison_tests {
+    use super::*;
+    use crate::peer::{LocalPeer, PeerApi};
+
+    /// Audit L3: a request that panics while holding one of the node's locks must not break the
+    /// node's other work — every lock recovers (see the accessors above for how).
+    #[tokio::test]
+    async fn a_panicking_holder_of_any_node_lock_does_not_break_later_calls() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nodes: Vec<Arc<Node>> = (1..=3u16)
+            .map(|i| {
+                let ks = KeyStore::open(tmp.path().join(format!("n{i}"))).unwrap();
+                Arc::new(Node::new(Identifier::try_from(i).unwrap(), 3, 2, ks))
+            })
+            .collect();
+        crate::peer::wire_local_mesh(&nodes).unwrap();
+        let peers: Vec<Arc<dyn PeerApi>> =
+            nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+        let group = crate::orchestrator::run_dkg(&peers, "k").await.unwrap();
+        let n = &nodes[0];
+        let records_before = n.all_records().len();
+        assert!(records_before > 0);
+        n.sign_round1("k", "in-flight", &Round1Ctx::default()).unwrap();
+
+        crate::sync::poison(&n.cosigners);
+        crate::sync::poison(&n.ceremonies);
+        crate::sync::poison(&n.stale);
+        crate::sync::poison(&n.book);
+
+        // Signing, led by the node and with it as a member, works.
+        let msg = rutli_frost_core::dealer::canton_test_message(b"after a panic");
+        let sig = crate::orchestrator::sign(n, &peers, "k", &msg).await.unwrap();
+        assert!(crate::verify_key::signature_verifies(&group, &msg, &sig));
+        // The key cache was emptied (its in-flight nonces with it), not trusted.
+        assert_eq!(n.pending_sign_count("k"), 0);
+        // Ceremony state was rebuilt from disk: the votes are all there, and new ones record.
+        assert_eq!(n.all_records().len(), records_before);
+        assert_eq!(n.ceremony_status("never-seen").unwrap().phase, crate::ceremony_record::Phase::Aborted);
+        assert_eq!(n.all_records().len(), records_before + 1);
+        assert!(n.key_epoch("k").unwrap().present);
+        assert!(n.stale_mark("k").is_none());
+        assert!(!n.cosigners.is_poisoned() && !n.ceremonies.is_poisoned());
+        assert!(!n.stale.is_poisoned() && !n.book.is_poisoned());
+        // A refresh (fence, guards, book, staged votes) runs end to end afterwards.
+        assert_eq!(crate::orchestrator::run_refresh(&peers, "k").await.unwrap(), group);
     }
 }

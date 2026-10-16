@@ -49,6 +49,9 @@ pub const SIGN_RETRIES: &str = "rutli_sign_retries_total";
 /// Signature shares that failed verification at aggregation (attributed to a cosigner and routed
 /// around). Any increase means a cosigner returned a bad share: alert on it.
 pub const INVALID_SIGNATURE_SHARES: &str = "rutli_invalid_signature_shares_total";
+/// Locks recovered after a panicking request poisoned them (audit L3), by `lock`. The node kept
+/// serving; the panic itself is a bug — alert on any increase and report it.
+pub const LOCK_POISON_RECOVERIES: &str = "rutli_lock_poison_recoveries_total";
 /// Hosted keys repaired by anti-entropy (pulled here or pushed to a peer).
 pub const ANTI_ENTROPY_REPAIRS: &str = "rutli_anti_entropy_repairs_total";
 /// Hosted keys found with *different* material on two nodes under one id. Any increase is a
@@ -160,6 +163,7 @@ pub fn describe() {
     describe_gauge!(STALE_SHARE, "1 while this node's share of the key is stale (refuses to sign), else 0");
     describe_counter!(SIGN_RETRIES, "Sign attempts beyond the first (a t-subset failed; retried with another)");
     describe_counter!(INVALID_SIGNATURE_SHARES, "Signature shares that failed verification at aggregation");
+    describe_counter!(LOCK_POISON_RECOVERIES, "Locks recovered after a panicking request poisoned them, by lock");
     describe_counter!(SIGN_ABORTS, "Aborted in-flight sign sessions (one per given-up signature)");
     describe_gauge!(PENDING_SIGN_SESSIONS, "In-flight round-1 sign sessions held on this node");
     describe_counter!(ANTI_ENTROPY_REPAIRS, "Hosted keys repaired by anti-entropy");

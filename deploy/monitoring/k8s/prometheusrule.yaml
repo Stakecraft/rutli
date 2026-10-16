@@ -142,6 +142,19 @@ spec:
           \ so no bad signature was returned \u2014 but a correct cosigner never produces an invalid share:\
           \ suspect a corrupted share file or a compromised node. The leader's log names the cosigner\
           \ (`a cosigner returned an invalid signature share`)."
+    - alert: RutliLockPoisonRecovered
+      expr: increase(rutli_lock_poison_recoveries_total[1h]) > 0
+      for: 0m
+      labels:
+        severity: warning
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }} recovered from a panic holding {{ $labels.lock\
+          \ }}"
+        description: 'A request panicked on {{ $labels.instance }} while holding the {{ $labels.lock }}
+          lock. The node recovered the lock and keeps serving (in-flight signing sessions or the key cache
+          may have been dropped, ceremony votes reloaded from disk), but a panic is a bug: find it in
+          the cosigner log just before ''recovered a lock poisoned by a panicking request'' and report
+          it.'
     - alert: RutliHostedKeyConflict
       expr: increase(rutli_anti_entropy_conflicts_total[1h]) > 0
       for: 0m
