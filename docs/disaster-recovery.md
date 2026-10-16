@@ -149,7 +149,7 @@ and the AES-256-GCM symmetric key themselves, so no key material sits on the par
 
 ```json
 {
-  "share_seal": { "secret_env": "RUTLI_SEAL_SECRET" },
+  "share_seal": { "secret_file": "/run/rutli/seal/node.json" },
   "hosted_keys": { "enabled": true, "write_quorum": 2, "anti_entropy_interval_secs": 300 }
 }
 ```

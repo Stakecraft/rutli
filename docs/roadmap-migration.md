@@ -38,6 +38,12 @@ namespace or any party ID.
 Unchanged. DevNet soak on `stakecraft-devnet-rutli-01`, histogram PR #6, v0.3.x patches as the
 soak finds things. Exit criteria in `docs/testnet-soak.md`.
 
+Audit remediation, deployment half (C3/M3, 2026-10-16): per-node seal bundles, per-peer TLS names,
+the `perNode` Helm topology and the exec-free backup sidecar. The soak moves with
+[runbook-per-node-seal.md](runbook-per-node-seal.md) (operator-run; no reseal, rollback by
+`helm rollback` until the master is deleted). No refresh on the soak until the protocol half
+(C1/H1) ships.
+
 ### Track B: migration of existing nodes (new)
 
 | # | Milestone | Scope | Est. | Gate / deliverable |

@@ -51,12 +51,12 @@ Choosing between them:
 
 ### Cosigner
 
-Add a `hosted_keys` block to each cosigner's JSON config (the shipped TLS examples and the k8s
-ConfigMap already carry it):
+Add a `hosted_keys` block to each cosigner's JSON config (the shipped compose TLS examples carry it;
+with Helm or `deploy/k8s` it is `hostedKeys.enabled` plus the pins below):
 
 ```json
 {
-  "share_seal": { "secret_env": "RUTLI_SEAL_SECRET" },
+  "share_seal": { "secret_file": "/run/rutli/seal/node.json" },
   "hosted_keys": {
     "enabled": true,
     "write_quorum": 2,
@@ -64,6 +64,13 @@ ConfigMap already carry it):
   }
 }
 ```
+
+On a seal bundle (`secret_file`, the per-node secret — see
+[runbook-per-node-seal.md](runbook-per-node-seal.md)), each node also needs
+`hosted_keys.commitment_key` and every peer's `dist_public_key` pinned in `peers[]`: the node holds
+only its own distribution key. `rutli-cosigner seal split-legacy` (migrating) or `seal new-node`
+(new cluster) prints them. The legacy `"share_seal": { "secret_env": "RUTLI_SEAL_SECRET" }` derives
+them from the shared master instead.
 
 | Field | Default | Meaning |
 |---|---|---|

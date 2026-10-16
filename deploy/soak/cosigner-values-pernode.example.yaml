@@ -1,0 +1,37 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# The DevNet soak's values AFTER the per-node migration (docs/runbook-per-node-seal.md, step 5).
+# Copy to cosigner-values-pernode.yaml, fill the three distPublicKey values and the commitmentKey
+# from `rutli-cosigner seal split-legacy` (public values — safe to commit), and pass it INSTEAD of
+# cosigner-values.yaml:
+#   helm -n rutli upgrade rutli deploy/helm/rutli-cosigner -f <exported values> -f deploy/soak/cosigner-values-pernode.yaml
+# The chart refuses to render while a placeholder is left in.
+topology: perNode
+persistence:
+  storageClassName: hcloud-volumes
+  accessModes:
+    - ReadWriteOnce
+hostedKeys:
+  enabled: true
+  commitmentKey: "<hosted_keys.commitment_key from seal split-legacy>"
+nodes:
+  # existingClaim: the legacy StatefulSet's claims (pod ordinal = id - 1). Same volumes, same shares.
+  - id: 1
+    existingClaim: data-rutli-cosigner-0
+    distPublicKey: "<peers[identifier=1].dist_public_key>"
+  - id: 2
+    existingClaim: data-rutli-cosigner-1
+    distPublicKey: "<peers[identifier=2].dist_public_key>"
+  - id: 3
+    existingClaim: data-rutli-cosigner-2
+    distPublicKey: "<peers[identifier=3].dist_public_key>"
+backup:
+  enabled: true
+  destination:
+    type: pvc
+    pvc:
+      size: 1Gi
+      storageClassName: hcloud-volumes
+      accessModes:
+        - ReadWriteOnce
