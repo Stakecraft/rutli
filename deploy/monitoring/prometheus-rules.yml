@@ -28,6 +28,20 @@
 #   rutli_anti_entropy_repairs_total                                 counter
 #   rutli_anti_entropy_conflicts_total                               counter
 #   rutli_key_replicas                                               gauge
+#   rutli_sign_intent_absent_total                                   counter
+#   rutli_sign_policy_refusals_total{reason=...}                     counter
+#   rutli_sign_rate_limited_total                                    counter
+#   rutli_signer_acl_absent_total                                    counter
+#   rutli_sign_journal_errors_total                                  counter
+#   rutli_delete_intent_refusals_total{reason=...}                   counter
+#   rutli_hosted_tombstones_written_total{how=...}                   counter
+#   rutli_hosted_tombstones{retained="true"|"false"}                 gauge
+#   rutli_keyfiles{format="v1"|"v2"|"plaintext", dek=...}            gauge
+#
+# The signing-policy series (audit C2) and the delete/tombstone series (audit M2) are not
+# pre-primed either — a series first appears when it first counts — so their rules alert on
+# increases. rutli_keyfiles is set once at start-up (audit M4: key-file format and which DEK seals
+# each file).
 #
 # The last six cover cluster-hosted keys (RSA/EC/AES key material replicated
 # whole to every node, unlike the FROST share, which is never copied between
@@ -148,6 +162,87 @@ groups:
         annotations:
           summary: "Rütli leader {{ $labels.instance }} received an invalid signature share"
           description: "A cosigner returned a signature share that failed verification when {{ $labels.instance }} aggregated a signature. The leader excluded that cosigner and retried with another quorum, so no bad signature was returned — but a correct cosigner never produces an invalid share: suspect a corrupted share file or a compromised node. The leader's log names the cosigner (`a cosigner returned an invalid signature share`)."
+
+      - alert: RutliSignJournalErrors
+        expr: increase(rutli_sign_journal_errors_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} cannot write or read its sign journal"
+          description: "{{ $labels.instance }} failed to append to (or open) its per-key sign journal under data_dir/journal. A node that cannot journal a share does not release it, so it is out of signing for that key and the others carry the quorum — at 2-of-3 with no margin. Usual causes: a full or read-only volume, or a journal segment that no longer verifies (a malformed line or a broken hash chain, which the node refuses to sign past). Check the cosigner log for 'sign journal', free space on the data volume, and `rutli-cosigner audit-cross-check` against a copy of the journal (docs/audit-cross-check.md). Never delete a journal to make the alert go away: it is the cluster's independent record of every signature."
+
+      - alert: RutliSignPolicyRefusals
+        expr: sum by (instance, reason) (increase(rutli_sign_policy_refusals_total[15m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} refused signatures by policy ({{ $labels.reason }})"
+          description: "{{ $labels.instance }} refused to take part in a signature because its signing policy said no (reason {{ $labels.reason }}). Expected reasons during a rollout: missing (require_intent on before the driver signs intents), approval (a gated key without its approvals), expiry (clock skew beyond clock_skew_secs — check NTP on the driver and the node). Suspicious ones: signer, certificate, signature, pin, cluster, key — something presented an intent this node did not accept, which is what a compromised cosigner or a stolen-but-revoked driver key looks like. The cosigner log names the refusal; cross-check the driver audit log (docs/approval-quorum.md)."
+
+      - alert: RutliSignIntentAbsent
+        expr: increase(rutli_sign_intent_absent_total[1h]) > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} signs without client intents"
+          description: "{{ $labels.instance }} has accepted signatures that carried no client-signed intent for over an hour. That is the transition state of this release (signing_policy.require_intent off): approvals, ACLs and rate limits then bind only in the driver, and a compromised cosigner can still obtain shares for arbitrary digests. Finish the rollout: upgrade the driver, then set require_intent on every node (docs/approval-quorum.md, Switching enforcement on). On a cluster that already enforces, this alert should never fire."
+
+      - alert: RutliSignRateLimited
+        expr: increase(rutli_sign_rate_limited_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} hit a per-key sign rate limit"
+          description: "{{ $labels.instance }} refused a signature because the key reached signing_policy.sign_rate_limit_per_min / _per_day (or a rate_limits rule). The driver does not fail over on it (every node enforces the same ceiling). Either a key outgrew its limit — raise it on every node — or something with the driver certificate is signing in bulk: compare the sign journals with the driver audit log (rutli-cosigner audit-cross-check)."
+
+      - alert: RutliSignerAclAbsent
+        expr: increase(rutli_signer_acl_absent_total[1h]) > 0
+        for: 1h
+        labels:
+          severity: info
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} serves a client with no key ACL"
+          description: "A Signer client CN without a signing_policy.signer_acl entry used a key on {{ $labels.instance }} — allowed while signer_acl_required is off, which means a stolen driver certificate may use every key, including another tenant's. Add an ACL entry for every signer CN and turn signer_acl_required on."
+
+      - alert: RutliDeleteIntentRefused
+        expr: sum by (instance, reason) (increase(rutli_delete_intent_refusals_total[15m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} refused a hosted-key delete ({{ $labels.reason }})"
+          description: "{{ $labels.instance }} refused a hosted-key delete or a peer's tombstone (reason {{ $labels.reason }}). disabled / role: a client outside hosted_keys.delete_allowlist tried to delete (with the driver certificate, that is either an unconfigured Canton deleteKey or someone holding the certificate). signature / certificate / signer / cluster / malformed in an anti-entropy log line: a peer presented a tombstone it could not back with a valid delete intent — suspect that cosigner. stale: a tombstone older than the copy it would delete (an undeleted or regenerated key) — expected after hosted-undelete until every node is undeleted. rollback: a PurgeKey without an intent outside a fenced generation. The cosigner log names the key."
+
+      - alert: RutliHostedKeyDeleted
+        expr: sum by (instance, how) (increase(rutli_hosted_tombstones_written_total[15m])) > 0
+        for: 0m
+        labels:
+          severity: info
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} tombstoned a hosted key ({{ $labels.how }})"
+          description: "A hosted key was deleted on {{ $labels.instance }} (how={{ $labels.how }}: converted = a live copy became a tombstone, recorded = a tombstone recorded for a key this node did not hold). Deletes are authorized by a signed delete intent every node verified, and the material stays sealed in the tombstone for hosted_keys.delete_grace_secs (rutli-cosigner hosted-undelete on every node to undo). Confirm the delete was intended; the cosigner log names the key and the signer CN."
+
+      - alert: RutliKeyFilesUnopenable
+        expr: max by (instance) (rutli_keyfiles{dek="unknown"}) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} holds key files no DEK it has opens"
+          description: "At start-up {{ $labels.instance }} found key files sealed under a DEK its seal bundle does not hold — typically previous_share_deks dropped (seal drop-previous) before every file was re-sealed, or the wrong bundle mounted. Those keys are unusable on this node. Mount the bundle that still lists the previous DEK, restart (the node re-seals at start), and check `rutli-cosigner keyfile status` before dropping it again."
+
+      - alert: RutliKeyFileMigrationPending
+        expr: max by (instance) (rutli_keyfiles{dek="previous"}) > 0 or max by (instance) (rutli_keyfiles{format="plaintext"}) > 0
+        for: 1d
+        labels:
+          severity: info
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} has key files under a previous DEK, or plaintext"
+          description: "{{ $labels.instance }} reported key files still sealed under a previous DEK (a DEK rotation not finished: restart the node or run keyfile migrate, then seal drop-previous after a backup) or plaintext key files for a day. The legacy seal master can be destroyed only after every node's files are under a fresh DEK (decision P1). Check with `rutli-cosigner keyfile status`."
 
       - alert: RutliLockPoisonRecovered
         expr: increase(rutli_lock_poison_recoveries_total[1h]) > 0

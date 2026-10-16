@@ -139,6 +139,13 @@ refreshAllowlist: []
 #     approvers: [{ id: alice, public_key_spki_b64: "MCowBQYDK2VwAyEA..." }]
 signingPolicy: {}
 
+# topology=perNode: node ids whose cosigner container runs NO daemon (`sleep infinity`, no probes),
+# for the offline commands that take the instance lock — restore, keyfile migrate/downgrade,
+# hosted-undelete, hosted-clear-tombstone, ceremony resolve, discard-partial-key — run with
+# `kubectl exec <pod> -c cosigner -- rutli-cosigner --config /config/cosigner-<id>.json …`.
+# One node at a time; the others keep signing. Empty in normal operation.
+maintenanceNodes: []
+
 # Key-file format (audit M4), written into every node's config as `keyfile` verbatim. Empty =
 # this release's defaults: read v1 and v2, write v1 (so a rollback to an older image stays
 # possible). After every cosigner runs this release: set cluster_uuid (one lowercase UUID for the

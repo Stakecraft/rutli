@@ -10,7 +10,11 @@
 #      /proc/<pid>/environ.
 #   3. A pod spec that references more than one seal Secret, or more than one cosigner TLS Secret —
 #      every kubelet that runs the pod may read, and materialises, everything its spec names.
-#   4. A seal Secret mounted into any container other than `cosigner` (e.g. a backup sidecar).
+#   4. A seal Secret mounted into any container other than `cosigner` (e.g. a backup sidecar), or a
+#      cosigner TLS Secret mounted into one (the backup sidecar ships sealed key files and sign
+#      journals; it never needs the node's TLS key).
+#   5. A container other than `cosigner` that mounts a cosigner's `data` volume writable — the
+#      backup sidecar reads it, it never writes it.
 #
 #   scripts/check-deploy-policy.sh FILE...            (FILE '-' = stdin)
 #   helm template rutli deploy/helm/rutli-cosigner -f deploy/helm/rutli-cosigner/ci/pernode-values.yaml \
@@ -77,11 +81,19 @@ violations="$(jq -rs --arg seal "$SEAL_SECRET_REGEX" --arg tls "$TLS_SECRET_REGE
           ( ([volsecrets($ps)[1]] | map(select(test($tls))) | unique) as $t
             | select(($t | length) > 1)
             | "\($w): pod spec references \($t | length) cosigner TLS Secrets (\($t | join(", "))) — at most one node'"'"'s" ),
-        # 4. seal Secret only in the cosigner container
+        # 4. seal Secret (and node TLS Secret) only in the cosigner container
           ( [volsecrets($ps) | select(.[1] | test($seal)) | .[0]] as $sealvols
             | containers($ps)[] | select(.name != "cosigner") | . as $c
             | (.volumeMounts // [])[] | select(.name as $n | $sealvols | index($n))
-            | "\($w): container \($c.name) mounts seal volume \(.name) — only the cosigner container may" )
+            | "\($w): container \($c.name) mounts seal volume \(.name) — only the cosigner container may" ),
+          ( [volsecrets($ps) | select(.[1] | test($tls)) | .[0]] as $tlsvols
+            | containers($ps)[] | select(.name != "cosigner") | . as $c
+            | (.volumeMounts // [])[] | select(.name as $n | $tlsvols | index($n))
+            | "\($w): container \($c.name) mounts the cosigner TLS volume \(.name) — only the cosigner container may" ),
+        # 5. the data volume is read-only for everything but the cosigner
+          ( containers($ps)[] | select(.name != "cosigner") | . as $c
+            | (.volumeMounts // [])[] | select(.name == "data" and (.readOnly // false) != true)
+            | "\($w): container \($c.name) mounts the data volume writable — only the cosigner container may write it" )
       )
     ]
   | unique | .[]

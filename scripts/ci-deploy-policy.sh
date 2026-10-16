@@ -40,6 +40,19 @@ if "$REPO/scripts/check-deploy-policy.sh" "$OUT/legacy-values.yaml" 2>/dev/null;
 fi
 echo "legacy-values: rejected, as it must be"
 
+echo "==> policy: a backup sidecar with the node's TLS key or a writable data mount must be rejected"
+for mutation in \
+  '.volumeMounts += [{"name": "certs", "mountPath": "/certs"}]' \
+  '(.volumeMounts[] | select(.name == "data") | .readOnly) = false'; do
+  yq "(select(.kind == \"StatefulSet\") | .spec.template.spec.containers[] | select(.name == \"backup\")) |= ($mutation)" \
+    "$OUT/pernode-values.yaml" >"$OUT/mutated.yaml"
+  if "$REPO/scripts/check-deploy-policy.sh" "$OUT/mutated.yaml" 2>/dev/null; then
+    echo "check-deploy-policy.sh ACCEPTED a backup sidecar with: $mutation — the checker is broken" >&2
+    exit 1
+  fi
+done
+echo "mutated sidecars: rejected, as they must be"
+
 echo "==> the soak's values still render the legacy StatefulSet (no topology/PVC change on upgrade)"
 sts="$(yq -N 'select(.kind == "StatefulSet") | .metadata.name' "$OUT/soak.yaml")"
 claims="$(yq -N 'select(.kind == "StatefulSet") | .spec.volumeClaimTemplates[].spec.accessModes[]' "$OUT/soak.yaml")"
