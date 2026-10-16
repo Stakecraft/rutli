@@ -310,6 +310,42 @@ class ApprovalGateSpec extends AnyWordSpec with Matchers {
       ApproveCli.requestIdMatches("../../etc/passwd", "frost-ns", digestHex, nonceHex) shouldBe false
       ApproveCli.requestIdMatches(id, "frost-ns", "zz", nonceHex) shouldBe false
     }
+
+    "show and check a hosted-key DELETE, domain-separated from signs (audit F6)" in {
+      import com.stakecraft.rutli.backend.FrostIntentSigner
+      val key = "participant1-rutli-enc-golden"
+      val opDigest = FileApprovalGate.sha256(FrostIntentSigner.deleteDigest(key))
+      val nonce = Array.fill(16)(2.toByte)
+      // The cosigner's golden vector (intent.rs GOLDEN_DELETE_REQUEST_ID).
+      val id = FileApprovalGate.requestIdFor(s"delete:$key", opDigest, nonce)
+      id shouldBe "5d1234a946bdaaad6c6103902b7fa4b6a92468e9dba71346504832a6f6335c1a"
+      id should not be FileApprovalGate.requestIdFor(key, opDigest, nonce)
+      val digestHex = FileApprovalGate.hex(opDigest)
+      ApproveCli.requestIdMatches(id, s"delete:$key", digestHex, FileApprovalGate.hex(nonce)) shouldBe true
+      ApproveCli.operationOf(s"delete:$key", digestHex, "delete-hosted-key") shouldBe Right(ApproveCli.DeleteHostedKey(key))
+      // A delete digest of another key, or an operation field that contradicts the id: refused.
+      val other = FileApprovalGate.hex(FileApprovalGate.sha256(FrostIntentSigner.deleteDigest("other")))
+      ApproveCli.operationOf(s"delete:$key", other, "").isLeft shouldBe true
+      ApproveCli.operationOf(key, digestHex, "delete-hosted-key").isLeft shouldBe true
+      ApproveCli.operationOf("frost-ns", digestHex, "") shouldBe Right(ApproveCli.SignWith("frost-ns"))
+
+      // End to end through an inbox: the delete request is approved, a tampered one refused.
+      val inbox = newInbox()
+      val a = approverKeypair()
+      val pending = Paths.get(inbox, "pending")
+      Files.createDirectories(pending)
+      def write(name: String, keyId: String, digest: String, rid: String): Unit =
+        Files.writeString(
+          pending.resolve(s"$name.json"),
+          s"""{"requestId":"$rid","keyId":"$keyId","digest":"$digest","nonce":"${FileApprovalGate.hex(nonce)}","ts":1,"operation":"delete-hosted-key"}"""
+        )
+      write(id, s"delete:$key", digestHex, id)
+      val forged = FileApprovalGate.requestIdFor(key, opDigest, nonce) // a delete shown as a sign id
+      write(forged, key, digestHex, forged)
+      val res = ApproveCli.approveInbox(inbox, "alice", a.getPrivate, None)
+      res.approved shouldBe Vector(id)
+      res.refused.map(_.getFileName.toString) shouldBe Vector(s"$forged.json")
+    }
   }
 
   private def pendingExists(inbox: String): Boolean = {

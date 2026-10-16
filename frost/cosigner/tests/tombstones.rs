@@ -273,11 +273,24 @@ async fn delete_approvals_are_counted_by_every_node() {
     // Without an approval: refused everywhere.
     let bare = delete_intent(&probe, "operator", "rutli-sym-gated");
     refused(delete_hosted_key(&peers, "rutli-sym-gated", &bare, 2).await, "approval");
-    // With alice's approval over the delete digest (what rutli-approve signs).
     let now = intent::now_ms();
     let nonce = vec![3u8; 16];
-    let request_id = intent::approval_request_id("rutli-sym-gated", &intent::delete_digest("rutli-sym-gated"), &nonce);
     use ed25519_dalek::Signer as _;
+    // Audit F6: alice's approval of what looks like a SIGN request over the same digest (the
+    // sign-format request id) does not approve the delete.
+    let sign_format = intent::approval_request_id("rutli-sym-gated", &intent::delete_digest("rutli-sym-gated"), &nonce);
+    let as_sign = pb::IntentApproval {
+        approver_id: "alice".into(),
+        signature: probe.approver.sign(sign_format.as_bytes()).to_bytes().to_vec(),
+    };
+    let mislabeled = sign(
+        &probe,
+        "operator",
+        pb::SignIntent { approval_nonce: nonce.clone(), approvals: vec![as_sign], ..unsigned_delete("rutli-sym-gated", now, now + 60_000) },
+    );
+    refused(delete_hosted_key(&peers, "rutli-sym-gated", &mislabeled, 2).await, "approval");
+    // With alice's approval of the DELETE (what rutli-approve signs for `delete:<key>`).
+    let request_id = intent::delete_approval_request_id("rutli-sym-gated", &intent::delete_digest("rutli-sym-gated"), &nonce);
     let approval = pb::IntentApproval {
         approver_id: "alice".into(),
         signature: probe.approver.sign(request_id.as_bytes()).to_bytes().to_vec(),

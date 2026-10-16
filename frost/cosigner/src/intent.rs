@@ -119,6 +119,19 @@ pub fn approval_request_id(key_id: &str, digest: &[u8], nonce: &[u8]) -> String 
     hex::encode(h.finalize())
 }
 
+/// What a delete approval's request id names instead of the bare key id (audit F6): `delete:` and
+/// the key. Key ids never contain `:`, so no sign approval's request id is ever a delete's — an
+/// approver shown a "sign" request cannot be approving a delete — and `rutli-approve` reads the
+/// operation out of the very field the request id is computed over.
+pub const DELETE_APPROVAL_KEY_PREFIX: &str = "delete:";
+
+/// The approval request id of a delete of hosted key `key_id`:
+/// [`approval_request_id`]`("delete:" ‖ key_id, delete_digest, nonce)`. Sign approvals keep the
+/// driver's format unchanged.
+pub fn delete_approval_request_id(key_id: &str, delete_digest: &[u8], nonce: &[u8]) -> String {
+    approval_request_id(&format!("{DELETE_APPROVAL_KEY_PREFIX}{key_id}"), delete_digest, nonce)
+}
+
 /// DER prefix of an Ed25519 SubjectPublicKeyInfo (RFC 8410): SEQUENCE { SEQUENCE { 1.3.101.112 },
 /// BIT STRING 0x00 ‖ key }.
 const ED25519_SPKI_PREFIX: [u8; 12] = [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
@@ -413,7 +426,10 @@ impl IntentVerifier {
         }
         let approvers = match self.delete.approval_threshold {
             0 => Vec::new(),
-            t => self.count_approvals(&intent, t, refused_delete)?,
+            t => {
+                let request_id = delete_approval_request_id(&intent.key_id, &intent.digest, &intent.approval_nonce);
+                self.count_approvals(&intent, &request_id, t, refused_delete)?
+            }
         };
         Ok(VerifiedIntent {
             digest: intent_digest(signed),
@@ -466,7 +482,10 @@ impl IntentVerifier {
         // 6. Approvals, for a gated key.
         let approvers = match self.policy.approval_threshold_for(key_id) {
             None => Vec::new(),
-            Some(threshold) => self.count_approvals(&intent, threshold, refused)?,
+            Some(threshold) => {
+                let request_id = approval_request_id(&intent.key_id, &intent.digest, &intent.approval_nonce);
+                self.count_approvals(&intent, &request_id, threshold, refused)?
+            }
         };
         Ok(VerifiedIntent {
             digest: intent_digest(signed),
@@ -526,15 +545,15 @@ impl IntentVerifier {
         Ok(())
     }
 
-    /// The distinct configured approvers with a valid signature over the intent's approval request
-    /// id; refused below `threshold`.
+    /// The distinct configured approvers with a valid signature over `request_id` (the intent's
+    /// approval request id for its purpose); refused below `threshold`.
     fn count_approvals(
         &self,
         intent: &pb::SignIntent,
+        request_id: &str,
         threshold: u32,
         refused: fn(&'static str, String) -> DaemonError,
     ) -> Result<Vec<String>> {
-        let request_id = approval_request_id(&intent.key_id, &intent.digest, &intent.approval_nonce);
         let mut valid: Vec<String> = intent
             .approvals
             .iter()
@@ -599,6 +618,22 @@ mod tests {
 
     /// The vector both test trees pin (see the test above).
     pub const GOLDEN_REQUEST_ID: &str = "e51b7d9a70d36a6b10e31ab7cf1da987175195c3862bf25f43f2a33a27a096cf";
+
+    /// Audit F6: a delete approval's request id is domain-separated from every sign approval's —
+    /// the key field carries `delete:` — while the sign format stays the driver's (golden vector
+    /// above). ApprovalGateSpec pins the same delete vector on the approver side.
+    #[test]
+    fn delete_approvals_are_domain_separated_from_sign_approvals() {
+        let key = "participant1-rutli-enc-golden";
+        let digest = delete_digest(key);
+        let nonce = [0x02; 16];
+        let delete = delete_approval_request_id(key, &digest, &nonce);
+        assert_eq!(delete, approval_request_id("delete:participant1-rutli-enc-golden", &digest, &nonce));
+        assert_ne!(delete, approval_request_id(key, &digest, &nonce), "never the sign id over the same digest");
+        assert_eq!(delete, GOLDEN_DELETE_REQUEST_ID);
+    }
+
+    pub const GOLDEN_DELETE_REQUEST_ID: &str = "5d1234a946bdaaad6c6103902b7fa4b6a92468e9dba71346504832a6f6335c1a";
 
     /// Parity with the driver's `FrostIntentSigner.deleteDigest` (FrostSigningIntentSpec pins it).
     #[test]

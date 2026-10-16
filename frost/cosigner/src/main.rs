@@ -1719,13 +1719,18 @@ fn collect_delete_approvals(
     use sha2::Digest;
     let mut nonce = [0u8; 16];
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut nonce);
-    let request_id = rutli_cosigner::intent::approval_request_id(key_id, delete_digest, &nonce);
+    // Domain-separated from sign approvals (audit F6): the request id is over `delete:<key>`, and
+    // the pending file shows exactly that as its keyId, so `rutli-approve` recomputes the id from
+    // what it displays and knows it is approving a DELETE (and checks the digest is the key's).
+    let request_id = rutli_cosigner::intent::delete_approval_request_id(key_id, delete_digest, &nonce);
     let (pending, approvals_dir) = (inbox.join("pending"), inbox.join("approvals"));
     std::fs::create_dir_all(&pending)?;
     std::fs::create_dir_all(&approvals_dir)?;
     let op_digest = hex::encode(sha2::Sha256::digest(delete_digest));
     let json = serde_json::json!({
-        "requestId": request_id, "keyId": key_id, "digest": op_digest, "nonce": hex::encode(nonce),
+        "requestId": request_id,
+        "keyId": format!("{}{key_id}", rutli_cosigner::intent::DELETE_APPROVAL_KEY_PREFIX),
+        "digest": op_digest, "nonce": hex::encode(nonce),
         "ts": rutli_cosigner::intent::now_ms(), "operation": "delete-hosted-key",
     });
     let file = pending.join(format!("{request_id}.json"));
