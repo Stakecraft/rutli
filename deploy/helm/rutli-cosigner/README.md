@@ -1,22 +1,38 @@
 # Helm chart: rutli-cosigner
 
-Deploys a `t`-of-`n` FROST cosigner StatefulSet with mTLS, sealed shares, PDB, and NetworkPolicy.
+Deploys a `t`-of-`n` FROST cosigner cluster with mTLS, sealed shares, PDB, and NetworkPolicy.
 Default image: `ghcr.io/stakecraft/rutli-cosigner:0.4.0-rc.1` pinned by multi-arch digest
 (`sha256:16b7a01ea098e82d99dbdc00aeb77d9e1fd0f1dce15a66ab19afe08aec375a00`). Also tagged `latest` on GHCR.
+
+Two layouts (`topology`):
+
+- **`perNode`** (default): one StatefulSet (replicas 1) and one Service `rutli-node-<id>` per node.
+  Each pod spec references **only its own** seal-bundle Secret and TLS Secret, mounted as files, so
+  the kubelet's node authorizer lets a host read only the secrets of the node it runs, and no pod
+  spec, init container or ServiceAccount ever sees two nodes' keys (audit C3). Sealing uses a
+  per-node seal bundle (`share_seal.secret_file`); there is no seal env var. Backups are a per-pod
+  sidecar (below); there is no exec RBAC.
+- **`legacy`** (deprecated): the ≤ 0.4.0-rc.1 single StatefulSet, whose one pod template references
+  every node's TLS Secret and injects the shared seal master `RUTLI_SEAL_SECRET` into every pod. It
+  exists so an existing install upgrades in place (the DevNet soak pins it in
+  `deploy/soak/cosigner-values.yaml`) until it migrates with
+  [`docs/runbook-per-node-seal.md`](../../../docs/runbook-per-node-seal.md). It fails
+  `scripts/check-deploy-policy.sh` by design.
 
 ## Prerequisites
 
 - Kubernetes 1.25+ with a NetworkPolicy-capable CNI (for production)
 - Helm 3.8+
-- Secrets created **before** install (TLS + seal) — the chart does not generate key material
+- Secrets created **before** install (TLS + seal bundles) — the chart does not generate key material
+- `rutli-cosigner` on an operator workstation, for `seal new-node` / `seal split-legacy`
 
-## Install
+## Install (topology perNode)
 
 ```sh
-# 1. Certs
+# 1. Certs (each cosigner cert carries only its own names: CN/SAN cosigner<id>)
 scripts/gen-frost-certs.sh 3 ./certs
 
-# 2. Namespace + secrets
+# 2. Namespace + secrets — one Secret per node, nothing shared but the CA
 kubectl create namespace rutli
 kubectl -n rutli label namespace rutli \
   pod-security.kubernetes.io/enforce=restricted \
@@ -27,11 +43,30 @@ for i in 1 2 3; do        # one kubernetes.io/tls Secret per cosigner (cert-mana
   kubectl -n rutli create secret tls rutli-cosigner-tls-$i --cert=certs/cosigner$i.crt --key=certs/cosigner$i.key
 done
 
-kubectl -n rutli create secret generic rutli-seal \
-  --from-literal=RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
+# Seal bundles: on a workstation, one per node, each into its own Secret, then delete the files.
+for i in 1 2 3; do
+  rutli-cosigner seal new-node --node $i --out node-$i.json        # prints its dist_public_key
+  kubectl -n rutli create secret generic rutli-seal-node-$i --from-file=node.json=node-$i.json
+  shred -u node-$i.json 2>/dev/null || rm -f node-$i.json
+done
 
-# 3. Install (values already pin the v0.4.0-rc.1 digest)
+# 3. Install (values already pin the image digest)
 helm upgrade --install rutli deploy/helm/rutli-cosigner -n rutli
+```
+
+With `hostedKeys.enabled=true` the chart also needs `hostedKeys.commitmentKey` (one random value
+for the cluster: `openssl rand -hex 32`) and every node's `nodes[].distPublicKey` (printed by
+`seal new-node`, or later by `rutli-cosigner seal inspect --in node-<i>.json`) — a node on a seal
+bundle knows its peers' hosted-key distribution keys only by these pins.
+
+Point the Canton driver at the per-node Services, each with its own TLS name (`helm` prints this):
+
+```hocon
+endpoints = [
+  { url = "rutli-node-1.rutli.svc.cluster.local:9101", tls-name = "cosigner1" },
+  { url = "rutli-node-2.rutli.svc.cluster.local:9101", tls-name = "cosigner2" },
+  { url = "rutli-node-3.rutli.svc.cluster.local:9101", tls-name = "cosigner3" }
+]
 ```
 
 If the GHCR package is private, create a pull secret and set `imagePullSecrets`.
@@ -42,34 +77,46 @@ Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org A
 
 | Key | Default | Notes |
 |---|---|---|
+| `topology` | `perNode` | `perNode` or `legacy` (deprecated; see above) |
 | `image.repository` | `ghcr.io/stakecraft/rutli-cosigner` | |
 | `image.tag` | `0.4.0-rc.1@sha256:16b7a0…375a00` | Digest-pinned |
-| `replicaCount` / `threshold` | `3` / `2` | Must match cert count |
-| `fullnameOverride` | `rutli-cosigner` | Peer DNS base |
-| `tls.layout` | `perNode` | `perNode`: `tls.caSecretName` (`rutli-cosigner-ca`, key `ca.crt`) + `tls.perNodeSecretPrefix<id>` (`rutli-cosigner-tls-1..N`, `tls.crt`/`tls.key`). `shared`: the legacy single `tlsSecretName`. Either way each cosigner container sees only its own key (below) |
+| `replicaCount` / `threshold` | `3` / `2` | Must match cert count (and `nodes`, if set) |
+| `nodes` | `[]` (= 1..replicaCount) | perNode roster: `id`, `existingClaim` (reuse a PVC, e.g. the legacy `data-rutli-cosigner-<id-1>`), `sealSecret`, `tlsSecret`, `distPublicKey`, `backupClaim`, `backupSecret` |
+| `perNode.servicePrefix` | `rutli-node-` | Per-node Service `<prefix><id>` |
+| `seal.perNodeSecretPrefix` / `seal.secretKey` | `rutli-seal-node-` / `node.json` | perNode: each node's seal bundle Secret |
+| `hostedKeys.commitmentKey` | `""` | perNode + hosted keys: required (64 hex) |
+| `fullnameOverride` | `rutli-cosigner` | Workload / headless Service base name |
+| `tls.layout` | `perNode` | legacy topology only: `perNode` (`rutli-cosigner-ca` + `rutli-cosigner-tls-1..N`) or `shared` (one `tlsSecretName`). topology perNode always uses `rutli-cosigner-ca` + the node's own `tlsSecret` |
 | `tls.allowExpiredCa` | `false` | Accept an expired/not-yet-valid CA in `ca.crt` (never a non-CA). Emergency rotation away from an already-expired CA only |
-| `sealSecretName` | `rutli-seal` | Pre-created |
+| `sealSecretName` | `rutli-seal` | legacy topology only: the shared master (deprecated) |
 | `signerAllowlist` | `[driver]` | Required under TLS |
 | `clusterId` | `""` | Cluster id pin (16 lowercase hex). Empty = derived from `ca.crt`'s bytes. Set it to the current derived id before changing `ca.crt` — see "Rotating the cluster CA". Never copy it to another cluster |
 | `clusterIdChangeAllowed` | `false` | Let the cosigners start under a different cluster id than the one each recorded in `data_dir/cluster-id`. Deliberate changes only, for one rollout |
 | `operatorAllowlist` | `[]` | Operator role for `verify-key` and `verify-hosted` (KeyStatus + HostedKeyStatus + CeremonySignTest only), e.g. `[operator]` |
 | `hostedKeys.enabled` | `false` | Cluster-hosted RSA/AES keys — replicated whole keys, not threshold shares |
-| `backup.enabled` | `false` | Nightly `backup` via `kubectl exec` inside each cosigner; needs `backup.ship` |
+| `backup.enabled` | `false` | perNode only: per-pod backup sidecar to a per-node destination (below) |
 
 See [`values.yaml`](values.yaml) for the full set.
 
-## TLS material: what each pod sees
+## TLS and seal material: what each pod sees
 
-The cosigner container of pod `<fullname>-<o>` sees only `ca.crt` and its own
-`cosigner<o+1>.{crt,key}`: a `tls-select` init container copies them from the source Secret(s)
-into an in-memory `certs` volume, and the source volume is mounted into that init container only.
-A StatefulSet has one pod template and Kubernetes cannot mount a different Secret per ordinal, so
-the pod spec, the kubelet and the (short, network-less) init container still see every node's key;
-full per-pod isolation needs one StatefulSet per node. **Residual risk:** anyone with `get secrets`
-in the namespace, root on a cosigner's node, or the right to create pods mounting these Secrets has
-every node's key — restrict them accordingly. Certificates are read at startup: restart the pods
-after rotating a Secret. The operator cert used by the split ceremony's `verify-key` is never part
-of this release (`deploy/k8s/job-verify-key.example.yaml`).
+**topology perNode:** the pod of node `<id>` references exactly the CA Secret, its own
+`rutli-cosigner-tls-<id>` and its own `rutli-seal-node-<id>`, mounted as files (mode 0440: Secret
+files are root-owned, and the non-root cosigner reads them through `fsGroup`). The seal bundle is
+mounted into the `cosigner` container only. No init container copies anything, and no other pod
+spec names these Secrets, so the node authorizer keeps every other kubelet away from them.
+**Residual risk:** anyone with `get secrets` in the namespace, or cluster-admin, still reads every
+node's Secret — for separate trust domains run each cosigner in its own cluster/account.
+
+**topology legacy:** a `tls-select` init container copies the node's TLS files out of a volume that
+references every node's TLS Secret, and the shared seal master reaches every pod as an env var, so
+every kubelet running a cosigner can read every node's TLS key and the master (audit C3). Migrate.
+
+Mesh identity: each cosigner dials each peer under that peer's own TLS name (`cosigner<id>`), and
+identifies a mesh caller by an exact match on its configured client CN — so one cosigner's
+certificate can no longer stand in for another (audit M3). Certificates from earlier releases also
+carry a shared `rutli-cosigner` SAN; nothing verifies it any more, and new ones do not have it.
+Certificates are read at startup: restart the pods after rotating a Secret.
 
 ### Rotating the cluster CA
 
@@ -88,22 +135,22 @@ resets `clusterId` to `""`. Each cosigner records the id it runs under in `data_
 and refuses to start under a different one (`cluster id mismatch`), so a dropped pin stops the
 rollout at the first pod instead of splitting the cluster; put the value back and roll again.
 
-### Migrating from the shared TLS Secret (≤ 0.3.x installs, e.g. the DevNet soak)
+### Migrating from the shared TLS Secret (≤ 0.3.x installs)
 
-Two options; neither changes a certificate.
+Legacy topology only. Two options; neither changes a certificate.
 
-1. **Keep the old Secret for now:** `helm upgrade … --set tls.layout=shared`. The pods restart with
-   the init-container split (each cosigner container sees only its own key); nothing else changes.
-2. **Move to per-node Secrets** (the default): create `rutli-cosigner-ca` and
-   `rutli-cosigner-tls-1..N` from the existing `rutli-cosigner-tls` — exact commands in
-   [`deploy/k8s/README.md`](../../k8s/README.md), "Migrating from the shared TLS Secret"
-   — then `helm upgrade` without `tls.layout` (or with `tls.layout=perNode`). Check
-   `kubectl exec <pod> -c cosigner -- ls /certs` shows one node's files, then delete
-   `rutli-cosigner-tls`. Copy `ca.crt` byte for byte: the split ceremony's cluster id is its hash.
+1. **Keep the old Secret for now:** `helm upgrade … --set tls.layout=shared`.
+2. **Move to per-node Secrets:** create `rutli-cosigner-ca` and `rutli-cosigner-tls-1..N` from the
+   existing `rutli-cosigner-tls` (commands in [`deploy/k8s/README.md`](../../k8s/README.md)), then
+   `helm upgrade` with `tls.layout=perNode`. Copy `ca.crt` byte for byte: the split ceremony's
+   cluster id is its hash.
 
-Upgrading with the default `perNode` before the new Secrets exist leaves the first rolled pod in
-`ContainerCreating` (missing Secret) — the rollout stops there with two nodes still signing; create
-the Secrets and it proceeds.
+### Migrating legacy → perNode
+
+[`docs/runbook-per-node-seal.md`](../../../docs/runbook-per-node-seal.md): split the shared master
+into per-node bundles offline (`rutli-cosigner seal split-legacy`, which keeps every node's existing
+DEK so nothing is re-sealed), create the per-node Secrets, and `helm upgrade` with
+`topology: perNode` and `nodes[].existingClaim` pointing at the legacy claims.
 
 ## Probes
 
@@ -120,34 +167,42 @@ pin must be ≥ 0.3.1.
 
 ## Backups
 
-`backup.enabled=true` adds a CronJob (default 03:17 UTC) that runs `rutli-cosigner backup` **inside
-each cosigner** — one `kubectl exec` per ordinal, from a ServiceAccount whose Role grants only `get`
-and `pods/exec` on exactly those pods. Each run leaves a seven-day rotation on the node's own volume
-(`/data/backup-<weekday>`, what the "wipe `keys/`, restore" drill uses), streams every result out as
-`<fullname>-N.tar`, and hands the directory of tars to `backup.ship`, a shell body you supply. The
-default body exits 1, so an unconfigured destination is a failed Job you will notice, not a silent
-gap:
+`backup.enabled=true` (topology perNode) adds a `backup` sidecar to each cosigner pod. Once a day
+(`backup.dailyAtUtc`, default 03:17 UTC; plus once at pod start) it tars that node's **sealed**
+`keys/*.json` — never dotfiles, nonce markers or temps — and hands the tar to that node's
+destination:
 
-```sh
-helm upgrade --install rutli deploy/helm/rutli-cosigner -n rutli \
-  --set backup.enabled=true \
-  --set-file backup.ship=./ship.sh   # e.g. rclone/aws to object storage; creds via backup.extraEnv,
-                                     # a destination PVC of the Job's own via backup.extraVolumes
-```
+- `backup.destination.type: pvc` (default): a per-node backup PVC `<fullname>-backup-n<id>` (or
+  `nodes[].backupClaim`), mounted in that node's sidecar only; the newest `backup.destination.keep`
+  tars are kept. Protects against a wiped or corrupted data volume. For the loss of the storage
+  backend, also ship off-cluster.
+- `backup.destination.type: script`: `backup.destination.ship` runs with `$1` = the tar and `$2` =
+  the node id, with that node's own credentials Secret (`nodes[].backupSecret`) at `/backup-creds`;
+  allow the endpoint with `backup.egress` (the pod shares one network namespace, so the cosigner
+  process gets the same egress — keep it to that one endpoint).
 
-Keep the tars in a different trust domain from `rutli-seal`, ideally one destination per cosigner
-(`docs/disaster-recovery.md` §4). Restore onto a rebuilt pod: stream the tar into the pod's `/tmp`
-(`kubectl exec -i <pod> -c cosigner -- tar -C /tmp -xf - < <pod>.tar`), run
-`rutli-cosigner --config /config/cosigner-<ordinal+1>.json restore --from /tmp/backup-<weekday> --force`
-there, then delete the pod so the daemon reopens its key store.
+The sidecar mounts the data volume **read-only** in the cosigner's own pod (no second mount of the
+claim) and never mounts the seal bundle or the TLS key — nothing in the backup path holds a DEK, and
+one node's destination yields one node's sealed files, below threshold. Each run logs one
+`BACKUP_OK node=<id> files=<n> bytes=<n> …` or `BACKUP_FAILED node=<id> reason=…` line; the sidecar
+never exits non-zero (a crashing sidecar would make the pod unready and eat the PDB), so alert on the
+log line or the destination's newest object.
 
-**Never mount a cosigner volume into another pod.** The StatefulSet's `data-<fullname>-N` claims
-are for the cosigner pod only — no backup Job, no debug pod, no sidecar. On 2026-10-07 a backup Job
-that bound a cosigner's ReadWriteOnce claim left `/data/keys` unreadable to the live cosigner, which
-stayed healthy to its probe and failed every Sign: a total signing outage on the DevNet soak until
-the pod was restarted (`docs/soak-2026-10-devnet.md`, incident #1). No template in this chart mounts
-a cosigner's claim anywhere but its own pod, and the chart refuses a `backup.extraVolumes` entry that
-names one.
+There is **no backup CronJob and no `pods/exec` RBAC** any more. Earlier releases ran
+`rutli-cosigner backup` inside each cosigner via `kubectl exec` from a ServiceAccount whose Role
+could exec into every cosigner — and so read every node's seal secret from its environment: the
+whole key in one principal (audit C3). `backup.mode: exec` now fails at template time.
+`scripts/check-deploy-policy.sh` (run in CI on this chart and on `deploy/k8s`) fails on any
+`pods/exec` RBAC, any `RUTLI_SEAL_SECRET` env, a pod spec naming more than one node's seal or TLS
+Secret, and a seal Secret mounted outside the `cosigner` container.
+
+Restore onto a rebuilt node: see [`docs/disaster-recovery.md`](../../../docs/disaster-recovery.md).
+
+**Never mount a cosigner volume into another pod.** A node's data claim is for its own pod only —
+no backup Job, no debug pod. On 2026-10-07 a backup Job that bound a cosigner's ReadWriteOnce claim
+left `/data/keys` unreadable to the live cosigner, which stayed healthy to its probe and failed every
+Sign: a total signing outage on the DevNet soak until the pod was restarted
+(`docs/soak-2026-10-devnet.md`, incident #1). The sidecar is in the same pod, on the same mount.
 
 **Volume access mode.** New installs default to `ReadWriteOncePod`, so the kernel refuses a second
 pod on a share volume (the cosigner also holds a `flock` on its data dir, which stops a second
@@ -157,5 +212,5 @@ rejected. `deploy/soak/cosigner-values.yaml` does this for the DevNet soak.
 
 ## Relation to raw manifests
 
-[`deploy/k8s/`](../../k8s/) remains the kustomize reference. This chart is the supported install path
-for the same topology with parameterized `n`/`t` and image pin.
+[`deploy/k8s/`](../../k8s/) is this chart rendered with `topology: perNode`
+(`scripts/render-k8s.sh`, values in `deploy/k8s/values.yaml`); CI fails if the two drift.

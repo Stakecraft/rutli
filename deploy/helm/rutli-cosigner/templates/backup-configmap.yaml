@@ -1,0 +1,63 @@
+{{- if and (eq (include "rutli-cosigner.topology" .) "perNode") .Values.backup.enabled }}
+{{- $backup := .Values.backup }}
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# The backup sidecar's scripts (topology=perNode). No secrets: per-node credentials, if any, come
+# from that node's own backupSecret.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rutli-cosigner.fullname" . }}-backup
+  labels:
+    {{- include "rutli-cosigner.labels" . | nindent 4 }}
+data:
+  backup-loop.sh: |
+    #!/bin/sh
+    # Daily at $DAILY_AT_UTC: tar this node's committed, sealed key files (keys/*.json; never
+    # dotfiles, nonce markers or staged files) and hand the tar to ship.sh. One BACKUP_OK or
+    # BACKUP_FAILED line per run. Never exits: a dead sidecar would make the pod unready.
+    set -u
+    run() {
+      stamp=$(date -u +%Y%m%dT%H%M%SZ)
+      tar="/work/node-${NODE_ID}-${stamp}.tar"
+      files=$(cd /data/keys 2>/dev/null && find . -maxdepth 1 -type f -name '*.json' ! -name '.*' | sed 's|^\./||' | sort)
+      if [ -z "$files" ]; then
+        echo "BACKUP_FAILED node=${NODE_ID} reason=no-key-files-in-/data/keys"
+        return
+      fi
+      # Key ids are [A-Za-z0-9_-], so word splitting of $files is safe.
+      # shellcheck disable=SC2086
+      if ! tar -C /data/keys -cf "$tar" -- $files; then
+        echo "BACKUP_FAILED node=${NODE_ID} reason=tar"; rm -f "$tar"; return
+      fi
+      n=$(echo "$files" | wc -l | tr -d ' ')
+      bytes=$(wc -c < "$tar" | tr -d ' ')
+      if sh /destination/ship.sh "$tar" "${NODE_ID}"; then
+        echo "BACKUP_OK node=${NODE_ID} files=${n} bytes=${bytes} dest={{ $backup.destination.type }} stamp=${stamp}"
+      else
+        echo "BACKUP_FAILED node=${NODE_ID} reason=ship files=${n} bytes=${bytes} stamp=${stamp}"
+      fi
+      rm -f "$tar"
+    }
+    [ "${RUN_ON_START:-false}" = "true" ] && run
+    while :; do
+      now=$(date -u +%s)
+      next=$(date -u -d "$(date -u +%F) ${DAILY_AT_UTC}" +%s)
+      [ "$next" -le "$now" ] && next=$((next + 86400))
+      sleep $((next - now))
+      run
+    done
+  ship.sh: |
+    #!/bin/sh
+    # $1 = the tar, $2 = the node id. Exit non-zero on failure.
+    set -eu
+{{- if eq $backup.destination.type "pvc" }}
+    # This node's own backup PVC at /backup: write atomically, keep the newest {{ int $backup.destination.keep }}.
+    cp "$1" "/backup/.$(basename "$1").part"
+    mv "/backup/.$(basename "$1").part" "/backup/$(basename "$1")"
+    ls -1 /backup/node-"$2"-*.tar 2>/dev/null | sort | head -n -{{ int $backup.destination.keep }} | while read -r old; do rm -f "$old"; done
+{{- else }}
+{{ $backup.destination.ship | indent 4 }}
+{{- end }}
+{{- end }}

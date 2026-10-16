@@ -11,6 +11,11 @@
 # rejected by the API server. (`helm get values` shows only what was overridden, so the old mode
 # is not in the exported values.) Do not change this on the live soak; switching modes means
 # recreating the StatefulSet and its claims.
+#
+# topology: the chart's default is now perNode (one StatefulSet + seal bundle per node). The soak
+# stays on the legacy StatefulSet, rendered byte-for-byte as before, until the user runs
+# docs/runbook-per-node-seal.md, which replaces this pin with the perNode values it lists.
+topology: legacy
 persistence:
   storageClassName: hcloud-volumes
   accessModes:

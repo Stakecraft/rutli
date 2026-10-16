@@ -1,0 +1,13 @@
+# CI render (scripts/check-deploy-policy.sh): topology=perNode, hosted keys on with placeholder
+# pins, the backup sidecar on with per-node backup PVCs, an operator role.
+topology: perNode
+operatorAllowlist: [operator]
+hostedKeys:
+  enabled: true
+  commitmentKey: "1111111111111111111111111111111111111111111111111111111111111111"
+nodes:
+  - { id: 1, distPublicKey: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }
+  - { id: 2, distPublicKey: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+  - { id: 3, distPublicKey: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" }
+backup:
+  enabled: true
