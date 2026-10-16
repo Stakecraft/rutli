@@ -64,6 +64,10 @@ quorum can reach. Pause the refresh CronJob and onboarding DKGs from step 1 unti
   id *and* the SHA-256 of the intent — so re-using one request id for other digests is a new charge
   each time. Retries and failovers of one driver call (one intent, forwarded unchanged) still
   coalesce.
+- **The audit cross-check keys on the authorized operation, not the bare request id.** Journal
+  entries are compared per (key, request id, message): a request id journaled over more messages
+  than the driver audited signs for it is a discrepancy (the extra signatures were made outside the
+  driver with its certificate), where before a re-used request id hid behind the audited sign.
 - **The sign journal survives I/O errors (F1).** A failed append (partial write, fsync error on a
   hung volume) is cut back to the last acknowledged length and the key's journal is reopened from
   disk on next use, instead of chaining the next entry onto stale state (which forked the chain and

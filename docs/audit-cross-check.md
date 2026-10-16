@@ -13,6 +13,7 @@ driver's signing intent. The driver writes the same id into the sign's audit ent
 | Finding | What it means |
 |---|---|
 | A request in a cosigner journal but not in the driver audit | Entries were cut from the end of the driver audit, or someone signed with the driver's certificate without going through the driver. Investigate either way. |
+| One request id journaled over more messages (digests) than the driver audit has signs for it | The driver draws a fresh request id for every sign and binds one message to it, so the extra messages were signed with the driver's certificate outside the driver, re-using an audited request id. Journal entries are compared per authorized operation (key, request id, message), as the cosigners charge them, not per bare request id. |
 | An `outcome=ok` sign in the driver audit that fewer than `--min-journals` journals hold | A journal was lost or rolled back (for example, a node restored from an old volume), or not every journal was supplied. |
 | Journal entries with `purpose: "no-intent"` | Signatures nobody can attribute: an older driver or leader, accepted while `signing_policy.require_intent` was off. Pass `--allow-no-intent` for the rollout window. After that, treat them as unexplained signatures. |
 | A broken hash chain on either side (exit 2) | The file was edited. Keep the evidence. |
