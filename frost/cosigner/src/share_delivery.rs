@@ -266,7 +266,13 @@ pub fn create_recipient(
     };
     let plain = to_json_zeroizing(&file)?;
     drop(Zeroizing::new(file.secret)); // wipe the hex copy
-    let sealed = sealer.seal(&plain)?;
+    let meta = crate::seal::RecordMeta {
+        kind: crate::seal::RecordKind::Recipient,
+        key_id: &template.key_id,
+        epoch: 0,
+        digest: &[],
+    };
+    let sealed = sealer.seal_record(&meta, &plain)?;
     write_private_atomic(&path, &sealed)?;
     Ok(template)
 }
@@ -285,7 +291,8 @@ pub fn load_recipient(data_dir: &Path, sealer: &Sealer, key_id: &str) -> Result<
     if !Sealer::is_sealed(&bytes) {
         return Err(DaemonError::Ceremony(format!("{} is not sealed — refusing it", path.display())));
     }
-    let plain = Zeroizing::new(sealer.unseal(&bytes)?);
+    let (plain, _) = sealer.unseal_record(&bytes, key_id, &[crate::seal::RecordKind::Recipient])?;
+    let plain = Zeroizing::new(plain);
     let file: RecipientSecretFile = serde_json::from_slice(&plain)?;
     let secret_hex = Zeroizing::new(file.secret);
     if file.kind != SECRET_KIND || file.v != 1 || file.request.key_id != key_id {
@@ -304,6 +311,37 @@ pub fn load_recipient(data_dir: &Path, sealer: &Sealer, key_id: &str) -> Result<
 
 /// Remove the pending recipient for `key_id`. Returns whether there was one. Best-effort erasure:
 /// the file is sealed, and on copy-on-write or wear-levelled storage the bytes may survive.
+/// Key ids with a pending recipient secret on this node (`data_dir/ceremony/*.recipient`).
+pub fn list_recipients(data_dir: &Path) -> Result<Vec<String>> {
+    let dir = ceremony_dir(data_dir);
+    if !dir.try_exists()? {
+        return Ok(Vec::new());
+    }
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(&dir)? {
+        let name = entry?.file_name().to_string_lossy().into_owned();
+        if let Some(key_id) = name.strip_suffix(".recipient") {
+            if recipient_path(data_dir, key_id).is_ok() {
+                out.push(key_id.to_string());
+            }
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
+/// Re-seal the pending recipient secret for `key_id` in key-file format `version` under the
+/// current DEK (`keyfile migrate` / `keyfile downgrade`). It is opened and checked as usual first.
+pub fn reseal_recipient(data_dir: &Path, sealer: &Sealer, key_id: &str, version: u8) -> Result<()> {
+    load_recipient(data_dir, sealer, key_id)?;
+    let path = recipient_path(data_dir, key_id)?;
+    let bytes = std::fs::read(&path)?;
+    let (plain, _) = sealer.unseal_record(&bytes, key_id, &[crate::seal::RecordKind::Recipient])?;
+    let plain = Zeroizing::new(plain);
+    let meta = crate::seal::RecordMeta { kind: crate::seal::RecordKind::Recipient, key_id, epoch: 0, digest: &[] };
+    write_private_atomic(&path, &sealer.seal_record_as(version, &meta, &plain)?)
+}
+
 pub fn delete_recipient(data_dir: &Path, key_id: &str) -> Result<bool> {
     let path = recipient_path(data_dir, key_id)?;
     if !path.try_exists()? {

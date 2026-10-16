@@ -180,8 +180,10 @@ async fn signing_survives_one_downed_cosigner() {
     vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig)).unwrap();
 }
 
+/// Audit M4: a plaintext share under sealing is refused (the daemon will not start with one), and
+/// only the explicit offline migration seals it.
 #[tokio::test]
-async fn reseal_plaintext_shares_migrates_legacy_files_at_startup() {
+async fn plaintext_shares_are_refused_under_sealing_until_migrated_explicitly() {
     use rutli_cosigner::seal::Sealer;
 
     let tmp = tempfile::tempdir().unwrap();
@@ -191,12 +193,15 @@ async fn reseal_plaintext_shares_migrates_legacy_files_at_startup() {
     let share_path = tmp.path().join("node-1").join(format!("{KEY_ID}.json"));
     assert!(!Sealer::is_sealed(&std::fs::read(&share_path).unwrap()));
 
-    // Re-open with sealing and migrate — plaintext must become a sealed envelope.
+    // Re-open with sealing: the plaintext file is listed and refused.
     let sealer = Arc::new(Sealer::from_master_secret(b"cluster master secret!!", 1));
     let ks = KeyStore::open_with_sealer(tmp.path().join("node-1"), Some(sealer)).unwrap();
-    assert_eq!(ks.reseal_plaintext_shares().unwrap(), 1);
+    assert_eq!(ks.plaintext_files().unwrap(), vec![share_path.clone()]);
+    assert!(ks.load(KEY_ID).is_err());
+
+    ks.migrate_plaintext(KEY_ID).unwrap();
     assert!(Sealer::is_sealed(&std::fs::read(&share_path).unwrap()));
-    assert_eq!(ks.reseal_plaintext_shares().unwrap(), 0, "idempotent");
+    assert!(ks.plaintext_files().unwrap().is_empty());
 
     // Share still loads under the same group key.
     let n = Node::new(Identifier::try_from(1u16).unwrap(), N, T, ks);

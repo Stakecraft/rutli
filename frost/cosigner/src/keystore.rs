@@ -7,9 +7,15 @@
 //! [`frost::keys::PublicKeyPackage`], serialized as JSON, one file per `key_id`. The KeyPackage
 //! contains only this node's secret share — never the whole private key, which is never assembled.
 //!
-//! With a [`Sealer`], shares are AES-256-GCM envelopes on disk. Legacy plaintext files are
-//! re-sealed at startup via [`KeyStore::reseal_plaintext_shares`]. Without a sealer (dev only),
-//! shares remain plaintext JSON.
+//! With a [`Sealer`], shares are AES-256-GCM envelopes on disk — key-file format v1, or v2 with a
+//! header bound into the associated data ([`crate::seal`], audit M4) — and a plaintext key file is
+//! **refused** (the daemon will not start with one; `rutli-cosigner keyfile migrate-plaintext`
+//! seals a genuine one, offline). Without a sealer (dev only), shares remain plaintext JSON.
+//!
+//! Every load checks the record against the file it came from: a v2 header must name this node,
+//! the file's key id and the expected kind (checked by the [`Sealer`] before decrypting), and the
+//! plaintext must agree with the header — its key id, a share's epoch and PKP digest, the share's
+//! FROST identifier is this node's.
 
 use frost_ed25519 as frost;
 use serde::{Deserialize, Serialize};
@@ -17,7 +23,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::seal::Sealer;
+use crate::seal::{KeyFileHeader, RecordKind, RecordMeta, Sealer};
 use crate::{DaemonError, Result};
 
 #[derive(Serialize, Deserialize)]
@@ -92,6 +98,65 @@ pub enum Record {
 /// The `kind` tag written into hosted-key files. FROST files carry no tag (backward compatible).
 const KIND_HOSTED: &str = "hosted";
 
+/// The record kinds a file under `keys/` may hold.
+const STORE_KINDS: &[RecordKind] = &[RecordKind::FrostShare, RecordKind::HostedKey];
+
+/// A share as written: the [`Share`] itself, or — when it does not name its key id yet (a share
+/// built by a ceremony or an import) — the share with `key_id` added, so every file written from
+/// now on carries its key id inside the sealed plaintext.
+#[derive(Serialize)]
+struct NamedShare<'a> {
+    #[serde(flatten)]
+    share: &'a Share,
+    key_id: &'a str,
+}
+
+/// A hosted key as written: tagged with its kind and key id (the [`crate::hosted::HostedKey`]
+/// reader ignores both).
+#[derive(Serialize)]
+struct TaggedHosted<'a> {
+    #[serde(flatten)]
+    key: &'a crate::hosted::HostedKey,
+    kind: &'static str,
+    key_id: &'a str,
+}
+
+/// The digest a v2 header records for a hosted key: SHA-256 over its spec and public half
+/// (asymmetric keys), empty for a symmetric key — nothing about secret material leaves the
+/// ciphertext.
+pub fn hosted_header_digest(key: &crate::hosted::HostedKey) -> Vec<u8> {
+    use sha2::{Digest, Sha256};
+    if !key.spec.is_asymmetric() {
+        return Vec::new();
+    }
+    let mut h = Sha256::new();
+    h.update(b"rutli-hosted-pub-v1\n");
+    h.update(key.spec.as_str().as_bytes());
+    h.update([0u8]);
+    h.update(key.public_der.as_bytes());
+    h.finalize().to_vec()
+}
+
+/// The plaintext and v2 header metadata of a share to be written under `key_id`.
+fn share_plaintext(key_id: &str, share: &Share) -> Result<(zeroize::Zeroizing<Vec<u8>>, [u8; 32])> {
+    if !share.key_id.is_empty() && share.key_id != key_id {
+        return Err(DaemonError::KeyFile(format!(
+            "refusing to write the share of {} under key id {key_id}",
+            share.key_id
+        )));
+    }
+    let plain = if share.key_id.is_empty() {
+        crate::share_delivery::to_json_zeroizing(&NamedShare { share, key_id })?
+    } else {
+        crate::share_delivery::to_json_zeroizing(share)?
+    };
+    Ok((plain, share.pkp_digest()?))
+}
+
+fn hosted_plaintext(key_id: &str, key: &crate::hosted::HostedKey) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+    crate::share_delivery::to_json_zeroizing(&TaggedHosted { key, kind: KIND_HOSTED, key_id })
+}
+
 /// Fault-injection seam: called with the path a key-store operation is about to touch, before it
 /// touches it — every key-file read, write and delete, the hosted-key listing, and the readiness
 /// probe. Lets a test make the store *hang* (a dead NFS/CSI mount, a frozen volume), which file
@@ -148,36 +213,158 @@ impl KeyStore {
         }
     }
 
-    /// When sealing is enabled, rewrite any leftover plaintext share files as sealed envelopes.
-    /// Idempotent: already-sealed files are left alone. Returns how many files were re-sealed.
-    pub fn reseal_plaintext_shares(&self) -> Result<usize> {
-        let Some(_) = &self.sealer else {
-            return Ok(0);
-        };
-        let mut migrated = 0usize;
-        for entry in std::fs::read_dir(&self.dir)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if !name.ends_with(".json") {
-                continue;
-            }
-            let key_id = name.trim_end_matches(".json");
-            let bytes = std::fs::read(entry.path())?;
-            if Sealer::is_sealed(&bytes) {
-                continue;
-            }
-            // load_record() accepts plaintext under a sealer; the save path always writes sealed.
-            // Must be record-aware: blindly parsing every file as a FROST Share would fail on a
-            // hosted key that was written while sealing was off.
-            match self.load_record(key_id)? {
-                Record::Frost(share) => self.save(key_id, &share)?,
-                Record::Hosted(k) => self.save_hosted(key_id, &k)?,
-            }
-            migrated += 1;
-            tracing::info!(key_id, "re-sealed legacy plaintext share at rest");
+    /// With sealing on, the key files (committed and staged) that are plaintext — refused by every
+    /// load, so the daemon refuses to start with any (audit M4: a plaintext file dropped on the
+    /// volume, or restored, used to be accepted and sealed as genuine). Empty without a sealer.
+    pub fn plaintext_files(&self) -> Result<Vec<PathBuf>> {
+        if self.sealer.is_none() {
+            return Ok(Vec::new());
         }
-        Ok(migrated)
+        let mut out = Vec::new();
+        for path in self.key_file_paths()? {
+            if !Sealer::is_sealed(&std::fs::read(&path)?) {
+                out.push(path);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Every key file of this store: `keys/<id>.json` and `keys/.staged/<id>.<ceremony>.json`
+    /// (temps, probes and nonce directories excluded), sorted.
+    pub fn key_file_paths(&self) -> Result<Vec<PathBuf>> {
+        let mut out = Vec::new();
+        for dir in [self.dir.clone(), self.staged_dir()] {
+            if !dir.try_exists()? {
+                continue;
+            }
+            for entry in std::fs::read_dir(&dir)? {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') || !name.ends_with(".json") || !entry.file_type()?.is_file() {
+                    continue;
+                }
+                out.push(entry.path());
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
+    /// The key id (and ceremony id, for a staged share) a key file path names.
+    pub fn key_id_of(&self, path: &Path) -> Option<(String, Option<String>)> {
+        let stem = path.file_name()?.to_str()?.strip_suffix(".json")?;
+        if path.parent()? == self.staged_dir() {
+            let (k, c) = stem.split_once('.')?;
+            Some((k.to_string(), Some(c.to_string())))
+        } else {
+            Some((stem.to_string(), None))
+        }
+    }
+
+    /// Parse a plaintext key file without sealing it (what `keyfile migrate-plaintext` shows the
+    /// operator before it seals anything).
+    pub fn inspect_plaintext(&self, key_id: &str) -> Result<Record> {
+        let bytes = zeroize::Zeroizing::new(std::fs::read(self.path(key_id)?)?);
+        if Sealer::is_sealed(&bytes) {
+            return Err(DaemonError::Config(format!("{key_id} is sealed, not plaintext")));
+        }
+        self.parse_record(key_id, &bytes, None)
+    }
+
+    /// Seal a plaintext key file in place (offline `keyfile migrate-plaintext`, under the instance
+    /// lock). Refuses a file that is already sealed or does not parse as the record its name says.
+    pub fn migrate_plaintext(&self, key_id: &str) -> Result<()> {
+        let sealer = self
+            .sealer
+            .as_ref()
+            .ok_or_else(|| DaemonError::Config("share sealing is not configured — nothing to migrate to".into()))?;
+        let path = self.path(key_id)?;
+        let bytes = std::fs::read(&path)?;
+        if Sealer::is_sealed(&bytes) {
+            return Err(DaemonError::Config(format!("{} is already sealed", path.display())));
+        }
+        let record = self.parse_record(key_id, &bytes, None)?;
+        tracing::info!(key_id, dek_id = %sealer.current_dek_id(), "sealing a plaintext key file");
+        match record {
+            Record::Frost(share) => self.save(key_id, &share),
+            Record::Hosted(k) => self.save_hosted(key_id, &k),
+        }
+    }
+
+    /// Re-seal one key file in format `version` under the current DEK (offline `keyfile migrate`
+    /// / `keyfile downgrade`, and the daemon's start-up pass). The record is loaded and checked as
+    /// usual first, so a file that does not belong here is never re-sealed into looking genuine.
+    pub fn rewrite(&self, path: &Path, version: u8) -> Result<()> {
+        let sealer = self
+            .sealer
+            .as_ref()
+            .ok_or_else(|| DaemonError::Config("share sealing is not configured".into()))?;
+        let (key_id, ceremony) = self
+            .key_id_of(path)
+            .ok_or_else(|| DaemonError::Config(format!("{} is not a key file", path.display())))?;
+        let (plain, record) = match &ceremony {
+            Some(c) => {
+                let share = self.load_staged(&key_id, c)?;
+                let (plain, _) = share_plaintext(&key_id, &share)?;
+                (plain, Record::Frost(Box::new(share)))
+            }
+            None => {
+                let record = self.load_record(&key_id)?;
+                let plain = match &record {
+                    Record::Frost(s) => share_plaintext(&key_id, s)?.0,
+                    Record::Hosted(k) => hosted_plaintext(&key_id, k)?,
+                };
+                (plain, record)
+            }
+        };
+        let digest = record_digest(&record)?;
+        let meta = RecordMeta { kind: record_kind(&record), key_id: &key_id, epoch: record_epoch(&record), digest: &digest };
+        let bytes = sealer.seal_record_as(version, &meta, &plain)?;
+        let dir = path.parent().expect("a key file has a parent");
+        write_atomic(dir, path, &bytes)
+    }
+
+    /// What a key file is: its format version and the DEK it is sealed under (`keyfile status`,
+    /// the start-up pass). `None` for a plaintext file.
+    pub fn file_state(&self, path: &Path) -> Result<Option<(u8, crate::seal::DekUse)>> {
+        let bytes = std::fs::read(path)?;
+        let Some(version) = crate::seal::file_version(&bytes) else { return Ok(None) };
+        let dek = match &self.sealer {
+            Some(s) => s.dek_use(&bytes),
+            None => crate::seal::DekUse::Unknown,
+        };
+        Ok(Some((version, dek)))
+    }
+
+    /// The daemon's start-up pass: re-seal every key file sealed under a previous DEK (a DEK
+    /// rotation) and, when writing v2, every v1 file. A file that cannot be rewritten is logged and
+    /// left alone (it is reported as unreadable elsewhere). Returns how many were rewritten.
+    pub fn reseal_outdated(&self) -> Result<usize> {
+        let Some(sealer) = &self.sealer else { return Ok(0) };
+        let target = sealer.binding().write_version;
+        let mut n = 0;
+        for path in self.key_file_paths()? {
+            let Some((version, dek)) = self.file_state(&path)? else { continue };
+            let outdated_dek = matches!(dek, crate::seal::DekUse::Previous(_));
+            let outdated_fmt = version < target;
+            if !(outdated_dek || outdated_fmt) {
+                continue;
+            }
+            match self.rewrite(&path, target.max(version)) {
+                Ok(()) => {
+                    n += 1;
+                    tracing::info!(
+                        file = %path.display(),
+                        from_format = version,
+                        to_format = target.max(version),
+                        previous_dek = outdated_dek,
+                        "re-sealed key file"
+                    );
+                }
+                Err(e) => tracing::error!(file = %path.display(), error = %e, "could not re-seal key file"),
+            }
+        }
+        Ok(n)
     }
 
     fn path(&self, key_id: &str) -> Result<PathBuf> {
@@ -204,7 +391,9 @@ impl KeyStore {
     }
 
     pub fn save(&self, key_id: &str, share: &Share) -> Result<()> {
-        self.write_sealed(key_id, &serde_json::to_vec_pretty(share)?)
+        let (plain, digest) = share_plaintext(key_id, share)?;
+        let meta = RecordMeta { kind: RecordKind::FrostShare, key_id, epoch: share.epoch, digest: &digest };
+        self.write_sealed(key_id, &meta, &plain)
     }
 
     /// Persist a **new** share: fails with [`DaemonError::KeyExists`] if any file already exists
@@ -214,19 +403,18 @@ impl KeyStore {
     ///
     /// [`save`]: KeyStore::save
     pub fn create(&self, key_id: &str, share: &Share) -> Result<()> {
-        let plain = crate::share_delivery::to_json_zeroizing(share)?;
-        self.create_bytes(key_id, &plain)
+        let (plain, digest) = share_plaintext(key_id, share)?;
+        let meta = RecordMeta { kind: RecordKind::FrostShare, key_id, epoch: share.epoch, digest: &digest };
+        self.create_bytes(key_id, &meta, &plain)
     }
 
     /// [`KeyStore::create`] for a cluster-hosted key: a new hosted key never replaces any file —
     /// in particular never an installed FROST share under the same id.
     pub fn create_hosted(&self, key_id: &str, key: &crate::hosted::HostedKey) -> Result<()> {
-        let mut value = serde_json::to_value(key)?;
-        value
-            .as_object_mut()
-            .expect("HostedKey serializes to a JSON object")
-            .insert("kind".into(), serde_json::Value::String(KIND_HOSTED.into()));
-        self.create_bytes(key_id, &zeroize::Zeroizing::new(serde_json::to_vec(&value)?))
+        let plain = hosted_plaintext(key_id, key)?;
+        let digest = hosted_header_digest(key);
+        let meta = RecordMeta { kind: RecordKind::HostedKey, key_id, epoch: 0, digest: &digest };
+        self.create_bytes(key_id, &meta, &plain)
     }
 
     /// Seal `plain` into a uniquely named dotfile temp (fsynced), move it into place **only if
@@ -235,18 +423,18 @@ impl KeyStore {
     /// filesystem or platform lacks it, `link(2)` (which also refuses an existing target) is the
     /// fallback, and a filesystem with neither is a clear error rather than a silent overwrite.
     /// Temps orphaned by a crash are removed by [`KeyStore::sweep_stale_create_temps`].
-    fn create_bytes(&self, key_id: &str, plain: &[u8]) -> Result<()> {
+    fn create_bytes(&self, key_id: &str, meta: &RecordMeta<'_>, plain: &[u8]) -> Result<()> {
         let path = self.path(key_id)?;
-        self.create_sealed_at(&self.dir, &path, key_id, plain)
+        self.create_sealed_at(&self.dir, &path, key_id, meta, plain)
     }
 
     /// The create-once write behind [`KeyStore::create_bytes`] and [`KeyStore::stage`]: seal
     /// `plain`, write a dotfile temp in `dir` (fsynced), move it to `path` only if nothing is
     /// there, fsync `dir`. `label` names the key in errors and in the temp's name.
-    fn create_sealed_at(&self, dir: &Path, path: &Path, label: &str, plain: &[u8]) -> Result<()> {
+    fn create_sealed_at(&self, dir: &Path, path: &Path, label: &str, meta: &RecordMeta<'_>, plain: &[u8]) -> Result<()> {
         self.touch(path);
         let bytes = match &self.sealer {
-            Some(s) => s.seal(plain)?,
+            Some(s) => s.seal_record(meta, plain)?,
             None => plain.to_vec(),
         };
         // A dotfile: never a key file (ids are [A-Za-z0-9_-]+), skipped by backup and the probe.
@@ -358,25 +546,14 @@ impl KeyStore {
 
     /// Seal `plain` and write it durably: temp file + fsync, atomic rename, fsync the directory —
     /// so a key survives power loss. Shared by FROST shares and hosted keys.
-    fn write_sealed(&self, key_id: &str, plain: &[u8]) -> Result<()> {
+    fn write_sealed(&self, key_id: &str, meta: &RecordMeta<'_>, plain: &[u8]) -> Result<()> {
         let path = self.path(key_id)?;
         self.touch(&path);
-        let tmp = path.with_extension("json.tmp");
         let bytes = match &self.sealer {
-            Some(s) => s.seal(plain)?,
+            Some(s) => s.seal_record(meta, plain)?,
             None => plain.to_vec(),
         };
-        // Write + fsync the temp file, atomically rename, then fsync the directory — so a share
-        // survives power loss as durably as the nonce store (which already fsyncs). Without this a
-        // crash right after DKG could lose the just-generated share while peers kept theirs.
-        {
-            let mut f = private_file(&tmp, false)?;
-            f.write_all(&bytes)?;
-            f.sync_all()?;
-        }
-        std::fs::rename(&tmp, &path)?;
-        std::fs::File::open(&self.dir)?.sync_all()?; // fsync the directory entry (the rename)
-        Ok(())
+        write_atomic(&self.dir, &path, &bytes)
     }
 
     pub fn load(&self, key_id: &str) -> Result<Share> {
@@ -388,13 +565,9 @@ impl KeyStore {
         }
     }
 
-    /// Read a key file and unseal it, without interpreting the contents.
-    fn read_plaintext(&self, key_id: &str) -> Result<Vec<u8>> {
-        let path = self.path(key_id)?;
-        self.read_plaintext_at(&path, key_id)
-    }
-
-    fn read_plaintext_at(&self, path: &Path, key_id: &str) -> Result<Vec<u8>> {
+    /// Read a key file and unseal it (`kinds`: what the file may hold), without interpreting the
+    /// contents. With sealing on, a plaintext file is refused.
+    fn read_plaintext_at(&self, path: &Path, key_id: &str, kinds: &[RecordKind]) -> Result<(Vec<u8>, Option<KeyFileHeader>)> {
         self.touch(path);
         // try_exists, not exists: an unreadable store must surface as an IO error (INTERNAL), never
         // as UnknownKey (NOT_FOUND) — Canton would take NOT_FOUND to mean the key is gone.
@@ -402,30 +575,81 @@ impl KeyStore {
             return Err(DaemonError::UnknownKey(key_id.to_string()));
         }
         let bytes = std::fs::read(path)?;
-        let plain = match (&self.sealer, Sealer::is_sealed(&bytes)) {
-            (Some(s), true) => s.unseal(&bytes)?,
-            // Sealing on, legacy plaintext file: readable (migration path); re-sealed on next save.
-            (Some(_), false) => bytes,
-            (None, true) => {
-                return Err(DaemonError::Config(format!(
-                    "share {key_id} is sealed but share sealing is not configured on this node"
-                )))
-            }
-            (None, false) => bytes,
+        self.unseal_bytes(&bytes, key_id, kinds)
+    }
+
+    fn unseal_bytes(&self, bytes: &[u8], key_id: &str, kinds: &[RecordKind]) -> Result<(Vec<u8>, Option<KeyFileHeader>)> {
+        match (&self.sealer, Sealer::is_sealed(bytes)) {
+            (Some(s), true) => s.unseal_record(bytes, key_id, kinds),
+            (Some(_), false) => Err(DaemonError::KeyFile(format!(
+                "{key_id} is a PLAINTEXT key file but sealing is configured — refusing it. If it is \
+                 genuine, seal it with the daemon stopped: `rutli-cosigner keyfile migrate-plaintext \
+                 --key-id {key_id}`"
+            ))),
+            (None, true) => Err(DaemonError::Config(format!(
+                "share {key_id} is sealed but share sealing is not configured on this node"
+            ))),
+            (None, false) => Ok((bytes.to_vec(), None)),
+        }
+    }
+
+    /// Classify and parse a key file's plaintext, and check it against its name and header.
+    fn parse_record(&self, key_id: &str, plain: &[u8], hdr: Option<&KeyFileHeader>) -> Result<Record> {
+        let value: serde_json::Value = serde_json::from_slice(plain)?;
+        let tag = value.get("kind").and_then(|k| k.as_str()).map(str::to_owned);
+        let named = value.get("key_id").and_then(|k| k.as_str()).map(str::to_owned);
+        if named.as_deref().is_some_and(|n| !n.is_empty() && n != key_id) {
+            return Err(DaemonError::KeyFile(format!(
+                "the file for {key_id} holds key {} — a key file renamed or copied over another",
+                named.unwrap_or_default()
+            )));
+        }
+        let record = if tag.as_deref() == Some(KIND_HOSTED) {
+            Record::Hosted(Box::new(serde_json::from_value(value)?))
+        } else {
+            Record::Frost(Box::new(serde_json::from_value(value)?))
         };
-        Ok(plain)
+        self.check_record(key_id, &record, hdr)?;
+        Ok(record)
+    }
+
+    /// A record must agree with the header it was sealed under, and a share must be this node's.
+    fn check_record(&self, key_id: &str, record: &Record, hdr: Option<&KeyFileHeader>) -> Result<()> {
+        if let Some(h) = hdr {
+            if h.kind != record_kind(record).as_str() {
+                return Err(DaemonError::KeyFile(format!(
+                    "{key_id}: the header says {} but the record is a {}",
+                    h.kind,
+                    record_kind(record).as_str()
+                )));
+            }
+            if h.epoch != record_epoch(record) || h.digest != hex::encode(record_digest(record)?) {
+                return Err(DaemonError::KeyFile(format!(
+                    "{key_id}: the record does not match its header (epoch {} / digest {})",
+                    h.epoch, h.digest
+                )));
+            }
+        }
+        if let (Record::Frost(share), Some(s)) = (record, &self.sealer) {
+            let own = frost::Identifier::try_from(s.node()).map_err(DaemonError::Frost)?;
+            if *share.key_package.identifier() != own {
+                return Err(DaemonError::KeyFile(format!(
+                    "{key_id}: the share belongs to another FROST identifier than this node's ({})",
+                    s.node()
+                )));
+            }
+        }
+        Ok(())
     }
 
     // -- cluster-hosted (non-FROST) keys --
 
     /// Persist a hosted key, sealed, with the same atomic + fsync discipline as a FROST share.
     pub fn save_hosted(&self, key_id: &str, key: &crate::hosted::HostedKey) -> Result<()> {
-        let mut value = serde_json::to_value(key)?;
-        value
-            .as_object_mut()
-            .expect("HostedKey serializes to a JSON object")
-            .insert("kind".into(), serde_json::Value::String(KIND_HOSTED.into()));
-        self.write_sealed(key_id, &serde_json::to_vec_pretty(&value)?)
+        let plain = hosted_plaintext(key_id, key)?;
+        let digest = hosted_header_digest(key);
+        let meta = RecordMeta { kind: RecordKind::HostedKey, key_id, epoch: 0, digest: &digest };
+        self.write_sealed(key_id, &meta, &plain)
     }
 
     pub fn load_hosted(&self, key_id: &str) -> Result<crate::hosted::HostedKey> {
@@ -439,14 +663,20 @@ impl KeyStore {
 
     /// Read a key file without knowing its type up front.
     pub fn load_record(&self, key_id: &str) -> Result<Record> {
-        let plain = self.read_plaintext(key_id)?;
-        let value: serde_json::Value = serde_json::from_slice(&plain)?;
-        let is_hosted = value.get("kind").and_then(|k| k.as_str()) == Some(KIND_HOSTED);
-        if is_hosted {
-            Ok(Record::Hosted(Box::new(serde_json::from_value(value)?)))
-        } else {
-            Ok(Record::Frost(Box::new(serde_json::from_value(value)?)))
-        }
+        let path = self.path(key_id)?;
+        let (plain, hdr) = self.read_plaintext_at(&path, key_id, STORE_KINDS)?;
+        let plain = zeroize::Zeroizing::new(plain);
+        self.parse_record(key_id, &plain, hdr.as_ref())
+    }
+
+    /// Load the key file at `path` (anywhere — a backup) as if it were this node's file for
+    /// `key_id`: unsealed and checked exactly like a live one (restore).
+    pub fn load_foreign(&self, path: &Path, key_id: &str) -> Result<(Record, Option<KeyFileHeader>)> {
+        self.path(key_id)?; // validates the id
+        let (plain, hdr) = self.read_plaintext_at(path, key_id, STORE_KINDS)?;
+        let plain = zeroize::Zeroizing::new(plain);
+        let record = self.parse_record(key_id, &plain, hdr.as_ref())?;
+        Ok((record, hdr))
     }
 
     /// Key ids of every hosted key on this node (FROST shares excluded).
@@ -529,8 +759,11 @@ impl KeyStore {
         let path = self.staged_path(key_id, ceremony_id)?;
         let dir = self.staged_dir();
         ensure_private_dir(&dir)?;
-        let plain = crate::share_delivery::to_json_zeroizing(share)?;
-        self.create_sealed_at(&dir, &path, key_id, &plain)
+        // The same header a committed share has (kind, key id, the new epoch), so committing is a
+        // pure rename.
+        let (plain, digest) = share_plaintext(key_id, share)?;
+        let meta = RecordMeta { kind: RecordKind::FrostShare, key_id, epoch: share.epoch, digest: &digest };
+        self.create_sealed_at(&dir, &path, key_id, &meta, &plain)
     }
 
     pub fn has_staged(&self, key_id: &str, ceremony_id: &str) -> Result<bool> {
@@ -541,8 +774,12 @@ impl KeyStore {
 
     pub fn load_staged(&self, key_id: &str, ceremony_id: &str) -> Result<Share> {
         let path = self.staged_path(key_id, ceremony_id)?;
-        let value: serde_json::Value = serde_json::from_slice(&self.read_plaintext_at(&path, key_id)?)?;
-        Ok(serde_json::from_value(value)?)
+        let (plain, hdr) = self.read_plaintext_at(&path, key_id, &[RecordKind::FrostShare])?;
+        let plain = zeroize::Zeroizing::new(plain);
+        match self.parse_record(key_id, &plain, hdr.as_ref())? {
+            Record::Frost(share) => Ok(*share),
+            _ => Err(DaemonError::KeyFile(format!("the staged file for {key_id} is not a FROST share"))),
+        }
     }
 
     /// Make a staged share live. `replace = false` (DKG): only if no file exists for `key_id` —
@@ -713,6 +950,44 @@ impl KeyStore {
 
 /// Name prefix of [`KeyStore::create`]'s temp files (a dotfile, like the probe's).
 const CREATE_TMP_PREFIX: &str = ".create-";
+
+/// Write `bytes` to `path` durably: an owner-only temp beside it (fsynced), an atomic rename, then
+/// fsync `dir` — so the file is either the old one or the new one after a crash, never torn.
+pub(crate) fn write_atomic(dir: &Path, path: &Path, bytes: &[u8]) -> Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    {
+        let mut f = private_file(&tmp, false)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    std::fs::File::open(dir)?.sync_all()?; // fsync the directory entry (the rename)
+    Ok(())
+}
+
+/// The v2 header kind of a record.
+pub fn record_kind(record: &Record) -> RecordKind {
+    match record {
+        Record::Frost(_) => RecordKind::FrostShare,
+        Record::Hosted(_) => RecordKind::HostedKey,
+    }
+}
+
+/// The epoch a v2 header records for a record (a share's; 0 otherwise).
+pub fn record_epoch(record: &Record) -> u64 {
+    match record {
+        Record::Frost(s) => s.epoch,
+        Record::Hosted(_) => 0,
+    }
+}
+
+/// The digest a v2 header records for a record.
+pub fn record_digest(record: &Record) -> Result<Vec<u8>> {
+    Ok(match record {
+        Record::Frost(s) => s.pkp_digest()?.to_vec(),
+        Record::Hosted(k) => hosted_header_digest(k),
+    })
+}
 
 /// Subdirectory of the key store holding staged (uncommitted) ceremony shares.
 pub const STAGED_DIR: &str = ".staged";
@@ -1109,18 +1384,240 @@ mod tests {
     }
 
     #[test]
-    fn plaintext_hosted_keys_are_resealed_on_startup() {
-        // reseal_plaintext_shares used to parse every file as a FROST Share; a hosted key written
-        // while sealing was off would have broken startup.
+    fn plaintext_key_files_are_refused_under_sealing_until_migrate_plaintext() {
+        // Audit M4: reseal_plaintext_shares used to accept and seal any plaintext file at start-up,
+        // so a file dropped on the volume became genuine. Now it is refused until an operator seals
+        // it explicitly.
         let tmp = tempfile::tempdir().unwrap();
         let key = HostedKey::generate(HostedSpec::Aes256Gcm, 7).unwrap();
         store(&tmp, false).save_hosted("rutli-sym-9", &key).unwrap(); // unsealed
+        store(&tmp, false).save("frost-a", &dealt_share(None)).unwrap();
 
         let sealed = store(&tmp, true);
-        assert_eq!(sealed.reseal_plaintext_shares().unwrap(), 1);
+        assert_eq!(sealed.plaintext_files().unwrap().len(), 2);
+        let e = sealed.load_hosted("rutli-sym-9").err().unwrap().to_string();
+        assert!(e.contains("PLAINTEXT") && e.contains("migrate-plaintext"), "{e}");
+        assert!(sealed.list_hosted().unwrap().is_empty(), "a refused file is not inventory");
+
+        sealed.migrate_plaintext("rutli-sym-9").unwrap();
+        sealed.migrate_plaintext("frost-a").unwrap();
+        assert!(sealed.plaintext_files().unwrap().is_empty());
         let raw = std::fs::read(tmp.path().join("keys").join("rutli-sym-9.json")).unwrap();
         assert!(crate::seal::Sealer::is_sealed(&raw), "hosted key must be sealed after migration");
         assert_eq!(sealed.load_hosted("rutli-sym-9").unwrap().created_at, 7);
+        assert_eq!(sealed.load("frost-a").unwrap().key_id, "frost-a", "the key id is now inside");
+        assert!(sealed.migrate_plaintext("frost-a").is_err(), "already sealed");
+    }
+
+    // ── key-file format v2 (audit M4) ─────────────────────────────────────────────────────────
+
+    const UUID: &str = "6f1d3c1e-8a0b-4a43-9c55-0d4f1f0b7a11";
+
+    fn v2_sealer(node: u16, cluster: &str, write: u8) -> Arc<crate::seal::Sealer> {
+        Arc::new(crate::seal::Sealer::from_master_secret(b"test master secret", node).with_binding(
+            crate::seal::KeyFileBinding {
+                node,
+                cluster_uuid: Some(cluster.into()),
+                write_version: write,
+                accept_v1: true,
+            },
+        ))
+    }
+
+    fn v2_store(dir: &Path, node: u16, cluster: &str) -> KeyStore {
+        KeyStore::open_with_sealer(dir, Some(v2_sealer(node, cluster, 2))).unwrap()
+    }
+
+    /// Edit the clear header of a v2 file in place.
+    fn edit_header(path: &Path, f: impl Fn(&mut serde_json::Value)) {
+        let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        f(&mut v["hdr"]);
+        std::fs::write(path, serde_json::to_vec(&v).unwrap()).unwrap();
+    }
+
+    fn refused(r: Result<impl Sized>, needle: &str) {
+        let e = r.err().expect("must be refused").to_string();
+        assert!(e.contains(needle), "expected {needle:?} in {e}");
+    }
+
+    #[test]
+    fn v2_files_carry_a_bound_header_and_round_trip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ks = v2_store(&tmp.path().join("keys"), 1, UUID);
+        let share = dealt_share(Some(origin()));
+        ks.create("frost-a", &share).unwrap();
+        ks.save_hosted("rutli-x", &HostedKey::generate(HostedSpec::EcP256, 3).unwrap()).unwrap();
+        let raw = std::fs::read(ks.dir().join("frost-a.json")).unwrap();
+        let h = crate::seal::header_of(&raw).expect("a v2 header");
+        assert_eq!((h.node, h.key_id.as_str(), h.kind.as_str(), h.cluster.as_str()), (1, "frost-a", "frost-share", UUID));
+        assert_eq!(h.digest, hex::encode(share.pkp_digest().unwrap()));
+        assert_eq!(ks.load("frost-a").unwrap().origin, Some(origin()));
+        assert_eq!(ks.load_hosted("rutli-x").unwrap().created_at, 3);
+        assert_eq!(crate::seal::header_of(&std::fs::read(ks.dir().join("rutli-x.json")).unwrap()).unwrap().kind, "hosted-key");
+    }
+
+    #[test]
+    fn a_v2_header_naming_another_key_node_cluster_kind_or_epoch_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("keys");
+        let ks = v2_store(&dir, 1, UUID);
+        ks.create("frost-a", &dealt_share(None)).unwrap();
+        let path = dir.join("frost-a.json");
+        let good = std::fs::read(&path).unwrap();
+        let reset = || std::fs::write(&path, &good).unwrap();
+
+        // The header is checked before anything is decrypted...
+        edit_header(&path, |h| h["key_id"] = "frost-b".into());
+        refused(ks.load("frost-a"), "holds key frost-b");
+        reset();
+        edit_header(&path, |h| h["node"] = 2.into());
+        refused(ks.load("frost-a"), "belongs to node 2");
+        reset();
+        edit_header(&path, |h| h["cluster"] = "00000000-0000-4000-8000-000000000000".into());
+        refused(ks.load("frost-a"), "another cluster");
+        reset();
+        edit_header(&path, |h| h["kind"] = "recipient".into());
+        refused(ks.load("frost-a"), "record where a frost-share or hosted-key is expected");
+        reset();
+        // A kind the store does hold passes the check and still fails the associated data.
+        edit_header(&path, |h| h["kind"] = "hosted-key".into());
+        refused(ks.load("frost-a"), "unseal failed");
+        reset();
+        // ...and every field is bound by the associated data: one the checks accept still fails.
+        edit_header(&path, |h| h["epoch"] = 7.into());
+        refused(ks.load("frost-a"), "unseal failed");
+        reset();
+        edit_header(&path, |h| h["digest"] = hex::encode([0u8; 32]).into());
+        refused(ks.load("frost-a"), "unseal failed");
+        reset();
+        assert!(ks.load("frost-a").is_ok());
+
+        // A store expecting another cluster, or run as another node, refuses the file as it is.
+        refused(v2_store(&dir, 1, "00000000-0000-4000-8000-000000000000").load("frost-a"), "another cluster");
+        let node2 = KeyStore::open_with_sealer(&dir, Some(v2_sealer(2, UUID, 2))).unwrap();
+        refused(node2.load("frost-a"), "belongs to node 1");
+        let no_uuid = KeyStore::open_with_sealer(
+            &dir,
+            Some(Arc::new(crate::seal::Sealer::from_master_secret(b"test master secret", 1))),
+        )
+        .unwrap();
+        refused(no_uuid.load("frost-a"), "keyfile.cluster_uuid is not set");
+    }
+
+    #[test]
+    fn a_key_file_copied_over_another_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("keys");
+        // v2: the header names the key.
+        let ks = v2_store(&dir, 1, UUID);
+        ks.create("frost-a", &dealt_share(None)).unwrap();
+        ks.create("frost-b", &dealt_share(None)).unwrap();
+        std::fs::copy(dir.join("frost-a.json"), dir.join("frost-b.json")).unwrap();
+        refused(ks.load("frost-b"), "holds key frost-a");
+        // A hosted key passed off as a share and vice versa.
+        ks.save_hosted("rutli-x", &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap()).unwrap();
+        std::fs::copy(dir.join("rutli-x.json"), dir.join("frost-a.json")).unwrap();
+        refused(ks.load("frost-a"), "holds key rutli-x");
+
+        // v1 written by this release: the key id inside the sealed plaintext names it.
+        let tmp1 = tempfile::tempdir().unwrap();
+        let ks1 = store(&tmp1, true);
+        ks1.create("frost-a", &dealt_share(None)).unwrap();
+        ks1.create("frost-b", &dealt_share(None)).unwrap();
+        std::fs::copy(ks1.dir().join("frost-a.json"), ks1.dir().join("frost-b.json")).unwrap();
+        refused(ks1.load("frost-b"), "holds key frost-a");
+    }
+
+    #[test]
+    fn a_share_of_another_node_is_refused_even_under_the_right_dek() {
+        // The legacy shared master gives every node its own DEK, so this needs a forged setup: a
+        // node-2 share sealed by node 1's sealer.
+        let tmp = tempfile::tempdir().unwrap();
+        let ks = v2_store(&tmp.path().join("keys"), 1, UUID);
+        let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&[5u8; 32], &[1, 2, 3], 2).unwrap();
+        let kp2 = frost::keys::KeyPackage::try_from(shares[1].clone()).unwrap();
+        let share = Share { key_package: kp2, public_key_package: pkp, origin: None, epoch: 0, key_id: String::new() };
+        ks.create("frost-a", &share).unwrap();
+        refused(ks.load("frost-a"), "another FROST identifier");
+    }
+
+    #[test]
+    fn v1_stays_readable_v2_is_opt_in_and_downgrade_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("keys");
+        // A v1 store (this release's default) next to a node that writes v2.
+        let v1 = KeyStore::open_with_sealer(&dir, Some(v2_sealer(1, UUID, 1))).unwrap();
+        v1.create("frost-a", &dealt_share(None)).unwrap();
+        v1.save_hosted("rutli-x", &HostedKey::generate(HostedSpec::Rsa2048, 1).unwrap()).unwrap();
+        let path = dir.join("frost-a.json");
+        assert_eq!(crate::seal::file_version(&std::fs::read(&path).unwrap()), Some(1), "v2 is opt-in");
+
+        let v2 = v2_store(&dir, 1, UUID);
+        assert!(v2.load("frost-a").is_ok(), "a v2 writer reads v1");
+        assert_eq!(v2.reseal_outdated().unwrap(), 2, "start-up migrates v1 files when writing v2");
+        assert_eq!(crate::seal::file_version(&std::fs::read(&path).unwrap()), Some(2));
+        assert!(v1.load("frost-a").is_ok(), "this release reads v2 even while writing v1");
+        assert_eq!(v2.reseal_outdated().unwrap(), 0, "idempotent");
+
+        // `keyfile downgrade`: back to v1, which a release that knows only v1 can open with the
+        // plain v1 unseal — then forward again.
+        for p in v2.key_file_paths().unwrap() {
+            v2.rewrite(&p, 1).unwrap();
+        }
+        let raw = std::fs::read(&path).unwrap();
+        assert_eq!(crate::seal::file_version(&raw), Some(1));
+        let plain = crate::seal::Sealer::from_master_secret(b"test master secret", 1).unseal(&raw).unwrap();
+        assert!(serde_json::from_slice::<Share>(&plain).is_ok());
+        for p in v2.key_file_paths().unwrap() {
+            v2.rewrite(&p, 2).unwrap();
+        }
+        assert!(v2.load("frost-a").is_ok() && v2.load_hosted("rutli-x").is_ok());
+
+        // accept_v1 off refuses a v1 file.
+        v1.save("frost-b", &dealt_share(None)).unwrap();
+        let strict = KeyStore::open_with_sealer(
+            &dir,
+            Some(Arc::new(crate::seal::Sealer::from_master_secret(b"test master secret", 1).with_binding(
+                crate::seal::KeyFileBinding { node: 1, cluster_uuid: Some(UUID.into()), write_version: 2, accept_v1: false },
+            ))),
+        )
+        .unwrap();
+        refused(strict.load("frost-b"), "accept_v1 is off");
+        assert!(strict.load("frost-a").is_ok());
+    }
+
+    #[test]
+    fn a_dek_rotation_reseals_everything_and_the_old_dek_is_then_not_needed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("keys");
+        let binding = |node| crate::seal::KeyFileBinding { node, cluster_uuid: Some(UUID.into()), write_version: 2, accept_v1: true };
+        let old = crate::seal::NodeSealBundle::random(1);
+        let ks_old = KeyStore::open_with_sealer(&dir, Some(Arc::new(old.sealer().with_binding(binding(1))))).unwrap();
+        ks_old.create("frost-a", &dealt_share(None)).unwrap();
+        ks_old.save_hosted("rutli-x", &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap()).unwrap();
+        // A v1 file under the old DEK too (written before v2 was switched on).
+        let v1_old = KeyStore::open_with_sealer(&dir, Some(Arc::new(old.sealer()))).unwrap();
+        v1_old.save("frost-b", &dealt_share(None)).unwrap();
+        ks_old.stage("frost-c", "dkg-1", &dealt_share(None)).unwrap();
+
+        let rotated = old.rotated();
+        assert_eq!(rotated.previous_count(), 1);
+        assert_ne!(rotated.dek_id(), old.dek_id());
+        let ks_rot = KeyStore::open_with_sealer(&dir, Some(Arc::new(rotated.sealer().with_binding(binding(1))))).unwrap();
+        for p in ks_rot.key_file_paths().unwrap() {
+            assert!(matches!(ks_rot.file_state(&p).unwrap(), Some((_, crate::seal::DekUse::Previous(0)))), "{p:?}");
+        }
+        assert_eq!(ks_rot.reseal_outdated().unwrap(), 4);
+        for p in ks_rot.key_file_paths().unwrap() {
+            assert_eq!(ks_rot.file_state(&p).unwrap(), Some((2, crate::seal::DekUse::Current)), "{p:?}");
+        }
+
+        // The old DEK dropped: everything still opens. The old bundle opens nothing.
+        let final_bundle = rotated.without_previous();
+        let ks_new = KeyStore::open_with_sealer(&dir, Some(Arc::new(final_bundle.sealer().with_binding(binding(1))))).unwrap();
+        assert!(ks_new.load("frost-a").is_ok() && ks_new.load("frost-b").is_ok());
+        assert!(ks_new.load_hosted("rutli-x").is_ok() && ks_new.load_staged("frost-c", "dkg-1").is_ok());
+        refused(ks_old.load("frost-a"), "does not hold");
     }
 
     #[test]
