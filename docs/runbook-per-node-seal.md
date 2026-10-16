@@ -21,9 +21,11 @@ the cluster while preparing it. Commands marked `# [MUTATES]` change the cluster
 
 ## Prerequisites
 
-- All three cosigners **and** the soak participant's driver run **0.4.0-rc.2 or later** (per-peer
-  TLS names, `share_seal.secret_file`, per-endpoint `tls-name` in the driver), on the legacy
-  topology with `deploy/soak/cosigner-values.yaml` (`topology: legacy`).
+- **Step zero: [runbook-rc2-soak-rollout.md](runbook-rc2-soak-rollout.md) is done** — all three
+  cosigners **and** the soak participant's driver run **0.4.0-rc.2 or later** (per-peer TLS names,
+  `share_seal.secret_file`, per-endpoint `tls-name` in the driver), still on the legacy topology
+  with `deploy/soak/cosigner-values.yaml` (`topology: legacy`), and the exec backup objects are
+  deleted (its step 6).
 - `rutli-cosigner` 0.4.0-rc.2+ built on the operator workstation (`cargo build --release -p
   rutli-cosigner` in `frost/`), `kubectl` access to the soak cluster, `helm` 3, `openssl`, `jq`.
 - The operator client config used for `verify-key` in B4 (`client-operator.json`, operator cert),
@@ -174,6 +176,11 @@ helm template rutli deploy/helm/rutli-cosigner -n rutli \
 scripts/check-deploy-policy.sh $D/pernode.render.yaml                       # deploy policy: OK
 yq -N 'select(.kind == "StatefulSet") | .metadata.name + " -> " + (.spec.template.spec.volumes[] | select(.name == "data") | .persistentVolumeClaim.claimName)' $D/pernode.render.yaml
 #   rutli-cosigner-n1 -> data-rutli-cosigner-0   (n2 -> -1, n3 -> -2)
+# The cluster id each node recorded in data_dir/cluster-id must not change: a clusterId pin in the
+# exported values must reappear in every perNode config (unset: both topologies derive it from the
+# same ca.crt). Compare with the live legacy ConfigMap:
+yq -N 'select(.kind == "ConfigMap" and .metadata.name == "rutli-cosigner-config") | .data["cosigner-1.json"]' $D/pernode.render.yaml | jq -r '.cluster_id // "unset (derived)"'
+kubectl -n rutli get configmap rutli-cosigner-config -o jsonpath='{.data.cosigner-1\.json}' | jq -r '.cluster_id // "unset (derived)"'
 helm -n rutli diff upgrade rutli deploy/helm/rutli-cosigner \
   -f $D/rutli-values.exported.yaml -f deploy/soak/cosigner-values-pernode.yaml 2>/dev/null || true   # if the helm-diff plugin is installed
 ```
@@ -247,7 +254,7 @@ need the master back from escrow.
 
 Only after step 6 passed (ideally after a day of clean soak-check):
 
-1. **Exec backup** (if the rc.2 rollout has not removed it already). The repo no longer ships it,
+1. **Exec backup** (if the rc.2 rollout's step 6 has not removed it already). The repo no longer ships it,
    but the live objects stay until deleted:
    ```sh
    kubectl -n rutli delete cronjob rutli-cosigner-backup                    # [MUTATES]
