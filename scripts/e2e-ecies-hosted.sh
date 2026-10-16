@@ -147,7 +147,11 @@ canton {
           backend = "frost"
           audit-logging = true
           frost = {
-            endpoints = ["127.0.0.1:$((BASE_PORT + 1))", "127.0.0.1:$((BASE_PORT + 2))", "127.0.0.1:$((BASE_PORT + 3))"]
+            endpoints = [
+              { url = "127.0.0.1:$((BASE_PORT + 1))", tls-name = "cosigner1" },
+              { url = "127.0.0.1:$((BASE_PORT + 2))", tls-name = "cosigner2" },
+              { url = "127.0.0.1:$((BASE_PORT + 3))", tls-name = "cosigner3" }
+            ]
             hosted-keys = true
             delegate = "none"
             key-prefix = "$PREFIX"
@@ -155,7 +159,6 @@ canton {
               ca-cert = "$WORK/certs/ca.crt"
               cert    = "$WORK/certs/driver.crt"
               key     = "$WORK/certs/driver.key"
-              domain  = "rutli-cosigner"
             }
           }
         }

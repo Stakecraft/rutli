@@ -30,12 +30,34 @@ class RutliConfigParsingSpec extends AnyWordSpec with Matchers {
       c.frost.map(_.keyPrefix) shouldBe Some("")
     }
 
+    "read endpoints with a per-endpoint tls-name, a bare string still meaning no name" in {
+      val c = parse("""
+        backend = "frost"
+        frost = {
+          endpoints = [
+            { url = "rutli-node-1.rutli.svc:9101", tls-name = "cosigner1" },
+            { url = "rutli-node-2.rutli.svc:9101", tls-name = "cosigner2" },
+            "legacy-host:9101"
+          ]
+          endpoint = "rutli-node-1.rutli.svc:9101"
+        }
+      """)
+      c.frost.map(_.allEndpoints) shouldBe Some(
+        List(
+          FrostEndpoint("rutli-node-1.rutli.svc:9101", Some("cosigner1")),
+          FrostEndpoint("rutli-node-2.rutli.svc:9101", Some("cosigner2")),
+          FrostEndpoint("legacy-host:9101", None),
+        )
+      )
+    }
+
     "read key-prefix" in {
       val c = parse("""
         backend = "frost"
         frost = { endpoints = ["c1:9101", "c2:9102"], key-prefix = "soak1-" }
       """)
       c.frost.map(_.keyPrefix) shouldBe Some("soak1-")
+      c.frost.map(_.allEndpoints.map(_.url)) shouldBe Some(List("c1:9101", "c2:9102"))
     }
   }
 }

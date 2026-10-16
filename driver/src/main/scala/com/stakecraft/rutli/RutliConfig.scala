@@ -71,7 +71,11 @@ final case class SigningJournalConfig(
   * @param endpoint   Single cosigner Signer endpoint (e.g. "localhost:9101"). Convenience for the
   *                   common one-target config; merged with `endpoints`.
   * @param endpoints  The full cosigner roster for failover (any live node leads a request). Prefer
-  *                   this in production so a downed cosigner doesn't block signing.
+  *                   this in production so a downed cosigner doesn't block signing. Each entry is
+  *                   either `{ url = "host:9101", tls-name = "cosigner1" }` — the cosigner must then
+  *                   present a certificate for exactly that name — or a bare `"host:9101"` string,
+  *                   verified under `tls.domain` as before (deprecated: one shared name lets any
+  *                   cosigner certificate answer for any endpoint, audit M3).
   * @param delegate   Backend for non-FROST keys: "hsm" | "software" | "none". Defaults to "hsm".
   *                   Use "none" together with `hosted-keys = true` for a deployment with no HSM
   *                   and no local key state at all.
@@ -94,15 +98,32 @@ final case class SigningJournalConfig(
   */
 final case class FrostConfig(
     endpoint: Option[String] = None,
-    endpoints: List[String] = Nil,
+    endpoints: List[FrostEndpoint] = Nil,
     delegate: String = "hsm",
     tls: Option[FrostTlsConfig] = None,
     hostedKeys: Boolean = false,
     keyPrefix: String = "",
 ) {
 
-  /** All configured endpoints, `endpoints` first then the single `endpoint`, de-duplicated. */
-  def allEndpoints: List[String] = (endpoints ++ endpoint.toList).distinct
+  /** All configured endpoints, `endpoints` first then the single `endpoint`, de-duplicated by url
+    * (the first entry for a url wins, so a `tls-name` on it is kept). */
+  def allEndpoints: List[FrostEndpoint] =
+    (endpoints ++ endpoint.map(FrostEndpoint(_)).toList).distinctBy(_.url)
+}
+
+/** One cosigner Signer endpoint.
+  *
+  * @param url      gRPC target, e.g. `rutli-node-1.rutli.svc:9101`.
+  * @param tlsName  The TLS server name (certificate SAN) this cosigner must present, normally
+  *                 `cosigner<id>`. Per endpoint, so a certificate issued to one cosigner cannot
+  *                 answer at another's address. Absent: `tls.domain`, else the url's host.
+  */
+final case class FrostEndpoint(url: String, tlsName: Option[String] = None)
+
+object FrostEndpoint {
+
+  /** Lets existing configs and code keep writing an endpoint as a bare string. */
+  implicit def fromUrl(url: String): FrostEndpoint = FrostEndpoint(url)
 }
 
 /** Mutual-TLS material for the driver→cluster gRPC channel. The driver presents a client cert
@@ -113,7 +134,9 @@ final case class FrostConfig(
   *                driver refuses to start ([[com.stakecraft.rutli.backend.FrostTrustFile]]).
   * @param cert    PEM client cert this driver presents.
   * @param key     PEM private key for `cert` (PKCS#8).
-  * @param domain  Expected server SAN/authority (overrides the endpoint host for cert validation).
+  * @param domain  Server name to verify for an endpoint that sets no `tls-name` (overrides the
+  *                endpoint host for cert validation). Deprecated for production: give every
+  *                endpoint its own `tls-name` instead.
   * @param allowExpiredCa Accept an expired or not-yet-valid CA in `caCert` (never a non-CA).
   *                Emergency use only: a rotation away from a CA that has already expired
   *                (docs/ca-rotation.md). Remove it afterwards.
