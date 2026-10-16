@@ -264,6 +264,130 @@ public final class PeerGrpc {
     return getRefreshPart3Method;
   }
 
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyPart1Request,
+      com.stakecraft.rutli.grpc.CeremonyPart1Reply> getCeremonyPart1Method;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "CeremonyPart1",
+      requestType = com.stakecraft.rutli.grpc.CeremonyPart1Request.class,
+      responseType = com.stakecraft.rutli.grpc.CeremonyPart1Reply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyPart1Request,
+      com.stakecraft.rutli.grpc.CeremonyPart1Reply> getCeremonyPart1Method() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyPart1Request, com.stakecraft.rutli.grpc.CeremonyPart1Reply> getCeremonyPart1Method;
+    if ((getCeremonyPart1Method = PeerGrpc.getCeremonyPart1Method) == null) {
+      synchronized (PeerGrpc.class) {
+        if ((getCeremonyPart1Method = PeerGrpc.getCeremonyPart1Method) == null) {
+          PeerGrpc.getCeremonyPart1Method = getCeremonyPart1Method =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.CeremonyPart1Request, com.stakecraft.rutli.grpc.CeremonyPart1Reply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "CeremonyPart1"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.CeremonyPart1Request.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.CeremonyPart1Reply.getDefaultInstance()))
+              .setSchemaDescriptor(new PeerMethodDescriptorSupplier("CeremonyPart1"))
+              .build();
+        }
+      }
+    }
+    return getCeremonyPart1Method;
+  }
+
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyPart2Request,
+      com.stakecraft.rutli.grpc.CeremonyPart2Reply> getCeremonyPart2Method;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "CeremonyPart2",
+      requestType = com.stakecraft.rutli.grpc.CeremonyPart2Request.class,
+      responseType = com.stakecraft.rutli.grpc.CeremonyPart2Reply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyPart2Request,
+      com.stakecraft.rutli.grpc.CeremonyPart2Reply> getCeremonyPart2Method() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyPart2Request, com.stakecraft.rutli.grpc.CeremonyPart2Reply> getCeremonyPart2Method;
+    if ((getCeremonyPart2Method = PeerGrpc.getCeremonyPart2Method) == null) {
+      synchronized (PeerGrpc.class) {
+        if ((getCeremonyPart2Method = PeerGrpc.getCeremonyPart2Method) == null) {
+          PeerGrpc.getCeremonyPart2Method = getCeremonyPart2Method =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.CeremonyPart2Request, com.stakecraft.rutli.grpc.CeremonyPart2Reply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "CeremonyPart2"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.CeremonyPart2Request.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.CeremonyPart2Reply.getDefaultInstance()))
+              .setSchemaDescriptor(new PeerMethodDescriptorSupplier("CeremonyPart2"))
+              .build();
+        }
+      }
+    }
+    return getCeremonyPart2Method;
+  }
+
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyDeliverRequest,
+      com.stakecraft.rutli.grpc.CeremonyDeliverReply> getCeremonyDeliverMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "CeremonyDeliver",
+      requestType = com.stakecraft.rutli.grpc.CeremonyDeliverRequest.class,
+      responseType = com.stakecraft.rutli.grpc.CeremonyDeliverReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyDeliverRequest,
+      com.stakecraft.rutli.grpc.CeremonyDeliverReply> getCeremonyDeliverMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyDeliverRequest, com.stakecraft.rutli.grpc.CeremonyDeliverReply> getCeremonyDeliverMethod;
+    if ((getCeremonyDeliverMethod = PeerGrpc.getCeremonyDeliverMethod) == null) {
+      synchronized (PeerGrpc.class) {
+        if ((getCeremonyDeliverMethod = PeerGrpc.getCeremonyDeliverMethod) == null) {
+          PeerGrpc.getCeremonyDeliverMethod = getCeremonyDeliverMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.CeremonyDeliverRequest, com.stakecraft.rutli.grpc.CeremonyDeliverReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "CeremonyDeliver"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.CeremonyDeliverRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.CeremonyDeliverReply.getDefaultInstance()))
+              .setSchemaDescriptor(new PeerMethodDescriptorSupplier("CeremonyDeliver"))
+              .build();
+        }
+      }
+    }
+    return getCeremonyDeliverMethod;
+  }
+
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyPart3Request,
+      com.stakecraft.rutli.grpc.CeremonyPart3Reply> getCeremonyPart3Method;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "CeremonyPart3",
+      requestType = com.stakecraft.rutli.grpc.CeremonyPart3Request.class,
+      responseType = com.stakecraft.rutli.grpc.CeremonyPart3Reply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyPart3Request,
+      com.stakecraft.rutli.grpc.CeremonyPart3Reply> getCeremonyPart3Method() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.CeremonyPart3Request, com.stakecraft.rutli.grpc.CeremonyPart3Reply> getCeremonyPart3Method;
+    if ((getCeremonyPart3Method = PeerGrpc.getCeremonyPart3Method) == null) {
+      synchronized (PeerGrpc.class) {
+        if ((getCeremonyPart3Method = PeerGrpc.getCeremonyPart3Method) == null) {
+          PeerGrpc.getCeremonyPart3Method = getCeremonyPart3Method =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.CeremonyPart3Request, com.stakecraft.rutli.grpc.CeremonyPart3Reply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "CeremonyPart3"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.CeremonyPart3Request.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.CeremonyPart3Reply.getDefaultInstance()))
+              .setSchemaDescriptor(new PeerMethodDescriptorSupplier("CeremonyPart3"))
+              .build();
+        }
+      }
+    }
+    return getCeremonyPart3Method;
+  }
+
   private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.AbortSignRequest,
       com.stakecraft.rutli.grpc.AbortSignReply> getAbortSignMethod;
 
@@ -718,6 +842,10 @@ public final class PeerGrpc {
     }
 
     /**
+     * <pre>
+     * Ceremony protocol 1 (leader-relayed round 2 — audit C1). Retained ONLY so that a node of this
+     * release refuses an older leader loudly: every one of these answers FAILED_PRECONDITION.
+     * </pre>
      */
     default void dkgPart1(com.stakecraft.rutli.grpc.DkgPart1Request request,
         io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DkgPart1Reply> responseObserver) {
@@ -757,6 +885,45 @@ public final class PeerGrpc {
     default void refreshPart3(com.stakecraft.rutli.grpc.DkgPart3Request request,
         io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DkgPart3Reply> responseObserver) {
       io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getRefreshPart3Method(), responseObserver);
+    }
+
+    /**
+     * <pre>
+     * Ceremony protocol 2 (DKG and refresh share one path). The leader coordinates only: it never
+     * sees a round-2 package. Part 2 makes each node deliver its round-2 packages DIRECTLY to their
+     * recipients (CeremonyDeliver, node to node over mTLS), and every delivery carries the sender's
+     * digest of the round-1 map, so a leader that shows nodes different maps makes all abort. Part 3
+     * stages the new share and records a yes-vote; CeremonyCommit then resolves (two-phase commit).
+     * </pre>
+     */
+    default void ceremonyPart1(com.stakecraft.rutli.grpc.CeremonyPart1Request request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyPart1Reply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getCeremonyPart1Method(), responseObserver);
+    }
+
+    /**
+     */
+    default void ceremonyPart2(com.stakecraft.rutli.grpc.CeremonyPart2Request request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyPart2Reply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getCeremonyPart2Method(), responseObserver);
+    }
+
+    /**
+     * <pre>
+     * Sender -&gt; recipient. The recipient takes the sender from the caller's certificate CN (exact
+     * roster mapping) and refuses a `from` that differs, or a `to` that is not itself.
+     * </pre>
+     */
+    default void ceremonyDeliver(com.stakecraft.rutli.grpc.CeremonyDeliverRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyDeliverReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getCeremonyDeliverMethod(), responseObserver);
+    }
+
+    /**
+     */
+    default void ceremonyPart3(com.stakecraft.rutli.grpc.CeremonyPart3Request request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyPart3Reply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getCeremonyPart3Method(), responseObserver);
     }
 
     /**
@@ -942,6 +1109,10 @@ public final class PeerGrpc {
     }
 
     /**
+     * <pre>
+     * Ceremony protocol 1 (leader-relayed round 2 — audit C1). Retained ONLY so that a node of this
+     * release refuses an older leader loudly: every one of these answers FAILED_PRECONDITION.
+     * </pre>
      */
     public void dkgPart1(com.stakecraft.rutli.grpc.DkgPart1Request request,
         io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DkgPart1Reply> responseObserver) {
@@ -987,6 +1158,49 @@ public final class PeerGrpc {
         io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DkgPart3Reply> responseObserver) {
       io.grpc.stub.ClientCalls.asyncUnaryCall(
           getChannel().newCall(getRefreshPart3Method(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     * <pre>
+     * Ceremony protocol 2 (DKG and refresh share one path). The leader coordinates only: it never
+     * sees a round-2 package. Part 2 makes each node deliver its round-2 packages DIRECTLY to their
+     * recipients (CeremonyDeliver, node to node over mTLS), and every delivery carries the sender's
+     * digest of the round-1 map, so a leader that shows nodes different maps makes all abort. Part 3
+     * stages the new share and records a yes-vote; CeremonyCommit then resolves (two-phase commit).
+     * </pre>
+     */
+    public void ceremonyPart1(com.stakecraft.rutli.grpc.CeremonyPart1Request request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyPart1Reply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getCeremonyPart1Method(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     */
+    public void ceremonyPart2(com.stakecraft.rutli.grpc.CeremonyPart2Request request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyPart2Reply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getCeremonyPart2Method(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     * <pre>
+     * Sender -&gt; recipient. The recipient takes the sender from the caller's certificate CN (exact
+     * roster mapping) and refuses a `from` that differs, or a `to` that is not itself.
+     * </pre>
+     */
+    public void ceremonyDeliver(com.stakecraft.rutli.grpc.CeremonyDeliverRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyDeliverReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getCeremonyDeliverMethod(), getCallOptions()), request, responseObserver);
+    }
+
+    /**
+     */
+    public void ceremonyPart3(com.stakecraft.rutli.grpc.CeremonyPart3Request request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyPart3Reply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getCeremonyPart3Method(), getCallOptions()), request, responseObserver);
     }
 
     /**
@@ -1167,6 +1381,10 @@ public final class PeerGrpc {
     }
 
     /**
+     * <pre>
+     * Ceremony protocol 1 (leader-relayed round 2 — audit C1). Retained ONLY so that a node of this
+     * release refuses an older leader loudly: every one of these answers FAILED_PRECONDITION.
+     * </pre>
      */
     public com.stakecraft.rutli.grpc.DkgPart1Reply dkgPart1(com.stakecraft.rutli.grpc.DkgPart1Request request) throws io.grpc.StatusException {
       return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
@@ -1206,6 +1424,45 @@ public final class PeerGrpc {
     public com.stakecraft.rutli.grpc.DkgPart3Reply refreshPart3(com.stakecraft.rutli.grpc.DkgPart3Request request) throws io.grpc.StatusException {
       return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
           getChannel(), getRefreshPart3Method(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * Ceremony protocol 2 (DKG and refresh share one path). The leader coordinates only: it never
+     * sees a round-2 package. Part 2 makes each node deliver its round-2 packages DIRECTLY to their
+     * recipients (CeremonyDeliver, node to node over mTLS), and every delivery carries the sender's
+     * digest of the round-1 map, so a leader that shows nodes different maps makes all abort. Part 3
+     * stages the new share and records a yes-vote; CeremonyCommit then resolves (two-phase commit).
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.CeremonyPart1Reply ceremonyPart1(com.stakecraft.rutli.grpc.CeremonyPart1Request request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getCeremonyPart1Method(), getCallOptions(), request);
+    }
+
+    /**
+     */
+    public com.stakecraft.rutli.grpc.CeremonyPart2Reply ceremonyPart2(com.stakecraft.rutli.grpc.CeremonyPart2Request request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getCeremonyPart2Method(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * Sender -&gt; recipient. The recipient takes the sender from the caller's certificate CN (exact
+     * roster mapping) and refuses a `from` that differs, or a `to` that is not itself.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.CeremonyDeliverReply ceremonyDeliver(com.stakecraft.rutli.grpc.CeremonyDeliverRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getCeremonyDeliverMethod(), getCallOptions(), request);
+    }
+
+    /**
+     */
+    public com.stakecraft.rutli.grpc.CeremonyPart3Reply ceremonyPart3(com.stakecraft.rutli.grpc.CeremonyPart3Request request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getCeremonyPart3Method(), getCallOptions(), request);
     }
 
     /**
@@ -1374,6 +1631,10 @@ public final class PeerGrpc {
     }
 
     /**
+     * <pre>
+     * Ceremony protocol 1 (leader-relayed round 2 — audit C1). Retained ONLY so that a node of this
+     * release refuses an older leader loudly: every one of these answers FAILED_PRECONDITION.
+     * </pre>
      */
     public com.stakecraft.rutli.grpc.DkgPart1Reply dkgPart1(com.stakecraft.rutli.grpc.DkgPart1Request request) {
       return io.grpc.stub.ClientCalls.blockingUnaryCall(
@@ -1413,6 +1674,45 @@ public final class PeerGrpc {
     public com.stakecraft.rutli.grpc.DkgPart3Reply refreshPart3(com.stakecraft.rutli.grpc.DkgPart3Request request) {
       return io.grpc.stub.ClientCalls.blockingUnaryCall(
           getChannel(), getRefreshPart3Method(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * Ceremony protocol 2 (DKG and refresh share one path). The leader coordinates only: it never
+     * sees a round-2 package. Part 2 makes each node deliver its round-2 packages DIRECTLY to their
+     * recipients (CeremonyDeliver, node to node over mTLS), and every delivery carries the sender's
+     * digest of the round-1 map, so a leader that shows nodes different maps makes all abort. Part 3
+     * stages the new share and records a yes-vote; CeremonyCommit then resolves (two-phase commit).
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.CeremonyPart1Reply ceremonyPart1(com.stakecraft.rutli.grpc.CeremonyPart1Request request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getCeremonyPart1Method(), getCallOptions(), request);
+    }
+
+    /**
+     */
+    public com.stakecraft.rutli.grpc.CeremonyPart2Reply ceremonyPart2(com.stakecraft.rutli.grpc.CeremonyPart2Request request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getCeremonyPart2Method(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * Sender -&gt; recipient. The recipient takes the sender from the caller's certificate CN (exact
+     * roster mapping) and refuses a `from` that differs, or a `to` that is not itself.
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.CeremonyDeliverReply ceremonyDeliver(com.stakecraft.rutli.grpc.CeremonyDeliverRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getCeremonyDeliverMethod(), getCallOptions(), request);
+    }
+
+    /**
+     */
+    public com.stakecraft.rutli.grpc.CeremonyPart3Reply ceremonyPart3(com.stakecraft.rutli.grpc.CeremonyPart3Request request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getCeremonyPart3Method(), getCallOptions(), request);
     }
 
     /**
@@ -1583,6 +1883,10 @@ public final class PeerGrpc {
     }
 
     /**
+     * <pre>
+     * Ceremony protocol 1 (leader-relayed round 2 — audit C1). Retained ONLY so that a node of this
+     * release refuses an older leader loudly: every one of these answers FAILED_PRECONDITION.
+     * </pre>
      */
     public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.DkgPart1Reply> dkgPart1(
         com.stakecraft.rutli.grpc.DkgPart1Request request) {
@@ -1628,6 +1932,49 @@ public final class PeerGrpc {
         com.stakecraft.rutli.grpc.DkgPart3Request request) {
       return io.grpc.stub.ClientCalls.futureUnaryCall(
           getChannel().newCall(getRefreshPart3Method(), getCallOptions()), request);
+    }
+
+    /**
+     * <pre>
+     * Ceremony protocol 2 (DKG and refresh share one path). The leader coordinates only: it never
+     * sees a round-2 package. Part 2 makes each node deliver its round-2 packages DIRECTLY to their
+     * recipients (CeremonyDeliver, node to node over mTLS), and every delivery carries the sender's
+     * digest of the round-1 map, so a leader that shows nodes different maps makes all abort. Part 3
+     * stages the new share and records a yes-vote; CeremonyCommit then resolves (two-phase commit).
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.CeremonyPart1Reply> ceremonyPart1(
+        com.stakecraft.rutli.grpc.CeremonyPart1Request request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getCeremonyPart1Method(), getCallOptions()), request);
+    }
+
+    /**
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.CeremonyPart2Reply> ceremonyPart2(
+        com.stakecraft.rutli.grpc.CeremonyPart2Request request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getCeremonyPart2Method(), getCallOptions()), request);
+    }
+
+    /**
+     * <pre>
+     * Sender -&gt; recipient. The recipient takes the sender from the caller's certificate CN (exact
+     * roster mapping) and refuses a `from` that differs, or a `to` that is not itself.
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.CeremonyDeliverReply> ceremonyDeliver(
+        com.stakecraft.rutli.grpc.CeremonyDeliverRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getCeremonyDeliverMethod(), getCallOptions()), request);
+    }
+
+    /**
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.CeremonyPart3Reply> ceremonyPart3(
+        com.stakecraft.rutli.grpc.CeremonyPart3Request request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getCeremonyPart3Method(), getCallOptions()), request);
     }
 
     /**
@@ -1781,18 +2128,22 @@ public final class PeerGrpc {
   private static final int METHODID_REFRESH_PART1 = 5;
   private static final int METHODID_REFRESH_PART2 = 6;
   private static final int METHODID_REFRESH_PART3 = 7;
-  private static final int METHODID_ABORT_SIGN = 8;
-  private static final int METHODID_CEREMONY_FENCE = 9;
-  private static final int METHODID_CEREMONY_RELEASE = 10;
-  private static final int METHODID_REPLICATE_KEY = 11;
-  private static final int METHODID_FETCH_KEY = 12;
-  private static final int METHODID_LIST_KEYS = 13;
-  private static final int METHODID_PURGE_KEY = 14;
-  private static final int METHODID_NODE_INFO = 15;
-  private static final int METHODID_KEY_EPOCH = 16;
-  private static final int METHODID_CEREMONY_COMMIT = 17;
-  private static final int METHODID_CEREMONY_STATUS = 18;
-  private static final int METHODID_CEREMONY_ABORT = 19;
+  private static final int METHODID_CEREMONY_PART1 = 8;
+  private static final int METHODID_CEREMONY_PART2 = 9;
+  private static final int METHODID_CEREMONY_DELIVER = 10;
+  private static final int METHODID_CEREMONY_PART3 = 11;
+  private static final int METHODID_ABORT_SIGN = 12;
+  private static final int METHODID_CEREMONY_FENCE = 13;
+  private static final int METHODID_CEREMONY_RELEASE = 14;
+  private static final int METHODID_REPLICATE_KEY = 15;
+  private static final int METHODID_FETCH_KEY = 16;
+  private static final int METHODID_LIST_KEYS = 17;
+  private static final int METHODID_PURGE_KEY = 18;
+  private static final int METHODID_NODE_INFO = 19;
+  private static final int METHODID_KEY_EPOCH = 20;
+  private static final int METHODID_CEREMONY_COMMIT = 21;
+  private static final int METHODID_CEREMONY_STATUS = 22;
+  private static final int METHODID_CEREMONY_ABORT = 23;
 
   private static final class MethodHandlers<Req, Resp> implements
       io.grpc.stub.ServerCalls.UnaryMethod<Req, Resp>,
@@ -1842,6 +2193,22 @@ public final class PeerGrpc {
         case METHODID_REFRESH_PART3:
           serviceImpl.refreshPart3((com.stakecraft.rutli.grpc.DkgPart3Request) request,
               (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.DkgPart3Reply>) responseObserver);
+          break;
+        case METHODID_CEREMONY_PART1:
+          serviceImpl.ceremonyPart1((com.stakecraft.rutli.grpc.CeremonyPart1Request) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyPart1Reply>) responseObserver);
+          break;
+        case METHODID_CEREMONY_PART2:
+          serviceImpl.ceremonyPart2((com.stakecraft.rutli.grpc.CeremonyPart2Request) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyPart2Reply>) responseObserver);
+          break;
+        case METHODID_CEREMONY_DELIVER:
+          serviceImpl.ceremonyDeliver((com.stakecraft.rutli.grpc.CeremonyDeliverRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyDeliverReply>) responseObserver);
+          break;
+        case METHODID_CEREMONY_PART3:
+          serviceImpl.ceremonyPart3((com.stakecraft.rutli.grpc.CeremonyPart3Request) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.CeremonyPart3Reply>) responseObserver);
           break;
         case METHODID_ABORT_SIGN:
           serviceImpl.abortSign((com.stakecraft.rutli.grpc.AbortSignRequest) request,
@@ -1965,6 +2332,34 @@ public final class PeerGrpc {
               com.stakecraft.rutli.grpc.DkgPart3Request,
               com.stakecraft.rutli.grpc.DkgPart3Reply>(
                 service, METHODID_REFRESH_PART3)))
+        .addMethod(
+          getCeremonyPart1Method(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.CeremonyPart1Request,
+              com.stakecraft.rutli.grpc.CeremonyPart1Reply>(
+                service, METHODID_CEREMONY_PART1)))
+        .addMethod(
+          getCeremonyPart2Method(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.CeremonyPart2Request,
+              com.stakecraft.rutli.grpc.CeremonyPart2Reply>(
+                service, METHODID_CEREMONY_PART2)))
+        .addMethod(
+          getCeremonyDeliverMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.CeremonyDeliverRequest,
+              com.stakecraft.rutli.grpc.CeremonyDeliverReply>(
+                service, METHODID_CEREMONY_DELIVER)))
+        .addMethod(
+          getCeremonyPart3Method(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.CeremonyPart3Request,
+              com.stakecraft.rutli.grpc.CeremonyPart3Reply>(
+                service, METHODID_CEREMONY_PART3)))
         .addMethod(
           getAbortSignMethod(),
           io.grpc.stub.ServerCalls.asyncUnaryCall(
@@ -2105,6 +2500,10 @@ public final class PeerGrpc {
               .addMethod(getRefreshPart1Method())
               .addMethod(getRefreshPart2Method())
               .addMethod(getRefreshPart3Method())
+              .addMethod(getCeremonyPart1Method())
+              .addMethod(getCeremonyPart2Method())
+              .addMethod(getCeremonyDeliverMethod())
+              .addMethod(getCeremonyPart3Method())
               .addMethod(getAbortSignMethod())
               .addMethod(getCeremonyFenceMethod())
               .addMethod(getCeremonyReleaseMethod())

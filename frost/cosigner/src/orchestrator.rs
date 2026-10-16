@@ -8,7 +8,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use frost_ed25519 as frost;
-use frost::keys::dkg::round2;
 use frost::round1::SigningCommitments;
 use frost::round2::SignatureShare;
 use frost::Identifier;
@@ -47,36 +46,82 @@ async fn run_dkg_attached(peers: &Peers, key_id: &str) -> Result<[u8; 32]> {
     if crate::share_delivery::is_reserved_for_import(key_id) {
         return Err(DaemonError::ReservedKeyId(key_id.to_string()));
     }
+    require_ceremony_protocol(peers).await?;
     let views = key_views(peers, key_id).await?;
     if let Some(existing) = dkg_preflight(peers, key_id, &views).await? {
         return Ok(existing);
     }
     let dkg_id = new_id("dkg");
     fence_all(peers, &dkg_id, key_id, CeremonyKind::Dkg, None).await?;
-    let staged = dkg_stage(peers, &dkg_id, key_id).await;
+    let staged = ceremony_stage(peers, &dkg_id, key_id, CeremonyKind::Dkg).await;
     finish_ceremony(peers, &dkg_id, key_id, staged).await
 }
 
-/// Parts 1–3 of a DKG: every node ends with a staged share and a STAGED vote, or the error.
-async fn dkg_stage(peers: &Peers, dkg_id: &str, key_id: &str) -> Result<[u8; 32]> {
-    // Part 1: every peer commits and broadcasts.
+/// Parts 1–3 of a DKG or refresh (ceremony protocol 2): every node ends with a staged share and a
+/// STAGED vote, or the error. The leader handles only public values — round-1 packages, digests,
+/// the staged outcome; round-2 packages go node to node ([`crate::ceremony::part2_and_deliver`]).
+async fn ceremony_stage(peers: &Peers, ceremony_id: &str, key_id: &str, kind: CeremonyKind) -> Result<[u8; 32]> {
+    let mut roster =
+        peers.iter().map(|p| crate::hosted::identifier_index(p.identifier())).collect::<Result<Vec<_>>>()?;
+    roster.sort_unstable();
+    // Part 1: every node commits; the leader collects the (public) round-1 packages.
     let mut round1_map = BTreeMap::new();
     for p in peers {
-        round1_map.insert(p.identifier(), p.dkg_part1(dkg_id, key_id).await?);
+        round1_map.insert(p.identifier(), p.ceremony_part1(ceremony_id, key_id, kind, &roster).await?);
     }
-    // Part 2: every peer processes the full round-1 set → per-recipient round-2 packages.
-    let mut outbox: BTreeMap<Identifier, BTreeMap<Identifier, round2::Package>> = BTreeMap::new();
+    // Part 2: every node checks the map, then delivers its round-2 packages to their recipients
+    // itself. The leader learns only each node's digest of the map. Equal digests are checked here
+    // for an early, clear failure; the check that matters runs on every node in part 3.
+    let mut digest: Option<[u8; 32]> = None;
     for p in peers {
-        outbox.insert(p.identifier(), p.dkg_part2(dkg_id, &round1_map).await?);
+        let me = crate::hosted::identifier_index(p.identifier())?;
+        let out = p.ceremony_part2(ceremony_id, &round1_map).await?;
+        let expected: Vec<u16> = roster.iter().copied().filter(|&id| id != me).collect();
+        if out.delivered != expected {
+            return Err(DaemonError::Disagreement(format!(
+                "cosigner {me} delivered round 2 to {:?}, expected {expected:?}",
+                out.delivered
+            )));
+        }
+        agree(&mut digest, out.round1_digest, "nodes computed different round-1 digests")?;
     }
-    // Part 3: route each round-2 package to its recipient; each stages and votes.
-    let mut group_key: Option<[u8; 32]> = None;
+    let digest = digest.ok_or_else(|| DaemonError::Config("no peers configured for the ceremony".into()))?;
+    // Part 3: each node checks every delivery against its own digest, stages and votes yes.
+    let mut outcome: Option<crate::node::StagedOutcome> = None;
     for p in peers {
-        let inbox = inbox_for(&outbox, p.identifier())?;
-        let gk = p.dkg_part3(dkg_id, &round1_map, &inbox).await?;
-        agree(&mut group_key, gk, "peers derived different group keys")?;
+        let staged = p.ceremony_part3(ceremony_id, &digest).await?;
+        match outcome {
+            None => outcome = Some(staged),
+            Some(prev) if prev != staged => {
+                return Err(DaemonError::Disagreement(format!(
+                    "nodes staged different outcomes for {key_id} (epoch {} vs {}) — aborting",
+                    prev.new_epoch, staged.new_epoch
+                )))
+            }
+            _ => {}
+        }
     }
-    group_key.ok_or_else(|| DaemonError::Config("no peers configured for DKG".into()))
+    outcome.map(|o| o.group_key).ok_or_else(|| DaemonError::Config("no peers configured for the ceremony".into()))
+}
+
+/// Refuse to start a ceremony unless every roster node speaks ceremony protocol 2 — so a cluster in
+/// the middle of a rolling upgrade refuses DKG/refresh loudly instead of falling back to relaying
+/// secret shares through the leader. A node that cannot be asked is refused too.
+async fn require_ceremony_protocol(peers: &Peers) -> Result<()> {
+    for p in peers {
+        let id = crate::hosted::identifier_index(p.identifier())?;
+        let problem = match p.ceremony_protocol().await {
+            Ok(v) if v >= crate::ceremony::CEREMONY_PROTOCOL => continue,
+            Ok(v) => format!("cosigner {id} speaks ceremony protocol {v}"),
+            Err(e) => format!("cosigner {id} could not report its ceremony protocol ({e})"),
+        };
+        return Err(DaemonError::CeremonyRefused(format!(
+            "{problem}; DKG and refresh need protocol {} on every node — finish upgrading the \
+             cluster first (signing is unaffected)",
+            crate::ceremony::CEREMONY_PROTOCOL
+        )));
+    }
+    Ok(())
 }
 
 /// Coordinate a proactive refresh across every peer. Same three-part exchange as DKG, but each
@@ -94,47 +139,13 @@ pub async fn run_refresh(peers: &Peers, key_id: &str) -> Result<[u8; 32]> {
 }
 
 async fn run_refresh_attached(peers: &Peers, key_id: &str) -> Result<[u8; 32]> {
+    require_ceremony_protocol(peers).await?;
     let views = key_views(peers, key_id).await?;
     let expect = refresh_preflight(peers, key_id, &views).await?;
     let refresh_id = new_id("refresh");
     fence_all(peers, &refresh_id, key_id, CeremonyKind::Refresh, Some(expect)).await?;
-    let staged = refresh_stage(peers, &refresh_id, key_id).await;
+    let staged = ceremony_stage(peers, &refresh_id, key_id, CeremonyKind::Refresh).await;
     finish_ceremony(peers, &refresh_id, key_id, staged).await
-}
-
-async fn refresh_stage(peers: &Peers, refresh_id: &str, key_id: &str) -> Result<[u8; 32]> {
-    let mut round1_map = BTreeMap::new();
-    for p in peers {
-        round1_map.insert(p.identifier(), p.refresh_part1(refresh_id, key_id).await?);
-    }
-    let mut outbox: BTreeMap<Identifier, BTreeMap<Identifier, round2::Package>> = BTreeMap::new();
-    for p in peers {
-        outbox.insert(p.identifier(), p.refresh_part2(refresh_id, &round1_map).await?);
-    }
-    let mut group_key: Option<[u8; 32]> = None;
-    for p in peers {
-        let inbox = inbox_for(&outbox, p.identifier())?;
-        let gk = p.refresh_part3(refresh_id, &round1_map, &inbox).await?;
-        agree(&mut group_key, gk, "refresh diverged the group key")?;
-    }
-    group_key.ok_or_else(|| DaemonError::Config("no peers configured for refresh".into()))
-}
-
-fn inbox_for(
-    outbox: &BTreeMap<Identifier, BTreeMap<Identifier, round2::Package>>,
-    me: Identifier,
-) -> Result<BTreeMap<Identifier, round2::Package>> {
-    let mut inbox = BTreeMap::new();
-    for (&from, packages) in outbox.iter() {
-        if from == me {
-            continue;
-        }
-        let pkg = packages.get(&me).ok_or_else(|| {
-            DaemonError::Disagreement(format!("missing round2 package from {from:?} to {me:?}"))
-        })?;
-        inbox.insert(from, pkg.clone());
-    }
-    Ok(inbox)
 }
 
 fn agree(seen: &mut Option<[u8; 32]>, gk: [u8; 32], what: &str) -> Result<()> {

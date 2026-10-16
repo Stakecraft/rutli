@@ -69,4 +69,14 @@ public interface CeremonyFenceRequestOrBuilder extends
    * @return The expectedPkpDigest.
    */
   com.google.protobuf.ByteString getExpectedPkpDigest();
+
+  /**
+   * <pre>
+   * The leader's ceremony protocol. A node refuses a DKG/refresh fence below its own (2).
+   * </pre>
+   *
+   * <code>uint32 protocol = 6;</code>
+   * @return The protocol.
+   */
+  int getProtocol();
 }

@@ -1,19 +1,113 @@
 // Copyright 2026 StakeCraft
 // SPDX-License-Identifier: Apache-2.0
 
-//! The networked half of two-phase ceremonies, run by every node for itself: the resolver that
-//! commits or aborts a STAGED ceremony from its peers' votes (asked directly over the mesh, never
-//! through the leader), the operator break-glass for a permanently lost node, and the legacy
-//! partial-key discard. The vote rules are [`crate::ceremony_record::decide`].
+//! The networked half of DKG/refresh, run by every node for itself:
+//!
+//! * **Confidential round 2 (audit C1).** A node delivers each of its round-2 packages straight to
+//!   its recipient over the mTLS mesh ([`part2_and_deliver`]): the sender dials the recipient under
+//!   its own TLS name (`cosigner<id>`), the recipient identifies the sender by its certificate CN.
+//!   The leader only coordinates; no peer API returns a round-2 package to it. Every delivery
+//!   carries the sender's digest of the round-1 map ([`round1_digest`]), and part 3 requires all of
+//!   them equal to the recipient's own, so a leader that shows nodes different round-1 maps makes
+//!   every honest node abort.
+//! * **Two-phase commit.** The resolver commits or aborts a STAGED ceremony from its peers' votes,
+//!   asked directly over the mesh, never through the leader; the vote rules are
+//!   [`crate::ceremony_record::decide`]. Plus the operator break-glass for a permanently lost node
+//!   and the legacy partial-key discard.
 
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
+use frost_ed25519::keys::dkg::round1;
+use frost_ed25519::Identifier;
+use sha2::{Digest, Sha256};
+
 use crate::ceremony_record::{decide, CeremonyRecord, Decision, PeerReport, RecordState, StatusInfo};
-use crate::node::Node;
+use crate::node::{CeremonyKind, KeyVersion, Node};
 use crate::{DaemonError, Result};
+
+/// The DKG/refresh wire protocol this build speaks: 2 = direct round-2 delivery with the round-1
+/// digest echo and two-phase commit. A leader refuses to start a ceremony unless every roster node
+/// reports at least this (`NodeInfo.ceremony_protocol`), and an upgraded node refuses the old
+/// leader-relayed RPCs — so a mixed-version cluster refuses ceremonies instead of falling back.
+pub const CEREMONY_PROTOCOL: u32 = 2;
+
+/// What the round-1 digest binds besides the map: which ceremony, over which key and sharing.
+pub struct DigestContext<'a> {
+    pub ceremony_id: &'a str,
+    pub key_id: &'a str,
+    pub kind: CeremonyKind,
+    pub max_signers: u16,
+    pub min_signers: u16,
+    /// Refresh: the (epoch, PKP digest) being replaced. DKG: none (zeros).
+    pub old: Option<KeyVersion>,
+}
+
+/// `SHA-256("rutli-ceremony-r1-v2" ‖ lp(ceremony_id) ‖ lp(key_id) ‖ lp(kind) ‖ u16 n ‖ u16 t ‖
+/// u64 old_epoch ‖ old_pkp_digest[32 or zero] ‖ Σ_{id asc}(id ‖ lp(package)))`, with frost's own
+/// canonical serializations and `lp` a u32 big-endian length prefix. Equal on two nodes iff they
+/// were shown the same round-1 map for the same ceremony.
+pub fn round1_digest(ctx: &DigestContext<'_>, map: &BTreeMap<Identifier, round1::Package>) -> Result<[u8; 32]> {
+    fn lp(h: &mut Sha256, bytes: &[u8]) {
+        h.update((bytes.len() as u32).to_be_bytes());
+        h.update(bytes);
+    }
+    let mut h = Sha256::new();
+    h.update(b"rutli-ceremony-r1-v2");
+    lp(&mut h, ctx.ceremony_id.as_bytes());
+    lp(&mut h, ctx.key_id.as_bytes());
+    lp(&mut h, ctx.kind.as_str().as_bytes());
+    h.update(ctx.max_signers.to_be_bytes());
+    h.update(ctx.min_signers.to_be_bytes());
+    let (old_epoch, old_digest) = ctx.old.unwrap_or((0, [0u8; 32]));
+    h.update(old_epoch.to_be_bytes());
+    h.update(old_digest);
+    for (id, pkg) in map {
+        h.update(id.serialize());
+        lp(&mut h, &pkg.serialize()?);
+    }
+    Ok(h.finalize().into())
+}
+
+/// What part 2 tells the leader: the node's round-1 digest and whom it delivered to. Never a
+/// round-2 package.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Part2Outcome {
+    pub round1_digest: [u8; 32],
+    pub delivered: Vec<u16>,
+}
+
+/// Part 2 on `node`: compute its round-2 packages ([`Node::ceremony_part2_compute`]) and deliver
+/// each directly to its recipient over the node's mesh. Any failed delivery aborts the session
+/// here (the leader then aborts it everywhere). The packages never leave this function except to
+/// their recipients.
+pub async fn part2_and_deliver(
+    node: &Arc<Node>,
+    ceremony_id: &str,
+    round1_map: BTreeMap<Identifier, round1::Package>,
+) -> Result<Part2Outcome> {
+    let id = ceremony_id.to_owned();
+    let (digest, packages) = node.blocking(move |n| n.ceremony_part2_compute(&id, &round1_map)).await?;
+    let me = node.index()?;
+    let mut delivered = Vec::new();
+    for (to, package) in packages {
+        let sent = match node.mesh_peer(to) {
+            Some(peer) => peer.ceremony_deliver(ceremony_id, me, to, &digest, &package).await,
+            None => Err(DaemonError::CeremonyRefused(format!("node {to} is not in this node's mesh"))),
+        };
+        if let Err(e) = sent {
+            let id = ceremony_id.to_owned();
+            let _ = node.blocking(move |n| n.ceremony_abort(&id)).await;
+            return Err(DaemonError::CeremonyRefused(format!(
+                "delivering the round-2 package to node {to} failed: {e}"
+            )));
+        }
+        delivered.push(to);
+    }
+    Ok(Part2Outcome { round1_digest: digest, delivered })
+}
 
 /// How often a node retries its STAGED ceremonies (and settles finished ones).
 pub const RESOLVER_INTERVAL: Duration = Duration::from_secs(30);

@@ -66,12 +66,25 @@ service Signer {
 service Peer {
   rpc SignRound1(SignRound1Request) returns (SignRound1Reply);
   rpc SignRound2(SignRound2Request) returns (SignRound2Reply);
+  // Ceremony protocol 1 (leader-relayed round 2 — audit C1). Retained ONLY so that a node of this
+  // release refuses an older leader loudly: every one of these answers FAILED_PRECONDITION.
   rpc DkgPart1(DkgPart1Request) returns (DkgPart1Reply);
   rpc DkgPart2(DkgPart2Request) returns (DkgPart2Reply);
   rpc DkgPart3(DkgPart3Request) returns (DkgPart3Reply);
   rpc RefreshPart1(RefreshPart1Request) returns (DkgPart1Reply);
   rpc RefreshPart2(DkgPart2Request) returns (DkgPart2Reply);
   rpc RefreshPart3(DkgPart3Request) returns (DkgPart3Reply);
+  // Ceremony protocol 2 (DKG and refresh share one path). The leader coordinates only: it never
+  // sees a round-2 package. Part 2 makes each node deliver its round-2 packages DIRECTLY to their
+  // recipients (CeremonyDeliver, node to node over mTLS), and every delivery carries the sender's
+  // digest of the round-1 map, so a leader that shows nodes different maps makes all abort. Part 3
+  // stages the new share and records a yes-vote; CeremonyCommit then resolves (two-phase commit).
+  rpc CeremonyPart1(CeremonyPart1Request) returns (CeremonyPart1Reply);
+  rpc CeremonyPart2(CeremonyPart2Request) returns (CeremonyPart2Reply);
+  // Sender -> recipient. The recipient takes the sender from the caller's certificate CN (exact
+  // roster mapping) and refuses a `from` that differs, or a `to` that is not itself.
+  rpc CeremonyDeliver(CeremonyDeliverRequest) returns (CeremonyDeliverReply);
+  rpc CeremonyPart3(CeremonyPart3Request) returns (CeremonyPart3Reply);
   // Best-effort: drop an in-flight sign session so its round-1 nonces are freed immediately
   // instead of lingering until the pending-TTL sweep. Sent by the leader when a sign gives up.
   rpc AbortSign(AbortSignRequest) returns (AbortSignReply);
@@ -209,6 +222,8 @@ message CeremonyFenceRequest {
   // refuses. Empty digest = no expectation (DKG, hosted-key fences).
   uint64 expected_epoch = 4;
   bytes expected_pkp_digest = 5;
+  // The leader's ceremony protocol. A node refuses a DKG/refresh fence below its own (2).
+  uint32 protocol = 6;
 }
 message CeremonyFenceReply {}
 
@@ -366,6 +381,10 @@ message NodeInfoReply {
   // cosigner older than ec-p256-ecies, or with hosted keys off: a leader refuses to create a key of
   // a spec some peer does not report, so a mixed-version cluster never holds one.
   repeated string hosted_key_specs = 3;
+  // The DKG/refresh protocol this node speaks: 2 = direct round-2 delivery + two-phase commit;
+  // 0 (absent) from an older cosigner. A leader refuses a ceremony unless every node reports >= 2.
+  // dist_public_key is empty when hosted keys are off (this reply no longer fails then).
+  uint32 ceremony_protocol = 4;
 }
 
 // ── two-phase ceremonies (mesh only) ───────────────────────────────────────────────────────────
@@ -401,4 +420,41 @@ message CeremonyStatusReply {
   uint64 new_epoch = 4;
   bytes new_pkp_digest = 5;
   bytes round1_digest = 6;
+}
+
+message CeremonyPart1Request {
+  string ceremony_id = 1;
+  string key_id = 2;
+  string kind = 3;              // "dkg" | "refresh"
+  repeated uint32 roster = 4;   // every participant; must be exactly the node's own roster
+  uint32 protocol = 5;          // the leader's ceremony protocol (2)
+}
+message CeremonyPart1Reply { bytes round1_package = 1; }  // json round1::Package (public)
+
+message CeremonyPart2Request {
+  string ceremony_id = 1;
+  bytes round1_map = 2;  // json BTreeMap<Identifier, round1::Package>, every roster node
+}
+message CeremonyPart2Reply {
+  bytes round1_digest = 1;             // the node's digest of the round-1 map
+  repeated uint32 delivered_to = 2;    // whom it delivered its round-2 packages to (never the packages)
+}
+
+message CeremonyDeliverRequest {
+  string ceremony_id = 1;
+  uint32 from = 2;            // must equal the caller's certificate identity
+  uint32 to = 3;              // must be the receiving node
+  bytes round1_digest = 4;    // the sender's digest of the round-1 map
+  bytes round2_package = 5;   // json round2::Package for `to` only
+}
+message CeremonyDeliverReply {}
+
+message CeremonyPart3Request {
+  string ceremony_id = 1;
+  bytes round1_digest = 2;    // the digest every node reported in part 2
+}
+message CeremonyPart3Reply {
+  uint64 new_epoch = 1;
+  bytes new_pkp_digest = 2;
+  bytes group_verifying_key = 3;
 }

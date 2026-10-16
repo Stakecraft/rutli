@@ -73,4 +73,16 @@ public interface NodeInfoReplyOrBuilder extends
    */
   com.google.protobuf.ByteString
       getHostedKeySpecsBytes(int index);
+
+  /**
+   * <pre>
+   * The DKG/refresh protocol this node speaks: 2 = direct round-2 delivery + two-phase commit;
+   * 0 (absent) from an older cosigner. A leader refuses a ceremony unless every node reports &gt;= 2.
+   * dist_public_key is empty when hosted keys are off (this reply no longer fails then).
+   * </pre>
+   *
+   * <code>uint32 ceremony_protocol = 4;</code>
+   * @return The ceremonyProtocol.
+   */
+  int getCeremonyProtocol();
 }

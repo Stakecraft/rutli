@@ -14,7 +14,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use frost_ed25519::keys::dkg::{round1, round2};
 use frost_ed25519::round1::SigningCommitments;
 use frost_ed25519::round2::SignatureShare;
 use frost_ed25519::Identifier;
@@ -271,42 +270,6 @@ impl PeerApi for DownPeer {
         down()
     }
     async fn ceremony_release(&self, _: &str, _: &str) -> DaemonResult<()> {
-        down()
-    }
-    async fn dkg_part1(&self, _: &str, _: &str) -> DaemonResult<round1::Package> {
-        down()
-    }
-    async fn dkg_part2(
-        &self,
-        _: &str,
-        _: &BTreeMap<Identifier, round1::Package>,
-    ) -> DaemonResult<BTreeMap<Identifier, round2::Package>> {
-        down()
-    }
-    async fn dkg_part3(
-        &self,
-        _: &str,
-        _: &BTreeMap<Identifier, round1::Package>,
-        _: &BTreeMap<Identifier, round2::Package>,
-    ) -> DaemonResult<[u8; 32]> {
-        down()
-    }
-    async fn refresh_part1(&self, _: &str, _: &str) -> DaemonResult<round1::Package> {
-        down()
-    }
-    async fn refresh_part2(
-        &self,
-        _: &str,
-        _: &BTreeMap<Identifier, round1::Package>,
-    ) -> DaemonResult<BTreeMap<Identifier, round2::Package>> {
-        down()
-    }
-    async fn refresh_part3(
-        &self,
-        _: &str,
-        _: &BTreeMap<Identifier, round1::Package>,
-        _: &BTreeMap<Identifier, round2::Package>,
-    ) -> DaemonResult<[u8; 32]> {
         down()
     }
     async fn node_info(&self) -> DaemonResult<(u16, [u8; 32])> {

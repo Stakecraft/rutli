@@ -522,6 +522,25 @@ impl PeerSvc {
         authorize_cn(self.allowed_cns.as_deref(), req, "Peer")
     }
 
+    /// The sender of a round-2 delivery: the caller's certificate identity, which must equal the
+    /// `from` it claims (audit C1 — a node delivers only its own packages). With no peer allowlist
+    /// (plaintext dev mode, where nothing on the mesh is authenticated) the claim is taken as is.
+    fn delivery_sender<T>(&self, req: &Request<T>, claimed: u32) -> Result<u16, Status> {
+        let claimed = u16::try_from(claimed).map_err(|_| Status::invalid_argument("sender out of range"))?;
+        if self.allowed_cns.is_none() {
+            self.authorize(req)?;
+            return Ok(claimed);
+        }
+        let id = self.authenticated_peer(req)?;
+        if id != claimed {
+            return Err(Status::permission_denied(format!(
+                "the caller is node {id} but delivers as node {claimed} — refusing a round-2 package \
+                 under another node's identity"
+            )));
+        }
+        Ok(id)
+    }
+
     /// The node identifier of the authenticated caller, taken from its client-cert CN: the roster
     /// node whose configured `tls_client_cn` (default `cosigner<N>`) it equals exactly.
     ///
@@ -619,6 +638,9 @@ impl Peer for PeerSvc {
             // The share-writing ceremonies take the two-phase fence (staged ceremonies, the
             // leader's expected sharing); it reads the key store.
             "dkg" | "refresh" => {
+                if r.protocol < crate::ceremony::CEREMONY_PROTOCOL {
+                    return Err(old_leader(r.protocol));
+                }
                 let kind = crate::node::CeremonyKind::parse(kind).map_err(Status::from)?;
                 let expect = match r.expected_pkp_digest.len() {
                     0 => None,
@@ -645,45 +667,21 @@ impl Peer for PeerSvc {
         Ok(Response::new(pb::CeremonyReleaseReply {}))
     }
 
-    async fn dkg_part1(
-        &self,
-        req: Request<pb::DkgPart1Request>,
-    ) -> Result<Response<pb::DkgPart1Reply>, Status> {
+    // Ceremony protocol 1 (leader-relayed round 2, audit C1): refused outright, so an older leader
+    // can neither run a ceremony with this node nor obtain round-2 packages from it.
+    async fn dkg_part1(&self, req: Request<pb::DkgPart1Request>) -> Result<Response<pb::DkgPart1Reply>, Status> {
         self.authorize(&req)?;
-        let r = req.into_inner();
-        let package = self
-            .node
-            .blocking(move |n| n.dkg_part1(&r.dkg_id, &r.key_id))
-            .await
-            .map_err(Status::from)?;
-        Ok(Response::new(pb::DkgPart1Reply { round1_package: json(&package)? }))
+        Err(relay_refused())
     }
 
-    async fn dkg_part2(
-        &self,
-        req: Request<pb::DkgPart2Request>,
-    ) -> Result<Response<pb::DkgPart2Reply>, Status> {
+    async fn dkg_part2(&self, req: Request<pb::DkgPart2Request>) -> Result<Response<pb::DkgPart2Reply>, Status> {
         self.authorize(&req)?;
-        let r = req.into_inner();
-        let round1_map = de(&r.round1_map)?;
-        let round2_map = self.node.dkg_part2(&r.dkg_id, &round1_map).map_err(Status::from)?;
-        Ok(Response::new(pb::DkgPart2Reply { round2_map: json(&round2_map)? }))
+        Err(relay_refused())
     }
 
-    async fn dkg_part3(
-        &self,
-        req: Request<pb::DkgPart3Request>,
-    ) -> Result<Response<pb::DkgPart3Reply>, Status> {
+    async fn dkg_part3(&self, req: Request<pb::DkgPart3Request>) -> Result<Response<pb::DkgPart3Reply>, Status> {
         self.authorize(&req)?;
-        let r = req.into_inner();
-        let round1_map = de(&r.round1_map)?;
-        let round2_for_me = de(&r.round2_map_for_me)?;
-        let key = self
-            .node
-            .blocking(move |n| n.dkg_part3(&r.dkg_id, &round1_map, &round2_for_me))
-            .await
-            .map_err(Status::from)?;
-        Ok(Response::new(pb::DkgPart3Reply { group_verifying_key: key.group_key.to_vec() }))
+        Err(relay_refused())
     }
 
     async fn refresh_part1(
@@ -691,40 +689,104 @@ impl Peer for PeerSvc {
         req: Request<pb::RefreshPart1Request>,
     ) -> Result<Response<pb::DkgPart1Reply>, Status> {
         self.authorize(&req)?;
+        Err(relay_refused())
+    }
+
+    async fn refresh_part2(&self, req: Request<pb::DkgPart2Request>) -> Result<Response<pb::DkgPart2Reply>, Status> {
+        self.authorize(&req)?;
+        Err(relay_refused())
+    }
+
+    async fn refresh_part3(&self, req: Request<pb::DkgPart3Request>) -> Result<Response<pb::DkgPart3Reply>, Status> {
+        self.authorize(&req)?;
+        Err(relay_refused())
+    }
+
+    async fn ceremony_part1(
+        &self,
+        req: Request<pb::CeremonyPart1Request>,
+    ) -> Result<Response<pb::CeremonyPart1Reply>, Status> {
+        self.authorize(&req)?;
         let r = req.into_inner();
+        if r.protocol < crate::ceremony::CEREMONY_PROTOCOL {
+            return Err(old_leader(r.protocol));
+        }
+        let kind = crate::node::CeremonyKind::parse(&r.kind).map_err(Status::from)?;
+        let roster: Vec<u16> = r
+            .roster
+            .iter()
+            .map(|&i| u16::try_from(i).map_err(|_| Status::invalid_argument("roster identifier out of range")))
+            .collect::<Result<_, _>>()?;
         let package = self
             .node
-            .blocking(move |n| n.refresh_part1(&r.refresh_id, &r.key_id))
+            .blocking(move |n| n.ceremony_part1(&r.ceremony_id, &r.key_id, kind, &roster))
             .await
             .map_err(Status::from)?;
-        Ok(Response::new(pb::DkgPart1Reply { round1_package: json(&package)? }))
+        Ok(Response::new(pb::CeremonyPart1Reply { round1_package: json(&package)? }))
     }
 
-    async fn refresh_part2(
+    async fn ceremony_part2(
         &self,
-        req: Request<pb::DkgPart2Request>,
-    ) -> Result<Response<pb::DkgPart2Reply>, Status> {
+        req: Request<pb::CeremonyPart2Request>,
+    ) -> Result<Response<pb::CeremonyPart2Reply>, Status> {
         self.authorize(&req)?;
         let r = req.into_inner();
         let round1_map = de(&r.round1_map)?;
-        let round2_map = self.node.refresh_part2(&r.dkg_id, &round1_map).map_err(Status::from)?;
-        Ok(Response::new(pb::DkgPart2Reply { round2_map: json(&round2_map)? }))
+        // Detached: the deliveries to every recipient finish (or the session aborts) even if the
+        // leader stops waiting.
+        let node = self.node.clone();
+        let out = crate::ceremony::detach(async move {
+            crate::ceremony::part2_and_deliver(&node, &r.ceremony_id, round1_map).await
+        })
+        .await
+        .map_err(Status::from)?;
+        Ok(Response::new(pb::CeremonyPart2Reply {
+            round1_digest: out.round1_digest.to_vec(),
+            delivered_to: out.delivered.into_iter().map(u32::from).collect(),
+        }))
     }
 
-    async fn refresh_part3(
+    async fn ceremony_deliver(
         &self,
-        req: Request<pb::DkgPart3Request>,
-    ) -> Result<Response<pb::DkgPart3Reply>, Status> {
+        req: Request<pb::CeremonyDeliverRequest>,
+    ) -> Result<Response<pb::CeremonyDeliverReply>, Status> {
+        let from = self.delivery_sender(&req, req.get_ref().from)?;
+        let r = req.into_inner();
+        let to = u16::try_from(r.to).map_err(|_| Status::invalid_argument("recipient out of range"))?;
+        let digest: [u8; 32] = r
+            .round1_digest
+            .as_slice()
+            .try_into()
+            .map_err(|_| Status::invalid_argument("round1_digest must be 32 bytes"))?;
+        let package = de(&zeroize::Zeroizing::new(r.round2_package))?;
+        self.node
+            .blocking(move |n| n.ceremony_deliver(&r.ceremony_id, from, to, digest, package))
+            .await
+            .map_err(Status::from)?;
+        Ok(Response::new(pb::CeremonyDeliverReply {}))
+    }
+
+    async fn ceremony_part3(
+        &self,
+        req: Request<pb::CeremonyPart3Request>,
+    ) -> Result<Response<pb::CeremonyPart3Reply>, Status> {
         self.authorize(&req)?;
         let r = req.into_inner();
-        let round1_map = de(&r.round1_map)?;
-        let round2_for_me = de(&r.round2_map_for_me)?;
-        let key = self
+        let digest: [u8; 32] = r
+            .round1_digest
+            .as_slice()
+            .try_into()
+            .map_err(|_| Status::invalid_argument("round1_digest must be 32 bytes"))?;
+        let out = self
             .node
-            .blocking(move |n| n.refresh_part3(&r.dkg_id, &round1_map, &round2_for_me))
+            .blocking(move |n| n.ceremony_part3(&r.ceremony_id, &digest))
             .await
             .map_err(Status::from)?;
-        Ok(Response::new(pb::DkgPart3Reply { group_verifying_key: key.group_key.to_vec() }))
+        Ok(Response::new(pb::CeremonyPart3Reply {
+            new_epoch: out.new_epoch,
+            new_pkp_digest: out.new_pkp_digest.to_vec(),
+            group_verifying_key: out.group_key.to_vec(),
+        }))
     }
 
     // -- hosted-key replication (mesh only; peer_allowlist gates every one of these) --
@@ -833,8 +895,11 @@ impl Peer for PeerSvc {
         self.authorize(&req)?;
         Ok(Response::new(pb::NodeInfoReply {
             identifier: crate::hosted::identifier_index(self.node.identifier).map_err(Status::from)? as u32,
-            dist_public_key: self.node.dist_public_key().map_err(Status::from)?.to_vec(),
+            // Empty with hosted keys off: the reply also carries the ceremony protocol, which every
+            // node must report.
+            dist_public_key: self.node.dist_public_key().map(|k| k.to_vec()).unwrap_or_default(),
             hosted_key_specs: self.node.hosted_specs(),
+            ceremony_protocol: crate::ceremony::CEREMONY_PROTOCOL,
         }))
     }
 
@@ -883,6 +948,23 @@ impl Peer for PeerSvc {
         let info = self.node.blocking(move |n| n.ceremony_abort(&id)).await.map_err(Status::from)?;
         Ok(Response::new(crate::peer::status_to_pb(&info)))
     }
+}
+
+fn relay_refused() -> Status {
+    Status::failed_precondition(format!(
+        "leader-relayed DKG/refresh (ceremony protocol 1) is disabled on this cosigner: it would hand \
+         round-2 secret shares to the leader (audit C1). This node speaks ceremony protocol {} — \
+         upgrade every cosigner before running a DKG or refresh",
+        crate::ceremony::CEREMONY_PROTOCOL
+    ))
+}
+
+fn old_leader(protocol: u32) -> Status {
+    Status::failed_precondition(format!(
+        "the ceremony leader speaks ceremony protocol {protocol}, this cosigner {} — upgrade every \
+         cosigner before running a DKG or refresh (a mixed-version cluster refuses ceremonies)",
+        crate::ceremony::CEREMONY_PROTOCOL
+    ))
 }
 
 fn json<T: serde::Serialize>(v: &T) -> Result<Vec<u8>, Status> {
