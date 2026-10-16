@@ -209,6 +209,13 @@ enum Command {
         #[command(subcommand)]
         command: SealCommand,
     },
+    /// Key-file format (audit M4): inspect this node's key files, migrate them to format v2,
+    /// downgrade them to v1 for a rollback, seal a genuine plaintext file. Everything but `status`
+    /// runs with this node's daemon STOPPED (the instance lock is taken).
+    Keyfile {
+        #[command(subcommand)]
+        command: KeyfileCommand,
+    },
     /// Two-phase DKG/refresh ceremonies on this node (docs/ceremonies.md). Run with this node's
     /// daemon STOPPED (the instance lock is taken); it talks to the other cosigners over the mesh
     /// with this node's certificate.
@@ -249,6 +256,29 @@ enum Command {
         /// Do not count signatures made without a signing intent (before require_intent is on).
         #[arg(long)]
         allow_no_intent: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum KeyfileCommand {
+    /// List every key file (committed, staged, pending recipients): format, and which DEK seals
+    /// it (current, a previous one of a rotation, or none this node holds). Read-only.
+    Status,
+    /// Re-seal every key file as format v2 under the current DEK (needs keyfile.cluster_uuid).
+    /// Also finishes a DEK rotation. Idempotent.
+    Migrate,
+    /// Re-seal every key file as format v1 under the current DEK — before rolling this node back
+    /// to a release that reads only v1. Set keyfile.write_version back to 1 first, or the daemon
+    /// migrates them again at its next start.
+    Downgrade,
+    /// Seal ONE plaintext key file that sealing refuses. Run once without --confirm: it prints what
+    /// the file holds (group key or hosted-key spec and public digest) and a confirmation code; run
+    /// again with --confirm <code> to seal exactly that file.
+    MigratePlaintext {
+        #[arg(long)]
+        key_id: String,
+        #[arg(long)]
+        confirm: Option<String>,
     },
 }
 
@@ -298,6 +328,25 @@ enum SealCommand {
     Inspect {
         #[arg(long, value_name = "FILE")]
         r#in: std::path::PathBuf,
+    },
+    /// DEK rotation, step 1: write a bundle for the same node with a fresh random share DEK, the
+    /// current one kept in `previous_share_deks` (so every file still opens) and the same
+    /// distribution seed (no peer re-pins anything). Deploy it, then `keyfile migrate` (or restart:
+    /// the daemon re-seals under the new DEK at start), then `seal drop-previous`.
+    RotateDek {
+        #[arg(long, value_name = "FILE")]
+        r#in: std::path::PathBuf,
+        /// File to write (0600, never overwritten).
+        #[arg(long)]
+        out: std::path::PathBuf,
+    },
+    /// DEK rotation, last step: the same bundle without `previous_share_deks`. Only once `keyfile
+    /// status` on that node shows no file under a previous DEK and a backup has been taken since.
+    DropPrevious {
+        #[arg(long, value_name = "FILE")]
+        r#in: std::path::PathBuf,
+        #[arg(long)]
+        out: std::path::PathBuf,
     },
 }
 
@@ -364,6 +413,7 @@ async fn main() -> Result<()> {
         Some(Command::DiscardPartialKey { key_id, confirm_group_key }) => {
             return discard_partial_key_command(&cfg, &key_id, &confirm_group_key).await
         }
+        Some(Command::Keyfile { command }) => return keyfile_command(&cfg, command),
         _ => {}
     }
     tracing::info!(identifier = cfg.identifier, listen = %cfg.listen, "starting cosigner");
@@ -404,7 +454,7 @@ async fn main() -> Result<()> {
                      per-node seal bundles (share_seal.secret_file, docs/runbook-per-node-seal.md)"
                 ),
             }
-            Some(Arc::new(keys.sealer(cfg.identifier)))
+            Some(Arc::new(keys.sealer(cfg.identifier).with_keyfile(&cfg.keyfile)))
         }
         None => {
             tracing::warn!("share sealing DISABLED — key shares stored as plaintext JSON (dev only)");
@@ -413,10 +463,28 @@ async fn main() -> Result<()> {
     };
 
     let keystore = KeyStore::open_with_sealer(cfg.data_dir.join("keys"), sealer)?;
-    match keystore.reseal_plaintext_shares()? {
-        0 => {}
-        n => tracing::info!(count = n, "migrated legacy plaintext shares to sealed envelopes"),
+    // Audit M4: a plaintext key file under sealing is refused, never sealed as genuine. Name every
+    // one and stop: an operator decides, offline, whether each is genuine.
+    let plaintext = keystore.plaintext_files()?;
+    if !plaintext.is_empty() {
+        let names: Vec<String> = plaintext.iter().map(|p| p.display().to_string()).collect();
+        return Err(DaemonError::KeyFile(format!(
+            "{} PLAINTEXT key file(s) under share sealing: {} — refusing to start. If a file is \
+             genuine, seal it with this daemon stopped: `rutli-cosigner keyfile migrate-plaintext \
+             --key-id <id>`; otherwise remove it (docs/disaster-recovery.md)",
+            names.len(),
+            names.join(", ")
+        )));
     }
+    log_keyfile_policy(&cfg);
+    // Files sealed under a previous DEK (a DEK rotation), and v1 files while writing v2, are
+    // re-sealed now — under the instance lock, before anything serves.
+    match keystore.reseal_outdated() {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(count = n, "re-sealed key files under the current DEK / format"),
+        Err(e) => tracing::warn!(error = %e, "could not check key files for re-sealing"),
+    }
+    publish_keyfile_gauges(&keystore);
     // A key installed by the split ceremony is only as strong as its dealt shares until the first
     // refresh: every copy of a dealt bundle (and the dealer's memory) still combines with the live
     // shares. Say so at every start until someone runs one.
@@ -1225,7 +1293,53 @@ fn offline_sealer(cfg: &Config) -> Result<Arc<rutli_cosigner::seal::Sealer>> {
         )
     })?;
     let keys = rutli_cosigner::seal::SealKeys::load(seal_cfg, cfg.identifier)?;
-    Ok(Arc::new(keys.sealer(cfg.identifier)))
+    Ok(Arc::new(keys.sealer(cfg.identifier).with_keyfile(&cfg.keyfile)))
+}
+
+/// Say which key-file format this node writes and what it accepts (audit M4 rollout).
+fn log_keyfile_policy(cfg: &Config) {
+    let k = &cfg.keyfile;
+    tracing::info!(
+        write_version = k.write_version,
+        accept_v1 = k.accept_v1,
+        cluster_uuid = k.cluster_uuid.as_deref().unwrap_or("<unset>"),
+        "key-file format"
+    );
+    if cfg.share_seal.is_some() && k.write_version == 1 {
+        tracing::info!(
+            "keyfile.write_version is 1: new key files carry no bound header (v1) — set \
+             keyfile.cluster_uuid and write_version 2 on every node once the whole cluster runs this \
+             release (docs/disaster-recovery.md, key-file format v2)"
+        );
+    }
+}
+
+/// `rutli_keyfiles{format, dek}`: how many key files are in each format and under which DEK —
+/// what a v2 migration and a DEK rotation watch go to zero.
+fn publish_keyfile_gauges(keystore: &KeyStore) {
+    use rutli_cosigner::seal::DekUse;
+    let Ok(paths) = keystore.key_file_paths() else { return };
+    let mut counts = std::collections::BTreeMap::new();
+    for path in paths {
+        let (format, dek) = match keystore.file_state(&path) {
+            Ok(Some((v, d))) => (
+                if v == 2 { "v2" } else { "v1" },
+                match d {
+                    DekUse::Current => "current",
+                    DekUse::Previous(_) => "previous",
+                    DekUse::Unknown => "unknown",
+                },
+            ),
+            _ => ("plaintext", "none"),
+        };
+        *counts.entry((format, dek)).or_insert(0usize) += 1;
+    }
+    for format in ["v1", "v2", "plaintext"] {
+        for dek in ["current", "previous", "unknown", "none"] {
+            let n = counts.get(&(format, dek)).copied().unwrap_or(0);
+            metrics::gauge!(rutli_cosigner::metrics::KEYFILES, "format" => format, "dek" => dek).set(n as f64);
+        }
+    }
 }
 
 /// `seal …`: offline seal-bundle tooling. See [`SealCommand`].
@@ -1288,8 +1402,173 @@ fn seal_command(command: SealCommand) -> Result<()> {
             let bundle = NodeSealBundle::parse(&bytes)?;
             println!("node {}", bundle.node);
             println!("dist_public_key {}", hex::encode(bundle.dist_public_key()));
+            println!("share_dek id {} (+{} previous)", bundle.dek_id(), bundle.previous_count());
+        }
+        SealCommand::RotateDek { r#in, out } => {
+            let bundle = NodeSealBundle::parse(&zeroize::Zeroizing::new(std::fs::read(&r#in)?))?;
+            let rotated = bundle.rotated();
+            write_new_private_file(&out, &rotated.to_json()?)?;
+            println!(
+                "wrote {} (node {}): share_dek id {} (new), previous {} — dist_public_key unchanged",
+                out.display(),
+                rotated.node,
+                rotated.dek_id(),
+                bundle.dek_id()
+            );
+            println!(
+                "Next: replace node {}'s seal Secret with it, restart the node (it re-seals every key \
+                 file under the new DEK at start), check `rutli-cosigner keyfile status`, take a \
+                 backup, then `seal drop-previous`.",
+                rotated.node
+            );
+        }
+        SealCommand::DropPrevious { r#in, out } => {
+            let bundle = NodeSealBundle::parse(&zeroize::Zeroizing::new(std::fs::read(&r#in)?))?;
+            if bundle.previous_count() == 0 {
+                return Err(DaemonError::Config(format!("{} has no previous DEKs", r#in.display())));
+            }
+            let dropped = bundle.without_previous();
+            write_new_private_file(&out, &dropped.to_json()?)?;
+            println!(
+                "wrote {} (node {}): share_dek id {}, {} previous DEK(s) dropped. Files sealed under \
+                 a dropped DEK no longer open on this node — including old backups.",
+                out.display(),
+                dropped.node,
+                dropped.dek_id(),
+                bundle.previous_count()
+            );
         }
     }
+    Ok(())
+}
+
+/// `keyfile …`: see [`KeyfileCommand`].
+fn keyfile_command(cfg: &Config, command: KeyfileCommand) -> Result<()> {
+    use rutli_cosigner::seal::DekUse;
+    let sealer = offline_sealer(cfg)?;
+    let lock = match command {
+        KeyfileCommand::Status => None,
+        _ => Some(rutli_cosigner::instance_lock::InstanceLock::acquire(&cfg.data_dir)?),
+    };
+    let keystore = KeyStore::open_with_sealer(cfg.data_dir.join("keys"), Some(sealer.clone()))?;
+    let recipients = rutli_cosigner::share_delivery::list_recipients(&cfg.data_dir)?;
+    let recipient_path = |k: &str| rutli_cosigner::share_delivery::recipient_path(&cfg.data_dir, k);
+    match command {
+        KeyfileCommand::Status => {
+            let mut files = keystore.key_file_paths()?;
+            for k in &recipients {
+                files.push(recipient_path(k)?);
+            }
+            let (mut outdated, mut previous) = (0, 0);
+            println!(
+                "node {} — writes v{} (cluster_uuid {}), current DEK {}",
+                cfg.identifier,
+                cfg.keyfile.write_version,
+                cfg.keyfile.cluster_uuid.as_deref().unwrap_or("<unset>"),
+                sealer.current_dek_id()
+            );
+            for path in &files {
+                let bytes = std::fs::read(path)?;
+                let state = match rutli_cosigner::seal::file_version(&bytes) {
+                    None => {
+                        outdated += 1;
+                        "PLAINTEXT (refused)".to_string()
+                    }
+                    Some(v) => {
+                        if v < 2 {
+                            outdated += 1;
+                        }
+                        let dek = match sealer.dek_use(&bytes) {
+                            DekUse::Current => "current DEK".to_string(),
+                            DekUse::Previous(i) => {
+                                previous += 1;
+                                format!("PREVIOUS DEK #{i}")
+                            }
+                            DekUse::Unknown => "UNKNOWN DEK (does not open here)".to_string(),
+                        };
+                        format!("v{v}, {dek}")
+                    }
+                };
+                println!("  {}  {state}", path.display());
+            }
+            println!(
+                "{} file(s): {outdated} not yet v2, {previous} under a previous DEK{}",
+                files.len(),
+                if previous == 0 && sealer.has_previous() {
+                    " — the previous DEK(s) can be dropped from the seal bundle (`seal drop-previous`) after a backup"
+                } else {
+                    ""
+                }
+            );
+        }
+        KeyfileCommand::Migrate | KeyfileCommand::Downgrade => {
+            let version = if matches!(command, KeyfileCommand::Migrate) { 2 } else { 1 };
+            let plaintext = keystore.plaintext_files()?;
+            if !plaintext.is_empty() {
+                return Err(DaemonError::KeyFile(format!(
+                    "plaintext key file(s) {} — seal or remove them first (keyfile migrate-plaintext)",
+                    plaintext.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
+                )));
+            }
+            let mut n = 0;
+            for path in keystore.key_file_paths()? {
+                keystore.rewrite(&path, version)?;
+                n += 1;
+            }
+            for k in &recipients {
+                rutli_cosigner::share_delivery::reseal_recipient(&cfg.data_dir, &sealer, k, version)?;
+                n += 1;
+            }
+            println!("re-sealed {n} key file(s) as format v{version} under DEK {}", sealer.current_dek_id());
+            if version == 1 && cfg.keyfile.write_version == 2 {
+                println!(
+                    "keyfile.write_version is still 2 here: set it to 1 before starting this release \
+                     again, or it migrates the files back to v2 at start"
+                );
+            }
+        }
+        KeyfileCommand::MigratePlaintext { key_id, confirm } => {
+            use sha2::Digest;
+            let path = cfg.data_dir.join("keys").join(format!("{key_id}.json"));
+            let bytes = std::fs::read(&path)?;
+            if rutli_cosigner::seal::Sealer::is_sealed(&bytes) {
+                return Err(DaemonError::Config(format!("{} is already sealed", path.display())));
+            }
+            let code = hex::encode(&sha2::Sha256::digest(&bytes)[..8]);
+            let what = match keystore.inspect_plaintext(&key_id) {
+                Ok(rutli_cosigner::keystore::Record::Frost(share)) => format!(
+                    "FROST share, group key {}, epoch {}",
+                    hex::encode(share.public_key_package.verifying_key().serialize()?),
+                    share.epoch
+                ),
+                Ok(rutli_cosigner::keystore::Record::Hosted(k)) => format!(
+                    "hosted key {}, public digest {}",
+                    k.spec.as_str(),
+                    hex::encode(rutli_cosigner::keystore::hosted_header_digest(&k))
+                ),
+                Err(e) => return Err(e),
+            };
+            match confirm {
+                Some(c) if c == code => {
+                    keystore.migrate_plaintext(&key_id)?;
+                    println!("sealed {} ({what})", path.display());
+                }
+                Some(_) => {
+                    return Err(DaemonError::Config(format!(
+                        "confirmation code mismatch: the file is not the one inspected (code now {code})"
+                    )))
+                }
+                None => {
+                    println!("{}: PLAINTEXT {what}", path.display());
+                    println!(
+                        "If this is genuine, seal it: rutli-cosigner keyfile migrate-plaintext --key-id \
+                         {key_id} --confirm {code}"
+                    );
+                }
+            }
+        }
+    }
+    drop(lock);
     Ok(())
 }
 

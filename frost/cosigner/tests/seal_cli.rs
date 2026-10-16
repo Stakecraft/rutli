@@ -96,7 +96,37 @@ fn new_node_and_inspect() {
     assert!(text(&out).contains(&pin));
     let shown = cosigner(&["seal", "inspect", "--in", path.to_str().unwrap()], None);
     assert!(shown.status.success());
-    assert_eq!(text(&shown), format!("node 4\ndist_public_key {pin}\n"));
+    assert_eq!(
+        text(&shown),
+        format!("node 4\ndist_public_key {pin}\nshare_dek id {} (+0 previous)\n", bundle.dek_id())
+    );
+}
+
+/// DEK rotation tooling (decision P1): rotate keeps the old DEK as previous and the distribution
+/// key unchanged; drop-previous removes it; neither ever overwrites a file.
+#[test]
+fn rotate_dek_then_drop_previous() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = |n: &str| tmp.path().join(n).to_str().unwrap().to_string();
+    assert!(cosigner(&["seal", "new-node", "--node", "2", "--out", &p("a.json")], None).status.success());
+    let rotated = cosigner(&["seal", "rotate-dek", "--in", &p("a.json"), "--out", &p("b.json")], None);
+    assert!(rotated.status.success(), "{}", text(&rotated));
+    let a = NodeSealBundle::parse(&std::fs::read(p("a.json")).unwrap()).unwrap();
+    let b = NodeSealBundle::parse(&std::fs::read(p("b.json")).unwrap()).unwrap();
+    assert_eq!(a.dist_public_key(), b.dist_public_key());
+    assert_ne!(a.dek_id(), b.dek_id());
+    assert_eq!(b.previous_count(), 1);
+    // A file sealed under the old DEK opens under the rotated bundle, not after the drop.
+    let sealed = a.sealer().seal(b"share").unwrap();
+    assert_eq!(b.sealer().unseal(&sealed).unwrap(), b"share");
+    let dropped = cosigner(&["seal", "drop-previous", "--in", &p("b.json"), "--out", &p("c.json")], None);
+    assert!(dropped.status.success(), "{}", text(&dropped));
+    let c = NodeSealBundle::parse(&std::fs::read(p("c.json")).unwrap()).unwrap();
+    assert_eq!((c.previous_count(), c.dek_id()), (0, b.dek_id()));
+    assert!(c.sealer().unseal(&sealed).is_err());
+    // Never overwrites, and refuses a bundle with nothing to drop.
+    assert!(!cosigner(&["seal", "rotate-dek", "--in", &p("a.json"), "--out", &p("b.json")], None).status.success());
+    assert!(!cosigner(&["seal", "drop-previous", "--in", &p("c.json"), "--out", &p("d.json")], None).status.success());
 }
 
 /// A config for node `id` on `bundle`, hosted keys on, with `pins` for nodes 1..=3.

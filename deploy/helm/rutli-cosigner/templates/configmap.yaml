@@ -112,6 +112,9 @@ data:
       {{- if $.Values.signingPolicy }}
       "signing_policy": {{ $.Values.signingPolicy | toJson }},
       {{- end }}
+      {{- if $.Values.keyfile }}
+      "keyfile": {{ $.Values.keyfile | toJson }},
+      {{- end }}
       "peer_allowlist": {{ $peerAllow | toJson }}
     }
 {{- end }}
@@ -161,6 +164,9 @@ data:
       {{- end }}
       {{- if $.Values.signingPolicy }}
       "signing_policy": {{ $.Values.signingPolicy | toJson }},
+      {{- end }}
+      {{- if $.Values.keyfile }}
+      "keyfile": {{ $.Values.keyfile | toJson }},
       {{- end }}
       "peer_allowlist": {{ $peerAllow | toJson }}
     }

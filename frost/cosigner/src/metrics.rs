@@ -84,6 +84,10 @@ pub const HOSTED_KEYS: &str = "rutli_hosted_keys";
 /// from the hosted-key inventory, so any non-zero value means a key is silently not being
 /// replicated or repaired — alert on it.
 pub const UNREADABLE_KEY_FILES: &str = "rutli_unreadable_key_files_total";
+/// Gauge, labels `format` (v1|v2|plaintext) and `dek` (current|previous|unknown|none): this node's
+/// key files at start-up (audit M4). A v2 migration watches `format="v1"` reach 0; a DEK rotation
+/// watches `dek="previous"` reach 0 before the previous DEK is dropped from the seal bundle.
+pub const KEYFILES: &str = "rutli_keyfiles";
 /// Hosted-key decryptions refused by the per-key rate limit. Non-zero means either a node that has
 /// outgrown its configured ceiling, or bulk decryption by someone holding the driver certificate —
 /// both worth an operator's attention, so alert on any sustained value.

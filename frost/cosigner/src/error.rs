@@ -86,6 +86,12 @@ pub enum DaemonError {
     #[error("configuration: {0}")]
     Config(String),
 
+    /// A key file this node refuses to load (audit M4): a v2 header naming another cluster, node,
+    /// key id or record kind, a DEK this node does not hold, a v1 file while `keyfile.accept_v1` is
+    /// off, a plaintext file under sealing, or a plaintext that disagrees with its header or name.
+    #[error("key file refused: {0}")]
+    KeyFile(String),
+
     #[error("cluster disagreement: {0}")]
     Disagreement(String),
 

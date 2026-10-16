@@ -20,9 +20,24 @@
 //! that requires enclave/HSM sealing ("MPC-of-HSM"), for which this module is the software seam:
 //! swap the [`Sealer`] implementation, keep the file format.
 //!
-//! File format (JSON): `{"v":1,"sealed":true,"nonce":<hex 12B>,"ct":<hex>}`. Legacy plaintext share
-//! files are still readable when sealing is enabled, so an operator can turn sealing on and have
-//! shares re-sealed on the next write (or via re-save), but new writes are always sealed.
+//! **File formats.**
+//!
+//! - v1 (`{"v":1,"sealed":true,"nonce":<hex 12B>,"ct":<hex>}`): AES-256-GCM with no associated
+//!   data. Bound to the node only through its DEK, so a sealed file renamed to another key id, or a
+//!   hosted key passed off as a share, opened as genuine (audit M4). Still read (while
+//!   `keyfile.accept_v1`), and written unless `keyfile.write_version` is 2, so a node can roll back
+//!   to a release that knows only v1.
+//! - v2 (key-file format v2, [`KeyFileHeader`]): a clear header `{fmt, cluster, node, key_id, kind,
+//!   epoch, digest, dek_id}` whose fixed binary encoding ([`header_aad`]) is the AES-GCM associated
+//!   data. A load checks the header against the configured `keyfile.cluster_uuid` (never the
+//!   CA-derived cluster id, which a CA rotation changes), this node's identifier, the file's key id
+//!   and the expected record kind before it decrypts, and picks the DEK by `dek_id` (the current one
+//!   or a `previous_share_deks` entry during a DEK rotation). Renaming, cross-node and cross-cluster
+//!   copies and kind confusion all fail. What it cannot catch is an older genuine file of the same
+//!   key and node (a rollback): the epoch checks do (restore, the startup stale-share check).
+//!
+//! Plaintext key files are refused whenever sealing is configured ([`crate::keystore`]); the only
+//! way in is the offline `rutli-cosigner keyfile migrate-plaintext`.
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{AeadCore, Aes256Gcm, Key, Nonce};
@@ -35,6 +50,13 @@ use crate::config::ShareSealConfig;
 use crate::{DaemonError, Result};
 
 const NONCE_LEN: usize = 12;
+
+/// `fmt` of a v2 key-file header.
+pub const KEYFILE_FMT: &str = "rutli-keyfile-v2";
+/// Domain separation of the v2 associated data.
+const AAD_CONTEXT: &[u8] = b"rutli-keyfile-v2\0";
+/// Domain separation of a DEK id.
+const DEK_ID_CONTEXT: &[u8] = b"rutli-dek-id-v1\n";
 
 /// Minimum length of a legacy master secret (chars of the env var). `openssl rand -hex 32` gives 64.
 const MIN_MASTER_LEN: usize = 32;
@@ -83,18 +105,384 @@ pub struct Sealer {
     /// Retired DEKs that may still open files (never used to seal). Empty unless a bundle lists
     /// `previous_share_deks` during a DEK rotation.
     previous: Vec<Zeroizing<[u8; 32]>>,
+    /// What a v2 key file must be bound to, and which format to write.
+    binding: KeyFileBinding,
+}
+
+/// What this node's v2 key files are bound to and which format it writes (`keyfile` in the config).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KeyFileBinding {
+    /// This node's configured identifier: a v2 header must name it.
+    pub node: u16,
+    /// `keyfile.cluster_uuid`: a v2 header must name it. Required to write v2.
+    pub cluster_uuid: Option<String>,
+    /// 1 (default in this release, so a rollback stays possible) or 2.
+    pub write_version: u8,
+    /// Read v1 (header-less) files. On by default; turn off once every file is v2.
+    pub accept_v1: bool,
+}
+
+impl KeyFileBinding {
+    pub fn v1(node: u16) -> Self {
+        Self { node, cluster_uuid: None, write_version: 1, accept_v1: true }
+    }
+}
+
+/// The kind of record a key file holds — part of the v2 header and of the associated data, so a
+/// file of one kind never opens as another.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordKind {
+    /// A FROST key share (committed, or staged by a ceremony).
+    FrostShare,
+    /// A cluster-hosted whole key.
+    HostedKey,
+    /// A deleted hosted key's tombstone (audit M2).
+    Tombstone,
+    /// A split-ceremony recipient secret (`data_dir/ceremony/<key_id>.recipient`).
+    Recipient,
+}
+
+impl RecordKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecordKind::FrostShare => "frost-share",
+            RecordKind::HostedKey => "hosted-key",
+            RecordKind::Tombstone => "tombstone",
+            RecordKind::Recipient => "recipient",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        [RecordKind::FrostShare, RecordKind::HostedKey, RecordKind::Tombstone, RecordKind::Recipient]
+            .into_iter()
+            .find(|k| k.as_str() == s)
+    }
+}
+
+/// The clear header of a v2 key file. Every field is bound into the AES-GCM associated data.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyFileHeader {
+    /// [`KEYFILE_FMT`].
+    pub fmt: String,
+    /// `keyfile.cluster_uuid` of the node that wrote it.
+    pub cluster: String,
+    /// The configured identifier of the node that wrote it.
+    pub node: u16,
+    /// The key id; must equal the file name's.
+    pub key_id: String,
+    /// [`RecordKind::as_str`].
+    pub kind: String,
+    /// The FROST share's epoch (0 for every other kind).
+    pub epoch: u64,
+    /// Hex: the FROST share's PKP digest, a hosted key's public-key digest, a tombstone's delete
+    /// intent digest; empty where there is none.
+    #[serde(default)]
+    pub digest: String,
+    /// Which DEK sealed it: hex of the first 4 bytes of SHA-256("rutli-dek-id-v1\n" ‖ DEK).
+    pub dek_id: String,
+}
+
+/// What a v2 header records about the record being sealed.
+#[derive(Clone, Copy, Debug)]
+pub struct RecordMeta<'a> {
+    pub kind: RecordKind,
+    pub key_id: &'a str,
+    pub epoch: u64,
+    pub digest: &'a [u8],
+}
+
+/// The v2 envelope on disk.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EnvelopeV2 {
+    v: u8,
+    hdr: KeyFileHeader,
+    nonce: String,
+    ct: String,
+}
+
+/// The fixed binary encoding of a header used as associated data: a context string, then each
+/// field length-prefixed (u32 big-endian) or fixed-width big-endian — no JSON canonicalization to
+/// disagree on.
+pub fn header_aad(h: &KeyFileHeader) -> Vec<u8> {
+    let mut out = AAD_CONTEXT.to_vec();
+    let mut lp = |b: &[u8]| {
+        out.extend_from_slice(&(b.len() as u32).to_be_bytes());
+        out.extend_from_slice(b);
+    };
+    lp(h.fmt.as_bytes());
+    lp(h.cluster.as_bytes());
+    lp(&h.node.to_be_bytes());
+    lp(h.key_id.as_bytes());
+    lp(h.kind.as_bytes());
+    lp(&h.epoch.to_be_bytes());
+    lp(h.digest.as_bytes());
+    lp(h.dek_id.as_bytes());
+    out
+}
+
+/// The id of a DEK, as a v2 header names it (public: a truncated hash of a 256-bit random key).
+pub fn dek_id(key: &[u8; 32]) -> String {
+    use sha2::Digest;
+    let mut h = Sha256::new();
+    h.update(DEK_ID_CONTEXT);
+    h.update(key);
+    hex::encode(&h.finalize()[..4])
+}
+
+/// The format of a key file's bytes: `Some(1)` for a v1 sealed envelope, `Some(2)` for v2, `None`
+/// for anything else (a plaintext record).
+pub fn file_version(file_bytes: &[u8]) -> Option<u8> {
+    #[derive(Deserialize)]
+    struct Probe {
+        v: u8,
+        #[serde(default)]
+        sealed: bool,
+        #[serde(default)]
+        hdr: Option<serde_json::Value>,
+    }
+    match serde_json::from_slice::<Probe>(file_bytes) {
+        Ok(Probe { v: 1, sealed: true, .. }) => Some(1),
+        Ok(Probe { v: 2, hdr: Some(_), .. }) => Some(2),
+        _ => None,
+    }
+}
+
+/// The clear header of a v2 key file, without decrypting anything (restore, `keyfile status`).
+pub fn header_of(file_bytes: &[u8]) -> Option<KeyFileHeader> {
+    serde_json::from_slice::<EnvelopeV2>(file_bytes).ok().filter(|e| e.v == 2).map(|e| e.hdr)
+}
+
+/// Which of a sealer's DEKs a file is sealed under.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DekUse {
+    Current,
+    /// `previous_share_deks[i]`.
+    Previous(usize),
+    /// None this node holds.
+    Unknown,
+}
+
+fn keyfile_err(msg: String) -> DaemonError {
+    DaemonError::KeyFile(msg)
 }
 
 impl Sealer {
     /// Derive this node's data-encryption key from the master secret and the node identifier.
     /// The identifier salt makes per-node keys distinct under one master secret.
     pub fn from_master_secret(master: &[u8], node_identifier: u16) -> Self {
-        Self::from_dek(derive_share_dek(master, node_identifier))
+        Self::from_dek(derive_share_dek(master, node_identifier), node_identifier)
     }
 
-    /// A sealer over an explicit 32-byte DEK (a node seal bundle's `share_dek`).
-    pub fn from_dek(key: Zeroizing<[u8; 32]>) -> Self {
-        Self { key, previous: Vec::new() }
+    /// A sealer over an explicit 32-byte DEK (a node seal bundle's `share_dek`) for node `node`.
+    pub fn from_dek(key: Zeroizing<[u8; 32]>, node: u16) -> Self {
+        Self { key, previous: Vec::new(), binding: KeyFileBinding::v1(node) }
+    }
+
+    /// Bind v2 key files to `keyfile` (cluster UUID, write format, v1 acceptance).
+    pub fn with_keyfile(mut self, keyfile: &crate::config::KeyFileConfig) -> Self {
+        self.binding.cluster_uuid = keyfile.cluster_uuid.clone();
+        self.binding.write_version = keyfile.write_version;
+        self.binding.accept_v1 = keyfile.accept_v1;
+        self
+    }
+
+    /// Replace the binding wholesale (tests, offline tools).
+    pub fn with_binding(mut self, binding: KeyFileBinding) -> Self {
+        self.binding = binding;
+        self
+    }
+
+    pub fn binding(&self) -> &KeyFileBinding {
+        &self.binding
+    }
+
+    /// This node's configured identifier.
+    pub fn node(&self) -> u16 {
+        self.binding.node
+    }
+
+    /// The id of the DEK new files are sealed under.
+    pub fn current_dek_id(&self) -> String {
+        dek_id(&self.key)
+    }
+
+    /// Whether this sealer still holds retired DEKs (a DEK rotation in progress).
+    pub fn has_previous(&self) -> bool {
+        !self.previous.is_empty()
+    }
+
+    /// Seal a key-file record in the configured write format (`keyfile.write_version`).
+    pub fn seal_record(&self, meta: &RecordMeta<'_>, plaintext: &[u8]) -> Result<Vec<u8>> {
+        self.seal_record_as(self.binding.write_version, meta, plaintext)
+    }
+
+    /// Seal a key-file record in format `version` (1 or 2), whatever the configured one: the
+    /// offline `keyfile migrate` / `keyfile downgrade` rewrite.
+    pub fn seal_record_as(&self, version: u8, meta: &RecordMeta<'_>, plaintext: &[u8]) -> Result<Vec<u8>> {
+        match version {
+            1 => self.seal(plaintext),
+            2 => {
+                let cluster = self.binding.cluster_uuid.clone().ok_or_else(|| {
+                    DaemonError::Config(
+                        "key-file format v2 needs keyfile.cluster_uuid (the same UUID on every node)".into(),
+                    )
+                })?;
+                let hdr = KeyFileHeader {
+                    fmt: KEYFILE_FMT.into(),
+                    cluster,
+                    node: self.binding.node,
+                    key_id: meta.key_id.to_string(),
+                    kind: meta.kind.as_str().to_string(),
+                    epoch: meta.epoch,
+                    digest: hex::encode(meta.digest),
+                    dek_id: self.current_dek_id(),
+                };
+                let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(self.key.as_ref()));
+                let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+                let aad = header_aad(&hdr);
+                let ct = cipher
+                    .encrypt(&nonce, aes_gcm::aead::Payload { msg: plaintext, aad: &aad })
+                    .map_err(|_| DaemonError::Config("share sealing failed".into()))?;
+                let env = EnvelopeV2 { v: 2, hdr, nonce: hex::encode(nonce), ct: hex::encode(ct) };
+                Ok(serde_json::to_vec_pretty(&env)?)
+            }
+            other => Err(DaemonError::Config(format!("unknown key-file format version {other}"))),
+        }
+    }
+
+    /// Open a key file for `key_id` that must hold one of `kinds`: a v2 file only if its header
+    /// names this cluster, this node, `key_id` and an expected kind (checked before decrypting,
+    /// then bound by the associated data); a v1 file while `keyfile.accept_v1`. Returns the
+    /// plaintext and, for v2, the verified header — the caller checks the plaintext agrees with it.
+    pub fn unseal_record(
+        &self,
+        file_bytes: &[u8],
+        key_id: &str,
+        kinds: &[RecordKind],
+    ) -> Result<(Vec<u8>, Option<KeyFileHeader>)> {
+        match file_version(file_bytes) {
+            Some(1) => {
+                if !self.binding.accept_v1 {
+                    return Err(keyfile_err(format!(
+                        "{key_id}: a v1 (header-less) key file, and keyfile.accept_v1 is off — \
+                         migrate it (`rutli-cosigner keyfile migrate`) or restore a v2 copy"
+                    )));
+                }
+                Ok((self.unseal(file_bytes)?, None))
+            }
+            Some(2) => {
+                let env: EnvelopeV2 = serde_json::from_slice(file_bytes)
+                    .map_err(|e| keyfile_err(format!("{key_id}: malformed v2 key file: {e}")))?;
+                let h = &env.hdr;
+                self.check_header(h, key_id, kinds)?;
+                let key = self.dek_for(&h.dek_id).ok_or_else(|| {
+                    keyfile_err(format!(
+                        "{key_id}: sealed under DEK {} which this node does not hold (current {}, \
+                         previous [{}]) — the wrong seal bundle, or a previous DEK dropped too early",
+                        h.dek_id,
+                        self.current_dek_id(),
+                        self.previous.iter().map(|k| dek_id(k)).collect::<Vec<_>>().join(", ")
+                    ))
+                })?;
+                let nonce = hex::decode(&env.nonce)
+                    .ok()
+                    .filter(|n| n.len() == NONCE_LEN)
+                    .ok_or_else(|| keyfile_err(format!("{key_id}: bad nonce")))?;
+                let ct = hex::decode(&env.ct).map_err(|_| keyfile_err(format!("{key_id}: bad ciphertext hex")))?;
+                let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_ref()));
+                let aad = header_aad(h);
+                let plain = cipher
+                    .decrypt(Nonce::from_slice(&nonce), aes_gcm::aead::Payload { msg: &ct, aad: &aad })
+                    .map_err(|_| {
+                        keyfile_err(format!(
+                            "{key_id}: unseal failed — the header or ciphertext was altered, or the \
+                             file is corrupted"
+                        ))
+                    })?;
+                Ok((plain, Some(env.hdr)))
+            }
+            _ => Err(keyfile_err(format!("{key_id}: not a sealed key file"))),
+        }
+    }
+
+    fn check_header(&self, h: &KeyFileHeader, key_id: &str, kinds: &[RecordKind]) -> Result<()> {
+        if h.fmt != KEYFILE_FMT {
+            return Err(keyfile_err(format!("{key_id}: unknown key-file format {:?}", h.fmt)));
+        }
+        match &self.binding.cluster_uuid {
+            Some(c) if *c == h.cluster => {}
+            Some(c) => {
+                return Err(keyfile_err(format!(
+                    "{key_id}: the file belongs to cluster {}, this node is in cluster {c} \
+                     (keyfile.cluster_uuid) — a file copied from another cluster",
+                    h.cluster
+                )))
+            }
+            None => {
+                return Err(keyfile_err(format!(
+                    "{key_id}: a v2 key file of cluster {}, but keyfile.cluster_uuid is not set on \
+                     this node — set it (the same UUID on every node)",
+                    h.cluster
+                )))
+            }
+        }
+        if h.node != self.binding.node {
+            return Err(keyfile_err(format!(
+                "{key_id}: the file belongs to node {}, this is node {} — a file copied from another node",
+                h.node, self.binding.node
+            )));
+        }
+        if h.key_id != key_id {
+            return Err(keyfile_err(format!(
+                "the file for {key_id} holds key {} — a key file renamed or copied over another",
+                h.key_id
+            )));
+        }
+        match RecordKind::parse(&h.kind) {
+            Some(k) if kinds.contains(&k) => Ok(()),
+            _ => Err(keyfile_err(format!(
+                "{key_id}: the file holds a {:?} record where a {} is expected",
+                h.kind,
+                kinds.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(" or ")
+            ))),
+        }
+    }
+
+    fn dek_for(&self, id: &str) -> Option<&Zeroizing<[u8; 32]>> {
+        std::iter::once(&self.key).chain(self.previous.iter()).find(|k| dek_id(k) == id)
+    }
+
+    /// Which DEK `file_bytes` is sealed under: a v2 file by its `dek_id`, a v1 file by trial
+    /// decryption.
+    pub fn dek_use(&self, file_bytes: &[u8]) -> DekUse {
+        let which = |id: &str| {
+            if dek_id(&self.key) == id {
+                return DekUse::Current;
+            }
+            self.previous.iter().position(|k| dek_id(k) == id).map(DekUse::Previous).unwrap_or(DekUse::Unknown)
+        };
+        match file_version(file_bytes) {
+            Some(2) => header_of(file_bytes).map(|h| which(&h.dek_id)).unwrap_or(DekUse::Unknown),
+            Some(1) => {
+                let Ok(env) = serde_json::from_slice::<SealedEnvelope>(file_bytes) else { return DekUse::Unknown };
+                let (Ok(nonce), Ok(ct)) = (hex::decode(&env.nonce), hex::decode(&env.ct)) else {
+                    return DekUse::Unknown;
+                };
+                if nonce.len() != NONCE_LEN {
+                    return DekUse::Unknown;
+                }
+                for (i, key) in std::iter::once(&self.key).chain(self.previous.iter()).enumerate() {
+                    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key.as_ref()));
+                    if cipher.decrypt(Nonce::from_slice(&nonce), ct.as_slice()).is_ok() {
+                        return if i == 0 { DekUse::Current } else { DekUse::Previous(i - 1) };
+                    }
+                }
+                DekUse::Unknown
+            }
+            _ => DekUse::Unknown,
+        }
     }
 
     /// Read the master secret from `env_var` (utf-8; recommended ≥ 32 bytes of entropy, e.g.
@@ -147,11 +535,9 @@ impl Sealer {
         ))
     }
 
-    /// Whether `file_bytes` look like a sealed envelope (vs. a legacy plaintext share).
+    /// Whether `file_bytes` look like a sealed envelope, v1 or v2 (vs. a plaintext record).
     pub fn is_sealed(file_bytes: &[u8]) -> bool {
-        serde_json::from_slice::<SealedEnvelope>(file_bytes)
-            .map(|e| e.sealed)
-            .unwrap_or(false)
+        file_version(file_bytes).is_some()
     }
 }
 
@@ -314,7 +700,43 @@ impl NodeSealBundle {
         Sealer {
             key: self.share_dek.clone(),
             previous: self.previous_share_deks.clone(),
+            binding: KeyFileBinding::v1(self.node),
         }
+    }
+
+    /// DEK rotation, step 1 (finishes the legacy-master retirement, decision P1): a bundle for the
+    /// same node with a fresh random `share_dek`, the current one moved to the front of
+    /// `previous_share_deks`, and the same distribution seed (so no peer re-pins anything). Files
+    /// sealed under the old DEK keep opening; `keyfile migrate` (or the next daemon start)
+    /// re-seals them under the new one.
+    pub fn rotated(&self) -> Self {
+        use rand::RngCore;
+        let mut dek = Zeroizing::new([0u8; 32]);
+        rand::rngs::OsRng.fill_bytes(dek.as_mut());
+        let mut previous = vec![self.share_dek.clone()];
+        previous.extend(self.previous_share_deks.iter().cloned());
+        Self { node: self.node, share_dek: dek, dist_seed: self.dist_seed.clone(), previous_share_deks: previous }
+    }
+
+    /// DEK rotation, last step: the same bundle without `previous_share_deks` — once `keyfile
+    /// status` shows no file under a previous DEK, and a backup has been taken since.
+    pub fn without_previous(&self) -> Self {
+        Self {
+            node: self.node,
+            share_dek: self.share_dek.clone(),
+            dist_seed: self.dist_seed.clone(),
+            previous_share_deks: Vec::new(),
+        }
+    }
+
+    /// How many retired DEKs the bundle carries.
+    pub fn previous_count(&self) -> usize {
+        self.previous_share_deks.len()
+    }
+
+    /// The id of the bundle's current DEK, as a v2 header names it.
+    pub fn dek_id(&self) -> String {
+        dek_id(&self.share_dek)
     }
 
     pub fn dist_key(&self) -> crate::wrap::DistKey {
@@ -620,6 +1042,7 @@ mod tests {
             cluster_id: None,
             cluster_id_change_allowed: false,
             signing_policy: Default::default(),
+            keyfile: Default::default(),
         }
     }
 

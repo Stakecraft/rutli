@@ -139,6 +139,16 @@ refreshAllowlist: []
 #     approvers: [{ id: alice, public_key_spki_b64: "MCowBQYDK2VwAyEA..." }]
 signingPolicy: {}
 
+# Key-file format (audit M4), written into every node's config as `keyfile` verbatim. Empty =
+# this release's defaults: read v1 and v2, write v1 (so a rollback to an older image stays
+# possible). After every cosigner runs this release: set cluster_uuid (one lowercase UUID for the
+# whole cluster, never changed — `uuidgen | tr A-Z a-z`), then write_version: 2 (each node re-seals
+# its files as v2 at start). accept_v1: false once no rollback is wanted. Example:
+#   keyfile:
+#     cluster_uuid: "6f1d3c1e-8a0b-4a43-9c55-0d4f1f0b7a11"
+#     write_version: 2
+keyfile: {}
+
 # topology=legacy only: the tls.domain written into each config. Since 0.4.0-rc.2 the cosigners
 # verify each peer under its own name (cosigner<id>) whatever this says; it only remains the
 # fallback name for operator commands against a non-roster target.

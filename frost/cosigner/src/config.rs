@@ -94,6 +94,70 @@ pub struct Config {
     /// What this node demands of the leaders it signs for.
     #[serde(default)]
     pub signing_policy: SigningPolicyConfig,
+    /// Key-file format (audit M4): which format new key files are written in and what v2 files
+    /// are bound to.
+    #[serde(default)]
+    pub keyfile: KeyFileConfig,
+}
+
+/// `keyfile`: the at-rest key-file format (audit M4, [`crate::seal`]).
+///
+/// Rollout: this release reads v1 and v2 and writes v1 unless `write_version` is 2, so a node can
+/// still roll back to a release that knows only v1 (`rutli-cosigner keyfile downgrade` rewrites v2
+/// files as v1 for that). Set `cluster_uuid` on every node, then `write_version: 2`, then run
+/// `keyfile migrate` (or restart: the daemon re-seals v1 files as v2 at start when writing v2).
+/// Once every file is v2 and no rollback is wanted, set `accept_v1: false`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct KeyFileConfig {
+    /// 1 (default in this release) or 2.
+    #[serde(default = "default_keyfile_write_version")]
+    pub write_version: u8,
+    /// The cluster identity v2 key files are bound to: a lowercase RFC 4122 UUID (`uuidgen | tr
+    /// A-Z a-z`), the same on every node, never changed afterwards. Deliberately not the CA-derived
+    /// `cluster_id`: a CA rotation must not make every key file unreadable. Required for v2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cluster_uuid: Option<String>,
+    /// Read v1 (header-less) key files. Turn off only once every file is v2.
+    #[serde(default = "default_true")]
+    pub accept_v1: bool,
+}
+
+impl Default for KeyFileConfig {
+    fn default() -> Self {
+        Self { write_version: default_keyfile_write_version(), cluster_uuid: None, accept_v1: true }
+    }
+}
+
+fn default_keyfile_write_version() -> u8 {
+    1
+}
+
+impl KeyFileConfig {
+    pub fn validate(&self, sealed: bool) -> crate::Result<()> {
+        use crate::DaemonError::Config;
+        if !matches!(self.write_version, 1 | 2) {
+            return Err(Config(format!("keyfile.write_version must be 1 or 2, got {}", self.write_version)));
+        }
+        if let Some(u) = &self.cluster_uuid {
+            let canonical = uuid::Uuid::parse_str(u).ok().map(|p| p.hyphenated().to_string());
+            if canonical.as_deref() != Some(u.as_str()) {
+                return Err(Config(format!(
+                    "keyfile.cluster_uuid must be a lowercase hyphenated UUID (uuidgen | tr A-Z a-z), got {u:?}"
+                )));
+            }
+        }
+        if self.write_version == 2 && self.cluster_uuid.is_none() {
+            return Err(Config("keyfile.write_version 2 needs keyfile.cluster_uuid".into()));
+        }
+        if self.write_version == 2 && !sealed {
+            return Err(Config("keyfile.write_version 2 needs share_seal (v2 is a sealed format)".into()));
+        }
+        if !self.accept_v1 && self.write_version != 2 {
+            return Err(Config("keyfile.accept_v1 false needs keyfile.write_version 2".into()));
+        }
+        Ok(())
+    }
 }
 
 /// Cosigner-side signing policy (`signing_policy`): what this node demands before it takes part in
@@ -821,6 +885,7 @@ impl Config {
                 )));
             }
         }
+        self.keyfile.validate(self.share_seal.is_some())?;
         Ok(())
     }
 }
@@ -852,6 +917,7 @@ mod tests {
             cluster_id: None,
             cluster_id_change_allowed: false,
             signing_policy: Default::default(),
+            keyfile: Default::default(),
         }
     }
 
@@ -1141,6 +1207,7 @@ mod hosted_config_tests {
             cluster_id: None,
             cluster_id_change_allowed: false,
             signing_policy: Default::default(),
+            keyfile: Default::default(),
         }
     }
 
@@ -1208,6 +1275,33 @@ mod hosted_config_tests {
         });
         assert!(c.validate().is_err(), "both sources at once is ambiguous");
         on_bundle(cfg(None, false)).validate().unwrap();
+    }
+
+    #[test]
+    fn keyfile_settings_are_validated() {
+        let uuid = "6f1d3c1e-8a0b-4a43-9c55-0d4f1f0b7a11";
+        let mut c = cfg(None, true);
+        assert_eq!(c.keyfile, KeyFileConfig::default());
+        assert_eq!((c.keyfile.write_version, c.keyfile.accept_v1), (1, true));
+        c.keyfile.write_version = 2;
+        assert!(c.validate().unwrap_err().to_string().contains("needs keyfile.cluster_uuid"));
+        c.keyfile.cluster_uuid = Some(uuid.to_uppercase());
+        assert!(c.validate().unwrap_err().to_string().contains("lowercase hyphenated UUID"));
+        c.keyfile.cluster_uuid = Some("not-a-uuid".into());
+        assert!(c.validate().is_err());
+        c.keyfile.cluster_uuid = Some(uuid.into());
+        c.validate().unwrap();
+        c.keyfile.write_version = 3;
+        assert!(c.validate().is_err());
+        c.keyfile.write_version = 1;
+        c.keyfile.accept_v1 = false;
+        assert!(c.validate().unwrap_err().to_string().contains("accept_v1 false needs"));
+        let mut unsealed = cfg(None, false);
+        unsealed.share_seal = None;
+        unsealed.keyfile = KeyFileConfig { write_version: 2, cluster_uuid: Some(uuid.into()), accept_v1: true };
+        assert!(unsealed.validate().unwrap_err().to_string().contains("needs share_seal"));
+        // Unknown fields are refused rather than ignored.
+        assert!(serde_json::from_str::<KeyFileConfig>(r#"{"write_version":2,"clusteruuid":"x"}"#).is_err());
     }
 
     #[test]
