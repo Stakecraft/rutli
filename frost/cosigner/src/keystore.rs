@@ -318,6 +318,24 @@ impl KeyStore {
         Ok(removed)
     }
 
+    /// Key ids of every FROST share on this node (hosted keys excluded). Unreadable files are
+    /// skipped (they are reported elsewhere).
+    pub fn list_frost(&self) -> Result<Vec<String>> {
+        self.touch(&self.dir);
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let Some(key_id) = name.strip_suffix(".json") else { continue };
+            if let Ok(Record::Frost(_)) = self.load_record(key_id) {
+                out.push(key_id.to_string());
+            }
+        }
+        out.sort();
+        Ok(out)
+    }
+
     /// FROST keys installed by the split ceremony that have not been refreshed since: their live
     /// shares are still the dealt ones. Unreadable files are skipped (they are reported elsewhere).
     pub fn dealt_keys_never_refreshed(&self) -> Result<Vec<String>> {

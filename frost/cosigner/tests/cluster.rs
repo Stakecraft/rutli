@@ -514,7 +514,7 @@ async fn sign_is_refused_on_every_node_after_cluster_wide_refresh_fence() {
 
     // A new sign is refused on EVERY node — not just the leader that started the ceremony.
     for (i, n) in nodes.iter().enumerate() {
-        let err = n.sign_round1(KEY_ID, &format!("sign-during-refresh-{i}")).unwrap_err();
+        let err = n.sign_round1(KEY_ID, &format!("sign-during-refresh-{i}"), &Default::default()).unwrap_err();
         assert!(
             matches!(err, DaemonError::CeremonyInProgress { .. }),
             "node {i}: got {err:?}"
@@ -533,7 +533,7 @@ async fn refresh_is_refused_while_a_sign_is_in_flight_on_any_node() {
     let group_key = run_dkg(&peers, KEY_ID).await.unwrap();
 
     // Node 1 has an in-flight sign (round1 done, round2 not yet).
-    nodes[1].sign_round1(KEY_ID, "in-flight").unwrap();
+    nodes[1].sign_round1(KEY_ID, "in-flight", &Default::default()).unwrap();
     assert_eq!(nodes[1].pending_sign_count(KEY_ID), 1);
 
     // Cluster refresh must fail at the fence (reverse fence), not mutate shares under the sign.
@@ -542,8 +542,8 @@ async fn refresh_is_refused_while_a_sign_is_in_flight_on_any_node() {
 
     // Partial fence rolled back: a node with no pending signs accepts a new round1 (not stuck
     // behind a leftover ceremony guard from the aborted refresh).
-    assert!(nodes[0].sign_round1(KEY_ID, "after-rollback").is_ok());
-    assert!(nodes[2].sign_round1(KEY_ID, "after-rollback-2").is_ok());
+    assert!(nodes[0].sign_round1(KEY_ID, "after-rollback", &Default::default()).is_ok());
+    assert!(nodes[2].sign_round1(KEY_ID, "after-rollback-2", &Default::default()).is_ok());
 
     // Abort the in-flight session and confirm the cluster still signs under the same group key.
     nodes[1].abort_sign(KEY_ID, "in-flight");
@@ -575,8 +575,8 @@ impl PeerApi for FailRound2 {
     fn identifier(&self) -> Identifier {
         self.inner.identifier()
     }
-    async fn sign_round1(&self, key_id: &str, session_id: &str) -> DaemonResult<SigningCommitments> {
-        self.inner.sign_round1(key_id, session_id).await
+    async fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &rutli_cosigner::node::Round1Ctx) -> DaemonResult<SigningCommitments> {
+        self.inner.sign_round1(key_id, session_id, ctx).await
     }
     async fn sign_round2(
         &self,
@@ -641,9 +641,11 @@ async fn a_failed_sign_round2_aborts_the_in_flight_session_on_every_quorum_membe
         Arc::new(FailRound2 { inner: LocalPeer::new(nodes[1].clone()) }) as Arc<dyn PeerApi>,
     ];
 
+    // With no other subset to retry on, the leader gives up after excluding node 1: UNAVAILABLE
+    // (ThresholdNotMet), so the driver fails over, rather than the member's own error.
     let message = canton_digest(b"round2 will fail");
     let err = sign(&nodes[0], &peers, KEY_ID, &message).await.unwrap_err();
-    assert!(matches!(err, DaemonError::Disagreement(_)), "got {err:?}");
+    assert!(matches!(err, DaemonError::ThresholdNotMet { needed: 2, got: 1 }), "got {err:?}");
 
     // The load-bearing assertion: node 1 held a round-1 nonce (it answered round 1) and the leader's
     // abort freed it immediately — no waiting for the pending TTL. Node 0 burned its own in round 2.
@@ -701,10 +703,10 @@ async fn peer_round2_refuses_a_non_canton_payload() {
 
     // A well-formed 34-byte digest is still accepted through the same path (round1 first).
     let msg = canton_digest(b"legit");
-    let c0 = nodes[0].sign_round1(KEY_ID, "ok-session").unwrap();
+    let c0 = nodes[0].sign_round1(KEY_ID, "ok-session", &Default::default()).unwrap();
     let mut cs = BTreeMap::new();
     cs.insert(nodes[0].identifier, c0);
-    let c1 = nodes[1].sign_round1(KEY_ID, "ok-session").unwrap();
+    let c1 = nodes[1].sign_round1(KEY_ID, "ok-session", &Default::default()).unwrap();
     cs.insert(nodes[1].identifier, c1);
     assert!(nodes[0].sign_round2(KEY_ID, "ok-session", &msg, &cs).is_ok());
 }
@@ -978,7 +980,7 @@ impl PeerApi for UnreachablePeer {
     fn identifier(&self) -> Identifier {
         self.id
     }
-    async fn sign_round1(&self, _: &str, _: &str) -> DaemonResult<SigningCommitments> {
+    async fn sign_round1(&self, _: &str, _: &str, _: &rutli_cosigner::node::Round1Ctx) -> DaemonResult<SigningCommitments> {
         Err(down())
     }
     async fn sign_round2(
@@ -1043,7 +1045,7 @@ impl PeerApi for FixedErrorPeer {
     fn identifier(&self) -> Identifier {
         self.id
     }
-    async fn sign_round1(&self, _: &str, _: &str) -> DaemonResult<SigningCommitments> {
+    async fn sign_round1(&self, _: &str, _: &str, _: &rutli_cosigner::node::Round1Ctx) -> DaemonResult<SigningCommitments> {
         Err(clone_err(&self.error))
     }
     async fn sign_round2(

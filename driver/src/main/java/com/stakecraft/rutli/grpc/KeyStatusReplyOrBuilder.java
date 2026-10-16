@@ -191,4 +191,16 @@ public interface KeyStatusReplyOrBuilder extends
    * @return The epoch.
    */
   long getEpoch();
+
+  /**
+   * <pre>
+   * This node's epoch check found its share stale (a peer holds a newer committed sharing of the
+   * same group key that this node never voted for, e.g. after a restore from an old backup). A
+   * stale node refuses to sign or lead for the key until its share is current again.
+   * </pre>
+   *
+   * <code>bool stale = 15;</code>
+   * @return The stale.
+   */
+  boolean getStale();
 }

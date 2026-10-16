@@ -104,6 +104,44 @@ spec:
         description: "{{ $labels.instance }} issued more than 3 leader-side sign aborts in the last 15\
           \ minutes. This indicates repeated give-ups on in-flight sign sessions \u2014 peers may be flapping\
           \ or the cluster may be degraded."
+    - alert: RutliStaleShare
+      expr: max by (instance, key) (rutli_stale_share) == 1
+      for: 0m
+      labels:
+        severity: critical
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }} holds a stale share of {{ $labels.key }}"
+        description: "{{ $labels.instance }} found its share of {{ $labels.key }} behind the cluster:\
+          \ a newer committed sharing (epoch) exists that this node never voted for, or its own ceremony\
+          \ record names a newer epoch than its share. Typical cause: a restore from an old backup or\
+          \ a volume snapshot rollback. It refuses to sign or lead for the key, so signing continues on\
+          \ the other cosigners \u2014 at 2-of-3 with no margin left. Fix: restore a current backup of\
+          \ this node (daemon stopped) or re-enrol it; the mark clears by itself once the share is current\
+          \ (docs/ceremonies.md, Signing across epochs). Never copy another node's share file."
+    - alert: RutliEpochMismatch
+      expr: increase(rutli_epoch_mismatch_total[15m]) > 0
+      for: 0m
+      labels:
+        severity: warning
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }} refused a leader on another epoch"
+        description: '{{ $labels.instance }} refused sign round 1 because the leader signs with a different
+          sharing (epoch, PKP digest) of the key than this node committed. Leaders route around it, but
+          two cosigners hold different epochs of one key: compare `rutli-cosigner verify-key` across nodes,
+          and check RutliStaleShare and rutli_ceremonies_staged (a ceremony still resolving clears within
+          a minute).'
+    - alert: RutliInvalidSignatureShare
+      expr: increase(rutli_invalid_signature_shares_total[1h]) > 0
+      for: 0m
+      labels:
+        severity: critical
+      annotations:
+        summary: "R\xFCtli leader {{ $labels.instance }} received an invalid signature share"
+        description: "A cosigner returned a signature share that failed verification when {{ $labels.instance\
+          \ }} aggregated a signature. The leader excluded that cosigner and retried with another quorum,\
+          \ so no bad signature was returned \u2014 but a correct cosigner never produces an invalid share:\
+          \ suspect a corrupted share file or a compromised node. The leader's log names the cosigner\
+          \ (`a cosigner returned an invalid signature share`)."
     - alert: RutliHostedKeyConflict
       expr: increase(rutli_anti_entropy_conflicts_total[1h]) > 0
       for: 0m
@@ -191,14 +229,15 @@ spec:
       annotations:
         summary: "R\xFCtli is refusing hosted-key decryptions on {{ $labels.instance }} (rate limit)"
         description: "{{ $labels.instance }} has refused hosted-key decryptions for at least 5 minutes\
-          \ because a key hit hosted_keys.decrypt_rate_limit_per_min (default 6000/min per key, enforced per node). In normal\
-          \ operation this counter never moves: the default is ~100 decryptions per second sustained on\
-          \ a SINGLE key, far above what a Canton participant does. Two readings. (1) Legitimate growth\
-          \ \u2014 the cosigner logs 'approaching its rate limit' with the key id before it starts refusing,\
-          \ so check for that warning and raise the limit. Canton sees RESOURCE_EXHAUSTED and backs off;\
-          \ the driver deliberately does NOT fail over to another cosigner, since every node enforces\
-          \ the same ceiling. (2) Abuse \u2014 this is what a stolen driver certificate looks like, and\
-          \ because Canton's encryption keys protect per-view session keys, whoever holds it can read\
-          \ retrospectively. If the traffic is not yours, treat it as a live confidentiality incident:\
-          \ check the driver certificate's provenance and signer_allowlist, then rotate the encryption\
-          \ key through Canton topology and the driver cert. See docs/hosted-keys.md section 5."
+          \ because a key hit hosted_keys.decrypt_rate_limit_per_min (default 6000/min per key, enforced\
+          \ per node). In normal operation this counter never moves: the default is ~100 decryptions per\
+          \ second sustained on a SINGLE key, far above what a Canton participant does. Two readings.\
+          \ (1) Legitimate growth \u2014 the cosigner logs 'approaching its rate limit' with the key id\
+          \ before it starts refusing, so check for that warning and raise the limit. Canton sees RESOURCE_EXHAUSTED\
+          \ and backs off; the driver deliberately does NOT fail over to another cosigner, since every\
+          \ node enforces the same ceiling. (2) Abuse \u2014 this is what a stolen driver certificate\
+          \ looks like, and because Canton's encryption keys protect per-view session keys, whoever holds\
+          \ it can read retrospectively. If the traffic is not yours, treat it as a live confidentiality\
+          \ incident: check the driver certificate's provenance and signer_allowlist, then rotate the\
+          \ encryption key through Canton topology and the driver cert. See docs/hosted-keys.md section\
+          \ 5."

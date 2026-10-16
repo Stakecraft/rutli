@@ -82,6 +82,22 @@ pub struct Config {
     /// started over); set it for one start, then remove it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub cluster_id_change_allowed: bool,
+    /// What this node demands of the leaders it signs for.
+    #[serde(default)]
+    pub signing_policy: SigningPolicyConfig,
+}
+
+/// Cosigner-side signing policy (`signing_policy`). Later releases add the signing-intent rules
+/// here (audit C2).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SigningPolicyConfig {
+    /// Refuse sign round 1 from a leader that does not say which sharing (epoch, PKP digest) of the
+    /// key it signs with. Off by default in this release so leaders on the previous release keep
+    /// signing during a rolling upgrade (the check is then skipped with a warning and
+    /// `rutli_epoch_check_skipped_total`); turn it on once every cosigner runs this release. A
+    /// leader that does send its sharing is always checked.
+    #[serde(default)]
+    pub require_epoch_match: bool,
 }
 
 /// Cluster-hosted key settings.
@@ -537,6 +553,7 @@ mod tests {
             ceremony_sign_test_rate_limit_per_min: DEFAULT_CEREMONY_SIGN_TEST_RATE_LIMIT_PER_MIN,
             cluster_id: None,
             cluster_id_change_allowed: false,
+            signing_policy: Default::default(),
         }
     }
 
@@ -765,6 +782,7 @@ mod hosted_config_tests {
             hosted_keys: hosted,
             cluster_id: None,
             cluster_id_change_allowed: false,
+            signing_policy: Default::default(),
         }
     }
 

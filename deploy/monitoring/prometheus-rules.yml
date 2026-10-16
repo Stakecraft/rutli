@@ -14,6 +14,11 @@
 #   rutli_ceremony_requests_total{kind="dkg"|"refresh", result=...}   counter
 #   rutli_sign_round1_skips_total                                    counter
 #   rutli_sign_aborts_total                                          counter
+#   rutli_sign_retries_total                                         counter
+#   rutli_invalid_signature_shares_total                             counter
+#   rutli_epoch_mismatch_total                                       counter
+#   rutli_epoch_check_skipped_total                                  counter
+#   rutli_stale_share{key=...}                                       gauge (0|1)
 #   rutli_pending_sign_sessions                                      gauge
 #   rutli_keystore_unreadable                                        gauge (0|1)
 #   rutli_hosted_keys                                                gauge
@@ -115,6 +120,33 @@ groups:
         annotations:
           summary: "Rütli repeated sign aborts on {{ $labels.instance }}"
           description: "{{ $labels.instance }} issued more than 3 leader-side sign aborts in the last 15 minutes. This indicates repeated give-ups on in-flight sign sessions — peers may be flapping or the cluster may be degraded."
+
+      - alert: RutliStaleShare
+        expr: max by (instance, key) (rutli_stale_share) == 1
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} holds a stale share of {{ $labels.key }}"
+          description: "{{ $labels.instance }} found its share of {{ $labels.key }} behind the cluster: a newer committed sharing (epoch) exists that this node never voted for, or its own ceremony record names a newer epoch than its share. Typical cause: a restore from an old backup or a volume snapshot rollback. It refuses to sign or lead for the key, so signing continues on the other cosigners — at 2-of-3 with no margin left. Fix: restore a current backup of this node (daemon stopped) or re-enrol it; the mark clears by itself once the share is current (docs/ceremonies.md, Signing across epochs). Never copy another node's share file."
+
+      - alert: RutliEpochMismatch
+        expr: increase(rutli_epoch_mismatch_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} refused a leader on another epoch"
+          description: "{{ $labels.instance }} refused sign round 1 because the leader signs with a different sharing (epoch, PKP digest) of the key than this node committed. Leaders route around it, but two cosigners hold different epochs of one key: compare `rutli-cosigner verify-key` across nodes, and check RutliStaleShare and rutli_ceremonies_staged (a ceremony still resolving clears within a minute)."
+
+      - alert: RutliInvalidSignatureShare
+        expr: increase(rutli_invalid_signature_shares_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Rütli leader {{ $labels.instance }} received an invalid signature share"
+          description: "A cosigner returned a signature share that failed verification when {{ $labels.instance }} aggregated a signature. The leader excluded that cosigner and retried with another quorum, so no bad signature was returned — but a correct cosigner never produces an invalid share: suspect a corrupted share file or a compromised node. The leader's log names the cosigner (`a cosigner returned an invalid signature share`)."
 
       - alert: RutliHostedKeyConflict
         expr: increase(rutli_anti_entropy_conflicts_total[1h]) > 0

@@ -65,6 +65,8 @@ pub struct NodeRow {
     pub recorded_usage: String,
     /// The sharing this node holds (1 after DKG, +1 per refresh; 0 = pre-epoch or dealt).
     pub epoch: u64,
+    /// The node's epoch check found its share stale: it refuses to sign with it.
+    pub stale: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -225,6 +227,7 @@ pub fn check_views(
             carried_for: String::new(),
             recorded_usage: String::new(),
             epoch: 0,
+            stale: false,
         };
         match &v.status {
             Err(e) => {
@@ -239,6 +242,14 @@ pub fn check_views(
                 row.carried_for = s.carried_for.clone();
                 row.recorded_usage = s.recorded_usage.clone();
                 row.epoch = s.epoch;
+                row.stale = s.stale;
+                if s.stale {
+                    problems.push(format!(
+                        "node {}: its share is stale (a newer sharing is committed elsewhere) — it \
+                         refuses to sign",
+                        v.identifier
+                    ));
+                }
                 epochs.insert(s.epoch);
                 provenance.insert((
                     s.origin.clone(),
@@ -385,6 +396,7 @@ mod tests {
                         carried_for: "namespace".into(),
                         recorded_usage: "namespace".into(),
                         epoch: 0,
+                        stale: false,
                     }),
                 }
             })

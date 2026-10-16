@@ -335,8 +335,29 @@ async fn commit_everywhere(peers: &Peers, ceremony_id: &str, key_id: &str) -> Re
     )))
 }
 
-/// Coordinate one signature. Selects a threshold-sized quorum, tolerating peers that fail round 1
-/// (a downed cosigner), and aggregates the shares into a 64-byte Ed25519 signature.
+/// Most t-subsets one Sign tries: C(5,3) = 10 covers every supported roster (C(3,2) = 3).
+pub const MAX_SIGN_ATTEMPTS: usize = 10;
+
+/// Wall-clock budget for one Sign's attempts — inside the driver's 60 s deadline, so a request
+/// that cannot be served here ends with an error the driver can still fail over on.
+pub const SIGN_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// Coordinate one signature (audit H1: epoch-matched quorums with retry).
+///
+/// * The leader signs only with its own sharing of the key (epoch, PKP digest), which it sends in
+///   round 1; a peer on another sharing refuses ([`DaemonError::EpochMismatch`]), and a stale peer
+///   refuses too. A leader whose own share is stale declines to lead (UNAVAILABLE, the driver
+///   fails over).
+/// * Candidate t-subsets are the roster's combinations, leader first then by identifier. Each
+///   attempt is a fresh session (new session id, fresh round-1 commitments from every member —
+///   commitments are never reused across subsets). A member that fails round 1 or round 2, or whose
+///   share fails verification at aggregation (frost's cheater detection names it), is excluded for
+///   the rest of the request; its session is aborted on the members that hold nonces, and the next
+///   subset without any excluded member is tried.
+/// * If `t` peers report one sharing that is not older than the leader's, the leader is the odd
+///   one out: it stops and answers UNAVAILABLE so the driver fails over to a node on the cluster's
+///   sharing (and nudges its own resolver if it has a ceremony for the key staged).
+/// * At most [`MAX_SIGN_ATTEMPTS`] attempts within [`SIGN_BUDGET`].
 ///
 /// Every step that may read this node's key store runs on the blocking pool ([`Node::blocking`];
 /// the [`PeerApi`] calls do the same on their side), so a stalled volume parks a blocking thread,
@@ -348,54 +369,196 @@ pub async fn sign(node: &Arc<Node>, peers: &Peers, key_id: &str, message: &[u8])
             expected: CANTON_DIGEST_LEN,
         });
     }
-    let threshold = {
+    let me = {
         let key_id = key_id.to_owned();
-        node.blocking(move |n| n.threshold_for(&key_id)).await? as usize
+        node.blocking(move |n| n.signing_view(&key_id)).await?
     };
-    let session_id = new_id("sign");
+    if let Some(mark) = &me.stale {
+        return Err(DaemonError::NotServing(format!(
+            "this node's share of {key_id} is stale (epoch {} < {}): {} — not leading",
+            mark.own_epoch, mark.newer_epoch, mark.reason
+        )));
+    }
+    let threshold = usize::from(me.threshold);
+    let started = std::time::Instant::now();
 
-    // Round 1: gather commitments until we reach the threshold; skip peers that error.
-    let mut commitments: BTreeMap<Identifier, SigningCommitments> = BTreeMap::new();
-    let mut chosen: Vec<&Arc<dyn PeerApi>> = Vec::new();
-    for p in peers {
-        if commitments.len() >= threshold {
+    // Leader first, then the rest in roster order.
+    let mut ordered: Vec<&Arc<dyn PeerApi>> = peers.iter().filter(|p| p.identifier() == node.identifier).collect();
+    ordered.extend(peers.iter().filter(|p| p.identifier() != node.identifier));
+
+    let mut excluded: BTreeMap<Identifier, String> = BTreeMap::new();
+    // Sharings peers reported that differ from ours and are not older (epoch-mismatch refusals).
+    let mut elsewhere: BTreeMap<Identifier, crate::node::KeyVersion> = BTreeMap::new();
+    let mut attempts = 0usize;
+    for subset in combinations(ordered.len(), threshold) {
+        let members: Vec<&Arc<dyn PeerApi>> = subset.iter().map(|&i| ordered[i]).collect();
+        if members.iter().any(|p| excluded.contains_key(&p.identifier())) {
+            continue;
+        }
+        if attempts >= MAX_SIGN_ATTEMPTS || started.elapsed() >= SIGN_BUDGET {
             break;
         }
-        match p.sign_round1(key_id, &session_id).await {
+        attempts += 1;
+        if attempts > 1 {
+            metrics::counter!(crate::metrics::SIGN_RETRIES).increment(1);
+        }
+        let ctx = crate::node::Round1Ctx { leader_view: Some(me.view) };
+        match attempt(node, &members, key_id, message, &ctx, "sign").await {
+            Ok(signature) => return Ok(signature),
+            Err(Attempt::Fatal(e)) => return Err(e),
+            Err(Attempt::Members(failed)) => {
+                for (id, e) in failed {
+                    if let DaemonError::EpochMismatch { peer, .. } = &e {
+                        if peer.0 >= me.view.0 {
+                            elsewhere.insert(id, *peer);
+                        }
+                    }
+                    tracing::warn!(key_id, peer = ?id, error = %e, "excluding a cosigner from this signature");
+                    excluded.insert(id, e.to_string());
+                }
+                if let Some((view, holders)) = quorum_elsewhere(&elsewhere, threshold) {
+                    nudge_resolver(node, key_id);
+                    return Err(DaemonError::NotServing(format!(
+                        "{holders} cosigners hold sharing epoch {} (pkp {}…) of {key_id}, but this node \
+                         holds epoch {} (pkp {}…) — not leading; another cosigner can sign",
+                        view.0,
+                        &hex::encode(view.1)[..12],
+                        me.view.0,
+                        &hex::encode(me.view.1)[..12]
+                    )));
+                }
+            }
+        }
+    }
+    let usable = ordered.len() - excluded.len();
+    tracing::warn!(key_id, attempts, ?excluded, "sign gave up: no t-subset of cosigners could sign");
+    if usable < threshold {
+        Err(DaemonError::ThresholdNotMet { needed: threshold, got: usable })
+    } else {
+        Err(DaemonError::NotServing(format!(
+            "sign for {key_id} gave up after {attempts} attempt(s) in {:?} ({} cosigner(s) excluded)",
+            started.elapsed(),
+            excluded.len()
+        )))
+    }
+}
+
+/// Why one signing attempt (one t-subset, one session) failed.
+enum Attempt {
+    /// These members failed (round 1, round 2, or an invalid share): another subset may work.
+    Members(Vec<(Identifier, DaemonError)>),
+    /// Not attributable to a member: give up.
+    Fatal(DaemonError),
+}
+
+/// One signing session over exactly `members`: round 1 to each (fresh nonces under a fresh session
+/// id), round 2 to each, aggregate. On a member's failure the session is aborted on every member
+/// still holding nonces for it, so nothing lingers until the pending TTL; a member that already
+/// produced its share has burned its nonce and is unaffected.
+async fn attempt(
+    node: &Arc<Node>,
+    members: &[&Arc<dyn PeerApi>],
+    key_id: &str,
+    message: &[u8],
+    ctx: &crate::node::Round1Ctx,
+    prefix: &str,
+) -> std::result::Result<[u8; 64], Attempt> {
+    let session_id = new_id(prefix);
+    let mut commitments: BTreeMap<Identifier, SigningCommitments> = BTreeMap::new();
+    for (i, p) in members.iter().enumerate() {
+        match p.sign_round1(key_id, &session_id, ctx).await {
             Ok(c) => {
                 commitments.insert(p.identifier(), c);
-                chosen.push(p);
             }
             Err(e) => {
                 metrics::counter!(crate::metrics::SIGN_ROUND1_SKIPS).increment(1);
-                tracing::warn!(peer = ?p.identifier(), error = %e, "sign_round1 failed; trying next");
+                abort_sign(&members[..i], key_id, &session_id).await;
+                return Err(Attempt::Members(vec![(p.identifier(), e)]));
             }
         }
     }
-    if commitments.len() < threshold {
-        // Not enough cosigners answered round 1 — free the nonces of those that did.
-        abort_sign(&chosen, key_id, &session_id).await;
-        return Err(DaemonError::ThresholdNotMet { needed: threshold, got: commitments.len() });
-    }
-
-    // Round 2: the chosen quorum produces signature shares over the fixed commitment set.
     let mut shares: BTreeMap<Identifier, SignatureShare> = BTreeMap::new();
-    for p in &chosen {
+    for p in members {
         match p.sign_round2(key_id, &session_id, message, &commitments).await {
             Ok(share) => {
                 shares.insert(p.identifier(), share);
             }
             Err(e) => {
-                // A quorum member failed round 2. The peers that already produced a share have
-                // burned their nonce; those not yet reached still hold round-1 nonces — free them.
-                abort_sign(&chosen, key_id, &session_id).await;
-                return Err(e);
+                // Members before this one burned their nonce; this one and later ones may still
+                // hold theirs — free them now.
+                abort_sign(members, key_id, &session_id).await;
+                return Err(Attempt::Members(vec![(p.identifier(), e)]));
             }
         }
     }
+    let (k, m) = (key_id.to_owned(), message.to_vec());
+    match node.blocking(move |n| n.aggregate(&k, &m, &commitments, &shares)).await {
+        Ok(signature) => Ok(signature),
+        Err(e) => match culprit(&e) {
+            Some(id) => {
+                metrics::counter!(crate::metrics::INVALID_SIGNATURE_SHARES).increment(1);
+                tracing::error!(key_id, peer = ?id, error = %e, "a cosigner returned an invalid signature share");
+                Err(Attempt::Members(vec![(id, e)]))
+            }
+            None => Err(Attempt::Fatal(e)),
+        },
+    }
+}
 
-    let (key_id, message) = (key_id.to_owned(), message.to_vec());
-    node.blocking(move |n| n.aggregate(&key_id, &message, &commitments, &shares)).await
+/// The cosigner frost's cheater detection blames for a failed aggregation, if any.
+fn culprit(e: &DaemonError) -> Option<Identifier> {
+    match e {
+        DaemonError::Core(rutli_frost_core::CoreError::Frost(f)) | DaemonError::Frost(f) => f.culprit(),
+        _ => None,
+    }
+}
+
+/// A sharing (other than the leader's, not older) that at least `threshold` peers reported, with
+/// how many did.
+fn quorum_elsewhere(
+    elsewhere: &BTreeMap<Identifier, crate::node::KeyVersion>,
+    threshold: usize,
+) -> Option<(crate::node::KeyVersion, usize)> {
+    let mut counts: BTreeMap<crate::node::KeyVersion, usize> = BTreeMap::new();
+    for v in elsewhere.values() {
+        *counts.entry(*v).or_default() += 1;
+    }
+    counts.into_iter().find(|(_, n)| *n >= threshold)
+}
+
+/// Best-effort: if this node has a ceremony for `key_id` staged (it may be the one node that has
+/// not committed yet), ask its resolver to settle it now instead of at the next pass.
+fn nudge_resolver(node: &Arc<Node>, key_id: &str) {
+    for rec in node.staged_records().into_iter().filter(|r| r.key_id == key_id) {
+        let node = node.clone();
+        tokio::spawn(async move {
+            let _ = crate::ceremony::resolve(&node, &rec.ceremony_id).await;
+        });
+    }
+}
+
+/// Every `k`-element subset of `0..n` as sorted index lists, in lexicographic order — so with the
+/// leader at index 0, every subset containing it comes first.
+fn combinations(n: usize, k: usize) -> Vec<Vec<usize>> {
+    fn go(start: usize, n: usize, k: usize, cur: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+        if cur.len() == k {
+            out.push(cur.clone());
+            return;
+        }
+        for i in start..n {
+            if n - i < k - cur.len() {
+                break;
+            }
+            cur.push(i);
+            go(i + 1, n, k, cur, out);
+            cur.pop();
+        }
+    }
+    let mut out = Vec::new();
+    if k > 0 && k <= n {
+        go(0, n, k, &mut Vec::with_capacity(k), &mut out);
+    }
+    out
 }
 
 /// The split ceremony's sign test (`Signer.CeremonySignTest`): sign the key's fixed test digest
@@ -411,11 +574,12 @@ pub async fn ceremony_sign_test(
     key_id: &str,
     signers: &[u16],
 ) -> Result<([u8; 34], [u8; 64])> {
-    let (message, threshold) = {
+    let (message, view) = {
         let key_id = key_id.to_owned();
-        node.blocking(move |n| Ok((n.ceremony_test_message(&key_id)?, n.threshold_for(&key_id)?)))
+        node.blocking(move |n| Ok((n.ceremony_test_message(&key_id)?, n.signing_view(&key_id)?)))
             .await?
     };
+    let threshold = view.threshold;
     let wanted: std::collections::BTreeSet<Identifier> = signers
         .iter()
         .map(|&i| Identifier::try_from(i).map_err(DaemonError::Frost))
@@ -431,35 +595,13 @@ pub async fn ceremony_sign_test(
         return Err(DaemonError::Ceremony(format!("{signers:?} are not all in this node's roster")));
     }
 
-    let session_id = new_id("signtest");
-    let mut commitments: BTreeMap<Identifier, SigningCommitments> = BTreeMap::new();
-    for p in &quorum {
-        match p.sign_round1(key_id, &session_id).await {
-            Ok(c) => {
-                commitments.insert(p.identifier(), c);
-            }
-            Err(e) => {
-                abort_sign(&quorum, key_id, &session_id).await;
-                return Err(e);
-            }
-        }
+    // One attempt over exactly this quorum, with the leader's sharing like any sign.
+    let ctx = crate::node::Round1Ctx { leader_view: Some(view.view) };
+    match attempt(node, &quorum, key_id, &message, &ctx, "signtest").await {
+        Ok(signature) => Ok((message, signature)),
+        Err(Attempt::Fatal(e)) => Err(e),
+        Err(Attempt::Members(mut failed)) => Err(failed.pop().map(|(_, e)| e).expect("one member error")),
     }
-    let mut shares: BTreeMap<Identifier, SignatureShare> = BTreeMap::new();
-    for p in &quorum {
-        match p.sign_round2(key_id, &session_id, &message, &commitments).await {
-            Ok(share) => {
-                shares.insert(p.identifier(), share);
-            }
-            Err(e) => {
-                abort_sign(&quorum, key_id, &session_id).await;
-                return Err(e);
-            }
-        }
-    }
-    let key_id = key_id.to_owned();
-    let signature =
-        node.blocking(move |n| n.aggregate(&key_id, &message, &commitments, &shares)).await?;
-    Ok((message, signature))
 }
 
 /// Best-effort: tell each quorum member to drop the in-flight session so its round-1 nonces are

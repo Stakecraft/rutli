@@ -165,7 +165,7 @@ fn a_store_call_parked_on_a_hung_volume_does_not_freeze_health_or_other_keys() {
         async move {
             Peer::sign_round1(
                 &*svc,
-                Request::new(SignRound1Request { key_id: "b".into(), session_id: session.into() }),
+                Request::new(SignRound1Request { key_id: "b".into(), session_id: session.into(), ..Default::default() }),
             )
             .await
         }

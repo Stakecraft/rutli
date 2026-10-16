@@ -575,9 +575,16 @@ impl Peer for PeerSvc {
     ) -> Result<Response<pb::SignRound1Reply>, Status> {
         self.authorize(&req)?;
         let r = req.into_inner();
+        // An empty digest is a leader from before epochs: no sharing declared (see the proto).
+        let leader_view = match r.pkp_digest.len() {
+            0 => None,
+            32 => Some((r.epoch, <[u8; 32]>::try_from(r.pkp_digest.as_slice()).expect("32 bytes"))),
+            n => return Err(Status::invalid_argument(format!("pkp_digest must be 32 bytes, got {n}"))),
+        };
+        let ctx = crate::node::Round1Ctx { leader_view };
         let commitments = self
             .node
-            .blocking(move |n| n.sign_round1(&r.key_id, &r.session_id))
+            .blocking(move |n| n.sign_round1(&r.key_id, &r.session_id, &ctx))
             .await
             .map_err(Status::from)?;
         Ok(Response::new(pb::SignRound1Reply {

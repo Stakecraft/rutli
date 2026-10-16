@@ -80,9 +80,9 @@ impl PeerApi for Faulty {
     fn identifier(&self) -> Identifier {
         self.inner.identifier()
     }
-    async fn sign_round1(&self, key_id: &str, session_id: &str) -> Result<SigningCommitments> {
+    async fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &rutli_cosigner::node::Round1Ctx) -> Result<SigningCommitments> {
         self.gate()?;
-        self.inner.sign_round1(key_id, session_id).await
+        self.inner.sign_round1(key_id, session_id, ctx).await
     }
     async fn sign_round2(
         &self,
@@ -580,7 +580,18 @@ async fn refresh_refuses_nodes_on_mixed_epochs() {
     let digest: [u8; 32] = mine.pkp_digest.as_slice().try_into().unwrap();
     let err = rig.nodes[1].ceremony_begin("refresh-x", KEY, CeremonyKind::Refresh, Some((1, digest))).unwrap_err();
     assert!(matches!(err, DaemonError::CeremonyRefused(_)), "{err:?}");
-    rig.every_pair_signs(&group).await;
+    // At sign time the node on the other epoch never joins a quorum (audit H1): a pair that needs
+    // it cannot sign, the pair on one sharing still does.
+    for (a, b) in [(0usize, 1usize), (1, 2)] {
+        let pair: Peers = vec![rig.peers[a].clone(), rig.peers[b].clone()];
+        let msg = rutli_frost_core::dealer::canton_test_message(b"mixed");
+        let err = sign(&rig.nodes[a], &pair, KEY, &msg).await.unwrap_err();
+        assert!(matches!(err, DaemonError::ThresholdNotMet { needed: 2, got: 1 }), "{a}{b}: {err:?}");
+    }
+    let pair: Peers = vec![rig.peers[0].clone(), rig.peers[2].clone()];
+    let msg = rutli_frost_core::dealer::canton_test_message(b"same sharing");
+    let sig = sign(&rig.nodes[0], &pair, KEY, &msg).await.unwrap();
+    assert!(rutli_cosigner::verify_key::signature_verifies(&group, &msg, &sig));
 }
 
 /// Install on node `i` (0-based) a share as a pre-two-phase DKG would have left it: origin DKG,
