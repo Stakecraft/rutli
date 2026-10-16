@@ -7,14 +7,22 @@ stolen driver certificate, outside the driver, never reaches that log at all.
 Since 0.4.0-rc.2 each cosigner keeps its own record of every signature it takes part in: the **sign
 journal** (`data_dir/journal/<key_id>/*.jsonl`). It is append-only and hash-chained, and each entry is
 fsynced before the signature share leaves the node. A journal entry carries the request id of the
-driver's signing intent. The driver writes the same id into the sign's audit entry as `intent=<hex>`.
-`rutli-cosigner audit-cross-check` compares the two sides.
+driver's signing intent and the message signed. The driver writes the same id into the sign's audit
+entry as `intent=<hex>`, and the SHA-256 of the exact bytes it signed as `msg=<hex>`:
+
+```
+sign keyId=frost-ns algo=Ed25519 inBytes=34 msg=<64 hex> intent=<32 hex> sigBytes=64 outcome=ok
+```
+
+`rutli-cosigner audit-cross-check` compares the two sides. A journaled message matches a driver line
+when the SHA-256 of the journal's `digest` bytes equals the line's `msg=`.
 
 | Finding | What it means |
 |---|---|
 | A request in a cosigner journal but not in the driver audit | Entries were cut from the end of the driver audit, or someone signed with the driver's certificate without going through the driver. Investigate either way. |
-| One request id journaled over more messages (digests) than the driver audit has signs for it | The driver draws a fresh request id for every sign and binds one message to it, so the extra messages were signed with the driver's certificate outside the driver, re-using an audited request id. Journal entries are compared per authorized operation (key, request id, message), as the cosigners charge them, not per bare request id. |
-| An `outcome=ok` sign in the driver audit that fewer than `--min-journals` journals hold | A journal was lost or rolled back (for example, a node restored from an old volume), or not every journal was supplied. |
+| A message journaled under an audited request id that no `msg=` of that request id names (`… was signed OUT OF BAND — the driver audit log signed only msg=<sha256> (seq N) …`) | The driver draws a fresh request id for every sign and binds one message to it, so this message was signed with the driver's certificate outside the driver, re-using an audited request id. The line names both the message the driver signed and the one signed out of band (its journaled digest and `msg=` hash), and which journals hold it. Journal entries are compared per authorized operation (key, request id, message), as the cosigners charge them, not per bare request id. |
+| For audit lines without `msg=` (a driver from 0.4.0-rc.2 or earlier): one request id journaled over more messages than the driver audit has signs for it | The same out-of-band signing, but such a line does not say which message the driver signed, so the check can only count. |
+| An `outcome=ok` sign in the driver audit that fewer than `--min-journals` journals hold (with `msg=`: that exact message) | A journal was lost or rolled back (for example, a node restored from an old volume), or not every journal was supplied. |
 | Journal entries with `purpose: "no-intent"` | Signatures nobody can attribute: an older driver or leader, accepted while `signing_policy.require_intent` was off. Pass `--allow-no-intent` for the rollout window. After that, treat them as unexplained signatures. |
 | A broken hash chain on either side (exit 2) | The file was edited. Keep the evidence. |
 
@@ -26,6 +34,9 @@ What is not compared:
   not from driver signatures.
 - Driver signs without an intent (`intent=none`). They happen without TLS, or while no cosigner reported
   a cluster id.
+- Nothing is lost for old logs: a sign line without `msg=` is matched on its request id alone, and the
+  report gives a count of these (`driver sign(s) without msg= (an older driver)`). One log can mix both
+  kinds across a driver upgrade.
 - A key that no supplied journal holds at all. Make sure every node's journal is copied in full.
 
 ## Running it

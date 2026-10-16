@@ -42,14 +42,26 @@ fn sign_detail(key: &str, request: &str, ok: bool) -> String {
     )
 }
 
+/// A sign line as the driver writes it since `msg=`: the SHA-256 of the signed bytes.
+fn sign_detail_msg(key: &str, request: &str, message_hex: &str) -> String {
+    let msg = hex::encode(Sha256::digest(hex::decode(message_hex).unwrap()));
+    format!("keyId={key} algo=Ed25519 inBytes=34 msg={msg} intent={request} sigBytes=64 outcome=ok")
+}
+
 fn journal(dir: &Path, node: u16, entries: &[(&str, &str, &str, u64)]) {
+    journal_messages(dir, node, &entries.iter().map(|&(k, p, r, at)| (k, p, r, "12".repeat(34), at)).collect::<Vec<_>>());
+}
+
+fn journal_messages(dir: &Path, node: u16, entries: &[(&str, &str, &str, String, u64)]) {
     let j = SignJournal::open(dir, node, KEEP).unwrap();
-    for (key, purpose, request, at) in entries {
+    for (key, purpose, request, digest, at) in entries {
         let e = JournalEntry {
             key_id: key.to_string(),
             purpose: purpose.to_string(),
             request_id: request.to_string(),
-            digest: "12".repeat(34),
+            // Each intent names its own digest, so its hash (the charge) differs too.
+            intent_sha256: hex::encode(Sha256::digest(format!("{request}/{digest}"))),
+            digest: digest.clone(),
             session_id: format!("sign-{request}-{node}"),
             ..Default::default()
         };
@@ -101,7 +113,7 @@ fn consistent_logs_pass_and_every_kind_of_discrepancy_is_reported() {
     );
     let (code, out) = run(&audit, &[&j1, &j2], &[]);
     assert_eq!(code, 1, "{out}");
-    assert!(out.contains(&format!("request {c} was signed at")) && out.contains("not in the driver audit log"), "{out}");
+    assert!(out.contains(&format!("request {c} was signed (message")) && out.contains("not in the driver audit log"), "{out}");
 
     // A signature outside the driver (stolen certificate): journaled, never audited.
     let d = "d".repeat(32);
@@ -157,4 +169,41 @@ fn a_tampered_driver_audit_log_or_journal_is_an_error() {
     let (code, out) = run(&audit, &[&j1], &[]);
     assert_eq!(code, 2, "{out}");
     assert!(out.contains("corrupt"), "{out}");
+}
+
+#[test]
+fn msg_names_which_message_the_driver_signed_and_which_were_signed_out_of_band() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (audit, j1, j2) = (tmp.path().join("audit.jsonl"), tmp.path().join("j1"), tmp.path().join("j2"));
+    let (a, b) = ("a".repeat(32), "b".repeat(32));
+    let (m1, m2, m3) = ("1220".to_string() + &"11".repeat(32), "1220".to_string() + &"22".repeat(32), "1220".to_string() + &"33".repeat(32));
+    // A current driver (msg=) and an older one (no msg=) in one log: both still match.
+    driver_log(&audit, &[("sign", sign_detail_msg("frost-ns", &a, &m1)), ("sign", sign_detail("frost-ns", &b, true))]);
+    let sign = |r: &str, m: &str, at: u64| ("frost-ns", PURPOSE_SIGN, r.to_string(), m.to_string(), at);
+    let both = |dir: &Path, node: u16, extra: Vec<(&str, &str, String, String, u64)>| {
+        let mut e = vec![sign(&a, &m1, T0 + 1500), sign(&b, &m2, T0 + 2500)];
+        e.extend(extra);
+        let e: Vec<_> = e.iter().map(|(k, p, r, m, at)| (*k, *p, r.as_str(), m.clone(), *at)).collect();
+        journal_messages(dir, node, &e);
+    };
+    both(&j1, 1, vec![]);
+    both(&j2, 2, vec![]);
+    let (code, out) = run(&audit, &[&j1, &j2], &["--min-journals", "2"]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("1 with a message digest") && out.contains("1 driver sign(s) without msg="), "{out}");
+
+    // Node 2 also signed m3 under the audited request id `a` — outside the driver.
+    let j3 = tmp.path().join("j3");
+    both(&j3, 2, vec![sign(&a, &m3, T0 + 5000)]);
+    let (code, out) = run(&audit, &[&j1, &j3], &["--min-journals", "2"]);
+    assert_eq!(code, 1, "{out}");
+    let flagged: Vec<_> = out.lines().filter(|l| l.starts_with("DISCREPANCY")).collect();
+    assert_eq!(flagged.len(), 1, "{out}");
+    let m1_sha = hex::encode(Sha256::digest(hex::decode(&m1).unwrap()));
+    assert!(
+        flagged[0].contains(&format!("message {m3}"))
+            && flagged[0].contains("OUT OF BAND")
+            && flagged[0].contains(&format!("signed only msg={m1_sha} (seq 1)")),
+        "{out}"
+    );
 }

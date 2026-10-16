@@ -331,7 +331,7 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
 
         val signEntry = sink.entries.collectFirst { case ("sign", d) => d }.get
         signEntry shouldBe
-          s"keyId=frost-ns algo=${SigningAlgoSpec.Ed25519} inBytes=34 " +
+          s"keyId=frost-ns algo=${SigningAlgoSpec.Ed25519} inBytes=34 msg=${RutliDriver.sha256Hex(Digest)} " +
           s"failover=${a.name}→${b.name} reason=INTERNAL sigBytes=64 outcome=ok"
       }
     }
