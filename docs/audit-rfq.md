@@ -46,9 +46,9 @@ before the `v0.4.0` freeze):
 | DS-C3 | The soak's exec-based backup could read the shared seal secret and every sealed share | rc.2 (closed on the soak) |
 | DS-H1 | Refresh is not atomic; an interruption leaves mixed share epochs | C |
 | DS-H2 | The driver trusted one cosigner's group key and did not verify signatures | rc.2 |
-| DS-M1 | Stale or rolled-back shares are not rejected; `restore --force` | C |
-| DS-M2 | No hosted-key tombstones (a restored backup can resurrect a deleted key) | C |
-| DS-M3 | Shared TLS SAN across cosigners; loose caller identity | rc.2 |
+| DS-M1 | Stale or rolled-back shares undetectable; `restore --force` revives old epochs | C |
+| DS-M2 | Hosted-key delete has no tombstone (anti-entropy resurrects deleted keys; one peer or the driver cert can purge every replica) | C |
+| DS-M3 | Shared `rutli-cosigner` SAN: mesh server identity not bound to the peer identifier | rc.2 |
 | DS-M4 | Share file lacks AAD (v2 format) | C (closed only with `accept_v1=false`) |
 | DS-M5 | A wedged DKG key id | C |
 | DS-M6 | Signing-journal rate limit | rc.2 |
@@ -58,7 +58,7 @@ before the `v0.4.0` freeze):
 | DS-L3 | Mutex poisoning | C |
 | DS-L4 | Nonce markers; cosigner-side limit | C |
 | DS-L5 | Unbounded rate-limiter map | rc.2 |
-| DS-L6 | Single-instance lock; volume access mode (RWOP) | rc.2 |
+| DS-L6 | Two live instances on one share set (RWO volume, no instance lock) | rc.2 |
 | DS-L7 | Nonce reuse after a VM snapshot restore | residual (documented) |
 | DS-X1 | `SoftKeyStore` directory fsync | rc.2 |
 | DS-X2 | Signing-journal short write | rc.2 |
