@@ -24,7 +24,7 @@ use rutli_cosigner::{DaemonError, Result};
 #[derive(Parser)]
 #[command(name = "rutli-cosigner", about = "FROST cosigner daemon for the Rütli Canton KMS")]
 struct Args {
-    /// Path to the JSON cluster config for this node. Required by every command except `seal`.
+    /// Path to the JSON cluster config for this node. Required by every command except `seal` and `audit-cross-check`.
     #[arg(short, long, env = "RUTLI_COSIGNER_CONFIG")]
     config: Option<std::path::PathBuf>,
     #[command(subcommand)]
@@ -229,6 +229,27 @@ enum Command {
         #[arg(long)]
         confirm_group_key: String,
     },
+    /// Compare the driver's hash-chained audit log with the cosigners' sign journals (audit C2):
+    /// signatures a cosigner journaled that the driver audit lacks (its tail truncated, or a
+    /// signature made outside the driver with its certificate), and audited signatures no journal
+    /// holds. Verifies both hash chains. Offline, read-only, needs no `--config`. Exit 0:
+    /// consistent; 1: discrepancies; 2: a file is unreadable or a chain is broken.
+    /// docs/audit-cross-check.md.
+    AuditCrossCheck {
+        /// The driver's audit log (`audit-log-path`), copied AFTER the journals.
+        #[arg(long)]
+        driver_audit: std::path::PathBuf,
+        /// One node's journal directory (`data_dir/journal`); repeat for every node.
+        #[arg(long, required = true)]
+        journal: Vec<std::path::PathBuf>,
+        /// An audited signature must be in at least this many journals (the threshold, when every
+        /// node's journal is given).
+        #[arg(long, default_value_t = 1)]
+        min_journals: usize,
+        /// Do not count signatures made without a signing intent (before require_intent is on).
+        #[arg(long)]
+        allow_no_intent: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -292,6 +313,9 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     if let Some(Command::Seal { command }) = args.command {
         return seal_command(command);
+    }
+    if let Some(Command::AuditCrossCheck { driver_audit, journal, min_journals, allow_no_intent }) = args.command {
+        audit_cross_check_command(&driver_audit, &journal, min_journals, allow_no_intent);
     }
     let config_path = args.config.ok_or_else(|| {
         DaemonError::Config("--config (or RUTLI_COSIGNER_CONFIG) is required".into())
@@ -727,6 +751,35 @@ async fn main() -> Result<()> {
         .serve_with_shutdown(addr, shutdown())
         .await?;
     Ok(())
+}
+
+fn audit_cross_check_command(
+    driver_audit: &std::path::Path,
+    journals: &[std::path::PathBuf],
+    min_journals: usize,
+    allow_no_intent: bool,
+) -> ! {
+    use rutli_cosigner::audit_check;
+    let run = || -> Result<audit_check::Report> {
+        let audit = audit_check::read_driver_audit(driver_audit)?;
+        let mut sets = Vec::new();
+        for j in journals {
+            sets.push((j.display().to_string(), audit_check::read_journal_root(j)?));
+        }
+        Ok(audit_check::cross_check(&audit, &sets, &audit_check::Options { min_journals, allow_no_intent }))
+    };
+    match run() {
+        Ok(report) => {
+            for line in &report.lines {
+                println!("{line}");
+            }
+            std::process::exit(if report.discrepancies == 0 { 0 } else { 1 })
+        }
+        Err(e) => {
+            eprintln!("audit-cross-check: {e}");
+            std::process::exit(2)
+        }
+    }
 }
 
 /// An offline node for the ceremony commands: this node's key store (sealed if configured), its
