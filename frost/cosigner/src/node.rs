@@ -112,6 +112,22 @@ pub const NONCE_PRUNE_BUDGET: usize = 10_000;
 /// The epoch a DKG commits its key at; each committed refresh adds one.
 pub const FIRST_EPOCH: u64 = 1;
 
+/// Most no-votes this node keeps for ceremony ids a peer asked about but this node never had a
+/// session or record for, per asking peer (certificate CN) and in total (audit F2). Beyond either
+/// cap such a question is answered with a refusal — not evidence of anything to the asker, which
+/// keeps waiting — instead of a durable record, so one compromised peer cannot fill the key volume
+/// with records (each is a file and two fsyncs) and stop the node.
+pub const MAX_UNKNOWN_NO_VOTES_PER_ASKER: usize = 256;
+pub const MAX_UNKNOWN_NO_VOTES: usize = 1024;
+
+/// Most ceremony sessions (between part 1 and the vote) held in memory at once. A part 1 beyond
+/// it first drops sessions orphaned past the orphan timeout, then is refused.
+pub const MAX_CEREMONY_SESSIONS: usize = 64;
+
+/// How long an abort that contradicts a peer's yes-vote waits before the votes are gathered again
+/// (audit F3; see [`crate::ceremony_record::mixed_evidence`]).
+pub const MIXED_EVIDENCE_REGATHER: Duration = Duration::from_secs(2);
+
 pub struct Node {
     pub identifier: Identifier,
     pub max_signers: u16,
@@ -149,6 +165,11 @@ pub struct Node {
     hosted_created_in: Mutex<std::collections::HashMap<String, String>>,
     /// `hosted_keys.delete_grace_secs`: how long a tombstone retains the deleted key's material.
     delete_grace: Duration,
+    /// Caps on no-votes for unknown ceremony ids: (per asker, total). See
+    /// [`MAX_UNKNOWN_NO_VOTES_PER_ASKER`].
+    unknown_no_vote_caps: (usize, usize),
+    /// See [`MIXED_EVIDENCE_REGATHER`].
+    regather_delay: Duration,
 }
 
 /// What a node holds under a hosted key id.
@@ -228,13 +249,13 @@ impl Node {
         keystore_health.set_io_hook(keystore.io_hook());
         let keystore_health = Arc::new(keystore_health);
         let record_store = CeremonyRecords::open(keystore.ceremony_dir());
-        let records = match record_store.load_all() {
-            Ok(list) => list.into_iter().map(|r| (r.ceremony_id.clone(), r)).collect(),
+        let (records, records_loaded) = match record_store.load_all() {
+            Ok(list) => (list.into_iter().map(|r| (r.ceremony_id.clone(), r)).collect(), true),
             Err(e) => {
                 // Unreadable record directory: start with no cached votes and say so. A ceremony this
                 // node voted in will read as unknown to peers — they wait, they never commit on it.
                 tracing::error!(error = %e, "cannot read this node's ceremony records");
-                BTreeMap::new()
+                (BTreeMap::new(), false)
             }
         };
         let node = Self {
@@ -255,18 +276,43 @@ impl Node {
             hosted: None,
             hosted_created_in: Mutex::new(Default::default()),
             delete_grace: Duration::from_secs(crate::config::DEFAULT_DELETE_GRACE_SECS),
+            unknown_no_vote_caps: (MAX_UNKNOWN_NO_VOTES_PER_ASKER, MAX_UNKNOWN_NO_VOTES),
+            regather_delay: MIXED_EVIDENCE_REGATHER,
         };
-        if let Err(e) = node.recover_ceremonies() {
+        if !records_loaded {
+            // Without the votes the repair cannot tell an orphaned staged share from one this node
+            // voted yes on (audit F4): leave everything as it is until a start that reads them.
+            tracing::error!("ceremony startup repair skipped: the ceremony records could not be read");
+        } else if let Err(e) = node.recover_ceremonies() {
             tracing::error!(error = %e, "ceremony recovery at startup failed");
         }
         node
     }
 
+    /// Override the caps on no-votes for unknown ceremony ids (per asker, total). Tests.
+    pub fn with_unknown_no_vote_caps(mut self, per_asker: usize, total: usize) -> Self {
+        self.unknown_no_vote_caps = (per_asker, total);
+        self
+    }
+
+    /// Override [`MIXED_EVIDENCE_REGATHER`]. Tests.
+    pub fn with_regather_delay(mut self, delay: Duration) -> Self {
+        self.regather_delay = delay;
+        self
+    }
+
+    pub fn regather_delay(&self) -> Duration {
+        self.regather_delay
+    }
+
     /// Startup repair of the two-phase ceremony state, for what a crash can leave behind:
     ///
-    /// * a staged share with no STAGED record (crashed between writing the share and the vote, or
-    ///   an aborted ceremony whose share delete did not finish): deleted — nobody can commit a
-    ///   ceremony this node never voted yes on;
+    /// * a staged share with no record **file** for its ceremony (crashed between writing the
+    ///   share and the vote), or whose record is a terminal vote without a quarantine (an aborted
+    ///   ceremony whose share delete did not finish, or a commit's leftover): deleted — nobody can
+    ///   commit a ceremony this node never voted yes on. A record file that exists but does not
+    ///   parse keeps its share (audit F4: that unreadable vote may be a yes), as does a STAGED vote
+    ///   or a quarantined abort (audit F3);
     /// * a STAGED record whose staged share is gone: if the live share is exactly the staged
     ///   outcome the node crashed between promoting it and recording COMMITTED, so the record is
     ///   completed; anything else is reported and left STAGED for an operator.
@@ -274,15 +320,24 @@ impl Node {
         let mut book = self.book()?;
         let records = &mut book.records;
         for (key_id, ceremony_id) in self.keystore.list_staged()? {
-            let voted_yes = records
-                .get(&ceremony_id)
-                .is_some_and(|r| r.state == RecordState::Staged && r.key_id == key_id);
-            if !voted_yes {
+            let discard = match records.get(&ceremony_id) {
+                Some(r) => r.key_id != key_id || (r.state != RecordState::Staged && !r.quarantined),
+                // No parsed record: discard only if there is no record file at all.
+                None => !self.record_store.file_exists(&ceremony_id)?,
+            };
+            if discard {
                 self.keystore.discard_staged(&key_id, &ceremony_id)?;
                 tracing::warn!(
                     key_id = %key_id,
                     ceremony_id = %ceremony_id,
                     "removed a staged share without a staged vote (interrupted or aborted ceremony)"
+                );
+            } else if !records.contains_key(&ceremony_id) {
+                tracing::error!(
+                    key_id = %key_id,
+                    ceremony_id = %ceremony_id,
+                    "staged share kept: its ceremony record exists but cannot be read — an operator \
+                     must inspect it (docs/ceremonies.md)"
                 );
             }
         }
@@ -1186,6 +1241,31 @@ impl Node {
                 "ceremony id {ceremony_id} was already used on this node"
             )));
         }
+        if book.sessions.len() >= MAX_CEREMONY_SESSIONS {
+            let orphans = self.drop_orphaned_sessions_locked(&mut book);
+            if book.sessions.len() >= MAX_CEREMONY_SESSIONS {
+                drop(book);
+                self.release_ceremony(key_id, ceremony_id);
+                for (k, c) in orphans {
+                    self.release_ceremony(&k, &c);
+                }
+                return Err(DaemonError::NotServing(format!(
+                    "{MAX_CEREMONY_SESSIONS} ceremony sessions are already in progress on this node — retry later"
+                )));
+            }
+            drop(book);
+            for (k, c) in orphans {
+                self.release_ceremony(&k, &c);
+            }
+            book = self.book()?;
+            if book.sessions.contains_key(ceremony_id) || book.records.contains_key(ceremony_id) {
+                drop(book);
+                self.release_ceremony(key_id, ceremony_id);
+                return Err(DaemonError::CeremonyRefused(format!(
+                    "ceremony id {ceremony_id} was already used on this node"
+                )));
+            }
+        }
         book.sessions.insert(
             ceremony_id.to_string(),
             Session {
@@ -1439,9 +1519,27 @@ impl Node {
 
     /// Record a no-vote for `ceremony_id` unless this node already recorded a vote. Caller holds
     /// the ceremony lock.
+    ///
+    /// Bounded like the no-votes for unknown ids ([`Node::record_unknown_locked`]): at most
+    /// [`MAX_UNKNOWN_NO_VOTES`] roster-less no-votes for failed or orphaned sessions are kept (a
+    /// peer can open sessions for made-up key ids and let them orphan). Beyond it the session is
+    /// dropped without a record and nothing is answered — the same safe refusal.
     fn record_abort_locked(&self, book: &mut CeremonyBook, ceremony_id: &str, reason: &str) -> Result<()> {
         if book.records.contains_key(ceremony_id) {
             return Ok(());
+        }
+        let cap = self.unknown_no_vote_caps.1;
+        let held = book
+            .records
+            .values()
+            .filter(|r| r.state == RecordState::Aborted && r.roster.is_empty() && r.unknown_asked_by.is_none())
+            .count();
+        if held >= cap {
+            metrics::counter!(crate::metrics::CEREMONY_UNKNOWN_REFUSED).increment(1);
+            return Err(DaemonError::RateLimited(format!(
+                "ceremony {ceremony_id}: this node already holds {held} no-votes for failed or orphaned \
+                 sessions (cap {cap}) — not recording another (this is no vote)"
+            )));
         }
         let rec = CeremonyRecord::aborted(ceremony_id, reason);
         self.record_store.write(None, &rec)?;
@@ -1536,6 +1634,10 @@ impl Node {
             peers_settled: false,
             created_ms: now,
             updated_ms: now,
+            quarantined: false,
+            split_detected_ms: 0,
+            unknown_asked_by: None,
+            recovered: false,
         };
         let mut book = self.book()?;
         // `write` refuses if a vote already exists (a no-vote recorded meanwhile stays a no-vote).
@@ -1619,11 +1721,93 @@ impl Node {
         Ok((share, Some(old_version)))
     }
 
+    /// Drop the sessions orphaned past the orphan timeout (their leader is gone; part 3 will never
+    /// come), each with a no-vote (best effort). Returns `(key_id, ceremony_id)` of each, whose
+    /// guards the caller releases after dropping the book lock.
+    fn drop_orphaned_sessions_locked(&self, book: &mut CeremonyBook) -> Vec<(String, String)> {
+        let orphaned: Vec<String> = book
+            .sessions
+            .iter()
+            .filter(|(_, s)| s.participant.is_some() && s.started.elapsed() >= self.ceremony_orphan_timeout)
+            .map(|(id, _)| id.clone())
+            .collect();
+        let mut out = Vec::new();
+        for id in orphaned {
+            if let Some(s) = book.sessions.remove(&id) {
+                if let Err(e) = self.record_abort_locked(book, &id, "orphaned: no part 3 within the orphan timeout") {
+                    tracing::warn!(ceremony_id = %id, error = %e, "could not record an orphaned ceremony's no-vote");
+                }
+                out.push((s.key_id, id));
+            }
+        }
+        out
+    }
+
+    /// Record a no-vote for `ceremony_id`, which this node has no session or record for, because
+    /// `asker` asked about it (audit F2). Caller holds the ceremony lock.
+    ///
+    /// Bounded: at most [`MAX_UNKNOWN_NO_VOTES_PER_ASKER`] such records per asking peer and
+    /// [`MAX_UNKNOWN_NO_VOTES`] in total (until the 30-day garbage collection removes them).
+    /// Beyond either cap this refuses (RESOURCE_EXHAUSTED) instead of answering.
+    ///
+    /// **Why the refusal keeps the two-phase commit safe.** The invariant is: this node answers
+    /// ABORTED only from a durable record, and once it has, never starts (and so never stages or
+    /// commits) that ceremony id. A refusal writes nothing and answers nothing: the asker gets
+    /// [`crate::ceremony_record::PeerReport::Unknown`], which is not evidence — its resolver waits,
+    /// it neither commits (that needs this node's yes-vote) nor aborts on it. And since no no-vote
+    /// was given, this node may still take part in that id later without contradicting anything it
+    /// said. The cost is liveness only, and only once a peer has spent its quota: a STAGED peer
+    /// asking about a ceremony this node really lost waits (or uses `ceremony resolve
+    /// --assume-lost`) instead of aborting, while signing continues on the old share.
+    fn record_unknown_locked(&self, book: &mut CeremonyBook, ceremony_id: &str, asker: Option<&str>) -> Result<()> {
+        let asker = asker.unwrap_or("");
+        let (per_asker, total) = self.unknown_no_vote_caps;
+        let mut mine = 0usize;
+        let mut all = 0usize;
+        for r in book.records.values() {
+            if let Some(by) = &r.unknown_asked_by {
+                all += 1;
+                if by == asker {
+                    mine += 1;
+                }
+            }
+        }
+        if mine >= per_asker || all >= total {
+            metrics::counter!(crate::metrics::CEREMONY_UNKNOWN_REFUSED).increment(1);
+            tracing::warn!(
+                ceremony_id,
+                asker,
+                from_asker = mine,
+                total = all,
+                "refusing to record another no-vote for an unknown ceremony id (cap reached) — the asker \
+                 waits; a peer asking about many unknown ceremonies is misbehaving"
+            );
+            return Err(DaemonError::RateLimited(format!(
+                "ceremony {ceremony_id} is unknown here and this node already holds {mine} no-vote(s) for \
+                 unknown ceremonies asked by {asker:?} ({all} in total; caps {per_asker}/{total}) — \
+                 not answering (this is no vote)"
+            )));
+        }
+        let mut rec = CeremonyRecord::aborted(ceremony_id, "unknown here: no session and no record when a peer asked");
+        rec.unknown_asked_by = Some(asker.to_string());
+        self.record_store.write(None, &rec)?;
+        book.records.insert(ceremony_id.to_string(), rec);
+        metrics::gauge!(crate::metrics::CEREMONY_UNKNOWN_NO_VOTES).set((all + 1) as f64);
+        Ok(())
+    }
+
     /// What this node can say about `ceremony_id` (`Peer.CeremonyStatus`): its recorded vote, or
     /// IN_PROGRESS while the session lives. With neither, it durably votes no **before** answering
     /// ABORTED — so the answer can never change later — and the same for a session orphaned past
-    /// the orphan timeout (its leader is gone; part 3 will never come).
+    /// the orphan timeout (its leader is gone; part 3 will never come). An in-process caller; a
+    /// peer's question goes through [`Node::ceremony_status_from`].
     pub fn ceremony_status(&self, ceremony_id: &str) -> Result<StatusInfo> {
+        self.ceremony_status_from(ceremony_id, None)
+    }
+
+    /// [`Node::ceremony_status`] asked by the peer whose certificate CN is `asker`: a no-vote for
+    /// an unknown id is bounded per asker ([`Node::record_unknown_locked`]).
+    pub fn ceremony_status_from(&self, ceremony_id: &str, asker: Option<&str>) -> Result<StatusInfo> {
         crate::keystore::validate_ceremony_id(ceremony_id)?;
         let mut release = None;
         let info = {
@@ -1638,26 +1822,29 @@ impl Node {
                 Some(_) => {
                     let s = book.sessions.remove(ceremony_id).expect("present");
                     release = Some(s.key_id);
-                    self.record_abort_locked(&mut book, ceremony_id, "orphaned: no part 3 within the orphan timeout")?;
+                    self.record_abort_locked(&mut book, ceremony_id, "orphaned: no part 3 within the orphan timeout")
                 }
-                None => self.record_abort_locked(
-                    &mut book,
-                    ceremony_id,
-                    "unknown here: no session and no record when a peer asked",
-                )?,
+                None => self.record_unknown_locked(&mut book, ceremony_id, asker),
             }
-            StatusInfo::from_record(book.records.get(ceremony_id).expect("just recorded"))
+            .map(|()| StatusInfo::from_record(book.records.get(ceremony_id).expect("just recorded")))
         };
+        // The orphaned session is gone either way, so its guard goes too — even when its no-vote
+        // could not be recorded (a cap): otherwise signing for the key would stay fenced.
         if let Some(key_id) = release {
             self.release_ceremony(&key_id, ceremony_id);
         }
-        Ok(info)
+        info
     }
 
     /// The leader gives up on `ceremony_id` (`Peer.CeremonyAbort`). Only a session still in memory
     /// is dropped (with a durable no-vote); a recorded vote is never changed by the leader's word —
     /// a STAGED node aborts only on evidence from its peers ([`crate::ceremony::resolve`]).
     pub fn ceremony_abort(&self, ceremony_id: &str) -> Result<StatusInfo> {
+        self.ceremony_abort_from(ceremony_id, None)
+    }
+
+    /// [`Node::ceremony_abort`] from the peer whose certificate CN is `asker`.
+    pub fn ceremony_abort_from(&self, ceremony_id: &str, asker: Option<&str>) -> Result<StatusInfo> {
         crate::keystore::validate_ceremony_id(ceremony_id)?;
         let mut release = None;
         let info = {
@@ -1670,20 +1857,28 @@ impl Node {
                     return Ok(StatusInfo::in_progress()); // part 3 running; it will vote
                 }
                 release = book.sessions.remove(ceremony_id).map(|s| s.key_id);
+                self.record_abort_locked(&mut book, ceremony_id, "aborted by the ceremony leader")
+            } else {
+                self.record_unknown_locked(&mut book, ceremony_id, asker)
             }
-            self.record_abort_locked(&mut book, ceremony_id, "aborted by the ceremony leader")?;
-            StatusInfo::from_record(book.records.get(ceremony_id).expect("just recorded"))
+            .map(|()| StatusInfo::from_record(book.records.get(ceremony_id).expect("just recorded")))
         };
         if let Some(key_id) = release {
             self.release_ceremony(&key_id, ceremony_id);
         }
-        Ok(info)
+        info
     }
 
     /// Apply the resolver's verdict to a STAGED ceremony: commit (promote the staged share, then
     /// record COMMITTED) or abort (delete it, then record ABORTED). A record that is not STAGED is
     /// returned unchanged — resolution is idempotent and a terminal vote never changes.
     pub fn apply_resolution(&self, ceremony_id: &str, decision: &Decision) -> Result<StatusInfo> {
+        self.apply_resolution_with(ceremony_id, decision, false, false)
+    }
+
+    /// [`Node::apply_resolution`]; an abort with `quarantine` keeps the staged share (audit F3),
+    /// and `split` flags the ceremony as resolved differently elsewhere (a peer COMMITTED it).
+    pub fn apply_resolution_with(&self, ceremony_id: &str, decision: &Decision, quarantine: bool, split: bool) -> Result<StatusInfo> {
         let mut book = self.book()?;
         let rec = book
             .records
@@ -1700,14 +1895,20 @@ impl Node {
                 (RecordState::Committed, String::new())
             }
             Decision::Abort(why) => {
-                self.keystore.discard_staged(&rec.key_id, ceremony_id)?;
+                if !quarantine {
+                    self.keystore.discard_staged(&rec.key_id, ceremony_id)?;
+                }
                 (RecordState::Aborted, why.clone())
             }
         };
+        let now = crate::ceremony_record::now_ms();
+        let aborted = state == RecordState::Aborted;
         let done = CeremonyRecord {
             state,
             reason,
-            updated_ms: crate::ceremony_record::now_ms(),
+            updated_ms: now,
+            quarantined: aborted && quarantine,
+            split_detected_ms: if aborted && split { now } else { 0 },
             ..rec.clone()
         };
         self.record_store.write(Some(&rec), &done)?;
@@ -1721,8 +1922,16 @@ impl Node {
                 self.set_stale(&rec.key_id, None);
             }
             tracing::info!(ceremony_id, key_id = %rec.key_id, epoch = rec.new_epoch, "ceremony committed");
+        } else if split {
+            tracing::error!(
+                ceremony_id,
+                key_id = %rec.key_id,
+                reason = %done.reason,
+                "ceremony aborted here while a peer reports it COMMITTED — a cosigner equivocated; the \
+                 staged share is quarantined: see `rutli-cosigner ceremony recover-commit` (docs/ceremonies.md)"
+            );
         } else {
-            tracing::warn!(ceremony_id, key_id = %rec.key_id, reason = %done.reason, "ceremony aborted");
+            tracing::warn!(ceremony_id, key_id = %rec.key_id, reason = %done.reason, quarantined = quarantine, "ceremony aborted");
         }
         metrics::counter!(crate::metrics::CEREMONY_RESOLUTIONS, "result" => state.as_str()).increment(1);
         Ok(StatusInfo::from_record(&done))
@@ -1840,7 +2049,7 @@ impl Node {
         let old: Vec<String> = book
             .records
             .values()
-            .filter(|r| r.is_terminal() && (r.peers_settled || r.roster.is_empty()) && r.updated_ms < cutoff)
+            .filter(|r| r.is_terminal() && !r.quarantined && (r.peers_settled || r.roster.is_empty()) && r.updated_ms < cutoff)
             .map(|r| r.ceremony_id.clone())
             .collect();
         for id in &old {
@@ -1848,6 +2057,111 @@ impl Node {
             book.records.remove(id);
         }
         Ok(old.len())
+    }
+
+    /// ABORTED records whose staged share is quarantined (audit F3).
+    pub fn quarantined_records(&self) -> Vec<CeremonyRecord> {
+        self.book()
+            .map(|b| b.records.values().filter(|r| r.quarantined).cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Flag a quarantined ceremony as split (a peer reports it COMMITTED with this node's outcome).
+    /// Returns whether it was newly flagged.
+    pub fn flag_split(&self, ceremony_id: &str) -> Result<bool> {
+        let mut book = self.book()?;
+        let Some(rec) = book.records.get(ceremony_id).cloned() else { return Ok(false) };
+        if !rec.quarantined || rec.split_detected_ms != 0 {
+            return Ok(false);
+        }
+        let now = crate::ceremony_record::now_ms();
+        let done = CeremonyRecord { split_detected_ms: now, updated_ms: now, ..rec.clone() };
+        self.record_store.write(Some(&rec), &done)?;
+        book.records.insert(ceremony_id.to_string(), done);
+        Ok(true)
+    }
+
+    /// Delete a quarantined staged share and clear the quarantine (no node can commit the
+    /// ceremony any more, its retention passed, or the operator dropped it).
+    pub fn drop_quarantine(&self, ceremony_id: &str) -> Result<()> {
+        let mut book = self.book()?;
+        let Some(rec) = book.records.get(ceremony_id).cloned() else {
+            return Err(DaemonError::UnknownDkg(ceremony_id.into()));
+        };
+        if !rec.quarantined {
+            return Ok(());
+        }
+        self.keystore.discard_staged(&rec.key_id, ceremony_id)?;
+        let done = CeremonyRecord { quarantined: false, updated_ms: crate::ceremony_record::now_ms(), ..rec.clone() };
+        self.record_store.write(Some(&rec), &done)?;
+        book.records.insert(ceremony_id.to_string(), done);
+        tracing::info!(ceremony_id, key_id = %rec.key_id, "dropped a quarantined staged share");
+        Ok(())
+    }
+
+    /// Drop quarantines older than `older_than` that no split was detected for. Returns how many.
+    pub fn gc_quarantine(&self, older_than: Duration) -> Result<usize> {
+        let cutoff = crate::ceremony_record::now_ms().saturating_sub(older_than.as_millis() as u64);
+        let old: Vec<String> = self
+            .quarantined_records()
+            .into_iter()
+            .filter(|r| r.split_detected_ms == 0 && r.updated_ms < cutoff)
+            .map(|r| r.ceremony_id)
+            .collect();
+        for id in &old {
+            self.drop_quarantine(id)?;
+        }
+        Ok(old.len())
+    }
+
+    /// Ceremonies this node aborted while a peer reports them COMMITTED, quarantine still held:
+    /// `rutli_ceremonies_split`.
+    pub fn split_count(&self) -> usize {
+        self.quarantined_records().iter().filter(|r| r.split_detected_ms != 0).count()
+    }
+
+    /// The last step of [`crate::ceremony::recover_commit`] (which checks the peers first): make
+    /// the quarantined share of an ABORTED ceremony live and record COMMITTED (`recovered`).
+    pub fn apply_recovery(&self, ceremony_id: &str) -> Result<StatusInfo> {
+        let mut book = self.book()?;
+        let rec = book
+            .records
+            .get(ceremony_id)
+            .cloned()
+            .ok_or_else(|| DaemonError::UnknownDkg(ceremony_id.into()))?;
+        if rec.state != RecordState::Aborted || !rec.quarantined {
+            return Err(DaemonError::CeremonyRefused(format!(
+                "ceremony {ceremony_id} is {} here{} — only a quarantined abort can be recovered",
+                rec.state.as_str(),
+                if rec.state == RecordState::Aborted { " without a quarantined share" } else { "" }
+            )));
+        }
+        if !self.keystore.has_staged(&rec.key_id, ceremony_id)? {
+            return Err(DaemonError::CeremonyRefused(format!(
+                "ceremony {ceremony_id}: the quarantined share of {} is missing",
+                rec.key_id
+            )));
+        }
+        self.commit_staged(&rec)?;
+        let now = crate::ceremony_record::now_ms();
+        let done = CeremonyRecord {
+            state: RecordState::Committed,
+            quarantined: false,
+            recovered: true,
+            reason: format!("recovered by the operator after: {}", rec.reason),
+            updated_ms: now,
+            ..rec.clone()
+        };
+        self.record_store.write_recovery(&rec, &done)?;
+        book.records.insert(ceremony_id.to_string(), done.clone());
+        drop(book);
+        self.cache().remove(&rec.key_id);
+        if self.stale_mark(&rec.key_id).is_some() {
+            self.set_stale(&rec.key_id, None);
+        }
+        metrics::counter!(crate::metrics::CEREMONY_RESOLUTIONS, "result" => "recovered").increment(1);
+        tracing::warn!(ceremony_id, key_id = %rec.key_id, epoch = rec.new_epoch, "quarantined ceremony share recovered and committed by the operator");
+        Ok(StatusInfo::from_record(&done))
     }
 
     /// [`Node::ceremony_part1`] for a DKG over this node's own roster (every identifier `1..=n`, or

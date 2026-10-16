@@ -24,7 +24,10 @@ use frost_ed25519::keys::dkg::round1;
 use frost_ed25519::Identifier;
 use sha2::{Digest, Sha256};
 
-use crate::ceremony_record::{decide, CeremonyRecord, Decision, PeerReport, RecordState, StatusInfo};
+use crate::ceremony_record::{
+    decide, equivocation, mixed_evidence, quarantine_droppable, split_evident, CeremonyRecord, Decision, PeerReport,
+    RecordState, StatusInfo,
+};
 use crate::node::{CeremonyKind, KeyVersion, Node};
 use crate::{DaemonError, Result};
 
@@ -98,10 +101,14 @@ pub async fn part2_and_deliver(
             None => Err(DaemonError::CeremonyRefused(format!("node {to} is not in this node's mesh"))),
         };
         if let Err(e) = sent {
+            // The recipient's error text (serde errors from parsing a package, for one) stays in
+            // this node's log; the leader gets only its category (audit F11).
+            tracing::warn!(ceremony_id, to, error = %e, "round-2 delivery failed; aborting this node's session");
             let id = ceremony_id.to_owned();
             let _ = node.blocking(move |n| n.ceremony_abort(&id)).await;
             return Err(DaemonError::CeremonyRefused(format!(
-                "delivering the round-2 package to node {to} failed: {e}"
+                "delivering the round-2 package to node {to} failed ({}) — see that node's and this node's logs",
+                delivery_failure_code(&e)
             )));
         }
         delivered.push(to);
@@ -109,11 +116,30 @@ pub async fn part2_and_deliver(
     Ok(Part2Outcome { round1_digest: digest, delivered })
 }
 
+/// The category of a failed round-2 delivery, for the leader: a gRPC code or an error kind,
+/// never the recipient's message (audit F11).
+fn delivery_failure_code(e: &DaemonError) -> &'static str {
+    match e {
+        DaemonError::Status(s) => s.code().description(),
+        DaemonError::Transport(_) => "transport error",
+        DaemonError::NotServing(_) => "recipient not serving",
+        DaemonError::UnknownDkg(_) => "recipient has no such session",
+        DaemonError::Serde(_) | DaemonError::Frost(_) => "malformed package",
+        DaemonError::CeremonyRefused(_) | DaemonError::Ceremony(_) | DaemonError::Config(_) => "refused by the recipient",
+        _ => "error",
+    }
+}
+
 /// How often a node retries its STAGED ceremonies (and settles finished ones).
 pub const RESOLVER_INTERVAL: Duration = Duration::from_secs(30);
 
 /// How long a settled ceremony record is kept.
 pub const RECORD_RETENTION: Duration = Duration::from_secs(30 * 24 * 3600);
+
+/// How long the staged share of an aborted ceremony is quarantined when no split is detected and
+/// not every peer has been seen terminal (audit F3). A detected split keeps it until the operator
+/// recovers or drops it.
+pub const QUARANTINE_RETENTION: Duration = Duration::from_secs(7 * 24 * 3600);
 
 /// Run `fut` as its own task and await it: a caller that stops waiting (a client deadline, a
 /// dropped RPC, a killed CronJob pod) cannot cut it in half. A panic stays a panic.
@@ -151,22 +177,63 @@ async fn gather(node: &Arc<Node>, rec: &CeremonyRecord, skip: &[u16]) -> Result<
 /// [`decide`], apply. Anything else is answered as [`Node::ceremony_status`] would (so asking about
 /// a ceremony this node never joined records its no-vote). Never acts on the caller's word.
 pub async fn resolve(node: &Arc<Node>, ceremony_id: &str) -> Result<StatusInfo> {
+    resolve_from(node, ceremony_id, None).await
+}
+
+/// [`resolve`] on behalf of the peer whose certificate CN is `asker` (`Peer.CeremonyCommit`): an
+/// unknown id is answered as [`Node::ceremony_status_from`] would for that asker.
+///
+/// An abort is never applied on the first look when some peer reported a yes-vote for this node's
+/// outcome ([`mixed_evidence`]): the votes are gathered again after [`Node::regather_delay`] and
+/// decided afresh (audit F3). With crash faults that only delays the abort; against a cosigner
+/// telling nodes different votes it gives the node that is told COMMITTED time to say so, which
+/// proves the equivocation ([`equivocation`]). Every resolver abort keeps the staged share
+/// quarantined; it is dropped once every peer is terminal with nobody committed
+/// ([`quarantine_droppable`]).
+pub async fn resolve_from(node: &Arc<Node>, ceremony_id: &str, asker: Option<String>) -> Result<StatusInfo> {
     let rec = match node.ceremony_record(ceremony_id) {
         Some(r) if r.state == RecordState::Staged => r,
         Some(r) => return Ok(StatusInfo::from_record(&r)),
         None => {
             let id = ceremony_id.to_owned();
-            return node.blocking(move |n| n.ceremony_status(&id)).await;
+            return node.blocking(move |n| n.ceremony_status_from(&id, asker.as_deref())).await;
         }
     };
-    let reports = gather(node, &rec, &[]).await?;
-    let decision = decide(&rec, node.index()?, &reports);
+    let me = node.index()?;
+    let mut reports = gather(node, &rec, &[]).await?;
+    let mut decision = decide(&rec, me, &reports);
+    if matches!(decision, Decision::Abort(_)) && mixed_evidence(&rec, me, &reports) {
+        tracing::warn!(
+            ceremony_id,
+            key_id = %rec.key_id,
+            "a peer voted no while another holds a yes-vote for this node's outcome — gathering the votes again before aborting"
+        );
+        tokio::time::sleep(node.regather_delay()).await;
+        match node.ceremony_record(ceremony_id) {
+            Some(r) if r.state == RecordState::Staged => {}
+            Some(r) => return Ok(StatusInfo::from_record(&r)),
+            None => return Err(DaemonError::UnknownDkg(ceremony_id.into())),
+        }
+        reports = gather(node, &rec, &[]).await?;
+        decision = decide(&rec, me, &reports);
+    }
     if let Decision::Wait(why) = &decision {
         tracing::debug!(ceremony_id, key_id = %rec.key_id, waiting = %why, "staged ceremony not decidable yet");
         return Ok(StatusInfo::from_record(&rec));
     }
+    let split = equivocation(&rec, me, &reports);
+    if split {
+        metrics::counter!(crate::metrics::CEREMONY_EQUIVOCATIONS).increment(1);
+        tracing::error!(
+            ceremony_id,
+            key_id = %rec.key_id,
+            ?reports,
+            "ceremony reported both COMMITTED and ABORTED by peers — a cosigner equivocated (docs/ceremonies.md)"
+        );
+    }
+    let quarantine = matches!(decision, Decision::Abort(_)) && !quarantine_droppable(&rec, me, &reports);
     let id = ceremony_id.to_owned();
-    node.blocking(move |n| n.apply_resolution(&id, &decision)).await
+    node.blocking(move |n| n.apply_resolution_with(&id, &decision, quarantine, split)).await
 }
 
 /// One resolver pass: every STAGED ceremony, then settling and garbage-collecting finished ones.
@@ -188,6 +255,38 @@ pub async fn resolve_pending(node: &Arc<Node>) -> usize {
              --assume-lost` (docs/ceremonies.md)"
         );
     }
+    // Quarantined aborts (audit F3): a peer now reporting COMMITTED for this node's outcome is a
+    // split; every peer terminal with nobody committed frees the share.
+    if let Ok(me) = node.index() {
+        for rec in node.quarantined_records() {
+            let Ok(reports) = gather(node, &rec, &[]).await else { continue };
+            if split_evident(&rec, me, &reports) {
+                if node.flag_split(&rec.ceremony_id).unwrap_or(false) {
+                    metrics::counter!(crate::metrics::CEREMONY_EQUIVOCATIONS).increment(1);
+                }
+                tracing::error!(
+                    ceremony_id = %rec.ceremony_id,
+                    key_id = %rec.key_id,
+                    ?reports,
+                    "SPLIT: this node aborted a ceremony a peer reports COMMITTED with the same outcome — a \
+                     cosigner equivocated. The staged share is quarantined; after checking the committed \
+                     node, run `rutli-cosigner ceremony recover-commit --ceremony-id {}` with this node's \
+                     daemon stopped (docs/ceremonies.md)",
+                    rec.ceremony_id
+                );
+            } else if rec.split_detected_ms == 0 && quarantine_droppable(&rec, me, &reports) {
+                if let Err(e) = node.drop_quarantine(&rec.ceremony_id) {
+                    tracing::warn!(ceremony_id = %rec.ceremony_id, error = %e, "could not drop a quarantined share");
+                }
+            }
+        }
+    }
+    match node.gc_quarantine(QUARANTINE_RETENTION) {
+        Ok(0) => {}
+        Ok(n) => tracing::info!(dropped = n, "dropped quarantined staged shares past their retention"),
+        Err(e) => tracing::warn!(error = %e, "quarantine garbage collection failed"),
+    }
+    metrics::gauge!(crate::metrics::CEREMONIES_SPLIT).set(node.split_count() as f64);
     for rec in node.unsettled_records() {
         let Ok(reports) = gather(node, &rec, &[]).await else { continue };
         let settled = rec
@@ -271,6 +370,71 @@ pub async fn resolve_assume_lost(node: &Arc<Node>, ceremony_id: &str, lost: &[u1
     tracing::warn!(ceremony_id, ?lost, decision = ?normal, "break-glass ceremony resolution");
     let id = ceremony_id.to_owned();
     node.blocking(move |n| n.apply_resolution(&id, &normal)).await
+}
+
+/// Operator recovery of a split (audit F3; `rutli-cosigner ceremony recover-commit`, daemon
+/// stopped, instance lock held): commit the quarantined staged share of a ceremony this node
+/// aborted, because a peer reports it COMMITTED with exactly this node's outcome.
+///
+/// Refuses unless every condition holds: this node's record is ABORTED with the share quarantined;
+/// some peer reports COMMITTED with this node's outcome **and** its key state shows that sharing
+/// live (epoch and PKP digest); no peer reports a yes-vote for any other outcome; and the commit
+/// rules of [`Node::apply_resolution`] (a refresh replaces exactly the sharing it started from).
+///
+/// Key-safe: an honest COMMITTED node committed only after confirming every roster node's yes-vote
+/// for that outcome, so it is a complete sharing of the same group key. A *lying* COMMITTED report
+/// can at worst move this node onto a sharing the other honest node does not hold — availability,
+/// as before — so the operator confirms which node is suspect first.
+pub async fn recover_commit(node: &Arc<Node>, ceremony_id: &str) -> Result<StatusInfo> {
+    let me = node.index()?;
+    let rec = node
+        .ceremony_record(ceremony_id)
+        .ok_or_else(|| DaemonError::UnknownDkg(ceremony_id.to_string()))?;
+    if rec.state != RecordState::Aborted || !rec.quarantined {
+        return Err(DaemonError::CeremonyRefused(format!(
+            "ceremony {ceremony_id} is {} here{} — nothing to recover",
+            rec.state.as_str(),
+            if rec.state == RecordState::Aborted { " and its staged share is not quarantined" } else { "" }
+        )));
+    }
+    let reports = gather(node, &rec, &[]).await?;
+    let mine = rec.outcome();
+    if let Some((id, _)) = reports
+        .iter()
+        .find(|(_, r)| matches!(r, PeerReport::Staged(o) | PeerReport::Committed(o) if *o != mine))
+    {
+        return Err(DaemonError::CeremonyRefused(format!(
+            "node {id} reports a yes-vote for another outcome of {ceremony_id} — refusing"
+        )));
+    }
+    let mut proven = Vec::new();
+    for (&id, r) in &reports {
+        if !matches!(r, PeerReport::Committed(o) if *o == mine) {
+            continue;
+        }
+        let Some(peer) = node.mesh_peer(id) else { continue };
+        match peer.key_epoch(&rec.key_id).await {
+            Ok(v) if v.present && v.epoch == rec.new_epoch && hex::encode(&v.pkp_digest) == rec.new_pkp_digest => {
+                proven.push(id)
+            }
+            Ok(v) => tracing::warn!(
+                node = id,
+                epoch = v.epoch,
+                "reports the ceremony COMMITTED but its live share is not that sharing — not counted"
+            ),
+            Err(e) => tracing::warn!(node = id, error = %e, "could not read its key state — not counted"),
+        }
+    }
+    if proven.is_empty() {
+        return Err(DaemonError::CeremonyRefused(format!(
+            "no peer both reports {ceremony_id} COMMITTED with this node's outcome and holds that sharing \
+             live (reports: {reports:?}) — nothing proves the ceremony committed anywhere"
+        )));
+    }
+    tracing::warn!(ceremony_id, key_id = %rec.key_id, committed_on = ?proven, "recovering a split ceremony");
+    let id = ceremony_id.to_owned();
+    let _ = me;
+    node.blocking(move |n| n.apply_recovery(&id)).await
 }
 
 /// What [`discard_partial_key`] found and did.

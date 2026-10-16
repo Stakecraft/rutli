@@ -26,6 +26,16 @@ pub const CEREMONY_REQUESTS: &str = "rutli_ceremony_requests_total";
 pub const CEREMONY_RESOLUTIONS: &str = "rutli_ceremony_resolutions_total";
 /// STAGED ceremonies on this node that are not yet resolved (resolver waiting on a peer).
 pub const CEREMONIES_STAGED: &str = "rutli_ceremonies_staged";
+/// Ceremonies this node aborted while a peer reports them COMMITTED (a split; audit F3), with the
+/// staged share still quarantined for `ceremony recover-commit`.
+pub const CEREMONIES_SPLIT: &str = "rutli_ceremonies_split";
+/// One ceremony reported both COMMITTED and ABORTED by peers: a cosigner equivocated (audit F3).
+pub const CEREMONY_EQUIVOCATIONS: &str = "rutli_ceremony_equivocations_total";
+/// No-votes this node refused to record (and so did not answer) for unknown ceremony ids or
+/// orphaned sessions, because a cap was reached (audit F2).
+pub const CEREMONY_UNKNOWN_REFUSED: &str = "rutli_ceremony_unknown_refused_total";
+/// No-votes held for ceremony ids peers asked about that this node never knew (audit F2).
+pub const CEREMONY_UNKNOWN_NO_VOTES: &str = "rutli_ceremony_unknown_no_votes";
 /// Peers skipped during sign round 1 (unreachable or refusing) — a quorum-margin canary.
 pub const SIGN_ROUND1_SKIPS: &str = "rutli_sign_round1_skips_total";
 /// Leader-issued aborts of in-flight sign sessions (one per given-up signature).
@@ -167,6 +177,10 @@ fn prime() {
         metrics::counter!(CEREMONY_RESOLUTIONS, "result" => result).absolute(0);
     }
     metrics::gauge!(CEREMONIES_STAGED).set(0.0);
+    metrics::gauge!(CEREMONIES_SPLIT).set(0.0);
+    metrics::counter!(CEREMONY_EQUIVOCATIONS).absolute(0);
+    metrics::counter!(CEREMONY_UNKNOWN_REFUSED).absolute(0);
+    metrics::gauge!(CEREMONY_UNKNOWN_NO_VOTES).set(0.0);
     metrics::counter!(SIGN_ROUND1_SKIPS).absolute(0);
     metrics::counter!(EPOCH_MISMATCH).absolute(0);
     metrics::counter!(EPOCH_CHECK_SKIPPED).absolute(0);
@@ -198,6 +212,10 @@ pub fn describe() {
     describe_counter!(CEREMONY_REQUESTS, "DKG/refresh ceremony outcomes, by kind and result");
     describe_counter!(CEREMONY_RESOLUTIONS, "Two-phase ceremonies resolved on this node, by result");
     describe_gauge!(CEREMONIES_STAGED, "Staged (yes-voted, unresolved) ceremonies on this node");
+    describe_gauge!(CEREMONIES_SPLIT, "Ceremonies aborted here that a peer reports COMMITTED (quarantined share held)");
+    describe_counter!(CEREMONY_EQUIVOCATIONS, "Ceremonies reported both COMMITTED and ABORTED by peers (equivocation)");
+    describe_counter!(CEREMONY_UNKNOWN_REFUSED, "No-votes for unknown ceremonies not recorded because a cap was reached");
+    describe_gauge!(CEREMONY_UNKNOWN_NO_VOTES, "No-votes held for ceremony ids peers asked about that this node never knew");
     describe_counter!(SIGN_ROUND1_SKIPS, "Peers skipped during sign round 1 (quorum-margin canary)");
     describe_counter!(SIGN_INTENT_ABSENT, "Sign rounds accepted without a signing intent (require_intent off)");
     describe_counter!(SIGN_POLICY_REFUSALS, "Signing-policy refusals at this node, by reason");

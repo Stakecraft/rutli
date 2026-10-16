@@ -163,3 +163,49 @@ fn a_staged_vote_whose_share_vanished_is_left_for_an_operator() {
     assert_eq!(n.ceremony_record("refresh-lost").unwrap().state, RecordState::Staged);
     assert_eq!(n.key_epoch("k").unwrap().epoch, 1, "the live share is untouched");
 }
+
+/// Audit F4: the startup repair never deletes a staged share whose vote it could not read — not
+/// when one record file does not parse, and not when the record directory cannot be listed at all.
+#[test]
+fn startup_keeps_a_staged_share_whose_vote_it_cannot_read() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("keys");
+    let ks = store(&dir);
+    let records = CeremonyRecords::open(ks.ceremony_dir());
+    // A yes-vote whose record file is garbled (a torn or corrupted write): the share stays.
+    let s = share(1, 2);
+    ks.stage("k", "refresh-garbled", &s).unwrap();
+    records.write(None, &record("refresh-garbled", RecordState::Staged, &s)).unwrap();
+    std::fs::write(ks.ceremony_dir().join("refresh-garbled.json"), b"{ torn").unwrap();
+    // A share with no record file at all is still an orphan.
+    ks.stage("k", "refresh-orphan", &share(2, 2)).unwrap();
+    // An abort whose share is quarantined (audit F3) keeps it too.
+    let q = share(3, 2);
+    ks.stage("k", "refresh-quarantined", &q).unwrap();
+    let staged = record("refresh-quarantined", RecordState::Staged, &q);
+    records.write(None, &staged).unwrap();
+    let quarantined = CeremonyRecord { state: RecordState::Aborted, quarantined: true, ..staged.clone() };
+    records.write(Some(&staged), &quarantined).unwrap();
+
+    let n = node(&dir);
+    assert_eq!(
+        ks.list_staged().unwrap(),
+        vec![("k".to_string(), "refresh-garbled".to_string()), ("k".to_string(), "refresh-quarantined".to_string())]
+    );
+    assert_eq!(n.quarantined_records().len(), 1);
+    drop(n);
+
+    // The record directory cannot be read at all: no repair, nothing deleted.
+    ks.stage("k", "refresh-orphan-2", &share(4, 2)).unwrap();
+    let ceremonies = ks.ceremony_dir();
+    let aside = tmp.path().join("ceremonies-aside");
+    std::fs::rename(&ceremonies, &aside).unwrap();
+    std::fs::write(&ceremonies, b"not a directory").unwrap();
+    drop(node(&dir));
+    assert_eq!(ks.list_staged().unwrap().len(), 3, "an unreadable vote set skips the repair");
+    // Readable again: the orphan goes, the rest stays.
+    std::fs::remove_file(&ceremonies).unwrap();
+    std::fs::rename(&aside, &ceremonies).unwrap();
+    drop(node(&dir));
+    assert_eq!(ks.list_staged().unwrap().len(), 2);
+}
