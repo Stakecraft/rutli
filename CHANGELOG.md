@@ -17,6 +17,13 @@ restore (M1), and the threat model (`docs/security/threat-model.md`). Batch C is
 Every step on **every** node before the next; a flag is only as strong as the most lenient node a
 quorum can reach. Pause the refresh CronJob and onboarding DKGs from step 1 until step 2 is done.
 
+0. **Before any batch C image: measure each key's sign rate** (audit F8). The per-key sign rate
+   limit is **on by default from step 1** (300/min, 20 000/day per key, per node) and a refusal is
+   final (RESOURCE_EXHAUSTED, the driver does not fail over). Count each protocol key's busiest
+   minute and day from a copy of the driver audit log (`docs/runbook-rc2-soak-rollout.md` §1 has the
+   commands); without intents every retry is a separate charge. Add `signing_policy.rate_limits`
+   rules (namespace key first, then protocol keys) on every node, in the same step-1 rollout, for
+   any key within a factor of 3 of the defaults. Watch `rutli_sign_rate_limited_total` = 0 after.
 1. **Upgrade every cosigner** (rolling restart, defaults unchanged). Signing keeps working across
    versions; DKG/refresh are refused until every node reports ceremony protocol 2; this release
    reads v1 and v2 key files and still writes v1; hosted-key deletes stay disabled (empty
@@ -34,7 +41,10 @@ quorum can reach. Pause the refresh CronJob and onboarding DKGs from step 1 unti
    never changed) on every node, then `keyfile.write_version: 2` (each node re-seals its files as v2
    at start; check `rutli_keyfiles{format="v1"}` = 0 or `rutli-cosigner keyfile status`). From here a
    rollback to an older release needs `keyfile downgrade` on each node first. `keyfile.accept_v1:
-   false` once no rollback is wanted.
+   false` once no rollback is wanted — **M4 counts as closed only from then on** (audit F10): until
+   `accept_v1: false` on every node, any v1 file sealed under the node's DEK is accepted, and even
+   with v2 a rollback to an older genuine file of the same key and node (a tombstone swapped back
+   for the key it replaced, say) passes the AEAD (`docs/security/threat-model.md`).
 7. **DEK rotation, per node** (`seal rotate-dek` → new Secret → restart → `keyfile status` shows no
    previous-DEK file → backup → `seal drop-previous` → restart; `docs/disaster-recovery.md` §3h).
 8. **Retire the legacy seal master** (clusters that came from `secret_env`): it stays escrowed
@@ -42,7 +52,57 @@ quorum can reach. Pause the refresh CronJob and onboarding DKGs from step 1 unti
    aged out, then it is destroyed (decision P1).
 9. **Deletes, if wanted:** `hosted_keys.delete_allowlist` (a delete-role CN, never a cosigner; the
    driver's CN only if Canton must delete), `delete_approval_threshold` ≥ 1 for production, the same
-   on every node — only once every node runs this release (older nodes ignore tombstones).
+   on every node — only once every node runs this release (older nodes ignore tombstones), and only
+   after every node has **started once** on it with hosted keys on (that start writes
+   `data_dir/delete-policy.json`; a grant recorded later stops older delete intents from being
+   replayed through peers' tombstones, audit F7). Canton calls `deleteKey` only from the operator's
+   `keys.secret.delete`, so leaving deletes disabled does not affect normal operation (F9).
+
+### Batch C review fixes
+
+- **Sign rate-limit charges bind the operation (R1).** A charge is per signed intent — its request
+  id *and* the SHA-256 of the intent — so re-using one request id for other digests is a new charge
+  each time. Retries and failovers of one driver call (one intent, forwarded unchanged) still
+  coalesce.
+- **The sign journal survives I/O errors (F1).** A failed append (partial write, fsync error on a
+  hung volume) is cut back to the last acknowledged length and the key's journal is reopened from
+  disk on next use, instead of chaining the next entry onto stale state (which forked the chain and
+  made the key's journal refuse to open after the next restart). Same for a panic mid-append.
+- **Bounded no-votes for unknown ceremonies (F2).** A peer asking about made-up ceremony ids could
+  make every node write a record file (two fsyncs) per id until the key volume filled. Now: at most
+  256 per asking peer and 1024 in total, 1024 for failed or orphaned sessions, 64 sessions in memory;
+  beyond a cap the node refuses (RESOURCE_EXHAUSTED) and records nothing — no vote, so the two-phase
+  commit stays safe (`docs/ceremonies.md`). New `rutli_ceremony_unknown_refused_total`,
+  `rutli_ceremony_unknown_no_votes`, alert `RutliCeremonyUnknownFlood`.
+- **Split ceremonies are detected and recoverable (F3).** One Byzantine cosigner can tell one honest
+  node STAGED and the other ABORTED (n = 3, f = 1: a documented residual, availability only). An
+  abort that contradicts a peer's yes-vote now re-gathers the votes first; the resolver quarantines
+  an aborted ceremony's staged share instead of deleting it (dropped once every peer is terminal with
+  nobody committed, or after 7 days); a peer reporting COMMITTED for this node's outcome raises
+  `rutli_ceremonies_split` / alert `RutliCeremonySplit`; `rutli-cosigner ceremony recover-commit`
+  commits the quarantined share once a peer proves the sharing committed and live, `ceremony
+  drop-quarantine` discards it. The "never resolve differently" guarantee is documented as holding
+  for crash faults.
+- **The startup ceremony repair no longer deletes a staged share whose vote it cannot read (F4):** it
+  is skipped when the records cannot be listed, and a staged share is discarded only when no record
+  file exists for its ceremony (or its vote is terminal and not quarantined).
+- **The driver agrees on the cluster id by majority (F5)** (at least two endpoints, more than any
+  other value) instead of trusting the first answer, learns it again when a cosigner refuses an
+  intent for its cluster, and has an emergency switch `frost.sign-intents = off` (default `on`).
+  `frost.cluster-id` stays the recommended pin.
+- **Delete approvals are domain-separated from sign approvals (F6):** a delete's approval request id
+  is computed over `delete:<key id>`; `ApproveCli` shows the operation and checks a delete's digest.
+  The sign request id is unchanged. Delete approvals collected by an older `rutli-cosigner` are
+  refused: re-issue the delete.
+- **Propagated tombstones (F7)** are accepted only with a deletion time inside their intent's validity
+  and an intent issued no earlier than the node last saw its signer's delete capability change
+  (`data_dir/delete-policy.json`; `rutli_delete_intent_refusals_total{reason="policy-changed"}`).
+  The backup sidecar copies the `keys/.cleared/` markers and `restore` merges them.
+- **Round-2 delivery errors reach the leader as a category only (F11)**, never the recipient's text.
+- Pre-existing items fixed on the way: round 1 is refused once 1024 sign sessions of a key wait for
+  round 2 on a node, and a hosted-key (`genkey`/`delkey`) fence is refused for a FROST key.
+  Remaining residual: any peer can still stall one key's signing for up to the 15-minute orphan
+  timeout at a time by fencing it for a refresh it leads (`docs/security/threat-model.md`).
 
 ### Upgrade notes (operators must act or know)
 - **Plaintext key files now stop the daemon when sealing is on (audit M4).** Earlier releases read
@@ -65,8 +125,9 @@ quorum can reach. Pause the refresh CronJob and onboarding DKGs from step 1 unti
   stopped — on Kubernetes with `maintenanceNodes: [<id>]` (perNode topology), not with `kubectl exec`
   next to a running daemon. `--force` no longer replaces a newer live share with an older one; the
   per-key break-glass is printed in the refusal. `docs/disaster-recovery.md` §1.
-- **Backups include the sign journals** (sidecar and `rutli-cosigner backup`); the tar layout now has
-  the key files at the top and `journal/` beside them. `restore --from` the extracted directory as
+- **Backups include the sign journals** (sidecar and `rutli-cosigner backup`) and the break-glass
+  `.cleared/` markers (sidecar); the tar layout now has the key files at the top and `journal/` and
+  `.cleared/` beside them. `restore --from` the extracted directory as
   before.
 - **Never snapshot, clone or live-migrate a running cosigner VM or container, and run no
   TLS-terminating service mesh between cosigners** (`docs/security/threat-model.md`: audit L7,
@@ -85,7 +146,8 @@ quorum can reach. Pause the refresh CronJob and onboarding DKGs from step 1 unti
   (hash-chained, fsynced before the share leaves; 4 MiB segments, 90 days / 64 MiB per key by
   default). A corrupt journal makes that node refuse to sign with the key (the others keep signing).
 - **Per-key sign rate limits are on by default: 300/min and 20 000/day per key, per node**, charged
-  once per driver request. Far above a namespace key's traffic and a DevNet validator's protocol-key
+  once per driver request (per signed intent; per session for a sign without one) — measure first,
+  rollout step 0. Far above a namespace key's traffic and a DevNet validator's protocol-key
   traffic; a refusal is RESOURCE_EXHAUSTED (non-retryable in the driver,
   `rutli_sign_rate_limited_total`). Size `sign_rate_limit_per_min`/`_per_day` for busier protocol
   keys and put a tight `rate_limits` rule on namespace keys.

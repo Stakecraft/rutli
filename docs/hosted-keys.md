@@ -311,22 +311,37 @@ delete pushed the key back to everyone at its next anti-entropy sweep.
   checks it, fences the key, and forwards it in `PurgeKey`; **every node verifies it itself** — chain
   to the cluster CA, the delete role, pin, signature, cluster, key, digest, validity, ACL — and, with
   `delete_approval_threshold` > 0, counts approvals by its own `signing_policy.approvers` over the
-  same request id `rutli-approve` signs. The delete succeeds once `write_quorum` nodes hold the
+  delete's request id — domain-separated from every signing approval (computed over `delete:<key
+  id>`, audit F6; `docs/approval-quorum.md`), which `rutli-approve` shows as `DELETE hosted key <id>`. The delete succeeds once `write_quorum` nodes hold the
   tombstone; the rest get it from anti-entropy.
 - **The operator command:** `rutli-cosigner --config <client config with a delete-role certificate>
   delete-hosted-key --key-id <id>`; with `--approvals-inbox <dir> --approvals <n>` it first writes a
   pending request into the same inbox `ApproveCli approve` serves and waits for `n` approvals. The
   driver signs a delete intent for Canton's `deleteKey` too (no approvals: if the cosigners require
   them, Canton's delete fails and the operator command is the way).
+- **Default-deny does not break normal Canton operation** (audit F9). Canton 3.6 calls
+  `KmsDriver.deleteKey` only from `KmsCryptoPrivateStore.removePrivateKey`, which only the operator
+  console command `keys.secret.delete` reaches (`GrpcVaultService`); key rotation never deletes.
+  Canton drops its own key metadata *before* calling the KMS, so with deletes disabled the operator
+  gets an error and the hosted key stays on the cluster — unreferenced and harmless — until it is
+  deleted with `delete-hosted-key`. FROST keys were never deletable through the driver.
 - **What a tombstone is:** the key file replaced in place by a sealed tombstone record (key-file kind
   `tombstone`) holding the authorizing intent and, for `hosted_keys.delete_grace_secs` (default 7
   days), the key's material. Every read of the id answers NOT_FOUND; create, replicate and read-repair
   refuse it; it travels in `ListKeys` and **beats a live copy** in anti-entropy (the receiving node
-  verifies the intent itself, ignoring only its expiry). A node restored from a backup taken before
+  verifies the intent itself, as of the delete: the tombstone's deletion time must lie within the
+  intent's validity window, and the intent must be issued no earlier than this node last saw the
+  signer's delete capability change — granted, ACL, threshold or approvers, recorded in
+  `data_dir/delete-policy.json` — so an intent refused when it was made cannot be replayed once the
+  role is granted, audit F7; refusals count `rutli_delete_intent_refusals_total{reason="policy-changed"}`).
+  The file is first written by the first start with hosted keys on (every CN on the role then
+  counts as granted long ago): **start every node on this release once before granting a new delete
+  role**, so the grant is recorded. A node restored from a backup taken before
   the delete is converted by its next sweep; nothing is ever pushed to a node holding the tombstone.
   A tombstone never applies to a copy created or undeleted after its intent was issued.
 - **Undelete** within the grace period: `rutli-cosigner hosted-undelete --key-id <id>` on every
-  node, daemon stopped (`disaster-recovery.md` §3g). **Reusing a deleted id** needs
+  node, daemon stopped (`disaster-recovery.md` §3g). The break-glass "cleared intent" markers
+  (`keys/.cleared/`) are in the backups (sidecar and `backup`), and `restore` merges them. **Reusing a deleted id** needs
   `hosted-clear-tombstone` on every node — a break-glass Canton never needs, since it mints fresh ids.
 - The hosted delete path refuses FROST shares outright: the namespace key is non-rotatable, and
   deleting it destroys the node's identity.
