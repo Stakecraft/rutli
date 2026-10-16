@@ -2,7 +2,8 @@
 # End-to-end: ECIES hosted keys (roadmap Track C) on a real Canton 3.6.1 participant.
 #
 #   CANTON_HOME=~/.cache/canton-3.6.1/canton-open-source-3.6.1 scripts/e2e-ecies-hosted.sh
-#   (from the repo root; KEEP=1 keeps the work dir; SKIP_BUILD=1 reuses existing binaries)
+#   (from the repo root; KEEP=1 keeps the work dir; SKIP_BUILD=1 reuses existing binaries;
+#   KEYFILE_V2_DELETES=1 adds the key-file v2 + hosted-key delete variant, E below)
 #
 # A local 2-of-3 cosigner cluster (mTLS, sealed, hosted keys) runs as native processes on
 # 127.0.0.1, exactly as scripts/e2e-split-ceremony.sh does. One Canton process runs a sequencer, a
@@ -30,6 +31,13 @@
 #      Canton's crypto init: the driver still advertises EcP256 because a silent cosigner does not
 #      veto it. (A *fresh* participant then needs every cosigner for its namespace DKG, so D stops
 #      once key generation starts; a restarted participant with existing keys would carry on.)
+#   E. (KEYFILE_V2_DELETES=1) the cosigners write key-file format v2 only and refuse v1
+#      (keyfile.write_version 2, accept_v1 false, one cluster_uuid; audit M4), and the driver
+#      certificate holds the hosted-key delete role (hosted_keys.delete_allowlist, delete_acl to
+#      this run's prefix; audit M2). After B rotates it out, Canton deletes the generated ECIES key
+#      (`keys.secret.delete`): the driver signs a delete intent, every cosigner verifies it and
+#      replaces the key with a tombstone; pings still work with the imported key, every key file on
+#      every node (the tombstone included) is v2, and the audit cross-check still agrees.
 #
 # Requires: cargo, sbt, jq, openssl, an OpenJDK 17+ (Oracle's JDK refuses Canton's unsigned
 # BouncyCastle for Cipher; set CANTON_JAVA_HOME, default: Homebrew's openjdk).
@@ -46,6 +54,7 @@ FP="$(jq -r '.keys[] | select(.name == "encryption") | .fingerprint' "$VEC/manif
 export E2E_EXPORT_PASSWORD
 E2E_EXPORT_PASSWORD="$(jq -r .password "$VEC/manifest.json")"
 PREFIX="e2e1-"
+V2_DELETES="${KEYFILE_V2_DELETES:-0}"
 IMPORTED_ID="${PREFIX}rutli-enc-imported-${FP:4:8}"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/rutli-e2e-ecies.XXXXXX")"
@@ -93,10 +102,19 @@ RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
 # driver's key pinned, its key ids limited to the two prefixes this script uses.
 DRIVER_PIN="$(openssl x509 -in "$WORK/certs/driver.crt" -noout -pubkey | openssl pkey -pubin -outform DER \
   | openssl dgst -sha256 -hex | awk '{print $NF}')"
+# E: key-file v2 only (one cluster_uuid for the cluster), and the driver on the delete role for this
+# run's prefix.
+CLUSTER_UUID="$(uuidgen | tr 'A-Z' 'a-z')"
 for i in 1 2 3; do
-  jq --arg work "$WORK" --argjson base "$BASE_PORT" --arg cert "cosigner$i" --arg pin "$DRIVER_PIN" '
+  jq --arg work "$WORK" --argjson base "$BASE_PORT" --arg cert "cosigner$i" --arg pin "$DRIVER_PIN" \
+    --arg v2 "$V2_DELETES" --arg uuid "$CLUSTER_UUID" --arg prefix "$PREFIX" '
       .signing_policy = { require_intent: true, signer_acl_required: true,
         signer_acl: { driver: ["e2e1-", "e2e2-"] }, signer_pins: { driver: [$pin] } }
+    | if $v2 == "1" then
+        .keyfile = { write_version: 2, accept_v1: false, cluster_uuid: $uuid }
+        | .hosted_keys.delete_allowlist = ["driver"]
+        | .hosted_keys.delete_acl = { driver: [$prefix] }
+      else . end
     | .listen = "127.0.0.1:\($base + .identifier)"
     | .data_dir = "\($work)/node\(.identifier)"
     | .peers |= map(.endpoint = "https://127.0.0.1:\($base + .identifier)")
@@ -226,6 +244,15 @@ check(published.map(_.fingerprint).distinct == Seq(imported.fingerprint), s"publ
 participant2.health.ping(participant1)
 participant1.health.ping(participant2)
 println("E2E-B pings OK with the imported Canton ECIES key")
+
+// E: the generated key, rotated out above, deleted through the driver (a signed delete intent).
+if ("$V2_DELETES" == "1") {
+  participant1.keys.secret.delete(gen.fingerprint, force = true) // force: no interactive confirmation
+  check(!encKeys.exists(_.publicKey.fingerprint == gen.fingerprint), s"\${gen.fingerprint} is still in participant1's store")
+  participant2.health.ping(participant1)
+  participant1.health.ping(participant2)
+  println(s"E2E-E deleted the rotated-out key \${gen.fingerprint}; pings OK with the imported key")
+}
 println("E2E-DONE")
 sys.exit(0)
 EOF
@@ -258,7 +285,40 @@ NOINTENT="$(cat "$WORK"/node*/journal/*/*.jsonl | grep -c '"purpose":"no-intent"
 [ "$NOINTENT" -eq 0 ] || fail "$NOINTENT signature(s) without an intent under require_intent"
 "$COSIGNER" audit-cross-check --driver-audit "$WORK/driver-audit.jsonl" \
   --journal "$WORK/node1/journal" --journal "$WORK/node2/journal" --journal "$WORK/node3/journal" \
-  --min-journals 2 || fail "audit-cross-check found discrepancies"
+  --min-journals 2 | tee "$WORK/cross-check.txt" || fail "audit-cross-check found discrepancies"
+# Every driver sign names its message (msg=), so the check matched each one by message.
+COUNTS="$(sed -n 's/^driver audit: [0-9]* entries, \([0-9]*\) sign(s) (\([0-9]*\) with an intent, \([0-9]*\) with a message digest).*/\1 \2 \3/p' "$WORK/cross-check.txt")"
+read -r N_SIGNS N_INTENT N_MSG <<<"$COUNTS"
+[ "${N_SIGNS:-0}" -gt 0 ] && [ "$N_INTENT" = "$N_SIGNS" ] && [ "$N_MSG" = "$N_SIGNS" ] \
+  || fail "not every driver sign carries intent= and msg=: $(head -1 "$WORK/cross-check.txt")"
+
+if [ "$V2_DELETES" = 1 ]; then
+  step "E. Key-file v2 only; the rotated-out key deleted through the driver, tombstoned on every node"
+  grep -q "^E2E-E " "$WORK/canton.out" || fail "the Canton script did not delete the rotated-out key"
+  grep -h "AUDIT deleteKey" "$WORK"/canton*.log >"$WORK/deletes.txt" || fail "no deleteKey in the driver audit"
+  DELETED="$(grep "outcome=ok" "$WORK/deletes.txt" | sed -n 's/.*keyId=\([^ ]*\).*/\1/p' | sort -u)"
+  [ "$(printf '%s\n' "$DELETED" | grep -c .)" -eq 1 ] || fail "expected one deleted key, got: $DELETED"
+  [ "$DELETED" != "$IMPORTED_ID" ] || fail "the imported key (in use) was deleted"
+  case "$DELETED" in "$PREFIX"*) ;; *) fail "deleted $DELETED outside $PREFIX" ;; esac
+  ! grep -q "outcome=failed" "$WORK/deletes.txt" || fail "a deleteKey failed: $(grep outcome=failed "$WORK/deletes.txt")"
+  echo "driver deleted $DELETED"
+  for i in 1 2 3; do
+    # Through the leader's PurgeKey or a peer's tombstone in anti-entropy, every node holds it.
+    tombstoned() {
+      grep -F "$DELETED" "$WORK/node$i.log" | grep -q -e "replaced by a tombstone" -e "applied a peer's tombstone"
+    }
+    for _ in $(seq 1 60); do tombstoned && break; sleep 0.5; done
+    tombstoned || fail "node $i never tombstoned $DELETED"
+    "$COSIGNER" --config "$WORK/c$i.json" keyfile status >"$WORK/keyfile$i.txt" 2>&1 || fail "keyfile status on node $i: $(cat "$WORK/keyfile$i.txt")"
+    grep -q "writes v2" "$WORK/keyfile$i.txt" || fail "node $i does not write v2"
+    grep -q "$DELETED" "$WORK/keyfile$i.txt" || fail "node $i holds no file for $DELETED (a tombstone stays on disk)"
+    grep -q " 0 not yet v2," "$WORK/keyfile$i.txt" || fail "node $i holds key files older than v2: $(cat "$WORK/keyfile$i.txt")"
+    tail -n 1 "$WORK/keyfile$i.txt"
+  done
+  "$COSIGNER" audit-cross-check --driver-audit "$WORK/driver-audit.jsonl" \
+    --journal "$WORK/node1/journal" --journal "$WORK/node2/journal" --journal "$WORK/node3/journal" \
+    --min-journals 2 >/dev/null || fail "audit-cross-check found discrepancies after the delete"
+fi
 
 if [ "${SKIP_DOWN:-0}" != 1 ]; then
   step "D. Cosigner 3 down: a participant configured for ECIES still passes Canton's crypto init"

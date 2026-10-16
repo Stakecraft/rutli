@@ -637,12 +637,10 @@ async fn a_write_quorum_rollback_purges_only_the_generations_own_key() {
 
 /// The Signer and Peer APIs of the three nodes over real mTLS: only the delete role may call
 /// DeleteKey, the intent must be the caller's own, and a cosigner certificate cannot purge.
-#[tokio::test]
-async fn the_driver_certificate_cannot_delete_and_the_delete_role_can() {
-    use rutli_cosigner::pb::peer_client::PeerClient;
-    use rutli_cosigner::pb::signer_client::SignerClient;
-    let c = cluster();
-    c.generate("rutli-sym-9").await;
+/// The cluster's nodes served over real mutual TLS on 127.0.0.1 (Signer + Peer), each node reaching
+/// the others through `GrpcPeer`. Returns the endpoints, the server tasks, and the directory holding
+/// every identity's certificate and key (`<cn>.pem`, `<cn>.key`, `ca.pem`).
+async fn serve_mesh(c: &Cluster) -> (Vec<String>, Vec<tokio::task::JoinHandle<()>>, PathBuf) {
     let dir = c.root.join("certs");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("ca.pem"), &c.ids.pki.ca_pem).unwrap();
@@ -709,6 +707,19 @@ async fn the_driver_certificate_cannot_delete_and_the_delete_role_can() {
             let _ = server.await;
         }));
     }
+    for cn in ["driver", "operator"] {
+        tls_for(cn);
+    }
+    (endpoints, servers, dir)
+}
+
+#[tokio::test]
+async fn the_driver_certificate_cannot_delete_and_the_delete_role_can() {
+    use rutli_cosigner::pb::peer_client::PeerClient;
+    use rutli_cosigner::pb::signer_client::SignerClient;
+    let c = cluster();
+    c.generate("rutli-sym-9").await;
+    let (endpoints, servers, _) = serve_mesh(&c).await;
     let channel = |who: &str| -> Channel {
         let (cert, key) = &c.ids.pems[who];
         let tls = ClientTlsConfig::new()
@@ -749,6 +760,111 @@ async fn the_driver_certificate_cannot_delete_and_the_delete_role_can() {
     assert!(listed.iter().any(|k| k.key_id == "rutli-sym-9" && k.tombstone && !k.delete_intent.is_empty()));
     let info = driver.key_info(pb::KeyInfoRequest { key_id: "rutli-sym-9".into() }).await.unwrap().into_inner();
     assert!(!info.exists);
+    for s in &servers {
+        s.abort();
+    }
+}
+
+/// `rutli-cosigner delete-hosted-key --approvals-inbox`, through the real binary against the mTLS
+/// mesh: refused without the approval every node requires (`delete_approval_threshold` 1); with the
+/// inbox it writes a pending DELETE request in the format `rutli-approve` serves, waits for the
+/// approval file, and the approved intent tombstones the key on every node. Without an approval it
+/// gives up at `--approval-timeout-secs` and withdraws its request.
+#[tokio::test]
+async fn delete_hosted_key_collects_approvals_through_the_inbox() {
+    use ed25519_dalek::Signer as _;
+    use sha2::Digest as _;
+    let key = "rutli-sym-inbox";
+    let policy = SigningPolicyConfig {
+        approvers: vec![ApproverConfig { id: "alice".into(), public_key_spki_b64: Ids::new().approver_spki_b64() }],
+        ..Default::default()
+    };
+    let c = cluster_with(DeletePolicy { approval_threshold: 1, ..operator_deletes() }, policy, Duration::from_secs(7 * 86400));
+    c.generate(key).await;
+    let (endpoints, servers, dir) = serve_mesh(&c).await;
+
+    // The operator's client config: the roster, and the delete-role certificate the intent is
+    // signed with.
+    let config = c.root.join("operator.json");
+    let cfg = serde_json::json!({
+        "identifier": 1, "listen": "127.0.0.1:0", "threshold": T, "data_dir": c.root.join("operator-data"),
+        "peers": endpoints.iter().enumerate().map(|(i, e)| serde_json::json!({ "identifier": i + 1, "endpoint": e })).collect::<Vec<_>>(),
+        "tls": { "ca_cert": dir.join("ca.pem"), "cert": dir.join("operator.pem"), "key": dir.join("operator.key") },
+        "signer_allowlist": ["driver"], "peer_allowlist": ["cosigner1", "cosigner2", "cosigner3"]
+    });
+    std::fs::write(&config, serde_json::to_vec_pretty(&cfg).unwrap()).unwrap();
+    let inbox = c.root.join("inbox");
+    let cli = |extra: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_rutli-cosigner"))
+            .arg("--config")
+            .arg(&config)
+            .args(["delete-hosted-key", "--key-id", key])
+            .args(extra)
+            .env("RUST_LOG", "warn")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    // The CLI blocks on its own runtime; keep serving the mesh while it runs.
+    async fn finish(mut child: std::process::Child) -> (bool, String) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while child.try_wait().unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline, "delete-hosted-key did not finish");
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let out = child.wait_with_output().unwrap();
+        (out.status.success(), String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr))
+    }
+
+    // No approvals: every node requires one, so the delete is refused and nothing changes.
+    let (ok, out) = finish(cli(&[])).await;
+    assert!(!ok && out.contains("DeleteKey refused") && out.contains("approval"), "{out}");
+    assert_eq!(c.states(key), vec![(true, false); 3]);
+
+    // The inbox, nobody approving: gives up at the timeout and withdraws its pending request.
+    let inbox_s = inbox.to_str().unwrap();
+    let (ok, out) = finish(cli(&["--approvals-inbox", inbox_s, "--approvals", "1", "--approval-timeout-secs", "1"])).await;
+    assert!(!ok && out.contains("0 of 1 approvals"), "{out}");
+    assert_eq!(std::fs::read_dir(inbox.join("pending")).unwrap().count(), 0, "the timed-out request is withdrawn");
+    assert_eq!(c.states(key), vec![(true, false); 3]);
+
+    // The inbox with alice approving.
+    let child = cli(&["--approvals-inbox", inbox_s, "--approvals", "1", "--approval-timeout-secs", "60"]);
+    let pending = loop {
+        let found = std::fs::read_dir(inbox.join("pending")).ok().and_then(|mut d| d.next()).map(|e| e.unwrap().path());
+        if let Some(p) = found.filter(|p| std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false)) {
+            break p;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    let req: serde_json::Value = serde_json::from_slice(&std::fs::read(&pending).unwrap()).unwrap();
+    // What rutli-approve shows and checks: a DELETE of this key (`delete:<key>`), the digest of
+    // the delete digest, and a request id it can recompute from those and the nonce.
+    let delete_digest = intent::delete_digest(key);
+    assert_eq!(req["keyId"], format!("{}{key}", intent::DELETE_APPROVAL_KEY_PREFIX));
+    assert_eq!(req["operation"], "delete-hosted-key");
+    assert_eq!(req["digest"].as_str().unwrap(), hex::encode(sha2::Sha256::digest(delete_digest)));
+    let nonce = hex::decode(req["nonce"].as_str().unwrap()).unwrap();
+    let request_id = req["requestId"].as_str().unwrap().to_string();
+    assert_eq!(request_id, intent::delete_approval_request_id(key, &delete_digest, &nonce));
+    assert_eq!(pending.file_name().unwrap().to_str().unwrap(), format!("{request_id}.json"));
+    // A stray approval for another request is ignored; alice's approval of this one completes it.
+    let approvals = inbox.join("approvals");
+    let approval = |rid: &str| {
+        serde_json::json!({
+            "approverId": "alice", "requestId": rid,
+            "signature": base64::engine::general_purpose::STANDARD.encode(c.ids.approver.sign(rid.as_bytes()).to_bytes()),
+        })
+        .to_string()
+    };
+    std::fs::write(approvals.join("0000.alice.sig"), approval("0000")).unwrap();
+    std::fs::write(approvals.join(format!("{request_id}.alice.sig")), approval(&request_id)).unwrap();
+    let (ok, out) = finish(child).await;
+    assert!(ok, "{out}");
+    assert!(out.contains(&format!("{key}: deleted — tombstoned on 3 node(s)")), "{out}");
+    assert_eq!(c.states(key), vec![(false, true); 3]);
+    assert!(!pending.exists(), "the answered request leaves the inbox");
     for s in &servers {
         s.abort();
     }

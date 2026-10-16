@@ -485,7 +485,7 @@ with `assert(VALIDATOR_PARTY.uid.toProtoPrimitive == OLD_UID)`; `PARTIES_PRE` (e
 | 4.14 | **[MUTATES]** Normalise | overlay `$D/validator-b4-final.yaml` = 4.12 without `participantIdentitiesDumpImport`/`migrateValidatorParty`; `helm -n $NS upgrade validator … -f validator-values.pre-b4.yaml -f validator-b4-final.yaml`; `kubectl -n $NS delete secret participant-bootstrap-dump` | `Party migration already complete` or a normal init. (The upgrade also drops `deploy.sh`'s validator probe patch; B0 ran on the chart defaults, 60 s / 5.) | a re-migration attempt |
 
 `$D/participant-b4.yaml` (the soak participant's KMS block, `helm -n stakecraft-devnet-rutli-01 get values participant`, plus the prefix and the
-ECIES lines from `hosted-keys.md` §2 / `scripts/e2e-ecies-hosted.sh:153-167`):
+ECIES lines from `hosted-keys.md` §2 / `scripts/e2e-ecies-hosted.sh:171-185`):
 ```yaml
 persistence: { databaseName: participant_b4, enableParticipantDbConflictCheck: false }
 pod: { labels: { rutli.io/client: "true" } }
@@ -724,5 +724,5 @@ classes from the 0.9.0 `splice-node.jar`.
 | `refresh --target` default | `frost/cosigner/src/main.rs:39-47,438-457` |
 | Ceremony CLI flags | `frost/cosigner/src/main.rs:115-183`; dealer `frost/cosigner/src/bin/rutli-dealer.rs:45-102` |
 | Chart TLS layout, `tls-select`, ConfigMap | `deploy/helm/rutli-cosigner/templates/statefulset.yaml`, `configmap.yaml`; `values.yaml` (`tls`, `operatorAllowlist`) |
-| ECIES participant config | `docs/hosted-keys.md` §2; `scripts/e2e-ecies-hosted.sh:153-167` |
+| ECIES participant config | `docs/hosted-keys.md` §2; `scripts/e2e-ecies-hosted.sh:171-185` |
 | Soak bundle/PVC/Cilium pattern | NAAS `deploy/rutli/rutli-prereqs.sh`; soak log 2026-10-07 (0.3.1 rollout) |
