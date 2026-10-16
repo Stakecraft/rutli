@@ -166,6 +166,10 @@ class HashChainedAuditLogSpec extends AnyWordSpec with Matchers {
       content should include("generateSigningKeyPair")
       content should include("outcome=failed")
       content should not include "\"signature\"" // never logs key material or signatures
+      // Each sign names the SHA-256 of the exact bytes signed (`msg=`), failed signs included:
+      // `rutli-cosigner audit-cross-check` matches it against the cosigners' journaled messages.
+      content should include("inBytes=34 msg=d891da1515b09db345eaf7b04e5b8d67597018130fe493cb239d380e8327d4d0 ") // SHA-256 of 34 × 0x01
+      content should include("inBytes=1 msg=4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a ") // of 0x01
     }
 
     "fail a sign closed when the durable audit append fails" in {

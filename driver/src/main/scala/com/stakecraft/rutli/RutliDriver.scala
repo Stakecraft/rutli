@@ -24,7 +24,8 @@ import scala.util.{Failure, Success}
   * and the per-key signing journal (replay detection + rate limit). The OpenTelemetry trace context
   * is accepted per the SPI and can be propagated to those layers.
   *
-  * With `auditLogging` enabled every operation is logged (op, keyId, algo, byte sizes, outcome).
+  * With `auditLogging` enabled every operation is logged (op, keyId, algo, byte sizes, outcome;
+  * for a sign also `msg=`, the SHA-256 of the signed bytes).
   * This is the plain-log precursor of the Phase 3 hash-chained audit log, and doubles as the
   * wire-contract capture tool (see docs/wire-contract.md).
   */
@@ -73,7 +74,10 @@ final class RutliDriver(
   override def sign(data: Array[Byte], keyId: String, algoSpec: SigningAlgoSpec)(
       traceContext: Context
   ): Future[Array[Byte]] =
-    audited(s"sign keyId=$keyId algo=$algoSpec inBytes=${data.length}")(notes =>
+    // `msg=` is SHA-256 of the exact bytes signed: `rutli-cosigner audit-cross-check` matches it
+    // against the message each cosigner journaled under the intent's request id, so it can name
+    // which message the driver signed and which were signed out of band.
+    audited(s"sign keyId=$keyId algo=$algoSpec inBytes=${data.length} msg=${RutliDriver.sha256Hex(data)}")(notes =>
       // Human M-of-N approval (for keys the policy gates) runs BEFORE the backend signs, so quorum
       // approval precedes even the threshold signature. Then the signing journal durably records the
       // (key, digest) — and enforces any rate limit — before the signature is produced. Auto-
@@ -195,4 +199,11 @@ final class RutliDriver(
       case None => None
     }
   }
+}
+
+object RutliDriver {
+
+  /** Lower-case hex SHA-256 of `data` — the `msg=` field of a sign's audit entry. */
+  def sha256Hex(data: Array[Byte]): String =
+    java.security.MessageDigest.getInstance("SHA-256").digest(data).map(b => f"${b & 0xff}%02x").mkString
 }
