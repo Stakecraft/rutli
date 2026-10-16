@@ -3,7 +3,7 @@
 
 package com.stakecraft.rutli.audit
 
-import com.stakecraft.rutli.util.DirSync
+import com.stakecraft.rutli.util.{DirSync, WriteFully}
 import org.slf4j.LoggerFactory
 
 import java.io.{File, FileOutputStream}
@@ -106,7 +106,7 @@ object HashChainedAuditLog {
               "operation result was released for it."
           )
           ch.truncate(cut.toLong)
-        } else ch.write(java.nio.ByteBuffer.wrap(Array('\n'.toByte)), bytes.length.toLong)
+        } else { ch.position(bytes.length.toLong); WriteFully(ch, java.nio.ByteBuffer.wrap(Array('\n'.toByte))) }
       finally { ch.force(true); ch.close() }
     }
   }

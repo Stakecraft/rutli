@@ -3,7 +3,7 @@
 
 package com.stakecraft.rutli.guard
 
-import com.stakecraft.rutli.util.DirSync
+import com.stakecraft.rutli.util.{DirSync, WriteFully}
 import org.slf4j.Logger
 
 import java.nio.charset.StandardCharsets.UTF_8
@@ -175,7 +175,7 @@ final class SigningJournal(
     val created = !Files.exists(path)
     val ch = java.nio.channels.FileChannel.open(path, CREATE, WRITE, APPEND)
     try {
-      ch.write(java.nio.ByteBuffer.wrap((line + "\n").getBytes(UTF_8)))
+      WriteFully(ch, java.nio.ByteBuffer.wrap((line + "\n").getBytes(UTF_8)))
       ch.force(true) // fsync before the caller may release the signature (write-ahead)
     } finally ch.close()
     // A newly created file is only durable once its directory entry is (RUTLI-05).
