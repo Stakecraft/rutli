@@ -29,64 +29,74 @@ behind it until an external review completes.
 
 ### 1.1 Internal security review (October 2026)
 
-Before engaging you we ran an internal security audit: two independent reviews,
-each against `v0.4.0-rc.1` (`903d318`), on 2026-10-16. It is not a substitute for your
-review; it is why the surface you will see differs from rc.1, and where we most want a second pair of
-eyes.
+Before engaging you we ran an internal security audit: two independent reviews, each against
+`v0.4.0-rc.1` (`903d318`), on 2026-10-16, followed by a review of the batch C design and code. It does
+not replace your review; it is why the surface you will see differs from rc.1, and where we most want
+a second pair of eyes. Finding ids carry the prefix `DS-`. The canonical list, with severity, impact
+and the fix for each, will live at [docs/security/internal-review-2026-10.md](security/internal-review-2026-10.md)
+(it lands with batch C; until then we can send it, see the pre-read question below).
 
-**Critical findings**
+**What was found, and where it is fixed** (`rc.2` = `v0.4.0-rc.2`, tagged 2026-10-16; `C` = batch C,
+before the `v0.4.0` freeze):
 
-| Id | Finding | Status |
+| Id | Issue | Fixed in |
 |---|---|---|
-| C1 | DKG and refresh round-2 packages (the secret polynomial evaluations) are relayed through the leader in plaintext, so a leader can reconstruct the key. | **Open; fixed in batch C** |
-| C2 | The cosigners have no signing policy: the approval gate, signing journal and rate limit live only in the driver JVM, so a holder of a driver certificate, or one compromised cosigner, can obtain a signature on any digest. | **Open; fixed in batch C** |
-| C3 | The soak's exec-based backup CronJob could read the shared seal master and every sealed share. | Fixed in `v0.4.0-rc.2` |
+| DS-C1 | DKG and refresh round-2 packages (secret polynomial evaluations) are relayed through the leader in plaintext; a leader can reconstruct the key | C |
+| DS-C2 | No signing policy on the cosigners: approval gate, journal and rate limit live only in the driver JVM, so a driver-certificate holder or one compromised cosigner can sign any digest | C |
+| DS-C3 | The soak's exec-based backup could read the shared seal secret and every sealed share | rc.2 (closed on the soak) |
+| DS-H1 | Refresh is not atomic; an interruption leaves mixed share epochs | C |
+| DS-H2 | The driver trusted one cosigner's group key and did not verify signatures | rc.2 |
+| DS-M1 | Stale or rolled-back shares are not rejected; `restore --force` | C |
+| DS-M2 | No hosted-key tombstones (a restored backup can resurrect a deleted key) | C |
+| DS-M3 | Shared TLS SAN across cosigners; loose caller identity | rc.2 |
+| DS-M4 | Share file lacks AAD (v2 format) | C (closed only with `accept_v1=false`) |
+| DS-M5 | A wedged DKG key id | C |
+| DS-M6 | Signing-journal rate limit | rc.2 |
+| DS-M7 | `ApproveCli` request-id check | rc.2 |
+| DS-L1 | Audit-log tail handling | rc.2 (plus a cross-check in C) |
+| DS-L2 | Config deduplication | rc.2 |
+| DS-L3 | Mutex poisoning | C |
+| DS-L4 | Nonce markers; cosigner-side limit | C |
+| DS-L5 | Unbounded rate-limiter map | rc.2 |
+| DS-L6 | Single-instance lock; volume access mode (RWOP) | rc.2 |
+| DS-L7 | Nonce reuse after a VM snapshot restore | residual (documented) |
+| DS-X1 | `SoftKeyStore` directory fsync | rc.2 |
+| DS-X2 | Signing-journal short write | rc.2 |
+| DS-CR1 to CR10 | Review of batch C itself: rate-limit amortization, journal I/O recovery, no-vote flood, Byzantine two-phase split (residual: availability), staged repair, driver cluster id, delete-approval domain separation, tombstone replay, error-text leak, cross-check key | within C |
 
-**High:** H1, refresh is not atomic and an interruption can leave nodes on mixed share epochs (open,
-batch C). H2, the driver trusted one cosigner's group key and did not verify the signatures it was
-handed (fixed in rc.2: the key is agreed by at least two cosigners, pinned per key id, and every
-signature is verified against it).
+The rc.2 fixes are in the tagged release (per-node seal bundles and the `perNode` Helm topology,
+exec-free backup sidecar, per-peer TLS server names, group-key pinning and signature verification in
+the driver, fail-closed journal and audit log, config validation); the DevNet soak has run rc.2 since
+2026-10-16 and the exec backup was removed there. Details: [CHANGELOG.md](../CHANGELOG.md),
+`[0.4.0-rc.2]`.
 
-**Medium and low** findings (per-peer TLS names and exact caller identity, M3; the signing journal and
-audit log failing closed, M6, L1; approval request-id recomputation, M7; trust files accepting
-non-CA certificates, M1; the cluster-id pin, M2; cosigner config validation, single-instance lock and
-bounded limiter, L2, L5, L6; and smaller items) are fixed in rc.2 and listed in
-[CHANGELOG.md](../CHANGELOG.md) under `[0.4.0-rc.2]`. Identifiers are those used in our changelog and
-runbooks; the two reviews numbered independently, and the findings list reconciles them.
+**Batch C, in progress; lands before the `v0.4.0` code freeze.** It is a wire change: confidential
+peer-to-peer delivery of DKG and refresh round-2 packages over mutual TLS (DS-C1); cosigner-enforced,
+driver-signed signing intents with per-node approvals, journal and rate limit (DS-C2); two-phase
+ceremonies with epochs (DS-H1, DS-M1); share format v2 with AAD (DS-M4); hosted-key tombstones
+(DS-M2). Until it ships, keys born or refreshed on the cluster are treated as leader-exposed (soak
+keys are test material) and refresh is not run.
 
-**Fixed in `v0.4.0-rc.2`** (tagged 2026-10-16, cosigner image pinned by digest; remediation batches A
-and B): driver pins and verifies FROST group keys and signatures (H2); cosigner config validation,
-single-instance lock on the data directory, `ReadWriteOncePod` volumes; per-node seal bundles and the
-`perNode` Helm topology, so a pod and a kubelet see only their own node's seal and TLS Secrets, and a
-backup sidecar without exec RBAC (C3); per-peer TLS server names (M3); fail-closed signing journal
-and audit log, with a read-only `StateCheck` tool. Our DevNet soak runs rc.2 since 2026-10-16 and the
-exec backup was removed there.
+**Residuals we state up front:**
 
-**Batch C, in progress; lands before the `v0.4.0` code freeze.** It is a wire change:
-
-- confidential peer-to-peer delivery of DKG and refresh round-2 packages over mutual TLS, so the
-  leader no longer sees them (C1);
-- cosigner-enforced, driver-signed signing intents, with per-node approvals, journal and rate limit
-  (C2);
-- two-phase ceremonies with epochs, so a refresh commits on all nodes or none and a stale share cannot
-  take part (H1 and related);
-- share file format v2 with authenticated associated data, and tombstones for hosted keys.
-
-Until batch C ships we treat keys born or refreshed on the cluster as leader-exposed (soak keys are
-test material) and do not run refresh. Decisions already recorded: no HPKE layer on top of mTLS, but a
-stated deployment requirement of **no TLS-terminating service mesh between cosigners** (the mTLS channel
-is the confidentiality boundary for round-2 packages); one Kubernetes cluster is one trust domain, a
-known limitation, with the mainnet topology to be decided later.
+- a refresh-fence stall can block signing until it clears (availability);
+- a Byzantine two-phase split at n=3 can cost availability (DS-CR);
+- one Kubernetes cluster is one trust domain (mainnet topology decided later);
+- no HPKE layer on top of mTLS, with the deployment requirement that **no TLS-terminating service mesh
+  sits between cosigners** (mTLS is the confidentiality boundary for round-2 packages);
+- a stolen driver key acts within its ACL and rate limit; its use is journaled and it is revocable via
+  the SPKI pin;
+- nonce reuse after a VM snapshot restore (DS-L7), documented.
 
 **What we ask of you**
 
-1. **Verify the fixes** for the findings above that are fixed in rc.2 and in batch C.
+1. **Verify the fixes** for the findings above, both those in rc.2 and those in batch C.
 2. **Specifically re-review two batch C areas**: the DKG and refresh confidentiality design (what each
-   party, the leader and the network can learn, and the mTLS-only delivery decision) and the
-   cosigner-side signing policy (intent format, signature binding, where approvals, journal and rate
-   limit are enforced, and what a compromised driver or a single compromised cosigner can still do).
-   Please quote these as separate line items if you can.
-3. **Pre-read:** tell us whether you want our internal findings list ahead of the engagement. We will
+   party, the leader and the network can learn, and the mTLS-only delivery decision; DS-C1, DS-H1) and
+   the cosigner-side signing policy (intent format, signature binding, where approvals, journal and
+   rate limit are enforced, and what a compromised driver or a single compromised cosigner can still
+   do; DS-C2). Please quote these as separate line items if you can.
+3. **Pre-read:** tell us whether you want the internal findings list ahead of the engagement. We will
    provide it under NDA, or in the evidence pack at engagement start, as you prefer.
 
 ## 2. Scope (in)
@@ -105,14 +115,14 @@ procedure (row i), review fixes and documentation.
 |---|---|---|---|
 | a | **FROST-ed25519 cosigner cluster** | DKG; t-of-n signing (two rounds); crash-safe nonce guard; proactive refresh; share repair; share sealing at rest (AES-256-GCM; per-node seal bundles in rc.2, each node holding only its own share key and hosted-key seed, replacing the shared master); mutual TLS and the `signer_allowlist` / `peer_allowlist` role split; per-key ceremony guards and cluster-wide signing fence; create-once guard | `frost/core`, `frost/cosigner` |
 | b | **Cluster-hosted keys** | Replicated whole keys (RSA-2048-OAEP via `aws-lc-rs`, AES-256-GCM, and EC-P256 ECIES keys, see row g); per-recipient wrapping (ephemeral X25519, HKDF-SHA256, AES-256-GCM, AAD-bound); write quorum, anti-entropy, read-repair; offline passphrase-encrypted export/import; per-key decrypt rate limit | `frost/cosigner` (`hosted`, `wrap`, `export`, `ratelimit`, `peer`) |
-| c | **JVM KMS driver** | Key-id routing (`frost-` / `rutli-` prefixes, `frost.key-prefix`); `FrostBackend` gRPC client with failover rules, group-key agreement and pinning, and signature verification (H2); M-of-N approval gate and policy; hash-chained audit log; signing journal; Canton 34-byte digest handling; ECIES completion for hosted EC keys (`CantonEcies`) | `driver/src/main` |
+| c | **JVM KMS driver** | Key-id routing (`frost-` / `rutli-` prefixes, `frost.key-prefix`); `FrostBackend` gRPC client with failover rules, group-key agreement and pinning, and signature verification (DS-H2); M-of-N approval gate and policy; hash-chained audit log; signing journal; Canton 34-byte digest handling; ECIES completion for hosted EC keys (`CantonEcies`) | `driver/src/main` |
 | d | **Split ceremony (milestone B2)** | In `v0.4.0-rc.1`; frozen with v0.4.0 (B6 touches its usage guard, row h). Offline dealer binary `rutli-dealer` splits an existing Canton Ed25519 namespace key into t-of-n FROST shares via `frost_ed25519::keys::split`, using RFC 8032 seed-to-scalar conversion (ed25519-dalek's SHA-512, clamp, reduce mod l); before writing anything it proves group key == Canton key, VSS, `min_signers`, every t-subset reconstructs and signs (`verify_strict`). Each share is sealed to a one-time per-ceremony X25519 recipient key the node minted (`share-recipient`; the hosted-key envelope construction with extra AAD fields, not the static distribution key); every request is signed with the node's mTLS key and verified by the dealer to the cluster CA and the `cosigner<N>` CN, plus a human-confirmed SAS. `import-share` (offline CLI) checks bundle vs node, config and expected fingerprint, VSS, package interpolation, then a no-clobber create (`renameat2(RENAME_NOREPLACE)` / `link(2)`); `abort-import`; DKG and hosted keys refuse `frost-import-` ids; read-only `KeyStatus` and fixed-message `CeremonySignTest` RPCs for an `operator_allowlist` role, and `verify-key` (cross-node digest agreement, every t-subset signs); then `Refresh`. Process hardening of the dealer (core dumps, ptrace, core handlers, mlock, swap). Includes the Canton key parser (B1) it depends on | `frost/core/src/dealer.rs`; `frost/cosigner/src/{share_delivery,share_import,request_auth,verify_key,wrap}.rs`, `src/bin/rutli-dealer.rs`; `frost/canton-key`; runbook [split-ceremony.md](split-ceremony.md) |
 | e | **Deployment artifacts** (secondary) | Helm chart with the `perNode` topology (one StatefulSet and Service per node, each pod referencing only its own seal and TLS Secrets), Kubernetes manifests (StatefulSet, NetworkPolicy, PDB, per-pod backup sidecar with no exec RBAC, refresh CronJob), deploy-policy CI gate, Docker Compose TLS config, cert generation script | `deploy/helm`, `deploy/k8s`, `deploy/frost`, `scripts/` |
 | f | **Operational runbooks** (procedural review) | Key ceremony, split ceremony (incl. destruction of the whole key), DR/backup/restore, approval quorum, and the pilot migration runbook (`docs/migration.md`), whose steps were exercised in the DevNet B4 cutover rehearsal on 2026-10-14 | `docs/key-ceremony.md`, `docs/split-ceremony.md`, `docs/disaster-recovery.md`, `docs/approval-quorum.md`, `docs/migration.md` |
 | g | **ECIES hosted keys (Track C)** | Merged and part of `v0.4.0` (in `v0.4.0-rc.1`); no longer a separate release or optional addendum. Hosted EC-P256 keys with an `EcdhDerive` RPC on the cosigner (`aws-lc-rs`) and a driver-side ECIES decrypt path (BouncyCastle `IESEngine`, shared secret supplied by the cluster); `import-key` of a Canton EC P-256 encryption key via the B1 parser. Details and our focus questions in section 2.1 | `frost/cosigner/src/{hosted,export,service,node}.rs`, `cosigner.proto`; `driver/.../backend/{CantonEcies,FrostBackend}.scala` |
 | h | **Optional carry of protocol signing and ECIES encryption keys (milestone B6)** | Implemented and in `v0.4.0-rc.2`. A discouraged path: the recommended migration carries only the namespace key and gives the new node fresh keys. It touches the offline dealer's usage guard (`rutli-dealer --expect-usage`, envelope v3), adds a `rutli-cosigner verify-hosted` RPC/CLI, and docs. Size to be given with the freeze commit | `frost/core/src/dealer.rs`, `frost/cosigner/src/bin/rutli-dealer.rs`, `frost/cosigner` (`verify-hosted`), `docs/` |
 | i | **In-place migration of an existing node (Flow 2a)** | Procedure, targeted for `v0.4.0` after a DevNet rehearsal (milestone B8). The existing participant keeps its database and UID: all its active keys are carried into the cluster with their fingerprints (namespace via the split ceremony, protocol signing and ECIES via B6), the node is restarted with `crypto.provider = kms`, the keys are registered by KMS id before it reconnects, then rotated per the operator's choice and the old plaintext rows removed. Mostly runbook and Canton console steps, little new code; not a procedure Digital Asset documents. We want the sequence, the rollback story and the residue reviewed. The B8 rehearsal on DevNet precedes the freeze. |
-| j | **Internal-review remediation, batch C (in progress)** | Lands before the `v0.4.0` code freeze; a wire change. Confidential peer-to-peer delivery of DKG/refresh round-2 packages over mTLS (C1); cosigner-enforced signed signing intents with per-node approvals, journal and rate limit (C2); two-phase ceremonies with epochs (H1); share format v2 with AAD; hosted-key tombstones. Our priority area for re-review (section 1.1). Size to be given with the freeze commit | `frost/core` (DKG, refresh), `frost/cosigner` (`orchestrator`, `node`, `service`, `keystore`, `peer`), `cosigner.proto`, `driver/src/main` (intent signing, approval gate) |
+| j | **Internal-review remediation, batch C (in progress)** | Lands before the `v0.4.0` code freeze; a wire change. Confidential peer-to-peer delivery of DKG/refresh round-2 packages over mTLS (DS-C1); cosigner-enforced signed signing intents with per-node approvals, journal and rate limit (DS-C2); two-phase ceremonies with epochs (DS-H1); share format v2 with AAD; hosted-key tombstones. Our priority area for re-review (section 1.1). Size to be given with the freeze commit | `frost/core` (DKG, refresh), `frost/cosigner` (`orchestrator`, `node`, `service`, `keystore`, `peer`), `cosigner.proto`, `driver/src/main` (intent signing, approval gate) |
 
 ### Approximate size
 
@@ -203,19 +213,19 @@ Each item below comes from our own design docs (`audit-prep.md`, `phase-2-frost.
 | Area | What we believe, and want challenged |
 |---|---|
 | **Nonce reuse** | Round-1 nonces are fresh per session from a CSPRNG; a nonce record is persisted and fsynced before a signature share is released; reuse is refused across restarts; in-flight nonces are freed on give-up. Reusing a nonce commitment across two messages leaks the share. |
-| **DKG/refresh round-2 confidentiality (C1, batch C focus)** | Round-2 packages carry secret polynomial evaluations; whoever sees all packages for a ceremony can reconstruct the key. In rc.2 they transit the leader in plaintext (known, open). Batch C delivers each package peer to peer over mutual TLS, never through the leader, with no HPKE layer on top. We want the design challenged: what the leader, a compromised cosigner and a network observer can learn; the reliance on mTLS alone and on the "no TLS-terminating mesh between cosigners" requirement (what breaks if it is violated, and can the cosigner detect it); binding of a package to ceremony, sender, recipient and epoch; replay and substitution. |
-| **Epochs and atomicity of refresh (H1, batch C focus)** | Rc.2 refresh is not atomic: an interruption between nodes leaves mixed share epochs. Batch C makes ceremonies two-phase (stage on all nodes, then commit) with an explicit epoch carried in the share, and share format v2 binds metadata with AAD. We want the state machine reviewed for partial commit, a crash at each step, a node restored from an old backup, abort and retry, concurrent ceremonies, and downgrade to the v1 share format. |
+| **DKG/refresh round-2 confidentiality (DS-C1, batch C focus)** | Round-2 packages carry secret polynomial evaluations; whoever sees all packages for a ceremony can reconstruct the key. In rc.2 they transit the leader in plaintext (known, open). Batch C delivers each package peer to peer over mutual TLS, never through the leader, with no HPKE layer on top. We want the design challenged: what the leader, a compromised cosigner and a network observer can learn; the reliance on mTLS alone and on the "no TLS-terminating mesh between cosigners" requirement (what breaks if it is violated, and can the cosigner detect it); binding of a package to ceremony, sender, recipient and epoch; replay and substitution. |
+| **Epochs and atomicity of refresh (DS-H1, batch C focus)** | Rc.2 refresh is not atomic: an interruption between nodes leaves mixed share epochs. Batch C makes ceremonies two-phase (stage on all nodes, then commit) with an explicit epoch carried in the share, and share format v2 binds metadata with AAD. We want the state machine reviewed for partial commit, a crash at each step, a node restored from an old backup, abort and retry, concurrent ceremonies, and downgrade to the v1 share format. |
 | **Ceremony races / split-brain** | A per-key guard, ownership re-checks on DKG/refresh part 2 and 3, a cluster-wide signing fence (and reverse fence against in-flight signs), and create-once refusal of DKG should prevent two ceremonies from leaving nodes on different sharing polynomials, or from overwriting a live namespace key. Batch C adds epochs on top (previous row). |
-| **Share exfiltration and seal secrets (changed in rc.2)** | Shares are sealed at rest. Rc.2 replaces the single shared seal master with per-node seal bundles (each node holds only its own share key and hosted-key seed, read from a file; peers' distribution keys are pinned in config), and the Helm `perNode` topology gives each pod only its own Secrets. This closes C3: the soak's exec-based backup could read the master and every share, and is gone. Backups now come from a per-pod sidecar that copies sealed files and never mounts the seal bundle or the TLS key. We want the derivations, the pinning, the bundle-to-node binding and the migration from a legacy shared master (`seal split-legacy`) reviewed, and whether any remaining path (kubelet, other RBAC, node-local tooling) gives one actor more than one node's secrets. Compromise of fewer than `t` cosigners within one refresh epoch must not yield the key. Hosted keys are the exception by design: one cosigner holds them. |
-| **Malicious or compromised cosigner** | What can a cosigner holding a valid mTLS cert do to the others (bad round-1/round-2 messages, bad DKG contributions, replicating bogus hosted keys, forcing conflicts)? Includes the leader role: what a hostile leader can learn (C1) or get signed (C2), before and after batch C. |
+| **Share exfiltration and seal secrets (changed in rc.2)** | Shares are sealed at rest. Rc.2 replaces the single shared seal master with per-node seal bundles (each node holds only its own share key and hosted-key seed, read from a file; peers' distribution keys are pinned in config), and the Helm `perNode` topology gives each pod only its own Secrets. This closes DS-C3: the soak's exec-based backup could read the master and every share, and is gone. Backups now come from a per-pod sidecar that copies sealed files and never mounts the seal bundle or the TLS key. We want the derivations, the pinning, the bundle-to-node binding and the migration from a legacy shared master (`seal split-legacy`) reviewed, and whether any remaining path (kubelet, other RBAC, node-local tooling) gives one actor more than one node's secrets. Compromise of fewer than `t` cosigners within one refresh epoch must not yield the key. Hosted keys are the exception by design: one cosigner holds them. |
+| **Malicious or compromised cosigner** | What can a cosigner holding a valid mTLS cert do to the others (bad round-1/round-2 messages, bad DKG contributions, replicating bogus hosted keys, forcing conflicts)? Includes the leader role: what a hostile leader can learn (DS-C1) or get signed (DS-C2), before and after batch C. |
 | **Peer API bypass** | The Peer RPCs are the raw FROST protocol. A caller reaching `SignRound1/2` on `t` cosigners could sign any message, so `peer_allowlist` must exclude the driver, and the 34-byte digest check is repeated in `Node::sign_round2`. We want the allowlist and CN-matching logic reviewed, including behavior under misconfiguration. |
-| **Signing policy enforcement point (C2, batch C focus)** | In rc.2 the approval gate, signing journal and signing rate limit run only in the driver JVM; the cosigners sign any well-formed request from an allowed caller. A holder of a driver certificate, or one compromised cosigner acting as leader, can therefore obtain a signature on any digest. Batch C moves enforcement to the cosigners: a driver-signed intent carrying the approval proof, verified by every signing cosigner, with per-node approval verification, journal and rate limit. We want the whole path reviewed: the intent format and its domain separation, what it binds (key, digest, approvals, time, nonce, epoch), replay across nodes and restarts, how a node decides an intent is authentic when the leader is hostile, what a compromised driver key and what `t-1` compromised cosigners can still sign, and key-id and prefix handling in the policy match. |
-| **Compromised driver host** | An attacker on the Canton host holds the driver's client certificate. Rc.2 bound (known gap, C2): it can request signatures, and the approval gate and journal run on the same host, so they can be bypassed by not using the driver; `Decrypt` is rate-limited on the cosigner, per node. After batch C we claim the cosigners also enforce approvals, journal and rate limit on signing (previous row). It must not reach key material or nonce state. |
+| **Signing policy enforcement point (DS-C2, batch C focus)** | In rc.2 the approval gate, signing journal and signing rate limit run only in the driver JVM; the cosigners sign any well-formed request from an allowed caller. A holder of a driver certificate, or one compromised cosigner acting as leader, can therefore obtain a signature on any digest. Batch C moves enforcement to the cosigners: a driver-signed intent carrying the approval proof, verified by every signing cosigner, with per-node approval verification, journal and rate limit. We want the whole path reviewed: the intent format and its domain separation, what it binds (key, digest, approvals, time, nonce, epoch), replay across nodes and restarts, how a node decides an intent is authentic when the leader is hostile, what a compromised driver key and what `t-1` compromised cosigners can still sign, and key-id and prefix handling in the policy match. |
+| **Compromised driver host** | An attacker on the Canton host holds the driver's client certificate. Rc.2 bound (known gap, DS-C2): it can request signatures, and the approval gate and journal run on the same host, so they can be bypassed by not using the driver; `Decrypt` is rate-limited on the cosigner, per node. After batch C we claim the cosigners also enforce approvals, journal and rate limit on signing (previous row). It must not reach key material or nonce state. |
 | **Approval bypass** | M-of-N Ed25519 approval over a per-request random id; each approver counted once; fail-closed on timeout; the approver CLI recomputes the request id from what it displays. It covers `sign`, deliberately not `Decrypt`. Approval is over key and opaque digest only, not transaction content (Canton does not pass more). In rc.2 it is enforced in the driver only; batch C enforces it on the cosigners (row above). |
 | **Seed-to-scalar trap (split ceremony)** | `SigningKey::deserialize` takes a scalar but Canton exports an RFC 8032 seed. A wrong conversion signs under a different key. We assert group key == Canton public key before any write; we want the conversion, the assertion, dealer memory handling, and key-destruction steps reviewed. |
 | **Carrying protocol keys (B6)** | Carrying a node's protocol signing and ECIES encryption keys into the cluster is a discouraged path (fresh keys are the default); it depends on the dealer's usage guard (`--expect-usage`) refusing a key of the wrong usage, and on `verify-hosted` proving what the cluster serves. We want that guard and the verification reviewed for ways to carry the wrong key, or to leave a plaintext copy behind unnoticed. In rc.2; runbook in `migration.md` section 8. |
 | **Share delivery (split ceremony)** | Two directions. *Forged requests* (an attacker substituting recipient keys gets real shares): requests are signed by the node's mTLS key and verified to the cluster CA with a CN → identifier rule, backed by a witnessed SAS; we want the X.509 path verification (`request_auth.rs`, aws-lc-rs over x509-parser, no webpki), the identity rule and the canonical encoding reviewed. *Forged bundles*: sealing to a public key gives confidentiality, not sender authentication; we rely on the install-time checks (expected fingerprint, VSS, package interpolation, own verifying share) and on `verify-key`'s cross-node digest comparison and every-quorum signing to make a forged or mixed bundle fail. Also: the AAD binding, recipient-secret lifetime and deletion, the operator role's reach (`CeremonySignTest`), and the reserved-id / no-clobber install races. |
-| **Rollback / stale state** | In rc.2, restoring a stale backup can resurrect a deleted hosted key (documented hazard, `disaster-recovery.md` section 3c); anti-entropy treats a missing key as something to repair. For FROST keys: round-1 nonces live only in RAM under a fresh random session id, and the on-disk single-use markers are keyed by that id (`nonce_store.rs`), so restoring or losing an old nonce store cannot cause nonce reuse. A node restored from a pre-refresh backup holds a stale share; the leader's aggregation verifies every signature share and attributes a bad one (`session.rs`), so it cannot produce a wrong signature, but rc.2 has **no explicit epoch or version check** that keeps such a node from taking part (the `refresh_count` in a share's provenance is informational and exists only for dealt keys). Batch C adds epochs (H1, above); please check whether they close replay of an old sealed share or backup after a refresh, or whether it needs a further control. Batch C also adds tombstones for hosted keys, aimed at the resurrection hazard: we want the tombstone and anti-entropy interaction reviewed. |
+| **Rollback / stale state** | In rc.2, restoring a stale backup can resurrect a deleted hosted key (documented hazard, `disaster-recovery.md` section 3c); anti-entropy treats a missing key as something to repair. For FROST keys: round-1 nonces live only in RAM under a fresh random session id, and the on-disk single-use markers are keyed by that id (`nonce_store.rs`), so restoring or losing an old nonce store cannot cause nonce reuse. A node restored from a pre-refresh backup holds a stale share; the leader's aggregation verifies every signature share and attributes a bad one (`session.rs`), so it cannot produce a wrong signature, but rc.2 has **no explicit epoch or version check** that keeps such a node from taking part (the `refresh_count` in a share's provenance is informational and exists only for dealt keys). Batch C adds epochs (DS-H1, above; also DS-M1); please check whether they close replay of an old sealed share or backup after a refresh, or whether it needs a further control. Batch C also adds tombstones for hosted keys (DS-M2), aimed at the resurrection hazard: we want the tombstone and anti-entropy interaction reviewed. |
 | **Hosted-key wrapping and replication** | Per-recipient wrap with a recipient key derived (never stored) from the cluster master secret; AAD binds cluster id, key id, spec and recipient; replication never touches FROST shares (stated invariant); conflicting commitments for one id are a hard error, never auto-reconciled. |
 | **Key-id handling** | Ids are opaque strings to cosigners; the driver derives them deterministically from Canton key names and applies `frost.key-prefix`. On a shared cluster a prefix is a namespace, not an authorization boundary: any driver cert can address any id. Look for prefix collisions, routing confusion between `frost-` / `rutli-` / delegate, and approval rules that match on a prefix that omits `key-prefix`. |
 | **Audit log and journal integrity** | Hash-chained, fsynced write-ahead audit log; fails closed if a successful operation cannot be logged. The signing journal detects replays but cannot see height or round. |
@@ -266,12 +276,12 @@ no forward secrecy; seal-secret protection is software, not HSM or enclave; one 
   - [docs/migration.md](migration.md): pilot migration runbook, exercised in the 2026-10-14 DevNet rehearsal
   - [docs/split-ceremony.md](split-ceremony.md): split ceremony runbook, records and destruction
   - [docs/testnet-soak.md](testnet-soak.md), [docs/soak-2026-10-devnet.md](soak-2026-10-devnet.md)
-  - [docs/runbook-rc2-soak-rollout.md](runbook-rc2-soak-rollout.md), [docs/runbook-per-node-seal.md](runbook-per-node-seal.md): the rc.2 upgrade and the per-node seal migration (C3)
+  - [docs/runbook-rc2-soak-rollout.md](runbook-rc2-soak-rollout.md), [docs/runbook-per-node-seal.md](runbook-per-node-seal.md): the rc.2 upgrade and the per-node seal migration (DS-C3)
   - [docs/roadmap.md](roadmap.md): the two migration flows and the milestone status
 - **Tests and CI:** `cd frost && cargo test && cargo clippy --all-targets -- -D warnings`;
   `sbt driver/test`; TLS compose smoke (`scripts/ci-frost-tls-smoke.sh`); the driver passes the
   upstream Canton KMS driver conformance suite.
-- **Internal security review:** the findings list (two independent reviews, 2026-10-16) and the batch C design notes, under NDA or in the evidence pack, as you prefer (section 1.1).
+- **Internal security review:** the findings list `docs/security/internal-review-2026-10.md` (lands with batch C; two independent reviews on 2026-10-16 plus the batch C review) and the batch C design notes, under NDA or in the evidence pack, as you prefer (section 1.1).
 - **Environment:** an evidence pack from our DevNet soak (3 cosigners backing a Splice DevNet
   validator, on rc.2 since 2026-10-16): the soak log, the B0/B4 runbooks and their evidence (driver audit logs, hashes,
   timings), and dashboard exports; a live demo over video call on request. We do not grant access
