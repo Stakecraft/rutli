@@ -116,7 +116,9 @@ sum(rate(rutli_sign_duration_seconds_sum{result="ok"}[1h]))
   pending-session growth, ceremony failure (critical), repeated aborts, hosted-key op errors, a
   hosted key under-replicated (below the cluster size) or critically under-replicated (a single
   copy — critical), hosted-key counts diverging across the job, unreadable key files, hosted-key
-  conflict (critical).
+  conflict (critical). CI runs `promtool check rules` (pinned `prom/prometheus` image) on this file
+  and on the rendered PrometheusRule, and fails if the render is stale:
+  `scripts/ci-prometheus-rules.sh` (set `PROMTOOL=` to use a local binary instead of docker).
 - Dashboard: import
   [`deploy/monitoring/grafana-dashboard.json`](../deploy/monitoring/grafana-dashboard.json)
   (uid `rutli-cosigner`) — cosigners up, *Key store readiness* (a state timeline of

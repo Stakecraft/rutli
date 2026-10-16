@@ -38,3 +38,6 @@ deploy/frost/certs/
 
 # Canton runtime logs from local devnet runs
 log/
+
+# scripts/ci-prometheus-rules.sh scratch (removed on exit)
+.promtool.*/
