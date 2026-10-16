@@ -4,6 +4,8 @@ What each realistic adversary can and cannot do to a Rütli cluster once every f
 remediation is deployed **and switched on**. It replaces the per-feature notes scattered through
 the other documents as the single place an auditor or an operator reads first. Where a control is
 only as good as a setting, the setting is named; where something is not defended, it says so.
+The findings these controls answer, with their canonical `DS-` IDs and status, are listed in
+[internal-review-2026-10.md](internal-review-2026-10.md).
 
 ## Scope and assumptions
 
