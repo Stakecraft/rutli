@@ -113,22 +113,43 @@ object HashChainedAuditLog {
 
   /** The chain check shared by [[open]] and [[verify]]: the entry count and head hash, or the
     * 1-based sequence number of the first broken entry. */
-  private def verifyChain(path: String): Either[Long, (Long, String)] = {
+  private def verifyChain(path: String): Either[Long, (Long, String)] =
+    Using.resource(Source.fromFile(path, "UTF-8"))(src => verifyLines(src.getLines()))
+
+  private def verifyLines(lines: Iterator[String]): Either[Long, (Long, String)] = {
     var prev = GenesisHash
     var count = 0L
-    Using.resource(Source.fromFile(path, "UTF-8")) { src =>
-      for (line <- src.getLines()) {
-        parse(line) match {
-          case Some(e)
-              if e.prev == prev && e.seq == count + 1 &&
-                entryHash(e.prev, e.seq, e.ts, e.op, e.detail) == e.hash =>
-            prev = e.hash
-            count += 1
-          case _ => return Left(count + 1)
-        }
+    for (line <- lines) {
+      parse(line) match {
+        case Some(e)
+            if e.prev == prev && e.seq == count + 1 &&
+              entryHash(e.prev, e.seq, e.ts, e.op, e.detail) == e.hash =>
+          prev = e.hash
+          count += 1
+        case _ => return Left(count + 1)
       }
     }
     Right((count, prev))
+  }
+
+  /** Read-only preflight of what [[open]] will make of an existing log, for an operator checking a
+    * participant's state before an upgrade (`tools.StateCheck`). Never writes. Right: (valid
+    * entries, bytes of a torn final line [[open]] would truncate — 0 if none). Left: why [[open]]
+    * would refuse the file. */
+  def preflight(path: String): Either[String, (Long, Int)] = {
+    val file = new File(path)
+    if (!file.exists() || file.length() == 0) return Right((0L, 0))
+    val bytes = Files.readAllBytes(file.toPath)
+    val cut = bytes.lastIndexOf('\n'.toByte) + 1
+    val torn =
+      if (cut < bytes.length && parse(new String(bytes, cut, bytes.length - cut, UTF_8)).isEmpty) bytes.length - cut
+      else 0
+    val text = new String(bytes, 0, bytes.length - torn, UTF_8)
+    verifyLines(text.split("\n", -1).iterator.filter(_.nonEmpty)) match {
+      case Right((count, _)) => Right((count, torn))
+      case Left(broken) =>
+        Left(s"$path: entry $broken is malformed or breaks the hash chain — the driver would refuse to start")
+    }
   }
 
   /** Offline verification: recompute the whole chain. Returns the number of valid entries, or the

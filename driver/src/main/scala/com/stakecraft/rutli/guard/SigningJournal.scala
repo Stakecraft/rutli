@@ -188,6 +188,28 @@ object SigningJournal {
   def sha256(b: Array[Byte]): Array[Byte] = MessageDigest.getInstance("SHA-256").digest(b)
   def hex(b: Array[Byte]): String = b.map("%02x".format(_)).mkString
 
+  /** Read-only preflight of what [[SigningJournal.recover]] will make of the journal directory
+    * `dir`, for an operator checking a participant's state before an upgrade (`tools.StateCheck`).
+    * Never writes. Right: per journal file (name, entries, bytes of a torn final line recovery would
+    * truncate — 0 if none). Left: the first malformed line, which makes recovery fail closed. */
+  def preflight(dir: String): Either[String, Vector[(String, Int, Int)]] = {
+    val root = Paths.get(dir)
+    if (!Files.isDirectory(root)) return Right(Vector.empty)
+    val files = Using(Files.list(root))(_.iterator().asScala.filter(_.getFileName.toString.endsWith(".jsonl")).toVector)
+    val out = Vector.newBuilder[(String, Int, Int)]
+    for (f <- files.sortBy(_.getFileName.toString)) {
+      val bytes = Files.readAllBytes(f)
+      val cut = bytes.lastIndexOf('\n'.toByte) + 1
+      val lines = new String(bytes, 0, cut, UTF_8).split("\n", -1).dropRight(1)
+      lines.zipWithIndex.find { case (line, _) => parseEntry(line).isEmpty } match {
+        case Some((_, i)) =>
+          return Left(s"$f line ${i + 1} is malformed — the driver would refuse to start (fail closed)")
+        case None => out += ((f.getFileName.toString, lines.length, bytes.length - cut))
+      }
+    }
+    Right(out.result())
+  }
+
   /** How far ahead of the wall clock a journal timestamp may be before recovery logs it as a stepped clock. */
   private val FutureSkewMillis = 60000L
 
