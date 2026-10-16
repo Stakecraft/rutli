@@ -137,14 +137,40 @@ verdict is **GO pending** (destruction and teardown below are still open).
 - Old member's OTK removed (serial 2 Remove, signed by the namespace key via FROST); it needed
   `force = ForceFlags(ForceFlag.AlienMember)`.
 - Destruction (5.4): **pending**, not before 2026-10-15 17:11Z, after GO and two green `soak-check` runs.
-- Teardown (`destroy.sh`, S3 prefix purge, offboarding the `-mig` member): **pending**.
-- `soak-check` outcomes after the event: **pending**. Today's 08:00Z run, before the cutover, failed on sign p99 latency
-  (1.75 s) with 0 errors; it is not caused by B4.
+- **GO 2026-10-15 18:04Z** after a 24 h window: G4–G7 green, soak-check 2026-10-15 08:00Z PASS and a manual run 17:19Z
+  PASS (p99 0.14 s, 0 errors). (The 2026-10-14 08:00Z run, before the cutover, had failed on p99 latency 1.75 s with
+  0 errors; not caused by B4.)
+- **Destruction 2026-10-15** (operator ran every irreversible step): `DROP DATABASE participant_1` (3 plaintext key
+  rows) and `cantonnet_validator`; WAL checkpoint + switch; 4 `pg_dumpall` files + 1 checksum removed from the backup
+  PVC, the next dump verified free of `participant_1` (0 rows in `common_crypto_private_keys`); S3: no objects (the
+  uploads never succeeded); the password-protected export file was the only copy (sha256 scan) and was removed.
+  Residue: not provable erasure on SSD/Hetzner volumes; dealer ran on the operator laptop (`--allow-swap`, encrypted swap).
+- **Teardown 2026-10-16:** the `-mig` member offboarded at 10:08Z (trust certificate removed, signed by the carried
+  namespace key through FROST — its 10th and last signature); `destroy.sh --teardown-all` at 13:16Z removed the
+  namespace, its volumes, the three Auth0 apps and the wallet user. The `b4-` keys stay on the cosigners (no delete path).
 - Gaps: the 4-hourly `pg_dumpall` CronJob in the B4 namespace fails its S3 upload (`InvalidAccessKeyId`: the namespace's
   `aws-credentials` Secret holds a key that no longer exists). Operator decision: local dump only for the scratch namespace;
   the dumps hold the old JCE key rows and are on the destruction list. The wallet API with the validator M2M token returns
   `No wallet found`, so G6 used the wallet UI; the M2M app also lacks a client grant for the Validator API audience.
 - Deltas to the pilot runbook: [migration.md](migration.md), "Lessons from the B4 rehearsal (2026-10-14)".
+
+**Planned event: soak to 0.4.0-rc.2 (audit remediation batches A+B), 2026-10-16 14:54 → 15:12 UTC.** Runbook
+[runbook-rc2-soak-rollout.md](runbook-rc2-soak-rollout.md), legacy topology.
+- Pre-checks: node certificates carry `CN=cosigner<i>` / `DNS:cosigner<i>`; the rc.2 render against the live values plus
+  `deploy/soak/cosigner-values.yaml` differs from the live manifest only in the image and the version labels; the
+  running configs pass rc.2 validation; `StateCheck` on a copy of the participant's state: audit 18 838 entries, chain
+  intact; journal 18 812 entries.
+- Cosigners: `helm upgrade` → rev 8, image `0.4.0-rc.2@sha256:dfb5c859…b2c4`, rolled one pod at a time (14:55–14:57Z).
+  Each node logs per-peer TLS names (M3) and the expected legacy-shared-master warning. One sign failover on the
+  participant (`UNAVAILABLE` → next cosigner), 0 errors. Rollback kept: `helm -n rutli rollback rutli 7`.
+- Driver: soak participant moved from **0.3.1** straight to 0.4.0-rc.2 (jar sha `04d3a19b…`, 0.3.1 kept as
+  `rutli-driver.jar.0.3.1-backup` in the bundle PVC); config unchanged (shared `domain`, per-endpoint names come with
+  the per-node migration). After the restart: `pinned group key for frost-signing`, 27 signs ok, `sig-verify=failed` 0;
+  `StateCheck` again OK (19 015 / 18 989 entries); manual soak-check 15:12Z PASS (p99 0.13 s, 0 errors).
+- **Audit C3 closed on the soak:** the exec-based backup CronJob, its Role, RoleBinding and ServiceAccount deleted. No
+  automatic share backup until the per-node migration adds the sidecar; manual sealed-file copies after key changes.
+- Still open from the audit: C1 (DKG/refresh round 2 via the leader) and C2 (no cosigner-side signing policy) — batch C.
+  The soak's DKG-born keys are treated as leader-exposed; **no refresh** until batch C.
 
 ## Drill calendar
 
