@@ -121,26 +121,45 @@ data:
   backup-loop.sh: |
     #!/bin/sh
     # Daily at $DAILY_AT_UTC: tar this node's committed, sealed key files (keys/*.json; never
-    # dotfiles, nonce markers or staged files) and hand the tar to ship.sh. One BACKUP_OK or
-    # BACKUP_FAILED line per run. Never exits: a dead sidecar would make the pod unready.
+    # dotfiles, nonce markers or staged files) and its sign journals (journal/<key>/*.jsonl, the
+    # node's own record of every signature share it released — audit-cross-check reads them), and
+    # hand the tar to ship.sh. Never the seal bundle or the TLS key: this container mounts neither.
+    # One BACKUP_OK or BACKUP_FAILED line per run. Never exits: a dead sidecar would make the pod
+    # unready.
     set -u
     run() {
       stamp=$(date -u +%Y%m%dT%H%M%SZ)
       tar="/work/node-${NODE_ID}-${stamp}.tar"
+      stage="/work/stage-${stamp}"
       files=$(cd /data/keys 2>/dev/null && find . -maxdepth 1 -type f -name '*.json' ! -name '.*' | sed 's|^\./||' | sort)
       if [ -z "$files" ]; then
         echo "BACKUP_FAILED node=${NODE_ID} reason=no-key-files-in-/data/keys"
         return
       fi
+      rm -rf "$stage" && mkdir -p "$stage" || { echo "BACKUP_FAILED node=${NODE_ID} reason=stage"; return; }
       # Key ids are [A-Za-z0-9_-], so word splitting of $files is safe.
-      # shellcheck disable=SC2086
-      if ! tar -C /data/keys -cf "$tar" -- $files; then
-        echo "BACKUP_FAILED node=${NODE_ID} reason=tar"; rm -f "$tar"; return
+      for f in $files; do
+        cp -p "/data/keys/$f" "$stage/$f" || { echo "BACKUP_FAILED node=${NODE_ID} reason=copy"; rm -rf "$stage"; return; }
+      done
+      journals=0
+      if [ -d /data/journal ]; then
+        # A segment copied mid-append may end in a partial line: the journal reader treats a torn
+        # final line of the newest segment as an interrupted append.
+        if ! (cd /data/journal && find . -type f -name '*.jsonl' | while read -r j; do
+                mkdir -p "$stage/journal/$(dirname "$j")" && cp -p "$j" "$stage/journal/$j" || exit 1
+              done); then
+          echo "BACKUP_FAILED node=${NODE_ID} reason=journal-copy"; rm -rf "$stage"; return
+        fi
+        journals=$(find "$stage/journal" -type f -name '*.jsonl' 2>/dev/null | wc -l | tr -d ' ')
       fi
+      if ! tar -C "$stage" -cf "$tar" .; then
+        echo "BACKUP_FAILED node=${NODE_ID} reason=tar"; rm -rf "$stage" "$tar"; return
+      fi
+      rm -rf "$stage"
       n=$(echo "$files" | wc -l | tr -d ' ')
       bytes=$(wc -c < "$tar" | tr -d ' ')
       if sh /destination/ship.sh "$tar" "${NODE_ID}"; then
-        echo "BACKUP_OK node=${NODE_ID} files=${n} bytes=${bytes} dest=pvc stamp=${stamp}"
+        echo "BACKUP_OK node=${NODE_ID} files=${n} journal_segments=${journals} bytes=${bytes} dest=pvc stamp=${stamp}"
       else
         echo "BACKUP_FAILED node=${NODE_ID} reason=ship files=${n} bytes=${bytes} stamp=${stamp}"
       fi

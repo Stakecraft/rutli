@@ -102,7 +102,14 @@ spec:
         - name: cosigner
           image: {{ include "rutli-cosigner.image" $ }}
           imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          {{- if has (toString $id) (toStrings ($.Values.maintenanceNodes | default list)) }}
+          # MAINTENANCE (maintenanceNodes): no daemon — the container idles so an operator can run the
+          # offline commands that take the instance lock (restore, keyfile, hosted-undelete,
+          # ceremony resolve, …) with `kubectl exec … -c cosigner`. The node does not sign.
+          command: ["sleep", "infinity"]
+          {{- else }}
           args: ["--config", "/config/cosigner-{{ $id }}.json"]
+          {{- end }}
           env:
             - name: RUST_LOG
               value: info
@@ -116,6 +123,13 @@ spec:
             - name: metrics
               containerPort: {{ $.Values.service.metricsPort }}
             {{- end }}
+          {{- if has (toString $id) (toStrings ($.Values.maintenanceNodes | default list)) }}
+          # Never Ready while in maintenance, so its Service sends the driver elsewhere.
+          readinessProbe:
+            exec:
+              command: ["/bin/false"]
+            periodSeconds: 30
+          {{- else }}
           # Readiness = "this node can actually sign" (key store usable + gRPC port open); see the
           # legacy StatefulSet template and README, "Probes".
           readinessProbe:
@@ -130,6 +144,7 @@ spec:
             tcpSocket: { port: grpc }
             initialDelaySeconds: 10
             periodSeconds: 15
+          {{- end }}
           resources:
             {{- toYaml $.Values.resources | nindent 12 }}
           securityContext:

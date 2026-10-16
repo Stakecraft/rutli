@@ -1339,6 +1339,13 @@ fn backup_command(cfg: &Config, out: &std::path::Path) -> Result<()> {
     std::fs::create_dir_all(out)?;
     let n = copy_dir_files(&src, out, true)?;
     println!("backed up {n} share file(s) from {} to {}", src.display(), out.display());
+    // The node's sign journals (audit C2): its own record of every share it released, which
+    // `audit-cross-check` compares with the driver's audit log. Never restored over a live journal.
+    let journal = cfg.data_dir.join("journal");
+    if journal.is_dir() {
+        let segments = copy_journal(&journal, &out.join("journal"))?;
+        println!("backed up {segments} sign-journal segment(s) to {}", out.join("journal").display());
+    }
     if cfg.share_seal.is_none() {
         tracing::warn!("shares are NOT sealed — this backup contains plaintext key shares");
     }
@@ -2232,6 +2239,27 @@ fn copy_dir_files(src: &std::path::Path, dst: &std::path::Path, overwrite: bool)
     Ok(count)
 }
 
+/// Copy `data_dir/journal/<key>/*.jsonl` into `dst`, keeping the layout. Returns the segment count.
+fn copy_journal(src: &std::path::Path, dst: &std::path::Path) -> Result<usize> {
+    let mut n = 0;
+    for key_dir in std::fs::read_dir(src)? {
+        let key_dir = key_dir?;
+        if !key_dir.file_type()?.is_dir() || key_dir.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
+        let target = dst.join(key_dir.file_name());
+        std::fs::create_dir_all(&target)?;
+        for seg in std::fs::read_dir(key_dir.path())? {
+            let seg = seg?;
+            if seg.file_type()?.is_file() && seg.file_name().to_string_lossy().ends_with(".jsonl") {
+                std::fs::copy(seg.path(), target.join(seg.file_name()))?;
+                n += 1;
+            }
+        }
+    }
+    Ok(n)
+}
+
 fn ident(id: u16) -> Result<Identifier> {
     Identifier::try_from(id).map_err(DaemonError::Frost)
 }
@@ -2262,5 +2290,17 @@ mod tests {
         assert_eq!(copy_dir_files(&src, &dst, false).unwrap(), 1);
         assert!(dst.join("k.json").exists());
         assert!(!dst.join(".readyz-1-2-3").exists(), "a probe file must never land in a backup");
+    }
+
+    #[test]
+    fn backup_copies_the_sign_journals_with_their_layout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (src, dst) = (tmp.path().join("journal"), tmp.path().join("backup").join("journal"));
+        std::fs::create_dir_all(src.join("frost-k")).unwrap();
+        std::fs::write(src.join("frost-k").join("00000000000000000001.jsonl"), b"{}\n").unwrap();
+        std::fs::write(src.join("frost-k").join("not-a-segment.tmp"), b"x").unwrap();
+        assert_eq!(copy_journal(&src, &dst).unwrap(), 1);
+        assert!(dst.join("frost-k").join("00000000000000000001.jsonl").exists());
+        assert!(!dst.join("frost-k").join("not-a-segment.tmp").exists());
     }
 }
