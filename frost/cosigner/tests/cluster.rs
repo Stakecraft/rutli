@@ -721,7 +721,7 @@ async fn peer_round2_refuses_a_non_canton_payload() {
 
 use rutli_cosigner::hosted::HostedSpec;
 use rutli_cosigner::orchestrator::{
-    anti_entropy_sweep, delete_hosted_key, generate_hosted_key, repair_hosted_key,
+    anti_entropy_sweep, generate_hosted_key, repair_hosted_key,
     DEFAULT_WRITE_QUORUM,
 };
 
@@ -896,7 +896,10 @@ async fn hosted_keys_and_frost_shares_do_not_interfere() {
     // as replicable: copying one would give two nodes the same share and break the threshold.
     assert_eq!(nodes[0].hosted_list().unwrap(), vec!["rutli-enc-5".to_string()]);
     assert!(nodes[0].hosted_load(KEY_ID).is_err(), "a FROST share must not load as a hosted key");
-    assert!(nodes[0].hosted_delete(KEY_ID).is_err(), "the namespace key must not be deletable");
+    assert!(
+        nodes[0].hosted_rollback_purge("genkey-x", KEY_ID).is_err(),
+        "the namespace key must not be deletable"
+    );
 }
 
 /// Review LOW-2: a hosted key can never be written under a split-ceremony id, by any path, and a
@@ -927,22 +930,6 @@ async fn hosted_keys_never_land_on_import_ids_or_over_a_share() {
     frost_ks.create("rutli-sym-taken", &share).unwrap();
     assert!(matches!(frost_ks.create_hosted("rutli-sym-taken", &key), Err(DaemonError::KeyExists(_))));
     assert!(frost_ks.load("rutli-sym-taken").is_ok(), "the share is still there");
-}
-
-#[tokio::test]
-async fn deleting_a_hosted_key_removes_it_cluster_wide() {
-    let tmp = tempfile::tempdir().unwrap();
-    let (nodes, peers) = hosted_cluster(&tmp);
-    generate_hosted_key(&nodes[0], &peers, "rutli-enc-6", HostedSpec::Rsa2048, DEFAULT_WRITE_QUORUM)
-        .await
-        .unwrap();
-
-    assert!(delete_hosted_key(&peers, "rutli-enc-6").await.unwrap());
-    for n in &nodes {
-        assert!(!n.hosted_exists("rutli-enc-6"));
-    }
-    // Idempotent: deleting again is a no-op, not an error.
-    assert!(!delete_hosted_key(&peers, "rutli-enc-6").await.unwrap());
 }
 
 #[tokio::test]

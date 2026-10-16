@@ -7,8 +7,9 @@ package com.stakecraft.rutli.grpc;
 
 /**
  * <pre>
- * What a client authorizes: one signature by key_id over digest, until not_after_ms. Carried
- * serialized inside SignedIntent.intent, so the verified bytes are exactly the signed bytes.
+ * What a client authorizes: one signature by key_id over digest, until not_after_ms — or, with
+ * purpose "delete-key", the deletion of hosted key key_id. Carried serialized inside
+ * SignedIntent.intent, so the verified bytes are exactly the signed bytes.
  * </pre>
  *
  * Protobuf type {@code rutli.cosigner.v1.SignIntent}
@@ -121,7 +122,7 @@ private static final long serialVersionUID = 0L;
   private volatile java.lang.Object purpose_ = "";
   /**
    * <pre>
-   * "sign"
+   * "sign" | "delete-key"
    * </pre>
    *
    * <code>string purpose = 3;</code>
@@ -142,7 +143,7 @@ private static final long serialVersionUID = 0L;
   }
   /**
    * <pre>
-   * "sign"
+   * "sign" | "delete-key"
    * </pre>
    *
    * <code>string purpose = 3;</code>
@@ -206,7 +207,8 @@ private static final long serialVersionUID = 0L;
   private com.google.protobuf.ByteString digest_ = com.google.protobuf.ByteString.EMPTY;
   /**
    * <pre>
-   * exactly the 34-byte Canton digest the signature is over
+   * "sign": exactly the 34-byte Canton digest the signature is over. "delete-key": the 32 bytes
+   * SHA-256("rutli-delete-key-v1&#92;n" ‖ key_id) (approvals are over this digest, like a sign's).
    * </pre>
    *
    * <code>bytes digest = 5;</code>
@@ -575,8 +577,9 @@ private static final long serialVersionUID = 0L;
   }
   /**
    * <pre>
-   * What a client authorizes: one signature by key_id over digest, until not_after_ms. Carried
-   * serialized inside SignedIntent.intent, so the verified bytes are exactly the signed bytes.
+   * What a client authorizes: one signature by key_id over digest, until not_after_ms — or, with
+   * purpose "delete-key", the deletion of hosted key key_id. Carried serialized inside
+   * SignedIntent.intent, so the verified bytes are exactly the signed bytes.
    * </pre>
    *
    * Protobuf type {@code rutli.cosigner.v1.SignIntent}
@@ -1014,7 +1017,7 @@ private static final long serialVersionUID = 0L;
     private java.lang.Object purpose_ = "";
     /**
      * <pre>
-     * "sign"
+     * "sign" | "delete-key"
      * </pre>
      *
      * <code>string purpose = 3;</code>
@@ -1034,7 +1037,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * "sign"
+     * "sign" | "delete-key"
      * </pre>
      *
      * <code>string purpose = 3;</code>
@@ -1055,7 +1058,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * "sign"
+     * "sign" | "delete-key"
      * </pre>
      *
      * <code>string purpose = 3;</code>
@@ -1072,7 +1075,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * "sign"
+     * "sign" | "delete-key"
      * </pre>
      *
      * <code>string purpose = 3;</code>
@@ -1086,7 +1089,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * "sign"
+     * "sign" | "delete-key"
      * </pre>
      *
      * <code>string purpose = 3;</code>
@@ -1178,7 +1181,8 @@ private static final long serialVersionUID = 0L;
     private com.google.protobuf.ByteString digest_ = com.google.protobuf.ByteString.EMPTY;
     /**
      * <pre>
-     * exactly the 34-byte Canton digest the signature is over
+     * "sign": exactly the 34-byte Canton digest the signature is over. "delete-key": the 32 bytes
+     * SHA-256("rutli-delete-key-v1&#92;n" ‖ key_id) (approvals are over this digest, like a sign's).
      * </pre>
      *
      * <code>bytes digest = 5;</code>
@@ -1190,7 +1194,8 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * exactly the 34-byte Canton digest the signature is over
+     * "sign": exactly the 34-byte Canton digest the signature is over. "delete-key": the 32 bytes
+     * SHA-256("rutli-delete-key-v1&#92;n" ‖ key_id) (approvals are over this digest, like a sign's).
      * </pre>
      *
      * <code>bytes digest = 5;</code>
@@ -1206,7 +1211,8 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * exactly the 34-byte Canton digest the signature is over
+     * "sign": exactly the 34-byte Canton digest the signature is over. "delete-key": the 32 bytes
+     * SHA-256("rutli-delete-key-v1&#92;n" ‖ key_id) (approvals are over this digest, like a sign's).
      * </pre>
      *
      * <code>bytes digest = 5;</code>

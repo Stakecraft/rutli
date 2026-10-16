@@ -130,6 +130,29 @@ impl SignerSvc {
         Ok(caller)
     }
 
+    /// `DeleteKey`: the delete role only (`hosted_keys.delete_allowlist`), with its SPKI pin. No
+    /// signing policy (plaintext dev) means no intent can be verified, so no delete.
+    fn authorize_delete<T>(&self, req: &Request<T>) -> Result<crate::intent::Caller, Status> {
+        let g = self.sign_guard.as_ref().filter(|g| g.verifier().deletes_enabled()).ok_or_else(|| {
+            Status::from(crate::intent::refused_delete(
+                "disabled",
+                "hosted-key deletes are disabled on this node (hosted_keys.delete_allowlist is empty)".into(),
+            ))
+        })?;
+        let caller = req
+            .peer_certs()
+            .and_then(|certs| certs.first().and_then(|leaf| crate::intent::Caller::from_leaf_der(leaf.as_ref())))
+            .ok_or_else(|| Status::unauthenticated("client certificate required for DeleteKey"))?;
+        if !g.verifier().may_delete(&caller.cn) {
+            return Err(Status::from(crate::intent::refused_delete(
+                "role",
+                format!("client {:?} may not delete hosted keys (not on hosted_keys.delete_allowlist)", caller.cn),
+            )));
+        }
+        g.verifier().check_pin(&caller.cn, &caller.spki_sha256).map_err(Status::from)?;
+        Ok(caller)
+    }
+
     /// The key ACL for a signer-role caller.
     fn check_acl(&self, caller: Option<&crate::intent::Caller>, key_id: &str) -> Result<(), Status> {
         match (&self.sign_guard, caller) {
@@ -439,18 +462,41 @@ impl Signer for SignerSvc {
         }
     }
 
+    // Audit M2: a delete is a tombstone, authorized by the client's signed delete intent, which
+    // this node and every other verifies itself. The delete role is its own allowlist
+    // (hosted_keys.delete_allowlist): being able to Sign or Decrypt does not make a client able to
+    // delete.
     async fn delete_key(
         &self,
         req: Request<pb::DeleteKeyRequest>,
     ) -> Result<Response<pb::DeleteKeyReply>, Status> {
-        self.authorize_key(&req, |r| &r.key_id)?;
-        let key_id = req.into_inner().key_id;
-        let result = match self.node.refuse_if_keystore_down() {
-            Ok(()) => orchestrator::delete_hosted_key(&self.peers, &key_id).await,
-            Err(e) => Err(e),
-        };
+        let caller = self.authorize_delete(&req)?;
+        self.refuse_if_keystore_down()?;
+        let r = req.into_inner();
+        let result = async {
+            let signed = r.intent.as_ref().ok_or_else(|| {
+                crate::intent::refused_delete(
+                    "missing",
+                    format!("DeleteKey for {} carries no delete intent — every delete needs one", r.key_id),
+                )
+            })?;
+            let g = self.sign_guard.as_ref().expect("authorize_delete requires a signing policy");
+            let v = g.verifier().verify_delete(signed, &r.key_id, crate::intent::now_ms(), crate::intent::Expiry::Enforce)?;
+            if v.signer_cn != caller.cn || v.signer_spki_sha256 != caller.spki_sha256 {
+                return Err(crate::intent::refused_delete(
+                    "signer",
+                    format!(
+                        "the delete intent is signed by {:?}, but the caller is {:?} with another certificate key",
+                        v.signer_cn, caller.cn
+                    ),
+                ));
+            }
+            orchestrator::delete_hosted_key(&self.peers, &r.key_id, signed, self.hosted_write_quorum).await
+        }
+        .await;
         record_hosted_op("delete", result.is_ok());
-        Ok(Response::new(pb::DeleteKeyReply { deleted: result.map_err(Status::from)? }))
+        let (deleted, tombstones) = result.map_err(Status::from)?;
+        Ok(Response::new(pb::DeleteKeyReply { deleted, tombstones: tombstones as u32 }))
     }
 
     async fn decrypt(
@@ -958,7 +1004,7 @@ impl Peer for PeerSvc {
         let commitment = self
             .node
             .blocking(move |n| {
-                n.hosted_store(&r.key_id, &key)?;
+                n.hosted_store_for(&r.key_id, &key, Some(&r.ceremony_id))?;
                 n.hosted_commitment(&key)
             })
             .await
@@ -1003,25 +1049,8 @@ impl Peer for PeerSvc {
     ) -> Result<Response<pb::ListKeysReply>, Status> {
         self.authorize(&req)?;
         self.node.refuse_if_keystore_down().map_err(Status::from)?;
-        let keys = self
-            .node
-            .blocking(|n| {
-                let mut keys = Vec::new();
-                for key_id in n.hosted_list()? {
-                    let key = n.hosted_load(&key_id)?;
-                    let commitment = n.hosted_commitment(&key)?;
-                    keys.push(pb::KeyManifest {
-                        key_id,
-                        spec: key.spec.as_str().to_string(),
-                        created_at: key.created_at,
-                        commitment,
-                    });
-                }
-                Ok(keys)
-            })
-            .await
-            .map_err(Status::from)?;
-        metrics::gauge!(crate::metrics::HOSTED_KEYS).set(keys.len() as f64);
+        let keys = self.node.blocking(|n| n.hosted_manifest()).await.map_err(Status::from)?;
+        metrics::gauge!(crate::metrics::HOSTED_KEYS).set(keys.iter().filter(|k| !k.tombstone).count() as f64);
         Ok(Response::new(pb::ListKeysReply { keys }))
     }
 
@@ -1032,8 +1061,17 @@ impl Peer for PeerSvc {
         self.authorize(&req)?;
         self.node.refuse_if_keystore_down().map_err(Status::from)?;
         let r = req.into_inner();
-        let deleted =
-            self.node.blocking(move |n| n.hosted_delete(&r.key_id)).await.map_err(Status::from)?;
+        let deleted = self
+            .node
+            .blocking(move |n| match &r.intent {
+                // A delete: verified here, whoever forwarded it.
+                Some(intent) => n
+                    .hosted_apply_tombstone(&r.key_id, intent, crate::intent::Expiry::Enforce, None)
+                    .map(|o| o == crate::node::TombstoneOutcome::Converted),
+                None => n.hosted_rollback_purge(&r.ceremony_id, &r.key_id),
+            })
+            .await
+            .map_err(Status::from)?;
         Ok(Response::new(pb::PurgeKeyReply { deleted }))
     }
 

@@ -45,12 +45,31 @@ private static final long serialVersionUID = 0L;
   public static final int DELETED_FIELD_NUMBER = 1;
   private boolean deleted_ = false;
   /**
+   * <pre>
+   * some node held the key live and tombstoned it
+   * </pre>
+   *
    * <code>bool deleted = 1;</code>
    * @return The deleted.
    */
   @java.lang.Override
   public boolean getDeleted() {
     return deleted_;
+  }
+
+  public static final int TOMBSTONES_FIELD_NUMBER = 2;
+  private int tombstones_ = 0;
+  /**
+   * <pre>
+   * how many nodes now hold the tombstone (including this one)
+   * </pre>
+   *
+   * <code>uint32 tombstones = 2;</code>
+   * @return The tombstones.
+   */
+  @java.lang.Override
+  public int getTombstones() {
+    return tombstones_;
   }
 
   private byte memoizedIsInitialized = -1;
@@ -70,6 +89,9 @@ private static final long serialVersionUID = 0L;
     if (deleted_ != false) {
       output.writeBool(1, deleted_);
     }
+    if (tombstones_ != 0) {
+      output.writeUInt32(2, tombstones_);
+    }
     getUnknownFields().writeTo(output);
   }
 
@@ -82,6 +104,10 @@ private static final long serialVersionUID = 0L;
     if (deleted_ != false) {
       size += com.google.protobuf.CodedOutputStream
         .computeBoolSize(1, deleted_);
+    }
+    if (tombstones_ != 0) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeUInt32Size(2, tombstones_);
     }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
@@ -100,6 +126,8 @@ private static final long serialVersionUID = 0L;
 
     if (getDeleted()
         != other.getDeleted()) return false;
+    if (getTombstones()
+        != other.getTombstones()) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -114,6 +142,8 @@ private static final long serialVersionUID = 0L;
     hash = (37 * hash) + DELETED_FIELD_NUMBER;
     hash = (53 * hash) + com.google.protobuf.Internal.hashBoolean(
         getDeleted());
+    hash = (37 * hash) + TOMBSTONES_FIELD_NUMBER;
+    hash = (53 * hash) + getTombstones();
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -246,6 +276,7 @@ private static final long serialVersionUID = 0L;
       super.clear();
       bitField0_ = 0;
       deleted_ = false;
+      tombstones_ = 0;
       return this;
     }
 
@@ -282,6 +313,9 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000001) != 0)) {
         result.deleted_ = deleted_;
       }
+      if (((from_bitField0_ & 0x00000002) != 0)) {
+        result.tombstones_ = tombstones_;
+      }
     }
 
     @java.lang.Override
@@ -298,6 +332,9 @@ private static final long serialVersionUID = 0L;
       if (other == com.stakecraft.rutli.grpc.DeleteKeyReply.getDefaultInstance()) return this;
       if (other.getDeleted() != false) {
         setDeleted(other.getDeleted());
+      }
+      if (other.getTombstones() != 0) {
+        setTombstones(other.getTombstones());
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -330,6 +367,11 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000001;
               break;
             } // case 8
+            case 16: {
+              tombstones_ = input.readUInt32();
+              bitField0_ |= 0x00000002;
+              break;
+            } // case 16
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -349,6 +391,10 @@ private static final long serialVersionUID = 0L;
 
     private boolean deleted_ ;
     /**
+     * <pre>
+     * some node held the key live and tombstoned it
+     * </pre>
+     *
      * <code>bool deleted = 1;</code>
      * @return The deleted.
      */
@@ -357,6 +403,10 @@ private static final long serialVersionUID = 0L;
       return deleted_;
     }
     /**
+     * <pre>
+     * some node held the key live and tombstoned it
+     * </pre>
+     *
      * <code>bool deleted = 1;</code>
      * @param value The deleted to set.
      * @return This builder for chaining.
@@ -369,12 +419,60 @@ private static final long serialVersionUID = 0L;
       return this;
     }
     /**
+     * <pre>
+     * some node held the key live and tombstoned it
+     * </pre>
+     *
      * <code>bool deleted = 1;</code>
      * @return This builder for chaining.
      */
     public Builder clearDeleted() {
       bitField0_ = (bitField0_ & ~0x00000001);
       deleted_ = false;
+      onChanged();
+      return this;
+    }
+
+    private int tombstones_ ;
+    /**
+     * <pre>
+     * how many nodes now hold the tombstone (including this one)
+     * </pre>
+     *
+     * <code>uint32 tombstones = 2;</code>
+     * @return The tombstones.
+     */
+    @java.lang.Override
+    public int getTombstones() {
+      return tombstones_;
+    }
+    /**
+     * <pre>
+     * how many nodes now hold the tombstone (including this one)
+     * </pre>
+     *
+     * <code>uint32 tombstones = 2;</code>
+     * @param value The tombstones to set.
+     * @return This builder for chaining.
+     */
+    public Builder setTombstones(int value) {
+
+      tombstones_ = value;
+      bitField0_ |= 0x00000002;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * how many nodes now hold the tombstone (including this one)
+     * </pre>
+     *
+     * <code>uint32 tombstones = 2;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearTombstones() {
+      bitField0_ = (bitField0_ & ~0x00000002);
+      tombstones_ = 0;
       onChanged();
       return this;
     }

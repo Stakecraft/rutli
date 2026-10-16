@@ -100,7 +100,7 @@ data:
       },
       "share_seal": { "secret_file": "/run/rutli/seal/{{ $.Values.seal.secretKey }}" },
       {{- if $hosted.enabled }}
-      "hosted_keys": { "enabled": true, "write_quorum": {{ int $hosted.writeQuorum }}, "anti_entropy_interval_secs": {{ int $hosted.antiEntropyIntervalSecs }}, "decrypt_rate_limit_per_min": {{ int (default 6000 $hosted.decryptRateLimitPerMin) }}, "commitment_key": {{ $hosted.commitmentKey | lower | quote }} },
+      "hosted_keys": { "enabled": true, "write_quorum": {{ int $hosted.writeQuorum }}, "anti_entropy_interval_secs": {{ int $hosted.antiEntropyIntervalSecs }}, "decrypt_rate_limit_per_min": {{ int (default 6000 $hosted.decryptRateLimitPerMin) }}, "commitment_key": {{ $hosted.commitmentKey | lower | quote }}{{ if $hosted.deleteAllowlist }}, "delete_allowlist": {{ $hosted.deleteAllowlist | toJson }}{{ end }}{{ if $hosted.deleteAcl }}, "delete_acl": {{ $hosted.deleteAcl | toJson }}{{ end }}{{ if $hosted.deleteApprovalThreshold }}, "delete_approval_threshold": {{ int $hosted.deleteApprovalThreshold }}{{ end }}, "delete_grace_secs": {{ int (default 604800 $hosted.deleteGraceSecs) }} },
       {{- end }}
       "signer_allowlist": {{ $allow | toJson }},
       {{- if $.Values.operatorAllowlist }}
@@ -153,7 +153,7 @@ data:
       },
       "share_seal": { "secret_env": "RUTLI_SEAL_SECRET" },
       {{- if $hosted.enabled }}
-      "hosted_keys": { "enabled": true, "write_quorum": {{ int $hosted.writeQuorum }}, "anti_entropy_interval_secs": {{ int $hosted.antiEntropyIntervalSecs }}, "decrypt_rate_limit_per_min": {{ int (default 6000 $hosted.decryptRateLimitPerMin) }} },
+      "hosted_keys": { "enabled": true, "write_quorum": {{ int $hosted.writeQuorum }}, "anti_entropy_interval_secs": {{ int $hosted.antiEntropyIntervalSecs }}, "decrypt_rate_limit_per_min": {{ int (default 6000 $hosted.decryptRateLimitPerMin) }}{{ if $hosted.deleteAllowlist }}, "delete_allowlist": {{ $hosted.deleteAllowlist | toJson }}{{ end }}{{ if $hosted.deleteAcl }}, "delete_acl": {{ $hosted.deleteAcl | toJson }}{{ end }}{{ if $hosted.deleteApprovalThreshold }}, "delete_approval_threshold": {{ int $hosted.deleteApprovalThreshold }}{{ end }}, "delete_grace_secs": {{ int (default 604800 $hosted.deleteGraceSecs) }} },
       {{- end }}
       "signer_allowlist": {{ $allow | toJson }},
       {{- if $.Values.operatorAllowlist }}

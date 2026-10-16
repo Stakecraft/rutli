@@ -93,13 +93,24 @@ pub enum Record {
     // unboxed enum would make every Record as large as the biggest variant.
     Frost(Box<Share>),
     Hosted(Box<crate::hosted::HostedKey>),
+    /// A deleted hosted key (audit M2). Never served, never overwritten by a key.
+    Tombstone(Box<crate::hosted::Tombstone>),
 }
 
 /// The `kind` tag written into hosted-key files. FROST files carry no tag (backward compatible).
 const KIND_HOSTED: &str = "hosted";
+/// The `kind` tag of a tombstone file.
+const KIND_TOMBSTONE: &str = "tombstone";
 
 /// The record kinds a file under `keys/` may hold.
-const STORE_KINDS: &[RecordKind] = &[RecordKind::FrostShare, RecordKind::HostedKey];
+const STORE_KINDS: &[RecordKind] = &[RecordKind::FrostShare, RecordKind::HostedKey, RecordKind::Tombstone];
+
+#[derive(Serialize)]
+struct TaggedTombstone<'a> {
+    #[serde(flatten)]
+    t: &'a crate::hosted::Tombstone,
+    kind: &'static str,
+}
 
 /// A share as written: the [`Share`] itself, or — when it does not name its key id yet (a share
 /// built by a ceremony or an import) — the share with `key_id` added, so every file written from
@@ -155,6 +166,13 @@ fn share_plaintext(key_id: &str, share: &Share) -> Result<(zeroize::Zeroizing<Ve
 
 fn hosted_plaintext(key_id: &str, key: &crate::hosted::HostedKey) -> Result<zeroize::Zeroizing<Vec<u8>>> {
     crate::share_delivery::to_json_zeroizing(&TaggedHosted { key, kind: KIND_HOSTED, key_id })
+}
+
+fn tombstone_plaintext(key_id: &str, t: &crate::hosted::Tombstone) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+    if t.key_id != key_id {
+        return Err(DaemonError::KeyFile(format!("refusing to write the tombstone of {} under {key_id}", t.key_id)));
+    }
+    crate::share_delivery::to_json_zeroizing(&TaggedTombstone { t, kind: KIND_TOMBSTONE })
 }
 
 /// Fault-injection seam: called with the path a key-store operation is about to touch, before it
@@ -288,6 +306,7 @@ impl KeyStore {
         match record {
             Record::Frost(share) => self.save(key_id, &share),
             Record::Hosted(k) => self.save_hosted(key_id, &k),
+            Record::Tombstone(t) => self.save_tombstone(key_id, &t),
         }
     }
 
@@ -313,6 +332,7 @@ impl KeyStore {
                 let plain = match &record {
                     Record::Frost(s) => share_plaintext(&key_id, s)?.0,
                     Record::Hosted(k) => hosted_plaintext(&key_id, k)?,
+                    Record::Tombstone(t) => tombstone_plaintext(&key_id, t)?,
                 };
                 (plain, record)
             }
@@ -559,7 +579,7 @@ impl KeyStore {
     pub fn load(&self, key_id: &str) -> Result<Share> {
         match self.load_record(key_id)? {
             Record::Frost(s) => Ok(*s),
-            Record::Hosted(_) => Err(DaemonError::Config(format!(
+            Record::Hosted(_) | Record::Tombstone(_) => Err(DaemonError::Config(format!(
                 "{key_id} is a cluster-hosted key, not a FROST share"
             ))),
         }
@@ -606,6 +626,12 @@ impl KeyStore {
         }
         let record = if tag.as_deref() == Some(KIND_HOSTED) {
             Record::Hosted(Box::new(serde_json::from_value(value)?))
+        } else if tag.as_deref() == Some(KIND_TOMBSTONE) {
+            let t: crate::hosted::Tombstone = serde_json::from_value(value)?;
+            if t.key_id != key_id {
+                return Err(DaemonError::KeyFile(format!("the file for {key_id} holds the tombstone of {}", t.key_id)));
+            }
+            Record::Tombstone(Box::new(t))
         } else {
             Record::Frost(Box::new(serde_json::from_value(value)?))
         };
@@ -652,13 +678,118 @@ impl KeyStore {
         self.write_sealed(key_id, &meta, &plain)
     }
 
+    /// A live hosted key. A tombstone reads as [`DaemonError::UnknownKey`] (NOT_FOUND): the key
+    /// was deleted.
     pub fn load_hosted(&self, key_id: &str) -> Result<crate::hosted::HostedKey> {
         match self.load_record(key_id)? {
             Record::Hosted(k) => Ok(*k),
+            Record::Tombstone(_) => Err(DaemonError::UnknownKey(key_id.to_string())),
             Record::Frost(_) => Err(DaemonError::Config(format!(
                 "{key_id} is a FROST share, not a cluster-hosted key"
             ))),
         }
+    }
+
+    /// Replace a live hosted key (or an existing tombstone) with `t`, atomically — a delete. Never
+    /// replaces a FROST share.
+    pub fn save_tombstone(&self, key_id: &str, t: &crate::hosted::Tombstone) -> Result<()> {
+        if let Ok(Record::Frost(_)) = self.load_record(key_id) {
+            return Err(DaemonError::Config(format!("{key_id} is a FROST share — never tombstoned")));
+        }
+        let plain = tombstone_plaintext(key_id, t)?;
+        let digest = t.intent_digest()?;
+        let meta = RecordMeta { kind: RecordKind::Tombstone, key_id, epoch: 0, digest: &digest };
+        self.write_sealed(key_id, &meta, &plain)
+    }
+
+    /// Record a tombstone for a key this node does not hold: create-once, like a new key, so a key
+    /// stored concurrently is never clobbered (the caller re-reads and converts it instead).
+    pub fn create_tombstone(&self, key_id: &str, t: &crate::hosted::Tombstone) -> Result<()> {
+        let plain = tombstone_plaintext(key_id, t)?;
+        let digest = t.intent_digest()?;
+        let meta = RecordMeta { kind: RecordKind::Tombstone, key_id, epoch: 0, digest: &digest };
+        self.create_bytes(key_id, &meta, &plain)
+    }
+
+    /// `keys/.cleared/`: the delete intents an operator cleared by break-glass
+    /// (`hosted-clear-tombstone`), one empty marker `<key_id>.<intent digest>` each. A peer's
+    /// tombstone carrying a cleared intent is ignored, so clearing a tombstone node by node does not
+    /// bring it back from the nodes not cleared yet.
+    fn cleared_marker(&self, key_id: &str, intent_digest: &[u8; 32]) -> Result<PathBuf> {
+        self.path(key_id)?;
+        Ok(self.dir.join(CLEARED_DIR).join(format!("{key_id}.{}", hex::encode(intent_digest))))
+    }
+
+    pub fn is_cleared(&self, key_id: &str, intent_digest: &[u8; 32]) -> Result<bool> {
+        Ok(self.cleared_marker(key_id, intent_digest)?.try_exists()?)
+    }
+
+    /// Break-glass (offline, under the instance lock): remove `key_id`'s tombstone so the id can be
+    /// generated again, and remember its intent as cleared. Refuses while the tombstone still
+    /// retains material (undelete it, or wait for the grace period) and anything but a tombstone.
+    pub fn clear_tombstone(&self, key_id: &str) -> Result<crate::hosted::Tombstone> {
+        let t = match self.load_record(key_id)? {
+            Record::Tombstone(t) => *t,
+            _ => return Err(DaemonError::Config(format!("{key_id} is not a tombstone here"))),
+        };
+        if t.retained.is_some() {
+            return Err(DaemonError::Config(format!(
+                "{key_id}'s tombstone still retains the key's material (grace period until {} ms) — undelete \
+                 it instead, or wait until the grace period is over",
+                t.purge_after_ms
+            )));
+        }
+        self.mark_cleared(key_id, &t.intent_digest()?)?;
+        self.delete(key_id)?;
+        Ok(t)
+    }
+
+    /// Durably note that the delete intent with `intent_digest` no longer applies to `key_id` here.
+    fn mark_cleared(&self, key_id: &str, intent_digest: &[u8; 32]) -> Result<()> {
+        let marker = self.cleared_marker(key_id, intent_digest)?;
+        let dir = marker.parent().expect("marker has a parent").to_path_buf();
+        ensure_private_dir(&dir)?;
+        private_file(&marker, false)?.sync_all()?;
+        std::fs::File::open(&dir)?.sync_all()?;
+        Ok(())
+    }
+
+    /// Undo a delete on this node (offline `hosted-undelete`, under the instance lock): restore the
+    /// material `key_id`'s tombstone retains, marked undeleted at `now_ms` so the tombstone it came
+    /// from — on this node's peers too — no longer applies to it. Refused once the material is gone.
+    pub fn undelete(&self, key_id: &str, now_ms: u64) -> Result<crate::hosted::HostedKey> {
+        let t = match self.load_record(key_id)? {
+            Record::Tombstone(t) => *t,
+            _ => return Err(DaemonError::Config(format!("{key_id} is not deleted (no tombstone) on this node"))),
+        };
+        let mut key = t.retained.clone().ok_or_else(|| {
+            DaemonError::Config(format!(
+                "{key_id}: the grace period is over and the material was dropped (purge_after {} ms) — only a \
+                 backup taken before the delete still holds it",
+                t.purge_after_ms
+            ))
+        })?;
+        key.undeleted_at_ms = Some(now_ms);
+        // The delete being undone never applies here again — not even from a peer that still
+        // holds its tombstone. A new delete (a new intent) does.
+        self.mark_cleared(key_id, &t.intent_digest()?)?;
+        self.save_hosted(key_id, &key)?;
+        Ok(key)
+    }
+
+    /// Every tombstone on this node. Unreadable files are skipped (reported by `list_hosted`).
+    pub fn list_tombstones(&self) -> Result<Vec<crate::hosted::Tombstone>> {
+        self.touch(&self.dir);
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(&self.dir)? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            let Some(key_id) = name.strip_suffix(".json") else { continue };
+            if let Ok(Record::Tombstone(t)) = self.load_record(key_id) {
+                out.push(*t);
+            }
+        }
+        out.sort_by(|a, b| a.key_id.cmp(&b.key_id));
+        Ok(out)
     }
 
     /// Read a key file without knowing its type up front.
@@ -698,7 +829,7 @@ impl KeyStore {
             // than overwriting it.
             match self.load_record(key_id) {
                 Ok(Record::Hosted(_)) => out.push(key_id.to_string()),
-                Ok(Record::Frost(_)) => {}
+                Ok(Record::Frost(_)) | Ok(Record::Tombstone(_)) => {}
                 Err(e) => {
                     metrics::counter!(crate::metrics::UNREADABLE_KEY_FILES).increment(1);
                     tracing::error!(
@@ -970,6 +1101,7 @@ pub fn record_kind(record: &Record) -> RecordKind {
     match record {
         Record::Frost(_) => RecordKind::FrostShare,
         Record::Hosted(_) => RecordKind::HostedKey,
+        Record::Tombstone(_) => RecordKind::Tombstone,
     }
 }
 
@@ -977,7 +1109,7 @@ pub fn record_kind(record: &Record) -> RecordKind {
 pub fn record_epoch(record: &Record) -> u64 {
     match record {
         Record::Frost(s) => s.epoch,
-        Record::Hosted(_) => 0,
+        Record::Hosted(_) | Record::Tombstone(_) => 0,
     }
 }
 
@@ -986,6 +1118,7 @@ pub fn record_digest(record: &Record) -> Result<Vec<u8>> {
     Ok(match record {
         Record::Frost(s) => s.pkp_digest()?.to_vec(),
         Record::Hosted(k) => hosted_header_digest(k),
+        Record::Tombstone(t) => t.intent_digest()?.to_vec(),
     })
 }
 
@@ -993,6 +1126,8 @@ pub fn record_digest(record: &Record) -> Result<Vec<u8>> {
 pub const STAGED_DIR: &str = ".staged";
 /// Subdirectory of the key store holding this node's ceremony records.
 pub const CEREMONY_DIR: &str = ".ceremonies";
+/// Subdirectory of the key store holding the break-glass cleared-tombstone markers.
+pub const CLEARED_DIR: &str = ".cleared";
 
 /// What [`KeyStore::promote_staged`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1206,7 +1341,9 @@ mod tests {
         // It is not valid FROST content, but it must be *classified* as a share, not as hosted.
         match ks.load_record("legacy") {
             Ok(Record::Frost(_)) => {}
-            Ok(Record::Hosted(_)) => panic!("untagged legacy file misclassified as a hosted key"),
+            Ok(Record::Hosted(_)) | Ok(Record::Tombstone(_)) => {
+                panic!("untagged legacy file misclassified as a hosted key")
+            }
             Err(_) => {} // frost rejects the empty packages; classification is what matters here
         }
         assert!(ks.list_hosted().is_err() || ks.list_hosted().unwrap().is_empty());
@@ -1477,7 +1614,7 @@ mod tests {
         refused(ks.load("frost-a"), "another cluster");
         reset();
         edit_header(&path, |h| h["kind"] = "recipient".into());
-        refused(ks.load("frost-a"), "record where a frost-share or hosted-key is expected");
+        refused(ks.load("frost-a"), "record where a frost-share or hosted-key or tombstone is expected");
         reset();
         // A kind the store does hold passes the check and still fails the associated data.
         edit_header(&path, |h| h["kind"] = "hosted-key".into());

@@ -10,8 +10,22 @@ public interface DeleteKeyReplyOrBuilder extends
     com.google.protobuf.MessageOrBuilder {
 
   /**
+   * <pre>
+   * some node held the key live and tombstoned it
+   * </pre>
+   *
    * <code>bool deleted = 1;</code>
    * @return The deleted.
    */
   boolean getDeleted();
+
+  /**
+   * <pre>
+   * how many nodes now hold the tombstone (including this one)
+   * </pre>
+   *
+   * <code>uint32 tombstones = 2;</code>
+   * @return The tombstones.
+   */
+  int getTombstones();
 }

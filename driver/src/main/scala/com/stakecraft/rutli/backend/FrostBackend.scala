@@ -952,11 +952,23 @@ class FrostBackend(
       // The cluster intentionally has no delete — the namespace key is non-rotatable and deleting
       // it would be catastrophic. Deletion is an operator ceremony, not an API call.
       Future.failed(new UnsupportedOperationException("FROST namespace keys cannot be deleted via the API"))
-    else if (ids.isHosted(keyId))
-      // Unlike the namespace key, Canton CAN rotate encryption keys, so hosted keys are deletable.
-      // A write: fail over only when the node is down, never on a leader-side error.
-      clusterCall("deleteKey", isNodeDown)(_.deleteKey(DeleteKeyRequest.newBuilder().setKeyId(keyId).build()))
-        .map(_ => ())
+    else if (ids.isHosted(keyId)) {
+      // Unlike the namespace key, Canton CAN rotate encryption keys, so hosted keys are deletable —
+      // by a signed delete intent (audit M2), which every cosigner verifies and honours only if
+      // this certificate holds the delete role (hosted_keys.delete_allowlist; by default it does
+      // not, and the delete fails PERMISSION_DENIED). The key becomes a tombstone on every node,
+      // recoverable for the cluster's grace period. A write: fail over only when the node is down.
+      val req = DeleteKeyRequest.newBuilder().setKeyId(keyId)
+      intentSigner.foreach { signer =>
+        learnClusterId().foreach { cluster =>
+          req.setIntent(
+            signer.signDelete(cluster, keyId, FrostIntentSigner.newRequestId(), System.currentTimeMillis(), intentLifetime.toMillis)
+          )
+        }
+      }
+      val built = req.build()
+      clusterCall("deleteKey", isNodeDown)(_.deleteKey(built)).map(_ => ())
+    }
     else delegate.deleteKey(keyId)
 
   override def health: Future[KmsDriverHealth] = {

@@ -990,7 +990,9 @@ public final class PeerGrpc {
 
     /**
      * <pre>
-     * Replicated delete.
+     * Replicated delete: with a delete intent, this node verifies it and tombstones the key. Without
+     * one, only the rollback of a key this node stored in the same, still-fenced generation that did
+     * not reach its write quorum (genkey ceremony id) — anything else is refused.
      * </pre>
      */
     default void purgeKey(com.stakecraft.rutli.grpc.PurgeKeyRequest request,
@@ -1273,7 +1275,9 @@ public final class PeerGrpc {
 
     /**
      * <pre>
-     * Replicated delete.
+     * Replicated delete: with a delete intent, this node verifies it and tombstones the key. Without
+     * one, only the rollback of a key this node stored in the same, still-fenced generation that did
+     * not reach its write quorum (genkey ceremony id) — anything else is refused.
      * </pre>
      */
     public void purgeKey(com.stakecraft.rutli.grpc.PurgeKeyRequest request,
@@ -1529,7 +1533,9 @@ public final class PeerGrpc {
 
     /**
      * <pre>
-     * Replicated delete.
+     * Replicated delete: with a delete intent, this node verifies it and tombstones the key. Without
+     * one, only the rollback of a key this node stored in the same, still-fenced generation that did
+     * not reach its write quorum (genkey ceremony id) — anything else is refused.
      * </pre>
      */
     public com.stakecraft.rutli.grpc.PurgeKeyReply purgeKey(com.stakecraft.rutli.grpc.PurgeKeyRequest request) throws io.grpc.StatusException {
@@ -1779,7 +1785,9 @@ public final class PeerGrpc {
 
     /**
      * <pre>
-     * Replicated delete.
+     * Replicated delete: with a delete intent, this node verifies it and tombstones the key. Without
+     * one, only the rollback of a key this node stored in the same, still-fenced generation that did
+     * not reach its write quorum (genkey ceremony id) — anything else is refused.
      * </pre>
      */
     public com.stakecraft.rutli.grpc.PurgeKeyReply purgeKey(com.stakecraft.rutli.grpc.PurgeKeyRequest request) {
@@ -2047,7 +2055,9 @@ public final class PeerGrpc {
 
     /**
      * <pre>
-     * Replicated delete.
+     * Replicated delete: with a delete intent, this node verifies it and tombstones the key. Without
+     * one, only the rollback of a key this node stored in the same, still-fenced generation that did
+     * not reach its write quorum (genkey ceremony id) — anything else is refused.
      * </pre>
      */
     public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.PurgeKeyReply> purgeKey(

@@ -481,6 +481,37 @@ pub struct HostedKeysConfig {
     /// cluster already uses; a new cluster generates one (`openssl rand -hex 32`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commitment_key: Option<String>,
+    /// Client-certificate CNs of the **delete** role (audit M2): the only clients whose signed
+    /// delete intents (`DeleteKey`, purpose `delete-key`) this node honours. Empty (the default):
+    /// hosted keys cannot be deleted at all. A role of its own — the driver certificate cannot
+    /// delete unless it is listed here — and never a cosigner CN. Every node verifies every delete
+    /// itself, so list the same CNs everywhere.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delete_allowlist: Vec<String>,
+    /// Key-id prefixes each delete-role CN may delete (`{"operator": ["participant1-"]}`). A CN
+    /// without an entry may delete any hosted key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub delete_acl: BTreeMap<String, Vec<String>>,
+    /// Distinct `signing_policy.approvers` that must have approved a delete (Ed25519 over the same
+    /// request id `rutli-approve` signs, for the delete digest). 0 = none; at least 1 is
+    /// recommended in production.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub delete_approval_threshold: u32,
+    /// How long a deleted key's material stays sealed inside its tombstone, for `rutli-cosigner
+    /// hosted-undelete`. The tombstone itself is permanent. Default 7 days.
+    #[serde(default = "default_delete_grace_secs")]
+    pub delete_grace_secs: u64,
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
+}
+
+/// A deleted hosted key's material is kept this long for undelete (decision P8).
+pub const DEFAULT_DELETE_GRACE_SECS: u64 = 7 * 24 * 60 * 60;
+
+fn default_delete_grace_secs() -> u64 {
+    DEFAULT_DELETE_GRACE_SECS
 }
 
 impl HostedKeysConfig {
@@ -885,6 +916,35 @@ impl Config {
                 )));
             }
         }
+        if let Some(h) = self.hosted_keys.as_ref().filter(|h| !h.delete_allowlist.is_empty()) {
+            if self.tls.is_none() {
+                return Err(Config(
+                    "hosted_keys.delete_allowlist needs TLS: delete intents are verified against the cluster CA".into(),
+                ));
+            }
+            let cosigners: std::collections::HashSet<String> = self
+                .peer_allowlist
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .chain(self.peers.iter().map(|p| p.client_cn()))
+                .collect();
+            if let Some(cn) = h.delete_allowlist.iter().find(|cn| cosigners.contains(*cn)) {
+                return Err(Config(format!(
+                    "hosted_keys.delete_allowlist CN {cn:?} is a cosigner — a cosigner certificate must never be able to delete"
+                )));
+            }
+            if let Some(cn) = h.delete_acl.keys().find(|cn| !h.delete_allowlist.contains(cn)) {
+                return Err(Config(format!("hosted_keys.delete_acl names {cn:?}, which is not on delete_allowlist")));
+            }
+            if h.delete_approval_threshold as usize > self.signing_policy.approvers.len() {
+                return Err(Config(format!(
+                    "hosted_keys.delete_approval_threshold {} exceeds the {} configured signing_policy.approvers",
+                    h.delete_approval_threshold,
+                    self.signing_policy.approvers.len()
+                )));
+            }
+        }
         self.keyfile.validate(self.share_seal.is_some())?;
         Ok(())
     }
@@ -1218,6 +1278,10 @@ mod hosted_config_tests {
             anti_entropy_interval_secs: 300,
             decrypt_rate_limit_per_min: DEFAULT_DECRYPT_RATE_LIMIT_PER_MIN,
             commitment_key: None,
+            delete_allowlist: Vec::new(),
+            delete_acl: Default::default(),
+            delete_approval_threshold: 0,
+            delete_grace_secs: crate::config::DEFAULT_DELETE_GRACE_SECS,
         }
     }
 
@@ -1275,6 +1339,60 @@ mod hosted_config_tests {
         });
         assert!(c.validate().is_err(), "both sources at once is ambiguous");
         on_bundle(cfg(None, false)).validate().unwrap();
+    }
+
+    #[test]
+    fn the_delete_role_is_validated() {
+        let tls = TlsConfig {
+            ca_cert: "/ca".into(),
+            allow_expired_ca: false,
+            cert: "/cert".into(),
+            key: "/key".into(),
+            domain: None,
+        };
+        let with = |f: &dyn Fn(&mut HostedKeysConfig), tls_on: bool| {
+            let mut h = hosted(true, 2);
+            f(&mut h);
+            let mut c = cfg(Some(h), true);
+            if tls_on {
+                c.tls = Some(tls.clone());
+                c.signer_allowlist = Some(vec!["driver".into()]);
+                c.peer_allowlist = Some((1..=3).map(|i| format!("cosigner{i}")).collect());
+            }
+            c.validate()
+        };
+        with(&|_| {}, false).unwrap();
+        with(&|h| h.delete_allowlist = vec!["operator".into()], true).unwrap();
+        // The driver may be opted in; a cosigner never.
+        with(&|h| h.delete_allowlist = vec!["driver".into()], true).unwrap();
+        let e = with(&|h| h.delete_allowlist = vec!["cosigner2".into()], true).unwrap_err().to_string();
+        assert!(e.contains("is a cosigner"), "{e}");
+        let e = with(&|h| h.delete_allowlist = vec!["operator".into()], false).unwrap_err().to_string();
+        assert!(e.contains("needs TLS"), "{e}");
+        let e = with(
+            &|h| {
+                h.delete_allowlist = vec!["operator".into()];
+                h.delete_acl.insert("driver".into(), vec!["x-".into()]);
+            },
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("not on delete_allowlist"), "{e}");
+        let e = with(
+            &|h| {
+                h.delete_allowlist = vec!["operator".into()];
+                h.delete_approval_threshold = 1;
+            },
+            true,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(e.contains("exceeds the 0 configured"), "{e}");
+        // Defaults: deletes off, 7 days of grace.
+        let parsed: HostedKeysConfig = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert!(parsed.delete_allowlist.is_empty());
+        assert_eq!(parsed.delete_grace_secs, 7 * 86_400);
     }
 
     #[test]

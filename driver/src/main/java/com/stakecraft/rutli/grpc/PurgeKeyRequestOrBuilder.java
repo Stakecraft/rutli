@@ -32,4 +32,34 @@ public interface PurgeKeyRequestOrBuilder extends
    */
   com.google.protobuf.ByteString
       getKeyIdBytes();
+
+  /**
+   * <pre>
+   * A delete (see Signer.DeleteKey), forwarded by the leader unchanged: this node verifies it and
+   * tombstones the key. Absent: a write-quorum rollback (see the Peer.PurgeKey comment).
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+   * @return Whether the intent field is set.
+   */
+  boolean hasIntent();
+  /**
+   * <pre>
+   * A delete (see Signer.DeleteKey), forwarded by the leader unchanged: this node verifies it and
+   * tombstones the key. Absent: a write-quorum rollback (see the Peer.PurgeKey comment).
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+   * @return The intent.
+   */
+  com.stakecraft.rutli.grpc.SignedIntent getIntent();
+  /**
+   * <pre>
+   * A delete (see Signer.DeleteKey), forwarded by the leader unchanged: this node verifies it and
+   * tombstones the key. Absent: a write-quorum rollback (see the Peer.PurgeKey comment).
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+   */
+  com.stakecraft.rutli.grpc.SignedIntentOrBuilder getIntentOrBuilder();
 }
