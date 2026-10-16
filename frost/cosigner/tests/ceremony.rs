@@ -21,7 +21,7 @@ use frost_ed25519::keys::dkg::{round1, round2};
 use frost_ed25519::round1::SigningCommitments;
 use frost_ed25519::round2::SignatureShare;
 use frost_ed25519::Identifier;
-use rutli_cosigner::ceremony::{resolve_assume_lost, resolve_pending, Part2Outcome};
+use rutli_cosigner::ceremony::{recover_commit, resolve_assume_lost, resolve_pending, Part2Outcome};
 use rutli_cosigner::ceremony_record::{Phase, RecordState, StatusInfo};
 use rutli_cosigner::keystore::KeyStore;
 use rutli_cosigner::node::{CeremonyKind, Node, StagedOutcome};
@@ -50,11 +50,16 @@ struct Switches {
     diverge: AtomicBool,
     /// This node reports ceremony protocol 0, as a cosigner of an older release would.
     old_protocol: AtomicBool,
+    /// Byzantine (audit F3): this node answers ABORTED to the resolvers of the nodes in this
+    /// bitmask (bit = 0-based index of the asking node), whatever it really recorded.
+    lie_aborted_to: AtomicU64,
 }
 
 struct Faulty {
     inner: LocalPeer,
     sw: Arc<Switches>,
+    /// 0-based index of the node holding this mesh handle (`usize::MAX` for a leader handle).
+    asker: usize,
     /// The leader's handle (commit faults apply) rather than a peer's mesh handle.
     leader: bool,
     /// Leader handles: everything passed to and returned from the node (the leader's whole view).
@@ -163,6 +168,9 @@ impl PeerApi for Faulty {
     }
     async fn ceremony_status(&self, ceremony_id: &str) -> Result<StatusInfo> {
         self.gate()?;
+        if !self.leader && self.sw.lie_aborted_to.load(Ordering::SeqCst) & (1 << self.asker) != 0 {
+            return Ok(StatusInfo { phase: Phase::Aborted, outcome: None });
+        }
         let mut info = self.inner.ceremony_status(ceremony_id).await?;
         if !self.leader && self.sw.diverge.load(Ordering::SeqCst) {
             if let Some(o) = info.outcome.as_mut() {
@@ -261,11 +269,21 @@ impl Rig {
     }
 
     fn with_orphan_timeout(orphan: std::time::Duration) -> Self {
+        Self::build(orphan, None)
+    }
+
+    /// `caps`: the unknown-ceremony no-vote caps (per asker, total) of every node (audit F2).
+    fn build(orphan: std::time::Duration, caps: Option<(usize, usize)>) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let nodes: Vec<Arc<Node>> = (1..=N)
             .map(|i| {
                 let ks = KeyStore::open(tmp.path().join(format!("node-{i}"))).unwrap();
-                Arc::new(Node::new_with_ceremony_timeout(Identifier::try_from(i).unwrap(), N, T, ks, orphan))
+                let mut node = Node::new_with_ceremony_timeout(Identifier::try_from(i).unwrap(), N, T, ks, orphan)
+                    .with_regather_delay(std::time::Duration::from_millis(10));
+                if let Some((per_asker, total)) = caps {
+                    node = node.with_unknown_no_vote_caps(per_asker, total);
+                }
+                Arc::new(node)
             })
             .collect();
         let sw: Vec<Arc<Switches>> = (0..N).map(|_| Arc::new(Switches::default())).collect();
@@ -280,6 +298,7 @@ impl Rig {
                     Arc::new(Faulty {
                         inner: LocalPeer::new(n.clone()).on_behalf_of(me.clone()),
                         sw: sw[k].clone(),
+                        asker: j,
                         leader: false,
                         log: delivery_log.clone(),
                     }) as Arc<dyn PeerApi>
@@ -294,6 +313,7 @@ impl Rig {
                 Arc::new(Faulty {
                     inner: LocalPeer::new(n.clone()),
                     sw: s.clone(),
+                    asker: usize::MAX,
                     leader: true,
                     log: leader_log.clone(),
                 }) as Arc<dyn PeerApi>
@@ -314,8 +334,18 @@ impl Rig {
         self.nodes.iter().map(|n| n.key_epoch(KEY).unwrap().pkp_digest).collect()
     }
 
+    /// No STAGED vote and no staged share, except the quarantined shares of aborted ceremonies
+    /// (audit F3), which [`Rig::no_quarantine_anywhere`] checks.
     fn no_staged_anywhere(&self) -> bool {
-        self.nodes.iter().all(|n| n.staged_records().is_empty() && n.staged_share_files().unwrap().is_empty())
+        self.nodes.iter().all(|n| {
+            let quarantined: Vec<String> = n.quarantined_records().into_iter().map(|r| r.ceremony_id).collect();
+            n.staged_records().is_empty()
+                && n.staged_share_files().unwrap().iter().all(|(_, c)| quarantined.contains(c))
+        })
+    }
+
+    fn no_quarantine_anywhere(&self) -> bool {
+        self.nodes.iter().all(|n| n.quarantined_records().is_empty() && n.staged_share_files().unwrap().is_empty())
     }
 
     /// Every 2-subset of nodes signs, verified under the group key.
@@ -458,6 +488,9 @@ async fn divergent_votes_abort_on_every_node() {
     assert_eq!(rig.digests(), before);
     assert_eq!(rig.epochs(), vec![1, 1, 1]);
     assert!(rig.no_staged_anywhere());
+    // Once every node is seen terminal with nobody committed, the next pass drops the quarantines.
+    rig.resolve_everywhere().await;
+    assert!(rig.no_quarantine_anywhere());
     rig.sw[2].diverge.store(false, Ordering::SeqCst);
     rig.every_pair_signs(&group).await;
 }
@@ -937,4 +970,216 @@ async fn a_repeated_part1_keeps_the_live_session_and_its_guard() {
     let err = n.ceremony_begin("dkg-other", KEY, CeremonyKind::Dkg, None).unwrap_err();
     assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "{err:?}");
     assert_eq!(n.ceremony_status("dkg-twice").unwrap().phase, Phase::InProgress);
+}
+
+
+/// Audit F2: a peer asking about made-up ceremony ids cannot make a node write unbounded durable
+/// no-votes. Within the cap each answer is a durable no-vote (and the id is never started later);
+/// beyond it the node refuses — no record, no answer, so it may still take part in that id.
+#[tokio::test]
+async fn a_flood_of_unknown_ceremony_ids_is_bounded_per_peer_and_in_total() {
+    let rig = Rig::build(std::time::Duration::from_secs(900), Some((3, 5)));
+    let target = &rig.nodes[0];
+    let records_dir = target.key_store_dir().join(".ceremonies");
+    let count_files = || std::fs::read_dir(&records_dir).map(|d| d.count()).unwrap_or(0);
+    // Node 2 floods node 1 through its mesh handle (asks as `cosigner2`).
+    let as_node2 = rig.nodes[1].mesh_peer(1).unwrap();
+    let mut answered = 0;
+    let mut refused = Vec::new();
+    for i in 0..50 {
+        let id = format!("refresh-junk-{i}");
+        match if i % 2 == 0 { as_node2.ceremony_status(&id).await } else { as_node2.ceremony_abort(&id).await } {
+            Ok(info) => {
+                assert_eq!(info.phase, Phase::Aborted);
+                answered += 1;
+            }
+            Err(e) => {
+                assert!(matches!(e, DaemonError::RateLimited(_)), "{e:?}");
+                refused.push(id);
+            }
+        }
+    }
+    assert_eq!(answered, 3, "node 2's quota");
+    // The leader's commit (resolve) path is capped the same way.
+    assert!(as_node2.ceremony_commit("refresh-junk-commit").await.is_err());
+    // Node 3 still has its own quota, up to the total.
+    let as_node3 = rig.nodes[2].mesh_peer(1).unwrap();
+    assert!(as_node3.ceremony_status("refresh-n3-a").await.is_ok());
+    assert!(as_node3.ceremony_status("refresh-n3-b").await.is_ok());
+    assert!(matches!(as_node3.ceremony_status("refresh-n3-c").await, Err(DaemonError::RateLimited(_))), "total cap");
+    assert_eq!(count_files(), 5, "bounded on disk");
+
+    // Safety: a recorded no-vote stays one and its id never starts; a refused id left no vote, so
+    // starting it later contradicts nothing this node said.
+    assert_eq!(as_node2.ceremony_status("refresh-junk-0").await.unwrap().phase, Phase::Aborted);
+    assert!(matches!(target.dkg_part1("refresh-junk-0", "frost-other"), Err(DaemonError::CeremonyRefused(_))));
+    assert!(target.ceremony_record(&refused[0]).is_none());
+    target.dkg_part1(&refused[0], "frost-other").unwrap();
+    assert_eq!(as_node2.ceremony_status(&refused[0]).await.unwrap().phase, Phase::InProgress);
+
+    // The cluster still runs ceremonies and signs.
+    let group = run_dkg(&rig.peers, KEY).await.unwrap();
+    rig.every_pair_signs(&group).await;
+}
+
+/// Ceremony sessions in memory are bounded: a peer opening sessions for made-up key ids is
+/// refused past [`rutli_cosigner::node::MAX_CEREMONY_SESSIONS`], and orphans make room.
+#[tokio::test]
+async fn ceremony_sessions_in_memory_are_bounded() {
+    let rig = Rig::with_orphan_timeout(std::time::Duration::from_millis(200));
+    let n = &rig.nodes[0];
+    let max = rutli_cosigner::node::MAX_CEREMONY_SESSIONS;
+    for i in 0..max {
+        n.dkg_part1(&format!("dkg-flood-{i}"), &format!("frost-flood-{i}")).unwrap();
+    }
+    assert!(matches!(n.dkg_part1("dkg-flood-x", "frost-flood-x"), Err(DaemonError::NotServing(_))));
+    // Past the orphan timeout the orphans are dropped (each with a no-vote) to make room.
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    n.dkg_part1("dkg-flood-x", "frost-flood-x").unwrap();
+    assert_eq!(n.ceremony_record("dkg-flood-0").unwrap().state, RecordState::Aborted);
+    // Their guards went with them: a ceremony on one of those keys runs.
+    n.dkg_part1("dkg-flood-0-again", "frost-flood-0").unwrap();
+}
+
+/// Audit F2: sessions a peer opens and lets orphan are bounded too — beyond the cap their no-vote
+/// is not recorded, and a node STAGED in such a ceremony waits instead of acting on a refusal.
+#[tokio::test]
+async fn orphaned_session_no_votes_are_capped_and_a_refusal_is_not_evidence() {
+    let rig = Rig::build(std::time::Duration::from_millis(200), Some((0, 0)));
+    let group = run_dkg(&rig.peers, KEY).await.unwrap();
+    let ceremony_id = "refresh-capped-orphans";
+    let v = rig.nodes[0].key_epoch(KEY).unwrap();
+    let expect = Some((v.epoch, v.pkp_digest.as_slice().try_into().unwrap()));
+    for p in &rig.peers {
+        p.ceremony_begin(ceremony_id, KEY, CeremonyKind::Refresh, expect).await.unwrap();
+    }
+    let mut map = BTreeMap::new();
+    for p in &rig.peers {
+        map.insert(p.identifier(), p.ceremony_part1(ceremony_id, KEY, CeremonyKind::Refresh, &[1, 2, 3]).await.unwrap());
+    }
+    let mut digest = [0u8; 32];
+    for p in &rig.peers {
+        digest = p.ceremony_part2(ceremony_id, &map).await.unwrap().round1_digest;
+    }
+    // Only node 1 stages; the leader is gone; nodes 2 and 3 orphan but may record no no-vote.
+    rig.peers[0].ceremony_part3(ceremony_id, &digest).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    for _ in 0..3 {
+        resolve_pending(&rig.nodes[0]).await;
+    }
+    assert_eq!(rig.nodes[0].ceremony_record(ceremony_id).unwrap().state, RecordState::Staged, "waits");
+    for n in &rig.nodes[1..] {
+        assert!(n.ceremony_record(ceremony_id).is_none(), "no no-vote beyond the cap");
+        assert!(n.staged_share_files().unwrap().is_empty(), "never staged, so never commits");
+    }
+    assert_eq!(rig.epochs(), vec![1, 1, 1]);
+    // Signing continues on the old sharing.
+    let pair: Peers = vec![rig.peers[1].clone(), rig.peers[2].clone()];
+    let msg = rutli_frost_core::dealer::canton_test_message(b"capped");
+    let sig = sign(&rig.nodes[1], &pair, KEY, &msg).await.unwrap();
+    assert!(rutli_cosigner::verify_key::signature_verifies(&group, &msg, &sig));
+}
+
+/// Audit F3: one Byzantine cosigner telling one honest node STAGED and the other ABORTED splits a
+/// refresh. Detected (equivocation, split flag) and recovered: the aborted node's share was
+/// quarantined, survives a restart, and `recover_commit` commits it once a peer proves COMMITTED.
+#[tokio::test]
+async fn a_byzantine_split_is_detected_and_recovered_from_the_quarantine() {
+    let rig = Rig::new();
+    let group = run_dkg(&rig.peers, KEY).await.unwrap();
+    // Node 3 lies ABORTED to node 2's resolver, and tells node 1 the truth.
+    rig.sw[2].lie_aborted_to.store(1 << 1, Ordering::SeqCst);
+    assert!(run_refresh(&rig.peers, KEY).await.is_err());
+    let id = rig.the_ceremony(0, "refresh");
+    assert_eq!(rig.nodes[0].ceremony_record(&id).unwrap().state, RecordState::Committed);
+    let rec2 = rig.nodes[1].ceremony_record(&id).unwrap();
+    assert_eq!(rec2.state, RecordState::Aborted);
+    assert!(rec2.quarantined, "the aborted node keeps its staged share");
+    assert_ne!(rec2.split_detected_ms, 0, "COMMITTED and ABORTED for one ceremony: equivocation");
+    assert_eq!(rig.nodes[1].split_count(), 1);
+    assert_eq!(rig.epochs()[..2], [2, 1], "the split");
+    // Further resolver passes keep the quarantine (a split is never garbage-collected silently).
+    rig.resolve_everywhere().await;
+    assert!(rig.nodes[1].ceremony_record(&id).unwrap().quarantined);
+
+    // The quarantined share survives a restart of node 2.
+    let restarted = Node::new(Identifier::try_from(2u16).unwrap(), N, T, KeyStore::open(rig.nodes[1].key_store_dir()).unwrap());
+    assert_eq!(restarted.quarantined_records().len(), 1);
+    assert_eq!(restarted.staged_share_files().unwrap().len(), 1);
+    drop(restarted);
+
+    // Recovery needs proof: with node 1 unreachable, nobody proves COMMITTED.
+    rig.sw[0].down.store(true, Ordering::SeqCst);
+    let err = recover_commit(&rig.nodes[1], &id).await.unwrap_err();
+    assert!(matches!(err, DaemonError::CeremonyRefused(_)), "{err:?}");
+    rig.sw[0].down.store(false, Ordering::SeqCst);
+    // Node 1 reports COMMITTED and holds that sharing live: node 2 commits its quarantined share.
+    let info = recover_commit(&rig.nodes[1], &id).await.unwrap();
+    assert_eq!(info.phase, Phase::Committed);
+    let rec2 = rig.nodes[1].ceremony_record(&id).unwrap();
+    assert!(rec2.recovered && !rec2.quarantined);
+    assert_eq!(rig.nodes[1].split_count(), 0);
+    // Node 3 (honest code, it was only lying in the test harness) recovers the same way.
+    rig.sw[2].lie_aborted_to.store(0, Ordering::SeqCst);
+    if rig.nodes[2].ceremony_record(&id).unwrap().state != RecordState::Committed {
+        recover_commit(&rig.nodes[2], &id).await.unwrap();
+    }
+    assert_eq!(rig.epochs(), vec![2, 2, 2]);
+    assert!(rig.no_quarantine_anywhere());
+    rig.every_pair_signs(&group).await;
+    // A recovered ceremony is not recoverable twice.
+    assert!(recover_commit(&rig.nodes[1], &id).await.is_err());
+}
+
+/// Audit F3, crash faults: one node failing part 3 aborts the rest; the abort is re-gathered,
+/// never counted as equivocation, and the quarantine is dropped once every peer is terminal.
+#[tokio::test]
+async fn a_crash_abort_is_not_a_split_and_its_quarantine_is_dropped() {
+    let rig = Rig::new();
+    let group = run_dkg(&rig.peers, KEY).await.unwrap();
+    rig.sw[2].down_after_part3.store(true, Ordering::SeqCst);
+    assert!(run_refresh(&rig.peers, KEY).await.is_err());
+    let id = rig.the_ceremony(0, "refresh");
+    // Node 3 staged, then went away: nodes 1 and 2 wait. (Node 3's own resolver is not run: it is
+    // the one that is gone — run, it would commit, and the break-glass below would then be the
+    // misuse the docs warn about, which the split detection does catch.)
+    resolve_pending(&rig.nodes[0]).await;
+    resolve_pending(&rig.nodes[1]).await;
+    assert!(rig.nodes[..2].iter().all(|n| n.ceremony_record(&id).unwrap().state == RecordState::Staged));
+    // Break-glass on node 1 (node 3 "lost"): node 1 aborts, node 2 then aborts on node 1's no-vote
+    // while node 3 is still unreachable — quarantined, not a split.
+    resolve_assume_lost(&rig.nodes[0], &id, &[3]).await.unwrap();
+    resolve_pending(&rig.nodes[1]).await;
+    let rec2 = rig.nodes[1].ceremony_record(&id).unwrap();
+    assert_eq!(rec2.state, RecordState::Aborted);
+    assert!(rec2.quarantined && rec2.split_detected_ms == 0);
+    assert_eq!(rig.nodes.iter().map(|n| n.split_count()).sum::<usize>(), 0);
+    // Node 3 returns and aborts too; then everybody is terminal and nobody committed.
+    rig.sw[2].down_after_part3.store(false, Ordering::SeqCst);
+    rig.sw[2].down.store(false, Ordering::SeqCst);
+    rig.resolve_everywhere().await;
+    rig.resolve_everywhere().await;
+    assert!(rig.no_quarantine_anywhere(), "{:?}", rig.nodes.iter().map(|n| n.quarantined_records()).collect::<Vec<_>>());
+    assert_eq!(rig.epochs(), vec![1, 1, 1]);
+    rig.every_pair_signs(&group).await;
+}
+
+/// Audit F11: a failed round-2 delivery reaches the leader as a category, never the recipient's
+/// error text.
+#[tokio::test]
+async fn a_failed_delivery_tells_the_leader_only_its_category() {
+    let rig = Rig::new();
+    let ceremony_id = "dkg-delivery-category";
+    for p in &rig.peers {
+        p.ceremony_begin(ceremony_id, KEY, CeremonyKind::Dkg, None).await.unwrap();
+    }
+    let mut map = BTreeMap::new();
+    for p in &rig.peers {
+        map.insert(p.identifier(), p.ceremony_part1(ceremony_id, KEY, CeremonyKind::Dkg, &[1, 2, 3]).await.unwrap());
+    }
+    // Node 3 drops its session: node 1's delivery to it fails there with "unknown dkg session …".
+    rig.peers[2].ceremony_abort(ceremony_id).await.unwrap();
+    let err = rig.peers[0].ceremony_part2(ceremony_id, &map).await.unwrap_err().to_string();
+    assert!(err.contains("node 3") && err.contains("recipient has no such session"), "{err}");
+    assert!(!err.contains("unknown dkg session"), "the recipient's text leaked to the leader: {err}");
 }

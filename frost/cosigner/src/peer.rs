@@ -199,6 +199,12 @@ impl LocalPeer {
         self.caller = Some(caller);
         self
     }
+
+    /// Who asks, as the serving node would see the caller's certificate CN (`cosigner<N>`), for a
+    /// handle acting on behalf of another node; `None` for an in-process leader handle.
+    fn asker(&self) -> Option<String> {
+        self.caller.as_ref().and_then(|c| c.index().ok()).map(|i| format!("cosigner{i}"))
+    }
 }
 
 /// Wire an in-process cluster's mesh: each node reaches every other through a [`LocalPeer`]
@@ -346,17 +352,19 @@ impl PeerApi for LocalPeer {
     }
 
     async fn ceremony_commit(&self, ceremony_id: &str) -> Result<StatusInfo> {
-        crate::ceremony::resolve(&self.node, ceremony_id).await
+        crate::ceremony::resolve_from(&self.node, ceremony_id, self.asker()).await
     }
 
     async fn ceremony_status(&self, ceremony_id: &str) -> Result<StatusInfo> {
         let ceremony_id = ceremony_id.to_owned();
-        self.node.blocking(move |n| n.ceremony_status(&ceremony_id)).await
+        let asker = self.asker();
+        self.node.blocking(move |n| n.ceremony_status_from(&ceremony_id, asker.as_deref())).await
     }
 
     async fn ceremony_abort(&self, ceremony_id: &str) -> Result<StatusInfo> {
         let ceremony_id = ceremony_id.to_owned();
-        self.node.blocking(move |n| n.ceremony_abort(&ceremony_id)).await
+        let asker = self.asker();
+        self.node.blocking(move |n| n.ceremony_abort_from(&ceremony_id, asker.as_deref())).await
     }
 
     async fn ceremony_protocol(&self) -> Result<u32> {

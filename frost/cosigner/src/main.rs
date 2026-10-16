@@ -355,6 +355,20 @@ enum CeremonyCommand {
         #[arg(long, value_delimiter = ',')]
         assume_lost: Vec<u16>,
     },
+    /// Recover a SPLIT (audit F3; alert RutliCeremonySplit): commit the quarantined staged share of
+    /// a ceremony this node aborted while a peer committed it. Refuses unless a peer reports the
+    /// ceremony COMMITTED with this node's outcome AND holds that sharing live, and no peer voted
+    /// for another outcome. A cosigner equivocated to cause the split: check which one first.
+    RecoverCommit {
+        #[arg(long)]
+        ceremony_id: String,
+    },
+    /// Delete the quarantined staged share of an aborted ceremony (and clear its split alert) once
+    /// it is settled that it will never be recovered.
+    DropQuarantine {
+        #[arg(long)]
+        ceremony_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -481,6 +495,12 @@ async fn main() -> Result<()> {
         Some(Command::Health) => health_command(&cfg),
         Some(Command::Ceremony { command: CeremonyCommand::Resolve { ceremony_id, assume_lost } }) => {
             return ceremony_resolve_command(&cfg, &ceremony_id, &assume_lost).await
+        }
+        Some(Command::Ceremony { command: CeremonyCommand::RecoverCommit { ceremony_id } }) => {
+            return ceremony_recover_commit_command(&cfg, &ceremony_id).await
+        }
+        Some(Command::Ceremony { command: CeremonyCommand::DropQuarantine { ceremony_id } }) => {
+            return ceremony_drop_quarantine_command(&cfg, &ceremony_id)
         }
         Some(Command::DiscardPartialKey { key_id, confirm_group_key }) => {
             return discard_partial_key_command(&cfg, &key_id, &confirm_group_key).await
@@ -1007,6 +1027,35 @@ async fn ceremony_resolve_command(cfg: &Config, ceremony_id: &str, assume_lost: 
         info.phase.as_str(),
         rec.state.as_str()
     );
+    Ok(())
+}
+
+/// `ceremony recover-commit`: see [`CeremonyCommand::RecoverCommit`].
+async fn ceremony_recover_commit_command(cfg: &Config, ceremony_id: &str) -> Result<()> {
+    let _lock = rutli_cosigner::instance_lock::InstanceLock::acquire(&cfg.data_dir)?;
+    let node = offline_ceremony_node(cfg)?;
+    let info = rutli_cosigner::ceremony::recover_commit(&node, ceremony_id).await?;
+    let rec = node.ceremony_record(ceremony_id);
+    println!(
+        "ceremony {ceremony_id} ({}): {} on this node (recovered from a quarantined abort); start the daemon",
+        rec.map(|r| format!("{} of {}, epoch {}", r.kind, r.key_id, r.new_epoch)).unwrap_or_default(),
+        info.phase.as_str()
+    );
+    Ok(())
+}
+
+/// `ceremony drop-quarantine`: see [`CeremonyCommand::DropQuarantine`].
+fn ceremony_drop_quarantine_command(cfg: &Config, ceremony_id: &str) -> Result<()> {
+    let _lock = rutli_cosigner::instance_lock::InstanceLock::acquire(&cfg.data_dir)?;
+    let node = offline_ceremony_node(cfg)?;
+    let rec = node
+        .ceremony_record(ceremony_id)
+        .ok_or_else(|| DaemonError::Config(format!("this node has no record of ceremony {ceremony_id}")))?;
+    if !rec.quarantined {
+        return Err(DaemonError::Config(format!("ceremony {ceremony_id} holds no quarantined share here")));
+    }
+    node.drop_quarantine(ceremony_id)?;
+    println!("dropped the quarantined share of ceremony {ceremony_id} ({} of {})", rec.kind, rec.key_id);
     Ok(())
 }
 

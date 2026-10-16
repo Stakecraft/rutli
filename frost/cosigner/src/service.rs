@@ -1105,12 +1105,12 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::CeremonyCommitRequest>,
     ) -> Result<Response<pb::CeremonyStatusReply>, Status> {
-        self.authorize(&req)?;
+        let asker = self.authorize(&req)?;
         let id = req.into_inner().ceremony_id;
         // Detached: a caller that stops waiting must not cut a commit between the promotion and
         // the record (the startup repair would finish it, but there is no need to rely on that).
         let node = self.node.clone();
-        let info = crate::ceremony::detach(async move { crate::ceremony::resolve(&node, &id).await })
+        let info = crate::ceremony::detach(async move { crate::ceremony::resolve_from(&node, &id, asker).await })
             .await
             .map_err(Status::from)?;
         Ok(Response::new(crate::peer::status_to_pb(&info)))
@@ -1120,9 +1120,14 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::CeremonyStatusRequest>,
     ) -> Result<Response<pb::CeremonyStatusReply>, Status> {
-        self.authorize(&req)?;
+        // The caller's CN bounds the no-votes it can make this node record for unknown ids (F2).
+        let asker = self.authorize(&req)?;
         let id = req.into_inner().ceremony_id;
-        let info = self.node.blocking(move |n| n.ceremony_status(&id)).await.map_err(Status::from)?;
+        let info = self
+            .node
+            .blocking(move |n| n.ceremony_status_from(&id, asker.as_deref()))
+            .await
+            .map_err(Status::from)?;
         Ok(Response::new(crate::peer::status_to_pb(&info)))
     }
 
@@ -1130,9 +1135,13 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::CeremonyAbortRequest>,
     ) -> Result<Response<pb::CeremonyStatusReply>, Status> {
-        self.authorize(&req)?;
+        let asker = self.authorize(&req)?;
         let id = req.into_inner().ceremony_id;
-        let info = self.node.blocking(move |n| n.ceremony_abort(&id)).await.map_err(Status::from)?;
+        let info = self
+            .node
+            .blocking(move |n| n.ceremony_abort_from(&id, asker.as_deref()))
+            .await
+            .map_err(Status::from)?;
         Ok(Response::new(crate::peer::status_to_pb(&info)))
     }
 }

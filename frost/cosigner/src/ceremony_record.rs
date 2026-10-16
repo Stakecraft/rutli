@@ -12,12 +12,31 @@
 //! STAGED --direct evidence: a node ABORTED, or one staged a different outcome--> ABORTED
 //! ```
 //!
-//! **Safety invariant.** A node commits only after confirming *directly* (over the mTLS mesh, not
-//! through the leader) that every roster node holds a durable yes-vote for the same outcome; it
-//! aborts only on direct evidence that some node voted no or diverged. A recorded vote is never
-//! rewritten except STAGED → COMMITTED / ABORTED, and a terminal state never changes. So no two
-//! nodes resolve one ceremony differently, and nobody needs the leader to finish: every node runs
-//! the resolver ([`decide`]) itself.
+//! **Safety invariant (crash faults).** A node commits only after confirming *directly* (over the
+//! mTLS mesh, not through the leader) that every roster node holds a durable yes-vote for the same
+//! outcome; it aborts only on direct evidence that some node voted no or diverged. A recorded vote
+//! is never rewritten except STAGED → COMMITTED / ABORTED, and a terminal state never changes
+//! (one operator break-glass excepted, below). So with nodes that crash, restart or lose
+//! messages, no two nodes resolve one ceremony differently, and nobody needs the leader to finish:
+//! every node runs the resolver ([`decide`]) itself.
+//!
+//! **Byzantine cosigner (audit F3).** The votes peers report are not signed or cross-checked, so
+//! one *lying* cosigner can tell one honest node STAGED and the other ABORTED: the first commits,
+//! the second aborts (a split: they no longer sign together, every signature needs the liar). With
+//! n = 3, f = 1 this cannot be prevented without Byzantine agreement; it costs availability, never
+//! the key (no node ever holds two shares of one sharing it should not). It is detected and
+//! recoverable instead:
+//!
+//! * an abort while some peer reported a yes-vote for this node's outcome re-gathers the votes
+//!   before acting ([`mixed_evidence`]), and COMMITTED plus ABORTED reported for one ceremony is
+//!   proof of equivocation ([`equivocation`]: with crash faults a node commits only after every
+//!   yes-vote, after which nobody can abort) — counted and logged;
+//! * the resolver never deletes the staged share of a ceremony it aborts: it is **quarantined**
+//!   (kept beside the ABORTED record) until every peer is seen terminal with nobody COMMITTED
+//!   ([`quarantine_droppable`]), or a retention passes;
+//! * a peer later reporting COMMITTED for this node's outcome flags a split
+//!   (`rutli_ceremonies_split`), and the operator may `ceremony recover-commit` the quarantined
+//!   share — key-safe, since an honest COMMITTED node saw every node's yes-vote for that outcome.
 //!
 //! Records live in `data_dir/keys/.ceremonies/<ceremony_id>.json`, written with the key store's
 //! discipline: temp + fsync + rename (create-once for a node's first vote) + directory fsync.
@@ -93,6 +112,30 @@ pub struct CeremonyRecord {
     pub created_ms: u64,
     #[serde(default)]
     pub updated_ms: u64,
+    /// ABORTED by the resolver with its staged share kept (quarantined), in case a peer reports it
+    /// COMMITTED later (audit F3). Cleared when the share is dropped.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub quarantined: bool,
+    /// When a peer was first seen reporting COMMITTED for this node's outcome of a ceremony this
+    /// node aborted (a split; 0 = never).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub split_detected_ms: u64,
+    /// A no-vote recorded because a peer asked about a ceremony id this node had no session or
+    /// record for: who asked (the caller's certificate CN, empty for an in-process caller). Counted
+    /// against the caps on such records (audit F2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unknown_asked_by: Option<String>,
+    /// COMMITTED by the operator's `ceremony recover-commit` from a quarantined ABORTED record.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub recovered: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 impl CeremonyRecord {
@@ -115,6 +158,10 @@ impl CeremonyRecord {
             peers_settled: false,
             created_ms: now,
             updated_ms: now,
+            quarantined: false,
+            split_detected_ms: 0,
+            unknown_asked_by: None,
+            recovered: false,
         }
     }
 
@@ -270,6 +317,42 @@ impl CeremonyRecords {
         Ok(())
     }
 
+    /// The one exception to "a terminal vote never changes" (audit F3): the operator's
+    /// `ceremony recover-commit` turns a quarantined ABORTED record into COMMITTED, after a peer
+    /// proved the outcome committed. Anything else is refused.
+    pub fn write_recovery(&self, prev: &CeremonyRecord, rec: &CeremonyRecord) -> Result<()> {
+        if !(prev.state == RecordState::Aborted
+            && prev.quarantined
+            && rec.state == RecordState::Committed
+            && rec.recovered
+            && prev.ceremony_id == rec.ceremony_id
+            && prev.outcome() == rec.outcome())
+        {
+            return Err(DaemonError::Disagreement(format!(
+                "ceremony {}: recovery only turns a quarantined ABORTED vote into COMMITTED for the same outcome",
+                rec.ceremony_id
+            )));
+        }
+        let path = self.path(&rec.ceremony_id)?;
+        let tmp = self.dir.join(format!(".{}-{}.tmp", rec.ceremony_id, uuid::Uuid::new_v4()));
+        {
+            let mut f = private_file(&tmp, true)?;
+            f.write_all(&serde_json::to_vec_pretty(rec)?)?;
+            f.sync_all()?;
+        }
+        let moved = std::fs::rename(&tmp, &path);
+        let _ = std::fs::remove_file(&tmp);
+        moved?;
+        std::fs::File::open(&self.dir)?.sync_all()?;
+        Ok(())
+    }
+
+    /// Whether a record file exists for `ceremony_id`, parsed or not (the startup repair must not
+    /// mistake an unreadable vote for no vote — audit F4).
+    pub fn file_exists(&self, ceremony_id: &str) -> Result<bool> {
+        Ok(self.path(ceremony_id)?.try_exists()?)
+    }
+
     /// Delete a record (garbage collection of a settled, old ceremony only).
     pub fn remove(&self, ceremony_id: &str) -> Result<()> {
         let path = self.path(ceremony_id)?;
@@ -398,6 +481,49 @@ pub fn decide(local: &CeremonyRecord, me: u16, reports: &BTreeMap<u16, PeerRepor
     }
 }
 
+/// Some other roster node reports a yes-vote (STAGED or COMMITTED) for exactly this node's outcome.
+/// An abort while this holds is acted on only after the votes are gathered again (audit F3).
+pub fn mixed_evidence(local: &CeremonyRecord, me: u16, reports: &BTreeMap<u16, PeerReport>) -> bool {
+    let mine = local.outcome();
+    local.roster.iter().filter(|&&id| id != me).any(|id| {
+        matches!(reports.get(id), Some(PeerReport::Staged(o)) | Some(PeerReport::Committed(o)) if *o == mine)
+    })
+}
+
+/// COMMITTED for this node's outcome and ABORTED, both reported for one ceremony: impossible with
+/// crash faults (a node commits only after every yes-vote, and a yes-voter then never sees a
+/// no-vote), so some cosigner equivocated (audit F3).
+pub fn equivocation(local: &CeremonyRecord, me: u16, reports: &BTreeMap<u16, PeerReport>) -> bool {
+    let mine = local.outcome();
+    let others = || local.roster.iter().filter(move |&&id| id != me).filter_map(|id| reports.get(id));
+    others().any(|r| matches!(r, PeerReport::Committed(o) if *o == mine))
+        && others().any(|r| matches!(r, PeerReport::Aborted))
+}
+
+/// For a ceremony this node aborted: some peer reports it COMMITTED with this node's outcome — the
+/// nodes resolved it differently (a split), and the quarantined share is what heals it.
+pub fn split_evident(local: &CeremonyRecord, me: u16, reports: &BTreeMap<u16, PeerReport>) -> bool {
+    let mine = local.outcome();
+    local
+        .roster
+        .iter()
+        .filter(|&&id| id != me)
+        .any(|id| matches!(reports.get(id), Some(PeerReport::Committed(o)) if *o == mine))
+}
+
+/// For a ceremony this node aborted with its share quarantined: every other roster node reports a
+/// terminal vote and none COMMITTED this node's outcome. An honest node that committed would say
+/// so, and a terminal vote never changes, so no honest node can commit it any more — the share is
+/// of no further use.
+pub fn quarantine_droppable(local: &CeremonyRecord, me: u16, reports: &BTreeMap<u16, PeerReport>) -> bool {
+    let mine = local.outcome();
+    local.roster.iter().filter(|&&id| id != me).all(|id| match reports.get(id) {
+        Some(PeerReport::Aborted) => true,
+        Some(PeerReport::Committed(o)) => *o != mine,
+        _ => false,
+    })
+}
+
 fn short(hex: &str) -> &str {
     &hex[..hex.len().min(12)]
 }
@@ -513,5 +639,48 @@ mod tests {
         // A record that is not STAGED is never decided again.
         let done = CeremonyRecord { state: RecordState::Committed, ..local };
         assert!(matches!(decide(&done, 1, &all(yes, committed)), Decision::Wait(_)));
+    }
+
+    #[test]
+    fn split_predicates() {
+        let local = staged("c", &[1, 2, 3], "aa");
+        let yes = PeerReport::Staged(local.outcome());
+        let committed = PeerReport::Committed(local.outcome());
+        let mut other = local.outcome();
+        other.new_pkp_digest = "bb".into();
+        let all = |r2: PeerReport, r3: PeerReport| BTreeMap::from([(2u16, r2), (3u16, r3)]);
+
+        // A crash: one node no, the other yes — mixed, not (yet) proof of anything.
+        let crash = all(PeerReport::Aborted, yes.clone());
+        assert!(mixed_evidence(&local, 1, &crash) && !equivocation(&local, 1, &crash));
+        assert!(!quarantine_droppable(&local, 1, &crash), "node 3 may still be resolving");
+        // COMMITTED and ABORTED for one ceremony: equivocation, a split if this node aborted.
+        let lie = all(PeerReport::Aborted, committed.clone());
+        assert!(equivocation(&local, 1, &lie) && split_evident(&local, 1, &lie));
+        assert!(!quarantine_droppable(&local, 1, &lie));
+        // Every peer terminal, nobody committed this outcome: the quarantined share can go.
+        assert!(quarantine_droppable(&local, 1, &all(PeerReport::Aborted, PeerReport::Aborted)));
+        assert!(quarantine_droppable(&local, 1, &all(PeerReport::Aborted, PeerReport::Committed(other.clone()))));
+        assert!(!quarantine_droppable(&local, 1, &all(PeerReport::Aborted, PeerReport::Unknown("down".into()))));
+        assert!(!mixed_evidence(&local, 1, &all(PeerReport::Aborted, PeerReport::Staged(other))));
+    }
+
+    #[test]
+    fn only_a_quarantined_abort_can_be_recovered_to_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CeremonyRecords::open(tmp.path().join(".ceremonies"));
+        let rec = staged("refresh-9", &[1, 2, 3], "aa");
+        store.write(None, &rec).unwrap();
+        let aborted = CeremonyRecord { state: RecordState::Aborted, ..rec.clone() };
+        store.write(Some(&rec), &aborted).unwrap();
+        let committed = CeremonyRecord { state: RecordState::Committed, recovered: true, ..rec.clone() };
+        assert!(store.write_recovery(&aborted, &committed).is_err(), "not quarantined");
+        let quarantined = CeremonyRecord { quarantined: true, ..aborted.clone() };
+        store.write(Some(&aborted), &quarantined).unwrap();
+        let mut wrong = committed.clone();
+        wrong.new_pkp_digest = "bb".into();
+        assert!(store.write_recovery(&quarantined, &wrong).is_err(), "another outcome");
+        store.write_recovery(&quarantined, &committed).unwrap();
+        assert_eq!(store.load_all().unwrap(), vec![committed]);
     }
 }
