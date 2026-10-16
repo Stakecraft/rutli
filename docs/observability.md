@@ -34,6 +34,16 @@ annotations, NetworkPolicy ingress for pods labelled `rutli.io/scraper: "true"`)
 | `rutli_anti_entropy_repairs_total` | counter | — | Hosted keys a sweep pulled to this node or pushed to a peer that lacked them |
 | `rutli_key_replicas` | gauge | — | Fewest cosigners holding any one hosted key, as of the last anti-entropy sweep (`NaN` until a sweep sees a hosted key, so comparisons never fire on an idle cluster). Below the cluster size means a write has not healed yet |
 | `rutli_anti_entropy_conflicts_total` | counter | — | Hosted keys found with *different* material on this node and a peer under the same key id — an invariant violation, never auto-reconciled |
+| `rutli_sign_intent_absent_total` | counter | — | Signatures this node took part in without a client-signed intent (accepted only while `signing_policy.require_intent` is off). Must stop growing once the driver signs intents; never moves on an enforcing cluster |
+| `rutli_sign_policy_refusals_total` | counter | `reason`=missing\|malformed\|certificate\|signer\|pin\|signature\|cluster\|purpose\|key\|expiry\|acl\|approval\|role\|… | Signatures this node refused by its signing policy (audit C2). `missing`/`approval`/`expiry` are rollout and NTP issues; `signer`/`certificate`/`signature`/`pin`/`cluster`/`key` mean something presented an intent this node does not accept |
+| `rutli_sign_rate_limited_total` | counter | — | Signatures refused by the per-key sign rate limit (per node; charged once per intent request id) |
+| `rutli_signer_acl_absent_total` | counter | — | Key operations by a Signer client CN with no `signer_acl` entry, allowed while `signer_acl_required` is off |
+| `rutli_sign_journal_entries_total` | counter | — | Shares this node journaled before releasing them |
+| `rutli_sign_journal_errors_total` | counter | — | Journal appends or opens that failed; the node refuses to release a share it cannot journal |
+| `rutli_delete_intent_refusals_total` | counter | `reason`=disabled\|role\|missing\|signer\|certificate\|signature\|cluster\|purpose\|key\|malformed\|expiry\|acl\|approval\|stale\|rollback | Hosted-key deletes and peer tombstones this node refused (audit M2) — on `DeleteKey`, a peer's `PurgeKey`, and a tombstone a peer lists in anti-entropy |
+| `rutli_hosted_tombstones_written_total` | counter | `how`=converted\|recorded | Tombstones this node wrote: a live copy deleted (directly or from a peer's tombstone), or a tombstone recorded for a key it did not hold |
+| `rutli_hosted_tombstones` | gauge | `retained`=true\|false | Deleted hosted keys on this node, split by whether the tombstone still retains the material (grace period) — refreshed by the anti-entropy sweep |
+| `rutli_keyfiles` | gauge | `format`=v1\|v2\|plaintext, `dek`=current\|previous\|unknown\|none | This node's key files at start-up (audit M4): a v2 migration watches `format="v1"` reach 0, a DEK rotation watches `dek="previous"` reach 0 before the previous DEK leaves the seal bundle; `dek="unknown"` files do not open on this node |
 
 Leader-side metrics (`sign_*`, `ceremony_*`) appear on whichever node served the driver's request —
 with driver failover that can be any of them, so always aggregate across instances (`sum(...)`).
@@ -61,6 +71,12 @@ primed to zero at startup, so they exist even where hosted keys are disabled; `r
 is primed to `NaN` for the same reason (zero would page an idle cluster instantly).
 `rutli_hosted_key_ops_total` has no fixed label set and its series appear on first use: alert on its
 rate, never on its absence.
+
+The signing-policy, delete and tombstone series are not primed: they first appear when they first
+count, so their rules (`deploy/monitoring/prometheus-rules.yml`: `RutliSignPolicyRefusals`,
+`RutliSignIntentAbsent`, `RutliSignRateLimited`, `RutliSignerAclAbsent`, `RutliSignJournalErrors`,
+`RutliDeleteIntentRefused`, `RutliHostedKeyDeleted`) alert on increases. `rutli_keyfiles` is set
+once per start (`RutliKeyFilesUnopenable`, `RutliKeyFileMigrationPending`).
 
 Published latency snapshots and how to reproduce them: [`performance.md`](performance.md).
 

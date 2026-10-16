@@ -130,7 +130,9 @@ All per node, in `signing_policy`. The defaults are in brackets.
 
 New metrics: `rutli_sign_intent_absent_total`, `rutli_sign_policy_refusals_total{reason}`,
 `rutli_sign_rate_limited_total`, `rutli_signer_acl_absent_total`, `rutli_sign_journal_entries_total`,
-`rutli_sign_journal_errors_total`.
+`rutli_sign_journal_errors_total` (`docs/observability.md`), with alerts in
+`deploy/monitoring/prometheus-rules.yml` (`RutliSignJournalErrors`, `RutliSignPolicyRefusals`,
+`RutliSignIntentAbsent`, `RutliSignRateLimited`, `RutliSignerAclAbsent`).
 
 ## Switching enforcement on
 
@@ -160,6 +162,29 @@ order:
 
 Rollback: turning a flag off is immediate (restart). A driver downgrade needs `require_intent` off
 first, or every sign is refused.
+
+## Approving hosted-key deletes
+
+Hosted-key deletes (audit M2) use the same approvers and the same request-id scheme, enforced at
+every cosigner and nowhere else: `hosted_keys.delete_approval_threshold` on every node (0 = none; at
+least 1 is recommended in production, decision P8) names how many distinct `signing_policy.approvers`
+must approve. The digest an approver signs for is the delete digest of the key,
+SHA-256(`"rutli-delete-key-v1\n"` ‖ key id), so a delete approval can never serve as a signing approval
+or vice versa. The delete role itself is `hosted_keys.delete_allowlist` (`docs/hosted-keys.md`,
+Delete).
+
+```sh
+# the delete-role operator (its certificate in the client config):
+rutli-cosigner --config client-operator.json delete-hosted-key --key-id <id> \
+  --approvals-inbox /var/rutli/approvals --approvals 2
+# each approver, from the same inbox (it shows keyId and the digest it recomputes the id from):
+java -cp rutli-driver.jar com.stakecraft.rutli.policy.ApproveCli approve \
+  --inbox /var/rutli/approvals --id alice --key alice.key --request <requestId>
+```
+
+The driver signs delete intents for Canton's `deleteKey` without approvals; with a threshold set,
+those deletes are refused (`rutli_delete_intent_refusals_total{reason="approval"}`) and go through
+the operator command instead.
 
 ## Approver workflow
 

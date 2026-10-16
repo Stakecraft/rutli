@@ -198,6 +198,12 @@ last, with a rolling restart (`# [MUTATES]`, user only).
 - Driver: put the rc.1 jar and the previous `frost` block back and restart the participant. The
   audit-log and journal formats are unchanged; anything rc.2 appended stays readable. An rc.1 driver
   sends no signing intents, so roll `signingPolicy.require_intent` back to false first.
+- Key files: an older cosigner reads only v1. Leave `keyfile` unset during the soak's first weeks on
+  this release (it then writes v1); once `keyfile.write_version: 2` is on, a cosigner rollback needs
+  `rutli-cosigner keyfile downgrade` on each node first (daemon stopped) and `write_version: 1`.
+  The legacy topology has no `maintenanceNodes` (perNode only): stop a node's daemon for the offline
+  commands by scaling the StatefulSet only during a full maintenance window, or migrate to perNode
+  first (next section).
 
 ## 6. Remove the exec-based backup (the user runs this)
 
@@ -220,9 +226,20 @@ for o in 0 1 2; do
 done
 ```
 
-Keep them off-cluster and apart from the seal master.
+Keep them off-cluster and apart from the seal master. Copy the sign journals too
+(`tar -C /data -cf - keys journal`): they are the evidence `audit-cross-check` needs. Restoring one
+of these needs the daemon stopped (`restore` takes the instance lock and refuses to roll a share
+back, `docs/disaster-recovery.md` §1).
 
 ## Next
 
 [runbook-per-node-seal.md](runbook-per-node-seal.md): per-node seal bundles, one StatefulSet per
 node, per-node Services for the driver, and the backup sidecar. Record this upgrade in the soak log.
+
+Then the rest of batch C, in the order `CHANGELOG.md` gives ("Rollout order across batch C"): flip
+the signing-policy switches; key-file v2 (`keyfile.cluster_uuid`, then `write_version: 2`); a DEK
+rotation per node (`docs/disaster-recovery.md` §3h) — the soak's legacy master then goes to offline
+escrow until every node's previous DEK is dropped and the backups sealed under it have aged out, and
+is destroyed after (decision P1); hosted-key deletes stay disabled on the soak unless a test needs
+them. Every DKG/refresh output from before ceremony protocol 2 on the soak is leader-exposed test
+material (P9).

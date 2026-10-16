@@ -253,7 +253,9 @@ failover can never produce two different keys under one name. Requesting an exis
 *different* spec is a hard error, never a silent replacement.
 
 **Below `write_quorum` the write rolls back.** The leader purges the partial copies and returns an
-error, leaving the id free for a clean retry — a single node holding the only copy is precisely the
+error, leaving the id free for a clean retry. Each node removes only a key it created in that very
+generation while the generation still holds its fence — a `PurgeKey` without a delete intent is
+nothing else, so a leader cannot use "rollback" to destroy an existing key — a single node holding the only copy is precisely the
 failure this feature exists to prevent. Above quorum but below n, the key is created, a warning is
 logged, and anti-entropy repairs the missing replica.
 
@@ -294,15 +296,52 @@ Rotation fixes the future, not the past — see section 5.
 
 ### Delete
 
-`DeleteKey` purges the key on every reachable node, best-effort, and reports whether any node
-deleted it. The hosted delete path refuses FROST shares outright: the namespace key is
-non-rotatable, and deleting it destroys the node's identity.
+A delete is a **tombstone**, authorized by the client (audit M2). Before this release `DeleteKey`
+physically removed the key on every reachable node, best-effort: any driver-certificate holder (or
+one cosigner, through `PurgeKey`) could purge every replica, and a node that was down during the
+delete pushed the key back to everyone at its next anti-entropy sweep.
 
-**Do not claim secure erasure.** On copy-on-write filesystems, wear-levelled SSDs and snapshotted
-volumes, removing a file does not destroy the bytes, and any backup taken while the key existed
-still contains it. The honest statement is: delete removes the referenced copies. True destruction
-requires rotating the cluster master secret so that every old sealed blob — including the ones in
-your backups — becomes undecryptable.
+- **Who may delete:** only a client on the **delete role**, `hosted_keys.delete_allowlist` on every
+  node — a role of its own. Being able to `Sign` or `Decrypt` does not make a client able to delete;
+  the driver certificate cannot delete unless an operator lists its CN. Empty (the default): hosted
+  keys cannot be deleted at all. `delete_acl` narrows a CN to key-id prefixes; a cosigner CN is
+  refused by config validation.
+- **How:** the client signs a delete intent (a `SignedIntent` with purpose `delete-key` and digest
+  SHA-256(`"rutli-delete-key-v1\n"` ‖ key id)) with its mTLS key and sends it in `DeleteKey`. The leader
+  checks it, fences the key, and forwards it in `PurgeKey`; **every node verifies it itself** — chain
+  to the cluster CA, the delete role, pin, signature, cluster, key, digest, validity, ACL — and, with
+  `delete_approval_threshold` > 0, counts approvals by its own `signing_policy.approvers` over the
+  same request id `rutli-approve` signs. The delete succeeds once `write_quorum` nodes hold the
+  tombstone; the rest get it from anti-entropy.
+- **The operator command:** `rutli-cosigner --config <client config with a delete-role certificate>
+  delete-hosted-key --key-id <id>`; with `--approvals-inbox <dir> --approvals <n>` it first writes a
+  pending request into the same inbox `ApproveCli approve` serves and waits for `n` approvals. The
+  driver signs a delete intent for Canton's `deleteKey` too (no approvals: if the cosigners require
+  them, Canton's delete fails and the operator command is the way).
+- **What a tombstone is:** the key file replaced in place by a sealed tombstone record (key-file kind
+  `tombstone`) holding the authorizing intent and, for `hosted_keys.delete_grace_secs` (default 7
+  days), the key's material. Every read of the id answers NOT_FOUND; create, replicate and read-repair
+  refuse it; it travels in `ListKeys` and **beats a live copy** in anti-entropy (the receiving node
+  verifies the intent itself, ignoring only its expiry). A node restored from a backup taken before
+  the delete is converted by its next sweep; nothing is ever pushed to a node holding the tombstone.
+  A tombstone never applies to a copy created or undeleted after its intent was issued.
+- **Undelete** within the grace period: `rutli-cosigner hosted-undelete --key-id <id>` on every
+  node, daemon stopped (`disaster-recovery.md` §3g). **Reusing a deleted id** needs
+  `hosted-clear-tombstone` on every node — a break-glass Canton never needs, since it mints fresh ids.
+- The hosted delete path refuses FROST shares outright: the namespace key is non-rotatable, and
+  deleting it destroys the node's identity.
+
+Rollout: tombstones need every cosigner on this release before the first delete — an older node
+ignores them (it reads a tombstone file as unreadable and lists a peer's tombstone as a key), so with
+a mixed cluster a delete may not hold. Configure the same delete role on every node: a node with
+deletes disabled refuses peers' tombstones too.
+
+**Do not claim secure erasure.** The tombstone keeps the material for the grace period by design;
+after it, on copy-on-write filesystems, wear-levelled SSDs and snapshotted volumes, the bytes may
+survive, and any backup taken while the key existed still contains it. The honest statement is:
+delete stops the key being served, cluster-wide and durably. Backups stop opening once the node's DEK
+that sealed them is dropped (`seal rotate-dek`, then `seal drop-previous` — `disaster-recovery.md`
+§3h).
 
 ## 4. Operations
 
@@ -355,7 +394,7 @@ so the existing commands already cover them:
 
 ```sh
 rutli-cosigner --config /etc/rutli/cosigner-2.json backup  --out /secure/backups/cosigner-2/$(date +%F)
-rutli-cosigner --config /etc/rutli/cosigner-2.json restore --from /secure/backups/cosigner-2/2026-08-17 --force
+rutli-cosigner --config /etc/rutli/cosigner-2.json restore --from /secure/backups/cosigner-2/2026-08-17
 ```
 
 That shared directory is intentional — a sibling directory would be silently skipped by every
@@ -511,8 +550,8 @@ decrypt already-recorded traffic.
    possibility as live until you have ruled it out.
 5. Only once the live copy is identified: stop the divergent node, move that key's file out of its
    `data_dir/keys/` (one file per key id) into a quarantine directory, and restart it — the next
-   sweep re-pulls the live material. **Do not use `DeleteKey` for this.** It purges cluster-wide,
-   including the copy you just decided was the good one.
+   sweep re-pulls the live material. **Do not use `DeleteKey` for this.** It tombstones the key
+   cluster-wide, including the copy you just decided was the good one.
 6. Rotate the key through Canton topology afterwards if there is any chance the divergent material
    was ever used, and treat the interval since divergence as a confidentiality incident (section 5).
 

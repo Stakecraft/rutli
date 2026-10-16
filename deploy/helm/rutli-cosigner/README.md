@@ -96,6 +96,9 @@ Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org A
 | `refreshAllowlist` | `[]` | Refresher role for the refresh job (Refresh + KeyStatus only, never Sign), e.g. `[refresher]`; may be `[operator]` until a refresher cert exists |
 | `signingPolicy` | `{}` | Cosigner signing policy (audit C2), rendered verbatim as `signing_policy`: `require_intent`, `signer_acl_required`, `signer_may_refresh`, `signer_acl`, `signer_pins`, rate limits, journal retention, approval `rules`/`approvers` — see `docs/approval-quorum.md`. Empty = verify-if-present defaults |
 | `hostedKeys.enabled` | `false` | Cluster-hosted RSA/AES keys — replicated whole keys, not threshold shares |
+| `hostedKeys.deleteAllowlist` | `[]` | Delete role (audit M2): client CNs whose signed delete intents tombstone hosted keys. Empty = no deletes; never a cosigner CN. `deleteAcl`, `deleteApprovalThreshold` (≥ 1 in production), `deleteGraceSecs` (604800) — `docs/hosted-keys.md`, Delete |
+| `keyfile` | `{}` | Key-file format (audit M4), rendered verbatim as `keyfile`: `cluster_uuid`, `write_version` (1 or 2), `accept_v1` — `docs/disaster-recovery.md` §3h |
+| `maintenanceNodes` | `[]` | perNode only: node ids whose cosigner container runs no daemon (`sleep infinity`, never Ready), for `restore`, `keyfile`, `hosted-undelete` and the ceremony tools, which take the instance lock |
 | `backup.enabled` | `false` | perNode only: per-pod backup sidecar to a per-node destination (below) |
 
 See [`values.yaml`](values.yaml) for the full set.
@@ -171,8 +174,8 @@ pin must be ≥ 0.3.1.
 
 `backup.enabled=true` (topology perNode) adds a `backup` sidecar to each cosigner pod. Once a day
 (`backup.dailyAtUtc`, default 03:17 UTC; plus once at pod start) it tars that node's **sealed**
-`keys/*.json` — never dotfiles, nonce markers or temps — and hands the tar to that node's
-destination:
+`keys/*.json` — never dotfiles, nonce markers or temps — and its sign journals (`journal/`), and
+hands the tar to that node's destination:
 
 - `backup.destination.type: pvc` (default): a per-node backup PVC `<fullname>-backup-n<id>` (or
   `nodes[].backupClaim`), mounted in that node's sidecar only; the newest `backup.destination.keep`

@@ -30,6 +30,8 @@ key, Canton can rotate them.
 | Every copy of a **cluster-hosted** key lost (whole cluster, no backup) | Only from backups | Restore **one** node's own backup onto that node (§3); the cluster re-replicates from it. With no backup the key is gone — rotate in Canton and accept §3b's bounded data gap. |
 | Seal **master secret** lost (backups intact but unopenable) | Only from an export | A sealed backup is useless without the master secret. An `export-key` artifact taken beforehand is the only recovery — see §3d. Without either, the key is gone: rotate in Canton and accept §3b's bounded gap. |
 | A **cluster-hosted** encryption key exposed | Mitigate, not undo | Rotate the key in Canton topology (the namespace key signs it; node identity is untouched). Rotation protects future traffic only — recorded traffic encrypted to the old key stays readable to whoever holds it. |
+| A cosigner restored from an **old backup** / volume snapshot | Yes, detected | `restore` refuses to roll a share back to an older epoch, even with `--force` (§1). A snapshot rollback or a break-glass restore is caught at the node's next start: its share is marked stale and refused for signing until current (`RutliStaleShare`). |
+| A hosted key **deleted** by mistake | Yes, within the grace period | `hosted-undelete` on every node (§3g) — the tombstone retains the material for `hosted_keys.delete_grace_secs` (7 days). |
 | **Cluster CA private key** lost | Yes, no key material at risk | Nothing breaks until the certificates expire, but no certificate can be issued (operator, replacement, new node, renewal). **Rotate the CA** with a dual-CA overlap (§3f, [ca-rotation.md](ca-rotation.md)). Shares, hosted keys, backups and exports do not depend on the CA. |
 
 ## §1 Restore a single cosigner from backup
@@ -40,14 +42,48 @@ Shares are encrypted at rest (see share sealing), so backups carry no plaintext 
 # routine, per cosigner, on a schedule — with the node stopped or the share dir quiesced:
 rutli-cosigner --config /etc/rutli/cosigner-2.json backup  --out /secure/backups/cosigner-2/$(date +%F)
 
-# recover a wiped node:
-rutli-cosigner --config /etc/rutli/cosigner-2.json restore --from /secure/backups/cosigner-2/2026-07-01 --force
+# recover a wiped node (daemon STOPPED — restore takes the instance lock):
+rutli-cosigner --config /etc/rutli/cosigner-2.json restore --from /secure/backups/cosigner-2/2026-07-01
 # then start the daemon; it rejoins with its old share (same group key).
 ```
 
+A backup holds the node's sealed key files (`keys/*.json`) and, since 0.4.0-rc.2, its **sign
+journals** (`journal/<key>/*.jsonl`): the node's own record of every signature share it released,
+which `rutli-cosigner audit-cross-check` compares with the driver's audit log. Never the seal bundle
+and never the TLS key. `restore` restores key files only; a journal in the backup is evidence, never
+copied back over a live journal.
+
+**What `restore` checks** (audit M1, `rutli_cosigner::restore`). It verifies **every** file in the
+backup before it writes anything, and one refusal writes nothing:
+
+- each file opens exactly like a live key file of this node: sealed (a plaintext file is refused
+  under sealing), a key-file v2 header naming this cluster (`keyfile.cluster_uuid`), this node and
+  the file's own key id, and a record consistent with it — a file of another node or cluster, or
+  renamed, is refused;
+- **no rollback, even with `--force`**: a FROST share at an older epoch than the live one (or than
+  the newest epoch this node's ceremony records say it committed — so deleting the live file first
+  does not help), another sharing at the same epoch, different material under a hosted key id, or a
+  hosted key over its tombstone. Another group key under the same id, or another kind of record, is
+  always refused;
+- an identical file (same sharing / same hosted key) is left alone; `--force` only lets a backup
+  that is **ahead** replace the live file (a newer epoch after a snapshot rollback, a tombstone over
+  a live key).
+
+The verified bytes go into `keys/.restore-<uuid>/` first (fsynced), then each is renamed over its
+target and the directory fsynced: a crash before the renames leaves the live store untouched (the
+next restore sweeps the staging directory), a crash during them leaves each file either old or new.
+
+**Break-glass** (an old epoch is the only copy left, a deleted key must come back from a backup):
+the refusal prints the exact flags for that one key —
+`--break-glass --key-id <id> --expected-epoch <e> --expected-digest <d>` (a share's PKP digest, else
+the SHA-256 of the backup file) — and nothing else in the backup is exempted. A share restored this
+way is then **behind its peers**: at its next start the node's stale-share check marks it stale and
+it refuses to sign with it until it is current (`RutliStaleShare`; re-enrol it, or refresh once
+every node is back on one epoch). It is a way to keep a copy, not a way to sign with an old sharing.
+
 Store backups **off the node's host** and, ideally, geographically separated. Because the shares are
-sealed, the backup is only usable together with the node's seal secret (which lives in your secret
-manager, not on disk) — keep the two recovery inputs in separate trust domains.
+sealed, the backup is only usable together with the node's seal bundle (a per-node Secret, never on
+the backup path) — keep the two recovery inputs in separate trust domains.
 
 **On Kubernetes: never mount a cosigner volume into another pod.** A cosigner's `data` PVC is
 mounted by that cosigner's pod and by nothing else, ever — not a backup Job, not a debug pod, not a
@@ -61,21 +97,25 @@ restarted (`soak-2026-10-devnet.md`, incident #1).
 Since 0.4.0-rc.2 the backup runs **in the cosigner's own pod**: with `topology: perNode` and
 `backup.enabled=true` (the Helm chart; `deploy/k8s` renders the same), each pod has a `backup`
 sidecar that mounts the pod's own data volume **read-only** (same pod, so no second mount of the
-claim) and copies that node's sealed `keys/*.json` daily to **that node's** destination — a per-node
-backup PVC by default, or a script with per-node credentials. The sidecar never mounts the seal
-bundle or the TLS key, and there is no CronJob, ServiceAccount or `pods/exec` RBAC any more: the
+claim) and copies that node's sealed `keys/*.json` and its sign journals daily to **that node's**
+destination — a per-node backup PVC by default, or a script with per-node credentials. The sidecar
+never mounts the seal bundle or the TLS key and never writes the data volume (all three enforced by
+`scripts/check-deploy-policy.sh`), and there is no CronJob, ServiceAccount or `pods/exec` RBAC any more: the
 exec-based backup Job of earlier releases could exec into every cosigner and read every node's seal
 secret, i.e. it held the whole key (audit C3). `scripts/check-deploy-policy.sh` refuses such RBAC.
 
 ```sh
 # what ran (one line per run):
 kubectl -n rutli logs rutli-cosigner-n2-0 -c backup | grep BACKUP_
-# restore onto a rebuilt node 2 (empty data volume), through the cosigner's own container:
+# restore onto a rebuilt node 2: put node 2 in maintenance (its cosigner container idles with no
+# daemon, so the instance lock is free; the other nodes keep signing) ...
+helm upgrade rutli deploy/helm/rutli-cosigner -n rutli -f saved-values.yaml --set 'maintenanceNodes={2}'
 kubectl -n rutli exec rutli-cosigner-n2-0 -c backup -- cat /backup/node-2-<stamp>.tar > node-2.tar
 kubectl -n rutli exec -i rutli-cosigner-n2-0 -c cosigner -- mkdir -p /tmp/restore
 kubectl -n rutli exec -i rutli-cosigner-n2-0 -c cosigner -- tar -C /tmp/restore -xf - < node-2.tar
-kubectl -n rutli exec rutli-cosigner-n2-0 -c cosigner -- rutli-cosigner --config /config/cosigner-2.json restore --from /tmp/restore --force
-kubectl -n rutli delete pod rutli-cosigner-n2-0   # the daemon reopens its key store with the restored share
+kubectl -n rutli exec rutli-cosigner-n2-0 -c cosigner -- rutli-cosigner --config /config/cosigner-2.json restore --from /tmp/restore
+# ... and back to service: the daemon opens the restored store and runs its stale-share check
+helm upgrade rutli deploy/helm/rutli-cosigner -n rutli -f saved-values.yaml --set 'maintenanceNodes={}'
 ```
 
 These `kubectl exec` calls are a human operator's, made for a restore; no standing principal may
@@ -242,16 +282,17 @@ rather than silently continuing with a wrong or empty key set:
   logs an error and increments `rutli_anti_entropy_conflicts_total` instead of picking a winner. Any
   increase is page-worthy — it means something wrote outside the create-once discipline.
 
-**Two hazards to write into your runbook.**
+**Deletes are tombstones (audit M2), so a stale node no longer resurrects a deleted key.** A delete
+replaces the key file with a tombstone on every node, authorized by a delete intent each node
+verifies, and the tombstone travels in anti-entropy: a node that was down during the delete, or was
+restored from a backup taken before it, has its live copy converted by its next sweep, and nothing
+is ever pushed to (or pulled from) a node that holds the tombstone. `restore` refuses to put a
+deleted key back over its tombstone without a break-glass (§1). See §3g for undelete.
 
-- **A stale backup can resurrect a deleted key.** The sweep treats "a peer does not have this key" as
-  something to fix, and cannot distinguish it from "this key was deleted cluster-wide while this node
-  was down". Restoring an old backup will therefore push a since-deleted hosted key back to every
-  node. After a cluster-wide delete, prune the key from the backups — or simply re-issue the delete
-  once the restored node has rejoined.
-- **Delete is not erasure.** Deleting a hosted key removes the only referenced copy; it does not
-  destroy bytes on a COW filesystem, a wear-levelled SSD, a volume snapshot, or an existing backup.
-  True destruction requires rotating the master secret and re-sealing every live key.
+**Delete is not erasure.** The tombstone deliberately keeps the material (sealed) for the grace
+period; after it, the material leaves the live file — but not a COW filesystem, a wear-levelled SSD,
+a volume snapshot, or an existing backup. Backups stop opening only once the DEK that sealed them is
+gone: rotate the node's DEK (`seal rotate-dek`, §3h) and drop the previous one after the next backup.
 
 ## §3d Recovering with an exported key (seal secret lost, or moving clusters)
 
@@ -342,17 +383,80 @@ the mesh. Exact commands, per-step gates and rollback: [ca-rotation.md](ca-rotat
 **Prevention (§4):** escrow the new CA key encrypted in two independent locations, test the restore
 by comparing public keys, and record where it lives in the key-ceremony record.
 
+## §3g Hosted-key deletes: undelete, and reusing a deleted id
+
+A delete (`DeleteKey`, `rutli-cosigner delete-hosted-key`, or Canton's `deleteKey` through the
+driver if its CN holds the delete role) leaves a tombstone on every node that **retains the key's
+material** for `hosted_keys.delete_grace_secs` (default 7 days; the anti-entropy sweep drops it
+afterwards — `rutli_hosted_tombstones{retained}`).
+
+- **Undelete, within the grace period:** on **every** node, with its daemon stopped (perNode:
+  `maintenanceNodes`), `rutli-cosigner --config … hosted-undelete --key-id <id>`; then
+  `verify-hosted`. A node still holding the tombstone answers NOT_FOUND for the key (and the driver
+  does not fail over on NOT_FOUND), so undelete every node before relying on the key. The undeleted
+  copy ignores the old delete intent from then on, also from peers that still hold the tombstone; a
+  new delete works as usual.
+- **After the grace period** the material is only in backups taken before the delete: `restore`
+  with the break-glass the refusal prints (§1), on one node, then `hosted-undelete` is not needed —
+  but the other nodes keep their tombstones and refuse the key until they are cleared too. Treat it
+  as an incident.
+- **Reusing a deleted key id** (never needed by Canton, which mints fresh ids): the tombstone blocks
+  generating the id again, by design. Break-glass, on **every** node with its daemon stopped:
+  `rutli-cosigner --config … hosted-clear-tombstone --key-id <id> --confirm-key-id <id>` (refused
+  while the tombstone still retains material). A generation fails and rolls back while any reachable
+  node still holds the tombstone; a node that was down holds on to it and refuses the new key until
+  cleared.
+
+## §3h Key-file format v2, DEK rotation, retiring the legacy seal master
+
+Key files are sealed per node. Format v2 (`keyfile.write_version: 2`) binds each file's header —
+cluster (`keyfile.cluster_uuid`), node, key id, kind, epoch, digest, DEK id — into the AEAD, so a
+file copied to another id, node or cluster no longer opens, and a plaintext file under sealing stops
+the daemon at start (seal a genuine one with `keyfile migrate-plaintext`, which shows what the file
+holds and asks for a confirmation code). `rutli-cosigner keyfile status` lists every file's format
+and DEK; `rutli_keyfiles{format,dek}` shows the same at each start.
+
+**Rolling back** to a release that reads only v1: `keyfile downgrade` on each node (daemon stopped),
+with `keyfile.write_version: 1` set first. Downgrade every node or none if hosted keys were deleted:
+an older release reads tombstones as unreadable files.
+
+**DEK rotation** (per node; finishes decision P1):
+
+1. On a workstation: `rutli-cosigner seal rotate-dek --in node-2.json --out node-2-rotated.json`
+   (fresh DEK, the old one kept as `previous_share_deks`, same distribution key — no peer re-pins).
+2. Replace node 2's seal Secret with the rotated bundle and restart node 2: it re-seals every key file
+   under the new DEK at start (or `keyfile migrate` with the daemon stopped). Check `keyfile status`
+   shows no file under a previous DEK, and `RutliKeyFilesUnopenable` is quiet.
+3. Take a backup. Backups taken **before** this point open only with the previous DEK.
+4. `seal drop-previous --in node-2-rotated.json --out node-2-final.json`, replace the Secret again,
+   restart. Old backups no longer open on this node — keep the previous bundle escrowed for as long
+   as you keep those backups, or accept that they are gone.
+
+**Retiring the legacy shared master** (clusters migrated with `seal split-legacy`): the master
+derives every node's original DEK, so it opens every backup taken before the rotation. Escrow it
+offline (two locations, strong KDF) until every node has finished step 4 and every backup sealed
+under a master-derived DEK has aged out, then destroy it. It also derives the hosted-key
+distribution seeds and the commitment key, which the bundles carry from then on; rotating those is a
+separate, optional step (new bundles with `seal new-node` and new peer pins), not needed to retire
+the master.
+
 ## §4 What you MUST have in place before go-live
 
 - **≥ `t` cosigner share backups**, encrypted (sealed) and stored in ≥ 2 separated locations. This is
   the difference between "recoverable" and "irrecoverable" for the catastrophic case.
 - **Seal secrets** for those shares in a secret manager, in a different trust domain from the backups.
-- On Kubernetes, the job that takes those backups runs `kubectl exec` **inside** each cosigner.
-  **Never mount a cosigner volume into another pod** — it took the DevNet soak's signing down on
-  2026-10-07 (§1).
+- On Kubernetes, backups run as the per-pod **backup sidecar** (perNode topology): the data volume
+  read-only, no seal bundle, no TLS key, one destination per node. **Never mount a cosigner volume
+  into another pod** — it took the DevNet soak's signing down on 2026-10-07 (§1).
+- The **sign journals** in those backups, kept as long as your audit policy requires: they are the
+  cluster's independent record of every signature (`audit-cross-check`).
+- **Key-file v2** on (`keyfile.cluster_uuid` recorded with the key-ceremony record — it must never
+  change), and each node's DEK rotated away from the legacy master (§3h).
 - A **documented, rehearsed** restore drill (test §1 and §3 on a devnet with the same tooling — the
   cluster test `a_lost_node_recovers_from_a_share_backup_and_the_cluster_signs` is the automated
-  analogue).
+  analogue, and `frost/cosigner/tests/restore.rs` covers the refusals, the break-glass and the
+  atomic install). Rehearse the break-glass too: who may authorize it, and that the node comes up
+  stale.
 - The **cluster CA private key escrowed**: encrypted with a strong KDF (`openssl pkcs8 -topk8 -v2
   aes-256-cbc -iter 600000`, or `age`; not `openssl pkey -aes256`), in ≥ 2 independent locations,
   restore tested (`openssl pkey -pubout` of the restored key equals the CA certificate's public
