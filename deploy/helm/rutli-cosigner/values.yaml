@@ -129,8 +129,21 @@ hostedKeys:
 persistence:
   size: 1Gi
   storageClassName: ""
+  # ReadWriteOncePod: the kernel lets exactly ONE pod mount a share volume, so a second cosigner
+  # process on the same share (a force-deleted pod on a partitioned node, a debug or backup pod
+  # that binds the claim) cannot start. Needs a CSI driver that supports it (Kubernetes >= 1.29,
+  # GA). The cosigner also takes a flock on its data dir, which covers two processes on ONE node.
+  #
+  # volumeClaimTemplates are IMMUTABLE on an existing StatefulSet: `helm upgrade` of a release
+  # installed with the old default fails ("updates to statefulset spec ... are forbidden"). An
+  # EXISTING install must keep the mode it was created with — override it:
+  #   persistence:
+  #     accessModes: [ReadWriteOnce]
+  # (deploy/soak/cosigner-values.yaml does this for the DevNet soak). Moving an existing install to
+  # ReadWriteOncePod means recreating the StatefulSet and its claims (restore from backup); do it
+  # only as a planned operation.
   accessModes:
-    - ReadWriteOnce
+    - ReadWriteOncePod
 
 resources:
   requests:

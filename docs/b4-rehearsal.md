@@ -167,8 +167,8 @@ done; rm -f $D/tls/c.crt $D/tls/c.key
 # driver cert for the B4 bundle (4.0); delete from the laptop right after 4.0
 kubectl -n rutli get secret rutli-cosigner-tls -o jsonpath='{.data.driver\.crt}' | base64 -d > $D/tls/driver.crt
 kubectl -n rutli get secret rutli-cosigner-tls -o jsonpath='{.data.driver\.key}' | base64 -d > $D/tls/driver.key; chmod 600 $D/tls/driver.key
-helm template rutli deploy/helm/rutli-cosigner -n rutli -f $D/rutli-values.pre-b4.yaml | kubectl diff -n rutli -f -
-helm -n rutli upgrade rutli deploy/helm/rutli-cosigner -f $D/rutli-values.pre-b4.yaml                 # [MUTATES]
+helm template rutli deploy/helm/rutli-cosigner -n rutli -f $D/rutli-values.pre-b4.yaml -f deploy/soak/cosigner-values.yaml | kubectl diff -n rutli -f -
+helm -n rutli upgrade rutli deploy/helm/rutli-cosigner -f $D/rutli-values.pre-b4.yaml -f deploy/soak/cosigner-values.yaml                 # [MUTATES]
 kubectl -n rutli rollout status sts/rutli-cosigner --timeout=15m
 for o in 0 1 2; do kubectl -n rutli exec rutli-cosigner-$o -c cosigner -- ls /certs; done
 for o in 0 1 2; do kubectl -n rutli exec rutli-cosigner-$o -c cosigner -- sh -c 'sha256sum /certs/ca.crt'; done
@@ -183,8 +183,8 @@ Do **not** delete `rutli-cosigner-tls` yet. It is the rev 4 rollback path. Delet
 **Step B: image → `0.4.0-rc.1` + `operatorAllowlist` (rev 6).**
 ```sh
 git -C <rutli checkout> checkout v0.4.0-rc.1
-helm template rutli deploy/helm/rutli-cosigner -n rutli -f $D/rutli-values.pre-b4.yaml --set 'operatorAllowlist={operator}' | kubectl diff -n rutli -f -
-helm -n rutli upgrade rutli deploy/helm/rutli-cosigner -f $D/rutli-values.pre-b4.yaml --set 'operatorAllowlist={operator}'   # [MUTATES]
+helm template rutli deploy/helm/rutli-cosigner -n rutli -f $D/rutli-values.pre-b4.yaml -f deploy/soak/cosigner-values.yaml --set 'operatorAllowlist={operator}' | kubectl diff -n rutli -f -
+helm -n rutli upgrade rutli deploy/helm/rutli-cosigner -f $D/rutli-values.pre-b4.yaml -f deploy/soak/cosigner-values.yaml --set 'operatorAllowlist={operator}'   # [MUTATES]
 kubectl -n rutli rollout status sts/rutli-cosigner --timeout=15m
 kubectl -n rutli get sts rutli-cosigner -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
 for o in 0 1 2; do kubectl -n rutli logs rutli-cosigner-$o -c cosigner | head -20 | grep -iE 'identifier|version|share sealing|WITHOUT TLS|WARN'; done

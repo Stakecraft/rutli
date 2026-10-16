@@ -162,7 +162,11 @@ spec:
     - metadata:
         name: data # holds the sealed key share + nonce markers — MUST be durable
       spec:
-        accessModes: ["ReadWriteOnce"]
+        # ReadWriteOncePod: only one pod may ever mount a share volume (needs Kubernetes >= 1.29).
+        # volumeClaimTemplates are immutable on an existing StatefulSet, so an install that already
+        # runs with ReadWriteOnce must keep it (patch this line locally; do not `apply` the new mode
+        # over a live StatefulSet).
+        accessModes: ["ReadWriteOncePod"]
         resources:
           requests:
             storage: 1Gi

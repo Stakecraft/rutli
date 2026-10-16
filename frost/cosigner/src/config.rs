@@ -229,6 +229,30 @@ impl Config {
         if self.peers.is_empty() {
             return Err(Config("peer roster is empty".into()));
         }
+        // A roster is a set. A repeated identifier would make `max_signers` and the threshold
+        // check count a node twice, and a repeated endpoint would send two rounds to one node (the
+        // second fails with UnknownSession and the quorum is silently one short).
+        let mut seen_ids = std::collections::HashSet::new();
+        for p in &self.peers {
+            if !seen_ids.insert(p.identifier) {
+                return Err(Config(if p.identifier == self.identifier {
+                    format!("this node's identifier {} is listed more than once in the peer roster", p.identifier)
+                } else {
+                    format!("peer identifier {} is listed more than once in the peer roster", p.identifier)
+                }));
+            }
+        }
+        let mut seen_endpoints = std::collections::HashSet::new();
+        for p in &self.peers {
+            // Compared loosely (case, trailing slash) so trivial respellings of one address count.
+            let norm = p.endpoint.trim().trim_end_matches('/').to_ascii_lowercase();
+            if !seen_endpoints.insert(norm) {
+                return Err(Config(format!(
+                    "peer endpoint {:?} (identifier {}) is listed more than once in the peer roster",
+                    p.endpoint, p.identifier
+                )));
+            }
+        }
         if self.threshold < 1 || self.threshold > self.max_signers() {
             return Err(Config(format!(
                 "threshold {} out of range 1..={}",
@@ -266,6 +290,16 @@ impl Config {
                  cert CNs permitted to call the mesh Peer API (typically every cosigner)"
                     .into(),
             ));
+        }
+        // The Signer API and the mesh Peer API are separate roles: a CN in both would put a
+        // cosigner cert on the Signer API (or the driver on the raw FROST rounds).
+        if let (Some(signers), Some(peers)) = (&self.signer_allowlist, &self.peer_allowlist) {
+            if let Some(cn) = signers.iter().find(|cn| peers.contains(cn)) {
+                return Err(Config(format!(
+                    "CN {cn:?} is in both signer_allowlist and peer_allowlist — a cosigner identity \
+                     must not also be a Signer API client (and the driver must not be a mesh peer)"
+                )));
+            }
         }
         // The operator role exists to be weaker than the driver role; a CN in two role lists
         // would quietly be the stronger one (and a cosigner CN would put a mesh cert on the
@@ -358,7 +392,9 @@ mod tests {
 
     #[test]
     fn tls_with_allowlist_is_ok() {
-        base(Some(tls()), Some(vec!["driver".into()])).validate().unwrap();
+        let mut c = base(Some(tls()), Some(vec!["driver".into()]));
+        c.peer_allowlist = Some(vec!["cosigner1".into(), "cosigner2".into(), "cosigner3".into()]);
+        c.validate().unwrap();
     }
 
     #[test]
@@ -384,6 +420,7 @@ mod tests {
         let ca = dir.path().join("ca.crt");
         std::fs::write(&ca, b"-----BEGIN CERTIFICATE-----\nold\n-----END CERTIFICATE-----\n").unwrap();
         let mut c = base(Some(TlsConfig { ca_cert: ca.clone(), ..tls() }), Some(vec!["driver".into()]));
+        c.peer_allowlist = Some(vec!["cosigner1".into(), "cosigner2".into(), "cosigner3".into()]);
 
         // Unset: derived from the CA file's bytes, as before.
         let derived = crate::wrap::cluster_id_from_ca(&std::fs::read(&ca).unwrap());
@@ -409,6 +446,7 @@ mod tests {
     #[test]
     fn a_malformed_cluster_id_pin_is_rejected() {
         let mut c = base(Some(tls()), Some(vec!["driver".into()]));
+        c.peer_allowlist = Some(vec!["cosigner1".into(), "cosigner2".into(), "cosigner3".into()]);
         c.cluster_id = Some("453bb4aea2088bb5".into());
         c.validate().unwrap();
         for bad in ["453BB4AEA2088BB5", "453bb4aea2088bb", "453bb4aea2088bb5a", "453bb4aea2088bbz", ""] {
@@ -428,6 +466,46 @@ mod tests {
         let pinned: Config =
             serde_json::from_str(&json.replacen('{', r#"{"cluster_id":"453bb4aea2088bb5","#, 1)).unwrap();
         assert_eq!(pinned.cluster_id().unwrap(), "453bb4aea2088bb5");
+    }
+
+    #[test]
+    fn duplicate_peer_identifiers_are_rejected() {
+        let mut c = base(None, None);
+        c.peers[2].identifier = 2;
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("peer identifier 2") && e.contains("more than once"), "{e}");
+    }
+
+    #[test]
+    fn this_node_listed_twice_is_rejected() {
+        let mut c = base(None, None);
+        c.peers.push(PeerConfig { identifier: 1, endpoint: "https://a2:9101".into() });
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("this node's identifier 1"), "{e}");
+    }
+
+    #[test]
+    fn duplicate_peer_endpoints_are_rejected() {
+        let mut c = base(None, None);
+        c.peers[2].endpoint = "https://b:9101".into();
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("endpoint") && e.contains("more than once"), "{e}");
+        // Trivial respellings of one address count as the same endpoint.
+        c.peers[2].endpoint = "HTTPS://B:9101/".into();
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn signer_and_peer_allowlists_must_not_overlap() {
+        let mut c = base(Some(tls()), Some(vec!["driver".into()]));
+        c.peer_allowlist = Some(vec!["cosigner1".into(), "cosigner2".into(), "cosigner3".into()]);
+        c.validate().unwrap();
+        c.signer_allowlist = Some(vec!["driver".into(), "cosigner2".into()]);
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("cosigner2") && e.contains("signer_allowlist") && e.contains("peer_allowlist"), "{e}");
+        c.signer_allowlist = Some(vec!["driver".into()]);
+        c.peer_allowlist = Some(vec!["driver".into(), "cosigner1".into()]);
+        assert!(c.validate().is_err(), "the driver must not be a mesh peer either");
     }
 
     #[test]

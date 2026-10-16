@@ -149,6 +149,12 @@ the pod was restarted (`docs/soak-2026-10-devnet.md`, incident #1). No template 
 a cosigner's claim anywhere but its own pod, and the chart refuses a `backup.extraVolumes` entry that
 names one.
 
+**Volume access mode.** New installs default to `ReadWriteOncePod`, so the kernel refuses a second
+pod on a share volume (the cosigner also holds a `flock` on its data dir, which stops a second
+process on one node). `volumeClaimTemplates` are immutable: an install created with the old
+`ReadWriteOnce` default must pin `persistence.accessModes: [ReadWriteOnce]` or `helm upgrade` is
+rejected. `deploy/soak/cosigner-values.yaml` does this for the DevNet soak.
+
 ## Relation to raw manifests
 
 [`deploy/k8s/`](../../k8s/) remains the kustomize reference. This chart is the supported install path
