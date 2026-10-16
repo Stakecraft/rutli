@@ -22,7 +22,10 @@
 #      participant1 by KMS id (RegisterKmsEncryptionKey) — its Canton fingerprint must come out
 #      identical to the one on the old node — and rotated in as participant1's encryption key;
 #      pings again, now decrypting with the imported key;
-#   C. the driver's audit lines show ECIES decryptions with both keys and no failure;
+#   C. the driver's audit lines show ECIES decryptions with both keys and no failure; with the
+#      cosigner signing policy enforced (audit C2: require_intent, the driver's key ACL and pin),
+#      every FROST signature was journaled under a driver intent, and `audit-cross-check` finds the
+#      driver's audit log and the three cosigner journals consistent;
 #   D. (SKIP_DOWN=1 skips it) with cosigner 3 stopped, a participant configured for ECIES gets past
 #      Canton's crypto init: the driver still advertises EcP256 because a silent cosigner does not
 #      veto it. (A *fresh* participant then needs every cosigner for its namespace DKG, so D stops
@@ -86,9 +89,15 @@ step "mTLS trust domain, seal secret, cosigner configs (127.0.0.1:$((BASE_PORT +
 "$REPO/scripts/gen-frost-certs.sh" 3 "$WORK/certs" >/dev/null
 export RUTLI_SEAL_SECRET
 RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
+# The cosigner signing policy enforced (audit C2): a driver-signed intent on every signature, the
+# driver's key pinned, its key ids limited to the two prefixes this script uses.
+DRIVER_PIN="$(openssl x509 -in "$WORK/certs/driver.crt" -noout -pubkey | openssl pkey -pubin -outform DER \
+  | openssl dgst -sha256 -hex | awk '{print $NF}')"
 for i in 1 2 3; do
-  jq --arg work "$WORK" --argjson base "$BASE_PORT" --arg cert "cosigner$i" '
-      .listen = "127.0.0.1:\($base + .identifier)"
+  jq --arg work "$WORK" --argjson base "$BASE_PORT" --arg cert "cosigner$i" --arg pin "$DRIVER_PIN" '
+      .signing_policy = { require_intent: true, signer_acl_required: true,
+        signer_acl: { driver: ["e2e1-", "e2e2-"] }, signer_pins: { driver: [$pin] } }
+    | .listen = "127.0.0.1:\($base + .identifier)"
     | .data_dir = "\($work)/node\(.identifier)"
     | .peers |= map(.endpoint = "https://127.0.0.1:\($base + .identifier)")
     | .tls.ca_cert = "\($work)/certs/ca.crt"
@@ -146,6 +155,7 @@ canton {
         config = {
           backend = "frost"
           audit-logging = true
+          audit-log-path = "$WORK/driver-audit.jsonl"
           frost = {
             endpoints = [
               { url = "127.0.0.1:$((BASE_PORT + 1))", tls-name = "cosigner1" },
@@ -240,6 +250,15 @@ echo "ECIES decryptions ok: $GEN_OK (with the imported key: $IMP_OK), failed: $B
 [ "$IMP_OK" -gt 0 ] || fail "no ECIES decryption with the imported key"
 [ "$BAD" -eq 0 ] || fail "$BAD decryptions failed"
 grep -q "every cosigner hosts non-FROST keys (.*ec-p256-ecies" "$WORK"/canton*.log || fail "the driver never saw ec-p256-ecies in Capabilities"
+
+step "C2. Every FROST signature carried a driver intent; the audit log and the cosigner journals agree"
+SIGNED="$(cat "$WORK"/node*/journal/*/*.jsonl 2>/dev/null | grep -c '"purpose":"sign".*"signer_cn":"driver"' || true)"
+[ "$SIGNED" -gt 0 ] || fail "no cosigner journaled a driver-intent signature"
+NOINTENT="$(cat "$WORK"/node*/journal/*/*.jsonl | grep -c '"purpose":"no-intent"' || true)"
+[ "$NOINTENT" -eq 0 ] || fail "$NOINTENT signature(s) without an intent under require_intent"
+"$COSIGNER" audit-cross-check --driver-audit "$WORK/driver-audit.jsonl" \
+  --journal "$WORK/node1/journal" --journal "$WORK/node2/journal" --journal "$WORK/node3/journal" \
+  --min-journals 2 || fail "audit-cross-check found discrepancies"
 
 if [ "${SKIP_DOWN:-0}" != 1 ]; then
   step "D. Cosigner 3 down: a participant configured for ECIES still passes Canton's crypto init"

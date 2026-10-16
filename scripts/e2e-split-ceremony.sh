@@ -8,9 +8,12 @@
 # Imports B1's throwaway Canton 3.6.1 namespace key (frost/canton-key/testdata) and checks, in
 # order: DKG on the import id is refused (ALREADY_EXISTS) before and after; share-recipient on the
 # running nodes; the dealer; import-share --dry-run then for real; an identical re-import is a
-# no-op; the startup warning for an unrefreshed dealt key; verify-key --sign-test; refresh;
-# verify-key again (new digest, refresh count 1); a re-import after refresh is refused; restart of
-# every node then verify-key; a Sign with one node down, verified independently by OpenSSL.
+# no-op; the startup warning for an unrefreshed dealt key; verify-key --sign-test; refresh by the
+# refresher role (the driver's refresh refused: signer_may_refresh off, audit C2); verify-key again
+# (new digest, refresh count 1); a re-import after refresh is refused; restart of every node then
+# verify-key; a Sign with one node down and no signing intent (accepted: require_intent off, the
+# rolling-upgrade mode, journaled as no-intent), verified independently by OpenSSL; then
+# require_intent on: the same intent-less Sign is refused, and verify-key --sign-test still passes.
 #
 # Requires: cargo, openssl (3.x, for Ed25519 verify), jq, grpcurl.
 set -euo pipefail
@@ -66,13 +69,17 @@ mkconfig() { # node-config-name  cert-name  out
     | .tls.ca_cert = "\($work)/certs/ca.crt"
     | .tls.cert = "\($work)/certs/\($cert).crt"
     | .tls.key = "\($work)/certs/\($cert).key"
+    | .refresh_allowlist = ["refresher"]
+    | .signing_policy.signer_may_refresh = false
     | del(.metrics_listen)' "$REPO/deploy/frost/config-tls/$1.json" >"$3"
 }
 for i in 1 2 3; do mkconfig "cosigner$i" "cosigner$i" "$WORK/c$i.json"; done
 # The operator role (operator_allowlist: KeyStatus + CeremonySignTest only) runs verify-key; the
-# driver cert, like the refresh CronJob, runs refresh.
+# refresher role (refresh_allowlist: Refresh + KeyStatus only), like the refresh CronJob, runs
+# refresh — the driver may not (signing_policy.signer_may_refresh off).
 mkconfig cosigner1 operator "$WORK/operator.json"
 mkconfig cosigner1 driver "$WORK/driver.json"
+mkconfig cosigner1 refresher "$WORK/refresher.json"
 
 start() {
   RUST_LOG=info "$COSIGNER" --config "$WORK/c$1.json" serve >>"$WORK/node$1.log" 2>&1 &
@@ -196,12 +203,23 @@ echo "operator Sign -> PermissionDenied"
 step "   DKG is still refused for the installed id"
 expect_dkg_refused "installed"
 
-step "6. refresh"
+step "6. refresh (refresher role; the operator and — signer_may_refresh off — the driver are refused)"
 if cli --config "$WORK/operator.json" refresh --key-id "$KEY_ID" >/dev/null 2>&1; then
   fail "the operator role could run a refresh"
 fi
-out="$(cli --config "$WORK/driver.json" refresh --key-id "$KEY_ID")"
+if out="$(cli --config "$WORK/driver.json" refresh --key-id "$KEY_ID" 2>&1)"; then
+  fail "the driver could run a refresh with signer_may_refresh off"
+fi
+grep -q "may not call Refresh" <<<"$out" || fail "driver refresh refused for the wrong reason: $out"
+echo "driver refresh -> refused (signer_may_refresh off)"
+out="$(cli --config "$WORK/refresher.json" refresh --key-id "$KEY_ID")"
 grep -q "$GROUP" <<<"$out" || fail "refresh changed the group key: $out"
+if out="$(grpcurl -cacert "$WORK/certs/ca.crt" -cert "$WORK/certs/refresher.crt" -key "$WORK/certs/refresher.key" \
+  -servername cosigner1 -import-path "$REPO/frost/cosigner/proto" -proto cosigner.proto \
+  -d "{\"key_id\":\"$KEY_ID\",\"message\":\"$MSG_B64\"}" "127.0.0.1:$((BASE_PORT + 1))" \
+  rutli.cosigner.v1.Signer/Sign 2>&1)"; then fail "the refresher cert signed"; fi
+grep -q "PermissionDenied" <<<"$out" || fail "refresher Sign refused for the wrong reason: $out"
+echo "refresher Sign -> PermissionDenied"
 
 step "7. verify-key after refresh"
 rep="$(cli --config "$WORK/operator.json" verify-key --key-id "$KEY_ID" --expect-fingerprint "$FP" --sign-test --json || true)"
@@ -219,7 +237,7 @@ for i in 1 2 3; do wait_healthy "$i"; done
 rep="$(cli --config "$WORK/operator.json" verify-key --key-id "$KEY_ID" --expect-fingerprint "$FP" --sign-test --json || true)"
 jq -e '.ok and .refresh_count == 1' <<<"$rep" >/dev/null || fail "verify-key after restart: $rep"
 
-step "9. Sign with node 3 down, verified by OpenSSL under the Canton public key"
+step "9. Sign with node 3 down and no signing intent (require_intent off), verified by OpenSSL under the Canton public key"
 stop 3
 MSG_HEX="1220$(printf 'rutli e2e split ceremony' | openssl dgst -sha256 -hex | awk '{print $NF}')"
 MSG_B64="$(printf '%s' "$MSG_HEX" | xxd -r -p | base64)"
@@ -232,3 +250,24 @@ printf '302a300506032b6570032100%s' "$GROUP" | xxd -r -p >"$WORK/pub.der"
 openssl pkey -pubin -inform DER -in "$WORK/pub.der" -out "$WORK/pub.pem"
 openssl pkeyutl -verify -pubin -inkey "$WORK/pub.pem" -rawin -in "$WORK/msg.bin" -sigfile "$WORK/sig.bin" \
   || fail "OpenSSL rejects the cluster's signature"
+grep -q '"purpose":"no-intent"' "$WORK"/node1/journal/"$KEY_ID"/*.jsonl \
+  || fail "node 1 did not journal the intent-less signature"
+grep -q '"purpose":"sign-test"' "$WORK"/node1/journal/"$KEY_ID"/*.jsonl \
+  || fail "node 1 did not journal the ceremony sign tests"
+echo "journaled on node 1: the sign tests and the intent-less signature"
+
+step "10. require_intent on (every node): an intent-less Sign is refused, the ceremony sign test still passes"
+for i in 1 2 3; do
+  jq '.signing_policy.require_intent = true' "$WORK/c$i.json" >"$WORK/c$i.json.new" && mv "$WORK/c$i.json.new" "$WORK/c$i.json"
+done
+for i in 1 2; do stop "$i"; done
+for i in 1 2 3; do start "$i"; done
+for i in 1 2 3; do wait_healthy "$i"; done
+if out="$(grpc -d "{\"key_id\":\"$KEY_ID\",\"message\":\"$MSG_B64\"}" "127.0.0.1:$((BASE_PORT + 1))" \
+  rutli.cosigner.v1.Signer/Sign 2>&1)"; then fail "an intent-less Sign succeeded with require_intent on"; fi
+grep -q "PermissionDenied" <<<"$out" && grep -q "no signing intent" <<<"$out" \
+  || fail "intent-less Sign refused for the wrong reason: $out"
+echo "intent-less Sign -> PermissionDenied"
+rep="$(cli --config "$WORK/operator.json" verify-key --key-id "$KEY_ID" --expect-fingerprint "$FP" --sign-test --json || true)"
+jq -e '.ok and all(.sign_test[]; .ok)' <<<"$rep" >/dev/null || fail "verify-key --sign-test under require_intent: $rep"
+echo "verify-key --sign-test OK under require_intent"
