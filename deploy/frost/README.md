@@ -29,7 +29,11 @@ RUTLI_SEAL_SECRET=$RUTLI_SEAL_SECRET \
   docker compose -f deploy/frost/docker-compose.tls.yml up -d
 ```
 
-The driver connects with `frost.tls` (`ca.crt` + `driver.crt/key`, `domain = "rutli-cosigner"`).
+The driver connects with `frost.tls` (`ca.crt` + `driver.crt/key`) and names the certificate each
+endpoint must present: `endpoints = [{ url = "localhost:9101", tls-name = "cosigner1" }, …]`
+(see `deploy/devnet/canton-hosted.conf`). Certificates from releases before 0.4.0-rc.2 also carry
+a shared `rutli-cosigner` SAN, so an older config with `tls.domain = "rutli-cosigner"` still
+connects; new certificates do not, and a shared name lets any cosigner answer for any endpoint.
 
 Three cosigners come up on `localhost:9101..9103`. On first start they have no key — trigger DKG
 once against any node's `Signer.Dkg` (e.g. with `grpcurl`, or via the `FrostBackend`):

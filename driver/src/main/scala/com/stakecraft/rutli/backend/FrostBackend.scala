@@ -102,6 +102,9 @@ class FrostBackend(
     // Once a majority has answered, how much longer the first probe waits for the silent rest, so
     // a cosigner that is down delays participant startup by this much, not the whole budget.
     capabilitiesSilentGrace: FiniteDuration = 5.seconds,
+    // The TLS server name each endpoint must present (url -> name, normally `cosigner<id>`). An
+    // endpoint missing here falls back to `tls.domain`, then to its own host.
+    endpointTlsNames: Map[String, String] = Map.empty,
 )(implicit ec: ExecutionContext)
     extends KmsBackend {
 
@@ -230,6 +233,11 @@ class FrostBackend(
   private def pinnedGroupKey(keyId: String): Future[ByteString] =
     Option(pinnedKeys.get(keyId)).fold(queryGroupKey(keyId).map(pin(keyId, _)))(Future.successful)
 
+  /** The TLS server name `endpoint` must present: its own `tls-name`, else `tls.domain`, else None
+    * (the host in the target). */
+  private[backend] def tlsServerName(endpoint: String): Option[String] =
+    endpointTlsNames.get(endpoint).orElse(tls.flatMap(_.domain))
+
   /** Build the gRPC channel for one endpoint. Overridable so tests can substitute an in-process
     * channel without standing up a TLS listener. */
   protected def buildChannel(endpoint: String): ManagedChannel = tls match {
@@ -242,8 +250,11 @@ class FrostBackend(
         .keyManager(new File(t.cert), new File(t.key))
         .build()
       val b = NettyChannelBuilder.forTarget(endpoint).sslContext(ssl)
-      t.domain.foreach(b.overrideAuthority)
-      logger.info(s"FROST: mutual TLS channel to $endpoint")
+      // Per endpoint (audit M3): with one shared name for every endpoint, a certificate issued to
+      // any cosigner would verify at every address.
+      val serverName = tlsServerName(endpoint)
+      serverName.foreach(b.overrideAuthority)
+      logger.info(s"FROST: mutual TLS channel to $endpoint (server name ${serverName.getOrElse("<host>")})")
       b.build()
     case None =>
       logger.warn(s"FROST: plaintext channel to $endpoint (no TLS) — do not use in production")

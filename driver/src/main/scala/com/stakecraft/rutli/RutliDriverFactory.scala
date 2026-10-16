@@ -32,6 +32,9 @@ final class RutliDriverFactory extends KmsDriverFactory {
     import com.stakecraft.rutli.policy.{Approver, ApprovalRule, ApprovalPolicy}
     implicit val hsmReader: ConfigReader[HsmConfig] = deriveReader[HsmConfig]
     implicit val frostTlsReader: ConfigReader[FrostTlsConfig] = deriveReader[FrostTlsConfig]
+    // An endpoint is `{ url, tls-name }` or, as before, a bare url string.
+    implicit val frostEndpointReader: ConfigReader[FrostEndpoint] =
+      ConfigReader[String].map(FrostEndpoint(_)).orElse(deriveReader[FrostEndpoint])
     implicit val frostReader: ConfigReader[FrostConfig] = deriveReader[FrostConfig]
     implicit val ruleReader: ConfigReader[ApprovalRule] = deriveReader[ApprovalRule]
     implicit val approverReader: ConfigReader[Approver] = deriveReader[Approver]
@@ -54,6 +57,7 @@ final class RutliDriverFactory extends KmsDriverFactory {
       val base = deriveWriter[FrostTlsConfig]
       if (confidential) base.contramap[FrostTlsConfig](_.copy(key = "<redacted>")) else base
     }
+    implicit val frostEndpointWriter: ConfigWriter[FrostEndpoint] = deriveWriter[FrostEndpoint]
     implicit val frostWriter: ConfigWriter[FrostConfig] = deriveWriter[FrostConfig]
     import com.stakecraft.rutli.policy.{Approver, ApprovalRule, ApprovalPolicy}
     implicit val ruleWriter: ConfigWriter[ApprovalRule] = deriveWriter[ApprovalRule]
@@ -139,13 +143,23 @@ final class RutliDriverFactory extends KmsDriverFactory {
             "frost.delegate = \"none\" requires frost.hosted-keys = true — otherwise nothing " +
               "would serve the participant's encryption and symmetric keys"
           )
+        if (frost.tls.isDefined)
+          eps.filter(_.tlsName.isEmpty).foreach { e =>
+            logger.warn(
+              s"FROST: endpoint ${e.url} has no tls-name, so it is verified under " +
+                s"${frost.tls.flatMap(_.domain).fold("its host name")(d => s"the shared tls.domain '$d'")}" +
+                " — any cosigner certificate carrying that name could answer for it; set " +
+                "endpoints = [{ url = \"…\", tls-name = \"cosigner<id>\" }, …]"
+            )
+          }
         new FrostBackend(
-          eps,
+          eps.map(_.url),
           buildBackend(frost.delegate),
           logger,
           frost.tls,
           hostedKeys = frost.hostedKeys,
           keyPrefix = frost.keyPrefix,
+          endpointTlsNames = eps.flatMap(e => e.tlsName.map(e.url -> _)).toMap,
         )(blockingEc)
       case other =>
         throw new IllegalArgumentException(
