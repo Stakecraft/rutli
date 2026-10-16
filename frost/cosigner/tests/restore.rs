@@ -236,6 +236,31 @@ async fn a_crash_before_the_install_leaves_the_live_store_untouched() {
     assert_eq!(ks.list_hosted().unwrap(), vec!["rutli-a".to_string(), "rutli-b".to_string()]);
 }
 
+/// Audit F7: a backup carries the break-glass "cleared delete intent" markers, and a restore merges
+/// them (never removes one), so a node restored after an undelete keeps ignoring that tombstone.
+#[tokio::test]
+async fn cleared_markers_in_a_backup_are_merged_on_restore() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    cluster(root).await;
+    let ks = store(root, 1);
+    let from = backup(root, 1, "with-markers");
+    let digest = "ab".repeat(32);
+    std::fs::create_dir_all(from.join(".cleared")).unwrap();
+    std::fs::write(from.join(".cleared").join(format!("rutli-x.{digest}")), b"").unwrap();
+    std::fs::write(from.join(".cleared").join("not-a-marker"), b"").unwrap();
+    std::fs::write(from.join(".cleared").join("../escape.aa"), b"").ok();
+    let p = plan(&ks, &from, false, None).unwrap();
+    assert_eq!(p.cleared, vec![format!("rutli-x.{digest}")]);
+    apply(&ks, &p, false).unwrap();
+    let mut d = [0u8; 32];
+    d.copy_from_slice(&hex::decode(&digest).unwrap());
+    assert!(ks.is_cleared("rutli-x", &d).unwrap());
+    assert!(!keys(root, 1).join(".cleared").join("not-a-marker").exists());
+    // Idempotent.
+    apply(&ks, &p, false).unwrap();
+}
+
 #[test]
 fn the_restore_command_takes_the_instance_lock() {
     let tmp = tempfile::tempdir().unwrap();

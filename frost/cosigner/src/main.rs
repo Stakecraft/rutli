@@ -729,7 +729,16 @@ async fn main() -> Result<()> {
             policy,
         )?;
         if let Some(h) = cfg.hosted_keys.as_ref().filter(|h| h.enabled) {
-            verifier = verifier.with_delete_policy(rutli_cosigner::intent::DeletePolicy::from_config(h));
+            let delete = rutli_cosigner::intent::DeletePolicy::from_config(h);
+            // When each delete-role CN's capability last changed (audit F7): peers' tombstones whose
+            // intent predates the change are not accepted by anti-entropy.
+            let grants = rutli_cosigner::intent::DeleteGrants::load_and_update(
+                &cfg.data_dir.join("delete-policy.json"),
+                &delete,
+                policy,
+                rutli_cosigner::intent::now_ms(),
+            )?;
+            verifier = verifier.with_delete_policy(delete).with_delete_grants(grants);
             if h.delete_allowlist.is_empty() {
                 tracing::info!(
                     "hosted-key deletes are disabled (hosted_keys.delete_allowlist is empty): DeleteKey is \
@@ -1460,6 +1469,9 @@ fn restore_command(
     let n = rutli_cosigner::restore::apply(&keystore, &plan, false)?;
     for (key_id, _) in &plan.install {
         println!("  {key_id}: restored{}", if plan.broke_glass.contains(key_id) { " (BREAK-GLASS)" } else { "" });
+    }
+    for marker in &plan.cleared {
+        println!("  .cleared/{marker}: cleared delete intent marker merged");
     }
     println!(
         "restored {n} key file(s) from {} into {}. At its next start this node compares every share \

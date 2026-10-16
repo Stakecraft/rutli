@@ -123,6 +123,18 @@ fn keys_dir(root: &Path, i: u16) -> PathBuf {
 }
 
 fn open_node(root: &Path, ids: &Ids, i: u16, delete: &DeletePolicy, policy: &SigningPolicyConfig, grace: Duration) -> Arc<Node> {
+    open_node_with(root, ids, i, delete, policy, grace, intent::DeleteGrants::default())
+}
+
+fn open_node_with(
+    root: &Path,
+    ids: &Ids,
+    i: u16,
+    delete: &DeletePolicy,
+    policy: &SigningPolicyConfig,
+    grace: Duration,
+    grants: intent::DeleteGrants,
+) -> Arc<Node> {
     let sealer = Sealer::from_master_secret(MASTER, i).with_binding(KeyFileBinding {
         node: i,
         cluster_uuid: Some(UUID.into()),
@@ -132,7 +144,8 @@ fn open_node(root: &Path, ids: &Ids, i: u16, delete: &DeletePolicy, policy: &Sig
     let ks = KeyStore::open_with_sealer(keys_dir(root, i), Some(Arc::new(sealer))).unwrap();
     let verifier = IntentVerifier::new(ids.pki.ca_pem.as_bytes().to_vec(), false, CLUSTER.into(), ["driver".to_string()], policy)
         .unwrap()
-        .with_delete_policy(delete.clone());
+        .with_delete_policy(delete.clone())
+        .with_delete_grants(grants);
     let journal = SignJournal::open(root.join(format!("node-{i}")).join("journal"), i, Retention { days: 90, max_bytes: 64 << 20 }).unwrap();
     let guard = Arc::new(SignGuard::new(Arc::new(verifier), journal, 10));
     Arc::new(
@@ -391,6 +404,61 @@ async fn a_forged_tombstone_from_a_peer_is_refused() {
     anti_entropy_sweep(&c.nodes[0], &peers).await.unwrap();
     assert!(c.nodes[0].hosted_exists("rutli-sym-4"));
     assert!(!c.nodes[0].hosted_tombstoned("rutli-sym-4").unwrap());
+}
+
+/// Audit F7: a delete intent that was refused when it was made (the driver signs one for every
+/// Canton `deleteKey`, normally without the delete role) cannot be replayed through a peer's
+/// tombstone once the role is granted later, nor with a deletion time outside its validity.
+#[tokio::test]
+async fn an_old_delete_intent_is_not_replayed_after_the_role_is_granted() {
+    let c = cluster();
+    c.generate("rutli-sym-replay").await;
+    // The driver's delete intent, refused at the time (not on the delete role).
+    let old = delete_intent(&c.ids, "driver", "rutli-sym-replay");
+    refused(delete_hosted_key(&c.peers, "rutli-sym-replay", &old, 2).await, "delete_allowlist");
+    let issued = intent::now_ms();
+    let with_time = |intent: pb::SignedIntent, deleted_at_ms: u64| pb::KeyManifest {
+        deleted_at_ms,
+        ..tomb("rutli-sym-replay", intent)
+    };
+
+    // Later (ten minutes, well past the clock-skew allowance) the operator grants the driver the
+    // delete role; node 1 restarts and notes the change.
+    let granted = DeletePolicy { allowlist: ["operator".to_string(), "driver".to_string()].into(), ..Default::default() };
+    let grants_file = c.root.join("delete-policy.json");
+    intent::DeleteGrants::load_and_update(&grants_file, &operator_deletes(), &SigningPolicyConfig::default(), issued - 10_000)
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(5));
+    let grants =
+        intent::DeleteGrants::load_and_update(&grants_file, &granted, &SigningPolicyConfig::default(), intent::now_ms() + 600_000)
+            .unwrap();
+    let node1 = open_node_with(&c.root, &c.ids, 1, &granted, &SigningPolicyConfig::default(), Duration::from_secs(60), grants);
+    rutli_cosigner::peer::wire_local_mesh(std::slice::from_ref(&node1)).ok();
+    // A compromised peer lists a tombstone carrying the old intent: refused, the key stays.
+    let liar = |m: pb::KeyManifest| -> Peers {
+        vec![
+            Arc::new(LocalPeer::new(node1.clone())) as Arc<dyn PeerApi>,
+            Arc::new(LyingPeer { inner: Arc::new(LocalPeer::new(c.nodes[2].clone())), manifest: vec![m] }),
+        ]
+    };
+    assert!(node1.hosted_exists("rutli-sym-replay"), "precondition");
+    anti_entropy_sweep(&node1, &liar(with_time(old.clone(), issued + 1))).await.unwrap();
+    assert!(node1.hosted_exists("rutli-sym-replay") && !node1.hosted_tombstoned("rutli-sym-replay").unwrap());
+
+    // Without a recorded change (a grant older than what the node knows), the same tombstone would
+    // apply — the grant time is what stops it. But never with a deletion time outside the window.
+    let unrestricted =
+        open_node_with(&c.root, &c.ids, 1, &granted, &SigningPolicyConfig::default(), Duration::from_secs(60), Default::default());
+    let liar2 = |m: pb::KeyManifest| -> Peers {
+        vec![
+            Arc::new(LocalPeer::new(unrestricted.clone())) as Arc<dyn PeerApi>,
+            Arc::new(LyingPeer { inner: Arc::new(LocalPeer::new(c.nodes[2].clone())), manifest: vec![m] }),
+        ]
+    };
+    anti_entropy_sweep(&unrestricted, &liar2(with_time(old.clone(), issued + 3_600_000))).await.unwrap();
+    assert!(!unrestricted.hosted_tombstoned("rutli-sym-replay").unwrap(), "deleted an hour after the intent expired");
+    anti_entropy_sweep(&unrestricted, &liar2(with_time(old, issued + 1))).await.unwrap();
+    assert!(unrestricted.hosted_tombstoned("rutli-sym-replay").unwrap());
 }
 
 fn tomb(key_id: &str, intent: pb::SignedIntent) -> pb::KeyManifest {
