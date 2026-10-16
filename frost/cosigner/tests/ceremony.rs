@@ -538,10 +538,10 @@ async fn refresh_keeps_the_group_key_and_old_and_new_shares_never_combine() {
     let c1 = Cosigner::new(old1.key_package, old1.public_key_package.clone(), NonceStore::open(tmp.path().join("a")).unwrap());
     let c2 = Cosigner::new(new2.key_package, new2.public_key_package.clone(), NonceStore::open(tmp.path().join("b")).unwrap());
     let msg = rutli_frost_core::dealer::canton_test_message(b"mixed epochs");
-    let commitments = BTreeMap::from([(c1.identifier(), c1.round1("s").unwrap()), (c2.identifier(), c2.round1("s").unwrap())]);
+    let commitments = BTreeMap::from([(c1.identifier(), c1.round1("s", rutli_frost_core::session::SessionBinding::new(KEY)).unwrap()), (c2.identifier(), c2.round1("s", rutli_frost_core::session::SessionBinding::new(KEY)).unwrap())]);
     let shares = BTreeMap::from([
-        (c1.identifier(), c1.round2("s", &msg, &commitments).unwrap()),
-        (c2.identifier(), c2.round2("s", &msg, &commitments).unwrap()),
+        (c1.identifier(), c1.round2("s", KEY, &msg, &commitments, None).unwrap()),
+        (c2.identifier(), c2.round2("s", KEY, &msg, &commitments, None).unwrap()),
     ]);
     for pkp in [&old1.public_key_package, &new2.public_key_package] {
         assert!(aggregate(&msg, &commitments, &shares, pkp).is_err(), "mixed epochs must not combine");

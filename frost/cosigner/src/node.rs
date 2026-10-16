@@ -18,7 +18,7 @@ use frost::Identifier;
 use rutli_frost_core::dkg::{group_verifying_key_bytes, DkgParticipant};
 use rutli_frost_core::nonce_store::NonceStore;
 use rutli_frost_core::refresh::RefreshParticipant;
-use rutli_frost_core::session::{aggregate, Cosigner};
+use rutli_frost_core::session::{aggregate, Cosigner, SessionBinding};
 
 use crate::ceremony_record::{CeremonyRecord, CeremonyRecords, Decision, RecordState, StatusInfo};
 use crate::keystore::{KeyStore, Share};
@@ -690,7 +690,7 @@ impl Node {
         self.refuse_if_keystore_down()?;
         let cached = self.cached(key_id)?;
         self.check_epoch(key_id, &cached, ctx)?;
-        let result = cached.cosigner.round1(session_id);
+        let result = cached.cosigner.round1(session_id, ctx.binding(key_id)?);
         self.update_pending_gauge();
         Ok(result?)
     }
@@ -748,7 +748,8 @@ impl Node {
                 expected: crate::orchestrator::CANTON_DIGEST_LEN,
             });
         }
-        let result = self.cosigner(key_id)?.round2(session_id, message, commitments);
+        // Signing intents (audit C2) will pass the verified intent's digest here.
+        let result = self.cosigner(key_id)?.round2(session_id, key_id, message, commitments, None);
         self.update_pending_gauge();
         Ok(result?)
     }
@@ -1654,6 +1655,39 @@ struct CachedKey {
 pub struct Round1Ctx {
     /// The sharing the leader signs with. `None`: a leader from before epochs, which sends none.
     pub leader_view: Option<KeyVersion>,
+    /// The message the session will sign; round 2 must sign exactly it. `None`: not declared.
+    pub message: Option<Vec<u8>>,
+    /// The attempt's signer set (configured identifiers); round 2's commitment map must be exactly
+    /// these. `None`: not declared.
+    pub signers: Option<Vec<u16>>,
+}
+
+impl Round1Ctx {
+    /// The session binding this context declares for `key_id` (see
+    /// [`rutli_frost_core::session::SessionBinding`]). Intents (audit C2) plug in here.
+    fn binding(&self, key_id: &str) -> Result<SessionBinding> {
+        let mut b = SessionBinding::new(key_id);
+        if let Some(m) = &self.message {
+            if m.len() != crate::orchestrator::CANTON_DIGEST_LEN {
+                return Err(DaemonError::InvalidMessageLength {
+                    got: m.len(),
+                    expected: crate::orchestrator::CANTON_DIGEST_LEN,
+                });
+            }
+            b = b.with_message(m);
+        }
+        if let Some(ids) = &self.signers {
+            let set: std::collections::BTreeSet<Identifier> =
+                ids.iter().map(|&i| Identifier::try_from(i)).collect::<std::result::Result<_, _>>()?;
+            if set.len() != ids.len() {
+                return Err(DaemonError::Core(rutli_frost_core::CoreError::InvalidBinding(format!(
+                    "the declared signer set {ids:?} repeats a cosigner"
+                ))));
+            }
+            b = b.with_signers(set);
+        }
+        Ok(b)
+    }
 }
 
 /// Why this node treats its share of a key as stale ([`crate::epoch_check`]).

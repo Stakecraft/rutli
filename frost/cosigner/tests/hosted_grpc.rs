@@ -572,3 +572,44 @@ async fn a_plaintext_dev_cluster_without_hosted_keys_runs_dkg_and_refresh_over_g
         s.abort();
     }
 }
+
+#[tokio::test]
+async fn epoch_refusals_and_session_binding_hold_over_mtls_grpc() {
+    // H1/M1 and the session binding over real sockets: the refusing node's own sharing rides back
+    // in the status trailers, and the leader routes around a stale node.
+    use rutli_cosigner::node::{Round1Ctx, StaleMark};
+    use rutli_cosigner::DaemonError;
+    let m = mesh().await;
+    let key = "frost-grpc-epochs";
+    let group = rutli_cosigner::orchestrator::run_dkg(&m.peers[0], key).await.unwrap();
+    let node2 = &m.peers[0][1]; // node 2 as node 1 dials it
+    let v2 = m.nodes[1].key_epoch(key).unwrap();
+    let view2 = (v2.epoch, <[u8; 32]>::try_from(v2.pkp_digest.as_slice()).unwrap());
+
+    let wrong = Round1Ctx { leader_view: Some((view2.0 + 1, view2.1)), ..Default::default() };
+    match node2.sign_round1(key, "g-mismatch", &wrong).await.unwrap_err() {
+        DaemonError::EpochMismatch { peer, leader, .. } => assert_eq!((peer, leader), (view2, wrong.leader_view.unwrap())),
+        other => panic!("expected EpochMismatch over gRPC, got {other:?}"),
+    }
+
+    // Round 2 for another message than round 1 declared: refused there, nothing burned.
+    let msg = rutli_frost_core::dealer::canton_test_message(b"declared");
+    let ctx = Round1Ctx { leader_view: Some(view2), message: Some(msg.to_vec()), signers: Some(vec![1, 2]) };
+    let mut cs = std::collections::BTreeMap::new();
+    cs.insert(m.nodes[0].identifier, m.nodes[0].sign_round1(key, "g-bind", &ctx).unwrap());
+    cs.insert(m.nodes[1].identifier, node2.sign_round1(key, "g-bind", &ctx).await.unwrap());
+    let other = rutli_frost_core::dealer::canton_test_message(b"swapped");
+    let err = node2.sign_round2(key, "g-bind", &other, &cs).await.unwrap_err();
+    assert!(
+        matches!(&err, DaemonError::Status(s) if s.code() == tonic::Code::FailedPrecondition && s.message().contains("round-1 binding")),
+        "{err:?}"
+    );
+
+    // A stale node refuses over the wire with its own trailer, and the leader signs around it.
+    m.nodes[1].set_stale(key, Some(StaleMark { own_epoch: 1, newer_epoch: 2, reason: "test".into() }));
+    let ok = Round1Ctx { leader_view: Some(view2), ..Default::default() };
+    assert!(matches!(node2.sign_round1(key, "g-stale", &ok).await.unwrap_err(), DaemonError::StaleShare { .. }));
+    let msg = rutli_frost_core::dealer::canton_test_message(b"around a stale node");
+    let sig = rutli_cosigner::orchestrator::sign(&m.nodes[0], &m.peers[0], key, &msg).await.unwrap();
+    assert!(rutli_cosigner::verify_key::signature_verifies(&group, &msg, &sig));
+}

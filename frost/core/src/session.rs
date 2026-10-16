@@ -26,8 +26,16 @@
 //!
 //! The aggregated signature is a standard Ed25519 signature over `m` under the group key —
 //! Canton's verifier cannot tell it from a single-signer one.
+//!
+//! **Session binding.** Round 1 binds the session to a [`SessionBinding`]: the key, the message
+//! the leader declares it will sign, the signer set of the attempt, and (once signing intents
+//! exist, audit C2) the digest of the verified intent. Round 2 must present exactly the same —
+//! and this cosigner's own round-1 commitment, unchanged, in the commitment map — or it is refused
+//! **before** the nonce marker burns, and the session's nonces are dropped. So a round 2 can never
+//! sign another message or under another commitment set than round 1 was opened for, whoever
+//! sends it. Unset fields (a leader from before binding) are not checked.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -40,6 +48,82 @@ use rand::rngs::OsRng;
 use crate::nonce_store::NonceStore;
 use crate::{CoreError, Result};
 
+/// What round 1 binds a signing session to. Round 2 must match it (see the module docs).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SessionBinding {
+    /// The key the session signs with.
+    pub key_id: String,
+    /// SHA-256 of the message the leader declared at round 1. `None`: not declared (a leader from
+    /// before session binding) — any message is accepted at round 2.
+    pub message_digest: Option<[u8; 32]>,
+    /// The signer set of this attempt as declared at round 1: round 2's commitment map must hold
+    /// exactly these identifiers. `None`: not declared.
+    pub signers: Option<BTreeSet<Identifier>>,
+    /// SHA-256 of the signing intent the cosigner verified at round 1 (audit C2). Always `None`
+    /// until signing intents exist; round 2 must present the same value.
+    pub intent_digest: Option<[u8; 32]>,
+}
+
+impl SessionBinding {
+    pub fn new(key_id: impl Into<String>) -> Self {
+        Self { key_id: key_id.into(), ..Default::default() }
+    }
+
+    /// Bind the message the session will sign.
+    pub fn with_message(mut self, message: &[u8]) -> Self {
+        self.message_digest = Some(sha256(message));
+        self
+    }
+
+    /// Bind the attempt's signer set.
+    pub fn with_signers(mut self, signers: impl IntoIterator<Item = Identifier>) -> Self {
+        self.signers = Some(signers.into_iter().collect());
+        self
+    }
+
+    /// Bind the verified signing intent (audit C2).
+    pub fn with_intent_digest(mut self, digest: [u8; 32]) -> Self {
+        self.intent_digest = Some(digest);
+        self
+    }
+
+    /// Whether a round 2 presenting these values matches this binding; `Err` names what differs.
+    fn check(
+        &self,
+        key_id: &str,
+        message: &[u8],
+        commitments: &BTreeMap<Identifier, SigningCommitments>,
+        intent_digest: Option<&[u8; 32]>,
+    ) -> std::result::Result<(), &'static str> {
+        if self.key_id != key_id {
+            return Err("another key");
+        }
+        if self.message_digest.is_some_and(|d| d != sha256(message)) {
+            return Err("another message than the leader declared");
+        }
+        if self.signers.as_ref().is_some_and(|s| !s.iter().eq(commitments.keys())) {
+            return Err("another signer set than the leader declared");
+        }
+        if self.intent_digest.as_ref() != intent_digest {
+            return Err("another signing intent");
+        }
+        Ok(())
+    }
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).into()
+}
+
+/// One in-flight session: its nonces, the commitments round 1 returned, when, and its binding.
+struct Pending {
+    nonces: SigningNonces,
+    commitments: SigningCommitments,
+    started: Instant,
+    binding: SessionBinding,
+}
+
 /// One cosigner's signing-side state: its DKG-produced key share, the group public key package,
 /// and the crash-safe nonce guard. In-flight session nonces live only in RAM — a crash simply
 /// aborts those sessions (the leader retries with a new session id).
@@ -47,9 +131,9 @@ pub struct Cosigner {
     key_package: frost::keys::KeyPackage,
     public_key_package: frost::keys::PublicKeyPackage,
     nonce_store: NonceStore,
-    // session id -> (nonces, when round1 minted them). Orphaned entries (round1 without round2 —
-    // leader gave up / crashed) are pruned by age so RAM cannot grow unbounded.
-    pending: Mutex<BTreeMap<String, (SigningNonces, Instant)>>,
+    // session id -> its nonces, commitments, start and binding. Orphaned entries (round1 without
+    // round2 — leader gave up / crashed) are pruned by age so RAM cannot grow unbounded.
+    pending: Mutex<BTreeMap<String, Pending>>,
 }
 
 /// Max lifetime of an un-completed round-1 session before it is pruned. Comfortably longer than any
@@ -78,17 +162,29 @@ impl Cosigner {
         &self.public_key_package
     }
 
-    /// Round 1: generate fresh nonces for `session_id` and return the commitments.
+    /// Round 1: generate fresh nonces for `session_id`, bound to `binding`, and return the
+    /// commitments.
     ///
     /// Refuses sessions whose nonce was already burned (a replayed session id must never mint new
-    /// nonces — the leader generates a fresh UUID per attempt).
-    pub fn round1(&self, session_id: &str) -> Result<SigningCommitments> {
+    /// nonces — the leader generates a fresh UUID per attempt), and a binding that cannot be
+    /// honoured: a declared signer set without this cosigner or smaller than the threshold.
+    pub fn round1(&self, session_id: &str, binding: SessionBinding) -> Result<SigningCommitments> {
+        if let Some(signers) = &binding.signers {
+            if !signers.contains(&self.identifier()) || signers.len() < usize::from(self.min_signers()) {
+                return Err(CoreError::InvalidBinding(format!(
+                    "the declared signer set has {} member(s) and must include this cosigner and at \
+                     least {} signers",
+                    signers.len(),
+                    self.min_signers()
+                )));
+            }
+        }
         if self.nonce_store.is_consumed(session_id)? {
             return Err(CoreError::NonceReuse(session_id.to_string()));
         }
         let mut pending = self.pending.lock().expect("pending lock");
         // Prune orphaned sessions so pending can't grow without bound.
-        pending.retain(|_, (_, started)| started.elapsed() < PENDING_TTL);
+        pending.retain(|_, p| p.started.elapsed() < PENDING_TTL);
         // Refuse to overwrite live nonces for an in-flight session id — a duplicate round1 (replay
         // or a confused/hostile caller) must not silently discard the pending nonces of a session
         // that hasn't reached round2. The caller should use a fresh session id (or abort first).
@@ -97,31 +193,48 @@ impl Cosigner {
         }
         let (nonces, commitments) =
             frost::round1::commit(self.key_package.signing_share(), &mut OsRng);
-        pending.insert(session_id.to_string(), (nonces, Instant::now()));
+        pending.insert(
+            session_id.to_string(),
+            Pending { nonces, commitments, started: Instant::now(), binding },
+        );
         Ok(commitments)
     }
 
     /// Round 2: produce this cosigner's signature share for `message` under the full commitment
-    /// set. The session is burned in the [`NonceStore`] *before* the share is computed — this is
-    /// the crash-safe single-use guarantee.
+    /// set, for the key `key_id` and the signing intent `intent_digest` (`None` until intents
+    /// exist). Everything must match the session's round-1 [`SessionBinding`], the commitment map
+    /// must carry this cosigner's own round-1 commitment unchanged, and it must have at least the
+    /// threshold of signers — all checked **before** the marker burns; on a mismatch the session's
+    /// nonces are dropped (no share is ever released for it). Then the session is burned in the
+    /// [`NonceStore`] *before* the share is computed — this is the crash-safe single-use guarantee.
     pub fn round2(
         &self,
         session_id: &str,
+        key_id: &str,
         message: &[u8],
         commitments: &BTreeMap<Identifier, SigningCommitments>,
+        intent_digest: Option<&[u8; 32]>,
     ) -> Result<SignatureShare> {
-        let (nonces, _started) = self
+        let p = self
             .pending
             .lock()
             .expect("pending lock")
             .remove(session_id)
             .ok_or_else(|| CoreError::UnknownSession(session_id.to_string()))?;
+        let mismatch = |what| CoreError::BindingMismatch { session: session_id.to_string(), what };
+        p.binding.check(key_id, message, commitments, intent_digest).map_err(mismatch)?;
+        if commitments.get(&self.identifier()) != Some(&p.commitments) {
+            return Err(mismatch("this cosigner's own round-1 commitment is missing or altered"));
+        }
+        if commitments.len() < usize::from(self.min_signers()) {
+            return Err(mismatch("fewer signers than the threshold"));
+        }
 
         // Burn FIRST. If we crash after this point the session is lost, never reused.
         self.nonce_store.consume(session_id)?;
 
         let signing_package = SigningPackage::new(commitments.clone(), message);
-        let share = frost::round2::sign(&signing_package, &nonces, &self.key_package)?;
+        let share = frost::round2::sign(&signing_package, &p.nonces, &self.key_package)?;
         Ok(share)
     }
 
@@ -137,7 +250,7 @@ impl Cosigner {
     pub fn prune_expired(&self) -> usize {
         let mut pending = self.pending.lock().expect("pending lock");
         let before = pending.len();
-        pending.retain(|_, (_, started)| started.elapsed() < PENDING_TTL);
+        pending.retain(|_, p| p.started.elapsed() < PENDING_TTL);
         before - pending.len()
     }
 

@@ -402,7 +402,7 @@ pub async fn sign(node: &Arc<Node>, peers: &Peers, key_id: &str, message: &[u8])
         if attempts > 1 {
             metrics::counter!(crate::metrics::SIGN_RETRIES).increment(1);
         }
-        let ctx = crate::node::Round1Ctx { leader_view: Some(me.view) };
+        let ctx = crate::node::Round1Ctx { leader_view: Some(me.view), ..Default::default() };
         match attempt(node, &members, key_id, message, &ctx, "sign").await {
             Ok(signature) => return Ok(signature),
             Err(Attempt::Fatal(e)) => return Err(e),
@@ -452,18 +452,24 @@ enum Attempt {
 }
 
 /// One signing session over exactly `members`: round 1 to each (fresh nonces under a fresh session
-/// id), round 2 to each, aggregate. On a member's failure the session is aborted on every member
-/// still holding nonces for it, so nothing lingers until the pending TTL; a member that already
-/// produced its share has burned its nonce and is unaffected.
+/// id, bound to `message` and this signer set), round 2 to each, aggregate. On a member's failure
+/// the session is aborted on every member still holding nonces for it, so nothing lingers until
+/// the pending TTL; a member that already produced its share has burned its nonce and is
+/// unaffected.
 async fn attempt(
     node: &Arc<Node>,
     members: &[&Arc<dyn PeerApi>],
     key_id: &str,
     message: &[u8],
-    ctx: &crate::node::Round1Ctx,
+    base: &crate::node::Round1Ctx,
     prefix: &str,
 ) -> std::result::Result<[u8; 64], Attempt> {
     let session_id = new_id(prefix);
+    let mut signers = Vec::with_capacity(members.len());
+    for p in members {
+        signers.push(crate::hosted::identifier_index(p.identifier()).map_err(Attempt::Fatal)?);
+    }
+    let ctx = &crate::node::Round1Ctx { message: Some(message.to_vec()), signers: Some(signers), ..base.clone() };
     let mut commitments: BTreeMap<Identifier, SigningCommitments> = BTreeMap::new();
     for (i, p) in members.iter().enumerate() {
         match p.sign_round1(key_id, &session_id, ctx).await {
@@ -596,7 +602,7 @@ pub async fn ceremony_sign_test(
     }
 
     // One attempt over exactly this quorum, with the leader's sharing like any sign.
-    let ctx = crate::node::Round1Ctx { leader_view: Some(view.view) };
+    let ctx = crate::node::Round1Ctx { leader_view: Some(view.view), ..Default::default() };
     match attempt(node, &quorum, key_id, &message, &ctx, "signtest").await {
         Ok(signature) => Ok((message, signature)),
         Err(Attempt::Fatal(e)) => Err(e),

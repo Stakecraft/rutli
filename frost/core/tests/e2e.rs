@@ -11,7 +11,9 @@ use frost_ed25519 as frost;
 use frost::Identifier;
 use rutli_frost_core::dkg::{group_verifying_key_bytes, DkgParticipant};
 use rutli_frost_core::nonce_store::NonceStore;
-use rutli_frost_core::session::{aggregate, Cosigner};
+use rutli_frost_core::session::{aggregate, Cosigner, SessionBinding};
+
+const KEY: &str = "k";
 use rutli_frost_core::CoreError;
 
 const MIN_SIGNERS: u16 = 2;
@@ -79,13 +81,16 @@ fn sign_with(
     session_id: &str,
     message: &[u8],
 ) -> Result<[u8; 64], CoreError> {
+    let binding = SessionBinding::new(KEY)
+        .with_message(message)
+        .with_signers(cosigners.iter().map(|c| c.identifier()));
     let mut commitments = BTreeMap::new();
     for c in cosigners {
-        commitments.insert(c.identifier(), c.round1(session_id)?);
+        commitments.insert(c.identifier(), c.round1(session_id, binding.clone())?);
     }
     let mut shares = BTreeMap::new();
     for c in cosigners {
-        shares.insert(c.identifier(), c.round2(session_id, message, &commitments)?);
+        shares.insert(c.identifier(), c.round2(session_id, KEY, message, &commitments, None)?);
     }
     aggregate(message, &commitments, &shares, cosigners[0].public_key_package())
 }
@@ -144,12 +149,12 @@ fn nonce_reuse_is_refused_even_across_cosigner_restart() {
     sign_with(&[&cosigners[0], &cosigners[1]], session, &message).unwrap();
 
     // Replaying round 1 with the same session id must be refused (burned marker on disk).
-    let err = cosigners[0].round1(session).unwrap_err();
+    let err = cosigners[0].round1(session, SessionBinding::new(KEY)).unwrap_err();
     assert!(matches!(err, CoreError::NonceReuse(_)), "got: {err:?}");
 
     // And round 2 for a session that never did round 1 is unknown.
     let commitments = BTreeMap::new();
-    let err = cosigners[0].round2("session-nonexistent", &message, &commitments).unwrap_err();
+    let err = cosigners[0].round2("session-nonexistent", KEY, &message, &commitments, None).unwrap_err();
     assert!(matches!(err, CoreError::UnknownSession(_)), "got: {err:?}");
 }
 
@@ -401,9 +406,9 @@ fn in_flight_sign_sessions_are_freed_on_completion_and_abort() {
     let c = &cosigners[0];
 
     // Three round-1 sessions minted, none completed yet.
-    c.round1("s1").unwrap();
-    c.round1("s2").unwrap();
-    c.round1("s3").unwrap();
+    c.round1("s1", SessionBinding::new(KEY)).unwrap();
+    c.round1("s2", SessionBinding::new(KEY)).unwrap();
+    c.round1("s3", SessionBinding::new(KEY)).unwrap();
     assert_eq!(c.pending_count(), 3);
 
     // Aborting a session frees its RAM nonces (leader gave up / timed out).
@@ -423,10 +428,99 @@ fn duplicate_round1_for_same_session_is_refused() {
     let tmp = tempfile::tempdir().unwrap();
     let cosigners = dkg_cluster(&tmp);
     let c = &cosigners[0];
-    c.round1("dup-session").unwrap();
+    c.round1("dup-session", SessionBinding::new(KEY)).unwrap();
     // A second round1 with the SAME id must not overwrite the live nonces.
-    let err = c.round1("dup-session").unwrap_err();
+    let err = c.round1("dup-session", SessionBinding::new(KEY)).unwrap_err();
     assert!(matches!(err, CoreError::DuplicateSession(_)), "got {err:?}");
     // A different session id still works.
-    assert!(c.round1("other-session").is_ok());
+    assert!(c.round1("other-session", SessionBinding::new(KEY)).is_ok());
+}
+
+// ── session binding: round 2 must match what round 1 was opened for ────────────────────────────
+
+type Commitments = BTreeMap<frost_ed25519::Identifier, frost_ed25519::round1::SigningCommitments>;
+
+/// Opens a bound session on cosigners 0 and 1 over `message`; returns the commitments.
+fn open_bound(cosigners: &[Cosigner], session: &str, message: &[u8]) -> Commitments {
+    let quorum = [&cosigners[0], &cosigners[1]];
+    let binding = SessionBinding::new(KEY)
+        .with_message(message)
+        .with_signers(quorum.iter().map(|c| c.identifier()));
+    quorum.iter().map(|c| (c.identifier(), c.round1(session, binding.clone()).unwrap())).collect()
+}
+
+fn burned(tmp: &tempfile::TempDir, c: &Cosigner, session: &str) -> bool {
+    NonceStore::open(tmp.path().join(format!("cosigner-{:?}", c.identifier())))
+        .unwrap()
+        .is_consumed(session)
+        .unwrap()
+}
+
+#[test]
+fn round2_is_refused_unless_it_matches_the_round1_binding_and_never_burns_on_a_mismatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cosigners = dkg_cluster(&tmp);
+    let message = canton_digest(b"declared");
+    let c = &cosigners[0];
+
+    let other_message = canton_digest(b"substituted");
+    let mut third = open_bound(&cosigners, "bind-x", &message);
+    third.insert(cosigners[2].identifier(), cosigners[2].round1("bind-x", SessionBinding::new(KEY)).unwrap());
+    let mut altered = open_bound(&cosigners, "bind-x2", &message);
+    let theirs = altered[&cosigners[1].identifier()];
+    altered.insert(c.identifier(), theirs);
+
+    // (session, key presented, message presented, commitments presented, intent, what differs)
+    type Case<'a> = (&'a str, &'a str, Vec<u8>, Commitments, Option<[u8; 32]>, &'a str);
+    let cases: Vec<Case> = vec![
+        ("bind-1", KEY, other_message.clone(), open_bound(&cosigners, "bind-1", &message), None, "message"),
+        ("bind-x", KEY, message.clone(), third, None, "signer set"),
+        ("bind-x2", KEY, message.clone(), altered, None, "own round-1 commitment"),
+        ("bind-3", "another-key", message.clone(), open_bound(&cosigners, "bind-3", &message), None, "key"),
+        ("bind-4", KEY, message.clone(), open_bound(&cosigners, "bind-4", &message), Some([7; 32]), "intent"),
+    ];
+    for (session, key, msg, commitments, intent, what) in cases {
+        let err = c.round2(session, key, &msg, &commitments, intent.as_ref()).unwrap_err();
+        assert!(
+            matches!(&err, CoreError::BindingMismatch { what: w, .. } if w.contains(what)),
+            "{session}: expected a {what} mismatch, got {err:?}"
+        );
+        assert!(!burned(&tmp, c, session), "{session}: a refused round 2 must not burn the marker");
+        // The session's nonces are gone: no later round 2 can release a share for it.
+        let err = c.round2(session, KEY, &message, &commitments, None).unwrap_err();
+        assert!(matches!(err, CoreError::UnknownSession(_)), "{session}: {err:?}");
+    }
+
+    // The bound round 2 itself goes through and burns.
+    let commitments = open_bound(&cosigners, "bind-ok", &message);
+    c.round2("bind-ok", KEY, &message, &commitments, None).unwrap();
+    assert!(burned(&tmp, c, "bind-ok"));
+}
+
+#[test]
+fn round1_refuses_a_signer_set_it_cannot_belong_to() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cosigners = dkg_cluster(&tmp);
+    let without_me = SessionBinding::new(KEY).with_signers([cosigners[1].identifier(), cosigners[2].identifier()]);
+    let too_small = SessionBinding::new(KEY).with_signers([cosigners[0].identifier()]);
+    for b in [without_me, too_small] {
+        let err = cosigners[0].round1("s", b).unwrap_err();
+        assert!(matches!(err, CoreError::InvalidBinding(_)), "{err:?}");
+    }
+    assert_eq!(cosigners[0].pending_count(), 0);
+}
+
+#[test]
+fn an_unbound_session_from_an_older_leader_still_signs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cosigners = dkg_cluster(&tmp);
+    let message = canton_digest(b"legacy leader");
+    let quorum = [&cosigners[0], &cosigners[2]];
+    let commitments: BTreeMap<_, _> =
+        quorum.iter().map(|c| (c.identifier(), c.round1("legacy", SessionBinding::new(KEY)).unwrap())).collect();
+    let shares: BTreeMap<_, _> = quorum
+        .iter()
+        .map(|c| (c.identifier(), c.round2("legacy", KEY, &message, &commitments, None).unwrap()))
+        .collect();
+    aggregate(&message, &commitments, &shares, cosigners[0].public_key_package()).unwrap();
 }

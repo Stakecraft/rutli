@@ -30,6 +30,8 @@ private static final long serialVersionUID = 0L;
     keyId_ = "";
     sessionId_ = "";
     pkpDigest_ = com.google.protobuf.ByteString.EMPTY;
+    message_ = com.google.protobuf.ByteString.EMPTY;
+    signers_ = emptyIntList();
   }
 
   public static final com.google.protobuf.Descriptors.Descriptor
@@ -155,6 +157,55 @@ private static final long serialVersionUID = 0L;
     return pkpDigest_;
   }
 
+  public static final int MESSAGE_FIELD_NUMBER = 7;
+  private com.google.protobuf.ByteString message_ = com.google.protobuf.ByteString.EMPTY;
+  /**
+   * <pre>
+   * Session binding: the message this session will sign (Canton's 34-byte digest) and the signer
+   * set of this attempt (configured identifiers). The node binds its round-1 nonces to them, and
+   * refuses a round 2 for the session with another message, another commitment set or its own
+   * commitment altered — before burning the nonce marker. Empty/absent from a leader that predates
+   * session binding: not checked.
+   * </pre>
+   *
+   * <code>bytes message = 7;</code>
+   * @return The message.
+   */
+  @java.lang.Override
+  public com.google.protobuf.ByteString getMessage() {
+    return message_;
+  }
+
+  public static final int SIGNERS_FIELD_NUMBER = 8;
+  @SuppressWarnings("serial")
+  private com.google.protobuf.Internal.IntList signers_ =
+      emptyIntList();
+  /**
+   * <code>repeated uint32 signers = 8;</code>
+   * @return A list containing the signers.
+   */
+  @java.lang.Override
+  public java.util.List<java.lang.Integer>
+      getSignersList() {
+    return signers_;
+  }
+  /**
+   * <code>repeated uint32 signers = 8;</code>
+   * @return The count of signers.
+   */
+  public int getSignersCount() {
+    return signers_.size();
+  }
+  /**
+   * <code>repeated uint32 signers = 8;</code>
+   * @param index The index of the element to return.
+   * @return The signers at the given index.
+   */
+  public int getSigners(int index) {
+    return signers_.getInt(index);
+  }
+  private int signersMemoizedSerializedSize = -1;
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -169,6 +220,7 @@ private static final long serialVersionUID = 0L;
   @java.lang.Override
   public void writeTo(com.google.protobuf.CodedOutputStream output)
                       throws java.io.IOException {
+    getSerializedSize();
     if (!com.google.protobuf.GeneratedMessage.isStringEmpty(keyId_)) {
       com.google.protobuf.GeneratedMessage.writeString(output, 1, keyId_);
     }
@@ -180,6 +232,16 @@ private static final long serialVersionUID = 0L;
     }
     if (!pkpDigest_.isEmpty()) {
       output.writeBytes(5, pkpDigest_);
+    }
+    if (!message_.isEmpty()) {
+      output.writeBytes(7, message_);
+    }
+    if (getSignersList().size() > 0) {
+      output.writeUInt32NoTag(66);
+      output.writeUInt32NoTag(signersMemoizedSerializedSize);
+    }
+    for (int i = 0; i < signers_.size(); i++) {
+      output.writeUInt32NoTag(signers_.getInt(i));
     }
     getUnknownFields().writeTo(output);
   }
@@ -204,6 +266,24 @@ private static final long serialVersionUID = 0L;
       size += com.google.protobuf.CodedOutputStream
         .computeBytesSize(5, pkpDigest_);
     }
+    if (!message_.isEmpty()) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeBytesSize(7, message_);
+    }
+    {
+      int dataSize = 0;
+      for (int i = 0; i < signers_.size(); i++) {
+        dataSize += com.google.protobuf.CodedOutputStream
+          .computeUInt32SizeNoTag(signers_.getInt(i));
+      }
+      size += dataSize;
+      if (!getSignersList().isEmpty()) {
+        size += 1;
+        size += com.google.protobuf.CodedOutputStream
+            .computeInt32SizeNoTag(dataSize);
+      }
+      signersMemoizedSerializedSize = dataSize;
+    }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
     return size;
@@ -227,6 +307,10 @@ private static final long serialVersionUID = 0L;
         != other.getEpoch()) return false;
     if (!getPkpDigest()
         .equals(other.getPkpDigest())) return false;
+    if (!getMessage()
+        .equals(other.getMessage())) return false;
+    if (!getSignersList()
+        .equals(other.getSignersList())) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -247,6 +331,12 @@ private static final long serialVersionUID = 0L;
         getEpoch());
     hash = (37 * hash) + PKP_DIGEST_FIELD_NUMBER;
     hash = (53 * hash) + getPkpDigest().hashCode();
+    hash = (37 * hash) + MESSAGE_FIELD_NUMBER;
+    hash = (53 * hash) + getMessage().hashCode();
+    if (getSignersCount() > 0) {
+      hash = (37 * hash) + SIGNERS_FIELD_NUMBER;
+      hash = (53 * hash) + getSignersList().hashCode();
+    }
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -382,6 +472,8 @@ private static final long serialVersionUID = 0L;
       sessionId_ = "";
       epoch_ = 0L;
       pkpDigest_ = com.google.protobuf.ByteString.EMPTY;
+      message_ = com.google.protobuf.ByteString.EMPTY;
+      signers_ = emptyIntList();
       return this;
     }
 
@@ -427,6 +519,13 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000008) != 0)) {
         result.pkpDigest_ = pkpDigest_;
       }
+      if (((from_bitField0_ & 0x00000010) != 0)) {
+        result.message_ = message_;
+      }
+      if (((from_bitField0_ & 0x00000020) != 0)) {
+        signers_.makeImmutable();
+        result.signers_ = signers_;
+      }
     }
 
     @java.lang.Override
@@ -456,6 +555,20 @@ private static final long serialVersionUID = 0L;
       }
       if (other.getPkpDigest() != com.google.protobuf.ByteString.EMPTY) {
         setPkpDigest(other.getPkpDigest());
+      }
+      if (other.getMessage() != com.google.protobuf.ByteString.EMPTY) {
+        setMessage(other.getMessage());
+      }
+      if (!other.signers_.isEmpty()) {
+        if (signers_.isEmpty()) {
+          signers_ = other.signers_;
+          signers_.makeImmutable();
+          bitField0_ |= 0x00000020;
+        } else {
+          ensureSignersIsMutable();
+          signers_.addAll(other.signers_);
+        }
+        onChanged();
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -503,6 +616,27 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000008;
               break;
             } // case 42
+            case 58: {
+              message_ = input.readBytes();
+              bitField0_ |= 0x00000010;
+              break;
+            } // case 58
+            case 64: {
+              int v = input.readUInt32();
+              ensureSignersIsMutable();
+              signers_.addInt(v);
+              break;
+            } // case 64
+            case 66: {
+              int length = input.readRawVarint32();
+              int limit = input.pushLimit(length);
+              ensureSignersIsMutable();
+              while (input.getBytesUntilLimit() > 0) {
+                signers_.addInt(input.readUInt32());
+              }
+              input.popLimit(limit);
+              break;
+            } // case 66
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -754,6 +888,146 @@ private static final long serialVersionUID = 0L;
     public Builder clearPkpDigest() {
       bitField0_ = (bitField0_ & ~0x00000008);
       pkpDigest_ = getDefaultInstance().getPkpDigest();
+      onChanged();
+      return this;
+    }
+
+    private com.google.protobuf.ByteString message_ = com.google.protobuf.ByteString.EMPTY;
+    /**
+     * <pre>
+     * Session binding: the message this session will sign (Canton's 34-byte digest) and the signer
+     * set of this attempt (configured identifiers). The node binds its round-1 nonces to them, and
+     * refuses a round 2 for the session with another message, another commitment set or its own
+     * commitment altered — before burning the nonce marker. Empty/absent from a leader that predates
+     * session binding: not checked.
+     * </pre>
+     *
+     * <code>bytes message = 7;</code>
+     * @return The message.
+     */
+    @java.lang.Override
+    public com.google.protobuf.ByteString getMessage() {
+      return message_;
+    }
+    /**
+     * <pre>
+     * Session binding: the message this session will sign (Canton's 34-byte digest) and the signer
+     * set of this attempt (configured identifiers). The node binds its round-1 nonces to them, and
+     * refuses a round 2 for the session with another message, another commitment set or its own
+     * commitment altered — before burning the nonce marker. Empty/absent from a leader that predates
+     * session binding: not checked.
+     * </pre>
+     *
+     * <code>bytes message = 7;</code>
+     * @param value The message to set.
+     * @return This builder for chaining.
+     */
+    public Builder setMessage(com.google.protobuf.ByteString value) {
+      if (value == null) { throw new NullPointerException(); }
+      message_ = value;
+      bitField0_ |= 0x00000010;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * Session binding: the message this session will sign (Canton's 34-byte digest) and the signer
+     * set of this attempt (configured identifiers). The node binds its round-1 nonces to them, and
+     * refuses a round 2 for the session with another message, another commitment set or its own
+     * commitment altered — before burning the nonce marker. Empty/absent from a leader that predates
+     * session binding: not checked.
+     * </pre>
+     *
+     * <code>bytes message = 7;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearMessage() {
+      bitField0_ = (bitField0_ & ~0x00000010);
+      message_ = getDefaultInstance().getMessage();
+      onChanged();
+      return this;
+    }
+
+    private com.google.protobuf.Internal.IntList signers_ = emptyIntList();
+    private void ensureSignersIsMutable() {
+      if (!signers_.isModifiable()) {
+        signers_ = makeMutableCopy(signers_);
+      }
+      bitField0_ |= 0x00000020;
+    }
+    /**
+     * <code>repeated uint32 signers = 8;</code>
+     * @return A list containing the signers.
+     */
+    public java.util.List<java.lang.Integer>
+        getSignersList() {
+      signers_.makeImmutable();
+      return signers_;
+    }
+    /**
+     * <code>repeated uint32 signers = 8;</code>
+     * @return The count of signers.
+     */
+    public int getSignersCount() {
+      return signers_.size();
+    }
+    /**
+     * <code>repeated uint32 signers = 8;</code>
+     * @param index The index of the element to return.
+     * @return The signers at the given index.
+     */
+    public int getSigners(int index) {
+      return signers_.getInt(index);
+    }
+    /**
+     * <code>repeated uint32 signers = 8;</code>
+     * @param index The index to set the value at.
+     * @param value The signers to set.
+     * @return This builder for chaining.
+     */
+    public Builder setSigners(
+        int index, int value) {
+
+      ensureSignersIsMutable();
+      signers_.setInt(index, value);
+      bitField0_ |= 0x00000020;
+      onChanged();
+      return this;
+    }
+    /**
+     * <code>repeated uint32 signers = 8;</code>
+     * @param value The signers to add.
+     * @return This builder for chaining.
+     */
+    public Builder addSigners(int value) {
+
+      ensureSignersIsMutable();
+      signers_.addInt(value);
+      bitField0_ |= 0x00000020;
+      onChanged();
+      return this;
+    }
+    /**
+     * <code>repeated uint32 signers = 8;</code>
+     * @param values The signers to add.
+     * @return This builder for chaining.
+     */
+    public Builder addAllSigners(
+        java.lang.Iterable<? extends java.lang.Integer> values) {
+      ensureSignersIsMutable();
+      com.google.protobuf.AbstractMessageLite.Builder.addAll(
+          values, signers_);
+      bitField0_ |= 0x00000020;
+      onChanged();
+      return this;
+    }
+    /**
+     * <code>repeated uint32 signers = 8;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearSigners() {
+      signers_ = emptyIntList();
+      bitField0_ = (bitField0_ & ~0x00000020);
       onChanged();
       return this;
     }

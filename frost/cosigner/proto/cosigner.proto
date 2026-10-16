@@ -209,6 +209,13 @@ message SignRound1Request {
   // refuses every round 1 for the key (rutli-error=stale-share).
   uint64 epoch = 4;
   bytes pkp_digest = 5;
+  // Session binding: the message this session will sign (Canton's 34-byte digest) and the signer
+  // set of this attempt (configured identifiers). The node binds its round-1 nonces to them, and
+  // refuses a round 2 for the session with another message, another commitment set or its own
+  // commitment altered — before burning the nonce marker. Empty/absent from a leader that predates
+  // session binding: not checked.
+  bytes message = 7;
+  repeated uint32 signers = 8;
 }
 message SignRound1Reply { bytes commitments = 1; } // json SigningCommitments
 

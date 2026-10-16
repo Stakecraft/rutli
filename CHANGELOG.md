@@ -54,6 +54,12 @@ key-file v2 and restore — see the warnings below.
   sharing fails over (UNAVAILABLE). New metrics: `rutli_epoch_mismatch_total`,
   `rutli_epoch_check_skipped_total`, `rutli_stale_share`, `rutli_sign_retries_total`,
   `rutli_invalid_signature_shares_total`.
+- **Signing sessions are bound at round 1** (groundwork for signing intents, audit C2). The leader
+  declares the message and the signer set in `SignRound1`; each cosigner binds its nonces to them
+  and to the key, and refuses a round 2 with another message, another commitment set, or its own
+  commitment altered, before burning the nonce marker (`CoreError::BindingMismatch`,
+  FAILED_PRECONDITION). `rutli-frost-core`: `Cosigner::round1` takes a `SessionBinding`,
+  `Cosigner::round2` the key id and an intent digest.
 - **DKG and refresh round-2 packages never reach the leader (audit C1, ceremony protocol 2).** Each
   node delivers its round-2 packages directly to their recipients over the mTLS mesh
   (`Peer.CeremonyDeliver`): the sender dials the recipient under its own TLS name, the recipient

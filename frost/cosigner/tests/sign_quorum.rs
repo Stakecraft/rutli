@@ -63,7 +63,7 @@ async fn a_peer_refuses_round1_from_a_leader_on_another_epoch_and_mints_no_nonce
     assert_eq!(mine.0, 1);
 
     for leader in [(2, mine.1), (mine.0, [0xAB; 32])] {
-        let ctx = Round1Ctx { leader_view: Some(leader) };
+        let ctx = Round1Ctx { leader_view: Some(leader), ..Default::default() };
         let err = nodes[1].sign_round1(KEY, "s-mismatch", &ctx).unwrap_err();
         match err {
             DaemonError::EpochMismatch { peer, leader: l, .. } => assert_eq!((peer, l), (mine, leader)),
@@ -77,7 +77,7 @@ async fn a_peer_refuses_round1_from_a_leader_on_another_epoch_and_mints_no_nonce
     assert_eq!(nodes[1].pending_sign_count(KEY), 0, "a refused round 1 holds no nonces");
 
     // The matching sharing is accepted; so is a leader that names none (an older release).
-    let ok = Round1Ctx { leader_view: Some(mine) };
+    let ok = Round1Ctx { leader_view: Some(mine), ..Default::default() };
     nodes[1].sign_round1(KEY, "s-ok", &ok).unwrap();
     nodes[1].sign_round1(KEY, "s-legacy", &Round1Ctx::default()).unwrap();
     assert_eq!(nodes[1].pending_sign_count(KEY), 2);
@@ -186,6 +186,8 @@ enum Fault {
     Round1,
     Round2,
     BadShare,
+    /// Forwards round 2 with another message than the leader declared at round 1.
+    SwapMessage,
 }
 
 /// (node, call, session id, detail) for every sign call a [`Spy`] saw.
@@ -238,6 +240,14 @@ impl PeerApi for Spy {
                 let mut one = [0u8; 32];
                 one[0] = 1;
                 Ok(SignatureShare::deserialize(&one).unwrap())
+            }
+            Fault::SwapMessage => {
+                let swapped = digest(b"not what round 1 declared");
+                let r = self.inner.sign_round2(key_id, session_id, &swapped, commitments).await;
+                if let Err(e) = &r {
+                    self.note("refused", session_id, e.to_string());
+                }
+                r
             }
             _ => self.inner.sign_round2(key_id, session_id, message, commitments).await,
         }
@@ -383,4 +393,63 @@ async fn three_of_five_retries_through_subsets_until_one_works() {
     let (peers, _log) = spied(&nodes, &[Fault::None, Fault::Round1, Fault::Round2, Fault::BadShare, Fault::None]);
     let err = sign(&nodes[0], &peers, KEY, &digest(b"too few")).await.unwrap_err();
     assert!(matches!(err, DaemonError::ThresholdNotMet { needed: 3, got: 2 }), "{err:?}");
+}
+
+// ── session binding through the node ──────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn a_node_refuses_round2_for_another_message_or_commitment_set_than_round1_declared() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = cluster(tmp.path(), 3, 2);
+    run_dkg(&peers, KEY).await.unwrap();
+    let msg = digest(b"declared at round 1");
+    let ctx = Round1Ctx {
+        leader_view: Some(view_of(&nodes[0])),
+        message: Some(msg.clone()),
+        signers: Some(vec![1, 2]),
+    };
+    let open = |session: &str| -> BTreeMap<Identifier, SigningCommitments> {
+        [0usize, 1].iter().map(|&i| (nodes[i].identifier, nodes[i].sign_round1(KEY, session, &ctx).unwrap())).collect()
+    };
+
+    // Another message.
+    let cs = open("b-msg");
+    let err = nodes[0].sign_round2(KEY, "b-msg", &digest(b"substituted"), &cs).unwrap_err();
+    assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::BindingMismatch { .. })), "{err:?}");
+    assert_eq!(tonic::Status::from(err).code(), tonic::Code::FailedPrecondition);
+    // Another commitment set (node 3 added).
+    let mut cs = open("b-set");
+    let c3 = nodes[2].sign_round1(KEY, "b-set", &Round1Ctx::default()).unwrap();
+    cs.insert(nodes[2].identifier, c3);
+    let err = nodes[0].sign_round2(KEY, "b-set", &msg, &cs).unwrap_err();
+    assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::BindingMismatch { .. })), "{err:?}");
+    for session in ["b-msg", "b-set"] {
+        assert!(!marker_exists(tmp.path(), 1, session), "{session}: refused before the marker burns");
+    }
+
+    // A round 1 declaring a signer set without this node is refused outright.
+    let not_me = Round1Ctx { signers: Some(vec![2, 3]), ..ctx.clone() };
+    assert!(nodes[0].sign_round1(KEY, "b-notme", &not_me).is_err());
+
+    // The declared message under the declared set signs.
+    let cs = open("b-ok");
+    nodes[0].sign_round2(KEY, "b-ok", &msg, &cs).unwrap();
+    assert!(marker_exists(tmp.path(), 1, "b-ok"));
+}
+
+#[tokio::test]
+async fn a_round2_tampered_in_transit_is_refused_by_the_node_and_routed_around() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, plain) = cluster(tmp.path(), 3, 2);
+    let group = run_dkg(&plain, KEY).await.unwrap();
+    let (peers, log) = spied(&nodes, &[Fault::None, Fault::SwapMessage, Fault::None]);
+    let msg = digest(b"the real message");
+    let sig = sign(&nodes[0], &peers, KEY, &msg).await.unwrap();
+    assert!(verifies(&group, &msg, &sig));
+    let s = sessions(&log);
+    let entries = log.lock().unwrap().clone();
+    let refused: Vec<_> = entries.iter().filter(|(n, w, _, _)| *n == 2 && *w == "refused").collect();
+    assert_eq!(refused.len(), 1, "{entries:?}");
+    assert!(refused[0].3.contains("round-1 binding"), "{}", refused[0].3);
+    assert!(!marker_exists(tmp.path(), 2, &s[0]), "node 2 never burned (nor signed) the tampered session");
 }
