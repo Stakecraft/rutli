@@ -63,7 +63,9 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
 
   /** A cosigner stand-in: reports `clusterId`, answers the group key, records every Sign request,
     * and fails the first `failSigns` of them with UNAVAILABLE. */
-  private final class Recorder(clusterId: String, failSigns: Int = 0) extends SignerGrpc.SignerImplBase {
+  private final class Recorder(@volatile var clusterId: String, failSigns: Int = 0) extends SignerGrpc.SignerImplBase {
+    /** Refuse an intent for any other cluster, as a cosigner does (intent.rs, reason "cluster"). */
+    @volatile var accept: Option[String] = None
     val signs = new ConcurrentLinkedQueue[SignRequest]()
     val deletes = new ConcurrentLinkedQueue[DeleteKeyRequest]()
     override def deleteKey(req: DeleteKeyRequest, obs: StreamObserver[DeleteKeyReply]): Unit = {
@@ -79,7 +81,14 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
     }
     override def sign(req: SignRequest, obs: StreamObserver[SignReply]): Unit = {
       signs.add(req)
-      if (failed.getAndIncrement() < failSigns) obs.onError(Status.UNAVAILABLE.withDescription("test: down").asRuntimeException())
+      val named = if (req.hasIntent) Some(SignIntent.parseFrom(req.getIntent.getIntent).getClusterId) else None
+      if (accept.isDefined && named.isDefined && named != accept)
+        obs.onError(
+          Status.PERMISSION_DENIED
+            .withDescription(s"signing intent refused: intent is for cluster \"${named.get}\", this is ${accept.get}")
+            .asRuntimeException()
+        )
+      else if (failed.getAndIncrement() < failSigns) obs.onError(Status.UNAVAILABLE.withDescription("test: down").asRuntimeException())
       else {
         obs.onNext(SignReply.newBuilder().setSignature(ByteString.copyFrom(ed25519(req.getMessage.toByteArray))).build())
         obs.onCompleted()
@@ -105,9 +114,9 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
     s"localhost:${s.getPort}"
   }
 
-  private def backend(eps: Seq[(String, String)], clusterId: Option[String] = None) =
+  private def backend(eps: Seq[(String, String)], clusterId: Option[String] = None, signIntents: Boolean = true) =
     new FrostBackend(eps.map(_._1), new NoDelegateBackend, logger, Some(tls), 10.seconds,
-      endpointTlsNames = eps.toMap, clusterId = clusterId)
+      endpointTlsNames = eps.toMap, clusterId = clusterId, signIntents = signIntents)
 
   private def decode(i: SignedIntent): SignIntent = SignIntent.parseFrom(i.getIntent)
 
@@ -196,6 +205,65 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
         Await.result(pinned.sign(Digest, Key, SigningAlgoSpec.Ed25519), 20.seconds)
         decode(rec2.signs.asScala.toList.loneElement.getIntent).getClusterId shouldBe "pinnedcluster000"
       } finally pinned.close()
+    }
+  }
+
+  "FrostBackend's cluster id (audit F5)" should {
+
+    "be what a majority of the cosigners report, never one cosigner's word" in {
+      val recs = Seq(new Recorder(Cluster), new Recorder("liarcluster00000"), new Recorder(Cluster))
+      val b = backend(recs.zipWithIndex.map { case (r, i) => serve(s"cosigner${i + 1}", r) -> s"cosigner${i + 1}" })
+      try {
+        Await.result(b.sign(Digest, Key, SigningAlgoSpec.Ed25519), 20.seconds)
+        val sent = recs.flatMap(_.signs.asScala).loneElement
+        decode(sent.getIntent).getClusterId shouldBe Cluster
+      } finally b.close()
+      // Two endpoints that disagree: no majority, no intent (and a loud error) — not the first one's.
+      val split = Seq(new Recorder("liarcluster00000"), new Recorder(Cluster))
+      val b2 = backend(split.zipWithIndex.map { case (r, i) => serve(s"cosigner${i + 1}", r) -> s"cosigner${i + 1}" })
+      try {
+        val notes = new AuditNotes
+        Await.result(b2.withAuditNotes(notes)(b2.sign(Digest, Key, SigningAlgoSpec.Ed25519)), 20.seconds)
+        split.flatMap(_.signs.asScala).loneElement.hasIntent shouldBe false
+        notes.render should include("intent=none")
+      } finally b2.close()
+    }
+
+    "be learned again when a cosigner refuses the intent for its cluster" in {
+      val recs = Seq(new Recorder("oldcluster000000"), new Recorder("oldcluster000000"))
+      val b = backend(recs.zipWithIndex.map { case (r, i) => serve(s"cosigner${i + 1}", r) -> s"cosigner${i + 1}" })
+      try {
+        Await.result(b.sign(Digest, Key, SigningAlgoSpec.Ed25519), 20.seconds)
+        // The cluster's id changes (or the learned one was wrong): the cosigners refuse the old one.
+        recs.foreach { r => r.clusterId = Cluster; r.accept = Some(Cluster) }
+        val notes = new AuditNotes
+        Await.result(b.withAuditNotes(notes)(b.sign(Digest, Key, SigningAlgoSpec.Ed25519)), 20.seconds) shouldBe ed25519(Digest)
+        decode(recs.flatMap(_.signs.asScala).last.getIntent).getClusterId shouldBe Cluster
+        notes.render should include("intent-cluster=relearned")
+      } finally b.close()
+      // A configured id is never "re-learned": the refusal is the answer.
+      val rec = new Recorder(Cluster)
+      rec.accept = Some(Cluster)
+      val pinned = backend(Seq(serve("cosigner3", rec) -> "cosigner3"), clusterId = Some("pinnedcluster000"))
+      try {
+        val e = intercept[Exception](Await.result(pinned.sign(Digest, Key, SigningAlgoSpec.Ed25519), 20.seconds))
+        e.getMessage should include("intent is for cluster")
+        rec.signs.size shouldBe 1
+      } finally pinned.close()
+    }
+
+    "not be attached at all with frost.sign-intents = off" in {
+      val rec = new Recorder(Cluster)
+      val b = backend(Seq(serve("cosigner1", rec) -> "cosigner1"), signIntents = false)
+      try {
+        val notes = new AuditNotes
+        Await.result(b.withAuditNotes(notes)(b.sign(Digest, Key, SigningAlgoSpec.Ed25519)), 20.seconds)
+        rec.signs.asScala.toList.loneElement.hasIntent shouldBe false
+        notes.render should include("intent=off")
+      } finally b.close()
+      com.stakecraft.rutli.FrostConfig(signIntents = "off").signIntentsEnabled shouldBe false
+      com.stakecraft.rutli.FrostConfig().signIntentsEnabled shouldBe true
+      an[IllegalArgumentException] should be thrownBy com.stakecraft.rutli.FrostConfig(signIntents = "maybe").signIntentsEnabled
     }
   }
 

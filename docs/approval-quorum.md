@@ -143,8 +143,11 @@ order:
    working in both directions. Each node verifies intents when they are present and journals every
    share. `rutli_sign_intent_absent_total` counts the older driver's signs.
 2. **The driver release** (participant restart). It signs an intent for every FROST sign and carries
-   the approvals. It learns the cluster id from the cosigners (`Capabilities`), or you can set
-   `frost.cluster-id`. Check that `rutli_sign_intent_absent_total` stops growing on every node, and
+   the approvals. It learns the cluster id from the cosigners (`Capabilities`: the value a majority
+   of the endpoints report; learned again if a cosigner refuses an intent for its cluster), or you
+   set `frost.cluster-id` (recommended: then no cosigner's answer decides it). `frost.sign-intents =
+   off` stops attaching intents — an emergency switch that works only while `require_intent` is off.
+   Check that `rutli_sign_intent_absent_total` stops growing on every node, and
    that the journals show `"purpose":"sign"` entries with request ids
    (`rutli-cosigner audit-cross-check`).
 3. **Policy on every node, identical everywhere:** approval `rules`/`approvers` matching the

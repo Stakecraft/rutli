@@ -20,6 +20,8 @@ import com.stakecraft.rutli.grpc.{
   KeyInfoRequest,
   PublicKeyReply,
   PublicKeyRequest,
+  SignIntent,
+  SignReply,
   SignRequest,
   SignerGrpc,
   SymmetricRequest,
@@ -105,11 +107,15 @@ class FrostBackend(
     // The TLS server name each endpoint must present (url -> name, normally `cosigner<id>`). An
     // endpoint missing here falls back to `tls.domain`, then to its own host.
     endpointTlsNames: Map[String, String] = Map.empty,
-    // The cosigners' cluster id for signing intents; None = learn it from Capabilities.
+    // The cosigners' cluster id for signing intents; None = learn it from Capabilities (a majority
+    // of the endpoints must agree).
     clusterId: Option[String] = None,
     // How long a signing intent is valid: room for a sign through every endpoint's deadline (the
     // cosigners accept at most `intent_max_lifetime_secs`, 300 s by default).
     intentLifetime: FiniteDuration = 180.seconds,
+    // `frost.sign-intents`: false stops attaching signing intents to signs — an emergency switch
+    // for a cluster-id or intent problem while the cosigners do not require intents (audit F5).
+    signIntents: Boolean = true,
 )(implicit ec: ExecutionContext)
     extends KmsBackend {
 
@@ -148,8 +154,15 @@ class FrostBackend(
   }
   if (tls.isEmpty) logger.warn("FROST: no TLS — signs carry no signing intent (a cosigner with require_intent refuses them)")
 
-  /** The cluster id intents name: configured, or learned once from the cluster. */
-  @volatile private var intentClusterId: Option[String] = clusterId.filter(_.nonEmpty)
+  /** The cluster id intents name: configured, or learned from the cluster (a majority of the
+    * endpoints agreeing), and learned again after a cosigner refuses an intent for its cluster. */
+  private val configuredClusterId: Option[String] = clusterId.filter(_.nonEmpty)
+  @volatile private var intentClusterId: Option[String] = configuredClusterId
+  if (!signIntents)
+    logger.warn(
+      "FROST: frost.sign-intents = off — signs carry NO signing intent; cosigners that require intents " +
+        "refuse them. An emergency setting: turn it back on once the incident is over."
+    )
   private val lastIntentWarning = new java.util.concurrent.atomic.AtomicLong(0L)
   private val lastClusterProbe = new java.util.concurrent.atomic.AtomicLong(0L)
 
@@ -695,10 +708,26 @@ class FrostBackend(
           // leader's session is abandoned and its nonces are burnt by the cosigners (AbortSign, or the
           // pending-session TTL), never reused — see isLeaderSick.
           Future(blocking {
-            val req = SignRequest.newBuilder().setKeyId(keyId).setMessage(ByteString.copyFrom(data))
-            signingIntent(keyId, data, requestId, approval, notes).foreach(req.setIntent)
-            val built = req.build()
-            withFailover("sign", isLeaderSick, notes)(_.sign(built))
+            def attempt(relearned: Boolean): SignReply = {
+              val req = SignRequest.newBuilder().setKeyId(keyId).setMessage(ByteString.copyFrom(data))
+              val intent = signingIntent(keyId, data, requestId, approval, notes)
+              intent.foreach(req.setIntent)
+              val built = req.build()
+              try withFailover("sign", isLeaderSick, notes)(_.sign(built))
+              catch {
+                // A cosigner says the intent names another cluster: the learned id is wrong (one
+                // endpoint lied, or the cluster id changed). Learn it again and retry once.
+                case e: StatusRuntimeException
+                    if !relearned && intent.nonEmpty && isClusterRefusal(e.getStatus) && forgetLearnedClusterId() =>
+                  logger.warn(
+                    s"FROST: a cosigner refused the signing intent for ${intent.map(i => SignIntent.parseFrom(i.getIntent).getClusterId).getOrElse("")} " +
+                      s"(${e.getStatus.getDescription}); learning the cluster id again"
+                  )
+                  notes.add("intent-cluster=relearned")
+                  attempt(relearned = true)
+              }
+            }
+            attempt(relearned = false)
           }).map { reply =>
             val sig = reply.getSignature.toByteArray
             require(sig.length == 64, s"expected 64-byte Ed25519 signature, got ${sig.length}")
@@ -734,7 +763,8 @@ class FrostBackend(
       approval: com.stakecraft.rutli.policy.ApprovalProof,
       notes: AuditNotes,
   ): Option[com.stakecraft.rutli.grpc.SignedIntent] =
-    intentSigner.flatMap { signer =>
+    if (!signIntents) { notes.add("intent=off"); None }
+    else intentSigner.flatMap { signer =>
       learnClusterId() match {
         case Some(cluster) =>
           notes.add(s"intent=${requestId.map("%02x".format(_)).mkString}")
@@ -752,9 +782,12 @@ class FrostBackend(
       }
     }
 
-  /** The cluster id for intents: configured, else the first non-empty `Capabilities.cluster_id`
-    * any endpoint reports (cached once found; asked again at most once a minute while unknown, so
-    * an older cluster does not cost a Capabilities round per sign). */
+  /** The cluster id for intents: configured, else the `Capabilities.cluster_id` a majority of the
+    * endpoints agree on — at least `requiredAgreement` of them (two, or the lone endpoint of a dev
+    * roster) and more than report any other value (audit F5: one compromised or misconfigured
+    * cosigner cannot set the id every honest cosigner then refuses). Cached once found; asked again
+    * at most once a minute while unknown, and again at once after a cluster refusal
+    * ([[forgetLearnedClusterId]]). */
   private def learnClusterId(): Option[String] =
     intentClusterId.orElse {
       val now = System.nanoTime()
@@ -762,23 +795,57 @@ class FrostBackend(
       if (last != 0L && now - last < 60.seconds.toNanos) None
       else {
         lastClusterProbe.set(now)
-        val found = channels.indices.iterator.flatMap { i =>
-          try {
-            val id = SignerGrpc
-              .newBlockingStub(channels(i))
-              .withDeadlineAfter(requestTimeout.min(5.seconds).toMillis, TimeUnit.MILLISECONDS)
-              .capabilities(CapabilitiesRequest.newBuilder().build())
-              .getClusterId
-            if (id.nonEmpty) Some(id) else None
-          } catch { case _: StatusRuntimeException => None }
-        }.nextOption()
+        val deadline = requestTimeout.min(5.seconds)
+        val probes = Future.traverse(channels.indices.toVector) { i =>
+          Future(blocking {
+            try {
+              val id = SignerGrpc
+                .newBlockingStub(channels(i))
+                .withDeadlineAfter(deadline.toMillis, TimeUnit.MILLISECONDS)
+                .capabilities(CapabilitiesRequest.newBuilder().build())
+                .getClusterId
+              Option(id).filter(_.nonEmpty).map(endpoints(i) -> _)
+            } catch { case _: StatusRuntimeException => None }
+          })
+        }
+        val answers =
+          try scala.concurrent.Await.result(probes, deadline + 2.seconds).flatten
+          catch { case _: java.util.concurrent.TimeoutException => Vector.empty }
+        val found = agreeOnClusterId(answers)
         found.foreach { id =>
-          logger.info(s"FROST: cluster id $id (from the cluster) for signing intents")
+          logger.info(s"FROST: cluster id $id (agreed by ${answers.count(_._2 == id)} of ${channels.size} cosigners) for signing intents")
           intentClusterId = Some(id)
         }
         found
       }
     }
+
+  /** The majority cluster id among `answers` (endpoint -> id), if one has enough agreement. */
+  private[backend] def agreeOnClusterId(answers: Seq[(String, String)]): Option[String] = {
+    val counts = answers.groupBy(_._2).view.mapValues(_.size).toVector.sortBy(-_._2)
+    if (counts.map(_._1).distinct.size > 1)
+      logger.error(
+        s"FROST: the cosigners report DIFFERENT cluster ids: ${answers.map { case (e, id) => s"$e=$id" }.mkString(", ")} — " +
+          "a misconfigured or compromised cosigner; using the majority value if there is one (set frost.cluster-id to pin it)"
+      )
+    counts match {
+      case (id, n) +: rest if n >= requiredAgreement && rest.forall(_._2 < n) => Some(id)
+      case _ => None
+    }
+  }
+
+  /** Forget a learned (never a configured) cluster id so the next sign learns it again. False when
+    * the id is configured: there is nothing to learn, the refusal is the answer. */
+  private def forgetLearnedClusterId(): Boolean =
+    configuredClusterId.isEmpty && {
+      intentClusterId = None
+      lastClusterProbe.set(0L)
+      true
+    }
+
+  /** A cosigner's refusal of an intent naming another cluster (`intent.rs` reason "cluster"). */
+  private def isClusterRefusal(s: Status): Boolean =
+    s.getCode == Status.Code.PERMISSION_DENIED && Option(s.getDescription).exists(_.contains("intent is for cluster"))
 
   override def decryptAsymmetric(
       ciphertext: Array[Byte],

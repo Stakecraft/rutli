@@ -53,8 +53,14 @@ Swapping the CA changes it again. Where the id is used:
 | Hosted-key replication envelopes (`wrap_for`/`unwrap_key` AAD): `GenerateKey` fan-out, read-repair `FetchKey`, anti-entropy push/pull | **No**, in flight only | Replication between nodes with different ids fails (`key envelope failed authentication`). Decrypt/ECDH are served locally and keep working. Anti-entropy heals once the ids agree again. |
 | Split ceremony recipient request (`share-recipient`), dealer check (`rutli-dealer --ca-cert`), share bundle (`import-share` check 3, envelope AAD) | **Yes, while a ceremony is in flight**: `data_dir/ceremony/<key_id>.recipient` (sealed) and the dealer's `r<i>.json` / `share-*-node<i>.json` | A pending recipient or bundle from before the change is refused. Run `abort-import`, then redo the ceremony. |
 | Installed shares (`KeyOrigin`), hosted keys at rest (share-seal AEAD, salted by node id only), hosted-key commitments, `backup`/`restore`, `export-key`/`import-key` files | No id inside | **None.** Nothing at rest has to be rewritten. |
+| Signing and delete intents (audit C2/M2): every intent names the cluster id, and each cosigner refuses one for another cluster (`rutli_sign_policy_refusals_total{reason="cluster"}`) | No (each intent lives ≤ `intent_max_lifetime_secs`) | The driver names the id it **pinned** (`frost.cluster-id`) or **learned** — the value a majority of the endpoints report in `Capabilities` (audit F5), learned again after a cosigner refuses an intent for its cluster. If the id changes under a pinned driver, every sign is refused with PERMISSION_DENIED until `frost.cluster-id` is updated. |
 
-The driver never sees the cluster id.
+The driver sees the cluster id: it names it in every signing intent. With the cosigner pin in place
+the id never changes, which is one more reason to pin it before the CA file changes. If the driver
+pins it too (`frost.cluster-id`, recommended in production — then no cosigner's `Capabilities`
+answer is trusted for it), it must be the same value. In an incident where intents are refused for
+the cluster id and the cosigners do not set `require_intent`, `frost.sign-intents = off` (driver
+restart) stops attaching intents until it is fixed.
 
 So nothing at rest is lost when the id changes. But a rolling restart over a changed CA file leaves
 nodes with **different** ids for the length of the roll, and that happens twice: when the second CA

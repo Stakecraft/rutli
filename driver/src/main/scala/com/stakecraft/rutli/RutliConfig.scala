@@ -98,7 +98,12 @@ final case class SigningJournalConfig(
   * @param clusterId  The cosigners' cluster id, named in every signing intent (audit C2) so an
   *                   intent cannot be replayed into another cluster. Default: learned from the
   *                   cluster (`Capabilities.cluster_id`). Set it to pin the value (16 hex chars,
-  *                   the cosigners' `cluster_id`).
+  *                   the cosigners' `cluster_id`). Learned, it is the value a majority of the
+  *                   endpoints report, and is learned again when a cosigner refuses an intent
+  *                   for its cluster.
+  * @param signIntents `on` (default) | `off`: attach a signing intent to every FROST sign. `off` is
+  *                   an emergency switch (a cluster-id or intent problem) that only works while
+  *                   the cosigners do not set `signing_policy.require_intent`.
   */
 final case class FrostConfig(
     endpoint: Option[String] = None,
@@ -108,7 +113,15 @@ final case class FrostConfig(
     hostedKeys: Boolean = false,
     keyPrefix: String = "",
     clusterId: Option[String] = None,
+    signIntents: String = "on",
 ) {
+
+  /** `sign-intents` as a switch; anything but on/off (or true/false) is a config error. */
+  def signIntentsEnabled: Boolean = signIntents.trim.toLowerCase match {
+    case "on" | "true" | "yes" => true
+    case "off" | "false" | "no" => false
+    case other => throw new IllegalArgumentException(s"frost.sign-intents must be on or off, got '$other'")
+  }
 
   /** All configured endpoints, `endpoints` first then the single `endpoint`, de-duplicated by url
     * (the first entry for a url wins, so a `tls-name` on it is kept). */
