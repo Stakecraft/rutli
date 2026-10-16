@@ -29,8 +29,8 @@ behind it until an external review completes.
 
 ### 1.1 Internal security review (October 2026)
 
-Before engaging you we ran an internal security audit: two independent reviews (Claude Opus and
-OpenAI Codex), each against `v0.4.0-rc.1` (`903d318`), on 2026-10-16. It is not a substitute for your
+Before engaging you we ran an internal security audit: two independent reviews,
+each against `v0.4.0-rc.1` (`903d318`), on 2026-10-16. It is not a substitute for your
 review; it is why the surface you will see differs from rc.1, and where we most want a second pair of
 eyes.
 
