@@ -160,6 +160,7 @@ final class RutliDriverFactory extends KmsDriverFactory {
           hostedKeys = frost.hostedKeys,
           keyPrefix = frost.keyPrefix,
           endpointTlsNames = eps.flatMap(e => e.tlsName.map(e.url -> _)).toMap,
+          clusterId = frost.clusterId,
         )(blockingEc)
       case other =>
         throw new IllegalArgumentException(

@@ -78,13 +78,14 @@ final class RutliDriver(
       // approval precedes even the threshold signature. Then the signing journal durably records the
       // (key, digest) — and enforces any rate limit — before the signature is produced. Auto-
       // approved, un-journalled keys pass straight through.
-      approvalGate.authorize(keyId, data).flatMap { _ =>
+      approvalGate.authorizeWithProof(keyId, data).flatMap { approval =>
         signingJournal.foreach(_.record(keyId, data)) // throws (fails the sign) if rate-limited
         // `withAuditNotes` must wrap the backend call itself, here inside the flatMap: a backend may
         // bind the notes to the calling thread (FrostBackend does), and this callback runs on an
         // ExecutionContext thread — wrapping the whole `authorize(...).flatMap` would bind them on
         // the wrong thread and lose a failover from the sign's audit entry.
-        backend.withAuditNotes(notes)(backend.sign(data, keyId, algoSpec))
+        // The approvals travel with the sign: the FROST cosigners verify them themselves.
+        backend.withAuditNotes(notes)(backend.sign(data, keyId, algoSpec, approval))
       }
     )(sig => s"sigBytes=${sig.length}")
 

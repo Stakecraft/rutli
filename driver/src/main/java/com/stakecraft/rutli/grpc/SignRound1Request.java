@@ -32,6 +32,7 @@ private static final long serialVersionUID = 0L;
     pkpDigest_ = com.google.protobuf.ByteString.EMPTY;
     message_ = com.google.protobuf.ByteString.EMPTY;
     signers_ = emptyIntList();
+    purpose_ = "";
   }
 
   public static final com.google.protobuf.Descriptors.Descriptor
@@ -47,6 +48,7 @@ private static final long serialVersionUID = 0L;
             com.stakecraft.rutli.grpc.SignRound1Request.class, com.stakecraft.rutli.grpc.SignRound1Request.Builder.class);
   }
 
+  private int bitField0_;
   public static final int KEY_ID_FIELD_NUMBER = 1;
   @SuppressWarnings("serial")
   private volatile java.lang.Object keyId_ = "";
@@ -125,11 +127,57 @@ private static final long serialVersionUID = 0L;
     }
   }
 
+  public static final int INTENT_FIELD_NUMBER = 3;
+  private com.stakecraft.rutli.grpc.SignedIntent intent_;
+  /**
+   * <pre>
+   * The client's signing intent (see SignRequest.intent), forwarded by the leader unchanged. This
+   * node verifies it itself — signature, certificate chain to the cluster CA, signer allowlist and
+   * pins, cluster, key, digest == message, expiry, key ACL, approvals — and binds its nonces to
+   * SHA-256(intent.intent). A leader or peer cannot mint or alter one.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+   * @return Whether the intent field is set.
+   */
+  @java.lang.Override
+  public boolean hasIntent() {
+    return ((bitField0_ & 0x00000001) != 0);
+  }
+  /**
+   * <pre>
+   * The client's signing intent (see SignRequest.intent), forwarded by the leader unchanged. This
+   * node verifies it itself — signature, certificate chain to the cluster CA, signer allowlist and
+   * pins, cluster, key, digest == message, expiry, key ACL, approvals — and binds its nonces to
+   * SHA-256(intent.intent). A leader or peer cannot mint or alter one.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+   * @return The intent.
+   */
+  @java.lang.Override
+  public com.stakecraft.rutli.grpc.SignedIntent getIntent() {
+    return intent_ == null ? com.stakecraft.rutli.grpc.SignedIntent.getDefaultInstance() : intent_;
+  }
+  /**
+   * <pre>
+   * The client's signing intent (see SignRequest.intent), forwarded by the leader unchanged. This
+   * node verifies it itself — signature, certificate chain to the cluster CA, signer allowlist and
+   * pins, cluster, key, digest == message, expiry, key ACL, approvals — and binds its nonces to
+   * SHA-256(intent.intent). A leader or peer cannot mint or alter one.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+   */
+  @java.lang.Override
+  public com.stakecraft.rutli.grpc.SignedIntentOrBuilder getIntentOrBuilder() {
+    return intent_ == null ? com.stakecraft.rutli.grpc.SignedIntent.getDefaultInstance() : intent_;
+  }
+
   public static final int EPOCH_FIELD_NUMBER = 4;
   private long epoch_ = 0L;
   /**
    * <pre>
-   * Field 3 is kept for the signing intent (audit C2), 6 for its purpose.
    * The leader's sharing of key_id: its committed epoch and PKP digest. A node whose own committed
    * share differs refuses (FAILED_PRECONDITION, trailer rutli-error=epoch-mismatch carrying its own
    * rutli-epoch / rutli-pkp-digest) and never signs from a mismatched epoch. An empty pkp_digest is
@@ -206,6 +254,57 @@ private static final long serialVersionUID = 0L;
   }
   private int signersMemoizedSerializedSize = -1;
 
+  public static final int PURPOSE_FIELD_NUMBER = 6;
+  @SuppressWarnings("serial")
+  private volatile java.lang.Object purpose_ = "";
+  /**
+   * <pre>
+   * "sign" (or empty) for a signature a client asked for; "sign-test" for the split ceremony's
+   * CeremonySignTest, which carries no intent and is accepted only for the node's OWN test digest
+   * of key_id (computed from the key's provenance) as `message`.
+   * </pre>
+   *
+   * <code>string purpose = 6;</code>
+   * @return The purpose.
+   */
+  @java.lang.Override
+  public java.lang.String getPurpose() {
+    java.lang.Object ref = purpose_;
+    if (ref instanceof java.lang.String) {
+      return (java.lang.String) ref;
+    } else {
+      com.google.protobuf.ByteString bs = 
+          (com.google.protobuf.ByteString) ref;
+      java.lang.String s = bs.toStringUtf8();
+      purpose_ = s;
+      return s;
+    }
+  }
+  /**
+   * <pre>
+   * "sign" (or empty) for a signature a client asked for; "sign-test" for the split ceremony's
+   * CeremonySignTest, which carries no intent and is accepted only for the node's OWN test digest
+   * of key_id (computed from the key's provenance) as `message`.
+   * </pre>
+   *
+   * <code>string purpose = 6;</code>
+   * @return The bytes for purpose.
+   */
+  @java.lang.Override
+  public com.google.protobuf.ByteString
+      getPurposeBytes() {
+    java.lang.Object ref = purpose_;
+    if (ref instanceof java.lang.String) {
+      com.google.protobuf.ByteString b = 
+          com.google.protobuf.ByteString.copyFromUtf8(
+              (java.lang.String) ref);
+      purpose_ = b;
+      return b;
+    } else {
+      return (com.google.protobuf.ByteString) ref;
+    }
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -227,11 +326,17 @@ private static final long serialVersionUID = 0L;
     if (!com.google.protobuf.GeneratedMessage.isStringEmpty(sessionId_)) {
       com.google.protobuf.GeneratedMessage.writeString(output, 2, sessionId_);
     }
+    if (((bitField0_ & 0x00000001) != 0)) {
+      output.writeMessage(3, getIntent());
+    }
     if (epoch_ != 0L) {
       output.writeUInt64(4, epoch_);
     }
     if (!pkpDigest_.isEmpty()) {
       output.writeBytes(5, pkpDigest_);
+    }
+    if (!com.google.protobuf.GeneratedMessage.isStringEmpty(purpose_)) {
+      com.google.protobuf.GeneratedMessage.writeString(output, 6, purpose_);
     }
     if (!message_.isEmpty()) {
       output.writeBytes(7, message_);
@@ -258,6 +363,10 @@ private static final long serialVersionUID = 0L;
     if (!com.google.protobuf.GeneratedMessage.isStringEmpty(sessionId_)) {
       size += com.google.protobuf.GeneratedMessage.computeStringSize(2, sessionId_);
     }
+    if (((bitField0_ & 0x00000001) != 0)) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeMessageSize(3, getIntent());
+    }
     if (epoch_ != 0L) {
       size += com.google.protobuf.CodedOutputStream
         .computeUInt64Size(4, epoch_);
@@ -265,6 +374,9 @@ private static final long serialVersionUID = 0L;
     if (!pkpDigest_.isEmpty()) {
       size += com.google.protobuf.CodedOutputStream
         .computeBytesSize(5, pkpDigest_);
+    }
+    if (!com.google.protobuf.GeneratedMessage.isStringEmpty(purpose_)) {
+      size += com.google.protobuf.GeneratedMessage.computeStringSize(6, purpose_);
     }
     if (!message_.isEmpty()) {
       size += com.google.protobuf.CodedOutputStream
@@ -303,6 +415,11 @@ private static final long serialVersionUID = 0L;
         .equals(other.getKeyId())) return false;
     if (!getSessionId()
         .equals(other.getSessionId())) return false;
+    if (hasIntent() != other.hasIntent()) return false;
+    if (hasIntent()) {
+      if (!getIntent()
+          .equals(other.getIntent())) return false;
+    }
     if (getEpoch()
         != other.getEpoch()) return false;
     if (!getPkpDigest()
@@ -311,6 +428,8 @@ private static final long serialVersionUID = 0L;
         .equals(other.getMessage())) return false;
     if (!getSignersList()
         .equals(other.getSignersList())) return false;
+    if (!getPurpose()
+        .equals(other.getPurpose())) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -326,6 +445,10 @@ private static final long serialVersionUID = 0L;
     hash = (53 * hash) + getKeyId().hashCode();
     hash = (37 * hash) + SESSION_ID_FIELD_NUMBER;
     hash = (53 * hash) + getSessionId().hashCode();
+    if (hasIntent()) {
+      hash = (37 * hash) + INTENT_FIELD_NUMBER;
+      hash = (53 * hash) + getIntent().hashCode();
+    }
     hash = (37 * hash) + EPOCH_FIELD_NUMBER;
     hash = (53 * hash) + com.google.protobuf.Internal.hashLong(
         getEpoch());
@@ -337,6 +460,8 @@ private static final long serialVersionUID = 0L;
       hash = (37 * hash) + SIGNERS_FIELD_NUMBER;
       hash = (53 * hash) + getSignersList().hashCode();
     }
+    hash = (37 * hash) + PURPOSE_FIELD_NUMBER;
+    hash = (53 * hash) + getPurpose().hashCode();
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -456,13 +581,19 @@ private static final long serialVersionUID = 0L;
 
     // Construct using com.stakecraft.rutli.grpc.SignRound1Request.newBuilder()
     private Builder() {
-
+      maybeForceBuilderInitialization();
     }
 
     private Builder(
         com.google.protobuf.GeneratedMessage.BuilderParent parent) {
       super(parent);
-
+      maybeForceBuilderInitialization();
+    }
+    private void maybeForceBuilderInitialization() {
+      if (com.google.protobuf.GeneratedMessage
+              .alwaysUseFieldBuilders) {
+        getIntentFieldBuilder();
+      }
     }
     @java.lang.Override
     public Builder clear() {
@@ -470,10 +601,16 @@ private static final long serialVersionUID = 0L;
       bitField0_ = 0;
       keyId_ = "";
       sessionId_ = "";
+      intent_ = null;
+      if (intentBuilder_ != null) {
+        intentBuilder_.dispose();
+        intentBuilder_ = null;
+      }
       epoch_ = 0L;
       pkpDigest_ = com.google.protobuf.ByteString.EMPTY;
       message_ = com.google.protobuf.ByteString.EMPTY;
       signers_ = emptyIntList();
+      purpose_ = "";
       return this;
     }
 
@@ -513,19 +650,30 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000002) != 0)) {
         result.sessionId_ = sessionId_;
       }
+      int to_bitField0_ = 0;
       if (((from_bitField0_ & 0x00000004) != 0)) {
-        result.epoch_ = epoch_;
+        result.intent_ = intentBuilder_ == null
+            ? intent_
+            : intentBuilder_.build();
+        to_bitField0_ |= 0x00000001;
       }
       if (((from_bitField0_ & 0x00000008) != 0)) {
-        result.pkpDigest_ = pkpDigest_;
+        result.epoch_ = epoch_;
       }
       if (((from_bitField0_ & 0x00000010) != 0)) {
-        result.message_ = message_;
+        result.pkpDigest_ = pkpDigest_;
       }
       if (((from_bitField0_ & 0x00000020) != 0)) {
+        result.message_ = message_;
+      }
+      if (((from_bitField0_ & 0x00000040) != 0)) {
         signers_.makeImmutable();
         result.signers_ = signers_;
       }
+      if (((from_bitField0_ & 0x00000080) != 0)) {
+        result.purpose_ = purpose_;
+      }
+      result.bitField0_ |= to_bitField0_;
     }
 
     @java.lang.Override
@@ -550,6 +698,9 @@ private static final long serialVersionUID = 0L;
         bitField0_ |= 0x00000002;
         onChanged();
       }
+      if (other.hasIntent()) {
+        mergeIntent(other.getIntent());
+      }
       if (other.getEpoch() != 0L) {
         setEpoch(other.getEpoch());
       }
@@ -563,11 +714,16 @@ private static final long serialVersionUID = 0L;
         if (signers_.isEmpty()) {
           signers_ = other.signers_;
           signers_.makeImmutable();
-          bitField0_ |= 0x00000020;
+          bitField0_ |= 0x00000040;
         } else {
           ensureSignersIsMutable();
           signers_.addAll(other.signers_);
         }
+        onChanged();
+      }
+      if (!other.getPurpose().isEmpty()) {
+        purpose_ = other.purpose_;
+        bitField0_ |= 0x00000080;
         onChanged();
       }
       this.mergeUnknownFields(other.getUnknownFields());
@@ -606,19 +762,31 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000002;
               break;
             } // case 18
+            case 26: {
+              input.readMessage(
+                  getIntentFieldBuilder().getBuilder(),
+                  extensionRegistry);
+              bitField0_ |= 0x00000004;
+              break;
+            } // case 26
             case 32: {
               epoch_ = input.readUInt64();
-              bitField0_ |= 0x00000004;
+              bitField0_ |= 0x00000008;
               break;
             } // case 32
             case 42: {
               pkpDigest_ = input.readBytes();
-              bitField0_ |= 0x00000008;
+              bitField0_ |= 0x00000010;
               break;
             } // case 42
+            case 50: {
+              purpose_ = input.readStringRequireUtf8();
+              bitField0_ |= 0x00000080;
+              break;
+            } // case 50
             case 58: {
               message_ = input.readBytes();
-              bitField0_ |= 0x00000010;
+              bitField0_ |= 0x00000020;
               break;
             } // case 58
             case 64: {
@@ -798,10 +966,193 @@ private static final long serialVersionUID = 0L;
       return this;
     }
 
+    private com.stakecraft.rutli.grpc.SignedIntent intent_;
+    private com.google.protobuf.SingleFieldBuilder<
+        com.stakecraft.rutli.grpc.SignedIntent, com.stakecraft.rutli.grpc.SignedIntent.Builder, com.stakecraft.rutli.grpc.SignedIntentOrBuilder> intentBuilder_;
+    /**
+     * <pre>
+     * The client's signing intent (see SignRequest.intent), forwarded by the leader unchanged. This
+     * node verifies it itself — signature, certificate chain to the cluster CA, signer allowlist and
+     * pins, cluster, key, digest == message, expiry, key ACL, approvals — and binds its nonces to
+     * SHA-256(intent.intent). A leader or peer cannot mint or alter one.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+     * @return Whether the intent field is set.
+     */
+    public boolean hasIntent() {
+      return ((bitField0_ & 0x00000004) != 0);
+    }
+    /**
+     * <pre>
+     * The client's signing intent (see SignRequest.intent), forwarded by the leader unchanged. This
+     * node verifies it itself — signature, certificate chain to the cluster CA, signer allowlist and
+     * pins, cluster, key, digest == message, expiry, key ACL, approvals — and binds its nonces to
+     * SHA-256(intent.intent). A leader or peer cannot mint or alter one.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+     * @return The intent.
+     */
+    public com.stakecraft.rutli.grpc.SignedIntent getIntent() {
+      if (intentBuilder_ == null) {
+        return intent_ == null ? com.stakecraft.rutli.grpc.SignedIntent.getDefaultInstance() : intent_;
+      } else {
+        return intentBuilder_.getMessage();
+      }
+    }
+    /**
+     * <pre>
+     * The client's signing intent (see SignRequest.intent), forwarded by the leader unchanged. This
+     * node verifies it itself — signature, certificate chain to the cluster CA, signer allowlist and
+     * pins, cluster, key, digest == message, expiry, key ACL, approvals — and binds its nonces to
+     * SHA-256(intent.intent). A leader or peer cannot mint or alter one.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+     */
+    public Builder setIntent(com.stakecraft.rutli.grpc.SignedIntent value) {
+      if (intentBuilder_ == null) {
+        if (value == null) {
+          throw new NullPointerException();
+        }
+        intent_ = value;
+      } else {
+        intentBuilder_.setMessage(value);
+      }
+      bitField0_ |= 0x00000004;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * The client's signing intent (see SignRequest.intent), forwarded by the leader unchanged. This
+     * node verifies it itself — signature, certificate chain to the cluster CA, signer allowlist and
+     * pins, cluster, key, digest == message, expiry, key ACL, approvals — and binds its nonces to
+     * SHA-256(intent.intent). A leader or peer cannot mint or alter one.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+     */
+    public Builder setIntent(
+        com.stakecraft.rutli.grpc.SignedIntent.Builder builderForValue) {
+      if (intentBuilder_ == null) {
+        intent_ = builderForValue.build();
+      } else {
+        intentBuilder_.setMessage(builderForValue.build());
+      }
+      bitField0_ |= 0x00000004;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * The client's signing intent (see SignRequest.intent), forwarded by the leader unchanged. This
+     * node verifies it itself — signature, certificate chain to the cluster CA, signer allowlist and
+     * pins, cluster, key, digest == message, expiry, key ACL, approvals — and binds its nonces to
+     * SHA-256(intent.intent). A leader or peer cannot mint or alter one.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+     */
+    public Builder mergeIntent(com.stakecraft.rutli.grpc.SignedIntent value) {
+      if (intentBuilder_ == null) {
+        if (((bitField0_ & 0x00000004) != 0) &&
+          intent_ != null &&
+          intent_ != com.stakecraft.rutli.grpc.SignedIntent.getDefaultInstance()) {
+          getIntentBuilder().mergeFrom(value);
+        } else {
+          intent_ = value;
+        }
+      } else {
+        intentBuilder_.mergeFrom(value);
+      }
+      if (intent_ != null) {
+        bitField0_ |= 0x00000004;
+        onChanged();
+      }
+      return this;
+    }
+    /**
+     * <pre>
+     * The client's signing intent (see SignRequest.intent), forwarded by the leader unchanged. This
+     * node verifies it itself — signature, certificate chain to the cluster CA, signer allowlist and
+     * pins, cluster, key, digest == message, expiry, key ACL, approvals — and binds its nonces to
+     * SHA-256(intent.intent). A leader or peer cannot mint or alter one.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+     */
+    public Builder clearIntent() {
+      bitField0_ = (bitField0_ & ~0x00000004);
+      intent_ = null;
+      if (intentBuilder_ != null) {
+        intentBuilder_.dispose();
+        intentBuilder_ = null;
+      }
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * The client's signing intent (see SignRequest.intent), forwarded by the leader unchanged. This
+     * node verifies it itself — signature, certificate chain to the cluster CA, signer allowlist and
+     * pins, cluster, key, digest == message, expiry, key ACL, approvals — and binds its nonces to
+     * SHA-256(intent.intent). A leader or peer cannot mint or alter one.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+     */
+    public com.stakecraft.rutli.grpc.SignedIntent.Builder getIntentBuilder() {
+      bitField0_ |= 0x00000004;
+      onChanged();
+      return getIntentFieldBuilder().getBuilder();
+    }
+    /**
+     * <pre>
+     * The client's signing intent (see SignRequest.intent), forwarded by the leader unchanged. This
+     * node verifies it itself — signature, certificate chain to the cluster CA, signer allowlist and
+     * pins, cluster, key, digest == message, expiry, key ACL, approvals — and binds its nonces to
+     * SHA-256(intent.intent). A leader or peer cannot mint or alter one.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+     */
+    public com.stakecraft.rutli.grpc.SignedIntentOrBuilder getIntentOrBuilder() {
+      if (intentBuilder_ != null) {
+        return intentBuilder_.getMessageOrBuilder();
+      } else {
+        return intent_ == null ?
+            com.stakecraft.rutli.grpc.SignedIntent.getDefaultInstance() : intent_;
+      }
+    }
+    /**
+     * <pre>
+     * The client's signing intent (see SignRequest.intent), forwarded by the leader unchanged. This
+     * node verifies it itself — signature, certificate chain to the cluster CA, signer allowlist and
+     * pins, cluster, key, digest == message, expiry, key ACL, approvals — and binds its nonces to
+     * SHA-256(intent.intent). A leader or peer cannot mint or alter one.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+     */
+    private com.google.protobuf.SingleFieldBuilder<
+        com.stakecraft.rutli.grpc.SignedIntent, com.stakecraft.rutli.grpc.SignedIntent.Builder, com.stakecraft.rutli.grpc.SignedIntentOrBuilder> 
+        getIntentFieldBuilder() {
+      if (intentBuilder_ == null) {
+        intentBuilder_ = new com.google.protobuf.SingleFieldBuilder<
+            com.stakecraft.rutli.grpc.SignedIntent, com.stakecraft.rutli.grpc.SignedIntent.Builder, com.stakecraft.rutli.grpc.SignedIntentOrBuilder>(
+                getIntent(),
+                getParentForChildren(),
+                isClean());
+        intent_ = null;
+      }
+      return intentBuilder_;
+    }
+
     private long epoch_ ;
     /**
      * <pre>
-     * Field 3 is kept for the signing intent (audit C2), 6 for its purpose.
      * The leader's sharing of key_id: its committed epoch and PKP digest. A node whose own committed
      * share differs refuses (FAILED_PRECONDITION, trailer rutli-error=epoch-mismatch carrying its own
      * rutli-epoch / rutli-pkp-digest) and never signs from a mismatched epoch. An empty pkp_digest is
@@ -819,7 +1170,6 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * Field 3 is kept for the signing intent (audit C2), 6 for its purpose.
      * The leader's sharing of key_id: its committed epoch and PKP digest. A node whose own committed
      * share differs refuses (FAILED_PRECONDITION, trailer rutli-error=epoch-mismatch carrying its own
      * rutli-epoch / rutli-pkp-digest) and never signs from a mismatched epoch. An empty pkp_digest is
@@ -835,13 +1185,12 @@ private static final long serialVersionUID = 0L;
     public Builder setEpoch(long value) {
 
       epoch_ = value;
-      bitField0_ |= 0x00000004;
+      bitField0_ |= 0x00000008;
       onChanged();
       return this;
     }
     /**
      * <pre>
-     * Field 3 is kept for the signing intent (audit C2), 6 for its purpose.
      * The leader's sharing of key_id: its committed epoch and PKP digest. A node whose own committed
      * share differs refuses (FAILED_PRECONDITION, trailer rutli-error=epoch-mismatch carrying its own
      * rutli-epoch / rutli-pkp-digest) and never signs from a mismatched epoch. An empty pkp_digest is
@@ -854,7 +1203,7 @@ private static final long serialVersionUID = 0L;
      * @return This builder for chaining.
      */
     public Builder clearEpoch() {
-      bitField0_ = (bitField0_ & ~0x00000004);
+      bitField0_ = (bitField0_ & ~0x00000008);
       epoch_ = 0L;
       onChanged();
       return this;
@@ -877,7 +1226,7 @@ private static final long serialVersionUID = 0L;
     public Builder setPkpDigest(com.google.protobuf.ByteString value) {
       if (value == null) { throw new NullPointerException(); }
       pkpDigest_ = value;
-      bitField0_ |= 0x00000008;
+      bitField0_ |= 0x00000010;
       onChanged();
       return this;
     }
@@ -886,7 +1235,7 @@ private static final long serialVersionUID = 0L;
      * @return This builder for chaining.
      */
     public Builder clearPkpDigest() {
-      bitField0_ = (bitField0_ & ~0x00000008);
+      bitField0_ = (bitField0_ & ~0x00000010);
       pkpDigest_ = getDefaultInstance().getPkpDigest();
       onChanged();
       return this;
@@ -925,7 +1274,7 @@ private static final long serialVersionUID = 0L;
     public Builder setMessage(com.google.protobuf.ByteString value) {
       if (value == null) { throw new NullPointerException(); }
       message_ = value;
-      bitField0_ |= 0x00000010;
+      bitField0_ |= 0x00000020;
       onChanged();
       return this;
     }
@@ -942,7 +1291,7 @@ private static final long serialVersionUID = 0L;
      * @return This builder for chaining.
      */
     public Builder clearMessage() {
-      bitField0_ = (bitField0_ & ~0x00000010);
+      bitField0_ = (bitField0_ & ~0x00000020);
       message_ = getDefaultInstance().getMessage();
       onChanged();
       return this;
@@ -953,7 +1302,7 @@ private static final long serialVersionUID = 0L;
       if (!signers_.isModifiable()) {
         signers_ = makeMutableCopy(signers_);
       }
-      bitField0_ |= 0x00000020;
+      bitField0_ |= 0x00000040;
     }
     /**
      * <code>repeated uint32 signers = 8;</code>
@@ -990,7 +1339,7 @@ private static final long serialVersionUID = 0L;
 
       ensureSignersIsMutable();
       signers_.setInt(index, value);
-      bitField0_ |= 0x00000020;
+      bitField0_ |= 0x00000040;
       onChanged();
       return this;
     }
@@ -1003,7 +1352,7 @@ private static final long serialVersionUID = 0L;
 
       ensureSignersIsMutable();
       signers_.addInt(value);
-      bitField0_ |= 0x00000020;
+      bitField0_ |= 0x00000040;
       onChanged();
       return this;
     }
@@ -1017,7 +1366,7 @@ private static final long serialVersionUID = 0L;
       ensureSignersIsMutable();
       com.google.protobuf.AbstractMessageLite.Builder.addAll(
           values, signers_);
-      bitField0_ |= 0x00000020;
+      bitField0_ |= 0x00000040;
       onChanged();
       return this;
     }
@@ -1027,7 +1376,109 @@ private static final long serialVersionUID = 0L;
      */
     public Builder clearSigners() {
       signers_ = emptyIntList();
-      bitField0_ = (bitField0_ & ~0x00000020);
+      bitField0_ = (bitField0_ & ~0x00000040);
+      onChanged();
+      return this;
+    }
+
+    private java.lang.Object purpose_ = "";
+    /**
+     * <pre>
+     * "sign" (or empty) for a signature a client asked for; "sign-test" for the split ceremony's
+     * CeremonySignTest, which carries no intent and is accepted only for the node's OWN test digest
+     * of key_id (computed from the key's provenance) as `message`.
+     * </pre>
+     *
+     * <code>string purpose = 6;</code>
+     * @return The purpose.
+     */
+    public java.lang.String getPurpose() {
+      java.lang.Object ref = purpose_;
+      if (!(ref instanceof java.lang.String)) {
+        com.google.protobuf.ByteString bs =
+            (com.google.protobuf.ByteString) ref;
+        java.lang.String s = bs.toStringUtf8();
+        purpose_ = s;
+        return s;
+      } else {
+        return (java.lang.String) ref;
+      }
+    }
+    /**
+     * <pre>
+     * "sign" (or empty) for a signature a client asked for; "sign-test" for the split ceremony's
+     * CeremonySignTest, which carries no intent and is accepted only for the node's OWN test digest
+     * of key_id (computed from the key's provenance) as `message`.
+     * </pre>
+     *
+     * <code>string purpose = 6;</code>
+     * @return The bytes for purpose.
+     */
+    public com.google.protobuf.ByteString
+        getPurposeBytes() {
+      java.lang.Object ref = purpose_;
+      if (ref instanceof String) {
+        com.google.protobuf.ByteString b = 
+            com.google.protobuf.ByteString.copyFromUtf8(
+                (java.lang.String) ref);
+        purpose_ = b;
+        return b;
+      } else {
+        return (com.google.protobuf.ByteString) ref;
+      }
+    }
+    /**
+     * <pre>
+     * "sign" (or empty) for a signature a client asked for; "sign-test" for the split ceremony's
+     * CeremonySignTest, which carries no intent and is accepted only for the node's OWN test digest
+     * of key_id (computed from the key's provenance) as `message`.
+     * </pre>
+     *
+     * <code>string purpose = 6;</code>
+     * @param value The purpose to set.
+     * @return This builder for chaining.
+     */
+    public Builder setPurpose(
+        java.lang.String value) {
+      if (value == null) { throw new NullPointerException(); }
+      purpose_ = value;
+      bitField0_ |= 0x00000080;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * "sign" (or empty) for a signature a client asked for; "sign-test" for the split ceremony's
+     * CeremonySignTest, which carries no intent and is accepted only for the node's OWN test digest
+     * of key_id (computed from the key's provenance) as `message`.
+     * </pre>
+     *
+     * <code>string purpose = 6;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearPurpose() {
+      purpose_ = getDefaultInstance().getPurpose();
+      bitField0_ = (bitField0_ & ~0x00000080);
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * "sign" (or empty) for a signature a client asked for; "sign-test" for the split ceremony's
+     * CeremonySignTest, which carries no intent and is accepted only for the node's OWN test digest
+     * of key_id (computed from the key's provenance) as `message`.
+     * </pre>
+     *
+     * <code>string purpose = 6;</code>
+     * @param value The bytes for purpose to set.
+     * @return This builder for chaining.
+     */
+    public Builder setPurposeBytes(
+        com.google.protobuf.ByteString value) {
+      if (value == null) { throw new NullPointerException(); }
+      checkByteStringIsUtf8(value);
+      purpose_ = value;
+      bitField0_ |= 0x00000080;
       onChanged();
       return this;
     }

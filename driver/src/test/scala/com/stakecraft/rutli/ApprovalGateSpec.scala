@@ -105,6 +105,85 @@ class ApprovalGateSpec extends AnyWordSpec with Matchers {
       Await.result(f, 5.seconds) shouldBe (())
     }
 
+    "hand back the approvals it counted, for the cosigners to verify themselves (C2)" in {
+      val inbox = newInbox()
+      val a = approverKeypair(); val b = approverKeypair()
+      val gate = new FileApprovalGate(policy(inbox, List(approver("alice", a), approver("bob", b)), 2, 10.seconds), logger)
+
+      val data = "digest".getBytes
+      val f = gate.authorizeWithProof("frost-participant1-namespace", data)
+      eventually(pendingExists(inbox))
+      val nonceHex = "\"nonce\":\"([0-9a-f]+)\"".r.findFirstMatchIn(Files.readString(
+        Files.list(Paths.get(inbox, "pending")).iterator().asScala.find(_.toString.endsWith(".json")).get
+      )).get.group(1)
+      dropApproval(inbox, "alice", a.getPrivate)
+      dropApproval(inbox, "bob", b.getPrivate)
+
+      val proof = Await.result(f, 5.seconds)
+      FileApprovalGate.hex(proof.nonce) shouldBe nonceHex
+      proof.approvals.map(_._1) shouldBe Seq("alice", "bob")
+      // Each signature is over the requestId the cosigners recompute from (key, digest, nonce).
+      val requestId = FileApprovalGate.requestIdFor("frost-participant1-namespace", FileApprovalGate.sha256(data), proof.nonce)
+      proof.approvals.foreach { case (id, sig) =>
+        val pub = if (id == "alice") a.getPublic else b.getPublic
+        FileApprovalGate.verifyEd25519(pub, requestId.getBytes(UTF_8), sig) shouldBe true
+      }
+      // Auto-approved keys carry no proof.
+      Await.result(gate.authorizeWithProof("hsm-some-key", data), 1.second).isEmpty shouldBe true
+    }
+
+    "reach the backend's sign through RutliDriver, with the approvals (C2)" in {
+      val proof = ApprovalProof(Array.fill(16)(4.toByte), Seq("alice" -> Array.fill(64)(5.toByte)))
+      @volatile var seen: Option[ApprovalProof] = None
+      def no[A]: Future[A] = Future.failed(new UnsupportedOperationException)
+      val backend = new com.stakecraft.rutli.backend.KmsBackend {
+        override def supportedSigningKeySpecs: Set[SigningKeySpec] = Set(SigningKeySpec.EcCurve25519)
+        override def supportedSigningAlgoSpecs: Set[SigningAlgoSpec] = Set(SigningAlgoSpec.Ed25519)
+        override def supportedEncryptionKeySpecs: Set[EncryptionKeySpec] = Set(EncryptionKeySpec.Rsa2048)
+        override def supportedEncryptionAlgoSpecs: Set[EncryptionAlgoSpec] = Set(EncryptionAlgoSpec.RsaEsOaepSha256)
+        override def generateSigningKeyPair(spec: SigningKeySpec, n: Option[String]): Future[String] = no
+        override def generateEncryptionKeyPair(spec: EncryptionKeySpec, n: Option[String]): Future[String] = no
+        override def generateSymmetricKey(n: Option[String]): Future[String] = no
+        override def sign(d: Array[Byte], k: String, a: SigningAlgoSpec): Future[Array[Byte]] = no
+        override def sign(d: Array[Byte], k: String, a: SigningAlgoSpec, approval: ApprovalProof): Future[Array[Byte]] = {
+          seen = Some(approval); Future.successful(Array.fill(64)(0.toByte))
+        }
+        override def decryptAsymmetric(c: Array[Byte], k: String, a: EncryptionAlgoSpec): Future[Array[Byte]] = no
+        override def encryptSymmetric(d: Array[Byte], k: String): Future[Array[Byte]] = no
+        override def decryptSymmetric(c: Array[Byte], k: String): Future[Array[Byte]] = no
+        override def getPublicKey(k: String): Future[PublicKey] = no
+        override def keyExistsAndIsActive(k: String): Future[Unit] = no
+        override def deleteKey(k: String): Future[Unit] = no
+        override def health: Future[KmsDriverHealth] = Future.successful(KmsDriverHealth.Ok)
+      }
+      val driver = new RutliDriver(
+        backend,
+        logger,
+        auditLogging = false,
+        auditLog = None,
+        new ApprovalGate {
+          override def authorize(keyId: String, data: Array[Byte]): Future[Unit] = Future.unit
+          override def authorizeWithProof(keyId: String, data: Array[Byte]): Future[ApprovalProof] = Future.successful(proof)
+        },
+        signingJournal = None,
+        backend.supportedSigningKeySpecs,
+        backend.supportedSigningAlgoSpecs,
+        backend.supportedEncryptionKeySpecs,
+        backend.supportedEncryptionAlgoSpecs,
+      )
+      Await.result(driver.sign("d".getBytes, "frost-ns", SigningAlgoSpec.Ed25519)(ctx), 5.seconds)
+      seen shouldBe Some(proof)
+    }
+
+    "compute requestIdFor exactly as the cosigners do (golden vector shared with intent.rs)" in {
+      val digest = Array[Byte](0x12, 0x20) ++ Array.fill(32)(0xab.toByte)
+      FileApprovalGate.requestIdFor(
+        "participant1-frost-namespace",
+        FileApprovalGate.sha256(digest),
+        Array.fill(16)(1.toByte),
+      ) shouldBe "e51b7d9a70d36a6b10e31ab7cf1da987175195c3862bf25f43f2a33a27a096cf"
+    }
+
     "not count the same approver twice" in {
       val inbox = newInbox()
       val a = approverKeypair(); val b = approverKeypair()

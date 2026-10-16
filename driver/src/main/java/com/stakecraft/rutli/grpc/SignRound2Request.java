@@ -31,6 +31,7 @@ private static final long serialVersionUID = 0L;
     sessionId_ = "";
     message_ = com.google.protobuf.ByteString.EMPTY;
     commitmentsMap_ = com.google.protobuf.ByteString.EMPTY;
+    intentDigest_ = com.google.protobuf.ByteString.EMPTY;
   }
 
   public static final com.google.protobuf.Descriptors.Descriptor
@@ -150,6 +151,22 @@ private static final long serialVersionUID = 0L;
     return commitmentsMap_;
   }
 
+  public static final int INTENT_DIGEST_FIELD_NUMBER = 5;
+  private com.google.protobuf.ByteString intentDigest_ = com.google.protobuf.ByteString.EMPTY;
+  /**
+   * <pre>
+   * SHA-256 of the SignedIntent.intent bytes round 1 carried; empty when round 1 had none. Must
+   * match what this node bound at round 1 (checked before the nonce marker burns).
+   * </pre>
+   *
+   * <code>bytes intent_digest = 5;</code>
+   * @return The intentDigest.
+   */
+  @java.lang.Override
+  public com.google.protobuf.ByteString getIntentDigest() {
+    return intentDigest_;
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -176,6 +193,9 @@ private static final long serialVersionUID = 0L;
     if (!commitmentsMap_.isEmpty()) {
       output.writeBytes(4, commitmentsMap_);
     }
+    if (!intentDigest_.isEmpty()) {
+      output.writeBytes(5, intentDigest_);
+    }
     getUnknownFields().writeTo(output);
   }
 
@@ -198,6 +218,10 @@ private static final long serialVersionUID = 0L;
     if (!commitmentsMap_.isEmpty()) {
       size += com.google.protobuf.CodedOutputStream
         .computeBytesSize(4, commitmentsMap_);
+    }
+    if (!intentDigest_.isEmpty()) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeBytesSize(5, intentDigest_);
     }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
@@ -222,6 +246,8 @@ private static final long serialVersionUID = 0L;
         .equals(other.getMessage())) return false;
     if (!getCommitmentsMap()
         .equals(other.getCommitmentsMap())) return false;
+    if (!getIntentDigest()
+        .equals(other.getIntentDigest())) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -241,6 +267,8 @@ private static final long serialVersionUID = 0L;
     hash = (53 * hash) + getMessage().hashCode();
     hash = (37 * hash) + COMMITMENTS_MAP_FIELD_NUMBER;
     hash = (53 * hash) + getCommitmentsMap().hashCode();
+    hash = (37 * hash) + INTENT_DIGEST_FIELD_NUMBER;
+    hash = (53 * hash) + getIntentDigest().hashCode();
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -376,6 +404,7 @@ private static final long serialVersionUID = 0L;
       sessionId_ = "";
       message_ = com.google.protobuf.ByteString.EMPTY;
       commitmentsMap_ = com.google.protobuf.ByteString.EMPTY;
+      intentDigest_ = com.google.protobuf.ByteString.EMPTY;
       return this;
     }
 
@@ -421,6 +450,9 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000008) != 0)) {
         result.commitmentsMap_ = commitmentsMap_;
       }
+      if (((from_bitField0_ & 0x00000010) != 0)) {
+        result.intentDigest_ = intentDigest_;
+      }
     }
 
     @java.lang.Override
@@ -450,6 +482,9 @@ private static final long serialVersionUID = 0L;
       }
       if (other.getCommitmentsMap() != com.google.protobuf.ByteString.EMPTY) {
         setCommitmentsMap(other.getCommitmentsMap());
+      }
+      if (other.getIntentDigest() != com.google.protobuf.ByteString.EMPTY) {
+        setIntentDigest(other.getIntentDigest());
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -497,6 +532,11 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000008;
               break;
             } // case 34
+            case 42: {
+              intentDigest_ = input.readBytes();
+              bitField0_ |= 0x00000010;
+              break;
+            } // case 42
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -730,6 +770,53 @@ private static final long serialVersionUID = 0L;
     public Builder clearCommitmentsMap() {
       bitField0_ = (bitField0_ & ~0x00000008);
       commitmentsMap_ = getDefaultInstance().getCommitmentsMap();
+      onChanged();
+      return this;
+    }
+
+    private com.google.protobuf.ByteString intentDigest_ = com.google.protobuf.ByteString.EMPTY;
+    /**
+     * <pre>
+     * SHA-256 of the SignedIntent.intent bytes round 1 carried; empty when round 1 had none. Must
+     * match what this node bound at round 1 (checked before the nonce marker burns).
+     * </pre>
+     *
+     * <code>bytes intent_digest = 5;</code>
+     * @return The intentDigest.
+     */
+    @java.lang.Override
+    public com.google.protobuf.ByteString getIntentDigest() {
+      return intentDigest_;
+    }
+    /**
+     * <pre>
+     * SHA-256 of the SignedIntent.intent bytes round 1 carried; empty when round 1 had none. Must
+     * match what this node bound at round 1 (checked before the nonce marker burns).
+     * </pre>
+     *
+     * <code>bytes intent_digest = 5;</code>
+     * @param value The intentDigest to set.
+     * @return This builder for chaining.
+     */
+    public Builder setIntentDigest(com.google.protobuf.ByteString value) {
+      if (value == null) { throw new NullPointerException(); }
+      intentDigest_ = value;
+      bitField0_ |= 0x00000010;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * SHA-256 of the SignedIntent.intent bytes round 1 carried; empty when round 1 had none. Must
+     * match what this node bound at round 1 (checked before the nonce marker burns).
+     * </pre>
+     *
+     * <code>bytes intent_digest = 5;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearIntentDigest() {
+      bitField0_ = (bitField0_ & ~0x00000010);
+      intentDigest_ = getDefaultInstance().getIntentDigest();
       onChanged();
       return this;
     }

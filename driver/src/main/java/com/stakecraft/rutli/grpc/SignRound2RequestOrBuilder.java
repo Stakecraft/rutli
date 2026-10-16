@@ -48,4 +48,15 @@ public interface SignRound2RequestOrBuilder extends
    * @return The commitmentsMap.
    */
   com.google.protobuf.ByteString getCommitmentsMap();
+
+  /**
+   * <pre>
+   * SHA-256 of the SignedIntent.intent bytes round 1 carried; empty when round 1 had none. Must
+   * match what this node bound at round 1 (checked before the nonce marker burns).
+   * </pre>
+   *
+   * <code>bytes intent_digest = 5;</code>
+   * @return The intentDigest.
+   */
+  com.google.protobuf.ByteString getIntentDigest();
 }

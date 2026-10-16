@@ -36,6 +36,16 @@ trait KmsBackend extends AutoCloseable {
   def generateSymmetricKey(keyName: Option[String]): Future[String]
 
   def sign(data: Array[Byte], keyId: String, algo: SigningAlgoSpec): Future[Array[Byte]]
+
+  /** [[sign]] with the approvals the driver's approval gate collected for it. A backend that cannot
+    * forward them ignores them (the default); the FROST backend carries them in the signing intent
+    * every cosigner verifies. */
+  def sign(
+      data: Array[Byte],
+      keyId: String,
+      algo: SigningAlgoSpec,
+      approval: com.stakecraft.rutli.policy.ApprovalProof,
+  ): Future[Array[Byte]] = sign(data, keyId, algo)
   def decryptAsymmetric(
       ciphertext: Array[Byte],
       keyId: String,

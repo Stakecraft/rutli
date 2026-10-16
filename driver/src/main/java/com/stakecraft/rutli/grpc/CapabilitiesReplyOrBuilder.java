@@ -59,4 +59,26 @@ public interface CapabilitiesReplyOrBuilder extends
    * @return The hostedKeysEnabled.
    */
   boolean getHostedKeysEnabled();
+
+  /**
+   * <pre>
+   * The cluster id signing intents must name (SignIntent.cluster_id): the pinned `cluster_id`, else
+   * derived from the CA file. Public. Empty from a cosigner that predates intents.
+   * </pre>
+   *
+   * <code>string cluster_id = 3;</code>
+   * @return The clusterId.
+   */
+  java.lang.String getClusterId();
+  /**
+   * <pre>
+   * The cluster id signing intents must name (SignIntent.cluster_id): the pinned `cluster_id`, else
+   * derived from the CA file. Public. Empty from a cosigner that predates intents.
+   * </pre>
+   *
+   * <code>string cluster_id = 3;</code>
+   * @return The bytes for clusterId.
+   */
+  com.google.protobuf.ByteString
+      getClusterIdBytes();
 }
