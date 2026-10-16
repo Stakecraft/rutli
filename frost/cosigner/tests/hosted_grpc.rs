@@ -448,3 +448,127 @@ async fn dkg_and_refresh_commit_on_every_node_over_mtls_grpc() {
     let sig = rutli_cosigner::orchestrator::sign(&m.nodes[0], &m.peers[0], key, &msg).await.unwrap();
     assert!(rutli_cosigner::verify_key::signature_verifies(&group, &msg, &sig));
 }
+
+#[tokio::test]
+async fn a_round2_delivery_under_another_nodes_identity_is_refused_over_mtls() {
+    // C1 over the wire: node 3's certificate may deliver only as node 3. (Node 1 has no session for
+    // the ceremony, so an honestly-identified delivery reaches the node and is NOT_FOUND there.)
+    let m = mesh().await;
+    let as3 = GrpcPeer::connect_lazy(
+        Identifier::try_from(1u16).unwrap(),
+        &m.endpoints[0],
+        Some(m.tls[2].client_for("cosigner1")),
+    )
+    .unwrap();
+    let mut b = [0u8; 32];
+    b[0] = 5;
+    let pkg = frost_ed25519::keys::dkg::round2::Package::new(frost_ed25519::keys::SigningShare::deserialize(&b).unwrap());
+    let err = as3.ceremony_deliver("dkg-x", 2, 1, &[0u8; 32], &pkg).await.unwrap_err();
+    match err {
+        rutli_cosigner::DaemonError::Status(s) => assert_eq!(s.code(), tonic::Code::PermissionDenied, "{s:?}"),
+        other => panic!("{other:?}"),
+    }
+    match as3.ceremony_deliver("dkg-x", 3, 1, &[0u8; 32], &pkg).await.unwrap_err() {
+        rutli_cosigner::DaemonError::Status(s) => assert_eq!(s.code(), tonic::Code::NotFound, "{s:?}"),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn an_upgraded_node_refuses_every_relay_rpc_and_an_old_leader_fence() {
+    use rutli_cosigner::pb::peer_client::PeerClient;
+    use rutli_cosigner::pb::{CeremonyFenceRequest, DkgPart1Request, DkgPart2Request, DkgPart3Request, RefreshPart1Request};
+    let m = mesh().await;
+    // What an rc.1 leader on node 2 would call on node 1.
+    let channel = tonic::transport::Endpoint::from_shared(m.endpoints[0].clone())
+        .unwrap()
+        .tls_config(m.tls[1].client_for("cosigner1"))
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut old = PeerClient::new(channel);
+    let refused = |r: Result<(), tonic::Status>| {
+        let s = r.unwrap_err();
+        assert_eq!(s.code(), tonic::Code::FailedPrecondition, "{s:?}");
+    };
+    refused(old.dkg_part1(DkgPart1Request { dkg_id: "d".into(), key_id: "k".into(), ..Default::default() }).await.map(|_| ()));
+    refused(old.dkg_part2(DkgPart2Request { dkg_id: "d".into(), round1_map: b"{}".to_vec() }).await.map(|_| ()));
+    refused(old.dkg_part3(DkgPart3Request::default()).await.map(|_| ()));
+    refused(old.refresh_part1(RefreshPart1Request { refresh_id: "r".into(), key_id: "k".into() }).await.map(|_| ()));
+    refused(old.refresh_part2(DkgPart2Request::default()).await.map(|_| ()));
+    refused(old.refresh_part3(DkgPart3Request::default()).await.map(|_| ()));
+    // An old leader's DKG fence (no protocol field) is refused before any guard is taken…
+    refused(
+        old.ceremony_fence(CeremonyFenceRequest {
+            ceremony_id: "d".into(),
+            key_id: "k".into(),
+            kind: "dkg".into(),
+            ..Default::default()
+        })
+        .await
+        .map(|_| ()),
+    );
+    // …while hosted-key fences are unaffected.
+    old.ceremony_fence(CeremonyFenceRequest {
+        ceremony_id: "g".into(),
+        key_id: "rutli-k".into(),
+        kind: "genkey".into(),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    // Every node reports protocol 2, which is what a new leader checks first.
+    for p in &m.peers[0] {
+        assert_eq!(p.ceremony_protocol().await.unwrap(), rutli_cosigner::ceremony::CEREMONY_PROTOCOL);
+    }
+}
+
+#[tokio::test]
+async fn a_plaintext_dev_cluster_without_hosted_keys_runs_dkg_and_refresh_over_grpc() {
+    // NodeInfo (the ceremony protocol check) must answer with hosted keys off, and the plaintext
+    // dev mesh (no allowlists, nothing authenticated) still delivers round 2 node to node.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut listeners = Vec::new();
+    let mut nodes = Vec::new();
+    for i in 1..=N {
+        listeners.push(TcpListener::bind("127.0.0.1:0").await.unwrap());
+        let ks = KeyStore::open(tmp.path().join(format!("node-{i}"))).unwrap();
+        nodes.push(Arc::new(Node::new(Identifier::try_from(i).unwrap(), N, T, ks)));
+    }
+    let endpoints: Vec<String> = listeners.iter().map(|l| format!("http://{}", l.local_addr().unwrap())).collect();
+    let mut views = Vec::new();
+    for (i, node) in nodes.iter().enumerate() {
+        let view: Peers = endpoints
+            .iter()
+            .enumerate()
+            .map(|(j, ep)| {
+                if i == j {
+                    Arc::new(LocalPeer::new(node.clone())) as Arc<dyn PeerApi>
+                } else {
+                    Arc::new(GrpcPeer::connect_lazy(Identifier::try_from(j as u16 + 1).unwrap(), ep, None).unwrap())
+                }
+            })
+            .collect();
+        node.set_mesh(view.clone()).unwrap();
+        views.push(view);
+    }
+    let mut servers = Vec::new();
+    for (i, listener) in listeners.into_iter().enumerate() {
+        let peer = PeerSvc { node: nodes[i].clone(), allowed_cns: None, peer_ids: None };
+        let server = tonic::transport::Server::builder()
+            .add_service(PeerServer::new(peer))
+            .serve_with_incoming(TcpListenerStream::new(listener));
+        servers.push(tokio::spawn(async move {
+            let _ = server.await;
+        }));
+    }
+    let group = rutli_cosigner::orchestrator::run_dkg(&views[2], "frost-plain").await.unwrap();
+    assert_eq!(rutli_cosigner::orchestrator::run_refresh(&views[1], "frost-plain").await.unwrap(), group);
+    for n in &nodes {
+        assert_eq!(n.key_epoch("frost-plain").unwrap().epoch, 2);
+    }
+    for s in servers {
+        s.abort();
+    }
+}

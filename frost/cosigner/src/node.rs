@@ -63,6 +63,22 @@ struct Session {
     /// `None` while part 3 runs: the session is finishing and is no longer abortable.
     participant: Option<Participant>,
     started: Instant,
+    /// Configured identifiers of every participant (checked against this node's own roster).
+    roster: Vec<u16>,
+    /// Refresh: the sharing this node held at part 1, which the new one must replace.
+    old: Option<KeyVersion>,
+    /// This node's own round-1 package (canonical bytes), to check the leader's map against.
+    own_round1: Vec<u8>,
+    /// Set by part 2: the round-1 map this node used and its digest.
+    part2: Option<Part2State>,
+    /// Round-2 packages delivered to this node directly by their senders, by sender, with the
+    /// round-1 digest each sender computed.
+    inbox: BTreeMap<u16, ([u8; 32], round2::Package)>,
+}
+
+struct Part2State {
+    digest: [u8; 32],
+    round1_map: BTreeMap<Identifier, round1::Package>,
 }
 
 /// Ceremony sessions and votes under one lock, so "no session and no record" is decided
@@ -763,7 +779,14 @@ impl Node {
     }
 
     /// Part 1 of either ceremony: take the guard, start the session, return the round-1 package.
-    fn start_session(&self, ceremony_id: &str, key_id: &str, kind: CeremonyKind) -> Result<round1::Package> {
+    fn start_session(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        kind: CeremonyKind,
+        roster: Vec<u16>,
+        old: Option<KeyVersion>,
+    ) -> Result<round1::Package> {
         crate::keystore::validate_ceremony_id(ceremony_id)?;
         self.refuse_if_staged(key_id)?;
         self.acquire_ceremony(key_id, ceremony_id, kind.as_str())?;
@@ -781,17 +804,26 @@ impl Node {
             Participant::Dkg(p) => p.part1(),
             Participant::Refresh(p) => p.part1(),
         };
-        let package = match package {
+        let (package, own_round1) = match package.map_err(DaemonError::from).and_then(|p| {
+            let bytes = p.serialize()?;
+            Ok((p, bytes))
+        }) {
             Ok(p) => p,
             Err(e) => {
                 self.release_ceremony(key_id, ceremony_id);
-                return Err(e.into());
+                return Err(e);
             }
         };
         let mut book = self.book.lock().expect("ceremony lock");
         // A ceremony id is used once per node: a node that already voted on it (or answered for
         // it as unknown, which is a no-vote) never starts it again.
-        if book.records.contains_key(ceremony_id) || book.sessions.contains_key(ceremony_id) {
+        if book.sessions.contains_key(ceremony_id) {
+            // A repeated part 1: the live session keeps its guard and its package.
+            return Err(DaemonError::CeremonyRefused(format!(
+                "ceremony {ceremony_id} is already in progress on this node"
+            )));
+        }
+        if book.records.contains_key(ceremony_id) {
             drop(book);
             self.release_ceremony(key_id, ceremony_id);
             return Err(DaemonError::CeremonyRefused(format!(
@@ -800,18 +832,253 @@ impl Node {
         }
         book.sessions.insert(
             ceremony_id.to_string(),
-            Session { key_id: key_id.to_string(), kind, participant: Some(participant), started: Instant::now() },
+            Session {
+                key_id: key_id.to_string(),
+                kind,
+                participant: Some(participant),
+                started: Instant::now(),
+                roster,
+                old,
+                own_round1,
+                part2: None,
+                inbox: BTreeMap::new(),
+            },
         );
         Ok(package)
     }
 
-    /// The key id of live session `ceremony_id` of `kind`.
-    fn session_key(&self, ceremony_id: &str, kind: CeremonyKind) -> Result<String> {
-        let book = self.book.lock().expect("ceremony lock");
-        match book.sessions.get(ceremony_id) {
-            Some(s) if s.kind == kind => Ok(s.key_id.clone()),
-            _ => Err(DaemonError::UnknownDkg(ceremony_id.into())),
+    /// The roster a leader names must be exactly this node's: itself plus its mesh peers (every
+    /// identifier `1..=n` when no mesh is attached). A ceremony over any other set of nodes —
+    /// fewer (so the leader could stand in for a missing one), more, or other ones — is refused.
+    fn check_roster(&self, roster: &[u16]) -> Result<()> {
+        let mut expected = self.own_roster()?;
+        expected.dedup();
+        if roster != expected.as_slice() || roster.len() != usize::from(self.max_signers) {
+            return Err(DaemonError::CeremonyRefused(format!(
+                "the ceremony roster {roster:?} is not this node's roster {expected:?}"
+            )));
         }
+        Ok(())
+    }
+
+    /// Part 1 (ceremony protocol 2): check the leader's roster, take the guard, start the session,
+    /// return this node's round-1 package (public; the leader broadcasts the full map in part 2).
+    pub fn ceremony_part1(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        kind: CeremonyKind,
+        roster: &[u16],
+    ) -> Result<round1::Package> {
+        let old = match kind {
+            CeremonyKind::Dkg => {
+                // `…frost-import-…` ids belong to the split ceremony. Refusing them here, on every
+                // node and whether or not the import has happened yet, means a DKG can never mint a
+                // key under an id an operator is about to install.
+                if crate::share_delivery::is_reserved_for_import(key_id) {
+                    return Err(DaemonError::ReservedKeyId(key_id.to_string()));
+                }
+                // DKG must never clobber a provisioned key — the namespace key is non-rotatable.
+                if self.keystore.exists(key_id) {
+                    return Err(DaemonError::KeyExists(key_id.to_string()));
+                }
+                None
+            }
+            CeremonyKind::Refresh => {
+                if !self.keystore.exists(key_id) {
+                    return Err(DaemonError::UnknownKey(key_id.to_string()));
+                }
+                let pending = self.pending_sign_count(key_id);
+                if pending > 0 {
+                    return Err(DaemonError::SignInProgress { key_id: key_id.to_string(), kind: "refresh", pending });
+                }
+                let share = self.keystore.load(key_id)?;
+                Some((share.epoch, share.pkp_digest()?))
+            }
+        };
+        self.check_roster(roster)?;
+        self.start_session(ceremony_id, key_id, kind, roster.to_vec(), old)
+    }
+
+    /// Part 2: check the leader's round-1 map — exactly the roster, and this node's own package
+    /// unchanged — compute its digest (C1 echo: every delivery carries it, so a leader that shows
+    /// nodes different maps makes every honest node abort) and this node's round-2 packages.
+    ///
+    /// The packages go to [`crate::ceremony::part2_and_deliver`], which sends each straight to its
+    /// recipient over the mesh. Crate-private on purpose: no peer API ever returns them.
+    pub(crate) fn ceremony_part2_compute(
+        &self,
+        ceremony_id: &str,
+        round1_map: &BTreeMap<Identifier, round1::Package>,
+    ) -> Result<([u8; 32], BTreeMap<u16, round2::Package>)> {
+        let (key_id, kind, roster, old, own) = {
+            let book = self.book.lock().expect("ceremony lock");
+            let s = book.sessions.get(ceremony_id).ok_or_else(|| DaemonError::UnknownDkg(ceremony_id.into()))?;
+            if s.part2.is_some() {
+                return Err(DaemonError::CeremonyRefused(format!("ceremony {ceremony_id}: part 2 already ran")));
+            }
+            (s.key_id.clone(), s.kind, s.roster.clone(), s.old, s.own_round1.clone())
+        };
+        self.assert_owns(&key_id, ceremony_id)?; // refuse if a newer ceremony superseded this one
+        let result = (|| -> Result<([u8; 32], BTreeMap<u16, round2::Package>)> {
+            let mut ids =
+                round1_map.keys().map(|&id| crate::hosted::identifier_index(id)).collect::<Result<Vec<_>>>()?;
+            ids.sort_unstable();
+            if ids != roster {
+                return Err(DaemonError::CeremonyRefused(format!(
+                    "the round-1 map covers nodes {ids:?}, but the ceremony roster is {roster:?}"
+                )));
+            }
+            let mine = round1_map
+                .get(&self.identifier)
+                .ok_or_else(|| DaemonError::CeremonyRefused("the round-1 map lacks this node".into()))?;
+            if mine.serialize()? != own {
+                return Err(DaemonError::Disagreement(
+                    "the leader's round-1 map carries a different package for this node — \
+                     equivocation; aborting"
+                        .into(),
+                ));
+            }
+            let ctx = crate::ceremony::DigestContext {
+                ceremony_id,
+                key_id: &key_id,
+                kind,
+                max_signers: self.max_signers,
+                min_signers: self.min_signers,
+                old,
+            };
+            let digest = crate::ceremony::round1_digest(&ctx, round1_map)?;
+            let others = without_self(round1_map, self.identifier);
+            let packages = {
+                let mut book = self.book.lock().expect("ceremony lock");
+                let s = book
+                    .sessions
+                    .get_mut(ceremony_id)
+                    .ok_or_else(|| DaemonError::UnknownDkg(ceremony_id.into()))?;
+                let packages = match s.participant.as_mut() {
+                    Some(Participant::Dkg(p)) => p.part2(&others)?,
+                    Some(Participant::Refresh(p)) => p.part2(&others)?,
+                    None => {
+                        return Err(DaemonError::CeremonyRefused(format!("ceremony {ceremony_id} is finishing")))
+                    }
+                };
+                s.part2 = Some(Part2State { digest, round1_map: round1_map.clone() });
+                packages
+            };
+            let mut by_index = BTreeMap::new();
+            for (id, pkg) in packages {
+                by_index.insert(crate::hosted::identifier_index(id)?, pkg);
+            }
+            Ok((digest, by_index))
+        })();
+        if let Err(e) = &result {
+            self.fail_session(ceremony_id, &key_id, &format!("part 2 failed: {e}"));
+        }
+        result
+    }
+
+    /// A round-2 package for this node, delivered directly by its sender. `from` is the sender as
+    /// the transport authenticated it (the caller's certificate CN, mapped exactly to a roster
+    /// identifier) — never a value the sender merely claims. The package must be addressed to this
+    /// node and the sender be in the roster; one package per sender — a second, different one is
+    /// equivocation and aborts the session. Deliveries may arrive before this node's own part 2.
+    pub fn ceremony_deliver(
+        &self,
+        ceremony_id: &str,
+        from: u16,
+        to: u16,
+        digest: [u8; 32],
+        package: round2::Package,
+    ) -> Result<()> {
+        let me = self.index()?;
+        if to != me {
+            return Err(DaemonError::CeremonyRefused(format!(
+                "a round-2 package for node {to} was delivered to node {me}"
+            )));
+        }
+        if from == me {
+            return Err(DaemonError::CeremonyRefused("a node never delivers to itself".into()));
+        }
+        let mut book = self.book.lock().expect("ceremony lock");
+        let s = book.sessions.get_mut(ceremony_id).ok_or_else(|| DaemonError::UnknownDkg(ceremony_id.into()))?;
+        if !s.roster.contains(&from) {
+            return Err(DaemonError::CeremonyRefused(format!(
+                "node {from} is not in the roster of ceremony {ceremony_id}"
+            )));
+        }
+        if s.participant.is_none() {
+            return Err(DaemonError::CeremonyRefused(format!("ceremony {ceremony_id} is finishing")));
+        }
+        match s.inbox.get(&from) {
+            Some((d, p)) if *d == digest && p.serialize()? == package.serialize()? => Ok(()), // a retry
+            Some(_) => {
+                let key_id = s.key_id.clone();
+                drop(book);
+                let why = format!("node {from} delivered two different round-2 packages — equivocation");
+                self.fail_session(ceremony_id, &key_id, &why);
+                Err(DaemonError::Disagreement(why))
+            }
+            None => {
+                s.inbox.insert(from, (digest, package));
+                Ok(())
+            }
+        }
+    }
+
+    /// Part 3: require a round-2 package from every other roster node, each computed over the
+    /// same round-1 map as this node's (equal digests) and the leader's digest equal too; then
+    /// stage the new share and vote yes ([`Node::finish_session`]). Any mismatch votes no.
+    pub fn ceremony_part3(&self, ceremony_id: &str, leader_digest: &[u8; 32]) -> Result<StagedOutcome> {
+        let (key_id, kind, roster, old, digest, round1_map, inbox) = {
+            let book = self.book.lock().expect("ceremony lock");
+            let s = book.sessions.get(ceremony_id).ok_or_else(|| DaemonError::UnknownDkg(ceremony_id.into()))?;
+            let p2 = s
+                .part2
+                .as_ref()
+                .ok_or_else(|| DaemonError::CeremonyRefused(format!("ceremony {ceremony_id}: part 3 before part 2")))?;
+            (s.key_id.clone(), s.kind, s.roster.clone(), s.old, p2.digest, p2.round1_map.clone(), s.inbox.clone())
+        };
+        let me = self.index()?;
+        let checked = (|| -> Result<BTreeMap<Identifier, round2::Package>> {
+            if digest != *leader_digest {
+                return Err(DaemonError::Disagreement(
+                    "the leader's round-1 digest differs from this node's — equivocation; aborting".into(),
+                ));
+            }
+            let mut for_me = BTreeMap::new();
+            for &id in roster.iter().filter(|&&id| id != me) {
+                let (d, pkg) = inbox.get(&id).ok_or_else(|| {
+                    DaemonError::CeremonyRefused(format!("no round-2 package was delivered by node {id}"))
+                })?;
+                if *d != digest {
+                    return Err(DaemonError::Disagreement(format!(
+                        "node {id} computed a different round-1 digest — the nodes were shown \
+                         different round-1 maps (leader equivocation); aborting"
+                    )));
+                }
+                for_me.insert(Identifier::try_from(id)?, pkg.clone());
+            }
+            Ok(for_me)
+        })();
+        let for_me = match checked {
+            Ok(m) => m,
+            Err(e) => {
+                self.fail_session(ceremony_id, &key_id, &format!("part 3 refused: {e}"));
+                return Err(e);
+            }
+        };
+        self.finish_session(ceremony_id, kind, roster, Some(digest), |key_id, participant| match kind {
+            CeremonyKind::Dkg => self.dkg_share(key_id, participant, &round1_map, &for_me),
+            CeremonyKind::Refresh => {
+                let (share, was) = self.refresh_share(key_id, participant, &round1_map, &for_me)?;
+                if was != old {
+                    return Err(DaemonError::Disagreement(format!(
+                        "the share of {key_id} changed during the refresh — aborting"
+                    )));
+                }
+                Ok((share, was))
+            }
+        })
     }
 
     /// Record a no-vote for `ceremony_id` unless this node already recorded a vote. Caller holds
@@ -837,32 +1104,6 @@ impl Node {
             }
         }
         self.release_ceremony(key_id, ceremony_id);
-    }
-
-    /// Run part 2 of either ceremony against the session's participant.
-    fn session_part2(
-        &self,
-        ceremony_id: &str,
-        kind: CeremonyKind,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-    ) -> Result<BTreeMap<Identifier, round2::Package>> {
-        let key_id = self.session_key(ceremony_id, kind)?;
-        self.assert_owns(&key_id, ceremony_id)?; // refuse if a newer ceremony superseded this one
-        let others = without_self(round1_map, self.identifier);
-        let result = {
-            let mut book = self.book.lock().expect("ceremony lock");
-            let session =
-                book.sessions.get_mut(ceremony_id).ok_or_else(|| DaemonError::UnknownDkg(ceremony_id.into()))?;
-            match session.participant.as_mut() {
-                Some(Participant::Dkg(p)) => p.part2(&others).map_err(DaemonError::from),
-                Some(Participant::Refresh(p)) => p.part2(&others).map_err(DaemonError::from),
-                None => Err(DaemonError::CeremonyRefused(format!("ceremony {ceremony_id} is finishing"))),
-            }
-        };
-        if let Err(e) = &result {
-            self.fail_session(ceremony_id, &key_id, &format!("part 2 failed: {e}"));
-        }
-        result
     }
 
     /// Part 3 of either ceremony: compute the new share (`finish`), then vote yes durably — the
@@ -1247,79 +1488,26 @@ impl Node {
         Ok(old.len())
     }
 
-    // -- relay transport (pre-C1 wire shape; replaced by direct delivery) --
-
+    /// [`Node::ceremony_part1`] for a DKG over this node's own roster (every identifier `1..=n`, or
+    /// itself plus its mesh). Convenience for tools and tests.
     pub fn dkg_part1(&self, dkg_id: &str, key_id: &str) -> Result<round1::Package> {
-        // `…frost-import-…` ids belong to the split ceremony. Refusing them here, on every node and
-        // whether or not the import has happened yet, means a DKG can never mint a key under an id
-        // an operator is about to install (and a half-installed import is never "completed" by one).
-        if crate::share_delivery::is_reserved_for_import(key_id) {
-            return Err(DaemonError::ReservedKeyId(key_id.to_string()));
-        }
-        // DKG must never clobber a provisioned key — the namespace key is non-rotatable, so an
-        // accidental re-DKG (failover retry, ops mistake) would destroy the node's identity.
-        if self.keystore.exists(key_id) {
-            return Err(DaemonError::KeyExists(key_id.to_string()));
-        }
-        self.start_session(dkg_id, key_id, CeremonyKind::Dkg)
+        self.ceremony_part1(dkg_id, key_id, CeremonyKind::Dkg, &self.own_roster()?)
     }
 
-    pub fn dkg_part2(
-        &self,
-        dkg_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-    ) -> Result<BTreeMap<Identifier, round2::Package>> {
-        self.session_part2(dkg_id, CeremonyKind::Dkg, round1_map)
-    }
-
-    /// Stage this node's new share and vote yes. Returns the group key; the share is not live
-    /// until the ceremony commits.
-    pub fn dkg_part3(
-        &self,
-        dkg_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-        round2_for_me: &BTreeMap<Identifier, round2::Package>,
-    ) -> Result<StagedOutcome> {
-        let roster = roster_of(round1_map)?;
-        self.finish_session(dkg_id, CeremonyKind::Dkg, roster, None, |key_id, participant| {
-            self.dkg_share(key_id, participant, round1_map, round2_for_me)
-        })
-    }
-
+    /// [`Node::ceremony_part1`] for a refresh over this node's own roster.
     pub fn refresh_part1(&self, refresh_id: &str, key_id: &str) -> Result<round1::Package> {
-        if !self.keystore.exists(key_id) {
-            return Err(DaemonError::UnknownKey(key_id.to_string()));
-        }
-        // Reverse fence (idempotent if the orchestrator already fenced with this id).
-        let pending = self.pending_sign_count(key_id);
-        if pending > 0 {
-            return Err(DaemonError::SignInProgress {
-                key_id: key_id.to_string(),
-                kind: "refresh",
-                pending,
-            });
-        }
-        self.start_session(refresh_id, key_id, CeremonyKind::Refresh)
+        self.ceremony_part1(refresh_id, key_id, CeremonyKind::Refresh, &self.own_roster()?)
     }
 
-    pub fn refresh_part2(
-        &self,
-        refresh_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-    ) -> Result<BTreeMap<Identifier, round2::Package>> {
-        self.session_part2(refresh_id, CeremonyKind::Refresh, round1_map)
-    }
-
-    pub fn refresh_part3(
-        &self,
-        refresh_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-        round2_for_me: &BTreeMap<Identifier, round2::Package>,
-    ) -> Result<StagedOutcome> {
-        let roster = roster_of(round1_map)?;
-        self.finish_session(refresh_id, CeremonyKind::Refresh, roster, None, |key_id, participant| {
-            self.refresh_share(key_id, participant, round1_map, round2_for_me)
-        })
+    fn own_roster(&self) -> Result<Vec<u16>> {
+        let me = self.index()?;
+        let mut roster: Vec<u16> = match self.mesh.get() {
+            Some(mesh) => mesh.iter().map(|p| crate::hosted::identifier_index(p.identifier())).collect::<Result<_>>()?,
+            None => (1..=self.max_signers).filter(|&i| i != me).collect(),
+        };
+        roster.push(me);
+        roster.sort_unstable();
+        Ok(roster)
     }
 }
 
@@ -1332,14 +1520,6 @@ pub struct StagedOutcome {
     pub new_epoch: u64,
     pub new_pkp_digest: [u8; 32],
     pub group_key: [u8; 32],
-}
-
-/// The configured identifiers of a round-1 map's participants, ascending.
-fn roster_of(round1_map: &BTreeMap<Identifier, round1::Package>) -> Result<Vec<u16>> {
-    let mut roster =
-        round1_map.keys().map(|&id| crate::hosted::identifier_index(id)).collect::<Result<Vec<_>>>()?;
-    roster.sort_unstable();
-    Ok(roster)
 }
 
 /// Hosted keys may never live under an id reserved for the split ceremony (`…frost-import-…`).

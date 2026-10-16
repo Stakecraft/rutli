@@ -132,6 +132,23 @@ private static final long serialVersionUID = 0L;
     return hostedKeySpecs_.getByteString(index);
   }
 
+  public static final int CEREMONY_PROTOCOL_FIELD_NUMBER = 4;
+  private int ceremonyProtocol_ = 0;
+  /**
+   * <pre>
+   * The DKG/refresh protocol this node speaks: 2 = direct round-2 delivery + two-phase commit;
+   * 0 (absent) from an older cosigner. A leader refuses a ceremony unless every node reports &gt;= 2.
+   * dist_public_key is empty when hosted keys are off (this reply no longer fails then).
+   * </pre>
+   *
+   * <code>uint32 ceremony_protocol = 4;</code>
+   * @return The ceremonyProtocol.
+   */
+  @java.lang.Override
+  public int getCeremonyProtocol() {
+    return ceremonyProtocol_;
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -154,6 +171,9 @@ private static final long serialVersionUID = 0L;
     }
     for (int i = 0; i < hostedKeySpecs_.size(); i++) {
       com.google.protobuf.GeneratedMessage.writeString(output, 3, hostedKeySpecs_.getRaw(i));
+    }
+    if (ceremonyProtocol_ != 0) {
+      output.writeUInt32(4, ceremonyProtocol_);
     }
     getUnknownFields().writeTo(output);
   }
@@ -180,6 +200,10 @@ private static final long serialVersionUID = 0L;
       size += dataSize;
       size += 1 * getHostedKeySpecsList().size();
     }
+    if (ceremonyProtocol_ != 0) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeUInt32Size(4, ceremonyProtocol_);
+    }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
     return size;
@@ -201,6 +225,8 @@ private static final long serialVersionUID = 0L;
         .equals(other.getDistPublicKey())) return false;
     if (!getHostedKeySpecsList()
         .equals(other.getHostedKeySpecsList())) return false;
+    if (getCeremonyProtocol()
+        != other.getCeremonyProtocol()) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -220,6 +246,8 @@ private static final long serialVersionUID = 0L;
       hash = (37 * hash) + HOSTED_KEY_SPECS_FIELD_NUMBER;
       hash = (53 * hash) + getHostedKeySpecsList().hashCode();
     }
+    hash = (37 * hash) + CEREMONY_PROTOCOL_FIELD_NUMBER;
+    hash = (53 * hash) + getCeremonyProtocol();
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -355,6 +383,7 @@ private static final long serialVersionUID = 0L;
       distPublicKey_ = com.google.protobuf.ByteString.EMPTY;
       hostedKeySpecs_ =
           com.google.protobuf.LazyStringArrayList.emptyList();
+      ceremonyProtocol_ = 0;
       return this;
     }
 
@@ -398,6 +427,9 @@ private static final long serialVersionUID = 0L;
         hostedKeySpecs_.makeImmutable();
         result.hostedKeySpecs_ = hostedKeySpecs_;
       }
+      if (((from_bitField0_ & 0x00000008) != 0)) {
+        result.ceremonyProtocol_ = ceremonyProtocol_;
+      }
     }
 
     @java.lang.Override
@@ -427,6 +459,9 @@ private static final long serialVersionUID = 0L;
           hostedKeySpecs_.addAll(other.hostedKeySpecs_);
         }
         onChanged();
+      }
+      if (other.getCeremonyProtocol() != 0) {
+        setCeremonyProtocol(other.getCeremonyProtocol());
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -470,6 +505,11 @@ private static final long serialVersionUID = 0L;
               hostedKeySpecs_.add(s);
               break;
             } // case 26
+            case 32: {
+              ceremonyProtocol_ = input.readUInt32();
+              bitField0_ |= 0x00000008;
+              break;
+            } // case 32
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -724,6 +764,56 @@ private static final long serialVersionUID = 0L;
       ensureHostedKeySpecsIsMutable();
       hostedKeySpecs_.add(value);
       bitField0_ |= 0x00000004;
+      onChanged();
+      return this;
+    }
+
+    private int ceremonyProtocol_ ;
+    /**
+     * <pre>
+     * The DKG/refresh protocol this node speaks: 2 = direct round-2 delivery + two-phase commit;
+     * 0 (absent) from an older cosigner. A leader refuses a ceremony unless every node reports &gt;= 2.
+     * dist_public_key is empty when hosted keys are off (this reply no longer fails then).
+     * </pre>
+     *
+     * <code>uint32 ceremony_protocol = 4;</code>
+     * @return The ceremonyProtocol.
+     */
+    @java.lang.Override
+    public int getCeremonyProtocol() {
+      return ceremonyProtocol_;
+    }
+    /**
+     * <pre>
+     * The DKG/refresh protocol this node speaks: 2 = direct round-2 delivery + two-phase commit;
+     * 0 (absent) from an older cosigner. A leader refuses a ceremony unless every node reports &gt;= 2.
+     * dist_public_key is empty when hosted keys are off (this reply no longer fails then).
+     * </pre>
+     *
+     * <code>uint32 ceremony_protocol = 4;</code>
+     * @param value The ceremonyProtocol to set.
+     * @return This builder for chaining.
+     */
+    public Builder setCeremonyProtocol(int value) {
+
+      ceremonyProtocol_ = value;
+      bitField0_ |= 0x00000008;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * The DKG/refresh protocol this node speaks: 2 = direct round-2 delivery + two-phase commit;
+     * 0 (absent) from an older cosigner. A leader refuses a ceremony unless every node reports &gt;= 2.
+     * dist_public_key is empty when hosted keys are off (this reply no longer fails then).
+     * </pre>
+     *
+     * <code>uint32 ceremony_protocol = 4;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearCeremonyProtocol() {
+      bitField0_ = (bitField0_ & ~0x00000008);
+      ceremonyProtocol_ = 0;
       onChanged();
       return this;
     }

@@ -21,10 +21,10 @@ use frost_ed25519::keys::dkg::{round1, round2};
 use frost_ed25519::round1::SigningCommitments;
 use frost_ed25519::round2::SignatureShare;
 use frost_ed25519::Identifier;
-use rutli_cosigner::ceremony::{resolve_assume_lost, resolve_pending};
+use rutli_cosigner::ceremony::{resolve_assume_lost, resolve_pending, Part2Outcome};
 use rutli_cosigner::ceremony_record::{Phase, RecordState, StatusInfo};
 use rutli_cosigner::keystore::KeyStore;
-use rutli_cosigner::node::{CeremonyKind, Node};
+use rutli_cosigner::node::{CeremonyKind, Node, StagedOutcome};
 use rutli_cosigner::orchestrator::{run_dkg, run_refresh, sign, Peers};
 use rutli_cosigner::peer::{LocalPeer, PeerApi};
 use rutli_cosigner::{pb, DaemonError, Result};
@@ -48,6 +48,8 @@ struct Switches {
     commit_delay_ms: AtomicU64,
     /// Other nodes' resolvers see this node vote for a different outcome.
     diverge: AtomicBool,
+    /// This node reports ceremony protocol 0, as a cosigner of an older release would.
+    old_protocol: AtomicBool,
 }
 
 struct Faulty {
@@ -55,9 +57,16 @@ struct Faulty {
     sw: Arc<Switches>,
     /// The leader's handle (commit faults apply) rather than a peer's mesh handle.
     leader: bool,
+    /// Leader handles: everything passed to and returned from the node (the leader's whole view).
+    /// Mesh handles: every round-2 delivery, as JSON.
+    log: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl Faulty {
+    fn note(&self, entry: String) {
+        self.log.lock().unwrap().push(entry);
+    }
+
     fn gate(&self) -> Result<()> {
         if self.sw.down.load(Ordering::SeqCst) {
             return Err(DaemonError::Status(tonic::Status::unavailable("transport error: node down")));
@@ -96,52 +105,6 @@ impl PeerApi for Faulty {
     async fn ceremony_release(&self, ceremony_id: &str, key_id: &str) -> Result<()> {
         self.gate()?;
         self.inner.ceremony_release(ceremony_id, key_id).await
-    }
-    async fn dkg_part1(&self, dkg_id: &str, key_id: &str) -> Result<round1::Package> {
-        self.gate()?;
-        self.inner.dkg_part1(dkg_id, key_id).await
-    }
-    async fn dkg_part2(
-        &self,
-        dkg_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-    ) -> Result<BTreeMap<Identifier, round2::Package>> {
-        self.gate()?;
-        self.inner.dkg_part2(dkg_id, round1_map).await
-    }
-    async fn dkg_part3(
-        &self,
-        dkg_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-        round2_for_me: &BTreeMap<Identifier, round2::Package>,
-    ) -> Result<[u8; 32]> {
-        self.part3_gate()?;
-        let r = self.inner.dkg_part3(dkg_id, round1_map, round2_for_me).await;
-        self.after_part3(&r);
-        r
-    }
-    async fn refresh_part1(&self, refresh_id: &str, key_id: &str) -> Result<round1::Package> {
-        self.gate()?;
-        self.inner.refresh_part1(refresh_id, key_id).await
-    }
-    async fn refresh_part2(
-        &self,
-        refresh_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-    ) -> Result<BTreeMap<Identifier, round2::Package>> {
-        self.gate()?;
-        self.inner.refresh_part2(refresh_id, round1_map).await
-    }
-    async fn refresh_part3(
-        &self,
-        refresh_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-        round2_for_me: &BTreeMap<Identifier, round2::Package>,
-    ) -> Result<[u8; 32]> {
-        self.part3_gate()?;
-        let r = self.inner.refresh_part3(refresh_id, round1_map, round2_for_me).await;
-        self.after_part3(&r);
-        r
     }
     async fn node_info(&self) -> Result<(u16, [u8; 32])> {
         self.gate()?;
@@ -211,6 +174,56 @@ impl PeerApi for Faulty {
         self.gate()?;
         self.inner.ceremony_abort(ceremony_id).await
     }
+    async fn ceremony_protocol(&self) -> Result<u32> {
+        self.gate()?;
+        if self.sw.old_protocol.load(Ordering::SeqCst) {
+            return Ok(0);
+        }
+        self.inner.ceremony_protocol().await
+    }
+    async fn ceremony_part1(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        kind: CeremonyKind,
+        roster: &[u16],
+    ) -> Result<round1::Package> {
+        self.gate()?;
+        let r = self.inner.ceremony_part1(ceremony_id, key_id, kind, roster).await;
+        if let Ok(p) = &r {
+            self.note(format!("part1 {ceremony_id} {key_id} {roster:?} -> {}", serde_json::to_string(p).unwrap()));
+        }
+        r
+    }
+    async fn ceremony_part2(
+        &self,
+        ceremony_id: &str,
+        round1_map: &BTreeMap<Identifier, round1::Package>,
+    ) -> Result<Part2Outcome> {
+        self.gate()?;
+        let r = self.inner.ceremony_part2(ceremony_id, round1_map).await;
+        self.note(format!("part2 {ceremony_id} {} -> {r:?}", serde_json::to_string(round1_map).unwrap()));
+        r
+    }
+    async fn ceremony_deliver(
+        &self,
+        ceremony_id: &str,
+        from: u16,
+        to: u16,
+        round1_digest: &[u8; 32],
+        package: &round2::Package,
+    ) -> Result<()> {
+        self.gate()?;
+        self.note(format!("deliver {from}->{to} {}", serde_json::to_string(package).unwrap()));
+        self.inner.ceremony_deliver(ceremony_id, from, to, round1_digest, package).await
+    }
+    async fn ceremony_part3(&self, ceremony_id: &str, round1_digest: &[u8; 32]) -> Result<StagedOutcome> {
+        self.part3_gate()?;
+        let r = self.inner.ceremony_part3(ceremony_id, round1_digest).await;
+        self.note(format!("part3 {ceremony_id} {} -> {r:?}", hex::encode(round1_digest)));
+        self.after_part3(&r);
+        r
+    }
 }
 
 impl Faulty {
@@ -232,6 +245,10 @@ impl Faulty {
 struct Rig {
     nodes: Vec<Arc<Node>>,
     sw: Vec<Arc<Switches>>,
+    /// What the leader's handles saw.
+    leader_log: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Every round-2 delivery between nodes.
+    delivery_log: Arc<std::sync::Mutex<Vec<String>>>,
     /// The leader's view (node 1 leads unless a test picks another).
     peers: Peers,
     _tmp: tempfile::TempDir,
@@ -251,6 +268,8 @@ impl Rig {
             })
             .collect();
         let sw: Vec<Arc<Switches>> = (0..N).map(|_| Arc::new(Switches::default())).collect();
+        let leader_log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let delivery_log = Arc::new(std::sync::Mutex::new(Vec::new()));
         for (j, me) in nodes.iter().enumerate() {
             let mesh: Vec<Arc<dyn PeerApi>> = nodes
                 .iter()
@@ -261,6 +280,7 @@ impl Rig {
                         inner: LocalPeer::new(n.clone()).on_behalf_of(me.clone()),
                         sw: sw[k].clone(),
                         leader: false,
+                        log: delivery_log.clone(),
                     }) as Arc<dyn PeerApi>
                 })
                 .collect();
@@ -270,10 +290,15 @@ impl Rig {
             .iter()
             .zip(&sw)
             .map(|(n, s)| {
-                Arc::new(Faulty { inner: LocalPeer::new(n.clone()), sw: s.clone(), leader: true }) as Arc<dyn PeerApi>
+                Arc::new(Faulty {
+                    inner: LocalPeer::new(n.clone()),
+                    sw: s.clone(),
+                    leader: true,
+                    log: leader_log.clone(),
+                }) as Arc<dyn PeerApi>
             })
             .collect();
-        Rig { nodes, sw, peers, _tmp: tmp }
+        Rig { nodes, sw, leader_log, delivery_log, peers, _tmp: tmp }
     }
 
     fn share_file(&self, i: usize) -> std::path::PathBuf {
@@ -639,4 +664,265 @@ async fn discard_partial_key_refuses_whenever_any_node_holds_a_committed_epoch()
     let err = discard_partial_key(&fresh, KEY, &group).await.unwrap_err();
     assert!(matches!(&err, DaemonError::CeremonyRefused(m) if m.contains("node 2")), "{err:?}");
     assert!(fresh.has_key(KEY), "nothing deleted");
+}
+
+// ── C1: confidential, authenticated round 2 ─────────────────────────────────────────────────────
+
+/// The signing-share hex of every round-2 package delivered between nodes.
+fn delivered_shares(rig: &Rig) -> Vec<String> {
+    rig.delivery_log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|e| {
+            let json = e.split_once(' ').map(|x| x.1)?.split_once(' ')?.1;
+            let v: serde_json::Value = serde_json::from_str(json).ok()?;
+            v.get("signing_share").and_then(|s| s.as_str()).map(String::from)
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn the_leader_never_sees_a_round2_package_in_dkg_or_refresh() {
+    // Audit C1: with the relay, the leader of a 2-of-3 DKG saw f_i(j) for every pair and could
+    // interpolate the group secret. Now everything the leader's handles carry, both ways, is
+    // recorded — and no round-2 package is in it.
+    let rig = Rig::new();
+    let group = run_dkg(&rig.peers, KEY).await.unwrap();
+    assert_eq!(run_refresh(&rig.peers, KEY).await.unwrap(), group);
+
+    let shares = delivered_shares(&rig);
+    // 2 ceremonies × 3 senders × 2 recipients, each delivered node to node.
+    assert_eq!(shares.len(), 12, "{:?}", rig.delivery_log.lock().unwrap());
+    let transcript = rig.leader_log.lock().unwrap().join("\n");
+    assert!(transcript.contains("part1") && transcript.contains("part3"), "the leader's view was recorded");
+    assert!(!transcript.contains("signing_share"), "no round-2 package passed through the leader");
+    for share in &shares {
+        assert!(!transcript.contains(share.as_str()), "a delivered share leaked to the leader");
+    }
+    assert_eq!(rig.epochs(), vec![2, 2, 2]);
+    rig.every_pair_signs(&group).await;
+}
+
+/// A leader that runs the ceremony by hand and shows node `victim` (0-based, per call) a doctored
+/// round-1 map. Parts 2 and 3 are driven for every node regardless of failures, with each node
+/// given its own digest at part 3 — the most a malicious leader can do to get a node to stage.
+async fn equivocate(
+    rig: &Rig,
+    kind: CeremonyKind,
+    tamper: impl Fn(usize, &mut BTreeMap<Identifier, round1::Package>),
+) -> String {
+    let ceremony_id = format!("{}-evil-{}", kind.as_str(), uuid_like());
+    let expect = (kind == CeremonyKind::Refresh).then(|| {
+        let v = rig.nodes[0].key_epoch(KEY).unwrap();
+        (v.epoch, v.pkp_digest.as_slice().try_into().unwrap())
+    });
+    for p in &rig.peers {
+        p.ceremony_begin(&ceremony_id, KEY, kind, expect).await.unwrap();
+    }
+    let mut map = BTreeMap::new();
+    for p in &rig.peers {
+        map.insert(p.identifier(), p.ceremony_part1(&ceremony_id, KEY, kind, &[1, 2, 3]).await.unwrap());
+    }
+    let mut digests = Vec::new();
+    for (i, p) in rig.peers.iter().enumerate() {
+        let mut shown = map.clone();
+        tamper(i, &mut shown);
+        digests.push(p.ceremony_part2(&ceremony_id, &shown).await.map(|o| o.round1_digest).unwrap_or([0u8; 32]));
+    }
+    for (i, p) in rig.peers.iter().enumerate() {
+        assert!(p.ceremony_part3(&ceremony_id, &digests[i]).await.is_err(), "node {} must not stage", i + 1);
+    }
+    for p in &rig.peers {
+        let _ = p.ceremony_release(&ceremony_id, KEY).await;
+    }
+    ceremony_id
+}
+
+fn uuid_like() -> String {
+    format!("{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos())
+}
+
+/// A valid round-1 package for `id` that no node of the cluster generated.
+fn fake_round1(id: u16) -> round1::Package {
+    rutli_frost_core::dkg::DkgParticipant::new(Identifier::try_from(id).unwrap(), N, T).part1().unwrap()
+}
+
+fn assert_aborted_everywhere(rig: &Rig, ceremony_id: &str) {
+    for (i, n) in rig.nodes.iter().enumerate() {
+        let rec = n.ceremony_record(ceremony_id).unwrap_or_else(|| panic!("node {} has no vote", i + 1));
+        assert_eq!(rec.state, RecordState::Aborted, "node {}: {rec:?}", i + 1);
+    }
+    assert!(rig.no_staged_anywhere());
+}
+
+#[tokio::test]
+async fn a_leader_showing_one_node_a_substituted_package_makes_every_node_abort() {
+    let rig = Rig::new();
+    // Node 2 is shown a different package for node 3.
+    let fake = fake_round1(3);
+    let id = equivocate(&rig, CeremonyKind::Dkg, |victim, m| {
+        if victim == 1 {
+            m.insert(Identifier::try_from(3u16).unwrap(), fake.clone());
+        }
+    })
+    .await;
+    assert_aborted_everywhere(&rig, &id);
+    assert!(rig.nodes.iter().all(|n| !n.has_key(KEY)), "no share persisted");
+    // Nothing was left behind: an honest DKG then works.
+    let group = run_dkg(&rig.peers, KEY).await.unwrap();
+    rig.every_pair_signs(&group).await;
+}
+
+#[tokio::test]
+async fn a_leader_substituting_a_nodes_own_package_for_the_others_makes_every_node_abort() {
+    let rig = Rig::new();
+    let group = run_dkg(&rig.peers, KEY).await.unwrap();
+    let before = rig.digests();
+    // Nodes 2 and 3 are shown a forged package for node 1 (node 1 sees the true map).
+    let fake = fake_round1(1);
+    let id = equivocate(&rig, CeremonyKind::Refresh, |victim, m| {
+        if victim != 0 {
+            m.insert(Identifier::try_from(1u16).unwrap(), fake.clone());
+        }
+    })
+    .await;
+    assert_aborted_everywhere(&rig, &id);
+    assert_eq!(rig.digests(), before, "no share replaced");
+    assert_eq!(rig.epochs(), vec![1, 1, 1]);
+    rig.every_pair_signs(&group).await;
+}
+
+#[tokio::test]
+async fn a_node_refuses_a_map_with_a_forged_package_of_its_own_or_a_foreign_digest() {
+    let rig = Rig::new();
+    // Every node is shown a forged package for itself: each refuses at part 2.
+    let id = equivocate(&rig, CeremonyKind::Dkg, |victim, m| {
+        m.insert(Identifier::try_from(victim as u16 + 1).unwrap(), fake_round1(victim as u16 + 1));
+    })
+    .await;
+    assert_aborted_everywhere(&rig, &id);
+
+    // An honest map, but the leader hands part 3 a digest that is not the nodes' own.
+    let ceremony_id = "dkg-wrong-digest";
+    for p in &rig.peers {
+        p.ceremony_begin(ceremony_id, KEY, CeremonyKind::Dkg, None).await.unwrap();
+    }
+    let mut map = BTreeMap::new();
+    for p in &rig.peers {
+        map.insert(p.identifier(), p.ceremony_part1(ceremony_id, KEY, CeremonyKind::Dkg, &[1, 2, 3]).await.unwrap());
+    }
+    for p in &rig.peers {
+        p.ceremony_part2(ceremony_id, &map).await.unwrap();
+    }
+    for p in &rig.peers {
+        assert!(p.ceremony_part3(ceremony_id, &[7u8; 32]).await.is_err());
+    }
+    assert_aborted_everywhere(&rig, ceremony_id);
+}
+
+#[tokio::test]
+async fn a_round2_delivery_is_bound_to_its_real_sender_and_recipient() {
+    let rig = Rig::new();
+    let ceremony_id = "dkg-deliveries";
+    for p in &rig.peers {
+        p.ceremony_begin(ceremony_id, KEY, CeremonyKind::Dkg, None).await.unwrap();
+        p.ceremony_part1(ceremony_id, KEY, CeremonyKind::Dkg, &[1, 2, 3]).await.unwrap();
+    }
+    let pkg = |b: u8| {
+        let mut bytes = [0u8; 32];
+        bytes[0] = b;
+        round2::Package::new(frost_ed25519::keys::SigningShare::deserialize(&bytes).unwrap())
+    };
+    // Node 3 delivering to node 1 as node 2: refused (the sender is who the transport says).
+    let as_node3 = LocalPeer::new(rig.nodes[0].clone()).on_behalf_of(rig.nodes[2].clone());
+    let err = as_node3.ceremony_deliver(ceremony_id, 2, 1, &[1u8; 32], &pkg(1)).await.unwrap_err();
+    assert!(err.to_string().contains("cannot deliver"), "{err}");
+    // A package addressed to node 2 is not accepted by node 1.
+    let err = as_node3.ceremony_deliver(ceremony_id, 3, 2, &[1u8; 32], &pkg(1)).await.unwrap_err();
+    assert!(err.to_string().contains("delivered to node 1"), "{err}");
+    // Node 3's own delivery is accepted; a retry of the same bytes too; a different second package
+    // is equivocation and aborts node 1's session.
+    as_node3.ceremony_deliver(ceremony_id, 3, 1, &[1u8; 32], &pkg(1)).await.unwrap();
+    as_node3.ceremony_deliver(ceremony_id, 3, 1, &[1u8; 32], &pkg(1)).await.unwrap();
+    assert!(as_node3.ceremony_deliver(ceremony_id, 3, 1, &[1u8; 32], &pkg(2)).await.is_err());
+    assert_eq!(rig.nodes[0].ceremony_record(ceremony_id).unwrap().state, RecordState::Aborted);
+}
+
+#[tokio::test]
+async fn a_leader_dying_before_every_part3_leaves_one_staged_node_that_aborts_on_orphans() {
+    let rig = Rig::with_orphan_timeout(std::time::Duration::from_millis(300));
+    let group = run_dkg(&rig.peers, KEY).await.unwrap();
+    let before = rig.digests();
+    let ceremony_id = "refresh-leader-died";
+    let v = rig.nodes[0].key_epoch(KEY).unwrap();
+    let expect = Some((v.epoch, v.pkp_digest.as_slice().try_into().unwrap()));
+    for p in &rig.peers {
+        p.ceremony_begin(ceremony_id, KEY, CeremonyKind::Refresh, expect).await.unwrap();
+    }
+    let mut map = BTreeMap::new();
+    for p in &rig.peers {
+        map.insert(p.identifier(), p.ceremony_part1(ceremony_id, KEY, CeremonyKind::Refresh, &[1, 2, 3]).await.unwrap());
+    }
+    let mut digest = [0u8; 32];
+    for p in &rig.peers {
+        digest = p.ceremony_part2(ceremony_id, &map).await.unwrap().round1_digest;
+    }
+    // Only node 1 gets part 3; then the leader is gone.
+    rig.peers[0].ceremony_part3(ceremony_id, &digest).await.unwrap();
+    resolve_pending(&rig.nodes[0]).await;
+    assert_eq!(rig.nodes[0].ceremony_record(ceremony_id).unwrap().state, RecordState::Staged, "2 and 3 in progress");
+    // Past the orphan timeout nodes 2 and 3 vote no when asked, and node 1 aborts on it.
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    resolve_pending(&rig.nodes[0]).await;
+    assert_aborted_everywhere(&rig, ceremony_id);
+    assert_eq!(rig.digests(), before);
+    rig.every_pair_signs(&group).await;
+    // The orphaned guards are gone with the sessions: the next refresh runs.
+    assert_eq!(run_refresh(&rig.peers, KEY).await.unwrap(), group);
+}
+
+#[tokio::test]
+async fn a_cluster_with_an_old_protocol_node_refuses_ceremonies_loudly() {
+    let rig = Rig::new();
+    rig.sw[2].old_protocol.store(true, Ordering::SeqCst);
+    let err = run_dkg(&rig.peers, KEY).await.unwrap_err();
+    assert!(
+        matches!(&err, DaemonError::CeremonyRefused(m) if m.contains("cosigner 3 speaks ceremony protocol 0")),
+        "{err:?}"
+    );
+    // Refused before any fence or session: no node recorded anything.
+    assert!(rig.nodes.iter().all(|n| n.all_records().is_empty()));
+    // A node that cannot be asked is refused the same way.
+    rig.sw[2].old_protocol.store(false, Ordering::SeqCst);
+    rig.sw[2].down.store(true, Ordering::SeqCst);
+    assert!(matches!(run_dkg(&rig.peers, KEY).await, Err(DaemonError::CeremonyRefused(_))));
+    rig.sw[2].down.store(false, Ordering::SeqCst);
+    let group = run_dkg(&rig.peers, KEY).await.unwrap();
+    rig.sw[1].old_protocol.store(true, Ordering::SeqCst);
+    assert!(matches!(run_refresh(&rig.peers, KEY).await, Err(DaemonError::CeremonyRefused(_))));
+    assert_eq!(rig.epochs(), vec![1, 1, 1]);
+    rig.every_pair_signs(&group).await;
+}
+
+#[tokio::test]
+async fn a_ceremony_over_a_roster_other_than_the_nodes_own_is_refused() {
+    let rig = Rig::new();
+    for roster in [&[1u16, 2][..], &[1, 2, 3, 4], &[1, 2, 4]] {
+        let err = rig.nodes[0].ceremony_part1("dkg-roster", KEY, CeremonyKind::Dkg, roster).unwrap_err();
+        assert!(matches!(err, DaemonError::CeremonyRefused(_)), "{roster:?}: {err:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_repeated_part1_keeps_the_live_session_and_its_guard() {
+    let rig = Rig::new();
+    let n = &rig.nodes[0];
+    n.ceremony_begin("dkg-twice", KEY, CeremonyKind::Dkg, None).unwrap();
+    n.ceremony_part1("dkg-twice", KEY, CeremonyKind::Dkg, &[1, 2, 3]).unwrap();
+    assert!(n.ceremony_part1("dkg-twice", KEY, CeremonyKind::Dkg, &[1, 2, 3]).is_err());
+    // Still fenced by the live ceremony: another one for the key is refused, and so is a sign.
+    let err = n.ceremony_begin("dkg-other", KEY, CeremonyKind::Dkg, None).unwrap_err();
+    assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "{err:?}");
+    assert_eq!(n.ceremony_status("dkg-twice").unwrap().phase, Phase::InProgress);
 }

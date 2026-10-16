@@ -198,6 +198,21 @@ private static final long serialVersionUID = 0L;
     return expectedPkpDigest_;
   }
 
+  public static final int PROTOCOL_FIELD_NUMBER = 6;
+  private int protocol_ = 0;
+  /**
+   * <pre>
+   * The leader's ceremony protocol. A node refuses a DKG/refresh fence below its own (2).
+   * </pre>
+   *
+   * <code>uint32 protocol = 6;</code>
+   * @return The protocol.
+   */
+  @java.lang.Override
+  public int getProtocol() {
+    return protocol_;
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -227,6 +242,9 @@ private static final long serialVersionUID = 0L;
     if (!expectedPkpDigest_.isEmpty()) {
       output.writeBytes(5, expectedPkpDigest_);
     }
+    if (protocol_ != 0) {
+      output.writeUInt32(6, protocol_);
+    }
     getUnknownFields().writeTo(output);
   }
 
@@ -253,6 +271,10 @@ private static final long serialVersionUID = 0L;
       size += com.google.protobuf.CodedOutputStream
         .computeBytesSize(5, expectedPkpDigest_);
     }
+    if (protocol_ != 0) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeUInt32Size(6, protocol_);
+    }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
     return size;
@@ -278,6 +300,8 @@ private static final long serialVersionUID = 0L;
         != other.getExpectedEpoch()) return false;
     if (!getExpectedPkpDigest()
         .equals(other.getExpectedPkpDigest())) return false;
+    if (getProtocol()
+        != other.getProtocol()) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -300,6 +324,8 @@ private static final long serialVersionUID = 0L;
         getExpectedEpoch());
     hash = (37 * hash) + EXPECTED_PKP_DIGEST_FIELD_NUMBER;
     hash = (53 * hash) + getExpectedPkpDigest().hashCode();
+    hash = (37 * hash) + PROTOCOL_FIELD_NUMBER;
+    hash = (53 * hash) + getProtocol();
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -436,6 +462,7 @@ private static final long serialVersionUID = 0L;
       kind_ = "";
       expectedEpoch_ = 0L;
       expectedPkpDigest_ = com.google.protobuf.ByteString.EMPTY;
+      protocol_ = 0;
       return this;
     }
 
@@ -484,6 +511,9 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000010) != 0)) {
         result.expectedPkpDigest_ = expectedPkpDigest_;
       }
+      if (((from_bitField0_ & 0x00000020) != 0)) {
+        result.protocol_ = protocol_;
+      }
     }
 
     @java.lang.Override
@@ -518,6 +548,9 @@ private static final long serialVersionUID = 0L;
       }
       if (other.getExpectedPkpDigest() != com.google.protobuf.ByteString.EMPTY) {
         setExpectedPkpDigest(other.getExpectedPkpDigest());
+      }
+      if (other.getProtocol() != 0) {
+        setProtocol(other.getProtocol());
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -570,6 +603,11 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000010;
               break;
             } // case 42
+            case 48: {
+              protocol_ = input.readUInt32();
+              bitField0_ |= 0x00000020;
+              break;
+            } // case 48
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -898,6 +936,50 @@ private static final long serialVersionUID = 0L;
     public Builder clearExpectedPkpDigest() {
       bitField0_ = (bitField0_ & ~0x00000010);
       expectedPkpDigest_ = getDefaultInstance().getExpectedPkpDigest();
+      onChanged();
+      return this;
+    }
+
+    private int protocol_ ;
+    /**
+     * <pre>
+     * The leader's ceremony protocol. A node refuses a DKG/refresh fence below its own (2).
+     * </pre>
+     *
+     * <code>uint32 protocol = 6;</code>
+     * @return The protocol.
+     */
+    @java.lang.Override
+    public int getProtocol() {
+      return protocol_;
+    }
+    /**
+     * <pre>
+     * The leader's ceremony protocol. A node refuses a DKG/refresh fence below its own (2).
+     * </pre>
+     *
+     * <code>uint32 protocol = 6;</code>
+     * @param value The protocol to set.
+     * @return This builder for chaining.
+     */
+    public Builder setProtocol(int value) {
+
+      protocol_ = value;
+      bitField0_ |= 0x00000020;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * The leader's ceremony protocol. A node refuses a DKG/refresh fence below its own (2).
+     * </pre>
+     *
+     * <code>uint32 protocol = 6;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearProtocol() {
+      bitField0_ = (bitField0_ & ~0x00000020);
+      protocol_ = 0;
       onChanged();
       return this;
     }

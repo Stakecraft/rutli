@@ -17,7 +17,7 @@ use frost::round2::SignatureShare;
 use frost::Identifier;
 
 use crate::ceremony_record::{Outcome, Phase, StatusInfo};
-use crate::node::{CeremonyKind, Node};
+use crate::node::{CeremonyKind, Node, StagedOutcome};
 use crate::pb::peer_client::PeerClient;
 use crate::pb;
 use crate::Result;
@@ -42,32 +42,6 @@ pub trait PeerApi: Send + Sync {
     async fn ceremony_fence(&self, ceremony_id: &str, key_id: &str, kind: &'static str) -> Result<()>;
     /// Release a fence taken by [`ceremony_fence`].
     async fn ceremony_release(&self, ceremony_id: &str, key_id: &str) -> Result<()>;
-    async fn dkg_part1(&self, dkg_id: &str, key_id: &str) -> Result<round1::Package>;
-    async fn dkg_part2(
-        &self,
-        dkg_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-    ) -> Result<BTreeMap<Identifier, round2::Package>>;
-    async fn dkg_part3(
-        &self,
-        dkg_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-        round2_for_me: &BTreeMap<Identifier, round2::Package>,
-    ) -> Result<[u8; 32]>;
-
-    async fn refresh_part1(&self, refresh_id: &str, key_id: &str) -> Result<round1::Package>;
-    async fn refresh_part2(
-        &self,
-        refresh_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-    ) -> Result<BTreeMap<Identifier, round2::Package>>;
-    async fn refresh_part3(
-        &self,
-        refresh_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-        round2_for_me: &BTreeMap<Identifier, round2::Package>,
-    ) -> Result<[u8; 32]>;
-
     // -- hosted-key replication --
 
     /// This peer's identifier and X25519 distribution public key, so material can be wrapped to it.
@@ -127,6 +101,49 @@ pub trait PeerApi: Send + Sync {
     /// returned unchanged.
     async fn ceremony_abort(&self, _ceremony_id: &str) -> Result<StatusInfo> {
         Err(unsupported("two-phase ceremonies"))
+    }
+    /// The DKG/refresh wire protocol this peer speaks (`NodeInfo.ceremony_protocol`; 0 from a
+    /// cosigner that predates it). A leader refuses a ceremony unless every node reports at least
+    /// [`crate::ceremony::CEREMONY_PROTOCOL`].
+    async fn ceremony_protocol(&self) -> Result<u32> {
+        Err(unsupported("ceremony protocol negotiation"))
+    }
+    /// Part 1 ([`Node::ceremony_part1`]): this peer's round-1 package (public).
+    async fn ceremony_part1(
+        &self,
+        _ceremony_id: &str,
+        _key_id: &str,
+        _kind: CeremonyKind,
+        _roster: &[u16],
+    ) -> Result<round1::Package> {
+        Err(unsupported("ceremony protocol 2"))
+    }
+    /// Part 2: the peer checks the round-1 map, computes its round-2 packages and delivers each
+    /// directly to its recipient ([`crate::ceremony::part2_and_deliver`]). Returns only its
+    /// round-1 digest and whom it delivered to — by construction, no method of this trait ever
+    /// returns a round-2 package to the caller (audit C1).
+    async fn ceremony_part2(
+        &self,
+        _ceremony_id: &str,
+        _round1_map: &BTreeMap<Identifier, round1::Package>,
+    ) -> Result<crate::ceremony::Part2Outcome> {
+        Err(unsupported("ceremony protocol 2"))
+    }
+    /// Deliver this caller's round-2 package for this peer (`to`). The peer takes the sender from
+    /// the caller's authenticated identity and refuses a `from` that differs.
+    async fn ceremony_deliver(
+        &self,
+        _ceremony_id: &str,
+        _from: u16,
+        _to: u16,
+        _round1_digest: &[u8; 32],
+        _package: &round2::Package,
+    ) -> Result<()> {
+        Err(unsupported("ceremony protocol 2"))
+    }
+    /// Part 3 ([`Node::ceremony_part3`]): stage and vote, given the leader's round-1 digest.
+    async fn ceremony_part3(&self, _ceremony_id: &str, _round1_digest: &[u8; 32]) -> Result<StagedOutcome> {
+        Err(unsupported("ceremony protocol 2"))
     }
 }
 
@@ -208,54 +225,6 @@ impl PeerApi for LocalPeer {
         self.node.ceremony_release(ceremony_id, key_id);
         Ok(())
     }
-    async fn dkg_part1(&self, dkg_id: &str, key_id: &str) -> Result<round1::Package> {
-        let (dkg_id, key_id) = (dkg_id.to_owned(), key_id.to_owned());
-        self.node.blocking(move |n| n.dkg_part1(&dkg_id, &key_id)).await
-    }
-    async fn dkg_part2(
-        &self,
-        dkg_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-    ) -> Result<BTreeMap<Identifier, round2::Package>> {
-        self.node.dkg_part2(dkg_id, round1_map)
-    }
-    async fn dkg_part3(
-        &self,
-        dkg_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-        round2_for_me: &BTreeMap<Identifier, round2::Package>,
-    ) -> Result<[u8; 32]> {
-        let dkg_id = dkg_id.to_owned();
-        let (round1_map, round2_for_me) = (round1_map.clone(), round2_for_me.clone());
-        let outcome =
-            self.node.blocking(move |n| n.dkg_part3(&dkg_id, &round1_map, &round2_for_me)).await?;
-        Ok(outcome.group_key)
-    }
-
-    async fn refresh_part1(&self, refresh_id: &str, key_id: &str) -> Result<round1::Package> {
-        let (refresh_id, key_id) = (refresh_id.to_owned(), key_id.to_owned());
-        self.node.blocking(move |n| n.refresh_part1(&refresh_id, &key_id)).await
-    }
-    async fn refresh_part2(
-        &self,
-        refresh_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-    ) -> Result<BTreeMap<Identifier, round2::Package>> {
-        self.node.refresh_part2(refresh_id, round1_map)
-    }
-    async fn refresh_part3(
-        &self,
-        refresh_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-        round2_for_me: &BTreeMap<Identifier, round2::Package>,
-    ) -> Result<[u8; 32]> {
-        let refresh_id = refresh_id.to_owned();
-        let (round1_map, round2_for_me) = (round1_map.clone(), round2_for_me.clone());
-        let outcome =
-            self.node.blocking(move |n| n.refresh_part3(&refresh_id, &round1_map, &round2_for_me)).await?;
-        Ok(outcome.group_key)
-    }
-
     async fn node_info(&self) -> Result<(u16, [u8; 32])> {
         Ok((crate::hosted::identifier_index(self.node.identifier)?, self.node.dist_public_key()?))
     }
@@ -349,6 +318,54 @@ impl PeerApi for LocalPeer {
     async fn ceremony_abort(&self, ceremony_id: &str) -> Result<StatusInfo> {
         let ceremony_id = ceremony_id.to_owned();
         self.node.blocking(move |n| n.ceremony_abort(&ceremony_id)).await
+    }
+
+    async fn ceremony_protocol(&self) -> Result<u32> {
+        Ok(crate::ceremony::CEREMONY_PROTOCOL)
+    }
+
+    async fn ceremony_part1(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        kind: CeremonyKind,
+        roster: &[u16],
+    ) -> Result<round1::Package> {
+        let (ceremony_id, key_id, roster) = (ceremony_id.to_owned(), key_id.to_owned(), roster.to_vec());
+        self.node.blocking(move |n| n.ceremony_part1(&ceremony_id, &key_id, kind, &roster)).await
+    }
+
+    async fn ceremony_part2(
+        &self,
+        ceremony_id: &str,
+        round1_map: &BTreeMap<Identifier, round1::Package>,
+    ) -> Result<crate::ceremony::Part2Outcome> {
+        crate::ceremony::part2_and_deliver(&self.node, ceremony_id, round1_map.clone()).await
+    }
+
+    async fn ceremony_deliver(
+        &self,
+        ceremony_id: &str,
+        from: u16,
+        to: u16,
+        round1_digest: &[u8; 32],
+        package: &round2::Package,
+    ) -> Result<()> {
+        // In process the sender is the node this handle acts for (`on_behalf_of`), exactly as the
+        // gRPC service takes it from the caller's certificate; a bare handle is this node itself.
+        let sender = crate::hosted::identifier_index(self.caller.as_deref().unwrap_or(&self.node).identifier)?;
+        if sender != from {
+            return Err(crate::DaemonError::CeremonyRefused(format!(
+                "node {sender} cannot deliver a round-2 package as node {from}"
+            )));
+        }
+        let (ceremony_id, digest, package) = (ceremony_id.to_owned(), *round1_digest, package.clone());
+        self.node.blocking(move |n| n.ceremony_deliver(&ceremony_id, from, to, digest, package)).await
+    }
+
+    async fn ceremony_part3(&self, ceremony_id: &str, round1_digest: &[u8; 32]) -> Result<StagedOutcome> {
+        let (ceremony_id, digest) = (ceremony_id.to_owned(), *round1_digest);
+        self.node.blocking(move |n| n.ceremony_part3(&ceremony_id, &digest)).await
     }
 }
 
@@ -461,113 +478,17 @@ impl PeerApi for GrpcPeer {
         Ok(())
     }
 
-    async fn dkg_part1(&self, dkg_id: &str, key_id: &str) -> Result<round1::Package> {
-        let reply = self
-            .client
-            .clone()
-            .dkg_part1(pb::DkgPart1Request {
-                dkg_id: dkg_id.into(),
-                key_id: key_id.into(),
-                identifier: 0, // the peer uses its own configured identifier
-                max_signers: 0,
-                min_signers: 0,
-            })
-            .await?
-            .into_inner();
-        Ok(serde_json::from_slice(&reply.round1_package)?)
-    }
-
-    async fn dkg_part2(
-        &self,
-        dkg_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-    ) -> Result<BTreeMap<Identifier, round2::Package>> {
-        let reply = self
-            .client
-            .clone()
-            .dkg_part2(pb::DkgPart2Request {
-                dkg_id: dkg_id.into(),
-                round1_map: serde_json::to_vec(round1_map)?,
-            })
-            .await?
-            .into_inner();
-        Ok(serde_json::from_slice(&reply.round2_map)?)
-    }
-
-    async fn dkg_part3(
-        &self,
-        dkg_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-        round2_for_me: &BTreeMap<Identifier, round2::Package>,
-    ) -> Result<[u8; 32]> {
-        let reply = self
-            .client
-            .clone()
-            .dkg_part3(pb::DkgPart3Request {
-                dkg_id: dkg_id.into(),
-                round1_map: serde_json::to_vec(round1_map)?,
-                round2_map_for_me: serde_json::to_vec(round2_for_me)?,
-            })
-            .await?
-            .into_inner();
-        to_group_key(reply.group_verifying_key)
-    }
-
-    async fn refresh_part1(&self, refresh_id: &str, key_id: &str) -> Result<round1::Package> {
-        let reply = self
-            .client
-            .clone()
-            .refresh_part1(pb::RefreshPart1Request {
-                refresh_id: refresh_id.into(),
-                key_id: key_id.into(),
-            })
-            .await?
-            .into_inner();
-        Ok(serde_json::from_slice(&reply.round1_package)?)
-    }
-
-    async fn refresh_part2(
-        &self,
-        refresh_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-    ) -> Result<BTreeMap<Identifier, round2::Package>> {
-        let reply = self
-            .client
-            .clone()
-            .refresh_part2(pb::DkgPart2Request {
-                dkg_id: refresh_id.into(),
-                round1_map: serde_json::to_vec(round1_map)?,
-            })
-            .await?
-            .into_inner();
-        Ok(serde_json::from_slice(&reply.round2_map)?)
-    }
-
-    async fn refresh_part3(
-        &self,
-        refresh_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-        round2_for_me: &BTreeMap<Identifier, round2::Package>,
-    ) -> Result<[u8; 32]> {
-        let reply = self
-            .client
-            .clone()
-            .refresh_part3(pb::DkgPart3Request {
-                dkg_id: refresh_id.into(),
-                round1_map: serde_json::to_vec(round1_map)?,
-                round2_map_for_me: serde_json::to_vec(round2_for_me)?,
-            })
-            .await?
-            .into_inner();
-        to_group_key(reply.group_verifying_key)
-    }
     async fn node_info(&self) -> Result<(u16, [u8; 32])> {
         let reply = self.client.clone().node_info(pb::NodeInfoRequest {}).await?.into_inner();
         let pk: [u8; 32] = reply
             .dist_public_key
             .as_slice()
             .try_into()
-            .map_err(|_| crate::DaemonError::Config("peer sent a malformed distribution key".into()))?;
+            .map_err(|_| {
+                crate::DaemonError::Config(
+                    "peer sent no (or a malformed) distribution key — hosted keys off there?".into(),
+                )
+            })?;
         Ok((reply.identifier as u16, pk))
     }
     async fn hosted_specs(&self) -> Result<Vec<String>> {
@@ -646,6 +567,7 @@ impl PeerApi for GrpcPeer {
                 kind: kind.as_str().into(),
                 expected_epoch: expect.map(|e| e.0).unwrap_or(0),
                 expected_pkp_digest: expect.map(|e| e.1.to_vec()).unwrap_or_default(),
+                protocol: crate::ceremony::CEREMONY_PROTOCOL,
             })
             .await?;
         Ok(())
@@ -680,6 +602,101 @@ impl PeerApi for GrpcPeer {
             .into_inner();
         status_from_pb(&reply)
     }
+
+    async fn ceremony_protocol(&self) -> Result<u32> {
+        Ok(self.client.clone().node_info(pb::NodeInfoRequest {}).await?.into_inner().ceremony_protocol)
+    }
+
+    async fn ceremony_part1(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        kind: CeremonyKind,
+        roster: &[u16],
+    ) -> Result<round1::Package> {
+        let reply = self
+            .client
+            .clone()
+            .ceremony_part1(pb::CeremonyPart1Request {
+                ceremony_id: ceremony_id.into(),
+                key_id: key_id.into(),
+                kind: kind.as_str().into(),
+                roster: roster.iter().map(|&i| u32::from(i)).collect(),
+                protocol: crate::ceremony::CEREMONY_PROTOCOL,
+            })
+            .await?
+            .into_inner();
+        Ok(serde_json::from_slice(&reply.round1_package)?)
+    }
+
+    async fn ceremony_part2(
+        &self,
+        ceremony_id: &str,
+        round1_map: &BTreeMap<Identifier, round1::Package>,
+    ) -> Result<crate::ceremony::Part2Outcome> {
+        let reply = self
+            .client
+            .clone()
+            .ceremony_part2(pb::CeremonyPart2Request {
+                ceremony_id: ceremony_id.into(),
+                round1_map: serde_json::to_vec(round1_map)?,
+            })
+            .await?
+            .into_inner();
+        Ok(crate::ceremony::Part2Outcome {
+            round1_digest: to_digest(&reply.round1_digest)?,
+            delivered: reply
+                .delivered_to
+                .iter()
+                .map(|&i| u16::try_from(i).map_err(|_| crate::DaemonError::Disagreement("bad identifier".into())))
+                .collect::<Result<_>>()?,
+        })
+    }
+
+    async fn ceremony_deliver(
+        &self,
+        ceremony_id: &str,
+        from: u16,
+        to: u16,
+        round1_digest: &[u8; 32],
+        package: &round2::Package,
+    ) -> Result<()> {
+        // The package rides inside this TLS session only: dialled under the recipient's own
+        // server name, so only that node can read it.
+        let bytes = zeroize::Zeroizing::new(serde_json::to_vec(package)?);
+        self.client
+            .clone()
+            .ceremony_deliver(pb::CeremonyDeliverRequest {
+                ceremony_id: ceremony_id.into(),
+                from: u32::from(from),
+                to: u32::from(to),
+                round1_digest: round1_digest.to_vec(),
+                round2_package: bytes.to_vec(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn ceremony_part3(&self, ceremony_id: &str, round1_digest: &[u8; 32]) -> Result<StagedOutcome> {
+        let reply = self
+            .client
+            .clone()
+            .ceremony_part3(pb::CeremonyPart3Request {
+                ceremony_id: ceremony_id.into(),
+                round1_digest: round1_digest.to_vec(),
+            })
+            .await?
+            .into_inner();
+        Ok(StagedOutcome {
+            new_epoch: reply.new_epoch,
+            new_pkp_digest: to_digest(&reply.new_pkp_digest)?,
+            group_key: to_group_key(reply.group_verifying_key)?,
+        })
+    }
+}
+
+fn to_digest(bytes: &[u8]) -> Result<[u8; 32]> {
+    bytes.try_into().map_err(|_| crate::DaemonError::Disagreement("digest not 32 bytes".into()))
 }
 
 /// [`StatusInfo`] on the wire.

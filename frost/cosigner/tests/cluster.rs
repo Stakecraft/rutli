@@ -487,11 +487,7 @@ async fn a_superseded_refresh_cannot_persist_after_orphan_preempt() {
     assert_eq!(run_refresh(&peers, KEY_ID).await.unwrap(), group_key);
 
     // The stale ceremony can no longer persist — its finish is refused (superseded / session gone).
-    let empty1: std::collections::BTreeMap<Identifier, frost_ed25519::keys::dkg::round1::Package> =
-        std::collections::BTreeMap::new();
-    let empty2: std::collections::BTreeMap<Identifier, frost_ed25519::keys::dkg::round2::Package> =
-        std::collections::BTreeMap::new();
-    assert!(nodes[0].refresh_part3("stale-refresh", &empty1, &empty2).is_err());
+    assert!(nodes[0].ceremony_part3("stale-refresh", &[0u8; 32]).is_err());
 
     // The cluster is consistent and still signs under the unchanged group key.
     for n in &nodes {
@@ -563,7 +559,6 @@ async fn refresh_is_refused_while_a_sign_is_in_flight_on_any_node() {
 
 use std::collections::BTreeMap;
 use async_trait::async_trait;
-use frost_ed25519::keys::dkg::{round1, round2};
 use frost_ed25519::round1::SigningCommitments;
 use frost_ed25519::round2::SignatureShare;
 use rutli_cosigner::Result as DaemonResult;
@@ -606,43 +601,6 @@ impl PeerApi for FailRound2 {
     async fn ceremony_release(&self, ceremony_id: &str, key_id: &str) -> DaemonResult<()> {
         self.inner.ceremony_release(ceremony_id, key_id).await
     }
-    async fn dkg_part1(&self, dkg_id: &str, key_id: &str) -> DaemonResult<round1::Package> {
-        self.inner.dkg_part1(dkg_id, key_id).await
-    }
-    async fn dkg_part2(
-        &self,
-        dkg_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-    ) -> DaemonResult<BTreeMap<Identifier, round2::Package>> {
-        self.inner.dkg_part2(dkg_id, round1_map).await
-    }
-    async fn dkg_part3(
-        &self,
-        dkg_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-        round2_for_me: &BTreeMap<Identifier, round2::Package>,
-    ) -> DaemonResult<[u8; 32]> {
-        self.inner.dkg_part3(dkg_id, round1_map, round2_for_me).await
-    }
-    async fn refresh_part1(&self, refresh_id: &str, key_id: &str) -> DaemonResult<round1::Package> {
-        self.inner.refresh_part1(refresh_id, key_id).await
-    }
-    async fn refresh_part2(
-        &self,
-        refresh_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-    ) -> DaemonResult<BTreeMap<Identifier, round2::Package>> {
-        self.inner.refresh_part2(refresh_id, round1_map).await
-    }
-    async fn refresh_part3(
-        &self,
-        refresh_id: &str,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-        round2_for_me: &BTreeMap<Identifier, round2::Package>,
-    ) -> DaemonResult<[u8; 32]> {
-        self.inner.refresh_part3(refresh_id, round1_map, round2_for_me).await
-    }
-    // Hosted-key methods just forward: this wrapper only sabotages sign round 2.
     async fn node_info(&self) -> DaemonResult<(u16, [u8; 32])> {
         self.inner.node_info().await
     }
@@ -1041,42 +999,6 @@ impl PeerApi for UnreachablePeer {
     async fn ceremony_release(&self, _: &str, _: &str) -> DaemonResult<()> {
         Err(down())
     }
-    async fn dkg_part1(&self, _: &str, _: &str) -> DaemonResult<round1::Package> {
-        Err(down())
-    }
-    async fn dkg_part2(
-        &self,
-        _: &str,
-        _: &BTreeMap<Identifier, round1::Package>,
-    ) -> DaemonResult<BTreeMap<Identifier, round2::Package>> {
-        Err(down())
-    }
-    async fn dkg_part3(
-        &self,
-        _: &str,
-        _: &BTreeMap<Identifier, round1::Package>,
-        _: &BTreeMap<Identifier, round2::Package>,
-    ) -> DaemonResult<[u8; 32]> {
-        Err(down())
-    }
-    async fn refresh_part1(&self, _: &str, _: &str) -> DaemonResult<round1::Package> {
-        Err(down())
-    }
-    async fn refresh_part2(
-        &self,
-        _: &str,
-        _: &BTreeMap<Identifier, round1::Package>,
-    ) -> DaemonResult<BTreeMap<Identifier, round2::Package>> {
-        Err(down())
-    }
-    async fn refresh_part3(
-        &self,
-        _: &str,
-        _: &BTreeMap<Identifier, round1::Package>,
-        _: &BTreeMap<Identifier, round2::Package>,
-    ) -> DaemonResult<[u8; 32]> {
-        Err(down())
-    }
     async fn node_info(&self) -> DaemonResult<(u16, [u8; 32])> {
         Err(down())
     }
@@ -1140,42 +1062,6 @@ impl PeerApi for FixedErrorPeer {
         Err(clone_err(&self.error))
     }
     async fn ceremony_release(&self, _: &str, _: &str) -> DaemonResult<()> {
-        Err(clone_err(&self.error))
-    }
-    async fn dkg_part1(&self, _: &str, _: &str) -> DaemonResult<round1::Package> {
-        Err(clone_err(&self.error))
-    }
-    async fn dkg_part2(
-        &self,
-        _: &str,
-        _: &BTreeMap<Identifier, round1::Package>,
-    ) -> DaemonResult<BTreeMap<Identifier, round2::Package>> {
-        Err(clone_err(&self.error))
-    }
-    async fn dkg_part3(
-        &self,
-        _: &str,
-        _: &BTreeMap<Identifier, round1::Package>,
-        _: &BTreeMap<Identifier, round2::Package>,
-    ) -> DaemonResult<[u8; 32]> {
-        Err(clone_err(&self.error))
-    }
-    async fn refresh_part1(&self, _: &str, _: &str) -> DaemonResult<round1::Package> {
-        Err(clone_err(&self.error))
-    }
-    async fn refresh_part2(
-        &self,
-        _: &str,
-        _: &BTreeMap<Identifier, round1::Package>,
-    ) -> DaemonResult<BTreeMap<Identifier, round2::Package>> {
-        Err(clone_err(&self.error))
-    }
-    async fn refresh_part3(
-        &self,
-        _: &str,
-        _: &BTreeMap<Identifier, round1::Package>,
-        _: &BTreeMap<Identifier, round2::Package>,
-    ) -> DaemonResult<[u8; 32]> {
         Err(clone_err(&self.error))
     }
     async fn node_info(&self) -> DaemonResult<(u16, [u8; 32])> {

@@ -5,6 +5,66 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+Builds on 0.4.0-rc.2. Audit remediation batch C phase 1: confidential, two-phase DKG/refresh with
+share epochs (audit C1, H1, M5). Still to come in batch C: the sign-time epoch check and quorum
+retry, cosigner-enforced signing intents (C2), key-file v2 and restore — see the warnings below.
+
+### Upgrade notes (operators must act or know)
+- **DKG and refresh need every cosigner on this release (ceremony protocol 2), and are refused on a
+  mixed-version cluster.** A leader refuses to start unless every node reports protocol 2
+  (`Peer.NodeInfo.ceremony_protocol`), and an upgraded node refuses the old relayed RPCs
+  (`DkgPart*`/`RefreshPart*`, FAILED_PRECONDITION) — so an older leader cannot run a ceremony with
+  it either. Signing works across versions. Pause any refresh CronJob and onboarding DKGs during the
+  roll; upgrade the whole cluster before the next ceremony. **Never run a refresh while the cluster
+  is mixed.** Rolling back a node after a ceremony: an older binary ignores the new `epoch`/`key_id`
+  fields and the `keys/.staged`/`keys/.ceremonies` directories; resolve every STAGED ceremony
+  (`rutli_ceremonies_staged` = 0) before downgrading.
+- **Treat every key generated or refreshed on an earlier release as exposed to that ceremony's
+  leader** (audit C1): the leader received every round-2 package. A DKG key's secret was computable
+  by it, and a refresh cannot repair that. A refresh on this release re-isolates the shares of a
+  dealt (split-ceremony) key. Generate or split mainnet keys only on this release or later.
+- **Sign-time epoch checks are not in this release yet.** A ceremony can no longer leave mixed
+  epochs, but a node restored from a pre-refresh backup is not yet detected at sign time (batch C
+  phase 2); keep restoring only current backups.
+- **A retried `Dkg` for a committed key now returns it** instead of ALREADY_EXISTS (audit M5), and a
+  retry while a ceremony is resolving answers UNAVAILABLE. A key id left on only some nodes by an
+  interrupted DKG on an older release answers FAILED_PRECONDITION; clear it with
+  `rutli-cosigner discard-partial-key` (`docs/ceremonies.md`).
+
+### Security
+- **DKG and refresh round-2 packages never reach the leader (audit C1, ceremony protocol 2).** Each
+  node delivers its round-2 packages directly to their recipients over the mTLS mesh
+  (`Peer.CeremonyDeliver`): the sender dials the recipient under its own TLS name, the recipient
+  takes the sender from the caller's certificate CN (exact roster mapping) and refuses another
+  claimed sender, another recipient, or a second different package (equivocation). Every delivery
+  carries the sender's digest of the round-1 map (bound to the ceremony, key, kind, n, t and the
+  sharing being refreshed); part 3 requires all of them equal to the node's own and the leader's,
+  so a leader that shows nodes different round-1 maps makes every honest node abort, and one that
+  substitutes a node's own package is refused by that node. A node refuses a ceremony roster other
+  than its own. No peer API returns a round-2 package (the relayed RPCs are kept only to refuse).
+  The mesh must not run through a TLS-terminating proxy.
+- **Two-phase DKG and refresh (audit H1, M5).** Part 3 stages the new share (`keys/.staged/`,
+  sealed, fsynced) and records a durable vote (`keys/.ceremonies/`); a node commits only after
+  confirming directly with every roster node that all staged the identical outcome, and aborts only
+  on a no-vote or a divergent one. No interruption — a failed part 3, a lost commit, a cancelled
+  caller, a dead leader, a node down after staging — can leave mixed epochs; every node's resolver
+  (startup, every 30 s, and `Peer.CeremonyCommit`) finishes without the leader. A refresh replaces a
+  share only if it is still the sharing the refresh started from, and is refused unless every node
+  holds the same `(epoch, PKP digest)`. The orchestration runs as a detached task. Startup repairs
+  crash leftovers (orphan staged shares deleted, an interrupted promotion completed).
+- **Share epochs.** Each share records its `epoch` (1 after DKG, +1 per refresh; older files read
+  as 0) and `key_id`. `Peer.KeyEpoch`, `KeyStatusReply.epoch`, and `verify-key` report epochs and
+  flag a mix.
+
+### Added
+- **Ceremony operator tools (`docs/ceremonies.md`)**, each run with the node's daemon stopped:
+  `rutli-cosigner ceremony resolve --ceremony-id <id>` resolves a staged ceremony now, and with
+  `--assume-lost <ids>` is the break-glass for a permanently lost node (commit if a reachable node
+  committed, else abort); `rutli-cosigner discard-partial-key --key-id <id> --confirm-group-key
+  <hex>` clears a legacy partial DKG key, refusing whenever any node holds it at a committed epoch,
+  a node does not answer, every node holds it, or it ever signed here. Metrics
+  `rutli_ceremonies_staged` and `rutli_ceremony_resolutions_total{result}`.
+
 ## [0.4.0-rc.2] — 2026-10-16
 
 _Release candidate, pre-audit: for soak and review, not for production key custody._
