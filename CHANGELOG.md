@@ -5,6 +5,134 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+Includes audit remediation, batches A and B (target: 0.4.0-rc.2). Batch C (confidential and two-phase
+DKG/refresh, cosigner-enforced signing intents, epochs) is still to come — see the warnings below.
+
+### Upgrade notes (operators must act or know)
+- **Do not run `refresh` until batch C ships.** A refresh still relays every round-2 package
+  through the leader (audit C1), and one interrupted between nodes can leave mixed share epochs
+  (H1). Nothing in this release changes that; leave any refresh CronJob disabled.
+- **`getPublicKey` (and a DKG reply) now needs at least two cosigners that agree** on the group key,
+  and none that disagrees. With one of three cosigners down it still works; with two down it fails
+  retryably instead of trusting the last one. A single-endpoint (dev) roster still needs one.
+- **The driver fails closed at startup on a malformed signing-journal line or a broken audit-log
+  chain** (it used to skip or not check them). A torn final line from a crash mid-append is
+  truncated with a warning, as before. Check a participant's state before upgrading the driver:
+  `java -cp rutli-driver.jar com.stakecraft.rutli.tools.StateCheck --audit-log … --journal-dir …`
+  (read-only; `docs/runbook-rc2-soak-rollout.md`).
+- **PVCs default to `ReadWriteOncePod`** (Helm and `deploy/k8s`). `volumeClaimTemplates` are
+  immutable, so an existing install must pin its mode (`persistence.accessModes: [ReadWriteOnce]`)
+  or `helm upgrade` is rejected; `deploy/soak/cosigner-values.yaml` does this for the soak.
+- **Config validation is stricter; a cosigner refuses to start on:** a duplicate peer identifier or
+  endpoint, its own identifier listed twice, a CN in both `signer_allowlist` and `peer_allowlist`,
+  a `peer_allowlist` that is not exactly the roster's client CNs (`cosigner<id>` by default), two
+  peers sharing a `tls_server_name` or `tls_client_cn`, and `share_seal` with both or neither of
+  `secret_env`/`secret_file`. The shipped and soak configs already comply.
+- **Helm chart: `topology` defaults to `perNode`.** An existing install must pin
+  `topology: legacy` to upgrade in place (byte-identical render; `deploy/soak/cosigner-values.yaml`
+  does this), then migrate with `docs/runbook-per-node-seal.md`.
+- **The exec-based backup is removed** — the chart's `backup` CronJob, its ServiceAccount and
+  `pods/exec` Role, `deploy/k8s/cronjob-backup.yaml` and `deploy/soak/k8s/cosigner-backup-exec-cronjob.yaml`.
+  Removing a file from the repo does not remove the live objects: `kubectl delete` the CronJob,
+  Role, RoleBinding and ServiceAccount (`rutli-cosigner-backup` / `rutli-backup` on the soak).
+  `backup.enabled` now means the per-node sidecar (perNode topology only).
+- **Mesh dials use per-peer TLS names (`cosigner<id>`)**, not `tls.domain`. Every certificate
+  `gen-frost-certs.sh` has issued carries `DNS:cosigner<id>`; check yours
+  (`openssl x509 -noout -ext subjectAltName`) before upgrading, or set `peers[].tls_server_name`.
+  New certificates no longer carry the shared `rutli-cosigner` SAN, so a driver talking to them
+  needs per-endpoint `tls-name`s.
+- The first start of this release writes `data_dir/cluster-id` with the id the node already runs
+  under; nothing else changes. From then on a cosigner whose effective cluster id changes refuses
+  to start. A dev setup that regenerates its CA on an existing data volume (e.g.
+  `deploy/frost` compose without `down -v`) now hits this: remove the volume, or set
+  `cluster_id_change_allowed` once.
+- A cosigner now **refuses to start** when `tls.ca_cert` holds anything but currently valid CA
+  certificates. Before upgrading, check the file: `openssl crl2pkcs7 -nocrl -certfile ca.crt |
+  openssl pkcs7 -print_certs -noout` lists what it holds; every entry must be a CA
+  (`openssl x509 -noout -ext basicConstraints`) and inside its validity period. A rolling upgrade
+  stops at the first pod that refuses (it never becomes Ready), with the other nodes still signing.
+  The driver applies the same rule to `frost.tls.ca-cert`: a participant whose file fails it does
+  not start.
+
+### Security
+- **Per-node seal bundles (audit C3).** `share_seal.secret_file` points at a bundle holding only
+  this node's share DEK and hosted-key distribution seed, read from a file (refused if it names
+  another node or is readable by every host user). `rutli-cosigner seal split-legacy` derives each
+  node's *existing* keys from the legacy master with the current derivations (golden-pinned), so a
+  cluster migrates without re-sealing anything; `seal new-node` and `seal inspect` cover new
+  installs. Peers' distribution keys and the hosted-key commitment key are pinned in config
+  (`peers[].dist_public_key`, `hosted_keys.commitment_key`); the node no longer holds the master,
+  checks its own pin at startup, and never wraps key material to a peer reporting a key other than
+  its pin. A mixed legacy/bundle cluster interoperates. `share_seal.secret_env` still works, with a
+  deprecation warning.
+- **Helm `topology: perNode` (C3).** One StatefulSet and one Service per node; each pod spec
+  references only its own TLS and seal-bundle Secrets, as files, so a kubelet can read only the
+  secrets of the node it runs. `existingClaim` reuses the legacy claims. `deploy/k8s` is now the
+  chart's render (`scripts/render-k8s.sh`).
+- **Exec-free backups (C3).** A per-pod sidecar copies the node's sealed `keys/*.json` (read-only
+  mount, same pod) to a per-node destination: a per-node backup PVC by default, or a script with
+  per-node credentials. It never mounts the seal bundle or the TLS key.
+- **Deploy policy gate.** `scripts/check-deploy-policy.sh` (CI job `deploy-policy`) fails on any
+  `pods/exec`/`attach` RBAC, any `RUTLI_SEAL_SECRET` env, a pod spec naming more than one node's seal
+  or TLS Secret, or a seal Secret mounted outside the `cosigner` container.
+- **Mesh identity binding (M3).** Each peer is dialled under its own TLS name; a mesh caller is
+  identified by an exact match on its configured client CN (the digit-stripping parser that read
+  `cosigner-2`/`xcosigner2`/`cosigner02` as node 2 is gone). The operator CLI does the same:
+  `refresh`, `verify-key` (and its TLS-alert probe) and `verify-hosted` verify each node under its own
+  name.
+- **Driver per-endpoint TLS names (M3).** `frost.endpoints = [{ url, tls-name }, …]`; a bare string
+  keeps `tls.domain` with a startup warning.
+- **Group-key agreement and pinning (H2).** The driver asks every endpoint, needs two identical
+  answers and no dissent, pins the key per key id, and verifies every signature (Ed25519, strict)
+  against it before returning it — a wrong-key or garbage signature is withheld.
+- **Signing journal (M6):** rate window on a monotonic clock, future timestamps clamped, atomic
+  check-and-append per key, recovery fails closed on unreadable or malformed journals, directory
+  fsynced on create.
+- **Audit log (L1):** directory fsynced on create, torn tail truncated, the whole chain verified on
+  open.
+- **Approvals (M7):** `ApproveCli` recomputes the request id from the displayed key id, digest and
+  nonce and refuses a mismatch. `docs/approval-quorum.md` now states plainly that approvals are
+  enforced in the driver only: the driver certificate or a compromised cosigner bypasses them until
+  cosigner-side intent enforcement (batch C) lands.
+- **Cosigner hardening (L2, L5, L6):** roster/allowlist validation (above); an exclusive `flock`
+  on `data_dir` so a second daemon on the same shares refuses to start; the per-key rate-limit map
+  is bounded (idle buckets evicted first); RWOP volumes by default.
+- `SoftKeyStore` no longer swallows a directory-fsync failure (RUTLI-06).
+- **Trust files hold CA certificates only (review M1).** rustls made every certificate in
+  `tls.ca_cert` a full trust anchor, never checking its CA flag, key usage or validity: a cosigner
+  leaf concatenated into the file (`cat ca.crt cosigner1.crt`) let whoever holds that leaf's key
+  mint a `cosigner2` or `driver` certificate that passed the handshake and every CN allowlist, and
+  an expired CA kept certifying its leaves. One shared validation (`trust::load_trust_anchors`) now
+  refuses a trust file unless every PEM block is a `CERTIFICATE` that is a CA (basicConstraints
+  CA, keyCertSign if a keyUsage is present) valid now; a private key pasted into it is refused
+  without being echoed. Applied by the cosigner at startup (`tls::load`, so also `refresh` and
+  `verify-key`), which then hands rustls exactly the certificates it validated, and by
+  `rutli-dealer split-key --ca-cert` before it reads any request. The cosigner logs every anchor
+  (`trust anchor` with subject, notAfter, SHA-256; WARN under 30 days to expiry); the dealer prints
+  them, records them in `dealer-record.json` (`ca_anchors`, `ca_file_sha256`) and warns when the
+  file holds more than one CA (review L8).
+  - `tls.allow_expired_ca` (chart `tls.allowExpiredCa`), default off: accept an expired or
+    not-yet-valid CA, never a non-CA. Only for a rotation away from a CA that has already expired.
+  - **Driver:** the same rule (`FrostTrustFile`) on `frost.tls.ca-cert` before any channel is built;
+    a bad file fails driver init with the path and the offending block. The channel trusts exactly
+    the validated certificates (no longer Netty's `trustManager(File)`), and each anchor is logged
+    (`FROST: trust anchor <i>: subject=… notAfter=… sha256=…`). `frost.tls.allow-expired-ca`
+    mirrors the cosigner flag. (The JDK already refused a non-CA anchor at the handshake, as an
+    opaque `UNAVAILABLE`; an expired CA it accepted.)
+
+- **A dropped cluster id pin no longer moves a node to another cluster silently (review M2).** A
+  `helm upgrade` without `--reuse-values` / `-f <saved values>` resets `clusterId` to `""`, and
+  after a CA rotation the id derived from the trust file is a different one: hosted-key
+  replication with the peers would fail and split-ceremony files in flight stop opening. Each
+  cosigner now records the cluster id it runs under in `data_dir/cluster-id` at its first start
+  and refuses to start under a different one (`cluster id mismatch`, naming both ids and the fix);
+  `share-recipient` and `import-share` check it too. A deliberate change takes
+  `cluster_id_change_allowed: true` (chart `clusterIdChangeAllowed`) for one start. The file sits
+  beside `keys/`, so the key store, the readiness probe and `backup`/`restore` never see it; a node
+  restored onto a fresh volume records its id again. The chart's `values.yaml` now says never to
+  copy `clusterId` to another cluster (a new cluster leaves it empty, review L7) and to upgrade with
+  saved values.
+
 ### Added
 - **Zero-downtime cluster CA rotation (`docs/ca-rotation.md`).** A runbook to move a live cluster to
   a new mTLS CA — including when the old CA's private key is lost — by trusting a bundle of the old
@@ -69,42 +197,12 @@ All notable changes to Rütli are documented here. Format loosely follows
   - `scripts/e2e-carry-protocol-keys.sh`: on Canton 3.6.1, both protocol keys split against running
     cosigners and the ECIES key imported into a running cosigner, registered with the old
     fingerprints, the OTK rotated onto them, pings, and sequencer authentication with the carried key.
-
-### Security
-- **Trust files hold CA certificates only (review M1).** rustls made every certificate in
-  `tls.ca_cert` a full trust anchor, never checking its CA flag, key usage or validity: a cosigner
-  leaf concatenated into the file (`cat ca.crt cosigner1.crt`) let whoever holds that leaf's key
-  mint a `cosigner2` or `driver` certificate that passed the handshake and every CN allowlist, and
-  an expired CA kept certifying its leaves. One shared validation (`trust::load_trust_anchors`) now
-  refuses a trust file unless every PEM block is a `CERTIFICATE` that is a CA (basicConstraints
-  CA, keyCertSign if a keyUsage is present) valid now; a private key pasted into it is refused
-  without being echoed. Applied by the cosigner at startup (`tls::load`, so also `refresh` and
-  `verify-key`), which then hands rustls exactly the certificates it validated, and by
-  `rutli-dealer split-key --ca-cert` before it reads any request. The cosigner logs every anchor
-  (`trust anchor` with subject, notAfter, SHA-256; WARN under 30 days to expiry); the dealer prints
-  them, records them in `dealer-record.json` (`ca_anchors`, `ca_file_sha256`) and warns when the
-  file holds more than one CA (review L8).
-  - `tls.allow_expired_ca` (chart `tls.allowExpiredCa`), default off: accept an expired or
-    not-yet-valid CA, never a non-CA. Only for a rotation away from a CA that has already expired.
-  - **Driver:** the same rule (`FrostTrustFile`) on `frost.tls.ca-cert` before any channel is built;
-    a bad file fails driver init with the path and the offending block. The channel trusts exactly
-    the validated certificates (no longer Netty's `trustManager(File)`), and each anchor is logged
-    (`FROST: trust anchor <i>: subject=… notAfter=… sha256=…`). `frost.tls.allow-expired-ca`
-    mirrors the cosigner flag. (The JDK already refused a non-CA anchor at the handshake, as an
-    opaque `UNAVAILABLE`; an expired CA it accepted.)
-
-- **A dropped cluster id pin no longer moves a node to another cluster silently (review M2).** A
-  `helm upgrade` without `--reuse-values` / `-f <saved values>` resets `clusterId` to `""`, and
-  after a CA rotation the id derived from the trust file is a different one: hosted-key
-  replication with the peers would fail and split-ceremony files in flight stop opening. Each
-  cosigner now records the cluster id it runs under in `data_dir/cluster-id` at its first start
-  and refuses to start under a different one (`cluster id mismatch`, naming both ids and the fix);
-  `share-recipient` and `import-share` check it too. A deliberate change takes
-  `cluster_id_change_allowed: true` (chart `clusterIdChangeAllowed`) for one start. The file sits
-  beside `keys/`, so the key store, the readiness probe and `backup`/`restore` never see it; a node
-  restored onto a fresh volume records its id again. The chart's `values.yaml` now says never to
-  copy `clusterId` to another cluster (a new cluster leaves it empty, review L7) and to upgrade with
-  saved values.
+- `rutli-cosigner seal split-legacy | new-node | inspect` (no `--config` needed).
+- `rutli-cosigner refresh --tls-server-name` for a non-roster target.
+- `com.stakecraft.rutli.tools.StateCheck`: read-only preflight of the driver's audit log and signing
+  journal against the fail-closed recovery.
+- `docs/runbook-per-node-seal.md` (soak: legacy → perNode) and `docs/runbook-rc2-soak-rollout.md`
+  (soak: plain rc.2 upgrade, the prerequisite).
 
 ### Changed
 - **`--any-usage` is removed** from `rutli-dealer split-key` (no runbook used it); use
@@ -163,20 +261,6 @@ All notable changes to Rütli are documented here. Format loosely follows
   one leader), §5, the alert text and the startup log line. Behaviour is unchanged: no
   distributed limiter and no cluster-budget setting (dividing on every node would cut legitimate
   headroom n-fold under one-leader routing).
-
-### Upgrade notes (breaking)
-- The first start of this release writes `data_dir/cluster-id` with the id the node already runs
-  under; nothing else changes. From then on a cosigner whose effective cluster id changes refuses
-  to start. A dev setup that regenerates its CA on an existing data volume (e.g.
-  `deploy/frost` compose without `down -v`) now hits this: remove the volume, or set
-  `cluster_id_change_allowed` once.
-- A cosigner now **refuses to start** when `tls.ca_cert` holds anything but currently valid CA
-  certificates. Before upgrading, check the file: `openssl crl2pkcs7 -nocrl -certfile ca.crt |
-  openssl pkcs7 -print_certs -noout` lists what it holds; every entry must be a CA
-  (`openssl x509 -noout -ext basicConstraints`) and inside its validity period. A rolling upgrade
-  stops at the first pod that refuses (it never becomes Ready), with the other nodes still signing.
-  The driver applies the same rule to `frost.tls.ca-cert`: a participant whose file fails it does
-  not start.
 
 ## [0.4.0-rc.1] — 2026-10-09
 
