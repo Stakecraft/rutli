@@ -126,6 +126,9 @@ pub struct Node {
     stale: Mutex<std::collections::HashMap<String, StaleMark>>,
     /// `signing_policy.require_epoch_match`: refuse round 1 from a leader that names no sharing.
     require_epoch_match: bool,
+    /// The signing policy and sign journal (audit C2). `None` (tests, offline tools): no policy,
+    /// no journal — the daemon always sets one.
+    sign_guard: Option<Arc<crate::sign_policy::SignGuard>>,
     // key_id -> the ceremony currently allowed to (re)write that key's share.
     ceremonies: Mutex<std::collections::HashMap<String, CeremonyGuard>>,
     ceremony_orphan_timeout: Duration,
@@ -208,6 +211,7 @@ impl Node {
             cosigners: Mutex::new(Default::default()),
             stale: Mutex::new(Default::default()),
             require_epoch_match: false,
+            sign_guard: None,
             ceremonies: Mutex::new(Default::default()),
             ceremony_orphan_timeout,
             record_store,
@@ -527,6 +531,17 @@ impl Node {
         self
     }
 
+    /// Apply the signing policy and sign journal (audit C2) to every signature this node takes
+    /// part in.
+    pub fn with_sign_guard(mut self, guard: Arc<crate::sign_policy::SignGuard>) -> Self {
+        self.sign_guard = Some(guard);
+        self
+    }
+
+    pub fn sign_guard(&self) -> Option<&Arc<crate::sign_policy::SignGuard>> {
+        self.sign_guard.as_ref()
+    }
+
     /// What a leader needs to sign with `key_id`: threshold, its own sharing, its stale mark.
     pub fn signing_view(&self, key_id: &str) -> Result<SigningView> {
         let c = self.cached(key_id)?;
@@ -795,7 +810,19 @@ impl Node {
         self.refuse_if_keystore_down()?;
         let cached = self.cached(key_id)?;
         self.check_epoch(key_id, &cached, ctx)?;
-        let result = cached.cosigner.round1(session_id, ctx.binding(key_id)?);
+        let mut binding = ctx.binding(key_id)?;
+        // The signing policy (audit C2), before any nonce exists: what authorizes this session.
+        let auth = match &self.sign_guard {
+            Some(g) => Some(g.authorize_round1(key_id, ctx, || self.ceremony_test_message(key_id))?),
+            None => None,
+        };
+        if let Some(crate::sign_policy::SessionAuth::Intent(v)) = &auth {
+            binding = binding.with_message(&v.message);
+        }
+        let result = cached.cosigner.round1(session_id, binding);
+        if let (Ok(_), Some(g), Some(auth)) = (&result, &self.sign_guard, auth) {
+            g.remember(session_id, auth);
+        }
         self.update_pending_gauge();
         Ok(result?)
     }
@@ -842,6 +869,22 @@ impl Node {
         message: &[u8],
         commitments: &BTreeMap<Identifier, SigningCommitments>,
     ) -> Result<SignatureShare> {
+        self.sign_round2_with(key_id, session_id, message, commitments, None)
+    }
+
+    /// Sign round 2, presenting the digest of the signing intent round 1 carried (`None`: round 1
+    /// had none). With a signing policy: the policy's round-2 checks, then the core binding
+    /// checks, then — before the nonce marker burns — the rate-limit charge and the durable
+    /// journal entry ([`crate::sign_policy::SignGuard`]); a refusal at any step releases nothing
+    /// and drops the session's nonces.
+    pub fn sign_round2_with(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        message: &[u8],
+        commitments: &BTreeMap<Identifier, SigningCommitments>,
+        intent_digest: Option<[u8; 32]>,
+    ) -> Result<SignatureShare> {
         // Defense in depth: the leader already rejects non-Canton payloads in `orchestrator::sign`,
         // but THIS is the function the mesh Peer RPC reaches directly. A caller that got onto the
         // Peer API could otherwise collect `threshold` shares over an arbitrary message and
@@ -853,16 +896,49 @@ impl Node {
                 expected: crate::orchestrator::CANTON_DIGEST_LEN,
             });
         }
-        // Signing intents (audit C2) will pass the verified intent's digest here.
-        let result = self.cosigner(key_id)?.round2(session_id, key_id, message, commitments, None);
+        let cosigner = self.cosigner(key_id)?;
+        let result = match &self.sign_guard {
+            None => cosigner.round2(session_id, key_id, message, commitments, intent_digest.as_ref()).map_err(DaemonError::from),
+            Some(g) => {
+                let auth = match g.take(session_id) {
+                    Some(a) => a,
+                    None if g.require_intent() => {
+                        cosigner.abort(session_id);
+                        self.update_pending_gauge();
+                        return Err(crate::intent::refused(
+                            "missing",
+                            format!("sign round 2 for session {session_id}: no round-1 authorization on this node"),
+                        ));
+                    }
+                    None => crate::sign_policy::SessionAuth::NoIntent,
+                };
+                match g.check_round2(&auth, message, intent_digest.as_ref()) {
+                    Err(e) => {
+                        cosigner.abort(session_id);
+                        Err(e)
+                    }
+                    Ok(()) => cosigner.round2_guarded(
+                        session_id,
+                        key_id,
+                        message,
+                        commitments,
+                        intent_digest.as_ref(),
+                        || g.journal_release(key_id, session_id, &auth, message),
+                    ),
+                }
+            }
+        };
         self.update_pending_gauge();
-        Ok(result?)
+        result
     }
 
     /// Best-effort abort of an in-flight sign session: free the round-1 nonces held for
     /// `session_id` instead of letting them linger until the pending-TTL sweep. No-op if this node
     /// never held nonces for it (cosigner not cached, or round2 already burned the session).
     pub fn abort_sign(&self, key_id: &str, session_id: &str) {
+        if let Some(g) = &self.sign_guard {
+            g.forget(session_id);
+        }
         let cached = self.cache().get(key_id).cloned();
         if let Some(c) = cached {
             c.cosigner.abort(session_id);
@@ -1776,6 +1852,11 @@ pub struct Round1Ctx {
     /// The attempt's signer set (configured identifiers); round 2's commitment map must be exactly
     /// these. `None`: not declared.
     pub signers: Option<Vec<u16>>,
+    /// The client's signing intent (audit C2), forwarded unchanged; the session is bound to its
+    /// digest, and a node with a signing policy verifies it.
+    pub intent: Option<crate::pb::SignedIntent>,
+    /// A split-ceremony sign test (`purpose = "sign-test"`): no intent, the node's own test digest.
+    pub sign_test: bool,
 }
 
 impl Round1Ctx {
@@ -1801,6 +1882,9 @@ impl Round1Ctx {
                 ))));
             }
             b = b.with_signers(set);
+        }
+        if let Some(intent) = &self.intent {
+            b = b.with_intent_digest(crate::intent::intent_digest(intent));
         }
         Ok(b)
     }

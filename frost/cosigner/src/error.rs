@@ -119,6 +119,18 @@ pub enum DaemonError {
     #[error("stale share for {key_id} (this node holds epoch {}): {reason}", .peer.0)]
     StaleShare { key_id: String, peer: KeyVersion, reason: String },
 
+    /// The signing policy refused this signature at this node (audit C2): no intent where one is
+    /// required, an invalid or expired intent, a signer the ACL or a pin excludes, missing
+    /// approvals, a refresher or other role calling outside its rights. PERMISSION_DENIED with the
+    /// `rutli-error: policy-refused` trailer; non-retryable for the driver.
+    #[error("{0}")]
+    PolicyRefused(String),
+
+    /// This node's sign journal for a key cannot be read or appended to; it refuses to release a
+    /// share it cannot journal.
+    #[error("sign journal: {0}")]
+    Journal(String),
+
     /// The key id is reserved for the split ceremony (`…frost-import-…`): DKG may never mint it.
     #[error(
         "key id {0} is reserved for imported keys (contains \"frost-import-\") — DKG refuses it; \
@@ -143,6 +155,7 @@ pub const EPOCH_TRAILER: &str = "rutli-epoch";
 pub const PKP_DIGEST_TRAILER: &str = "rutli-pkp-digest";
 const EPOCH_MISMATCH: &str = "epoch-mismatch";
 const STALE_SHARE: &str = "stale-share";
+const POLICY_REFUSED: &str = "policy-refused";
 
 fn with_view(code: tonic::Code, message: String, reason: &'static str, view: &KeyVersion) -> tonic::Status {
     let mut md = tonic::metadata::MetadataMap::new();
@@ -158,9 +171,11 @@ fn with_view(code: tonic::Code, message: String, reason: &'static str, view: &Ke
 }
 
 impl DaemonError {
-    /// The typed error behind a peer's `SignRound1` refusal: [`DaemonError::EpochMismatch`] or
+    /// The typed error behind a peer's sign refusal: [`DaemonError::EpochMismatch`] or
     /// [`DaemonError::StaleShare`] when the status carries the [`ERROR_TRAILER`] (with the peer's
-    /// own sharing), else the plain status. `leader` is the sharing the caller sent.
+    /// own sharing), [`DaemonError::PolicyRefused`] for a signing-policy refusal,
+    /// [`DaemonError::RateLimited`] for RESOURCE_EXHAUSTED, else the plain status. `leader` is the
+    /// sharing the caller sent.
     pub fn from_peer_status(status: tonic::Status, key_id: &str, leader: Option<KeyVersion>) -> Self {
         let md = status.metadata();
         let reason = md.get(ERROR_TRAILER).and_then(|v| v.to_str().ok()).map(str::to_owned);
@@ -180,6 +195,10 @@ impl DaemonError {
                 peer,
                 reason: status.message().to_owned(),
             },
+            (Some(POLICY_REFUSED), _) => DaemonError::PolicyRefused(status.message().to_owned()),
+            _ if status.code() == tonic::Code::ResourceExhausted => {
+                DaemonError::RateLimited(status.message().to_owned())
+            }
             _ => DaemonError::Status(status),
         }
     }
@@ -194,6 +213,12 @@ impl From<DaemonError> for tonic::Status {
             DaemonError::StaleShare { peer, .. } => {
                 with_view(tonic::Code::FailedPrecondition, e.to_string(), STALE_SHARE, &peer)
             }
+            DaemonError::PolicyRefused(_) => {
+                let mut md = tonic::metadata::MetadataMap::new();
+                md.insert(ERROR_TRAILER, tonic::metadata::MetadataValue::from_static(POLICY_REFUSED));
+                tonic::Status::with_metadata(tonic::Code::PermissionDenied, e.to_string(), md)
+            }
+            DaemonError::Journal(_) => tonic::Status::unavailable(e.to_string()),
             DaemonError::UnknownKey(_) | DaemonError::UnknownDkg(_) => {
                 tonic::Status::not_found(e.to_string())
             }

@@ -194,13 +194,53 @@ message RefreshPart1Request {
 message SignRequest {
   string key_id = 1;
   bytes message = 2; // Canton's 34-byte pre-hashed payload
+  // The client's signed authorization for exactly this signature (audit C2): every participating
+  // cosigner verifies it independently before it commits to a nonce, and again before it releases
+  // its share. The leader also requires the intent's signer to be the mTLS caller. Absent from a
+  // driver that predates intents: accepted (with rutli_sign_intent_absent_total) unless the node
+  // sets signing_policy.require_intent.
+  SignedIntent intent = 3;
+}
+
+// What a client authorizes: one signature by key_id over digest, until not_after_ms. Carried
+// serialized inside SignedIntent.intent, so the verified bytes are exactly the signed bytes.
+message SignIntent {
+  uint32 version = 1;            // 1
+  string cluster_id = 2;         // the cosigners' cluster id (Capabilities.cluster_id) — no cross-cluster replay
+  string purpose = 3;            // "sign"
+  string key_id = 4;
+  bytes digest = 5;              // exactly the 34-byte Canton digest the signature is over
+  bytes request_id = 6;          // 16 random bytes; one per driver sign call, the same across leader failover
+  uint64 issued_at_ms = 7;       // Unix epoch milliseconds
+  uint64 not_after_ms = 8;
+  // Approvals collected by the driver's ApprovalGate for a gated key: Ed25519 signatures over the
+  // UTF-8 hex requestId = hex(SHA-256(key_id ‖ SHA-256(digest) ‖ approval_nonce)), exactly what
+  // rutli-approve signs (FileApprovalGate.requestIdFor). Every cosigner counts them itself.
+  bytes approval_nonce = 9;
+  repeated IntentApproval approvals = 10;
+}
+message IntentApproval {
+  string approver_id = 1;
+  bytes signature = 2;           // 64-byte Ed25519
+}
+message SignedIntent {
+  bytes intent = 1;              // a serialized SignIntent
+  // "ecdsa-p256-sha256" (the driver's mTLS key as gen-frost-certs.sh issues it), or
+  // "ecdsa-p384-sha384", "ed25519", "rsa-pkcs1-sha256" — whatever the leaf key is.
+  string signature_alg = 2;
+  bytes signature = 3;           // over "rutli-intent-v1\n" ‖ intent, by the leaf's key
+  repeated bytes signer_chain = 4; // DER certificates, leaf first (the client's mTLS certificate)
 }
 message SignReply { bytes signature = 1; } // 64-byte Ed25519 signature
 
 message SignRound1Request {
   string key_id = 1;
   string session_id = 2;
-  // Field 3 is kept for the signing intent (audit C2), 6 for its purpose.
+  // The client's signing intent (see SignRequest.intent), forwarded by the leader unchanged. This
+  // node verifies it itself — signature, certificate chain to the cluster CA, signer allowlist and
+  // pins, cluster, key, digest == message, expiry, key ACL, approvals — and binds its nonces to
+  // SHA-256(intent.intent). A leader or peer cannot mint or alter one.
+  SignedIntent intent = 3;
   // The leader's sharing of key_id: its committed epoch and PKP digest. A node whose own committed
   // share differs refuses (FAILED_PRECONDITION, trailer rutli-error=epoch-mismatch carrying its own
   // rutli-epoch / rutli-pkp-digest) and never signs from a mismatched epoch. An empty pkp_digest is
@@ -216,6 +256,10 @@ message SignRound1Request {
   // session binding: not checked.
   bytes message = 7;
   repeated uint32 signers = 8;
+  // "sign" (or empty) for a signature a client asked for; "sign-test" for the split ceremony's
+  // CeremonySignTest, which carries no intent and is accepted only for the node's OWN test digest
+  // of key_id (computed from the key's provenance) as `message`.
+  string purpose = 6;
 }
 message SignRound1Reply { bytes commitments = 1; } // json SigningCommitments
 
@@ -224,6 +268,9 @@ message SignRound2Request {
   string session_id = 2;
   bytes message = 3;
   bytes commitments_map = 4; // json BTreeMap<Identifier, SigningCommitments>
+  // SHA-256 of the SignedIntent.intent bytes round 1 carried; empty when round 1 had none. Must
+  // match what this node bound at round 1 (checked before the nonce marker burns).
+  bytes intent_digest = 5;
 }
 message SignRound2Reply { bytes share = 1; } // json SignatureShare
 
@@ -283,6 +330,9 @@ message CapabilitiesReply {
   // "ec-p256-ecies".
   repeated string hosted_key_specs = 1;
   bool hosted_keys_enabled = 2;
+  // The cluster id signing intents must name (SignIntent.cluster_id): the pinned `cluster_id`, else
+  // derived from the CA file. Public. Empty from a cosigner that predates intents.
+  string cluster_id = 3;
 }
 
 message GenerateKeyRequest {

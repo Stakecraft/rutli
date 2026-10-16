@@ -183,6 +183,8 @@ async fn mesh_with(mode: impl Fn(u16) -> SealMode, pin_override: impl Fn(u16) ->
             hosted_write_quorum: DEFAULT_WRITE_QUORUM,
             decrypt_limiter: Arc::new(DecryptRateLimiter::new(0)),
             ceremony_test_limiter: Arc::new(DecryptRateLimiter::new(0)),
+            sign_guard: None,
+            refresh_cns: None,
         };
         let peer = PeerSvc {
             node: nodes[i].clone(),
@@ -594,12 +596,12 @@ async fn epoch_refusals_and_session_binding_hold_over_mtls_grpc() {
 
     // Round 2 for another message than round 1 declared: refused there, nothing burned.
     let msg = rutli_frost_core::dealer::canton_test_message(b"declared");
-    let ctx = Round1Ctx { leader_view: Some(view2), message: Some(msg.to_vec()), signers: Some(vec![1, 2]) };
+    let ctx = Round1Ctx { leader_view: Some(view2), message: Some(msg.to_vec()), signers: Some(vec![1, 2]), ..Default::default() };
     let mut cs = std::collections::BTreeMap::new();
     cs.insert(m.nodes[0].identifier, m.nodes[0].sign_round1(key, "g-bind", &ctx).unwrap());
     cs.insert(m.nodes[1].identifier, node2.sign_round1(key, "g-bind", &ctx).await.unwrap());
     let other = rutli_frost_core::dealer::canton_test_message(b"swapped");
-    let err = node2.sign_round2(key, "g-bind", &other, &cs).await.unwrap_err();
+    let err = node2.sign_round2(key, "g-bind", &other, &cs, None).await.unwrap_err();
     assert!(
         matches!(&err, DaemonError::Status(s) if s.code() == tonic::Code::FailedPrecondition && s.message().contains("round-1 binding")),
         "{err:?}"

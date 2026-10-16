@@ -117,6 +117,8 @@ fn signer_svc(node: &Arc<Node>, peers: &Peers) -> Arc<SignerSvc> {
         hosted_write_quorum: 1,
         decrypt_limiter: Arc::new(DecryptRateLimiter::new(0)),
         ceremony_test_limiter: Arc::new(DecryptRateLimiter::new(0)),
+        sign_guard: None,
+        refresh_cns: None,
     })
 }
 
@@ -192,7 +194,7 @@ fn a_store_call_parked_on_a_hung_volume_does_not_freeze_health_or_other_keys() {
     let led = answers_within(&rt, answer, {
         let svc = signer1.clone();
         async move {
-            Signer::sign(&*svc, Request::new(SignRequest { key_id: "b".into(), message: canton_digest() }))
+            Signer::sign(&*svc, Request::new(SignRequest { key_id: "b".into(), message: canton_digest(), intent: None }))
                 .await
         }
     })

@@ -230,26 +230,27 @@ impl PeerApi for Spy {
         session_id: &str,
         message: &[u8],
         commitments: &BTreeMap<Identifier, SigningCommitments>,
+        intent_digest: Option<&[u8; 32]>,
     ) -> Result<SignatureShare> {
         self.note("round2", session_id, String::new());
         match self.fault {
             Fault::Round2 => Err(down()),
             Fault::BadShare => {
                 // Burn the real session, then hand back a well-formed but wrong share.
-                self.inner.sign_round2(key_id, session_id, message, commitments).await?;
+                self.inner.sign_round2(key_id, session_id, message, commitments, intent_digest).await?;
                 let mut one = [0u8; 32];
                 one[0] = 1;
                 Ok(SignatureShare::deserialize(&one).unwrap())
             }
             Fault::SwapMessage => {
                 let swapped = digest(b"not what round 1 declared");
-                let r = self.inner.sign_round2(key_id, session_id, &swapped, commitments).await;
+                let r = self.inner.sign_round2(key_id, session_id, &swapped, commitments, intent_digest).await;
                 if let Err(e) = &r {
                     self.note("refused", session_id, e.to_string());
                 }
                 r
             }
-            _ => self.inner.sign_round2(key_id, session_id, message, commitments).await,
+            _ => self.inner.sign_round2(key_id, session_id, message, commitments, intent_digest).await,
         }
     }
     async fn abort_sign(&self, key_id: &str, session_id: &str) -> Result<()> {
@@ -407,6 +408,7 @@ async fn a_node_refuses_round2_for_another_message_or_commitment_set_than_round1
         leader_view: Some(view_of(&nodes[0])),
         message: Some(msg.clone()),
         signers: Some(vec![1, 2]),
+        ..Default::default()
     };
     let open = |session: &str| -> BTreeMap<Identifier, SigningCommitments> {
         [0usize, 1].iter().map(|&i| (nodes[i].identifier, nodes[i].sign_round1(KEY, session, &ctx).unwrap())).collect()

@@ -44,6 +44,12 @@ pub struct SignerSvc {
     /// Each call writes a durable nonce marker on every signer, so the operator role must not be
     /// able to loop it.
     pub ceremony_test_limiter: Arc<crate::ratelimit::DecryptRateLimiter>,
+    /// The signing policy (audit C2): intents, key ACLs, SPKI pins. `None` (tests, plaintext dev):
+    /// no intents are checked here and every allowlisted caller may use every key.
+    pub sign_guard: Option<Arc<crate::sign_policy::SignGuard>>,
+    /// Client-cert CNs of the **refresher** role (`Config::refresh_allowlist`): `Refresh` and
+    /// `KeyStatus` only. `None` = no refresher role.
+    pub refresh_cns: Option<Arc<HashSet<String>>>,
 }
 
 /// The `CeremonySignTest` limiter for `per_minute` (0 disables it).
@@ -57,15 +63,79 @@ pub fn ceremony_sign_test_limiter(per_minute: u32) -> crate::ratelimit::DecryptR
 }
 
 impl SignerSvc {
-    /// Enforce the client-cert allowlist (if configured) for a sensitive Signer call.
-    fn authorize<T>(&self, req: &Request<T>) -> Result<(), Status> {
-        authorize_cn(self.allowed_cns.as_deref(), req, "Signer").map(|_| ())
+    /// Enforce the client-cert allowlist (if configured) for a sensitive Signer call, and the
+    /// caller's SPKI pin.
+    fn authorize<T>(&self, req: &Request<T>) -> Result<Option<crate::intent::Caller>, Status> {
+        authorize_cn(self.allowed_cns.as_deref(), req, "Signer")?;
+        self.check_pin(req)
+    }
+
+    /// [`SignerSvc::authorize`] plus the key ACL for the request's key.
+    fn authorize_key<T>(&self, req: &Request<T>, key_id: impl Fn(&T) -> &str) -> Result<(), Status> {
+        let caller = self.authorize(req)?;
+        self.check_acl(caller.as_ref(), key_id(req.get_ref()))
     }
 
     /// For the operator-role RPCs (`KeyStatus`, `CeremonySignTest`): the driver role or the
     /// operator role.
     fn authorize_operator<T>(&self, req: &Request<T>) -> Result<(), Status> {
-        authorize_either(self.allowed_cns.as_deref(), self.operator_cns.as_deref(), req)
+        authorize_either(self.allowed_cns.as_deref(), self.operator_cns.as_deref(), req)?;
+        self.check_pin(req).map(|_| ())
+    }
+
+    /// `KeyStatus`: the operator-role RPCs' callers or the refresher role.
+    fn authorize_status<T>(&self, req: &Request<T>) -> Result<(), Status> {
+        match self.authorize_operator(req) {
+            Err(refused) if self.refresh_cns.is_some() => {
+                authorize_cn(self.refresh_cns.as_deref(), req, "Signer").map_err(|_| refused)?;
+                self.check_pin(req).map(|_| ())
+            }
+            other => other,
+        }
+    }
+
+    /// `Refresh`: the refresher role, or the signer role while `signing_policy.signer_may_refresh`.
+    fn authorize_refresh<T>(&self, req: &Request<T>, key_id: &str) -> Result<(), Status> {
+        let signer_may = self.sign_guard.as_ref().is_none_or(|g| g.verifier().policy().signer_may_refresh);
+        if self.allowed_cns.is_none() {
+            return Ok(()); // plaintext dev: open
+        }
+        if let Some(refreshers) = self.refresh_cns.as_deref() {
+            if authorize_cn(Some(refreshers), req, "Signer").is_ok() {
+                return self.check_pin(req).map(|_| ());
+            }
+        }
+        if signer_may {
+            let caller = self.authorize(req)?;
+            return self.check_acl(caller.as_ref(), key_id);
+        }
+        let cn = req.peer_certs().and_then(|c| c.first().and_then(|l| cn_of(l.as_ref())));
+        Err(Status::from(crate::intent::refused(
+            "role",
+            format!(
+                "client {cn:?} may not call Refresh: only the refresher role (refresh_allowlist) may, \
+                 signing_policy.signer_may_refresh is off"
+            ),
+        )))
+    }
+
+    /// The caller's identity, and its SPKI pin if its CN is pinned.
+    fn check_pin<T>(&self, req: &Request<T>) -> Result<Option<crate::intent::Caller>, Status> {
+        let caller = req
+            .peer_certs()
+            .and_then(|certs| certs.first().and_then(|leaf| crate::intent::Caller::from_leaf_der(leaf.as_ref())));
+        if let (Some(g), Some(c)) = (&self.sign_guard, &caller) {
+            g.verifier().check_pin(&c.cn, &c.spki_sha256).map_err(Status::from)?;
+        }
+        Ok(caller)
+    }
+
+    /// The key ACL for a signer-role caller.
+    fn check_acl(&self, caller: Option<&crate::intent::Caller>, key_id: &str) -> Result<(), Status> {
+        match (&self.sign_guard, caller) {
+            (Some(g), Some(c)) => g.verifier().check_acl(&c.cn, key_id).map_err(Status::from),
+            _ => Ok(()),
+        }
     }
 
     /// UNAVAILABLE while this node's key store fails its readiness probe — at the entry of every
@@ -158,7 +228,7 @@ impl Signer for SignerSvc {
         &self,
         req: Request<pb::GroupKeyRequest>,
     ) -> Result<Response<pb::GroupKeyReply>, Status> {
-        self.authorize(&req)?;
+        self.authorize_key(&req, |r| &r.key_id)?;
         self.refuse_if_keystore_down()?;
         let key_id = req.into_inner().key_id;
         let key = self.node.blocking(move |n| n.group_key(&key_id)).await.map_err(Status::from)?;
@@ -171,7 +241,7 @@ impl Signer for SignerSvc {
         &self,
         req: Request<pb::KeyStatusRequest>,
     ) -> Result<Response<pb::KeyStatusReply>, Status> {
-        self.authorize_operator(&req)?;
+        self.authorize_status(&req)?;
         self.refuse_if_keystore_down()?;
         let key_id = req.into_inner().key_id;
         let reply = self.node.blocking(move |n| n.key_status(&key_id)).await.map_err(Status::from)?;
@@ -208,7 +278,7 @@ impl Signer for SignerSvc {
     }
 
     async fn dkg(&self, req: Request<pb::DkgRequest>) -> Result<Response<pb::DkgReply>, Status> {
-        self.authorize(&req)?;
+        self.authorize_key(&req, |r| &r.key_id)?;
         let key_id = req.into_inner().key_id;
         // A node whose key store failed its readiness probe declines to lead (UNAVAILABLE, so the
         // driver picks another leader) rather than start a ceremony it cannot persist.
@@ -222,14 +292,22 @@ impl Signer for SignerSvc {
     }
 
     async fn sign(&self, req: Request<pb::SignRequest>) -> Result<Response<pb::SignReply>, Status> {
-        self.authorize(&req)?;
+        let caller = self.authorize(&req)?;
+        self.check_acl(caller.as_ref(), &req.get_ref().key_id)?;
         let r = req.into_inner();
         let started = std::time::Instant::now();
+        // The signing intent (audit C2), checked here first so a refusal is a clear
+        // PERMISSION_DENIED from the leader, not every member failing round 1. Every member checks
+        // it again on its own.
+        self.check_intent(caller.as_ref(), &r)?;
         // Decline to lead while the key store fails its readiness probe: UNAVAILABLE, which every
         // driver version fails over on, instead of an INTERNAL from deep inside the session. Counted
         // as a sign error below so the sick node's own metrics show it.
         let result = match self.node.refuse_if_keystore_down() {
-            Ok(()) => orchestrator::sign(&self.node, &self.peers, &r.key_id, &r.message).await,
+            Ok(()) => {
+                orchestrator::sign_with_intent(&self.node, &self.peers, &r.key_id, &r.message, r.intent.as_ref())
+                    .await
+            }
             Err(e) => Err(e),
         };
         let outcome = if result.is_ok() { "ok" } else { "error" };
@@ -244,8 +322,8 @@ impl Signer for SignerSvc {
         &self,
         req: Request<pb::RefreshRequest>,
     ) -> Result<Response<pb::RefreshReply>, Status> {
-        self.authorize(&req)?;
-        let key_id = req.into_inner().key_id;
+        let key_id = req.get_ref().key_id.clone();
+        self.authorize_refresh(&req, &key_id)?;
         let result = match self.node.refuse_if_keystore_down() {
             Ok(()) => orchestrator::run_refresh(&self.peers, &key_id).await,
             Err(e) => Err(e),
@@ -282,6 +360,7 @@ impl Signer for SignerSvc {
         Ok(Response::new(pb::CapabilitiesReply {
             hosted_key_specs: specs,
             hosted_keys_enabled: enabled,
+            cluster_id: self.sign_guard.as_ref().map(|g| g.verifier().cluster_id().to_string()).unwrap_or_default(),
         }))
     }
 
@@ -289,7 +368,7 @@ impl Signer for SignerSvc {
         &self,
         req: Request<pb::GenerateKeyRequest>,
     ) -> Result<Response<pb::GenerateKeyReply>, Status> {
-        self.authorize(&req)?;
+        self.authorize_key(&req, |r| &r.key_id)?;
         let r = req.into_inner();
         let spec = crate::hosted::HostedSpec::parse(&r.spec).map_err(Status::from)?;
         let result = match self.node.refuse_if_keystore_down() {
@@ -325,7 +404,7 @@ impl Signer for SignerSvc {
         &self,
         req: Request<pb::PublicKeyRequest>,
     ) -> Result<Response<pb::PublicKeyReply>, Status> {
-        self.authorize(&req)?;
+        self.authorize_key(&req, |r| &r.key_id)?;
         self.refuse_if_keystore_down()?;
         let key_id = req.into_inner().key_id;
         let key = self.load_hosted_repairing(&key_id).await?;
@@ -339,7 +418,7 @@ impl Signer for SignerSvc {
         &self,
         req: Request<pb::KeyInfoRequest>,
     ) -> Result<Response<pb::KeyInfoReply>, Status> {
-        self.authorize(&req)?;
+        self.authorize_key(&req, |r| &r.key_id)?;
         // Above all here: a sick node must not answer `exists: false` for a key it simply cannot read.
         self.refuse_if_keystore_down()?;
         let key_id = req.into_inner().key_id;
@@ -364,7 +443,7 @@ impl Signer for SignerSvc {
         &self,
         req: Request<pb::DeleteKeyRequest>,
     ) -> Result<Response<pb::DeleteKeyReply>, Status> {
-        self.authorize(&req)?;
+        self.authorize_key(&req, |r| &r.key_id)?;
         let key_id = req.into_inner().key_id;
         let result = match self.node.refuse_if_keystore_down() {
             Ok(()) => orchestrator::delete_hosted_key(&self.peers, &key_id).await,
@@ -378,7 +457,7 @@ impl Signer for SignerSvc {
         &self,
         req: Request<pb::DecryptRequest>,
     ) -> Result<Response<pb::DecryptReply>, Status> {
-        self.authorize(&req)?;
+        self.authorize_key(&req, |r| &r.key_id)?;
         // Before charging the budget: a refused call does no work, so it must not spend any.
         self.refuse_if_keystore_down()?;
         let r = req.into_inner();
@@ -398,7 +477,7 @@ impl Signer for SignerSvc {
         &self,
         req: Request<pb::EcdhDeriveRequest>,
     ) -> Result<Response<pb::EcdhDeriveReply>, Status> {
-        self.authorize(&req)?;
+        self.authorize_key(&req, |r| &r.key_id)?;
         self.refuse_if_keystore_down()?;
         let r = req.into_inner();
         // Refused before any budget is charged or any work done: an id reserved for the split
@@ -436,7 +515,7 @@ impl Signer for SignerSvc {
         &self,
         req: Request<pb::SymmetricRequest>,
     ) -> Result<Response<pb::SymmetricReply>, Status> {
-        self.authorize(&req)?;
+        self.authorize_key(&req, |r| &r.key_id)?;
         self.refuse_if_keystore_down()?;
         let r = req.into_inner();
         self.load_hosted_repairing(&r.key_id).await?;
@@ -449,7 +528,7 @@ impl Signer for SignerSvc {
         &self,
         req: Request<pb::SymmetricRequest>,
     ) -> Result<Response<pb::SymmetricReply>, Status> {
-        self.authorize(&req)?;
+        self.authorize_key(&req, |r| &r.key_id)?;
         self.refuse_if_keystore_down()?;
         let r = req.into_inner();
         self.charge_decrypt(&r.key_id)?;
@@ -484,6 +563,47 @@ impl SignerSvc {
 }
 
 impl SignerSvc {
+    /// The leader's own check of a `Sign` request's intent: valid here, for exactly this message,
+    /// and signed by the very client calling (CN and certificate key) — an intent cannot be
+    /// replayed through another client's connection. No intent: refused when this node requires
+    /// one; otherwise the members decide (each counts and logs the absence).
+    fn check_intent(&self, caller: Option<&crate::intent::Caller>, r: &pb::SignRequest) -> Result<(), Status> {
+        let Some(g) = &self.sign_guard else { return Ok(()) };
+        let Some(signed) = &r.intent else {
+            if g.require_intent() {
+                return Err(Status::from(crate::intent::refused(
+                    "missing",
+                    format!(
+                        "Sign for {} carries no signing intent and this node requires one \
+                         (signing_policy.require_intent) — upgrade the driver",
+                        r.key_id
+                    ),
+                )));
+            }
+            return Ok(());
+        };
+        let v = g.verifier().verify(signed, &r.key_id, crate::intent::now_ms()).map_err(Status::from)?;
+        if v.message != r.message {
+            return Err(Status::from(crate::intent::refused(
+                "key",
+                "the intent authorizes another message than this Sign asks for".into(),
+            )));
+        }
+        if let Some(c) = caller {
+            if c.cn != v.signer_cn || c.spki_sha256 != v.signer_spki_sha256 {
+                return Err(Status::from(crate::intent::refused(
+                    "signer",
+                    format!(
+                        "the intent is signed by {:?}, but the caller is {:?} with another certificate \
+                         key — an intent is only valid on its signer's own connection",
+                        v.signer_cn, c.cn
+                    ),
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Charge one decryption against `key_id`'s budget, or refuse.
     ///
     /// Applies to every decrypt path (RSA `Decrypt`, `SymmetricDecrypt`, ECIES `EcdhDerive`) and
@@ -587,10 +707,17 @@ impl Peer for PeerSvc {
             .iter()
             .map(|&s| u16::try_from(s).map_err(|_| Status::invalid_argument("signer id out of range")))
             .collect::<Result<Vec<u16>, _>>()?;
+        let sign_test = match r.purpose.as_str() {
+            "" | crate::intent::PURPOSE_SIGN => false,
+            crate::intent::PURPOSE_SIGN_TEST => true,
+            other => return Err(Status::invalid_argument(format!("unknown sign purpose {other:?}"))),
+        };
         let ctx = crate::node::Round1Ctx {
             leader_view,
             message: (!r.message.is_empty()).then(|| r.message.clone()),
             signers: (!signers.is_empty()).then_some(signers),
+            intent: r.intent.clone(),
+            sign_test,
         };
         let commitments = self
             .node
@@ -612,9 +739,14 @@ impl Peer for PeerSvc {
         // One blocking call, so burn-before-sign stays exactly as it is inline: round 2 creates
         // and fsyncs the nonce marker, then computes the share — and finishes even if the leader
         // stops waiting, so a burnt session is never half-done.
+        let intent_digest = match r.intent_digest.len() {
+            0 => None,
+            32 => Some(<[u8; 32]>::try_from(r.intent_digest.as_slice()).expect("32 bytes")),
+            n => return Err(Status::invalid_argument(format!("intent_digest must be 32 bytes, got {n}"))),
+        };
         let share = self
             .node
-            .blocking(move |n| n.sign_round2(&r.key_id, &r.session_id, &r.message, &commitments))
+            .blocking(move |n| n.sign_round2_with(&r.key_id, &r.session_id, &r.message, &commitments, intent_digest))
             .await
             .map_err(Status::from)?;
         Ok(Response::new(pb::SignRound2Reply { share: json(&share)? }))

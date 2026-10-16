@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 /// Static cluster configuration for one cosigner node.
@@ -48,6 +49,14 @@ pub struct Config {
     /// `signer_allowlist` or `peer_allowlist`.
     #[serde(default)]
     pub operator_allowlist: Option<Vec<String>>,
+    /// Client-certificate Common Names of the **refresher** role: `Refresh` and `KeyStatus` only —
+    /// never `Sign` — for the proactive-refresh job, so the credential a CronJob carries cannot
+    /// sign (audit C2). Must not share a CN with `signer_allowlist` or `peer_allowlist`; may share
+    /// one with `operator_allowlist` (both roles cannot sign), which lets the operator certificate
+    /// run refreshes until a `refresher` certificate is issued. The signer role keeps `Refresh`
+    /// while `signing_policy.signer_may_refresh` is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_allowlist: Option<Vec<String>>,
     /// Ceiling on `CeremonySignTest` calls this node leads, per key per minute (token bucket,
     /// burst = one minute's allowance). Every call burns a durable nonce marker on each signer, so
     /// the operator role must not be able to loop it. One `verify-key --sign-test` needs C(n,t)
@@ -87,9 +96,16 @@ pub struct Config {
     pub signing_policy: SigningPolicyConfig,
 }
 
-/// Cosigner-side signing policy (`signing_policy`). Later releases add the signing-intent rules
-/// here (audit C2).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Cosigner-side signing policy (`signing_policy`): what this node demands before it takes part in
+/// a signature (audit H1 epochs, audit C2 signing intents). Every node enforces its own copy; the
+/// cluster is only as strict as its most lenient node that a quorum can reach, so set the same
+/// policy everywhere.
+///
+/// **Enforcement switches** (`require_intent`, `signer_acl_required`, and `signer_may_refresh`
+/// turned off) default to the lenient side in this release, so a rolling upgrade and a driver that
+/// predates intents keep working. Turn them on, on every node, once every cosigner and the driver
+/// run this release (docs/approval-quorum.md, "Switching enforcement on").
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SigningPolicyConfig {
     /// Refuse sign round 1 from a leader that does not say which sharing (epoch, PKP digest) of the
     /// key it signs with. Off by default in this release so leaders on the previous release keep
@@ -98,6 +114,268 @@ pub struct SigningPolicyConfig {
     /// leader that does send its sharing is always checked.
     #[serde(default)]
     pub require_epoch_match: bool,
+    /// Refuse to take part in a signature without a valid client-signed intent (audit C2). Off:
+    /// an intent that is present is verified in full (and refused if invalid); a sign without one
+    /// is accepted and counted in `rutli_sign_intent_absent_total`. On: absence is refusal.
+    /// Requires TLS (intents are verified against the cluster CA).
+    #[serde(default)]
+    pub require_intent: bool,
+    /// Refuse every key operation by a Signer client CN that has no `signer_acl` entry. Off: a CN
+    /// without an entry may use every key (counted in `rutli_signer_acl_absent_total`).
+    #[serde(default)]
+    pub signer_acl_required: bool,
+    /// Let the signer role (`signer_allowlist`, the driver) call `Refresh` too, as before this
+    /// release. Turn it off once the refresh job runs with a `refresh_allowlist` certificate, so a
+    /// stolen driver certificate cannot drive share refreshes.
+    #[serde(default = "default_true")]
+    pub signer_may_refresh: bool,
+    /// Per-client key ACL: Signer client CN -> the key-id prefixes it may use (`""` = every key).
+    /// Checked on every key-scoped Signer RPC at the node the client calls, and on the intent's
+    /// signer by every node in a signature. Multi-tenant clusters give each participant's driver
+    /// certificate its own CN and prefix (`frost.key-prefix`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub signer_acl: BTreeMap<String, Vec<String>>,
+    /// SPKI pins: client CN -> SHA-256 hex of the SubjectPublicKeyInfo of every certificate key
+    /// that may act under that CN (`openssl x509 -in driver.crt -noout -pubkey | openssl pkey
+    /// -pubin -outform DER | sha256sum`). A CN listed here is refused on the Signer API and as an
+    /// intent signer with any other key, however valid its certificate — revocation without the
+    /// CA: rotate a stolen driver key by issuing a new certificate and replacing the pin.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub signer_pins: BTreeMap<String, Vec<String>>,
+    /// Longest validity (`not_after - issued_at`) an intent may claim.
+    #[serde(default = "default_intent_max_lifetime")]
+    pub intent_max_lifetime_secs: u64,
+    /// Clock skew tolerated between the driver and this node, both ways, on intent times.
+    #[serde(default = "default_clock_skew")]
+    pub clock_skew_secs: u64,
+    /// Per-key signing ceiling on this node, per minute and per rolling 24 hours, charged once per
+    /// intent request id (retries, subsets and failover leaders of one driver call share a charge)
+    /// or per session for a sign without an intent. Durable across restarts (rebuilt from the sign
+    /// journal). `0` disables a limit. A key matching a `rate_limits` rule uses the rule instead.
+    #[serde(default = "default_sign_rate_per_min")]
+    pub sign_rate_limit_per_min: u32,
+    #[serde(default = "default_sign_rate_per_day")]
+    pub sign_rate_limit_per_day: u32,
+    /// Per-prefix ceilings (first match wins): e.g. a tight one for the namespace key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rate_limits: Vec<RateLimitRule>,
+    /// Most signature shares this node releases for one intent request id (a valid intent re-used
+    /// by a compromised leader buys at most this many signatures over the same digest).
+    #[serde(default = "default_max_shares_per_request")]
+    pub max_shares_per_request: u32,
+    /// Sign journal (`data_dir/journal/<key_id>/`): segments older than this are deleted...
+    #[serde(default = "default_journal_retention_days")]
+    pub journal_retention_days: u32,
+    /// ...and so are the oldest segments of a key past this total size.
+    #[serde(default = "default_journal_max_mib_per_key")]
+    pub journal_max_mib_per_key: u32,
+    /// Approval rules, as the driver's `approval.rules` (key-id prefix, first match wins): a key a
+    /// `quorum` rule matches needs `threshold` distinct `approvers` signatures in the intent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rules: Vec<ApprovalRuleConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approvers: Vec<ApproverConfig>,
+}
+
+impl Default for SigningPolicyConfig {
+    fn default() -> Self {
+        Self {
+            require_epoch_match: false,
+            require_intent: false,
+            signer_acl_required: false,
+            signer_may_refresh: true,
+            signer_acl: BTreeMap::new(),
+            signer_pins: BTreeMap::new(),
+            intent_max_lifetime_secs: default_intent_max_lifetime(),
+            clock_skew_secs: default_clock_skew(),
+            sign_rate_limit_per_min: default_sign_rate_per_min(),
+            sign_rate_limit_per_day: default_sign_rate_per_day(),
+            rate_limits: Vec::new(),
+            max_shares_per_request: default_max_shares_per_request(),
+            journal_retention_days: default_journal_retention_days(),
+            journal_max_mib_per_key: default_journal_max_mib_per_key(),
+            rules: Vec::new(),
+            approvers: Vec::new(),
+        }
+    }
+}
+
+/// A per-prefix sign rate limit (`signing_policy.rate_limits`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitRule {
+    pub key_id_prefix: String,
+    pub per_min: u32,
+    pub per_day: u32,
+}
+
+/// An approval rule (`signing_policy.rules`), the same shape as the driver's `approval.rules`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApprovalRuleConfig {
+    pub key_id_prefix: String,
+    /// "quorum" (needs `threshold` approvals) or "auto" (carves an exception out of a broader rule).
+    #[serde(default = "default_quorum_mode")]
+    pub mode: String,
+    #[serde(default = "default_quorum_threshold")]
+    pub threshold: u32,
+}
+
+/// An approver (`signing_policy.approvers`): the id and Ed25519 key of the driver's
+/// `approval.approvers` entry (base64 DER SubjectPublicKeyInfo, the same value).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApproverConfig {
+    pub id: String,
+    pub public_key_spki_b64: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_quorum_mode() -> String {
+    "quorum".into()
+}
+fn default_quorum_threshold() -> u32 {
+    2
+}
+/// The driver's intents live 180 s; 300 s leaves room without letting one live long.
+pub const DEFAULT_INTENT_MAX_LIFETIME_SECS: u64 = 300;
+fn default_intent_max_lifetime() -> u64 {
+    DEFAULT_INTENT_MAX_LIFETIME_SECS
+}
+/// Generous: an intent refused for skew is an outage, and the expiry only bounds replay.
+pub const DEFAULT_CLOCK_SKEW_SECS: u64 = 120;
+fn default_clock_skew() -> u64 {
+    DEFAULT_CLOCK_SKEW_SECS
+}
+/// 300 per minute (5/s bursts) and 20 000 per day per key, on each node: far above a namespace
+/// key's handful a day and above a DevNet validator's protocol-key traffic, low enough that a
+/// stolen driver certificate cannot turn a key into a bulk oracle unnoticed — and ~8 MB/day of
+/// journal at the ceiling. Put a tight `rate_limits` rule on namespace keys.
+pub const DEFAULT_SIGN_RATE_LIMIT_PER_MIN: u32 = 300;
+pub const DEFAULT_SIGN_RATE_LIMIT_PER_DAY: u32 = 20_000;
+fn default_sign_rate_per_min() -> u32 {
+    DEFAULT_SIGN_RATE_LIMIT_PER_MIN
+}
+fn default_sign_rate_per_day() -> u32 {
+    DEFAULT_SIGN_RATE_LIMIT_PER_DAY
+}
+/// One driver call through the t-subset retry and leader failover releases a share from one node
+/// at most a few times (2-of-3: two subsets per node per leader).
+pub const DEFAULT_MAX_SHARES_PER_REQUEST: u32 = 8;
+fn default_max_shares_per_request() -> u32 {
+    DEFAULT_MAX_SHARES_PER_REQUEST
+}
+pub const DEFAULT_JOURNAL_RETENTION_DAYS: u32 = 90;
+fn default_journal_retention_days() -> u32 {
+    DEFAULT_JOURNAL_RETENTION_DAYS
+}
+/// 64 MiB per key: on the shipped 1 Gi volume, a handful of signing keys stays far below it.
+pub const DEFAULT_JOURNAL_MAX_MIB_PER_KEY: u32 = 64;
+fn default_journal_max_mib_per_key() -> u32 {
+    DEFAULT_JOURNAL_MAX_MIB_PER_KEY
+}
+
+impl SigningPolicyConfig {
+    /// The (per minute, per day) ceiling for `key_id`.
+    pub fn rate_limit_for(&self, key_id: &str) -> (u32, u32) {
+        match self.rate_limits.iter().find(|r| key_id.starts_with(&r.key_id_prefix)) {
+            Some(r) => (r.per_min, r.per_day),
+            None => (self.sign_rate_limit_per_min, self.sign_rate_limit_per_day),
+        }
+    }
+
+    /// The approvals `key_id` needs (first matching rule), or `None`.
+    pub fn approval_threshold_for(&self, key_id: &str) -> Option<u32> {
+        self.rules
+            .iter()
+            .find(|r| key_id.starts_with(&r.key_id_prefix))
+            .filter(|r| r.mode == "quorum")
+            .map(|r| r.threshold)
+    }
+
+    /// The pins of `cn`, decoded; `None` when the CN is not pinned.
+    pub fn pins_for(&self, cn: &str) -> Option<Vec<[u8; 32]>> {
+        self.signer_pins.get(cn).map(|list| {
+            list.iter().filter_map(|h| hex32("signer_pins", h).ok()).collect()
+        })
+    }
+
+    fn validate(&self, signers: &[String], tls: bool) -> crate::Result<()> {
+        use crate::DaemonError::Config;
+        if self.require_intent && !tls {
+            return Err(Config(
+                "signing_policy.require_intent needs tls: intents are verified against the cluster CA".into(),
+            ));
+        }
+        if self.intent_max_lifetime_secs == 0 || self.intent_max_lifetime_secs > 3600 {
+            return Err(Config("signing_policy.intent_max_lifetime_secs must be 1..=3600".into()));
+        }
+        if self.clock_skew_secs > 3600 {
+            return Err(Config("signing_policy.clock_skew_secs must be at most 3600".into()));
+        }
+        if self.max_shares_per_request == 0 {
+            return Err(Config("signing_policy.max_shares_per_request must be at least 1".into()));
+        }
+        if self.journal_max_mib_per_key < 4 {
+            return Err(Config("signing_policy.journal_max_mib_per_key must be at least 4".into()));
+        }
+        if self.journal_retention_days == 0 {
+            return Err(Config("signing_policy.journal_retention_days must be at least 1".into()));
+        }
+        for cn in self.signer_acl.keys() {
+            if !signers.contains(cn) {
+                return Err(Config(format!(
+                    "signing_policy.signer_acl names {cn:?}, which is not in signer_allowlist"
+                )));
+            }
+        }
+        if self.signer_acl_required {
+            if let Some(cn) = signers.iter().find(|cn| !self.signer_acl.contains_key(*cn)) {
+                return Err(Config(format!(
+                    "signing_policy.signer_acl_required is set but signer {cn:?} has no signer_acl \
+                     entry — it could use no key; give it its prefixes (\"\" = every key)"
+                )));
+            }
+        }
+        for (cn, pins) in &self.signer_pins {
+            if pins.is_empty() {
+                return Err(Config(format!("signing_policy.signer_pins.{cn} is empty — omit the CN or pin a key")));
+            }
+            for h in pins {
+                hex32(&format!("signing_policy.signer_pins.{cn}"), h)?;
+            }
+        }
+        let mut ids = std::collections::HashSet::new();
+        for a in &self.approvers {
+            if !ids.insert(a.id.as_str()) {
+                return Err(Config(format!("signing_policy.approvers lists {:?} twice", a.id)));
+            }
+            crate::intent::ed25519_key_from_spki_b64(&a.public_key_spki_b64).map_err(|e| {
+                Config(format!("signing_policy.approvers[{}].public_key_spki_b64: {e}", a.id))
+            })?;
+        }
+        for r in &self.rules {
+            match r.mode.as_str() {
+                "auto" => {}
+                "quorum" if r.threshold >= 1 && (r.threshold as usize) <= self.approvers.len() => {}
+                "quorum" => {
+                    return Err(Config(format!(
+                        "signing_policy.rules[{:?}]: threshold {} must be between 1 and the number of \
+                         approvers ({})",
+                        r.key_id_prefix,
+                        r.threshold,
+                        self.approvers.len()
+                    )))
+                }
+                other => {
+                    return Err(Config(format!(
+                        "signing_policy.rules[{:?}]: mode must be \"quorum\" or \"auto\", got {other:?}",
+                        r.key_id_prefix
+                    )))
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Cluster-hosted key settings.
@@ -463,6 +741,25 @@ impl Config {
                 )));
             }
         }
+        // The refresher role cannot sign; it may coincide with the operator role (which cannot
+        // either) but never with the signer or mesh role.
+        if let Some(refresh) = &self.refresh_allowlist {
+            if refresh.is_empty() {
+                return Err(Config(
+                    "refresh_allowlist is empty — omit it, or list the refresher cert CN(s)".into(),
+                ));
+            }
+            let other: Vec<&String> =
+                self.signer_allowlist.iter().chain(self.peer_allowlist.iter()).flatten().collect();
+            if let Some(cn) = refresh.iter().find(|cn| other.contains(cn)) {
+                return Err(Config(format!(
+                    "refresh_allowlist CN {cn:?} is also in signer_allowlist or peer_allowlist — the \
+                     refresher must be a certificate that cannot sign (its own, or the operator's)"
+                )));
+            }
+        }
+        let signers: Vec<String> = self.signer_allowlist.clone().unwrap_or_default();
+        self.signing_policy.validate(&signers, self.tls.is_some())?;
         if let Some(seal) = &self.share_seal {
             if seal.secret_env.is_some() == seal.secret_file.is_some() {
                 return Err(Config(
@@ -550,6 +847,7 @@ mod tests {
             peer_allowlist: allow,
             metrics_listen: None,
             operator_allowlist: None,
+            refresh_allowlist: None,
             ceremony_sign_test_rate_limit_per_min: DEFAULT_CEREMONY_SIGN_TEST_RATE_LIMIT_PER_MIN,
             cluster_id: None,
             cluster_id_change_allowed: false,
@@ -613,6 +911,65 @@ mod tests {
         assert_eq!(c.peer_identities().get("cosigner03"), None, "exact match only");
         // The legacy tls.domain is not a mesh name.
         assert_ne!(c.peers[0].server_name(), "rutli-cosigner");
+    }
+
+    /// Audit C2: the refresher role cannot sign, so it may share the operator's CN but never the
+    /// signer's or a cosigner's.
+    #[test]
+    fn the_refresher_role_may_be_the_operator_but_never_a_signer_or_a_peer() {
+        let mut c = mesh_ok();
+        c.operator_allowlist = Some(vec!["operator".into()]);
+        c.refresh_allowlist = Some(vec!["operator".into()]);
+        c.validate().unwrap();
+        c.refresh_allowlist = Some(vec!["driver".into()]);
+        assert!(c.validate().unwrap_err().to_string().contains("refresh_allowlist"));
+        c.refresh_allowlist = Some(vec!["cosigner2".into()]);
+        assert!(c.validate().unwrap_err().to_string().contains("refresh_allowlist"));
+        c.refresh_allowlist = Some(vec![]);
+        assert!(c.validate().is_err());
+    }
+
+    #[test]
+    fn the_signing_policy_is_validated() {
+        use super::{ApprovalRuleConfig, ApproverConfig};
+        // Defaults: lenient switches, the documented limits.
+        let d = SigningPolicyConfig::default();
+        assert!(!d.require_intent && !d.signer_acl_required && d.signer_may_refresh);
+        assert_eq!((d.sign_rate_limit_per_min, d.sign_rate_limit_per_day), (300, 20_000));
+        let parsed: SigningPolicyConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed.max_shares_per_request, d.max_shares_per_request);
+        assert!(parsed.signer_may_refresh, "absent = on, like Default");
+
+        // require_intent needs TLS.
+        let mut plain = base(None, None);
+        plain.signing_policy.require_intent = true;
+        assert!(plain.validate().unwrap_err().to_string().contains("require_intent"));
+
+        let mut c = mesh_ok();
+        c.signing_policy.signer_acl.insert("nobody".into(), vec!["".into()]);
+        assert!(c.validate().unwrap_err().to_string().contains("not in signer_allowlist"));
+        let mut c = mesh_ok();
+        c.signing_policy.signer_acl_required = true;
+        assert!(c.validate().unwrap_err().to_string().contains("no signer_acl"));
+        c.signing_policy.signer_acl.insert("driver".into(), vec!["participant1-".into()]);
+        c.validate().unwrap();
+
+        let mut c = mesh_ok();
+        c.signing_policy.signer_pins.insert("driver".into(), vec!["zz".into()]);
+        assert!(c.validate().is_err());
+
+        let key = "MCowBQYDK2VwAyEAGb9ECWmEzf6FQbrBZ9w7lshQhqowtrbLDFw4rXAxZuE=";
+        let mut c = mesh_ok();
+        c.signing_policy.approvers = vec![ApproverConfig { id: "alice".into(), public_key_spki_b64: key.into() }];
+        c.signing_policy.rules =
+            vec![ApprovalRuleConfig { key_id_prefix: "p1-".into(), mode: "quorum".into(), threshold: 2 }];
+        assert!(c.validate().unwrap_err().to_string().contains("threshold"));
+        c.signing_policy.rules[0].threshold = 1;
+        c.validate().unwrap();
+        assert_eq!(c.signing_policy.approval_threshold_for("p1-namespace"), Some(1));
+        assert_eq!(c.signing_policy.approval_threshold_for("p2-namespace"), None);
+        c.signing_policy.approvers[0].public_key_spki_b64 = "not a key".into();
+        assert!(c.validate().is_err());
     }
 
     #[test]
@@ -778,6 +1135,7 @@ mod hosted_config_tests {
             peer_allowlist: None,
             metrics_listen: None,
             operator_allowlist: None,
+            refresh_allowlist: None,
             ceremony_sign_test_rate_limit_per_min: DEFAULT_CEREMONY_SIGN_TEST_RATE_LIMIT_PER_MIN,
             hosted_keys: hosted,
             cluster_id: None,

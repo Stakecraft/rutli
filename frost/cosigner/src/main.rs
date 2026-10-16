@@ -505,6 +505,64 @@ async fn main() -> Result<()> {
         );
     }
 
+    // The signing policy (audit C2): intents verified against the cluster CA, key ACLs, SPKI pins,
+    // approvals, the per-key sign rate limit, and the durable sign journal every released share is
+    // written to first.
+    let sign_guard = {
+        let policy = &cfg.signing_policy;
+        let ca_pem = match &cfg.tls {
+            Some(t) => std::fs::read(&t.ca_cert)?,
+            None => Vec::new(),
+        };
+        let verifier = rutli_cosigner::intent::IntentVerifier::new(
+            ca_pem,
+            cfg.tls.as_ref().is_some_and(|t| t.allow_expired_ca),
+            cluster_id.clone(),
+            cfg.signer_allowlist.clone().unwrap_or_default(),
+            policy,
+        )?;
+        let journal = rutli_cosigner::journal::SignJournal::open(
+            cfg.data_dir.join("journal"),
+            cfg.identifier,
+            rutli_cosigner::journal::Retention {
+                days: policy.journal_retention_days,
+                max_bytes: u64::from(policy.journal_max_mib_per_key) << 20,
+            },
+        )?;
+        tracing::info!(
+            require_intent = policy.require_intent,
+            signer_acl_required = policy.signer_acl_required,
+            signer_may_refresh = policy.signer_may_refresh,
+            acl_entries = policy.signer_acl.len(),
+            pinned_cns = policy.signer_pins.len(),
+            approval_rules = policy.rules.len(),
+            approvers = policy.approvers.len(),
+            rate_per_min = policy.sign_rate_limit_per_min,
+            rate_per_day = policy.sign_rate_limit_per_day,
+            journal = %journal.dir().display(),
+            "signing policy"
+        );
+        if !policy.require_intent {
+            tracing::warn!(
+                "signing_policy.require_intent is off: a signature without a client-signed intent is \
+                 accepted (counted in rutli_sign_intent_absent_total) — turn it on, on every node, once \
+                 every cosigner and the driver run this release (docs/approval-quorum.md)"
+            );
+        }
+        if policy.signer_may_refresh {
+            tracing::info!(
+                "signing_policy.signer_may_refresh is on: the driver certificate may still call Refresh \
+                 — turn it off once the refresh job uses a refresh_allowlist certificate"
+            );
+        }
+        Arc::new(rutli_cosigner::sign_policy::SignGuard::new(
+            Arc::new(verifier),
+            journal,
+            cfg.ceremony_sign_test_rate_limit_per_min,
+        ))
+    };
+    node = node.with_sign_guard(sign_guard.clone());
+
     // Cluster-hosted (non-FROST) keys. The wrapping key comes from the same seal keys as the at-rest
     // DEK, so hosted keys require share_seal (enforced by config validation) — a hosted key is a
     // whole private key and must never sit unsealed on disk.
@@ -580,6 +638,12 @@ async fn main() -> Result<()> {
     if let Some(cns) = &operator_cns {
         tracing::info!(?cns, "operator role: KeyStatus, HostedKeyStatus and CeremonySignTest only");
     }
+    let refresh_cns = cfg.refresh_allowlist.as_ref().map(|v| {
+        Arc::new(v.iter().cloned().collect::<std::collections::HashSet<String>>())
+    });
+    if let Some(cns) = &refresh_cns {
+        tracing::info!(?cns, "refresher role: Refresh and KeyStatus only");
+    }
 
     // Anti-entropy: pull hosted keys this node lacks and push ones a peer lacks. This is what
     // heals an under-quorum write and a node restored from a stale backup, so the 2-of-3 write
@@ -642,6 +706,8 @@ async fn main() -> Result<()> {
         hosted_write_quorum,
         decrypt_limiter,
         ceremony_test_limiter,
+        sign_guard: Some(sign_guard),
+        refresh_cns,
     };
     let peer = PeerSvc { node, allowed_cns: peer_cns, peer_ids: Some(Arc::new(cfg.peer_identities())) };
 

@@ -59,8 +59,8 @@ pub struct SessionBinding {
     /// The signer set of this attempt as declared at round 1: round 2's commitment map must hold
     /// exactly these identifiers. `None`: not declared.
     pub signers: Option<BTreeSet<Identifier>>,
-    /// SHA-256 of the signing intent the cosigner verified at round 1 (audit C2). Always `None`
-    /// until signing intents exist; round 2 must present the same value.
+    /// SHA-256 of the signing intent the cosigner verified at round 1 (audit C2); `None` for a
+    /// session opened without one. Round 2 must present the same value.
     pub intent_digest: Option<[u8; 32]>,
 }
 
@@ -235,8 +235,8 @@ impl Cosigner {
     }
 
     /// Round 2: produce this cosigner's signature share for `message` under the full commitment
-    /// set, for the key `key_id` and the signing intent `intent_digest` (`None` until intents
-    /// exist). Everything must match the session's round-1 [`SessionBinding`], the commitment map
+    /// set, for the key `key_id` and the signing intent `intent_digest` (`None` for a session
+    /// opened without one). Everything must match the session's round-1 [`SessionBinding`], the commitment map
     /// must carry this cosigner's own round-1 commitment unchanged, and it must have at least the
     /// threshold of signers — all checked **before** the marker burns; on a mismatch the session's
     /// nonces are dropped (no share is ever released for it). Then the session is burned in the
@@ -249,6 +249,26 @@ impl Cosigner {
         commitments: &BTreeMap<Identifier, SigningCommitments>,
         intent_digest: Option<&[u8; 32]>,
     ) -> Result<SignatureShare> {
+        self.round2_guarded(session_id, key_id, message, commitments, intent_digest, || Ok(()))
+    }
+
+    /// [`Cosigner::round2`] with a `guard` run **after** every binding check passed and **before**
+    /// the nonce marker burns — the one point where it is certain that this session will release a
+    /// share unless the marker write or the share computation itself fails. The daemon runs its
+    /// signing policy there (audit C2: rate limit, durable journal entry), so a refused or
+    /// mismatched round 2 is never charged or journaled, and a share never leaves without its
+    /// journal entry. A guard error releases nothing: the session's nonces are already out of the
+    /// pending map and are dropped, and the marker is not written (the session id stays unusable
+    /// anyway — its nonces are gone).
+    pub fn round2_guarded<E: From<CoreError>>(
+        &self,
+        session_id: &str,
+        key_id: &str,
+        message: &[u8],
+        commitments: &BTreeMap<Identifier, SigningCommitments>,
+        intent_digest: Option<&[u8; 32]>,
+        guard: impl FnOnce() -> std::result::Result<(), E>,
+    ) -> std::result::Result<SignatureShare, E> {
         let p = self
             .pending()
             .remove(session_id)
@@ -256,22 +276,24 @@ impl Cosigner {
         // An entry past the TTL is dead even if no sweep removed it yet: the marker-pruning proof
         // (NonceStore::prune_older_than) relies on no nonce older than PENDING_TTL ever signing.
         if p.started.elapsed() >= PENDING_TTL {
-            return Err(CoreError::UnknownSession(format!("{session_id} (expired)")));
+            return Err(CoreError::UnknownSession(format!("{session_id} (expired)")).into());
         }
         let mismatch = |what| CoreError::BindingMismatch { session: session_id.to_string(), what };
         p.binding.check(key_id, message, commitments, intent_digest).map_err(mismatch)?;
         if commitments.get(&self.identifier()) != Some(&p.commitments) {
-            return Err(mismatch("this cosigner's own round-1 commitment is missing or altered"));
+            return Err(mismatch("this cosigner's own round-1 commitment is missing or altered").into());
         }
         if commitments.len() < usize::from(self.min_signers()) {
-            return Err(mismatch("fewer signers than the threshold"));
+            return Err(mismatch("fewer signers than the threshold").into());
         }
+
+        guard()?;
 
         // Burn FIRST. If we crash after this point the session is lost, never reused.
         self.nonce_store.consume(session_id)?;
 
         let signing_package = SigningPackage::new(commitments.clone(), message);
-        let share = frost::round2::sign(&signing_package, &p.nonces, &self.key_package)?;
+        let share = frost::round2::sign(&signing_package, &p.nonces, &self.key_package).map_err(CoreError::from)?;
         Ok(share)
     }
 
@@ -337,6 +359,46 @@ mod tests {
         let err = c.round2("old", "k", &[0; 34], &commitments, None).unwrap_err();
         assert!(matches!(err, CoreError::UnknownSession(ref s) if s.contains("expired")), "{err:?}");
         assert!(!c.nonce_store.is_consumed("old").unwrap(), "an expired session is not burned");
+        assert_eq!(c.pending_count(), 0);
+    }
+
+    /// The round-2 guard runs only once every binding check passed, before the marker burns; a
+    /// guard refusal releases nothing and burns nothing, and a binding mismatch never reaches it.
+    #[test]
+    fn the_round2_guard_runs_after_the_binding_checks_and_before_the_burn() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = cosigner(tmp.path());
+        let msg = [7u8; 34];
+
+        // Binding mismatch: the guard is never called.
+        let mine = c.round1("s1", SessionBinding::new("k").with_message(&msg)).unwrap();
+        let commitments = BTreeMap::from([(c.identifier(), mine)]);
+        let called = std::cell::Cell::new(false);
+        let err = c
+            .round2_guarded::<CoreError>("s1", "k", &[8u8; 34], &commitments, None, || {
+                called.set(true);
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(matches!(err, CoreError::BindingMismatch { .. }), "{err:?}");
+        assert!(!called.get());
+
+        // Guard refuses: no marker, the session is gone.
+        let (shares, pkp) = crate::dealer::split_ed25519_seed(&[5; 32], &[1, 2, 3], 2).unwrap();
+        let tmp2 = tempfile::tempdir().unwrap();
+        let other = Cosigner::new(
+            frost::keys::KeyPackage::try_from(shares[1].clone()).unwrap(),
+            pkp,
+            NonceStore::open(tmp2.path()).unwrap(),
+        );
+        let mine = c.round1("s2", SessionBinding::new("k").with_message(&msg)).unwrap();
+        let theirs = other.round1("s2", SessionBinding::new("k")).unwrap();
+        let commitments = BTreeMap::from([(c.identifier(), mine), (other.identifier(), theirs)]);
+        let err = c
+            .round2_guarded("s2", "k", &msg, &commitments, None, || Err(CoreError::Dealer("refused".into())))
+            .unwrap_err();
+        assert!(matches!(err, CoreError::Dealer(_)), "{err:?}");
+        assert!(!c.nonce_store.is_consumed("s2").unwrap(), "a refused round 2 burns no marker");
         assert_eq!(c.pending_count(), 0);
     }
 

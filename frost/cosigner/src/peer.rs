@@ -32,12 +32,15 @@ pub trait PeerApi: Send + Sync {
     /// a refusal because of it is [`crate::DaemonError::EpochMismatch`] or
     /// [`crate::DaemonError::StaleShare`] over every transport.
     async fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &Round1Ctx) -> Result<SigningCommitments>;
+    /// Sign round 2. `intent_digest`: SHA-256 of the signing intent round 1 carried (`None` if it
+    /// carried none); the peer refuses one that differs from what it bound.
     async fn sign_round2(
         &self,
         key_id: &str,
         session_id: &str,
         message: &[u8],
         commitments: &BTreeMap<Identifier, SigningCommitments>,
+        intent_digest: Option<&[u8; 32]>,
     ) -> Result<SignatureShare>;
     /// Best-effort: drop an in-flight sign session so its nonces are freed now, not at TTL.
     async fn abort_sign(&self, key_id: &str, session_id: &str) -> Result<()>;
@@ -212,10 +215,13 @@ impl PeerApi for LocalPeer {
         session_id: &str,
         message: &[u8],
         commitments: &BTreeMap<Identifier, SigningCommitments>,
+        intent_digest: Option<&[u8; 32]>,
     ) -> Result<SignatureShare> {
         let (key_id, session_id) = (key_id.to_owned(), session_id.to_owned());
-        let (message, commitments) = (message.to_vec(), commitments.clone());
-        self.node.blocking(move |n| n.sign_round2(&key_id, &session_id, &message, &commitments)).await
+        let (message, commitments, digest) = (message.to_vec(), commitments.clone(), intent_digest.copied());
+        self.node
+            .blocking(move |n| n.sign_round2_with(&key_id, &session_id, &message, &commitments, digest))
+            .await
     }
     async fn abort_sign(&self, key_id: &str, session_id: &str) -> Result<()> {
         self.node.abort_sign(key_id, session_id);
@@ -423,6 +429,8 @@ impl PeerApi for GrpcPeer {
                 pkp_digest: ctx.leader_view.map(|v| v.1.to_vec()).unwrap_or_default(),
                 message: ctx.message.clone().unwrap_or_default(),
                 signers: ctx.signers.iter().flatten().map(|&i| u32::from(i)).collect(),
+                intent: ctx.intent.clone(),
+                purpose: if ctx.sign_test { crate::intent::PURPOSE_SIGN_TEST.into() } else { String::new() },
             })
             .await
             .map_err(|s| crate::DaemonError::from_peer_status(s, key_id, ctx.leader_view))?
@@ -436,6 +444,7 @@ impl PeerApi for GrpcPeer {
         session_id: &str,
         message: &[u8],
         commitments: &BTreeMap<Identifier, SigningCommitments>,
+        intent_digest: Option<&[u8; 32]>,
     ) -> Result<SignatureShare> {
         let reply = self
             .client
@@ -445,8 +454,10 @@ impl PeerApi for GrpcPeer {
                 session_id: session_id.into(),
                 message: message.to_vec(),
                 commitments_map: serde_json::to_vec(commitments)?,
+                intent_digest: intent_digest.map(|d| d.to_vec()).unwrap_or_default(),
             })
-            .await?
+            .await
+            .map_err(|s| crate::DaemonError::from_peer_status(s, key_id, None))?
             .into_inner();
         Ok(serde_json::from_slice(&reply.share)?)
     }
