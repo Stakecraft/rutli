@@ -29,6 +29,7 @@ private static final long serialVersionUID = 0L;
   private CapabilitiesReply() {
     hostedKeySpecs_ =
         com.google.protobuf.LazyStringArrayList.emptyList();
+    clusterId_ = "";
   }
 
   public static final com.google.protobuf.Descriptors.Descriptor
@@ -112,6 +113,55 @@ private static final long serialVersionUID = 0L;
     return hostedKeysEnabled_;
   }
 
+  public static final int CLUSTER_ID_FIELD_NUMBER = 3;
+  @SuppressWarnings("serial")
+  private volatile java.lang.Object clusterId_ = "";
+  /**
+   * <pre>
+   * The cluster id signing intents must name (SignIntent.cluster_id): the pinned `cluster_id`, else
+   * derived from the CA file. Public. Empty from a cosigner that predates intents.
+   * </pre>
+   *
+   * <code>string cluster_id = 3;</code>
+   * @return The clusterId.
+   */
+  @java.lang.Override
+  public java.lang.String getClusterId() {
+    java.lang.Object ref = clusterId_;
+    if (ref instanceof java.lang.String) {
+      return (java.lang.String) ref;
+    } else {
+      com.google.protobuf.ByteString bs = 
+          (com.google.protobuf.ByteString) ref;
+      java.lang.String s = bs.toStringUtf8();
+      clusterId_ = s;
+      return s;
+    }
+  }
+  /**
+   * <pre>
+   * The cluster id signing intents must name (SignIntent.cluster_id): the pinned `cluster_id`, else
+   * derived from the CA file. Public. Empty from a cosigner that predates intents.
+   * </pre>
+   *
+   * <code>string cluster_id = 3;</code>
+   * @return The bytes for clusterId.
+   */
+  @java.lang.Override
+  public com.google.protobuf.ByteString
+      getClusterIdBytes() {
+    java.lang.Object ref = clusterId_;
+    if (ref instanceof java.lang.String) {
+      com.google.protobuf.ByteString b = 
+          com.google.protobuf.ByteString.copyFromUtf8(
+              (java.lang.String) ref);
+      clusterId_ = b;
+      return b;
+    } else {
+      return (com.google.protobuf.ByteString) ref;
+    }
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -131,6 +181,9 @@ private static final long serialVersionUID = 0L;
     }
     if (hostedKeysEnabled_ != false) {
       output.writeBool(2, hostedKeysEnabled_);
+    }
+    if (!com.google.protobuf.GeneratedMessage.isStringEmpty(clusterId_)) {
+      com.google.protobuf.GeneratedMessage.writeString(output, 3, clusterId_);
     }
     getUnknownFields().writeTo(output);
   }
@@ -153,6 +206,9 @@ private static final long serialVersionUID = 0L;
       size += com.google.protobuf.CodedOutputStream
         .computeBoolSize(2, hostedKeysEnabled_);
     }
+    if (!com.google.protobuf.GeneratedMessage.isStringEmpty(clusterId_)) {
+      size += com.google.protobuf.GeneratedMessage.computeStringSize(3, clusterId_);
+    }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
     return size;
@@ -172,6 +228,8 @@ private static final long serialVersionUID = 0L;
         .equals(other.getHostedKeySpecsList())) return false;
     if (getHostedKeysEnabled()
         != other.getHostedKeysEnabled()) return false;
+    if (!getClusterId()
+        .equals(other.getClusterId())) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -190,6 +248,8 @@ private static final long serialVersionUID = 0L;
     hash = (37 * hash) + HOSTED_KEYS_ENABLED_FIELD_NUMBER;
     hash = (53 * hash) + com.google.protobuf.Internal.hashBoolean(
         getHostedKeysEnabled());
+    hash = (37 * hash) + CLUSTER_ID_FIELD_NUMBER;
+    hash = (53 * hash) + getClusterId().hashCode();
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -324,6 +384,7 @@ private static final long serialVersionUID = 0L;
       hostedKeySpecs_ =
           com.google.protobuf.LazyStringArrayList.emptyList();
       hostedKeysEnabled_ = false;
+      clusterId_ = "";
       return this;
     }
 
@@ -364,6 +425,9 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000002) != 0)) {
         result.hostedKeysEnabled_ = hostedKeysEnabled_;
       }
+      if (((from_bitField0_ & 0x00000004) != 0)) {
+        result.clusterId_ = clusterId_;
+      }
     }
 
     @java.lang.Override
@@ -390,6 +454,11 @@ private static final long serialVersionUID = 0L;
       }
       if (other.getHostedKeysEnabled() != false) {
         setHostedKeysEnabled(other.getHostedKeysEnabled());
+      }
+      if (!other.getClusterId().isEmpty()) {
+        clusterId_ = other.clusterId_;
+        bitField0_ |= 0x00000004;
+        onChanged();
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -428,6 +497,11 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000002;
               break;
             } // case 16
+            case 26: {
+              clusterId_ = input.readStringRequireUtf8();
+              bitField0_ |= 0x00000004;
+              break;
+            } // case 26
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -629,6 +703,103 @@ private static final long serialVersionUID = 0L;
     public Builder clearHostedKeysEnabled() {
       bitField0_ = (bitField0_ & ~0x00000002);
       hostedKeysEnabled_ = false;
+      onChanged();
+      return this;
+    }
+
+    private java.lang.Object clusterId_ = "";
+    /**
+     * <pre>
+     * The cluster id signing intents must name (SignIntent.cluster_id): the pinned `cluster_id`, else
+     * derived from the CA file. Public. Empty from a cosigner that predates intents.
+     * </pre>
+     *
+     * <code>string cluster_id = 3;</code>
+     * @return The clusterId.
+     */
+    public java.lang.String getClusterId() {
+      java.lang.Object ref = clusterId_;
+      if (!(ref instanceof java.lang.String)) {
+        com.google.protobuf.ByteString bs =
+            (com.google.protobuf.ByteString) ref;
+        java.lang.String s = bs.toStringUtf8();
+        clusterId_ = s;
+        return s;
+      } else {
+        return (java.lang.String) ref;
+      }
+    }
+    /**
+     * <pre>
+     * The cluster id signing intents must name (SignIntent.cluster_id): the pinned `cluster_id`, else
+     * derived from the CA file. Public. Empty from a cosigner that predates intents.
+     * </pre>
+     *
+     * <code>string cluster_id = 3;</code>
+     * @return The bytes for clusterId.
+     */
+    public com.google.protobuf.ByteString
+        getClusterIdBytes() {
+      java.lang.Object ref = clusterId_;
+      if (ref instanceof String) {
+        com.google.protobuf.ByteString b = 
+            com.google.protobuf.ByteString.copyFromUtf8(
+                (java.lang.String) ref);
+        clusterId_ = b;
+        return b;
+      } else {
+        return (com.google.protobuf.ByteString) ref;
+      }
+    }
+    /**
+     * <pre>
+     * The cluster id signing intents must name (SignIntent.cluster_id): the pinned `cluster_id`, else
+     * derived from the CA file. Public. Empty from a cosigner that predates intents.
+     * </pre>
+     *
+     * <code>string cluster_id = 3;</code>
+     * @param value The clusterId to set.
+     * @return This builder for chaining.
+     */
+    public Builder setClusterId(
+        java.lang.String value) {
+      if (value == null) { throw new NullPointerException(); }
+      clusterId_ = value;
+      bitField0_ |= 0x00000004;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * The cluster id signing intents must name (SignIntent.cluster_id): the pinned `cluster_id`, else
+     * derived from the CA file. Public. Empty from a cosigner that predates intents.
+     * </pre>
+     *
+     * <code>string cluster_id = 3;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearClusterId() {
+      clusterId_ = getDefaultInstance().getClusterId();
+      bitField0_ = (bitField0_ & ~0x00000004);
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * The cluster id signing intents must name (SignIntent.cluster_id): the pinned `cluster_id`, else
+     * derived from the CA file. Public. Empty from a cosigner that predates intents.
+     * </pre>
+     *
+     * <code>string cluster_id = 3;</code>
+     * @param value The bytes for clusterId to set.
+     * @return This builder for chaining.
+     */
+    public Builder setClusterIdBytes(
+        com.google.protobuf.ByteString value) {
+      if (value == null) { throw new NullPointerException(); }
+      checkByteStringIsUtf8(value);
+      clusterId_ = value;
+      bitField0_ |= 0x00000004;
       onChanged();
       return this;
     }

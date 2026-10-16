@@ -35,7 +35,42 @@ public interface SignRound1RequestOrBuilder extends
 
   /**
    * <pre>
-   * Field 3 is kept for the signing intent (audit C2), 6 for its purpose.
+   * The client's signing intent (see SignRequest.intent), forwarded by the leader unchanged. This
+   * node verifies it itself — signature, certificate chain to the cluster CA, signer allowlist and
+   * pins, cluster, key, digest == message, expiry, key ACL, approvals — and binds its nonces to
+   * SHA-256(intent.intent). A leader or peer cannot mint or alter one.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+   * @return Whether the intent field is set.
+   */
+  boolean hasIntent();
+  /**
+   * <pre>
+   * The client's signing intent (see SignRequest.intent), forwarded by the leader unchanged. This
+   * node verifies it itself — signature, certificate chain to the cluster CA, signer allowlist and
+   * pins, cluster, key, digest == message, expiry, key ACL, approvals — and binds its nonces to
+   * SHA-256(intent.intent). A leader or peer cannot mint or alter one.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+   * @return The intent.
+   */
+  com.stakecraft.rutli.grpc.SignedIntent getIntent();
+  /**
+   * <pre>
+   * The client's signing intent (see SignRequest.intent), forwarded by the leader unchanged. This
+   * node verifies it itself — signature, certificate chain to the cluster CA, signer allowlist and
+   * pins, cluster, key, digest == message, expiry, key ACL, approvals — and binds its nonces to
+   * SHA-256(intent.intent). A leader or peer cannot mint or alter one.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+   */
+  com.stakecraft.rutli.grpc.SignedIntentOrBuilder getIntentOrBuilder();
+
+  /**
+   * <pre>
    * The leader's sharing of key_id: its committed epoch and PKP digest. A node whose own committed
    * share differs refuses (FAILED_PRECONDITION, trailer rutli-error=epoch-mismatch carrying its own
    * rutli-epoch / rutli-pkp-digest) and never signs from a mismatched epoch. An empty pkp_digest is
@@ -85,4 +120,28 @@ public interface SignRound1RequestOrBuilder extends
    * @return The signers at the given index.
    */
   int getSigners(int index);
+
+  /**
+   * <pre>
+   * "sign" (or empty) for a signature a client asked for; "sign-test" for the split ceremony's
+   * CeremonySignTest, which carries no intent and is accepted only for the node's OWN test digest
+   * of key_id (computed from the key's provenance) as `message`.
+   * </pre>
+   *
+   * <code>string purpose = 6;</code>
+   * @return The purpose.
+   */
+  java.lang.String getPurpose();
+  /**
+   * <pre>
+   * "sign" (or empty) for a signature a client asked for; "sign-test" for the split ceremony's
+   * CeremonySignTest, which carries no intent and is accepted only for the node's OWN test digest
+   * of key_id (computed from the key's provenance) as `message`.
+   * </pre>
+   *
+   * <code>string purpose = 6;</code>
+   * @return The bytes for purpose.
+   */
+  com.google.protobuf.ByteString
+      getPurposeBytes();
 }

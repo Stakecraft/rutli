@@ -95,6 +95,10 @@ final case class SigningJournalConfig(
   *                   `frost-namespace` id and the cluster's create-once guard would refuse its DKG
   *                   with `ALREADY_EXISTS`. Alphabet `[A-Za-z0-9_-]`. Choose it before the
   *                   participant's first bootstrap and never change it — Canton stores the ids.
+  * @param clusterId  The cosigners' cluster id, named in every signing intent (audit C2) so an
+  *                   intent cannot be replayed into another cluster. Default: learned from the
+  *                   cluster (`Capabilities.cluster_id`). Set it to pin the value (16 hex chars,
+  *                   the cosigners' `cluster_id`).
   */
 final case class FrostConfig(
     endpoint: Option[String] = None,
@@ -103,6 +107,7 @@ final case class FrostConfig(
     tls: Option[FrostTlsConfig] = None,
     hostedKeys: Boolean = false,
     keyPrefix: String = "",
+    clusterId: Option[String] = None,
 ) {
 
   /** All configured endpoints, `endpoints` first then the single `endpoint`, de-duplicated by url

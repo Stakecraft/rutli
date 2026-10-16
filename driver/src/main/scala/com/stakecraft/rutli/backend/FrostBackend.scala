@@ -105,6 +105,11 @@ class FrostBackend(
     // The TLS server name each endpoint must present (url -> name, normally `cosigner<id>`). An
     // endpoint missing here falls back to `tls.domain`, then to its own host.
     endpointTlsNames: Map[String, String] = Map.empty,
+    // The cosigners' cluster id for signing intents; None = learn it from Capabilities.
+    clusterId: Option[String] = None,
+    // How long a signing intent is valid: room for a sign through every endpoint's deadline (the
+    // cosigners accept at most `intent_max_lifetime_secs`, 300 s by default).
+    intentLifetime: FiniteDuration = 180.seconds,
 )(implicit ec: ExecutionContext)
     extends KmsBackend {
 
@@ -133,6 +138,20 @@ class FrostBackend(
   }
 
   private val channels: Vector[ManagedChannel] = endpoints.toVector.map(buildChannel)
+
+  /** Signs every FROST sign's intent with the mTLS identity (audit C2). None without TLS: a
+    * plaintext (dev) cluster has no CA to verify intents against, and gets none. */
+  private val intentSigner: Option[FrostIntentSigner] = tls.map { t =>
+    val signer = FrostIntentSigner.load(t.cert, t.key)
+    logger.info(s"FROST: signing intents are signed by ${signer.subject} (${signer.signatureAlg})")
+    signer
+  }
+  if (tls.isEmpty) logger.warn("FROST: no TLS — signs carry no signing intent (a cosigner with require_intent refuses them)")
+
+  /** The cluster id intents name: configured, or learned once from the cluster. */
+  @volatile private var intentClusterId: Option[String] = clusterId.filter(_.nonEmpty)
+  private val lastIntentWarning = new java.util.concurrent.atomic.AtomicLong(0L)
+  private val lastClusterProbe = new java.util.concurrent.atomic.AtomicLong(0L)
 
   /** Group keys (raw 32-byte Ed25519) agreed across the roster and pinned in memory, per key id.
     * A pinned key never changes for the life of the process: the namespace key is non-rotatable. */
@@ -653,19 +672,34 @@ class FrostBackend(
   }
 
   override def sign(data: Array[Byte], keyId: String, algo: SigningAlgoSpec): Future[Array[Byte]] =
+    sign(data, keyId, algo, com.stakecraft.rutli.policy.ApprovalProof.None)
+
+  override def sign(
+      data: Array[Byte],
+      keyId: String,
+      algo: SigningAlgoSpec,
+      approval: com.stakecraft.rutli.policy.ApprovalProof,
+  ): Future[Array[Byte]] =
     if (ids.isFrost(keyId))
       precondition(algo == SigningAlgoSpec.Ed25519, s"FROST keys sign Ed25519 only, got $algo") {
-        val req = SignRequest.newBuilder().setKeyId(keyId).setMessage(ByteString.copyFrom(data)).build()
         // Captured here, synchronously: the binding is thread-local and the flatMap below runs on a
         // pool thread (see clusterCall).
         val notes = currentNotes.get
+        // One request id per driver call: every leader the sign fails over to gets the same intent,
+        // so the cosigners charge their rate limit once and journal one request (audit C2).
+        val requestId = FrostIntentSigner.newRequestId()
         // Pin the group key first (no-op once pinned), so a signature is never produced for a key
         // the cluster has not agreed on.
         pinnedGroupKey(keyId).flatMap { groupKey =>
           // Re-issuing through another leader opens a fresh session with fresh nonces; the sick
           // leader's session is abandoned and its nonces are burnt by the cosigners (AbortSign, or the
           // pending-session TTL), never reused — see isLeaderSick.
-          Future(blocking(withFailover("sign", isLeaderSick, notes)(_.sign(req)))).map { reply =>
+          Future(blocking {
+            val req = SignRequest.newBuilder().setKeyId(keyId).setMessage(ByteString.copyFrom(data))
+            signingIntent(keyId, data, requestId, approval, notes).foreach(req.setIntent)
+            val built = req.build()
+            withFailover("sign", isLeaderSick, notes)(_.sign(built))
+          }).map { reply =>
             val sig = reply.getSignature.toByteArray
             require(sig.length == 64, s"expected 64-byte Ed25519 signature, got ${sig.length}")
             // Never release a signature the pinned group key does not verify — a wrong-key or
@@ -685,6 +719,66 @@ class FrostBackend(
         }
       }
     else delegate.sign(data, keyId, algo)
+
+  /** The signing intent for one sign (audit C2): signed with the mTLS identity, naming the
+    * cluster, the key, the exact digest, `requestId`, a validity of `intentLifetime` and the
+    * approvals. None — the sign goes without one, which only a cosigner that does not require
+    * intents accepts — without TLS, or while the cluster id is unknown (configured nowhere and no
+    * cosigner reports one: an older cluster, which ignores intents anyway). The request id is noted
+    * in the sign's audit entry (`intent=<hex>`), the key `rutli-cosigner audit-cross-check` matches
+    * the cosigners' sign journals on. */
+  private def signingIntent(
+      keyId: String,
+      data: Array[Byte],
+      requestId: Array[Byte],
+      approval: com.stakecraft.rutli.policy.ApprovalProof,
+      notes: AuditNotes,
+  ): Option[com.stakecraft.rutli.grpc.SignedIntent] =
+    intentSigner.flatMap { signer =>
+      learnClusterId() match {
+        case Some(cluster) =>
+          notes.add(s"intent=${requestId.map("%02x".format(_)).mkString}")
+          Some(signer.sign(cluster, keyId, data, requestId, approval, System.currentTimeMillis(), intentLifetime.toMillis))
+        case None =>
+          val now = System.nanoTime()
+          val last = lastIntentWarning.get
+          if (now - last > 60.seconds.toNanos && lastIntentWarning.compareAndSet(last, now))
+            logger.warn(
+              "FROST: no cosigner reports a cluster id (frost.cluster-id unset) — signing WITHOUT an intent; " +
+                "cosigners that require intents will refuse. Upgrade the cosigners or set frost.cluster-id."
+            )
+          notes.add("intent=none")
+          None
+      }
+    }
+
+  /** The cluster id for intents: configured, else the first non-empty `Capabilities.cluster_id`
+    * any endpoint reports (cached once found; asked again at most once a minute while unknown, so
+    * an older cluster does not cost a Capabilities round per sign). */
+  private def learnClusterId(): Option[String] =
+    intentClusterId.orElse {
+      val now = System.nanoTime()
+      val last = lastClusterProbe.get
+      if (last != 0L && now - last < 60.seconds.toNanos) None
+      else {
+        lastClusterProbe.set(now)
+        val found = channels.indices.iterator.flatMap { i =>
+          try {
+            val id = SignerGrpc
+              .newBlockingStub(channels(i))
+              .withDeadlineAfter(requestTimeout.min(5.seconds).toMillis, TimeUnit.MILLISECONDS)
+              .capabilities(CapabilitiesRequest.newBuilder().build())
+              .getClusterId
+            if (id.nonEmpty) Some(id) else None
+          } catch { case _: StatusRuntimeException => None }
+        }.nextOption()
+        found.foreach { id =>
+          logger.info(s"FROST: cluster id $id (from the cluster) for signing intents")
+          intentClusterId = Some(id)
+        }
+        found
+      }
+    }
 
   override def decryptAsymmetric(
       ciphertext: Array[Byte],

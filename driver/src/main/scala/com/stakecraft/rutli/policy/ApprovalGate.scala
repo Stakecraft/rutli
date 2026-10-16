@@ -14,6 +14,19 @@ import scala.concurrent.{ExecutionContext, Future}
 import scala.jdk.CollectionConverters._
 import scala.util.Try
 
+/** What an approval gate hands the backend for one approved operation: the request nonce and the
+  * approvers' Ed25519 signatures over `requestId = hex(SHA-256(keyId ‖ SHA-256(data) ‖ nonce))`.
+  * The FROST backend carries them in the signing intent, where every cosigner verifies them
+  * against its own approver list (audit C2) — so a gated key needs real approvals at the cluster,
+  * not only in this JVM. Empty for an auto-approved operation. */
+final case class ApprovalProof(nonce: Array[Byte], approvals: Seq[(String, Array[Byte])]) {
+  def isEmpty: Boolean = approvals.isEmpty
+}
+
+object ApprovalProof {
+  val None: ApprovalProof = ApprovalProof(Array.emptyByteArray, Nil)
+}
+
 /** Decides whether a signing operation may proceed. */
 trait ApprovalGate {
 
@@ -21,12 +34,19 @@ trait ApprovalGate {
     * operation is approved, and fails (non-fatally) when it is denied or times out. */
   def authorize(keyId: String, data: Array[Byte]): Future[Unit]
 
+  /** [[authorize]], returning the approvals collected so the cluster can check them itself. A gate
+    * that collects none (the default) returns [[ApprovalProof.None]]. */
+  def authorizeWithProof(keyId: String, data: Array[Byte]): Future[ApprovalProof] =
+    authorize(keyId, data).map(_ => ApprovalProof.None)(ExecutionContext.parasitic)
+
   def close(): Unit = ()
 }
 
 /** No gating — every operation proceeds immediately. The default. */
 object AutoApproveGate extends ApprovalGate {
   override def authorize(keyId: String, data: Array[Byte]): Future[Unit] = Future.unit
+  override def authorizeWithProof(keyId: String, data: Array[Byte]): Future[ApprovalProof] =
+    Future.successful(ApprovalProof.None)
 }
 
 /** M-of-N approval gate over a file inbox.
@@ -53,12 +73,15 @@ final class FileApprovalGate(policy: ApprovalPolicy, logger: Logger)(implicit ec
   policy.carriedProtocolKeyWarnings.foreach(w => logger.warn(w))
 
   override def authorize(keyId: String, data: Array[Byte]): Future[Unit] =
+    authorizeWithProof(keyId, data).map(_ => ())
+
+  override def authorizeWithProof(keyId: String, data: Array[Byte]): Future[ApprovalProof] =
     policy.thresholdFor(keyId) match {
-      case None            => Future.unit // auto-approved
+      case None            => Future.successful(ApprovalProof.None) // auto-approved
       case Some(threshold) => awaitQuorum(keyId, data, threshold)
     }
 
-  private def awaitQuorum(keyId: String, data: Array[Byte], threshold: Int): Future[Unit] =
+  private def awaitQuorum(keyId: String, data: Array[Byte], threshold: Int): Future[ApprovalProof] =
     Future {
       val opDigest = sha256(data)
       val nonce = randomBytes(16)
@@ -69,15 +92,16 @@ final class FileApprovalGate(policy: ApprovalPolicy, logger: Logger)(implicit ec
       )
 
       val deadline = System.nanoTime() + policy.timeout.toNanos
-      var approvals = Set.empty[String]
+      var approvals = Map.empty[String, Array[Byte]]
       while (approvals.size < threshold && System.nanoTime() < deadline) {
         approvals = countApprovals(requestId)
         if (approvals.size < threshold) Thread.sleep(policy.pollInterval.toMillis)
       }
 
       if (approvals.size >= threshold) {
-        logger.info(s"APPROVAL granted: request=$requestId by ${approvals.toList.sorted.mkString(",")}")
+        logger.info(s"APPROVAL granted: request=$requestId by ${approvals.keys.toList.sorted.mkString(",")}")
         cleanup(requestId)
+        ApprovalProof(nonce, approvals.toSeq.sortBy(_._1))
       } else {
         cleanup(requestId)
         throw new SecurityException(
@@ -87,19 +111,20 @@ final class FileApprovalGate(policy: ApprovalPolicy, logger: Logger)(implicit ec
       }
     }
 
-  /** Distinct approver ids with a valid signature over `requestId`. */
-  private def countApprovals(requestId: String): Set[String] = {
+  /** Distinct approver ids with a valid signature over `requestId`, and that signature. */
+  private def countApprovals(requestId: String): Map[String, Array[Byte]] = {
     val requestIdBytes = requestId.getBytes(UTF_8)
     listFiles(approvalsDir, s"$requestId.").flatMap { f =>
       Try {
         val a = parseApproval(Files.readString(f))
+        val sig = Base64.getDecoder.decode(a.signatureB64)
         for {
           approver <- policy.approverById(a.approverId)
           if a.requestId == requestId
-          if verifyEd25519(approver.publicKey, requestIdBytes, Base64.getDecoder.decode(a.signatureB64))
-        } yield approver.id
+          if verifyEd25519(approver.publicKey, requestIdBytes, sig)
+        } yield approver.id -> sig
       }.toOption.flatten
-    }.toSet
+    }.toMap
   }
 
   private def writePending(requestId: String, keyId: String, opDigest: Array[Byte], nonce: Array[Byte]): Unit = {

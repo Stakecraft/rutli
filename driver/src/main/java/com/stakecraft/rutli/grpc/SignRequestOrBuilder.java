@@ -30,4 +30,43 @@ public interface SignRequestOrBuilder extends
    * @return The message.
    */
   com.google.protobuf.ByteString getMessage();
+
+  /**
+   * <pre>
+   * The client's signed authorization for exactly this signature (audit C2): every participating
+   * cosigner verifies it independently before it commits to a nonce, and again before it releases
+   * its share. The leader also requires the intent's signer to be the mTLS caller. Absent from a
+   * driver that predates intents: accepted (with rutli_sign_intent_absent_total) unless the node
+   * sets signing_policy.require_intent.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+   * @return Whether the intent field is set.
+   */
+  boolean hasIntent();
+  /**
+   * <pre>
+   * The client's signed authorization for exactly this signature (audit C2): every participating
+   * cosigner verifies it independently before it commits to a nonce, and again before it releases
+   * its share. The leader also requires the intent's signer to be the mTLS caller. Absent from a
+   * driver that predates intents: accepted (with rutli_sign_intent_absent_total) unless the node
+   * sets signing_policy.require_intent.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+   * @return The intent.
+   */
+  com.stakecraft.rutli.grpc.SignedIntent getIntent();
+  /**
+   * <pre>
+   * The client's signed authorization for exactly this signature (audit C2): every participating
+   * cosigner verifies it independently before it commits to a nonce, and again before it releases
+   * its share. The leader also requires the intent's signer to be the mTLS caller. Absent from a
+   * driver that predates intents: accepted (with rutli_sign_intent_absent_total) unless the node
+   * sets signing_policy.require_intent.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+   */
+  com.stakecraft.rutli.grpc.SignedIntentOrBuilder getIntentOrBuilder();
 }
