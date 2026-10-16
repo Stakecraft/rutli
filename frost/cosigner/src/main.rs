@@ -110,13 +110,30 @@ enum Command {
     /// store under `data_dir/keys` can be listed, opened and written, and this node's gRPC port
     /// accepts connections. Prints `ready` (exit 0) or the reason (exit 1). Needs no seal secret.
     Health,
-    /// Restore this node's key shares from a backup directory. Run with the node stopped.
+    /// Restore this node's key files from a backup directory (audit M1). Run with the daemon
+    /// STOPPED (the instance lock is taken). Every file is verified first — sealed, bound to this
+    /// cluster/node/key (key-file v2), consistent — and one refusal writes nothing. Never rolls a
+    /// FROST share back to an older epoch (nor another sharing, nor a hosted key over its
+    /// tombstone), even with --force, short of a per-key break-glass naming the exact backup.
+    /// Installs atomically per file. At its next start the node checks the restored shares against
+    /// its peers and refuses to sign with any that is behind.
     Restore {
         #[arg(long)]
         from: std::path::PathBuf,
-        /// Overwrite existing share files.
+        /// Replace a live file when the backup is ahead of it (a newer epoch, a tombstone over a
+        /// live key). Never allows going back.
         #[arg(long)]
         force: bool,
+        /// BREAK-GLASS: restore --key-id despite a rollback refusal. Needs --expected-epoch and
+        /// --expected-digest exactly as the refusal printed them.
+        #[arg(long, requires_all = ["key_id", "expected_epoch", "expected_digest"])]
+        break_glass: bool,
+        #[arg(long)]
+        key_id: Option<String>,
+        #[arg(long)]
+        expected_epoch: Option<u64>,
+        #[arg(long)]
+        expected_digest: Option<String>,
     },
     /// Split ceremony, step 1 (docs/split-ceremony.md): mint this node's one-time recipient key for
     /// an imported key and write the public request the dealer needs. The secret half stays here,
@@ -431,7 +448,20 @@ async fn main() -> Result<()> {
                 key_prefix.as_deref(),
             )
         }
-        Some(Command::Restore { from, force }) => return restore_command(&cfg, &from, force),
+        Some(Command::Restore { from, force, break_glass, key_id, expected_epoch, expected_digest }) => {
+            let glass = match (break_glass, key_id, expected_epoch, expected_digest) {
+                (true, Some(key_id), Some(expected_epoch), Some(expected_digest)) => {
+                    Some(rutli_cosigner::restore::BreakGlass { key_id, expected_epoch, expected_digest })
+                }
+                (false, None, None, None) => None,
+                _ => {
+                    return Err(DaemonError::Config(
+                        "--key-id, --expected-epoch and --expected-digest go with --break-glass, all together".into(),
+                    ))
+                }
+            };
+            return restore_command(&cfg, &from, force, glass.as_ref());
+        }
         Some(Command::ShareRecipient { key_id, ceremony_id, out, replace }) => {
             return share_recipient_command(&cfg, &key_id, &ceremony_id, &out, replace)
         }
@@ -1355,12 +1385,32 @@ fn readiness(cfg: &Config) -> std::result::Result<(), String> {
     Ok(())
 }
 
-/// Restore key-share files from `from` into data_dir/keys.
-fn restore_command(cfg: &Config, from: &std::path::Path, force: bool) -> Result<()> {
-    let dst = cfg.data_dir.join("keys");
-    std::fs::create_dir_all(&dst)?;
-    let n = copy_dir_files(from, &dst, force)?;
-    println!("restored {n} share file(s) from {} to {}", from.display(), dst.display());
+/// `restore`: see [`Command::Restore`] and [`rutli_cosigner::restore`].
+fn restore_command(
+    cfg: &Config,
+    from: &std::path::Path,
+    force: bool,
+    glass: Option<&rutli_cosigner::restore::BreakGlass>,
+) -> Result<()> {
+    let _lock = rutli_cosigner::instance_lock::InstanceLock::acquire(&cfg.data_dir)?;
+    let keystore = match &cfg.share_seal {
+        Some(_) => offline_keystore(cfg)?,
+        None => KeyStore::open(cfg.data_dir.join("keys"))?,
+    };
+    let plan = rutli_cosigner::restore::plan(&keystore, from, force, glass)?;
+    for (key_id, why) in &plan.skipped {
+        println!("  {key_id}: unchanged ({why})");
+    }
+    let n = rutli_cosigner::restore::apply(&keystore, &plan, false)?;
+    for (key_id, _) in &plan.install {
+        println!("  {key_id}: restored{}", if plan.broke_glass.contains(key_id) { " (BREAK-GLASS)" } else { "" });
+    }
+    println!(
+        "restored {n} key file(s) from {} into {}. At its next start this node compares every share \
+         with its peers and refuses to sign with one that is behind (rutli_stale_share).",
+        from.display(),
+        keystore.dir().display()
+    );
     Ok(())
 }
 
