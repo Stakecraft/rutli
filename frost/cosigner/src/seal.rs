@@ -607,6 +607,7 @@ mod tests {
             signer_allowlist: None,
             peer_allowlist: None,
             operator_allowlist: None,
+            refresh_allowlist: None,
             ceremony_sign_test_rate_limit_per_min: 0,
             metrics_listen: None,
             hosted_keys: Some(crate::config::HostedKeysConfig {

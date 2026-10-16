@@ -45,6 +45,22 @@ pub const EPOCH_CHECK_SKIPPED: &str = "rutli_epoch_check_skipped_total";
 pub const STALE_SHARE: &str = "rutli_stale_share";
 /// Sign attempts beyond the first within one Sign request: a t-subset failed and the leader
 /// retried with another (fresh session, fresh commitments).
+/// Sign rounds this node took part in without a signing intent (a driver or leader older than
+/// intents), accepted because `signing_policy.require_intent` is off.
+pub const SIGN_INTENT_ABSENT: &str = "rutli_sign_intent_absent_total";
+/// Signing-policy refusals at this node, by `reason` (certificate, signer, pin, signature, cluster,
+/// key, purpose, expiry, acl, approval, malformed, missing, role, sign-test).
+pub const SIGN_POLICY_REFUSALS: &str = "rutli_sign_policy_refusals_total";
+/// Signature shares this node refused because a per-key sign rate limit or the per-request share
+/// cap was reached.
+pub const SIGN_RATE_LIMITED: &str = "rutli_sign_rate_limited_total";
+/// Key operations by a Signer client CN with no `signing_policy.signer_acl` entry (allowed while
+/// `signer_acl_required` is off).
+pub const SIGNER_ACL_ABSENT: &str = "rutli_signer_acl_absent_total";
+/// Sign journal entries appended (one per released signature share).
+pub const SIGN_JOURNAL_ENTRIES: &str = "rutli_sign_journal_entries_total";
+/// Sign journal failures (corrupt on open, append failed): the share was refused.
+pub const SIGN_JOURNAL_ERRORS: &str = "rutli_sign_journal_errors_total";
 pub const SIGN_RETRIES: &str = "rutli_sign_retries_total";
 /// Signature shares that failed verification at aggregation (attributed to a cosigner and routed
 /// around). Any increase means a cosigner returned a bad share: alert on it.
@@ -149,6 +165,11 @@ fn prime() {
     metrics::counter!(UNREADABLE_KEY_FILES).absolute(0);
     metrics::counter!(DECRYPT_RATE_LIMITED).absolute(0);
     metrics::counter!(CEREMONY_SIGN_TEST_RATE_LIMITED).absolute(0);
+    metrics::counter!(SIGN_INTENT_ABSENT).absolute(0);
+    metrics::counter!(SIGN_RATE_LIMITED).absolute(0);
+    metrics::counter!(SIGNER_ACL_ABSENT).absolute(0);
+    metrics::counter!(SIGN_JOURNAL_ENTRIES).absolute(0);
+    metrics::counter!(SIGN_JOURNAL_ERRORS).absolute(0);
     // No hosted keys yet means no shortfall — not a shortfall of zero, which would page instantly.
     metrics::gauge!(KEY_REPLICAS).set(f64::NAN);
     metrics::counter!(SIGN_ABORTS).absolute(0);
@@ -164,6 +185,12 @@ pub fn describe() {
     describe_counter!(CEREMONY_RESOLUTIONS, "Two-phase ceremonies resolved on this node, by result");
     describe_gauge!(CEREMONIES_STAGED, "Staged (yes-voted, unresolved) ceremonies on this node");
     describe_counter!(SIGN_ROUND1_SKIPS, "Peers skipped during sign round 1 (quorum-margin canary)");
+    describe_counter!(SIGN_INTENT_ABSENT, "Sign rounds accepted without a signing intent (require_intent off)");
+    describe_counter!(SIGN_POLICY_REFUSALS, "Signing-policy refusals at this node, by reason");
+    describe_counter!(SIGN_RATE_LIMITED, "Signature shares refused by the per-key sign rate limit or share cap");
+    describe_counter!(SIGNER_ACL_ABSENT, "Key operations by a client CN without a signer_acl entry");
+    describe_counter!(SIGN_JOURNAL_ENTRIES, "Sign journal entries appended (one per released share)");
+    describe_counter!(SIGN_JOURNAL_ERRORS, "Sign journal failures; the share was refused");
     describe_counter!(EPOCH_MISMATCH, "Sign round-1 refusals: the leader signed with another sharing (epoch)");
     describe_counter!(EPOCH_CHECK_SKIPPED, "Sign round-1 requests without the leader's sharing (pre-epoch leader)");
     describe_gauge!(STALE_SHARE, "1 while this node's share of the key is stale (refuses to sign), else 0");

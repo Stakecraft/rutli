@@ -79,6 +79,8 @@ fn signer(node: &Arc<Node>, peers: &Peers, decrypt_per_min: u32) -> SignerSvc {
         hosted_write_quorum: DEFAULT_WRITE_QUORUM,
         decrypt_limiter: Arc::new(DecryptRateLimiter::new(decrypt_per_min)),
         ceremony_test_limiter: Arc::new(DecryptRateLimiter::new(0)),
+        sign_guard: None,
+        refresh_cns: None,
     }
 }
 

@@ -90,9 +90,10 @@ impl PeerApi for Faulty {
         session_id: &str,
         message: &[u8],
         commitments: &BTreeMap<Identifier, SigningCommitments>,
+        intent_digest: Option<&[u8; 32]>,
     ) -> Result<SignatureShare> {
         self.gate()?;
-        self.inner.sign_round2(key_id, session_id, message, commitments).await
+        self.inner.sign_round2(key_id, session_id, message, commitments, intent_digest).await
     }
     async fn abort_sign(&self, key_id: &str, session_id: &str) -> Result<()> {
         self.gate()?;

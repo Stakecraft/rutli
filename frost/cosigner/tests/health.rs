@@ -64,6 +64,8 @@ async fn unreadable_keys_dir_makes_health_not_serving() {
         hosted_write_quorum: 1,
         decrypt_limiter: Arc::new(DecryptRateLimiter::new(0)),
         ceremony_test_limiter: Arc::new(DecryptRateLimiter::new(0)),
+        sign_guard: None,
+        refresh_cns: None,
     };
     std::fs::write(keys.join("some-key.json"), b"{}").unwrap();
 
@@ -77,7 +79,7 @@ async fn unreadable_keys_dir_makes_health_not_serving() {
     // every driver version fails over on), not an INTERNAL from deep inside a session or ceremony.
     let led_sign = Signer::sign(
         &svc,
-        Request::new(SignRequest { key_id: "some-key".into(), message: canton_digest() }),
+        Request::new(SignRequest { key_id: "some-key".into(), message: canton_digest(), intent: None }),
     )
     .await;
     let led_dkg = Signer::dkg(&svc, Request::new(DkgRequest { key_id: "new-key".into() })).await;

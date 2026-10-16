@@ -584,6 +584,7 @@ impl PeerApi for FailRound2 {
         _session_id: &str,
         _message: &[u8],
         _commitments: &BTreeMap<Identifier, SigningCommitments>,
+        _intent_digest: Option<&[u8; 32]>,
     ) -> DaemonResult<SignatureShare> {
         Err(DaemonError::Disagreement("forced round2 failure".into()))
     }
@@ -989,6 +990,7 @@ impl PeerApi for UnreachablePeer {
         _: &str,
         _: &[u8],
         _: &BTreeMap<Identifier, SigningCommitments>,
+        _: Option<&[u8; 32]>,
     ) -> DaemonResult<SignatureShare> {
         Err(down())
     }
@@ -1054,6 +1056,7 @@ impl PeerApi for FixedErrorPeer {
         _: &str,
         _: &[u8],
         _: &BTreeMap<Identifier, SigningCommitments>,
+        _: Option<&[u8; 32]>,
     ) -> DaemonResult<SignatureShare> {
         Err(clone_err(&self.error))
     }

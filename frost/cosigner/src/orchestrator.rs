@@ -363,6 +363,23 @@ pub const SIGN_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
 /// the [`PeerApi`] calls do the same on their side), so a stalled volume parks a blocking thread,
 /// never an async worker.
 pub async fn sign(node: &Arc<Node>, peers: &Peers, key_id: &str, message: &[u8]) -> Result<[u8; 64]> {
+    sign_with_intent(node, peers, key_id, message, None).await
+}
+
+/// [`sign`] for a client's signing intent (audit C2), forwarded unchanged to every member in round
+/// 1 (each verifies it itself and binds its session to it) and named by digest in round 2. The
+/// caller (`Signer.Sign`) has verified it and bound it to the mTLS caller already. A member's
+/// policy refusal (an invalid intent there, its rate limit, missing approvals under its rules)
+/// excludes it like any failure; when no subset can sign, that refusal is the answer
+/// (PERMISSION_DENIED / RESOURCE_EXHAUSTED, which the driver does not fail over on) rather than
+/// UNAVAILABLE.
+pub async fn sign_with_intent(
+    node: &Arc<Node>,
+    peers: &Peers,
+    key_id: &str,
+    message: &[u8],
+    intent: Option<&crate::pb::SignedIntent>,
+) -> Result<[u8; 64]> {
     if message.len() != CANTON_DIGEST_LEN {
         return Err(DaemonError::InvalidMessageLength {
             got: message.len(),
@@ -387,6 +404,8 @@ pub async fn sign(node: &Arc<Node>, peers: &Peers, key_id: &str, message: &[u8])
     ordered.extend(peers.iter().filter(|p| p.identifier() != node.identifier));
 
     let mut excluded: BTreeMap<Identifier, String> = BTreeMap::new();
+    // The first signing-policy refusal by a member: the answer if no subset can sign.
+    let mut policy_refusal: Option<DaemonError> = None;
     // Sharings peers reported that differ from ours and are not older (epoch-mismatch refusals).
     let mut elsewhere: BTreeMap<Identifier, crate::node::KeyVersion> = BTreeMap::new();
     let mut attempts = 0usize;
@@ -402,12 +421,16 @@ pub async fn sign(node: &Arc<Node>, peers: &Peers, key_id: &str, message: &[u8])
         if attempts > 1 {
             metrics::counter!(crate::metrics::SIGN_RETRIES).increment(1);
         }
-        let ctx = crate::node::Round1Ctx { leader_view: Some(me.view), ..Default::default() };
+        let ctx =
+            crate::node::Round1Ctx { leader_view: Some(me.view), intent: intent.cloned(), ..Default::default() };
         match attempt(node, &members, key_id, message, &ctx, "sign").await {
             Ok(signature) => return Ok(signature),
             Err(Attempt::Fatal(e)) => return Err(e),
             Err(Attempt::Members(failed)) => {
                 for (id, e) in failed {
+                    if policy_refusal.is_none() && is_policy_refusal(&e) {
+                        policy_refusal = Some(clone_policy_refusal(&e));
+                    }
                     if let DaemonError::EpochMismatch { peer, .. } = &e {
                         if peer.0 >= me.view.0 {
                             elsewhere.insert(id, *peer);
@@ -432,6 +455,9 @@ pub async fn sign(node: &Arc<Node>, peers: &Peers, key_id: &str, message: &[u8])
     }
     let usable = ordered.len() - excluded.len();
     tracing::warn!(key_id, attempts, ?excluded, "sign gave up: no t-subset of cosigners could sign");
+    if let Some(refusal) = policy_refusal {
+        return Err(refusal);
+    }
     if usable < threshold {
         Err(DaemonError::ThresholdNotMet { needed: threshold, got: usable })
     } else {
@@ -440,6 +466,18 @@ pub async fn sign(node: &Arc<Node>, peers: &Peers, key_id: &str, message: &[u8])
             started.elapsed(),
             excluded.len()
         )))
+    }
+}
+
+/// A member refused for the signing policy (audit C2) rather than for being unable to sign.
+fn is_policy_refusal(e: &DaemonError) -> bool {
+    matches!(e, DaemonError::PolicyRefused(_) | DaemonError::RateLimited(_))
+}
+
+fn clone_policy_refusal(e: &DaemonError) -> DaemonError {
+    match e {
+        DaemonError::RateLimited(m) => DaemonError::RateLimited(m.clone()),
+        other => DaemonError::PolicyRefused(other.to_string()),
     }
 }
 
@@ -483,9 +521,10 @@ async fn attempt(
             }
         }
     }
+    let intent_digest = ctx.intent.as_ref().map(crate::intent::intent_digest);
     let mut shares: BTreeMap<Identifier, SignatureShare> = BTreeMap::new();
     for p in members {
-        match p.sign_round2(key_id, &session_id, message, &commitments).await {
+        match p.sign_round2(key_id, &session_id, message, &commitments, intent_digest.as_ref()).await {
             Ok(share) => {
                 shares.insert(p.identifier(), share);
             }
@@ -601,8 +640,9 @@ pub async fn ceremony_sign_test(
         return Err(DaemonError::Ceremony(format!("{signers:?} are not all in this node's roster")));
     }
 
-    // One attempt over exactly this quorum, with the leader's sharing like any sign.
-    let ctx = crate::node::Round1Ctx { leader_view: Some(view.view), ..Default::default() };
+    // One attempt over exactly this quorum, with the leader's sharing like any sign. No intent: each
+    // member accepts a sign-test round only for its own test digest of the key.
+    let ctx = crate::node::Round1Ctx { leader_view: Some(view.view), sign_test: true, ..Default::default() };
     match attempt(node, &quorum, key_id, &message, &ctx, "signtest").await {
         Ok(signature) => Ok((message, signature)),
         Err(Attempt::Fatal(e)) => Err(e),

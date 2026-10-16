@@ -132,6 +132,8 @@ fn signer_svc(node: &Arc<Node>, peers: &Peers) -> rutli_cosigner::service::Signe
         ceremony_test_limiter: Arc::new(rutli_cosigner::service::ceremony_sign_test_limiter(
             rutli_cosigner::config::DEFAULT_CEREMONY_SIGN_TEST_RATE_LIMIT_PER_MIN,
         )),
+        sign_guard: None,
+        refresh_cns: None,
     }
 }
 
@@ -260,6 +262,7 @@ impl PeerApi for DownPeer {
         _: &str,
         _: &[u8],
         _: &BTreeMap<Identifier, SigningCommitments>,
+        _: Option<&[u8; 32]>,
     ) -> DaemonResult<SignatureShare> {
         down()
     }
