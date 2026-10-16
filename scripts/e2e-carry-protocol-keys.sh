@@ -28,6 +28,10 @@
 #      ok (the latter again after the reconnect: sequencer authentication), ECIES
 #      `decryptAsymmetric keyId=…rutli-enc-imported-…` ok, nothing failed for any of them; then
 #      verify-key and verify-hosted once more.
+#   5. The cosigner signing policy (audit C2) is fully enforced throughout (require_intent, the
+#      driver's key ACL and SPKI pin, refresher-only refresh): every journal entry is a driver-signed
+#      intent, and `audit-cross-check` finds the driver's hash-chained audit log and the three
+#      cosigner journals consistent (every ok sign journaled on at least two nodes).
 #
 # Requires: cargo, sbt, jq, openssl, an OpenJDK 17+ (Oracle's JDK refuses Canton's unsigned
 # BouncyCastle for Cipher; set CANTON_JAVA_HOME, default: Homebrew's openjdk).
@@ -94,8 +98,12 @@ step "mTLS trust domain, seal secret, configs (127.0.0.1:$((BASE_PORT + 1))..$((
 "$REPO/scripts/gen-frost-certs.sh" 3 "$WORK/certs" >/dev/null
 export RUTLI_SEAL_SECRET
 RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
+# The cosigner signing policy fully enforced (audit C2): every signature needs a driver-signed
+# intent, the driver may use only its own prefix, its key is pinned, and only the refresher refreshes.
+DRIVER_PIN="$(openssl x509 -in "$WORK/certs/driver.crt" -noout -pubkey | openssl pkey -pubin -outform DER \
+  | openssl dgst -sha256 -hex | awk '{print $NF}')"
 mkconfig() { # node-config-name  cert-name  out
-  jq --arg work "$WORK" --arg cert "$2" --argjson base "$BASE_PORT" '
+  jq --arg work "$WORK" --arg cert "$2" --argjson base "$BASE_PORT" --arg prefix "$PREFIX" --arg pin "$DRIVER_PIN" '
       .listen = "127.0.0.1:\($base + .identifier)"
     | .data_dir = "\($work)/node\(.identifier)"
     | .peers |= map(.endpoint = "https://127.0.0.1:\($base + .identifier)")
@@ -103,13 +111,16 @@ mkconfig() { # node-config-name  cert-name  out
     | .tls.cert = "\($work)/certs/\($cert).crt"
     | .tls.key = "\($work)/certs/\($cert).key"
     | .hosted_keys.anti_entropy_interval_secs = 10
+    | .refresh_allowlist = ["refresher"]
+    | .signing_policy = { require_intent: true, require_epoch_match: true, signer_acl_required: true,
+        signer_may_refresh: false, signer_acl: { driver: [$prefix] }, signer_pins: { driver: [$pin] } }
     | del(.metrics_listen)' "$REPO/deploy/frost/config-tls/$1.json" >"$3"
 }
 for i in 1 2 3; do mkconfig "cosigner$i" "cosigner$i" "$WORK/c$i.json"; done
 # The operator role (KeyStatus, HostedKeyStatus, CeremonySignTest) runs verify-key and
-# verify-hosted; the driver cert, like the refresh CronJob, runs refresh.
+# verify-hosted; the refresher (refresh_allowlist), like the refresh CronJob, runs refresh.
 mkconfig cosigner1 operator "$WORK/operator.json"
-mkconfig cosigner1 driver "$WORK/driver.json"
+mkconfig cosigner1 refresher "$WORK/refresher.json"
 
 start() {
   RUST_LOG=info "$COSIGNER" --config "$WORK/c$1.json" serve >>"$WORK/node$1.log" 2>&1 &
@@ -184,8 +195,8 @@ carry() { # vector-name  key-id  fingerprint  recorded-usage-json
   jq -e --arg d "$digest" '.ok and .pkp_digest == $d and .refresh_count == 0 and .carried_for == "protocol"
     and (.sign_test | length == 3) and all(.sign_test[]; .ok)' <<<"$rep" >/dev/null || fail "verify-key: $rep"
 
-  step "   ${name}: refresh (driver cert), verify-key again"
-  cli --config "$WORK/driver.json" refresh --key-id "$key_id" >/dev/null
+  step "   ${name}: refresh (refresher cert), verify-key again"
+  cli --config "$WORK/refresher.json" refresh --key-id "$key_id" >/dev/null
   rep="$(cli --config "$WORK/operator.json" verify-key --key-id "$key_id" --expect-fingerprint "$fp" --sign-test --json || true)"
   jq -e --arg d "$digest" '.ok and .pkp_digest != $d and .refresh_count == 1 and .carried_for == "protocol"
     and all(.sign_test[]; .ok)' <<<"$rep" >/dev/null || fail "verify-key after refresh: $rep"
@@ -243,6 +254,7 @@ canton {
         config = {
           backend = "frost"
           audit-logging = true
+          audit-log-path = "$WORK/driver-audit.jsonl"
           frost = {
             endpoints = [
               { url = "127.0.0.1:$((BASE_PORT + 1))", tls-name = "cosigner1" },
@@ -383,3 +395,15 @@ for pair in "$SIG_ID:$SIG_FP" "$SEQ_ID:$SEQ_FP"; do
 done
 cli --config "$WORK/operator.json" verify-hosted --key-id "$ENC_ID" --expect-fingerprint "$ENC_FP" >/dev/null \
   || fail "verify-hosted after the Canton run"
+
+step "5. Every signature carried a driver intent; the driver audit log and the cosigner journals agree"
+for i in 1 2 3; do
+  n="$(cat "$WORK"/node$i/journal/*/*.jsonl 2>/dev/null | grep -c '"purpose":"sign".*"signer_cn":"driver"' || true)"
+  echo "node $i journaled $n signature(s) under a driver intent"
+done
+NOINTENT="$(cat "$WORK"/node*/journal/*/*.jsonl | grep -c '"purpose":"no-intent"' || true)"
+[ "$NOINTENT" -eq 0 ] || fail "$NOINTENT signature(s) without an intent under require_intent"
+grep -q 'intent=[0-9a-f]\{32\}' "$WORK/driver-audit.jsonl" || fail "the driver audit log names no intent"
+"$COSIGNER" audit-cross-check --driver-audit "$WORK/driver-audit.jsonl" \
+  --journal "$WORK/node1/journal" --journal "$WORK/node2/journal" --journal "$WORK/node3/journal" \
+  --min-journals 2 || fail "audit-cross-check found discrepancies"
