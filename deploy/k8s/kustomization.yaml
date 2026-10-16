@@ -1,23 +1,19 @@
 # Copyright 2026 StakeCraft
 # SPDX-License-Identifier: Apache-2.0
 #
-# Applies the cosigner cluster. Create the two Secrets out-of-band first (see secrets.example.yaml);
+# Applies the cosigner cluster. Create the Secrets out-of-band first (see secrets.example.yaml);
 # they are intentionally NOT listed here so real key material is never kustomize-managed from the repo.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: rutli
 resources:
   - namespace.yaml
-  - cosigner-config.yaml
-  - service.yaml
-  - statefulset.yaml
-  - networkpolicy.yaml
-  - pdb.yaml
-  # Day-2 CronJobs are opt-in. cronjob-backup.yaml backs up via `kubectl exec` into each cosigner
-  # (it never mounts a cosigner volume — see its header) and needs ship.sh in ConfigMap
-  # rutli-backup-destination pointed at your off-cluster destination first. cronjob-refresh.yaml
-  # needs KEY_ID.
-  # - cronjob-backup.yaml
+  # GENERATED from the Helm chart (scripts/render-k8s.sh, values.yaml): per-node StatefulSets,
+  # Services, PVCs, backup sidecars, the config, NetworkPolicy and PDB.
+  - cosigner.yaml
+  - client-config.yaml
+  # Opt-in: cronjob-refresh.yaml needs KEY_ID — and must NOT run until the ceremony fixes (audit
+  # C1/H1) ship; see its header. There is no backup CronJob: each pod's backup sidecar does it.
   # - cronjob-refresh.yaml
 images:
   - name: ghcr.io/stakecraft/rutli-cosigner

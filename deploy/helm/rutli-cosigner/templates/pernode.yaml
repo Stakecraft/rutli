@@ -1,0 +1,282 @@
+{{- if eq (include "rutli-cosigner.topology" .) "perNode" }}
+{{- $fullname := include "rutli-cosigner.fullname" . }}
+{{- $nodes := include "rutli-cosigner.nodes" . | fromJsonArray }}
+{{- $backup := .Values.backup }}
+{{- if $backup.enabled }}
+  {{- if not (has $backup.destination.type (list "pvc" "script")) }}
+    {{- fail (printf "backup.destination.type must be pvc or script, got %q" $backup.destination.type) }}
+  {{- end }}
+  {{- if not (regexMatch "^([01][0-9]|2[0-3]):[0-5][0-9]$" (toString $backup.dailyAtUtc)) }}
+    {{- fail (printf "backup.dailyAtUtc must be HH:MM (UTC), got %q" (toString $backup.dailyAtUtc)) }}
+  {{- end }}
+{{- end }}
+{{- range $node := $nodes }}
+{{- $id := int $node.id }}
+{{- $name := printf "%s-n%d" $fullname $id }}
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Node {{ $id }} (topology=perNode). This pod spec names exactly one seal Secret and one TLS Secret —
+# node {{ $id }}'s — so only the kubelet running this pod may read them (node authorizer), and no
+# other pod spec ever references them. scripts/check-deploy-policy.sh enforces that.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "rutli-cosigner.labels" $ | nindent 4 }}
+    rutli.io/node: {{ $id | quote }}
+spec:
+  # A StatefulSet, not a Deployment, even for one replica: it never starts a replacement while the
+  # old pod object still exists, so a partitioned node cannot end up with two live processes on one
+  # share (a ReplicaSet replaces a Terminating pod at once).
+  serviceName: {{ $fullname }}
+  replicas: 1
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "rutli-cosigner.selectorLabels" $ | nindent 6 }}
+      rutli.io/node: {{ $id | quote }}
+  template:
+    metadata:
+      labels:
+        {{- include "rutli-cosigner.selectorLabels" $ | nindent 8 }}
+        rutli.io/node: {{ $id | quote }}
+      {{- if and $.Values.metrics.enabled $.Values.metrics.annotations }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: {{ $.Values.service.metricsPort | quote }}
+        prometheus.io/path: /metrics
+      {{- end }}
+    spec:
+      {{- with $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # No API access from a cosigner pod, ever.
+      automountServiceAccountToken: false
+      securityContext:
+        {{- toYaml $.Values.podSecurityContext | nindent 8 }}
+      {{- if or (ne $.Values.podAntiAffinity "none") $.Values.affinity }}
+      affinity:
+        {{- if eq $.Values.podAntiAffinity "required" }}
+        # Across all nodes' StatefulSets (shared labels): never two shares on one host.
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  {{- include "rutli-cosigner.selectorLabels" $ | nindent 18 }}
+              topologyKey: kubernetes.io/hostname
+        {{- else if eq $.Values.podAntiAffinity "preferred" }}
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    {{- include "rutli-cosigner.selectorLabels" $ | nindent 20 }}
+                topologyKey: kubernetes.io/hostname
+        {{- end }}
+        {{- with $.Values.affinity }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- end }}
+      {{- if $.Values.topologySpreadConstraints.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ $.Values.topologySpreadConstraints.maxSkew }}
+          topologyKey: {{ $.Values.topologySpreadConstraints.topologyKey }}
+          whenUnsatisfiable: {{ $.Values.topologySpreadConstraints.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "rutli-cosigner.selectorLabels" $ | nindent 14 }}
+      {{- end }}
+      {{- with $.Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $.Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: cosigner
+          image: {{ include "rutli-cosigner.image" $ }}
+          imagePullPolicy: {{ $.Values.image.pullPolicy }}
+          args: ["--config", "/config/cosigner-{{ $id }}.json"]
+          env:
+            - name: RUST_LOG
+              value: info
+            {{- with $.Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: grpc
+              containerPort: {{ $.Values.service.grpcPort }}
+            {{- if $.Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ $.Values.service.metricsPort }}
+            {{- end }}
+          # Readiness = "this node can actually sign" (key store usable + gRPC port open); see the
+          # legacy StatefulSet template and README, "Probes".
+          readinessProbe:
+            exec:
+              command: ["rutli-cosigner", "--config", "/config/cosigner-{{ $id }}.json", "health"]
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # Liveness stays a bare TCP check on purpose: a restart does not fix a broken volume.
+          livenessProbe:
+            tcpSocket: { port: grpc }
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            {{- toYaml $.Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml $.Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - { name: config, mountPath: /config, readOnly: true }
+            - { name: certs, mountPath: /certs, readOnly: true }
+            - { name: seal, mountPath: /run/rutli/seal, readOnly: true }
+            - { name: data, mountPath: /data }
+            - { name: tmp, mountPath: /tmp }
+        {{- if $backup.enabled }}
+        # Copies this node's SEALED key files to this node's destination. Data volume read-only; no
+        # seal bundle, no TLS key, no API token: it never holds anything that opens a share.
+        - name: backup
+          image: {{ if $backup.image.repository }}{{ printf "%s:%s" $backup.image.repository $backup.image.tag }}{{ else }}{{ include "rutli-cosigner.image" $ }}{{ end }}
+          imagePullPolicy: {{ $backup.image.pullPolicy | default $.Values.image.pullPolicy }}
+          command: ["/bin/sh", "/destination/backup-loop.sh"]
+          env:
+            - { name: NODE_ID, value: {{ $id | quote }} }
+            - { name: DAILY_AT_UTC, value: {{ $backup.dailyAtUtc | quote }} }
+            - { name: RUN_ON_START, value: {{ $backup.runOnStart | toString | quote }} }
+          resources:
+            {{- toYaml $backup.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml $.Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - { name: data, mountPath: /data, readOnly: true }
+            - { name: destination, mountPath: /destination, readOnly: true }
+            - { name: backup-work, mountPath: /work }
+            {{- if eq $backup.destination.type "pvc" }}
+            - { name: backup-dest, mountPath: /backup }
+            {{- else if $node.backupSecret }}
+            - { name: backup-creds, mountPath: /backup-creds, readOnly: true }
+            {{- end }}
+        {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $fullname }}-config
+        # Node {{ $id }}'s TLS identity and the CA — nothing of any other node. 0440, not 0400: Secret
+        # files are owned by root, and the non-root cosigner (uid 10001) reads them through fsGroup.
+        - name: certs
+          projected:
+            defaultMode: 0440
+            sources:
+              - secret:
+                  name: {{ $.Values.tls.caSecretName }}
+                  items: [{ key: ca.crt, path: ca.crt }]
+              - secret:
+                  name: {{ $node.tlsSecret }}
+                  items:
+                    - { key: tls.crt, path: cosigner{{ $id }}.crt }
+                    - { key: tls.key, path: cosigner{{ $id }}.key }
+        # Node {{ $id }}'s seal bundle, as a file (never an env var: exec and /proc/<pid>/environ
+        # expose the env). Mounted into the cosigner container only.
+        - name: seal
+          secret:
+            secretName: {{ $node.sealSecret }}
+            defaultMode: 0440
+            items:
+              - { key: {{ $.Values.seal.secretKey }}, path: {{ $.Values.seal.secretKey }} }
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ $node.dataClaim }}
+        - name: tmp
+          emptyDir: {}
+        {{- if $backup.enabled }}
+        - name: destination
+          configMap:
+            name: {{ $fullname }}-backup
+            defaultMode: 0555
+        - name: backup-work
+          emptyDir: {}
+        {{- if eq $backup.destination.type "pvc" }}
+        - name: backup-dest
+          persistentVolumeClaim:
+            claimName: {{ $node.backupClaim | default (printf "%s-backup-n%d" $fullname $id) }}
+        {{- else if $node.backupSecret }}
+        - name: backup-creds
+          secret:
+            secretName: {{ $node.backupSecret }}
+            defaultMode: 0440
+        {{- end }}
+        {{- end }}
+---
+# Stable endpoint of node {{ $id }} for its peers and the driver, independent of the workload kind:
+# https://{{ $node.service }}.{{ $.Release.Namespace }}.svc:{{ $.Values.service.grpcPort }}, TLS name cosigner{{ $id }}.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $node.service }}
+  labels:
+    {{- include "rutli-cosigner.labels" $ | nindent 4 }}
+    rutli.io/node: {{ $id | quote }}
+spec:
+  type: ClusterIP
+  # The mesh needs not-ready peers during DKG; routing around a sick node is the driver's failover.
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "rutli-cosigner.selectorLabels" $ | nindent 4 }}
+    rutli.io/node: {{ $id | quote }}
+  ports:
+    - name: grpc
+      port: {{ $.Values.service.grpcPort }}
+      targetPort: grpc
+{{- if not $node.existingClaim }}
+---
+# Node {{ $id }}'s share volume. Kept on uninstall: it holds a non-rotatable key share.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $node.dataClaim }}
+  labels:
+    {{- include "rutli-cosigner.labels" $ | nindent 4 }}
+    rutli.io/node: {{ $id | quote }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: {{ $.Values.persistence.accessModes | toJson }}
+  {{- if $.Values.persistence.storageClassName }}
+  storageClassName: {{ $.Values.persistence.storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $.Values.persistence.size }}
+{{- end }}
+{{- if and $backup.enabled (eq $backup.destination.type "pvc") (not $node.backupClaim) }}
+---
+# Node {{ $id }}'s backup destination: sealed key files only, mounted by its backup sidecar only.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ printf "%s-backup-n%d" $fullname $id }}
+  labels:
+    {{- include "rutli-cosigner.labels" $ | nindent 4 }}
+    rutli.io/node: {{ $id | quote }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes: {{ $backup.destination.pvc.accessModes | toJson }}
+  {{- if $backup.destination.pvc.storageClassName }}
+  storageClassName: {{ $backup.destination.pvc.storageClassName | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $backup.destination.pvc.size }}
+{{- end }}
+---
+{{- end }}
+{{- end }}

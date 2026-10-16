@@ -1,0 +1,21 @@
+# CI render: the DevNet soak after docs/runbook-per-node-seal.md — reuses the legacy StatefulSet's
+# claims, script-type backup with per-node credentials and an egress rule.
+topology: perNode
+persistence:
+  storageClassName: hcloud-volumes
+  accessModes: [ReadWriteOnce]
+hostedKeys:
+  enabled: true
+  commitmentKey: "2222222222222222222222222222222222222222222222222222222222222222"
+nodes:
+  - { id: 1, existingClaim: data-rutli-cosigner-0, distPublicKey: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", backupSecret: rutli-backup-node-1 }
+  - { id: 2, existingClaim: data-rutli-cosigner-1, distPublicKey: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", backupSecret: rutli-backup-node-2 }
+  - { id: 3, existingClaim: data-rutli-cosigner-2, distPublicKey: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc", backupSecret: rutli-backup-node-3 }
+backup:
+  enabled: true
+  destination:
+    type: script
+    ship: |
+      rclone --config /backup-creds/rclone.conf copyto "$1" "remote:rutli-backups/node-$2/$(basename "$1")"
+  egress:
+    - { cidr: 203.0.113.10/32, port: 443 }

@@ -57,4 +57,13 @@ spec:
       ports:
         - { protocol: UDP, port: 53 }
         - { protocol: TCP, port: 53 }
+    {{- if and .Values.backup.enabled .Values.backup.egress }}
+    # The backup sidecar's off-cluster destination (backup.egress). Shared by the whole pod.
+    {{- range .Values.backup.egress }}
+    - to:
+        - ipBlock: { cidr: {{ .cidr | quote }} }
+      ports:
+        - { protocol: TCP, port: {{ .port | default 443 }} }
+    {{- end }}
+    {{- end }}
 {{- end }}

@@ -56,22 +56,31 @@ backup CronJob bound `cosigner-0`'s ReadWriteOnce claim into a second pod: the e
 `data_dir/keys` unreadable to the running cosigner, whose health check does not touch the key store,
 so it stayed in rotation and answered every Sign with `INTERNAL` — and the driver deliberately does
 not fail over on `INTERNAL`, so a sick leader at position 0 blocked the participant until the pod was
-restarted (`soak-2026-10-devnet.md`, incident #1). Take the backup **from inside the cosigner**
-instead, one `kubectl exec` per pod — which is what `deploy/k8s/cronjob-backup.yaml` and the Helm
-chart's `backup.enabled=true` do nightly, streaming each result out as a tar for your off-cluster
-destination:
+restarted (`soak-2026-10-devnet.md`, incident #1).
+
+Since 0.4.0-rc.2 the backup runs **in the cosigner's own pod**: with `topology: perNode` and
+`backup.enabled=true` (the Helm chart; `deploy/k8s` renders the same), each pod has a `backup`
+sidecar that mounts the pod's own data volume **read-only** (same pod, so no second mount of the
+claim) and copies that node's sealed `keys/*.json` daily to **that node's** destination — a per-node
+backup PVC by default, or a script with per-node credentials. The sidecar never mounts the seal
+bundle or the TLS key, and there is no CronJob, ServiceAccount or `pods/exec` RBAC any more: the
+exec-based backup Job of earlier releases could exec into every cosigner and read every node's seal
+secret, i.e. it held the whole key (audit C3). `scripts/check-deploy-policy.sh` refuses such RBAC.
 
 ```sh
-# backup, from inside the running cosigner (share files are written atomically; keep refresh
-# ceremonies off the backup minute):
-kubectl -n rutli exec cosigner-1 -c cosigner -- rutli-cosigner --config /config/cosigner-2.json backup --out /data/backup-$(date -u +%u)
-kubectl -n rutli exec cosigner-1 -c cosigner -- tar -C /data -cf - backup-$(date -u +%u) > cosigner-1.tar   # then ship off-cluster
-
-# restore onto a rebuilt pod (empty PVC), again through the cosigner's own container:
-kubectl -n rutli exec -i cosigner-1 -c cosigner -- tar -C /tmp -xf - < cosigner-1.tar
-kubectl -n rutli exec cosigner-1 -c cosigner -- rutli-cosigner --config /config/cosigner-2.json restore --from /tmp/backup-<weekday> --force
-kubectl -n rutli delete pod cosigner-1   # the daemon reopens its key store with the restored share
+# what ran (one line per run):
+kubectl -n rutli logs rutli-cosigner-n2-0 -c backup | grep BACKUP_
+# restore onto a rebuilt node 2 (empty data volume), through the cosigner's own container:
+kubectl -n rutli exec rutli-cosigner-n2-0 -c backup -- cat /backup/node-2-<stamp>.tar > node-2.tar
+kubectl -n rutli exec -i rutli-cosigner-n2-0 -c cosigner -- mkdir -p /tmp/restore
+kubectl -n rutli exec -i rutli-cosigner-n2-0 -c cosigner -- tar -C /tmp/restore -xf - < node-2.tar
+kubectl -n rutli exec rutli-cosigner-n2-0 -c cosigner -- rutli-cosigner --config /config/cosigner-2.json restore --from /tmp/restore --force
+kubectl -n rutli delete pod rutli-cosigner-n2-0   # the daemon reopens its key store with the restored share
 ```
+
+These `kubectl exec` calls are a human operator's, made for a restore; no standing principal may
+hold `pods/exec`. A restore needs the node's seal bundle as well (Secret `rutli-seal-node-2`), which
+is never in the backup path — keep the two in separate trust domains.
 
 A CSI volume snapshot is fine (it is the storage layer, not a second mount). A second mount is not,
 whatever its access mode or `fsGroup`.

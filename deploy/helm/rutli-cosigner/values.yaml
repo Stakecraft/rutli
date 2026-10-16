@@ -4,8 +4,56 @@
 # Default values for rutli-cosigner. Secrets (TLS + seal) are NOT created by this chart —
 # create them out-of-band (see README / secrets.example.yaml in deploy/k8s/).
 
+# How the cosigners are laid out.
+#
+# perNode (default for new installs): one StatefulSet (replicas 1) and one Service per node. Each
+#   pod spec references ONLY its own seal-bundle Secret and TLS Secret, mounted as files, so the
+#   kubelet's node authorizer lets a host read only the secrets of the node it runs — compromising
+#   one host or one pod spec yields one node's keys, below threshold (audit C3). Sealing uses a
+#   per-node seal bundle (`rutli-cosigner seal split-legacy` / `seal new-node`); there is no seal
+#   env var. Peers and the driver dial the per-node Services under per-node TLS names (cosigner<id>).
+# legacy: the ≤ 0.4.0-rc.1 layout — one StatefulSet whose single pod template references every
+#   node's TLS Secret and injects the shared master RUTLI_SEAL_SECRET as an env var into every pod.
+#   Kept only so an existing install upgrades without moving (deploy/soak/cosigner-values.yaml pins
+#   it) until it runs docs/runbook-per-node-seal.md. It fails scripts/check-deploy-policy.sh.
+topology: perNode
+
 replicaCount: 3
 threshold: 2
+
+# topology=perNode: the roster. Empty = nodes 1..replicaCount with every default below. Per entry:
+#   id:             node identifier (1..n), its config is cosigner-<id>.json
+#   existingClaim:  reuse this PVC as the node's data volume (the soak: data-rutli-cosigner-<id-1>,
+#                   the legacy StatefulSet's claims). Omit to let the chart create
+#                   data-<fullname>-n<id> (kept on uninstall: helm.sh/resource-policy keep).
+#   sealSecret:     Secret holding this node's seal bundle under key seal.secretKey
+#                   (default <seal.perNodeSecretPrefix><id>)
+#   tlsSecret:      kubernetes.io/tls Secret of this node (default <tls.perNodeSecretPrefix><id>)
+#   distPublicKey:  this node's hosted-key distribution public key (64 hex; required with
+#                   hostedKeys.enabled — printed by `seal split-legacy` / `seal inspect`)
+#   backupClaim:    backup.destination.type=pvc: use this PVC instead of the chart-made
+#                   <fullname>-backup-n<id>
+#   backupSecret:   backup.destination.type=script: credentials Secret for THIS node's destination,
+#                   mounted into its backup sidecar only, at /backup-creds
+# e.g.
+#   nodes:
+#     - { id: 1, existingClaim: data-rutli-cosigner-0, distPublicKey: "…" }
+#     - { id: 2, existingClaim: data-rutli-cosigner-1, distPublicKey: "…" }
+#     - { id: 3, existingClaim: data-rutli-cosigner-2, distPublicKey: "…" }
+nodes: []
+
+# topology=perNode: the Service in front of each node is <perNode.servicePrefix><id> (ClusterIP,
+# publishes not-ready addresses). Peer endpoints and the driver's frost.endpoints use it:
+#   https://<perNode.servicePrefix><id>.<namespace>.svc:<grpcPort>  with tls-name cosigner<id>
+perNode:
+  servicePrefix: rutli-node-
+
+# topology=perNode: per-node seal bundles (share_seal.secret_file). Create one Secret per node from
+# its bundle file and nothing else:
+#   kubectl -n rutli create secret generic rutli-seal-node-1 --from-file=node.json=node-1.json
+seal:
+  perNodeSecretPrefix: rutli-seal-node-
+  secretKey: node.json
 
 image:
   repository: ghcr.io/stakecraft/rutli-cosigner
@@ -46,7 +94,8 @@ tls:
 # tls.layout=shared only: the legacy Secret with ca.crt + cosigner1..N .crt/.key.
 tlsSecretName: rutli-cosigner-tls
 
-# Existing Secret with key RUTLI_SEAL_SECRET (≥ 32 chars; e.g. openssl rand -hex 32)
+# topology=legacy only: existing Secret with key RUTLI_SEAL_SECRET (the shared master, ≥ 32 chars).
+# Deprecated (audit C3): every pod gets every node's DEK root through its env.
 sealSecretName: rutli-seal
 sealSecretKey: RUTLI_SEAL_SECRET
 
@@ -66,7 +115,9 @@ peerAllowlist: []
 # the driver cert). Must not share a CN with signerAllowlist or peerAllowlist.
 operatorAllowlist: []
 
-# mTLS domain / shared SAN on cosigner certs
+# topology=legacy only: the tls.domain written into each config. Since 0.4.0-rc.2 the cosigners
+# verify each peer under its own name (cosigner<id>) whatever this says; it only remains the
+# fallback name for operator commands against a non-roster target.
 tlsDomain: rutli-cosigner
 
 # Cluster id pin (`cluster_id` in every cosigner's config): the identity hosted-key replication
@@ -125,6 +176,10 @@ hostedKeys:
   # driver sends a key's traffic to one leader at a time, so this must still cover the full
   # legitimate rate on one node: set it to cluster_budget / replicaCount, keeping it above that peak.
   decryptRateLimitPerMin: 6000
+  # topology=perNode: the cluster-wide hosted-key commitment key (64 hex, public, the same on every
+  # node). Required with enabled=true. A migrated install takes the value `seal split-legacy`
+  # prints; a new cluster generates one: openssl rand -hex 32.
+  commitmentKey: ""
 
 persistence:
   size: 1Gi
@@ -196,58 +251,51 @@ affinity: {}
 # Extra env vars for every cosigner
 extraEnv: []
 
-# Nightly sealed-share backups, taken INSIDE each running cosigner with `kubectl exec` (one exec
-# per ordinal), streamed out as one tar per cosigner, then handed to `backup.ship` for off-cluster
-# storage. This is the only supported way to back a cosigner up on Kubernetes:
+# Backups (topology=perNode only): a `backup` sidecar in each cosigner pod copies that node's
+# SEALED key files (data_dir/keys/*.json — never nonce markers, temps or staged files) to that
+# node's own destination, once a day. The sidecar mounts the node's data volume read-only (same pod:
+# no second mount of the claim, so not the 2026-10-07 failure mode) and never mounts the seal
+# bundle or the TLS key: nothing in the backup path ever holds a DEK. There is no CronJob, no
+# ServiceAccount and no pods/exec RBAC — the exec-based backup was removed (audit C3: its Role could
+# exec into every cosigner and read every node's seal secret).
 #
-#   NEVER MOUNT A COSIGNER'S DATA VOLUME INTO ANOTHER POD. On 2026-10-07 a backup Job that bound a
-#   cosigner's ReadWriteOnce PVC left /data/keys unreadable to the live cosigner, which kept passing
-#   its health check and failed every Sign — a total signing outage on the DevNet soak
-#   (docs/soak-2026-10-devnet.md, incident #1). The chart refuses a backup.extraVolumes entry that
-#   names a cosigner's claim.
-#
-# Off by default. Turning it on also needs a destination: the default `ship` body exits 1, so an
-# unconfigured destination shows up as a failed Job, not as a silent gap. Each run also leaves a
-# seven-day rotation on the node's own volume (/data/backup-<weekday>), which is what the
-# "wipe keys/, restore" drill uses.
+# Each run logs one line, `BACKUP_OK node=<id> files=<n> bytes=<n> dest=<…>` or
+# `BACKUP_FAILED node=<id> …`. The sidecar never exits non-zero (a crashing sidecar would flip the
+# pod's readiness and eat the PDB), so alert on the log line or on the destination's newest object.
 backup:
   enabled: false
-  schedule: "17 3 * * *" # daily 03:17 UTC — keep refresh drills away from this minute
-  image:
-    # kubectl + bash + coreutils. Pinned by digest; bump deliberately.
-    repository: alpine/k8s
-    tag: "1.31.13@sha256:7a319b15cfc99c9aaa27ec9891d6b4ca24632b795908591c7b0ba89b03549e0a"
-    pullPolicy: IfNotPresent
-  # POSIX sh body, run once per backup with $1 = a directory holding one tar per cosigner
-  # (<fullname>-0.tar … <fullname>-N.tar), each containing that node's backup-<weekday>/ directory
-  # of sealed share + hosted-key files. Keep the tars in a different trust domain from the seal
-  # secret, ideally one destination per cosigner (docs/disaster-recovery.md §4). For example:
-  #   cp -r "$1" /backups/                                        # a volume of the Job's OWN, via extraVolumes
-  #   rclone copy "$1" "remote:rutli-backups/$(basename "$1")"    # object storage; image + creds via extraEnv
-  ship: |
-    echo "ship.sh: no backup destination configured — set backup.ship" >&2
-    echo "ship.sh: this run's backups exist only on each cosigner's own volume (/data/backup-<weekday>)" >&2
-    exit 1
-  successfulJobsHistoryLimit: 7
-  failedJobsHistoryLimit: 7
-  activeDeadlineSeconds: 900 # a hung exec must not block the next night's run
+  # Daily at this UTC time (HH:MM). Keep refresh drills away from it.
+  dailyAtUtc: "03:17"
+  # Also take one backup as soon as the pod starts (shows the destination works right away).
+  runOnStart: true
+  destination:
+    # pvc (default): a per-node backup PVC (<fullname>-backup-n<id>, or nodes[].backupClaim), mounted
+    #   in that node's sidecar only, at /backup. Keeps the newest `keep` tars. Protects against a
+    #   wiped or corrupted data volume; for loss of the storage backend, also ship off-cluster.
+    # script: run `ship` with $1 = the tar, $2 = the node id; credentials from nodes[].backupSecret
+    #   (mounted at /backup-creds, per node). Add the endpoint to backup.egress.
+    type: pvc
+    keep: 14
+    pvc:
+      size: 1Gi
+      storageClassName: ""
+      accessModes:
+        - ReadWriteOncePod
+    # type=script only. POSIX sh body; must exit non-zero on failure. For example:
+    #   rclone --config /backup-creds/rclone.conf copyto "$1" "remote:rutli-backups/node-$2/$(basename "$1")"
+    ship: |
+      echo "ship: no backup destination script configured — set backup.destination.ship" >&2
+      exit 1
+  # Extra egress for the cosigner pods so the sidecar can reach an off-cluster destination
+  # (type=script). The pod shares one network namespace, so this also opens the path for the
+  # cosigner process — keep it to the one endpoint. e.g. [{ cidr: 203.0.113.10/32, port: 443 }]
+  egress: []
+  # Defaults to the cosigner image (it has /bin/sh, tar and coreutils).
+  image: {}
   resources:
     requests:
-      cpu: 20m
-      memory: 64Mi
+      cpu: 5m
+      memory: 16Mi
     limits:
-      cpu: 200m
-      memory: 128Mi
-  # Credentials for `ship` (e.g. object-storage keys via secretKeyRef).
-  extraEnv: []
-  # Volumes the backup Job OWNS (e.g. its own destination PVC mounted at /backups). A cosigner's
-  # claim (data-<fullname>-N) is rejected at template time.
-  extraVolumes: []
-  extraVolumeMounts: []
-  podSecurityContext:
-    runAsNonRoot: true
-    runAsUser: 1000
-    seccompProfile:
-      type: RuntimeDefault
-  nodeSelector: {}
-  tolerations: []
+      cpu: 100m
+      memory: 64Mi

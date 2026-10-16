@@ -1,8 +1,12 @@
 {{/*
 Copyright 2026 StakeCraft
 SPDX-License-Identifier: Apache-2.0
-Per-pod cosigner JSON. Pod ordinal i runs cosigner-(i+1).json (identifier i+1).
-Peers: identifier k -> https://<fullname>-(k-1).<fullname>:grpcPort
+Per-node cosigner JSON: node <id> runs cosigner-<id>.json. No secrets in here — only where they are.
+topology=legacy:  pod ordinal i runs cosigner-(i+1).json; peers are the headless pod DNS names
+                  https://<fullname>-(k-1).<fullname>:grpcPort; sealing from the shared env master.
+topology=perNode: peers are the per-node Services https://<servicePrefix><k>.<ns>.svc:grpcPort,
+                  each verified under its own TLS name (cosigner<k>, the cosigner default); sealing
+                  from the node's own bundle file; hosted keys use pinned distribution keys.
 */}}
 apiVersion: v1
 kind: ConfigMap
@@ -48,6 +52,64 @@ data:
     {{- fail (printf "hostedKeys.writeQuorum %d out of range 1..%d (replicaCount)" $q $n) }}
   {{- end }}
 {{- end }}
+{{- if eq (include "rutli-cosigner.topology" .) "perNode" }}
+{{- $nodes := include "rutli-cosigner.nodes" . | fromJsonArray }}
+{{- if not .Values.peerAllowlist }}
+  {{- $peerAllow = list }}
+  {{- range $node := $nodes }}{{ $peerAllow = append $peerAllow (printf "cosigner%d" (int $node.id)) }}{{ end }}
+{{- end }}
+{{- if $hosted.enabled }}
+  {{- if not (regexMatch "^[0-9a-fA-F]{64}$" (toString $hosted.commitmentKey)) }}
+    {{- fail "topology=perNode with hostedKeys.enabled needs hostedKeys.commitmentKey (64 hex): the value `rutli-cosigner seal split-legacy` prints, or `openssl rand -hex 32` for a new cluster" }}
+  {{- end }}
+  {{- range $node := $nodes }}
+    {{- if not (regexMatch "^[0-9a-fA-F]{64}$" $node.distPublicKey) }}
+      {{- fail (printf "topology=perNode with hostedKeys.enabled needs nodes[id=%d].distPublicKey (64 hex) — printed by `rutli-cosigner seal split-legacy` / `seal inspect`" (int $node.id)) }}
+    {{- end }}
+  {{- end }}
+{{- end }}
+{{- range $node := $nodes }}
+{{- $id := int $node.id }}
+  cosigner-{{ $id }}.json: |
+    {
+      "identifier": {{ $id }},
+      {{- if $clusterId }}
+      "cluster_id": {{ $clusterId | quote }},
+      {{- end }}
+      {{- if $.Values.clusterIdChangeAllowed }}
+      "cluster_id_change_allowed": true,
+      {{- end }}
+      "listen": "0.0.0.0:{{ $port }}",
+      {{- if $.Values.metrics.enabled }}
+      "metrics_listen": "0.0.0.0:{{ $metricsPort }}",
+      {{- end }}
+      "threshold": {{ $t }},
+      "data_dir": "/data",
+      "peers": [
+        {{- range $k, $peer := $nodes }}
+        { "identifier": {{ int $peer.id }}, "endpoint": "https://{{ $peer.service }}.{{ $.Release.Namespace }}.svc:{{ $port }}"{{ if $hosted.enabled }}, "dist_public_key": {{ $peer.distPublicKey | lower | quote }}{{ end }} }{{ if lt (add $k 1) (len $nodes) }},{{ end }}
+        {{- end }}
+      ],
+      "tls": {
+        "ca_cert": "/certs/ca.crt",
+        "cert": "/certs/cosigner{{ $id }}.crt",
+        {{- if $.Values.tls.allowExpiredCa }}
+        "allow_expired_ca": true,
+        {{- end }}
+        "key": "/certs/cosigner{{ $id }}.key"
+      },
+      "share_seal": { "secret_file": "/run/rutli/seal/{{ $.Values.seal.secretKey }}" },
+      {{- if $hosted.enabled }}
+      "hosted_keys": { "enabled": true, "write_quorum": {{ int $hosted.writeQuorum }}, "anti_entropy_interval_secs": {{ int $hosted.antiEntropyIntervalSecs }}, "decrypt_rate_limit_per_min": {{ int (default 6000 $hosted.decryptRateLimitPerMin) }}, "commitment_key": {{ $hosted.commitmentKey | lower | quote }} },
+      {{- end }}
+      "signer_allowlist": {{ $allow | toJson }},
+      {{- if $.Values.operatorAllowlist }}
+      "operator_allowlist": {{ $.Values.operatorAllowlist | toJson }},
+      {{- end }}
+      "peer_allowlist": {{ $peerAllow | toJson }}
+    }
+{{- end }}
+{{- else }}
 {{- range $i := until $n }}
 {{- $id := add $i 1 }}
   cosigner-{{ $id }}.json: |
@@ -90,4 +152,5 @@ data:
       {{- end }}
       "peer_allowlist": {{ $peerAllow | toJson }}
     }
+{{- end }}
 {{- end }}

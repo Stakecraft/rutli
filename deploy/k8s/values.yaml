@@ -1,0 +1,18 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Chart values deploy/k8s/cosigner.yaml is rendered with (scripts/render-k8s.sh). Edit here, then
+# re-render; or install the chart directly with your own values.
+topology: perNode
+replicaCount: 3
+threshold: 2
+signerAllowlist: [driver]
+operatorAllowlist: [operator]
+# Cluster-hosted keys need per-cluster public values (hostedKeys.commitmentKey and each node's
+# distPublicKey), which a checked-in manifest cannot know. Enable them by rendering with your own
+# values (README §5), or with the chart.
+hostedKeys:
+  enabled: false
+# Per-node backup sidecars into per-node backup PVCs (README, "Backups").
+backup:
+  enabled: true

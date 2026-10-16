@@ -1,7 +1,47 @@
-Rütli FROST cosigner cluster ({{ .Chart.AppVersion }})
+Rütli FROST cosigner cluster ({{ .Chart.AppVersion }}), topology={{ include "rutli-cosigner.topology" . }}
 
 Image: {{ include "rutli-cosigner.image" . }}
 Replicas: {{ .Values.replicaCount }}  threshold: {{ .Values.threshold }}
+{{- $fullname := include "rutli-cosigner.fullname" . }}
+{{- $port := .Values.service.grpcPort }}
+{{- if eq (include "rutli-cosigner.topology" .) "perNode" }}
+{{- $nodes := include "rutli-cosigner.nodes" . | fromJsonArray }}
+
+BEFORE the pods can start, create in this namespace — one Secret per node, nothing shared but the CA:
+
+  1) mTLS material:
+     kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.tls.caSecretName }} --from-file=ca.crt=certs/ca.crt
+{{- range $node := $nodes }}
+     kubectl -n {{ $.Release.Namespace }} create secret tls {{ $node.tlsSecret }} --cert=certs/cosigner{{ int $node.id }}.crt --key=certs/cosigner{{ int $node.id }}.key
+{{- end }}
+
+  2) Seal bundles (on a workstation; `seal new-node` for a new cluster, `seal split-legacy` to migrate):
+{{- range $node := $nodes }}
+     kubectl -n {{ $.Release.Namespace }} create secret generic {{ $node.sealSecret }} --from-file={{ $.Values.seal.secretKey }}=node-{{ int $node.id }}.json
+{{- end }}
+     then delete the local bundle files. Never keep two nodes' bundles in one place.
+
+Generate certs with:  scripts/gen-frost-certs.sh {{ .Values.replicaCount }} ./certs
+
+Canton driver endpoints (one per node, each with its own TLS name):
+  frost.endpoints = [
+{{- range $node := $nodes }}
+    { url = "{{ $node.service }}.{{ $.Release.Namespace }}.svc.cluster.local:{{ $port }}", tls-name = "cosigner{{ int $node.id }}" },
+{{- end }}
+  ]
+{{- if .Values.backup.enabled }}
+
+Backups: each pod's `backup` sidecar copies that node's sealed key files daily at
+{{ .Values.backup.dailyAtUtc }} UTC to {{ if eq .Values.backup.destination.type "pvc" }}its own backup PVC ({{ $fullname }}-backup-n<id>){{ else }}its own destination (backup.destination.ship){{ end }}.
+Check: kubectl -n {{ .Release.Namespace }} logs {{ $fullname }}-n1-0 -c backup | grep BACKUP_
+{{- else }}
+
+Backups are OFF (backup.enabled=false). Enable them before go-live (README, "Backups").
+{{- end }}
+{{- else }}
+
+topology=legacy is DEPRECATED: one pod template references every node's TLS Secret and injects the
+shared seal master into every pod (audit C3). Migrate: docs/runbook-per-node-seal.md.
 
 BEFORE the pods can start you must create secrets in this namespace:
 
@@ -17,33 +57,18 @@ BEFORE the pods can start you must create secrets in this namespace:
        --from-file=cosigner1.crt=certs/cosigner1.crt --from-file=cosigner1.key=certs/cosigner1.key \
        # … repeat for each cosigner …
 {{- end }}
-     Each cosigner container sees only its own key (init container tls-select); see README.
 
   2) Seal master secret (≥ 32 chars):
      kubectl -n {{ .Release.Namespace }} create secret generic {{ .Values.sealSecretName }} \
        --from-literal={{ .Values.sealSecretKey }}="$(openssl rand -hex 32)"
 
-Generate certs with:  scripts/gen-frost-certs.sh {{ .Values.replicaCount }} ./certs
-
 Canton driver endpoints (headless):
-{{- $fullname := include "rutli-cosigner.fullname" . }}
-{{- $port := .Values.service.grpcPort }}
 {{- range $i := until (int .Values.replicaCount) }}
   - {{ $fullname }}-{{ $i }}.{{ $fullname }}.{{ $.Release.Namespace }}.svc.cluster.local:{{ $port }}
+{{- end }}
 {{- end }}
 
 Label the Canton namespace {{ .Values.networkPolicy.clientNamespaceLabel }}=true and the
 participant pod {{ .Values.networkPolicy.clientPodLabel }}=true so NetworkPolicy allows the driver.
 
-{{- if .Values.backup.enabled }}
-
-Backups: CronJob {{ include "rutli-cosigner.backup.name" . }} ({{ .Values.backup.schedule }}) runs
-`rutli-cosigner backup` INSIDE each cosigner via kubectl exec and hands the tars to backup.ship.
-The Job FAILS until backup.ship names an off-cluster destination.
-{{- else }}
-
-Backups are OFF (backup.enabled=false). Enable them before go-live. Never mount a cosigner volume
-into another pod to take one — the chart's backup runs inside the cosigner (README, "Backups").
-{{- end }}
-
-Docs: deploy/helm/rutli-cosigner/README.md · docs/key-ceremony.md · docs/disaster-recovery.md
+Docs: deploy/helm/rutli-cosigner/README.md · docs/runbook-per-node-seal.md · docs/disaster-recovery.md

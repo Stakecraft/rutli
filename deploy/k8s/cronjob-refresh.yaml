@@ -1,12 +1,16 @@
 # Copyright 2026 StakeCraft
 # SPDX-License-Identifier: Apache-2.0
 #
+# DO NOT ENABLE YET: until the ceremony fixes ship (audit C1: the leader sees every round-2 package;
+# H1: a refresh interrupted between nodes can leave mixed share epochs), a refresh is a risk to the
+# key, not a mitigation. See docs/runbook-per-node-seal.md.
+#
 # Example: weekly proactive share refresh. Runs against one Signer endpoint; the leader fences the
 # key cluster-wide, so drain heavy topology traffic first (or accept SignInProgress retries).
 # Set KEY_ID to the FROST key (e.g. frost-participant1-namespace). Runs as the driver role (CN
 # `driver`, on signer_allowlist): it mounts ONLY the driver's cert/key (Secret rutli-driver-tls,
 # kubernetes.io/tls) and the CA (rutli-cosigner-ca) — never a cosigner key — with the client config
-# client-driver.json from rutli-cosigner-config.
+# client-driver.json from rutli-client-config (client-config.yaml).
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -42,7 +46,7 @@ spec:
                   set -eu
                   rutli-cosigner --config /config/client-driver.json \
                     refresh --key-id "$KEY_ID" \
-                    --target https://cosigner-0.rutli-cosigner.rutli.svc.cluster.local:9101
+                    --target https://rutli-node-1.rutli.svc:9101
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true
@@ -55,7 +59,7 @@ spec:
                 - { name: tmp, mountPath: /tmp }
           volumes:
             - name: config
-              configMap: { name: rutli-cosigner-config }
+              configMap: { name: rutli-client-config }
             - name: certs
               projected:
                 defaultMode: 0440
