@@ -180,4 +180,15 @@ public interface KeyStatusReplyOrBuilder extends
    */
   com.google.protobuf.ByteString
       getRecordedUsageBytes();
+
+  /**
+   * <pre>
+   * Which sharing this node holds: 1 after DKG, +1 per committed refresh; 0 for a share written
+   * before epochs existed or installed by the split ceremony. Nodes must agree.
+   * </pre>
+   *
+   * <code>uint64 epoch = 14;</code>
+   * @return The epoch.
+   */
+  long getEpoch();
 }

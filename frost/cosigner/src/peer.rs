@@ -92,6 +92,15 @@ pub trait PeerApi: Send + Sync {
     async fn list_keys(&self) -> Result<Vec<(String, String, Vec<u8>)>>;
     /// Delete a hosted key on this peer.
     async fn purge_key(&self, ceremony_id: &str, key_id: &str) -> Result<bool>;
+
+    // -- two-phase ceremonies --
+
+    /// This peer's committed epoch / PKP digest for `key_id` and whether a ceremony for it is
+    /// staged there (`Peer.KeyEpoch`). The default — a peer that cannot say — makes every ceremony
+    /// that needs the answer refuse.
+    async fn key_epoch(&self, _key_id: &str) -> Result<pb::KeyEpochReply> {
+        Err(crate::DaemonError::Config("this peer does not report key epochs".into()))
+    }
 }
 
 /// This node, called in-process.
@@ -260,6 +269,11 @@ impl PeerApi for LocalPeer {
     async fn purge_key(&self, _ceremony_id: &str, key_id: &str) -> Result<bool> {
         let key_id = key_id.to_owned();
         self.node.blocking(move |n| n.hosted_delete(&key_id)).await
+    }
+
+    async fn key_epoch(&self, key_id: &str) -> Result<pb::KeyEpochReply> {
+        let key_id = key_id.to_owned();
+        self.node.blocking(move |n| n.key_epoch(&key_id)).await
     }
 }
 
@@ -535,6 +549,10 @@ impl PeerApi for GrpcPeer {
             .await?
             .into_inner();
         Ok(reply.deleted)
+    }
+
+    async fn key_epoch(&self, key_id: &str) -> Result<pb::KeyEpochReply> {
+        Ok(self.client.clone().key_epoch(pb::KeyEpochRequest { key_id: key_id.into() }).await?.into_inner())
     }
 }
 

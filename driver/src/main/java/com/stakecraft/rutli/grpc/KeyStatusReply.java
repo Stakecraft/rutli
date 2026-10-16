@@ -399,6 +399,22 @@ private static final long serialVersionUID = 0L;
     }
   }
 
+  public static final int EPOCH_FIELD_NUMBER = 14;
+  private long epoch_ = 0L;
+  /**
+   * <pre>
+   * Which sharing this node holds: 1 after DKG, +1 per committed refresh; 0 for a share written
+   * before epochs existed or installed by the split ceremony. Nodes must agree.
+   * </pre>
+   *
+   * <code>uint64 epoch = 14;</code>
+   * @return The epoch.
+   */
+  @java.lang.Override
+  public long getEpoch() {
+    return epoch_;
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -451,6 +467,9 @@ private static final long serialVersionUID = 0L;
     }
     if (!com.google.protobuf.GeneratedMessage.isStringEmpty(recordedUsage_)) {
       com.google.protobuf.GeneratedMessage.writeString(output, 13, recordedUsage_);
+    }
+    if (epoch_ != 0L) {
+      output.writeUInt64(14, epoch_);
     }
     getUnknownFields().writeTo(output);
   }
@@ -508,6 +527,10 @@ private static final long serialVersionUID = 0L;
     if (!com.google.protobuf.GeneratedMessage.isStringEmpty(recordedUsage_)) {
       size += com.google.protobuf.GeneratedMessage.computeStringSize(13, recordedUsage_);
     }
+    if (epoch_ != 0L) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeUInt64Size(14, epoch_);
+    }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
     return size;
@@ -549,6 +572,8 @@ private static final long serialVersionUID = 0L;
         .equals(other.getCarriedFor())) return false;
     if (!getRecordedUsage()
         .equals(other.getRecordedUsage())) return false;
+    if (getEpoch()
+        != other.getEpoch()) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -588,6 +613,9 @@ private static final long serialVersionUID = 0L;
     hash = (53 * hash) + getCarriedFor().hashCode();
     hash = (37 * hash) + RECORDED_USAGE_FIELD_NUMBER;
     hash = (53 * hash) + getRecordedUsage().hashCode();
+    hash = (37 * hash) + EPOCH_FIELD_NUMBER;
+    hash = (53 * hash) + com.google.protobuf.Internal.hashLong(
+        getEpoch());
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -732,6 +760,7 @@ private static final long serialVersionUID = 0L;
       refreshCount_ = 0L;
       carriedFor_ = "";
       recordedUsage_ = "";
+      epoch_ = 0L;
       return this;
     }
 
@@ -804,6 +833,9 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00001000) != 0)) {
         result.recordedUsage_ = recordedUsage_;
       }
+      if (((from_bitField0_ & 0x00002000) != 0)) {
+        result.epoch_ = epoch_;
+      }
     }
 
     @java.lang.Override
@@ -866,6 +898,9 @@ private static final long serialVersionUID = 0L;
         recordedUsage_ = other.recordedUsage_;
         bitField0_ |= 0x00001000;
         onChanged();
+      }
+      if (other.getEpoch() != 0L) {
+        setEpoch(other.getEpoch());
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -958,6 +993,11 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00001000;
               break;
             } // case 106
+            case 112: {
+              epoch_ = input.readUInt64();
+              bitField0_ |= 0x00002000;
+              break;
+            } // case 112
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -1761,6 +1801,53 @@ private static final long serialVersionUID = 0L;
       checkByteStringIsUtf8(value);
       recordedUsage_ = value;
       bitField0_ |= 0x00001000;
+      onChanged();
+      return this;
+    }
+
+    private long epoch_ ;
+    /**
+     * <pre>
+     * Which sharing this node holds: 1 after DKG, +1 per committed refresh; 0 for a share written
+     * before epochs existed or installed by the split ceremony. Nodes must agree.
+     * </pre>
+     *
+     * <code>uint64 epoch = 14;</code>
+     * @return The epoch.
+     */
+    @java.lang.Override
+    public long getEpoch() {
+      return epoch_;
+    }
+    /**
+     * <pre>
+     * Which sharing this node holds: 1 after DKG, +1 per committed refresh; 0 for a share written
+     * before epochs existed or installed by the split ceremony. Nodes must agree.
+     * </pre>
+     *
+     * <code>uint64 epoch = 14;</code>
+     * @param value The epoch to set.
+     * @return This builder for chaining.
+     */
+    public Builder setEpoch(long value) {
+
+      epoch_ = value;
+      bitField0_ |= 0x00002000;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * Which sharing this node holds: 1 after DKG, +1 per committed refresh; 0 for a share written
+     * before epochs existed or installed by the split ceremony. Nodes must agree.
+     * </pre>
+     *
+     * <code>uint64 epoch = 14;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearEpoch() {
+      bitField0_ = (bitField0_ & ~0x00002000);
+      epoch_ = 0L;
       onChanged();
       return this;
     }

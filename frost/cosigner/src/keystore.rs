@@ -29,6 +29,25 @@ pub struct Share {
     /// backup/restore carry it unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub origin: Option<KeyOrigin>,
+    /// Which sharing of the key this is: 1 after a two-phase DKG commit, +1 per committed refresh.
+    /// 0 for every file written before epochs existed (the field is absent and defaults) and for a
+    /// share installed by the split ceremony (every node gets the same 0 from the same dealer).
+    /// Only the comparison between nodes means anything: two nodes on different epochs hold shares
+    /// of different sharings, which never combine (H1/M1).
+    #[serde(default)]
+    pub epoch: u64,
+    /// The key id this share was committed under. Empty for files written before it was recorded.
+    /// Inside the sealed plaintext; checked against the file name by later work (M4).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub key_id: String,
+}
+
+impl Share {
+    /// SHA-256 of the canonical public key package ([`rutli_frost_core::dealer::pkp_digest`]): two
+    /// nodes hold shares of the same sharing iff their digests match.
+    pub fn pkp_digest(&self) -> Result<[u8; 32]> {
+        Ok(rutli_frost_core::dealer::pkp_digest(&self.public_key_package)?)
+    }
 }
 
 /// Provenance of a share that did not come from DKG.
@@ -218,25 +237,32 @@ impl KeyStore {
     /// Temps orphaned by a crash are removed by [`KeyStore::sweep_stale_create_temps`].
     fn create_bytes(&self, key_id: &str, plain: &[u8]) -> Result<()> {
         let path = self.path(key_id)?;
-        self.touch(&path);
+        self.create_sealed_at(&self.dir, &path, key_id, plain)
+    }
+
+    /// The create-once write behind [`KeyStore::create_bytes`] and [`KeyStore::stage`]: seal
+    /// `plain`, write a dotfile temp in `dir` (fsynced), move it to `path` only if nothing is
+    /// there, fsync `dir`. `label` names the key in errors and in the temp's name.
+    fn create_sealed_at(&self, dir: &Path, path: &Path, label: &str, plain: &[u8]) -> Result<()> {
+        self.touch(path);
         let bytes = match &self.sealer {
             Some(s) => s.seal(plain)?,
             None => plain.to_vec(),
         };
         // A dotfile: never a key file (ids are [A-Za-z0-9_-]+), skipped by backup and the probe.
-        let tmp = self.dir.join(format!("{CREATE_TMP_PREFIX}{key_id}-{}.tmp", uuid::Uuid::new_v4()));
+        let tmp = dir.join(format!("{CREATE_TMP_PREFIX}{label}-{}.tmp", uuid::Uuid::new_v4()));
         {
             let mut f = private_file(&tmp, true)?;
             f.write_all(&bytes)?;
             f.sync_all()?;
         }
-        let outcome = match rename_noreplace(&tmp, &path) {
+        let outcome = match rename_noreplace(&tmp, path) {
             Ok(NoReplace::Moved) => Ok(()),
-            Ok(NoReplace::Exists) => Err(DaemonError::KeyExists(key_id.to_string())),
-            Ok(NoReplace::Unsupported) => match std::fs::hard_link(&tmp, &path) {
+            Ok(NoReplace::Exists) => Err(DaemonError::KeyExists(label.to_string())),
+            Ok(NoReplace::Unsupported) => match std::fs::hard_link(&tmp, path) {
                 Ok(()) => Ok(()),
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    Err(DaemonError::KeyExists(key_id.to_string()))
+                    Err(DaemonError::KeyExists(label.to_string()))
                 }
                 Err(e) => Err(DaemonError::Io(std::io::Error::new(
                     e.kind(),
@@ -251,7 +277,7 @@ impl KeyStore {
         };
         let _ = std::fs::remove_file(&tmp); // already gone after a successful rename
         outcome?;
-        std::fs::File::open(&self.dir)?.sync_all()?;
+        std::fs::File::open(dir)?.sync_all()?;
         Ok(())
     }
 
@@ -259,9 +285,18 @@ impl KeyStore {
     /// between writing its temp and moving it into place. They hold a sealed key that never became
     /// live. Run at daemon start; returns the names removed (for the log).
     pub fn sweep_stale_create_temps(&self, older_than: std::time::Duration) -> Result<Vec<String>> {
-        self.touch(&self.dir);
+        let mut removed = self.sweep_stale_temps_in(&self.dir, older_than)?;
+        let staged = self.staged_dir();
+        if staged.is_dir() {
+            removed.extend(self.sweep_stale_temps_in(&staged, older_than)?);
+        }
+        Ok(removed)
+    }
+
+    fn sweep_stale_temps_in(&self, dir: &Path, older_than: std::time::Duration) -> Result<Vec<String>> {
+        self.touch(dir);
         let mut removed = Vec::new();
-        for entry in std::fs::read_dir(&self.dir)? {
+        for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
             if !(name.starts_with(CREATE_TMP_PREFIX) && name.ends_with(".tmp")) {
@@ -278,7 +313,7 @@ impl KeyStore {
             }
         }
         if !removed.is_empty() {
-            std::fs::File::open(&self.dir)?.sync_all()?;
+            std::fs::File::open(dir)?.sync_all()?;
         }
         Ok(removed)
     }
@@ -338,13 +373,17 @@ impl KeyStore {
     /// Read a key file and unseal it, without interpreting the contents.
     fn read_plaintext(&self, key_id: &str) -> Result<Vec<u8>> {
         let path = self.path(key_id)?;
-        self.touch(&path);
+        self.read_plaintext_at(&path, key_id)
+    }
+
+    fn read_plaintext_at(&self, path: &Path, key_id: &str) -> Result<Vec<u8>> {
+        self.touch(path);
         // try_exists, not exists: an unreadable store must surface as an IO error (INTERNAL), never
         // as UnknownKey (NOT_FOUND) — Canton would take NOT_FOUND to mean the key is gone.
         if !path.try_exists()? {
             return Err(DaemonError::UnknownKey(key_id.to_string()));
         }
-        let bytes = std::fs::read(&path)?;
+        let bytes = std::fs::read(path)?;
         let plain = match (&self.sealer, Sealer::is_sealed(&bytes)) {
             (Some(s), true) => s.unseal(&bytes)?,
             // Sealing on, legacy plaintext file: readable (migration path); re-sealed on next save.
@@ -442,6 +481,114 @@ impl KeyStore {
 
     pub fn nonce_dir(&self, key_id: &str) -> PathBuf {
         self.dir.join(format!("{key_id}.nonces"))
+    }
+
+    // -- two-phase ceremonies (DKG/refresh): staged shares and ceremony records --
+
+    /// `keys/.staged/`: shares a DKG or refresh produced but this node has not committed. A
+    /// dot-dir, so backup, the readiness probe, the hosted-key inventory and the re-seal sweep
+    /// never see it, and a staged share is never loaded for signing.
+    pub fn staged_dir(&self) -> PathBuf {
+        self.dir.join(STAGED_DIR)
+    }
+
+    /// `keys/.ceremonies/`: this node's durable ceremony records (its votes). Not secret, but kept
+    /// beside the shares they decide, owner-only, and out of backups (a dot-dir).
+    pub fn ceremony_dir(&self) -> PathBuf {
+        self.dir.join(CEREMONY_DIR)
+    }
+
+    fn staged_path(&self, key_id: &str, ceremony_id: &str) -> Result<PathBuf> {
+        self.path(key_id)?; // validates the key id
+        validate_ceremony_id(ceremony_id)?;
+        Ok(self.staged_dir().join(format!("{key_id}.{ceremony_id}.json")))
+    }
+
+    /// Durably write the share ceremony `ceremony_id` produced for `key_id`: sealed, fsynced,
+    /// create-once (a second stage for the same ceremony and key is refused, never an overwrite).
+    /// It does not become `key_id`'s live share until [`KeyStore::promote_staged`].
+    pub fn stage(&self, key_id: &str, ceremony_id: &str, share: &Share) -> Result<()> {
+        let path = self.staged_path(key_id, ceremony_id)?;
+        let dir = self.staged_dir();
+        ensure_private_dir(&dir)?;
+        let plain = crate::share_delivery::to_json_zeroizing(share)?;
+        self.create_sealed_at(&dir, &path, key_id, &plain)
+    }
+
+    pub fn has_staged(&self, key_id: &str, ceremony_id: &str) -> Result<bool> {
+        let path = self.staged_path(key_id, ceremony_id)?;
+        self.touch(&path);
+        Ok(path.try_exists()?)
+    }
+
+    pub fn load_staged(&self, key_id: &str, ceremony_id: &str) -> Result<Share> {
+        let path = self.staged_path(key_id, ceremony_id)?;
+        let value: serde_json::Value = serde_json::from_slice(&self.read_plaintext_at(&path, key_id)?)?;
+        Ok(serde_json::from_value(value)?)
+    }
+
+    /// Make a staged share live. `replace = false` (DKG): only if no file exists for `key_id` —
+    /// [`Promotion::TargetExists`] otherwise, and the staged file stays. `replace = true` (refresh):
+    /// an atomic rename over the old share, so a crash leaves exactly one of the two. Both
+    /// directories are fsynced before this returns.
+    pub fn promote_staged(&self, key_id: &str, ceremony_id: &str, replace: bool) -> Result<Promotion> {
+        let from = self.staged_path(key_id, ceremony_id)?;
+        let to = self.path(key_id)?;
+        self.touch(&to);
+        if replace {
+            std::fs::rename(&from, &to)?;
+        } else {
+            match rename_noreplace(&from, &to)? {
+                NoReplace::Moved => {}
+                NoReplace::Exists => return Ok(Promotion::TargetExists),
+                NoReplace::Unsupported => match std::fs::hard_link(&from, &to) {
+                    Ok(()) => std::fs::remove_file(&from)?,
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        return Ok(Promotion::TargetExists)
+                    }
+                    Err(e) => return Err(e.into()),
+                },
+            }
+        }
+        std::fs::File::open(&self.dir)?.sync_all()?;
+        std::fs::File::open(self.staged_dir())?.sync_all()?;
+        Ok(Promotion::Promoted)
+    }
+
+    /// Delete a staged share (an aborted ceremony, or an orphan from a crash). Idempotent.
+    pub fn discard_staged(&self, key_id: &str, ceremony_id: &str) -> Result<()> {
+        let path = self.staged_path(key_id, ceremony_id)?;
+        self.touch(&path);
+        if path.try_exists()? {
+            std::fs::remove_file(&path)?;
+            std::fs::File::open(self.staged_dir())?.sync_all()?;
+        }
+        Ok(())
+    }
+
+    /// Every staged share on this node as `(key_id, ceremony_id)`, temps excluded.
+    pub fn list_staged(&self) -> Result<Vec<(String, String)>> {
+        let dir = self.staged_dir();
+        self.touch(&dir);
+        if !dir.try_exists()? {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(&dir)? {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                continue;
+            }
+            let Some(stem) = name.strip_suffix(".json") else { continue };
+            // Key ids and ceremony ids never contain '.', so the split is unambiguous.
+            if let Some((key_id, ceremony_id)) = stem.split_once('.') {
+                if self.staged_path(key_id, ceremony_id).is_ok() {
+                    out.push((key_id.to_string(), ceremony_id.to_string()));
+                }
+            }
+        }
+        out.sort();
+        Ok(out)
     }
 
     pub fn dir(&self) -> &Path {
@@ -549,7 +696,46 @@ impl KeyStore {
 /// Name prefix of [`KeyStore::create`]'s temp files (a dotfile, like the probe's).
 const CREATE_TMP_PREFIX: &str = ".create-";
 
-enum NoReplace {
+/// Subdirectory of the key store holding staged (uncommitted) ceremony shares.
+pub const STAGED_DIR: &str = ".staged";
+/// Subdirectory of the key store holding this node's ceremony records.
+pub const CEREMONY_DIR: &str = ".ceremonies";
+
+/// What [`KeyStore::promote_staged`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Promotion {
+    Promoted,
+    /// No-replace promotion found a file already under the key id; nothing moved.
+    TargetExists,
+}
+
+/// Ceremony ids name files: the same alphabet as key ids (`[A-Za-z0-9_-]`, which the leader's
+/// `<kind>-<uuid>` ids satisfy), bounded in length.
+pub fn validate_ceremony_id(ceremony_id: &str) -> Result<()> {
+    if ceremony_id.is_empty()
+        || ceremony_id.len() > 128
+        || !ceremony_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(DaemonError::Config(format!("invalid ceremony id: {ceremony_id:?}")));
+    }
+    Ok(())
+}
+
+/// Create `dir` if needed and make it owner-only (`0700`).
+pub(crate) fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(dir)?.permissions().mode();
+        if mode & 0o077 != 0 {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) enum NoReplace {
     Moved,
     Exists,
     /// The platform or filesystem has no no-replace rename: use the `link(2)` fallback.
@@ -557,7 +743,7 @@ enum NoReplace {
 }
 
 /// Rename `from` to `to` unless `to` exists, atomically.
-fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<NoReplace> {
+pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<NoReplace> {
     #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     {
         use std::os::unix::ffi::OsStrExt;
@@ -621,7 +807,7 @@ fn sweep_stale_probe(path: &Path) {
 /// umask. `create_new`: fail if it exists (the create-once temps); otherwise create or truncate (the
 /// save temp), and re-apply `0600` in case a leftover file had another mode. The final key file is
 /// this temp renamed, so it keeps the mode.
-fn private_file(path: &Path, create_new: bool) -> std::io::Result<std::fs::File> {
+pub(crate) fn private_file(path: &Path, create_new: bool) -> std::io::Result<std::fs::File> {
     let mut opts = std::fs::OpenOptions::new();
     opts.write(true);
     if create_new {
@@ -738,7 +924,7 @@ mod tests {
         let (shares, pkp) =
             rutli_frost_core::dealer::split_ed25519_seed(&[5u8; 32], &[1, 2, 3], 2).unwrap();
         let key_package = frost::keys::KeyPackage::try_from(shares[0].clone()).unwrap();
-        Share { key_package, public_key_package: pkp, origin }
+        Share { key_package, public_key_package: pkp, origin, epoch: 0, key_id: String::new() }
     }
 
     fn origin() -> KeyOrigin {

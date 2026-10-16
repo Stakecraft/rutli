@@ -512,6 +512,37 @@ public final class PeerGrpc {
     return getNodeInfoMethod;
   }
 
+  private static volatile io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.KeyEpochRequest,
+      com.stakecraft.rutli.grpc.KeyEpochReply> getKeyEpochMethod;
+
+  @io.grpc.stub.annotations.RpcMethod(
+      fullMethodName = SERVICE_NAME + '/' + "KeyEpoch",
+      requestType = com.stakecraft.rutli.grpc.KeyEpochRequest.class,
+      responseType = com.stakecraft.rutli.grpc.KeyEpochReply.class,
+      methodType = io.grpc.MethodDescriptor.MethodType.UNARY)
+  public static io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.KeyEpochRequest,
+      com.stakecraft.rutli.grpc.KeyEpochReply> getKeyEpochMethod() {
+    io.grpc.MethodDescriptor<com.stakecraft.rutli.grpc.KeyEpochRequest, com.stakecraft.rutli.grpc.KeyEpochReply> getKeyEpochMethod;
+    if ((getKeyEpochMethod = PeerGrpc.getKeyEpochMethod) == null) {
+      synchronized (PeerGrpc.class) {
+        if ((getKeyEpochMethod = PeerGrpc.getKeyEpochMethod) == null) {
+          PeerGrpc.getKeyEpochMethod = getKeyEpochMethod =
+              io.grpc.MethodDescriptor.<com.stakecraft.rutli.grpc.KeyEpochRequest, com.stakecraft.rutli.grpc.KeyEpochReply>newBuilder()
+              .setType(io.grpc.MethodDescriptor.MethodType.UNARY)
+              .setFullMethodName(generateFullMethodName(SERVICE_NAME, "KeyEpoch"))
+              .setSampledToLocalTracing(true)
+              .setRequestMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.KeyEpochRequest.getDefaultInstance()))
+              .setResponseMarshaller(io.grpc.protobuf.ProtoUtils.marshaller(
+                  com.stakecraft.rutli.grpc.KeyEpochReply.getDefaultInstance()))
+              .setSchemaDescriptor(new PeerMethodDescriptorSupplier("KeyEpoch"))
+              .build();
+        }
+      }
+    }
+    return getKeyEpochMethod;
+  }
+
   /**
    * Creates a new async stub that supports all call types for the service
    */
@@ -716,6 +747,19 @@ public final class PeerGrpc {
         io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.NodeInfoReply> responseObserver) {
       io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getNodeInfoMethod(), responseObserver);
     }
+
+    /**
+     * <pre>
+     * --- two-phase ceremonies (DKG/refresh) ---
+     * This node's committed epoch and PKP digest for one FROST key, and whether a ceremony for it is
+     * staged here. Public values only. The leader asks every node before a DKG (idempotent retry)
+     * or a refresh (every node must be on the same sharing).
+     * </pre>
+     */
+    default void keyEpoch(com.stakecraft.rutli.grpc.KeyEpochRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.KeyEpochReply> responseObserver) {
+      io.grpc.stub.ServerCalls.asyncUnimplementedUnaryCall(getKeyEpochMethod(), responseObserver);
+    }
   }
 
   /**
@@ -906,6 +950,20 @@ public final class PeerGrpc {
       io.grpc.stub.ClientCalls.asyncUnaryCall(
           getChannel().newCall(getNodeInfoMethod(), getCallOptions()), request, responseObserver);
     }
+
+    /**
+     * <pre>
+     * --- two-phase ceremonies (DKG/refresh) ---
+     * This node's committed epoch and PKP digest for one FROST key, and whether a ceremony for it is
+     * staged here. Public values only. The leader asks every node before a DKG (idempotent retry)
+     * or a refresh (every node must be on the same sharing).
+     * </pre>
+     */
+    public void keyEpoch(com.stakecraft.rutli.grpc.KeyEpochRequest request,
+        io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.KeyEpochReply> responseObserver) {
+      io.grpc.stub.ClientCalls.asyncUnaryCall(
+          getChannel().newCall(getKeyEpochMethod(), getCallOptions()), request, responseObserver);
+    }
   }
 
   /**
@@ -1065,6 +1123,19 @@ public final class PeerGrpc {
       return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
           getChannel(), getNodeInfoMethod(), getCallOptions(), request);
     }
+
+    /**
+     * <pre>
+     * --- two-phase ceremonies (DKG/refresh) ---
+     * This node's committed epoch and PKP digest for one FROST key, and whether a ceremony for it is
+     * staged here. Public values only. The leader asks every node before a DKG (idempotent retry)
+     * or a refresh (every node must be on the same sharing).
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.KeyEpochReply keyEpoch(com.stakecraft.rutli.grpc.KeyEpochRequest request) throws io.grpc.StatusException {
+      return io.grpc.stub.ClientCalls.blockingV2UnaryCall(
+          getChannel(), getKeyEpochMethod(), getCallOptions(), request);
+    }
   }
 
   /**
@@ -1223,6 +1294,19 @@ public final class PeerGrpc {
     public com.stakecraft.rutli.grpc.NodeInfoReply nodeInfo(com.stakecraft.rutli.grpc.NodeInfoRequest request) {
       return io.grpc.stub.ClientCalls.blockingUnaryCall(
           getChannel(), getNodeInfoMethod(), getCallOptions(), request);
+    }
+
+    /**
+     * <pre>
+     * --- two-phase ceremonies (DKG/refresh) ---
+     * This node's committed epoch and PKP digest for one FROST key, and whether a ceremony for it is
+     * staged here. Public values only. The leader asks every node before a DKG (idempotent retry)
+     * or a refresh (every node must be on the same sharing).
+     * </pre>
+     */
+    public com.stakecraft.rutli.grpc.KeyEpochReply keyEpoch(com.stakecraft.rutli.grpc.KeyEpochRequest request) {
+      return io.grpc.stub.ClientCalls.blockingUnaryCall(
+          getChannel(), getKeyEpochMethod(), getCallOptions(), request);
     }
   }
 
@@ -1399,6 +1483,20 @@ public final class PeerGrpc {
       return io.grpc.stub.ClientCalls.futureUnaryCall(
           getChannel().newCall(getNodeInfoMethod(), getCallOptions()), request);
     }
+
+    /**
+     * <pre>
+     * --- two-phase ceremonies (DKG/refresh) ---
+     * This node's committed epoch and PKP digest for one FROST key, and whether a ceremony for it is
+     * staged here. Public values only. The leader asks every node before a DKG (idempotent retry)
+     * or a refresh (every node must be on the same sharing).
+     * </pre>
+     */
+    public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.KeyEpochReply> keyEpoch(
+        com.stakecraft.rutli.grpc.KeyEpochRequest request) {
+      return io.grpc.stub.ClientCalls.futureUnaryCall(
+          getChannel().newCall(getKeyEpochMethod(), getCallOptions()), request);
+    }
   }
 
   private static final int METHODID_SIGN_ROUND1 = 0;
@@ -1417,6 +1515,7 @@ public final class PeerGrpc {
   private static final int METHODID_LIST_KEYS = 13;
   private static final int METHODID_PURGE_KEY = 14;
   private static final int METHODID_NODE_INFO = 15;
+  private static final int METHODID_KEY_EPOCH = 16;
 
   private static final class MethodHandlers<Req, Resp> implements
       io.grpc.stub.ServerCalls.UnaryMethod<Req, Resp>,
@@ -1498,6 +1597,10 @@ public final class PeerGrpc {
         case METHODID_NODE_INFO:
           serviceImpl.nodeInfo((com.stakecraft.rutli.grpc.NodeInfoRequest) request,
               (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.NodeInfoReply>) responseObserver);
+          break;
+        case METHODID_KEY_EPOCH:
+          serviceImpl.keyEpoch((com.stakecraft.rutli.grpc.KeyEpochRequest) request,
+              (io.grpc.stub.StreamObserver<com.stakecraft.rutli.grpc.KeyEpochReply>) responseObserver);
           break;
         default:
           throw new AssertionError();
@@ -1629,6 +1732,13 @@ public final class PeerGrpc {
               com.stakecraft.rutli.grpc.NodeInfoRequest,
               com.stakecraft.rutli.grpc.NodeInfoReply>(
                 service, METHODID_NODE_INFO)))
+        .addMethod(
+          getKeyEpochMethod(),
+          io.grpc.stub.ServerCalls.asyncUnaryCall(
+            new MethodHandlers<
+              com.stakecraft.rutli.grpc.KeyEpochRequest,
+              com.stakecraft.rutli.grpc.KeyEpochReply>(
+                service, METHODID_KEY_EPOCH)))
         .build();
   }
 
@@ -1693,6 +1803,7 @@ public final class PeerGrpc {
               .addMethod(getListKeysMethod())
               .addMethod(getPurgeKeyMethod())
               .addMethod(getNodeInfoMethod())
+              .addMethod(getKeyEpochMethod())
               .build();
         }
       }

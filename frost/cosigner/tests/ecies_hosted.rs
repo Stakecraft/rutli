@@ -506,6 +506,8 @@ async fn verify_hosted_sees_each_nodes_own_copy_and_the_canton_fingerprint() {
         key_package: frost_ed25519::keys::KeyPackage::try_from(shares[0].clone()).unwrap(),
         public_key_package: pkp,
         origin: None,
+        epoch: 0,
+        key_id: String::new(),
     };
     let node1_store = || {
         KeyStore::open_with_sealer(tmp.path().join("node-1"), Some(Arc::new(Sealer::from_master_secret(MASTER, 1))))

@@ -90,6 +90,26 @@ async fn refresh_rotates_shares_keeping_group_key_and_still_signs() {
 }
 
 #[tokio::test]
+async fn dkg_commits_epoch_one_and_every_refresh_adds_one_on_every_node() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = cluster(&tmp);
+    run_dkg(&peers, KEY_ID).await.unwrap();
+    let digest = |n: &Node| n.key_epoch(KEY_ID).unwrap().pkp_digest;
+    for expected in 1..=3u64 {
+        for (n, p) in nodes.iter().zip(&peers) {
+            let view = p.key_epoch(KEY_ID).await.unwrap();
+            assert!(view.present && !view.staged);
+            assert_eq!(view.epoch, expected);
+            assert_eq!(n.key_status(KEY_ID).unwrap().epoch, expected);
+            assert_eq!(view.pkp_digest, digest(&nodes[0]), "every node on the same sharing");
+        }
+        if expected < 3 {
+            run_refresh(&peers, KEY_ID).await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_lost_node_recovers_from_a_share_backup_and_the_cluster_signs() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = cluster(&tmp);
@@ -390,7 +410,13 @@ async fn refresh_carries_a_dealt_keys_origin_and_counts_refreshes() {
     for (i, s) in shares.iter().enumerate() {
         let ks = KeyStore::open(tmp.path().join(format!("node-{}", i + 1))).unwrap();
         let key_package = frost_ed25519::keys::KeyPackage::try_from(s.clone()).unwrap();
-        ks.create(IMPORTED, &Share { key_package, public_key_package: pkp.clone(), origin: Some(origin.clone()) })
+        ks.create(IMPORTED, &Share {
+            key_package,
+            public_key_package: pkp.clone(),
+            origin: Some(origin.clone()),
+            epoch: 0,
+            key_id: IMPORTED.into(),
+        })
             .unwrap();
     }
     let (_nodes, peers) = cluster(&tmp);
@@ -916,6 +942,8 @@ async fn hosted_keys_never_land_on_import_ids_or_over_a_share() {
         key_package: frost_ed25519::keys::KeyPackage::try_from(shares[1].clone()).unwrap(),
         public_key_package: pkp,
         origin: None,
+        epoch: 0,
+        key_id: String::new(),
     };
     let frost_ks = KeyStore::open(tmp.path().join("frost-only")).unwrap();
     frost_ks.create("rutli-sym-taken", &share).unwrap();
