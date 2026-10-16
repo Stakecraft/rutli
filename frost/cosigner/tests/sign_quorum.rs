@@ -453,3 +453,51 @@ async fn a_round2_tampered_in_transit_is_refused_by_the_node_and_routed_around()
     assert!(refused[0].3.contains("round-1 binding"), "{}", refused[0].3);
     assert!(!marker_exists(tmp.path(), 2, &s[0]), "node 2 never burned (nor signed) the tampered session");
 }
+
+// ── nonce-marker pruning (audit L4) ───────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn marker_pruning_removes_old_markers_keeps_young_ones_and_the_node_still_signs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = cluster(tmp.path(), 3, 2);
+    let group = run_dkg(&peers, KEY).await.unwrap();
+    for i in 0..4 {
+        sign(&nodes[0], &peers, KEY, &digest(format!("m{i}").as_bytes())).await.unwrap();
+    }
+    let dir = tmp.path().join(format!("node-1/{KEY}.nonces"));
+    let markers = || -> Vec<std::path::PathBuf> {
+        let mut v: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.extension().is_some_and(|x| x == "used"))
+            .collect();
+        v.sort();
+        v
+    };
+    let all = markers();
+    assert_eq!(all.len(), 4, "the leader burned one marker per signature");
+    // Age three of them past the retention.
+    let retention = rutli_frost_core::session::MARKER_RETENTION;
+    for p in &all[..3] {
+        let f = std::fs::File::options().write(true).open(p).unwrap();
+        f.set_modified(std::time::SystemTime::now() - retention - std::time::Duration::from_secs(60)).unwrap();
+    }
+
+    let r = nodes[0].prune_nonce_markers(retention, 10_000).unwrap();
+    assert_eq!((r.removed, r.kept, r.truncated), (3, 1, false));
+    assert_eq!(markers(), vec![all[3].clone()], "the young marker stays");
+    // The store still says the key signed here: discard-partial-key keeps refusing it.
+    assert!(dir.join(rutli_frost_core::nonce_store::PRUNED_SENTINEL).exists());
+    assert!(nodes[0].discard_local_key(KEY).is_err());
+    // Budgeted passes, and signing is unaffected.
+    for p in markers() {
+        let f = std::fs::File::options().write(true).open(&p).unwrap();
+        f.set_modified(std::time::SystemTime::now() - retention - std::time::Duration::from_secs(60)).unwrap();
+    }
+    sign(&nodes[0], &peers, KEY, &digest(b"after pruning")).await.unwrap();
+    let r = nodes[0].prune_nonce_markers(retention, 0).unwrap();
+    assert!(r.truncated && r.removed == 0);
+    let msg = digest(b"still signs");
+    let sig = sign(&nodes[0], &peers, KEY, &msg).await.unwrap();
+    assert!(verifies(&group, &msg, &sig));
+}

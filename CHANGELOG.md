@@ -62,6 +62,13 @@ key-file v2 and restore — see the warnings below.
   restart). Each recovery is logged and counted in `rutli_lock_poison_recoveries_total{lock}`
   (alert `RutliLockPoisonRecovered`). The key cache is no longer held while a cosigner's session
   lock is taken.
+- **Nonce markers are pruned (audit L4).** Each node removes burned-session markers older than
+  15 minutes (3 × the 5-minute pending TTL) at startup and every 10 minutes, at most 10 000 per
+  pass, fsyncing the directory once per pass (`rutli_nonce_markers_pruned_total`, gauge
+  `rutli_nonce_markers`). Round 2 now also refuses a session older than the pending TTL even before
+  a sweep removed it, which is what makes pruning safe (argument on
+  `NonceStore::prune_older_than`). The first prune leaves a `.signed` sentinel so
+  `discard-partial-key` still refuses a key that signed.
 - **Signing sessions are bound at round 1** (groundwork for signing intents, audit C2). The leader
   declares the message and the signer set in `SignRound1`; each cosigner binds its nonces to them
   and to the key, and refuses a round 2 with another message, another commitment set, or its own

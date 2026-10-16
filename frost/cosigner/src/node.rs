@@ -103,6 +103,12 @@ struct CeremonyGuard {
 /// realistic DKG/refresh round-trip; shorter than a human's patience for a crashed ceremony.
 const CEREMONY_ORPHAN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
+/// How often a running node prunes expired nonce markers (and once at startup).
+pub const NONCE_PRUNE_INTERVAL: Duration = Duration::from_secs(10 * 60);
+/// Most markers one prune pass removes, so a pass over a huge backlog stays short; a pass that hits
+/// it is followed by another a few seconds later.
+pub const NONCE_PRUNE_BUDGET: usize = 10_000;
+
 /// The epoch a DKG commits its key at; each committed refresh adds one.
 pub const FIRST_EPOCH: u64 = 1;
 
@@ -567,6 +573,57 @@ impl Node {
             .filter(|r| r.key_id == key_id && r.state == RecordState::Committed)
             .map(|r| r.new_epoch)
             .max()
+    }
+
+    /// One nonce-marker prune pass over every key's store (audit L4): remove burned-session
+    /// markers older than `retention`, at most `budget` in total. Returns the totals; publishes
+    /// `rutli_nonce_markers_pruned_total` and `rutli_nonce_markers`. Skipped (an error) while the
+    /// key store fails its readiness probe. See
+    /// [`rutli_frost_core::nonce_store::NonceStore::prune_older_than`] for why pruning past
+    /// [`rutli_frost_core::session::MARKER_RETENTION`] cannot enable nonce reuse.
+    pub fn prune_nonce_markers(&self, retention: Duration, budget: usize) -> Result<rutli_frost_core::nonce_store::PruneReport> {
+        self.refuse_if_keystore_down()?;
+        let mut total = rutli_frost_core::nonce_store::PruneReport::default();
+        for entry in std::fs::read_dir(self.keystore.dir())? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if !name.to_string_lossy().ends_with(".nonces") || !entry.file_type()?.is_dir() {
+                continue;
+            }
+            let r = NonceStore::open(entry.path())?.prune_older_than(retention, budget - total.removed)?;
+            total.removed += r.removed;
+            total.kept += r.kept;
+            total.truncated |= r.truncated;
+        }
+        metrics::counter!(crate::metrics::NONCE_MARKERS_PRUNED).increment(total.removed as u64);
+        metrics::gauge!(crate::metrics::NONCE_MARKERS).set(total.kept as f64);
+        if total.removed > 0 {
+            tracing::info!(removed = total.removed, kept = total.kept, "pruned expired nonce markers");
+        }
+        Ok(total)
+    }
+
+    /// The background nonce-marker pruner: a pass now (startup), then every
+    /// [`NONCE_PRUNE_INTERVAL`] — sooner while a pass hits [`NONCE_PRUNE_BUDGET`]. Each pass runs on
+    /// the blocking pool, and the next one starts only after it returns, so a hung volume parks one
+    /// thread, never a pile of them.
+    pub fn spawn_nonce_pruner(node: Arc<Node>) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            loop {
+                let pass = node
+                    .blocking(|n| n.prune_nonce_markers(rutli_frost_core::session::MARKER_RETENTION, NONCE_PRUNE_BUDGET))
+                    .await;
+                let wait = match pass {
+                    Ok(r) if r.truncated => Duration::from_secs(5),
+                    Ok(_) => NONCE_PRUNE_INTERVAL,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "nonce-marker prune pass skipped");
+                        NONCE_PRUNE_INTERVAL
+                    }
+                };
+                tokio::time::sleep(wait).await;
+            }
+        })
     }
 
     /// Every FROST key id this node holds a share for.
@@ -1612,7 +1669,8 @@ impl Node {
 
     /// Delete this node's file for `key_id` and its (empty) nonce directory — the last step of
     /// [`crate::ceremony::discard_partial_key`], which checks everything else first. Refuses if
-    /// any signing session was ever burned for the key here.
+    /// any signing session was ever burned for the key here: a marker, or the sentinel marker
+    /// pruning leaves behind ([`rutli_frost_core::nonce_store::PRUNED_SENTINEL`]).
     pub fn discard_local_key(&self, key_id: &str) -> Result<()> {
         let nonces = self.keystore.nonce_dir(key_id);
         if nonces.try_exists()? && std::fs::read_dir(&nonces)?.next().is_some() {
