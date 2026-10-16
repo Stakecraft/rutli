@@ -87,6 +87,22 @@ jobs:
       - name: Lint, render, check-deploy-policy (fails on pods/exec RBAC, seal env, shared secrets)
         run: scripts/ci-deploy-policy.sh
 
+  prometheus-rules:
+    name: Alert rules (promtool)
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: PyYAML (for render-prometheusrule.py)
+        run: python -m pip install pyyaml==6.0.2
+      # yq (v4) and docker ship with the ubuntu runner image and deploy/ci-runner's (which drives
+      # the daemon it is given, with the work dir at the same path); promtool is the pinned
+      # prom/prometheus image (by digest) the script runs.
+      - name: promtool check rules (source + rendered PrometheusRule, render up to date)
+        run: scripts/ci-prometheus-rules.sh
+
   frost-tls-smoke:
     name: FROST TLS cluster smoke
     runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
