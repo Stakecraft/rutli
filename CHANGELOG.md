@@ -58,6 +58,30 @@ quorum can reach. Pause the refresh CronJob and onboarding DKGs from step 1 unti
    replayed through peers' tombstones, audit F7). Canton calls `deleteKey` only from the operator's
    `keys.secret.delete`, so leaving deletes disabled does not affect normal operation (F9).
 
+### Batch C follow-ups
+
+- **The driver's sign audit line names the message (`msg=`).** Next to `intent=<request id>` each
+  sign's audit entry now carries `msg=<hex SHA-256 of the bytes signed>`. `rutli-cosigner
+  audit-cross-check` matches it against the SHA-256 of each journaled digest, so a message
+  journaled under an audited request id that the driver did not sign is reported by name (`… was
+  signed OUT OF BAND — the driver audit log signed only msg=… (seq N)`), and an audited sign is
+  checked against the journals for that exact message. Audit lines without `msg=` (a driver from
+  0.4.0-rc.2 or earlier) keep the count-based match on the request id; one log may mix both.
+  `docs/audit-cross-check.md`.
+- **CI: `promtool check rules`** (`scripts/ci-prometheus-rules.sh`, job `prometheus-rules`, pinned
+  `prom/prometheus:v3.5.0` by digest) on `deploy/monitoring/prometheus-rules.yml` and on the rendered
+  PrometheusRule's groups, failing on a stale render, duplicate rules, or a dashboard query that
+  does not parse.
+- **Grafana:** three rows for the batch C series — signing policy & sign journal, ceremonies & share
+  epochs (including a per-(node, key) share-freshness timeline), and key store (`rutli_keyfiles`,
+  `rutli_nonce_markers`).
+- **Tests:** `KEYFILE_V2_DELETES=1 scripts/e2e-ecies-hosted.sh` runs the Canton 3.6.1 ECIES e2e with
+  key-file v2 only (`write_version` 2, `accept_v1` false) and the driver on the hosted-key delete
+  role: Canton's `keys.secret.delete` of the rotated-out key sends a driver-signed delete intent and
+  every cosigner tombstones it. An integration test drives `rutli-cosigner delete-hosted-key
+  --approvals-inbox` end to end over mTLS (refused without approval, timeout withdraws the request,
+  an approval file completes it).
+
 ### Batch C review fixes
 
 - **Sign rate-limit charges bind the operation (R1).** A charge is per signed intent — its request
