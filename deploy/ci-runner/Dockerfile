@@ -4,7 +4,9 @@
 # through the mounted socket — see docker-compose.yml for the matching work-dir mount).
 FROM docker:27.3.1-cli AS dockercli
 
-FROM ghcr.io/actions/actions-runner:2.321.0
+# GitHub refuses to register runners below a minimum version (and the runner self-updates once
+# registered), so bump this when registration reports "out of date".
+FROM ghcr.io/actions/actions-runner:2.338.0
 USER root
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
