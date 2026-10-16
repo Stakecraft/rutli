@@ -251,6 +251,12 @@ async fn main() -> Result<()> {
     }
     tracing::info!(identifier = cfg.identifier, listen = %cfg.listen, "starting cosigner");
 
+    // One daemon per data directory, for the life of the process (released by the kernel on exit).
+    // Taken first, so a second instance fails with this error rather than a port clash. The
+    // offline subcommands above deliberately skip it: import-share and import-key are safe to run
+    // inside the pod next to a running daemon (create-once, no-clobber key store writes).
+    let _instance_lock = rutli_cosigner::instance_lock::InstanceLock::acquire(&cfg.data_dir)?;
+
     // Prometheus /metrics endpoint (opt-in). Operation counts/latencies only — no key material.
     if let Some(metrics_listen) = &cfg.metrics_listen {
         rutli_cosigner::metrics::install(metrics_listen)?;

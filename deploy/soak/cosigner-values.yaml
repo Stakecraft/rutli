@@ -1,0 +1,17 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Values pinned for the LIVE DevNet soak install of deploy/helm/rutli-cosigner (release `rutli`,
+# namespace `rutli`). Pass it to every helm template/upgrade of that release, after the values
+# exported from the cluster:
+#   helm -n rutli upgrade rutli deploy/helm/rutli-cosigner -f <exported values> -f deploy/soak/cosigner-values.yaml
+#
+# Why: the soak StatefulSet was created with ReadWriteOnce claims. volumeClaimTemplates are
+# immutable, and the chart's default is now ReadWriteOncePod, so an upgrade without this pin is
+# rejected by the API server. (`helm get values` shows only what was overridden, so the old mode
+# is not in the exported values.) Do not change this on the live soak; switching modes means
+# recreating the StatefulSet and its claims.
+persistence:
+  storageClassName: hcloud-volumes
+  accessModes:
+    - ReadWriteOnce

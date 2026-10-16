@@ -21,6 +21,7 @@ pub mod error;
 pub mod export;
 pub mod health;
 pub mod hosted;
+pub mod instance_lock;
 pub mod keystore;
 pub mod metrics;
 pub mod node;

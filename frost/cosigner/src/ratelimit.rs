@@ -36,6 +36,8 @@ use std::time::{Duration, Instant};
 pub struct DecryptRateLimiter {
     per_minute: u32,
     labels: Labels,
+    /// Cap on `buckets`; see [`MAX_TRACKED_KEYS`]. A field so the tests can use a small one.
+    max_tracked: usize,
     buckets: Mutex<HashMap<String, Bucket>>,
 }
 
@@ -67,6 +69,17 @@ const WARN_INTERVAL: Duration = Duration::from_secs(60);
 /// near the ceiling *before* decryption starts failing.
 const WARN_THRESHOLD: f64 = 0.2; // warn once fewer than 20% of tokens remain
 
+/// Most keys a limiter tracks at once. Buckets are keyed by the caller-supplied key id, which is
+/// charged BEFORE the id is validated or looked up, so without a cap a certificate holder could
+/// grow the map (and the memory behind it) without limit with made-up ids. Real deployments hold a
+/// handful of hosted keys; this is orders of magnitude above that.
+///
+/// At the cap, buckets that have fully refilled are dropped first — that is lossless, since a
+/// missing bucket starts full. If every bucket is still draining, a NEW key id is refused instead
+/// of evicting a tracked one: evicting would hand an attacker a fresh budget on a real key by
+/// flooding made-up ids, while refusing only ever costs a key that is not already being served.
+pub const MAX_TRACKED_KEYS: usize = 4096;
+
 impl DecryptRateLimiter {
     /// `per_minute` of 0 disables limiting entirely.
     pub fn new(per_minute: u32) -> Self {
@@ -81,7 +94,7 @@ impl DecryptRateLimiter {
     /// A limiter for another operation: `what` names it in messages, `setting` is the config key
     /// that raises it, `hint` is what sustained use near the ceiling may mean if it is not yours.
     pub fn named(per_minute: u32, what: &'static str, setting: &'static str, hint: &'static str) -> Self {
-        Self { per_minute, labels: Labels { what, setting, hint }, buckets: Mutex::new(HashMap::new()) }
+        Self { per_minute, labels: Labels { what, setting, hint }, max_tracked: MAX_TRACKED_KEYS, buckets: Mutex::new(HashMap::new()) }
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -102,6 +115,21 @@ impl DecryptRateLimiter {
         let per_sec = capacity / 60.0;
 
         let mut buckets = self.buckets.lock().expect("rate limiter lock");
+        if !buckets.contains_key(key_id) && buckets.len() >= self.max_tracked {
+            // Idle buckets are equivalent to no bucket: drop them, then see if there is room.
+            buckets.retain(|_, b| {
+                let elapsed = now.saturating_duration_since(b.last_refill).as_secs_f64();
+                b.tokens + elapsed * per_sec < capacity
+            });
+            if buckets.len() >= self.max_tracked {
+                return Err(RateLimited {
+                    key_id: key_id.to_string(),
+                    per_minute: self.per_minute,
+                    what: self.labels.what,
+                    setting: self.labels.setting,
+                });
+            }
+        }
         let bucket = buckets
             .entry(key_id.to_string())
             .or_insert_with(|| Bucket { tokens: capacity, last_refill: now, last_warned: None });
@@ -241,6 +269,48 @@ mod tests {
         }
         let earlier = t0 - Duration::from_secs(50);
         assert!(rl.check_at("rutli-enc-1", earlier).is_err());
+    }
+
+    #[test]
+    fn the_bucket_map_is_bounded_and_idle_buckets_are_evicted() {
+        let mut rl = DecryptRateLimiter::new(60); // 1 token/sec
+        rl.max_tracked = 4;
+        let t0 = Instant::now();
+        // Four distinct ids fill the map; each spent one token, so none is idle yet.
+        for i in 0..4 {
+            rl.check_at(&format!("junk-{i}"), t0).unwrap();
+        }
+        assert_eq!(rl.tracked_keys(), 4);
+        // A fifth, new id is refused while every bucket is still draining ...
+        assert!(rl.check_at("junk-4", t0).is_err());
+        assert_eq!(rl.tracked_keys(), 4, "a refused id must not be tracked");
+        // ... but a tracked key keeps its own budget.
+        rl.check_at("junk-0", t0).unwrap();
+
+        // Once the buckets have refilled they are dropped to make room, so the map never exceeds
+        // the cap and a new id is served again.
+        let t1 = t0 + Duration::from_secs(5);
+        rl.check_at("rutli-enc-1", t1).unwrap();
+        assert!(rl.tracked_keys() <= 4);
+        for i in 0..100 {
+            let _ = rl.check_at(&format!("flood-{i}"), t1 + Duration::from_secs(10 * i));
+            assert!(rl.tracked_keys() <= 4);
+        }
+    }
+
+    #[test]
+    fn flooding_made_up_ids_cannot_reset_a_real_keys_budget() {
+        let mut rl = DecryptRateLimiter::new(10);
+        rl.max_tracked = 8;
+        let t0 = Instant::now();
+        for _ in 0..10 {
+            rl.check_at("rutli-enc-1", t0).unwrap();
+        }
+        assert!(rl.check_at("rutli-enc-1", t0).is_err());
+        for i in 0..1000 {
+            let _ = rl.check_at(&format!("junk-{i}"), t0);
+        }
+        assert!(rl.check_at("rutli-enc-1", t0).is_err(), "the drained bucket must survive the flood");
     }
 
     #[test]
