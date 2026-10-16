@@ -26,13 +26,13 @@
 //! Deriving rather than generating avoids a first-boot ordering problem: there is no key to
 //! distribute before the cluster can talk.
 //!
-//! Two honest limits on what this buys today. Under the current *shared* master secret any node can
-//! derive any peer's key, so this binds material to a node identity only as strongly as the shared
-//! secret is held — no worse than share sealing already is, and it becomes a real binding with no
-//! code change once operators move to per-node seal secrets. And `PeerConfig` does **not** yet pin
-//! each peer's expected `dist_pubkey`, so a wrong secret or a wrong mount is caught when an
-//! envelope fails to open, not at startup before any key exists. Pinning it is the follow-up that
-//! would make the failure loud and early.
+//! Under the legacy *shared* master secret (`share_seal.secret_env`) any node can derive any peer's
+//! key, so this binds material to a node identity only as strongly as the shared secret is held.
+//! A node on its own seal bundle (`share_seal.secret_file`, see [`crate::seal::NodeSealBundle`])
+//! holds only its own seed and knows its peers by the public keys pinned in config
+//! (`PeerConfig.dist_public_key`), which makes the binding real. A node checks its own pin against
+//! its seed at startup, and a replication target's reported key against its pin, so a wrong bundle
+//! or a wrong mount fails loudly and early rather than when an envelope will not open.
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng, Payload};
 use aes_gcm::{AeadCore, Aes256Gcm, Key, Nonce};
@@ -63,14 +63,46 @@ pub struct DistKey {
     identifier: u16,
 }
 
+/// The X25519 seed of node `node_identifier`'s distribution key under the legacy shared master.
+///
+/// This is the derivation every cluster has used since hosted keys shipped, so it must never
+/// change: `seal split-legacy` copies its output into each node's seal bundle, and that is what
+/// lets a node move from the shared master to its own bundle with every peer's envelope still
+/// opening.
+pub fn derive_dist_seed(master: &[u8], node_identifier: u16) -> Zeroizing<[u8; 32]> {
+    let salt = format!("rutli-dist/node-{node_identifier}");
+    let hk = Hkdf::<Sha256>::new(Some(salt.as_bytes()), master);
+    let mut seed = Zeroizing::new([0u8; 32]);
+    hk.expand(b"x25519-v1", seed.as_mut())
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
+    seed
+}
+
+/// Node index whose legacy distribution public key is the cluster-wide hosted-key commitment key.
+///
+/// A commitment is compared across nodes (replication acks, anti-entropy), so it must be the same
+/// on every node: it is keyed off one fixed, cluster-wide value, not off the computing node's own
+/// distribution key. It is 0 because that is the value every node effectively used before the
+/// identifier-index fix (0.3.2), when each node's index read as 0 — keeping it makes commitments
+/// from a 0.3.1 node and a fixed node agree during a rolling upgrade.
+pub const COMMITMENT_KEY_INDEX: u16 = 0;
+
+/// The hosted-key commitment key a legacy (shared-master) cluster uses. A node on a per-node seal
+/// bundle cannot derive it and reads it from config (`hosted_keys.commitment_key`) instead; `seal
+/// split-legacy` prints this value so both kinds of node agree byte for byte.
+pub fn legacy_commitment_key(master: &[u8]) -> [u8; 32] {
+    DistKey::derive(master, COMMITMENT_KEY_INDEX).public_bytes()
+}
+
 impl DistKey {
     /// Derive the distribution key for `node_identifier` from the cluster master secret.
     pub fn derive(master: &[u8], node_identifier: u16) -> Self {
-        let salt = format!("rutli-dist/node-{node_identifier}");
-        let hk = Hkdf::<Sha256>::new(Some(salt.as_bytes()), master);
-        let mut seed = Zeroizing::new([0u8; 32]);
-        hk.expand(b"x25519-v1", seed.as_mut())
-            .expect("32 bytes is a valid HKDF-SHA256 output length");
+        Self::from_seed(&derive_dist_seed(master, node_identifier), node_identifier)
+    }
+
+    /// The distribution key for `node_identifier` from its 32-byte seed (a node seal bundle's
+    /// `dist_seed`).
+    pub fn from_seed(seed: &[u8; 32], node_identifier: u16) -> Self {
         // StaticSecret::from clamps the scalar, so any 32 bytes are a valid secret key.
         let secret = StaticSecret::from(*seed);
         let public = PublicKey::from(&secret);
@@ -253,6 +285,8 @@ mod tests {
 
     const MASTER: &[u8] = b"cluster master secret for wrap tests";
     const CLUSTER: &str = "abcdef0123456789";
+    const GOLDEN_SEED_2: &str = "b63a8a39e06763d2723bb5c602657ad14d2bd4361270e19d0d7fa5b78f885f1d";
+    const GOLDEN_COMMITMENT: &str = "b8c3f120e13f6e286a4012cf13df26d856984e20a6ef184d4796f8ea7dc6442a";
 
     #[test]
     fn wrap_round_trips_to_the_intended_node() {
@@ -320,6 +354,27 @@ mod tests {
             DistKey::derive(MASTER, 2).public_bytes(),
             DistKey::derive(b"a different master", 2).public_bytes()
         );
+    }
+
+    #[test]
+    fn a_seed_from_the_legacy_derivation_gives_the_same_key() {
+        // What makes `seal split-legacy` a no-op for peers: the bundle carries the seed, and the
+        // key built from it is the one every peer already wraps to.
+        for id in [1u16, 2, 3, 300] {
+            let derived = DistKey::derive(MASTER, id);
+            let from_seed = DistKey::from_seed(&derive_dist_seed(MASTER, id), id);
+            assert_eq!(derived.public_bytes(), from_seed.public_bytes());
+            let w = wrap_for(id, &derived.public_bytes(), b"m", CLUSTER, "k", "aes-256-gcm").unwrap();
+            assert_eq!(from_seed.unwrap_key(&w, CLUSTER, "k", "aes-256-gcm").unwrap().as_slice(), b"m");
+        }
+    }
+
+    #[test]
+    fn the_legacy_derivations_are_unchanged_golden() {
+        // Pinned outputs of the derivations every running cluster's envelopes and commitments
+        // depend on. A change here strands every hosted key on every legacy cluster.
+        assert_eq!(hex::encode(*derive_dist_seed(MASTER, 2)), GOLDEN_SEED_2);
+        assert_eq!(hex::encode(legacy_commitment_key(MASTER)), GOLDEN_COMMITMENT);
     }
 
     #[test]

@@ -65,24 +65,28 @@ pub struct Node {
     hosted: Option<HostedCtx>,
 }
 
-/// Node index whose distribution public key keys [`Node::hosted_commitment`].
-///
-/// A commitment is compared across nodes (replication acks, anti-entropy), so it must be the same
-/// on every node: it is keyed off one fixed, cluster-wide value, not off the computing node's own
-/// distribution key. It is 0 because that is the value every node effectively used before the
-/// identifier-index fix (0.3.2), when each node's index read as 0 — keeping it makes commitments
-/// from a 0.3.1 node and a fixed node agree during a rolling upgrade.
-const COMMITMENT_KEY_INDEX: u16 = 0;
+/// What a node needs to take part in hosted-key replication, built from its seal keys and config
+/// by [`crate::seal::SealKeys::hosted_keyring`].
+pub struct HostedKeyring {
+    /// This node's distribution keypair (it unwraps envelopes addressed to it).
+    pub dist_key: crate::wrap::DistKey,
+    /// The cluster-wide key [`Node::hosted_commitment`] is keyed by (see
+    /// [`crate::wrap::COMMITMENT_KEY_INDEX`]); the same on every node.
+    pub commitment_key: [u8; 32],
+    /// The distribution public key of every roster node, this one included, by identifier:
+    /// pinned in config on a seal bundle, derived from the master on the legacy path. A node is
+    /// never wrapped material under any other key.
+    pub peer_dist_keys: BTreeMap<u16, [u8; 32]>,
+}
 
 struct HostedCtx {
     dist_key: crate::wrap::DistKey,
-    /// Public half of the cluster-wide commitment key (see [`COMMITMENT_KEY_INDEX`]).
+    /// Public, cluster-wide commitment key (see [`HostedKeyring::commitment_key`]).
     commitment_key: [u8; 32],
     cluster_id: String,
-    /// Needed to derive a *peer's* distribution public key when serving FetchKey. Under today's
-    /// shared master secret every node can already derive every peer's key; with per-node secrets
-    /// this becomes a pinned config value instead.
-    master: zeroize::Zeroizing<Vec<u8>>,
+    /// Every roster node's distribution public key, for wrapping material to it (FetchKey,
+    /// replication). Holding the master is no longer needed: a peer's key is looked up, not derived.
+    peer_dist_keys: BTreeMap<u16, [u8; 32]>,
 }
 
 impl Node {
@@ -735,16 +739,43 @@ fn without_self(
 // ── cluster-hosted (non-FROST) keys ────────────────────────────────────────────────────────────
 
 impl Node {
-    /// Enable hosted keys on this node: derive its wrapping key from the cluster master secret and
-    /// bind envelopes to `cluster_id`. Without this, every hosted-key op returns an error.
-    pub fn with_hosted_keys(mut self, master_secret: &[u8], cluster_id: String) -> Result<Self> {
+    /// Enable hosted keys from a legacy shared master: every key derived as before, for a roster of
+    /// identifiers `1..=max_signers`. The daemon builds its keyring from config instead
+    /// ([`crate::seal::SealKeys::hosted_keyring`]); this stays for tests and tools.
+    pub fn with_hosted_keys(self, master_secret: &[u8], cluster_id: String) -> Result<Self> {
         let id = crate::hosted::identifier_index(self.identifier)?;
-        self.hosted = Some(HostedCtx {
+        let keyring = HostedKeyring {
             dist_key: crate::wrap::DistKey::derive(master_secret, id),
-            commitment_key: crate::wrap::DistKey::derive(master_secret, COMMITMENT_KEY_INDEX)
-                .public_bytes(),
+            commitment_key: crate::wrap::legacy_commitment_key(master_secret),
+            peer_dist_keys: (1..=self.max_signers)
+                .map(|j| (j, crate::wrap::DistKey::derive(master_secret, j).public_bytes()))
+                .collect(),
+        };
+        self.with_hosted_keyring(keyring, cluster_id)
+    }
+
+    /// Enable hosted keys with an explicit keyring and bind envelopes to `cluster_id`. Without
+    /// this, every hosted-key op returns an error. Refuses a keyring whose own key is for another
+    /// node, or which pins a different key for this node than the one it holds.
+    pub fn with_hosted_keyring(mut self, keyring: HostedKeyring, cluster_id: String) -> Result<Self> {
+        let id = crate::hosted::identifier_index(self.identifier)?;
+        if keyring.dist_key.identifier() != id {
+            return Err(DaemonError::Config(format!(
+                "hosted-key distribution key is for node {}, but this node is {id}",
+                keyring.dist_key.identifier()
+            )));
+        }
+        if keyring.peer_dist_keys.get(&id) != Some(&keyring.dist_key.public_bytes()) {
+            return Err(DaemonError::Config(format!(
+                "the pinned distribution key for this node ({id}) is missing or does not match its \
+                 seal keys"
+            )));
+        }
+        self.hosted = Some(HostedCtx {
+            dist_key: keyring.dist_key,
+            commitment_key: keyring.commitment_key,
             cluster_id,
-            master: zeroize::Zeroizing::new(master_secret.to_vec()),
+            peer_dist_keys: keyring.peer_dist_keys,
         });
         Ok(self)
     }
@@ -782,10 +813,15 @@ impl Node {
         Ok(&self.hosted_ctx()?.cluster_id)
     }
 
-    /// The distribution public key of peer `node_identifier`, for wrapping material to it.
+    /// The pinned distribution public key of roster node `node_identifier`, for wrapping material
+    /// to it. A node outside the roster has none, so nothing is ever wrapped to it.
     pub fn dist_public_key_for(&self, node_identifier: u16) -> Result<[u8; 32]> {
         let ctx = self.hosted_ctx()?;
-        Ok(crate::wrap::DistKey::derive(&ctx.master, node_identifier).public_bytes())
+        ctx.peer_dist_keys.get(&node_identifier).copied().ok_or_else(|| {
+            DaemonError::Config(format!(
+                "node {node_identifier} is not in this node's roster — no distribution key for it"
+            ))
+        })
     }
 
     /// The existing hosted key for `key_id`, if this node already has one.
@@ -923,8 +959,8 @@ impl Node {
     }
 
     /// Keyed digest of a key's material: lets two nodes agree they hold the *same* key without
-    /// revealing anything about it. Keyed by the cluster master (via the dist key), so a
-    /// commitment is meaningless off-cluster.
+    /// revealing anything about it. Keyed by the cluster-wide commitment key, so a commitment is
+    /// not a bare hash of the key.
     pub fn hosted_commitment(&self, key: &crate::hosted::HostedKey) -> Result<Vec<u8>> {
         let ctx = self.hosted_ctx()?;
         use sha2::{Digest, Sha256};

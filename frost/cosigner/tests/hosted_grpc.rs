@@ -30,7 +30,9 @@ use rutli_cosigner::pb::peer_server::PeerServer;
 use rutli_cosigner::pb::signer_server::SignerServer;
 use rutli_cosigner::peer::{GrpcPeer, LocalPeer, PeerApi};
 use rutli_cosigner::ratelimit::DecryptRateLimiter;
-use rutli_cosigner::seal::Sealer;
+use rutli_cosigner::node::HostedKeyring;
+use rutli_cosigner::seal::{NodeSealBundle, Sealer};
+use rutli_cosigner::wrap::{legacy_commitment_key, DistKey};
 use rutli_cosigner::service::{PeerSvc, SignerSvc};
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -71,7 +73,22 @@ fn write_tls(dir: &std::path::Path, ca: &(rcgen::Certificate, KeyPair), cn: &str
     TlsConfig { ca_cert: ca_path, cert: cert_path, key: key_path, domain: Some(SAN.to_string()), allow_expired_ca: false }
 }
 
+/// How a test node gets its seal keys.
+#[derive(Clone, Copy, PartialEq)]
+enum SealMode {
+    /// The deprecated shared master (`share_seal.secret_env`).
+    Legacy,
+    /// Its own bundle split from that master (`seal split-legacy`), with peers pinned.
+    SplitBundle,
+}
+
 async fn mesh() -> Mesh {
+    mesh_with(|_| SealMode::Legacy, |_| None).await
+}
+
+/// A mesh whose node `i` (1-based) runs `mode(i)`; `pin_override(i)` replaces the distribution key
+/// every bundle node pins for node `i` (to model a wrong pin).
+async fn mesh_with(mode: impl Fn(u16) -> SealMode, pin_override: impl Fn(u16) -> Option<[u8; 32]>) -> Mesh {
     let tmp = tempfile::tempdir().unwrap();
 
     let ca_key = KeyPair::generate().unwrap();
@@ -85,12 +102,39 @@ async fn mesh() -> Mesh {
     let mut tls = Vec::new();
     for i in 1..=N {
         listeners.push(TcpListener::bind("127.0.0.1:0").await.unwrap());
-        let sealer = Arc::new(Sealer::from_master_secret(MASTER, i));
-        let ks =
-            KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}")), Some(sealer)).unwrap();
-        let node = Node::new(Identifier::try_from(i).unwrap(), N, T, ks)
-            .with_hosted_keys(MASTER, CLUSTER.to_string())
-            .unwrap();
+        let node = match mode(i) {
+            SealMode::Legacy => {
+                let sealer = Arc::new(Sealer::from_master_secret(MASTER, i));
+                let ks = KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}")), Some(sealer))
+                    .unwrap();
+                Node::new(Identifier::try_from(i).unwrap(), N, T, ks)
+                    .with_hosted_keys(MASTER, CLUSTER.to_string())
+                    .unwrap()
+            }
+            SealMode::SplitBundle => {
+                // What the daemon does on `share_seal.secret_file`: the node holds only its own
+                // bundle and knows its peers by pinned public keys and the commitment key.
+                let bundle = NodeSealBundle::from_legacy_master(MASTER, i);
+                let ks = KeyStore::open_with_sealer(
+                    tmp.path().join(format!("node-{i}")),
+                    Some(Arc::new(bundle.sealer())),
+                )
+                .unwrap();
+                let keyring = HostedKeyring {
+                    dist_key: bundle.dist_key(),
+                    commitment_key: legacy_commitment_key(MASTER),
+                    peer_dist_keys: (1..=N)
+                        .map(|j| {
+                            let pinned = if j == i { None } else { pin_override(j) };
+                            (j, pinned.unwrap_or_else(|| DistKey::derive(MASTER, j).public_bytes()))
+                        })
+                        .collect(),
+                };
+                Node::new(Identifier::try_from(i).unwrap(), N, T, ks)
+                    .with_hosted_keyring(keyring, CLUSTER.to_string())
+                    .unwrap()
+            }
+        };
         nodes.push(Arc::new(node));
         tls.push(
             rutli_cosigner::tls::load(&write_tls(tmp.path(), &ca, &format!("cosigner{i}"))).unwrap(),
@@ -240,4 +284,57 @@ async fn a_hosted_key_replicates_over_grpc_and_the_sweep_pulls_and_converges() {
     let (pulled, _pushed) = anti_entropy_sweep(&m.nodes[1], &m.peers[1]).await.unwrap();
     assert!(pulled >= 1, "sweep should pull the key node 2 lacked");
     assert!(m.nodes[1].hosted_exists("rutli-enc-9"));
+}
+
+#[tokio::test]
+async fn a_mixed_legacy_and_bundle_cluster_replicates_and_repairs_over_grpc() {
+    // Mid-migration: node 1 still on the shared master, nodes 2 and 3 on bundles split from it.
+    // Every direction of push, pull and commitment comparison must work unchanged.
+    let m = mesh_with(|i| if i == 1 { SealMode::Legacy } else { SealMode::SplitBundle }, |_| None).await;
+
+    for leader in 0..N as usize {
+        let key_id = format!("rutli-sym-mixed-{leader}");
+        let (key, _, replicas) = generate_hosted_key(
+            &m.nodes[leader],
+            &m.peers[leader],
+            &key_id,
+            HostedSpec::Aes256Gcm,
+            DEFAULT_WRITE_QUORUM,
+        )
+        .await
+        .unwrap();
+        assert_eq!(replicas, N as usize, "leader {} must reach every node", leader + 1);
+        let expected = m.nodes[leader].hosted_commitment(&key).unwrap();
+        for n in &m.nodes {
+            assert_eq!(n.hosted_commitment(&n.hosted_load(&key_id).unwrap()).unwrap(), expected);
+        }
+    }
+
+    // FetchKey both ways: the legacy node pulls from a bundle node, and a bundle node from it.
+    let (k3, _) = m.nodes[2].hosted_generate("rutli-enc-only-3", HostedSpec::Rsa2048).unwrap();
+    assert!(repair_hosted_key(&m.nodes[0], &m.peers[0], "rutli-enc-only-3").await.unwrap());
+    let ct = k3.encrypt_oaep(b"mixed").unwrap();
+    assert_eq!(m.nodes[0].hosted_decrypt("rutli-enc-only-3", &ct).unwrap(), b"mixed");
+    let (k1, _) = m.nodes[0].hosted_generate("rutli-enc-only-1", HostedSpec::Rsa2048).unwrap();
+    assert!(repair_hosted_key(&m.nodes[1], &m.peers[1], "rutli-enc-only-1").await.unwrap());
+    let ct = k1.encrypt_oaep(b"mixed").unwrap();
+    assert_eq!(m.nodes[1].hosted_decrypt("rutli-enc-only-1", &ct).unwrap(), b"mixed");
+}
+
+#[tokio::test]
+async fn a_node_never_wraps_to_a_key_other_than_the_pinned_one() {
+    // Every bundle node pins a wrong key for node 3 (as if node 3 had the wrong bundle mounted, or
+    // an impostor answered for it): node 3 reports its real key, which no longer matches the pin.
+    let m = mesh_with(|_| SealMode::SplitBundle, |j| (j == 3).then_some([7u8; 32])).await;
+    let (_, _, replicas) = generate_hosted_key(
+        &m.nodes[0],
+        &m.peers[0],
+        "rutli-sym-pinned",
+        HostedSpec::Aes256Gcm,
+        DEFAULT_WRITE_QUORUM,
+    )
+    .await
+    .unwrap();
+    assert_eq!(replicas, 2, "node 3 must be refused, nodes 1 and 2 still make the quorum");
+    assert!(!m.nodes[2].hosted_exists("rutli-sym-pinned"));
 }
