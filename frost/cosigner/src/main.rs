@@ -24,9 +24,9 @@ use rutli_cosigner::{DaemonError, Result};
 #[derive(Parser)]
 #[command(name = "rutli-cosigner", about = "FROST cosigner daemon for the Rütli Canton KMS")]
 struct Args {
-    /// Path to the JSON cluster config for this node.
+    /// Path to the JSON cluster config for this node. Required by every command except `seal`.
     #[arg(short, long, env = "RUTLI_COSIGNER_CONFIG")]
-    config: std::path::PathBuf,
+    config: Option<std::path::PathBuf>,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -199,6 +199,45 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Per-node seal bundles (`share_seal.secret_file`). Offline, on an operator workstation —
+    /// never in the cluster. Needs no `--config`.
+    Seal {
+        #[command(subcommand)]
+        command: SealCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum SealCommand {
+    /// Split a legacy shared master into one bundle per node, with the CURRENT derivations: each
+    /// node keeps its DEK and distribution key, so every sealed file and every envelope still opens
+    /// and nothing is re-sealed. Writes `node-<id>.json` (0600, never overwrites) and prints the
+    /// public values to pin: each node's `dist_public_key` and `hosted_keys.commitment_key`.
+    SplitLegacy {
+        /// Node identifiers to write bundles for, e.g. `1,2,3`.
+        #[arg(long, value_delimiter = ',', required = true)]
+        nodes: Vec<u16>,
+        /// Directory to write the bundles into (created if missing).
+        #[arg(long)]
+        out_dir: std::path::PathBuf,
+        /// Env var holding the legacy master, exactly as the cosigners read it.
+        #[arg(long, default_value = "RUTLI_SEAL_SECRET")]
+        master_env: String,
+    },
+    /// Write a bundle of fresh random keys for node `--node` of a NEW cluster (an existing node's
+    /// sealed files would not open under it). Prints its `dist_public_key`.
+    NewNode {
+        #[arg(long)]
+        node: u16,
+        /// File to write (0600, never overwritten).
+        #[arg(long)]
+        out: std::path::PathBuf,
+    },
+    /// Print a bundle's node and `dist_public_key` (never its secrets).
+    Inspect {
+        #[arg(long, value_name = "FILE")]
+        r#in: std::path::PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -211,7 +250,13 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-    let cfg = Config::load(&args.config)?;
+    if let Some(Command::Seal { command }) = args.command {
+        return seal_command(command);
+    }
+    let config_path = args.config.ok_or_else(|| {
+        DaemonError::Config("--config (or RUTLI_COSIGNER_CONFIG) is required".into())
+    })?;
+    let cfg = Config::load(&config_path)?;
 
     match args.command {
         Some(Command::Refresh { key_id, target }) => return refresh_command(&cfg, &key_id, target).await,
@@ -265,14 +310,29 @@ async fn main() -> Result<()> {
 
     let identifier = ident(cfg.identifier)?;
 
-    // Share sealing: encryption-at-rest for key shares, keyed from an operator-injected secret.
-    let sealer = match &cfg.share_seal {
-        Some(seal_cfg) => {
-            tracing::info!(env = %seal_cfg.secret_env, "share sealing enabled (AES-256-GCM at rest)");
-            Some(Arc::new(rutli_cosigner::seal::Sealer::from_env(
-                &seal_cfg.secret_env,
-                cfg.identifier,
-            )?))
+    // Share sealing: encryption-at-rest for key shares, keyed from this node's seal bundle (or the
+    // deprecated shared master). Read once; dropped below once the sealer and keyring exist.
+    let seal_keys = cfg
+        .share_seal
+        .as_ref()
+        .map(|s| rutli_cosigner::seal::SealKeys::load(s, cfg.identifier))
+        .transpose()?;
+    let sealer = match &seal_keys {
+        Some(keys) => {
+            match keys {
+                rutli_cosigner::seal::SealKeys::Bundle { bundle, .. } => tracing::info!(
+                    source = %keys.describe(),
+                    "share sealing enabled (bundle node={}) — AES-256-GCM at rest",
+                    bundle.node
+                ),
+                rutli_cosigner::seal::SealKeys::LegacyMaster { .. } => tracing::warn!(
+                    source = %keys.describe(),
+                    "share sealing enabled from the legacy SHARED master (share_seal.secret_env) — \
+                     whoever can read that one secret can derive every node's DEK; migrate to \
+                     per-node seal bundles (share_seal.secret_file, docs/runbook-per-node-seal.md)"
+                ),
+            }
+            Some(Arc::new(keys.sealer(cfg.identifier)))
         }
         None => {
             tracing::warn!("share sealing DISABLED — key shares stored as plaintext JSON (dev only)");
@@ -385,21 +445,23 @@ async fn main() -> Result<()> {
         );
     }
 
-    // Cluster-hosted (non-FROST) keys. The wrapping key and the at-rest seal key both come from the
-    // same operator master secret, so hosted keys require share_seal (enforced by config
-    // validation) — a hosted key is a whole private key and must never sit unsealed on disk.
+    // Cluster-hosted (non-FROST) keys. The wrapping key comes from the same seal keys as the at-rest
+    // DEK, so hosted keys require share_seal (enforced by config validation) — a hosted key is a
+    // whole private key and must never sit unsealed on disk.
     if cfg.hosted_keys.as_ref().map(|h| h.enabled).unwrap_or(false) {
-        let seal_cfg = cfg.share_seal.as_ref().expect("validate() requires share_seal");
-        let master = std::env::var(&seal_cfg.secret_env).map_err(|_| {
-            DaemonError::Config(format!("hosted keys enabled but {} is not set", seal_cfg.secret_env))
-        })?;
+        let keys = seal_keys.as_ref().expect("validate() requires share_seal");
         // Bind envelopes to this trust domain (the pinned `cluster_id`, else derived from the CA
-        // cert), so an envelope can never be replayed into a different deployment.
-        node = node.with_hosted_keys(master.as_bytes(), cluster_id.clone())?;
+        // cert), so an envelope can never be replayed into a different deployment. Peers are known
+        // by their pinned distribution keys (bundle) or derived ones (legacy master), never by a
+        // master held here.
+        node = node.with_hosted_keyring(keys.hosted_keyring(&cfg)?, cluster_id.clone())?;
         tracing::info!(
             "cluster-hosted keys enabled (RSA-2048 and EC P-256 encryption, AES-256-GCM symmetric)"
         );
     }
+    // The bundle (or master) is no longer needed: the sealer holds the DEK, the node its own
+    // distribution key and the peers' public pins. Wiped on drop.
+    drop(seal_keys);
     let node = Arc::new(node);
 
     // Key-store readiness, re-probed in the background so `rutli_keystore_unreadable`, the
@@ -889,7 +951,84 @@ fn offline_sealer(cfg: &Config) -> Result<Arc<rutli_cosigner::seal::Sealer>> {
                 .into(),
         )
     })?;
-    Ok(Arc::new(rutli_cosigner::seal::Sealer::from_env(&seal_cfg.secret_env, cfg.identifier)?))
+    let keys = rutli_cosigner::seal::SealKeys::load(seal_cfg, cfg.identifier)?;
+    Ok(Arc::new(keys.sealer(cfg.identifier)))
+}
+
+/// `seal …`: offline seal-bundle tooling. See [`SealCommand`].
+fn seal_command(command: SealCommand) -> Result<()> {
+    use rutli_cosigner::seal::NodeSealBundle;
+    match command {
+        SealCommand::SplitLegacy { nodes, out_dir, master_env } => {
+            let mut ids = nodes.clone();
+            ids.sort_unstable();
+            ids.dedup();
+            if ids.len() != nodes.len() || ids.contains(&0) {
+                return Err(DaemonError::Config(
+                    "--nodes must list distinct node identifiers ≥ 1".into(),
+                ));
+            }
+            let master = rutli_cosigner::seal::read_master_env(&master_env)?;
+            std::fs::create_dir_all(&out_dir)?;
+            let mut pins = Vec::new();
+            for &id in &ids {
+                let bundle = NodeSealBundle::from_legacy_master(master.as_bytes(), id);
+                let path = out_dir.join(format!("node-{id}.json"));
+                write_new_private_file(&path, &bundle.to_json()?)?;
+                pins.push((id, hex::encode(bundle.dist_public_key()), path));
+            }
+            let commitment = hex::encode(rutli_cosigner::wrap::legacy_commitment_key(master.as_bytes()));
+            drop(master);
+            for (id, _, path) in &pins {
+                println!("wrote {} (node {id}: its share DEK + distribution seed, nothing else)", path.display());
+            }
+            println!("\nPublic values to pin (identical on every node; not secret):");
+            println!("  hosted_keys.commitment_key = {commitment}");
+            for (id, pk, _) in &pins {
+                println!("  peers[identifier={id}].dist_public_key = {pk}");
+            }
+            println!("\nHelm values (deploy/helm/rutli-cosigner, topology: perNode):");
+            println!("hostedKeys:\n  commitmentKey: \"{commitment}\"\nnodes:");
+            for (id, pk, _) in &pins {
+                println!("  - id: {id}\n    distPublicKey: \"{pk}\"");
+            }
+            println!(
+                "\nEach file is ONE node's secret: create one Secret per node from it, delete the \
+                 local copies, and never put two nodes' bundles in one place."
+            );
+        }
+        SealCommand::NewNode { node, out } => {
+            if node == 0 {
+                return Err(DaemonError::Config("--node must be ≥ 1".into()));
+            }
+            let bundle = NodeSealBundle::random(node);
+            write_new_private_file(&out, &bundle.to_json()?)?;
+            println!("wrote {} (node {node}, fresh random keys)", out.display());
+            println!("  dist_public_key = {}", hex::encode(bundle.dist_public_key()));
+            println!(
+                "A new cluster also needs one hosted_keys.commitment_key, the same on every node: \
+                 `openssl rand -hex 32`."
+            );
+        }
+        SealCommand::Inspect { r#in } => {
+            let bytes = zeroize::Zeroizing::new(std::fs::read(&r#in)?);
+            let bundle = NodeSealBundle::parse(&bytes)?;
+            println!("node {}", bundle.node);
+            println!("dist_public_key {}", hex::encode(bundle.dist_public_key()));
+        }
+    }
+    Ok(())
+}
+
+/// Create `path` owner-only and write `bytes`; refuses to replace an existing file.
+fn write_new_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut f = rutli_cosigner::share_delivery::private_create_new(path).map_err(|e| {
+        DaemonError::Config(format!("cannot create {} (refusing to overwrite): {e}", path.display()))
+    })?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    Ok(())
 }
 
 /// Split ceremony: `share-recipient`. See [`rutli_cosigner::share_import::share_recipient`].

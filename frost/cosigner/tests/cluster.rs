@@ -235,6 +235,57 @@ async fn sealed_shares_are_encrypted_at_rest_and_reload_with_the_right_key() {
 }
 
 #[tokio::test]
+async fn shares_sealed_under_the_legacy_master_sign_after_switching_to_split_bundles() {
+    // The soak migration, in miniature: DKG with every node on the shared master, then restart a
+    // mixed cluster (node 1 still legacy, nodes 2 and 3 on bundles from `seal split-legacy`). No
+    // file is re-sealed, and every 2-subset still signs under the same group key.
+    use rutli_cosigner::seal::{NodeSealBundle, Sealer};
+    const MASTER: &[u8] = b"soak master secret, 32+ chars long";
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut nodes = Vec::new();
+    for i in 1..=N {
+        let sealer = Arc::new(Sealer::from_master_secret(MASTER, i));
+        let ks = KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}")), Some(sealer)).unwrap();
+        nodes.push(Arc::new(Node::new(Identifier::try_from(i).unwrap(), N, T, ks)));
+    }
+    let peers: Peers =
+        nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    let group_key = run_dkg(&peers, KEY_ID).await.unwrap();
+    let before: Vec<Vec<u8>> = (1..=N)
+        .map(|i| std::fs::read(tmp.path().join(format!("node-{i}")).join(format!("{KEY_ID}.json"))).unwrap())
+        .collect();
+    drop((nodes, peers));
+
+    let mut reloaded = Vec::new();
+    for i in 1..=N {
+        let sealer = if i == 1 {
+            Sealer::from_master_secret(MASTER, i)
+        } else {
+            let json = NodeSealBundle::from_legacy_master(MASTER, i).to_json().unwrap();
+            NodeSealBundle::parse(&json).unwrap().sealer()
+        };
+        let ks = KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}")), Some(Arc::new(sealer)))
+            .unwrap();
+        reloaded.push(Arc::new(Node::new(Identifier::try_from(i).unwrap(), N, T, ks)));
+    }
+    let vk = ed25519_dalek::VerifyingKey::from_bytes(&group_key).unwrap();
+    for pair in [[0usize, 1], [0, 2], [1, 2]] {
+        let peers: Peers = pair
+            .iter()
+            .map(|&k| Arc::new(LocalPeer::new(reloaded[k].clone())) as Arc<dyn PeerApi>)
+            .collect();
+        let message = canton_digest(format!("after split {pair:?}").as_bytes());
+        let sig = sign(&reloaded[pair[0]], &peers, KEY_ID, &message).await.unwrap();
+        vk.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig)).unwrap();
+    }
+    for i in 1..=N {
+        let after = std::fs::read(tmp.path().join(format!("node-{i}")).join(format!("{KEY_ID}.json"))).unwrap();
+        assert_eq!(after, before[i as usize - 1], "node {i}'s share file must not be rewritten");
+    }
+}
+
+#[tokio::test]
 async fn shares_persist_across_node_reload() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = cluster(&tmp);

@@ -117,6 +117,26 @@ pub struct HostedKeysConfig {
     /// peak with headroom; the effective cluster-wide ceiling is `n ×` this value.
     #[serde(default = "default_decrypt_rate_limit")]
     pub decrypt_rate_limit_per_min: u32,
+    /// The cluster-wide key hosted-key commitments are keyed by (64 hex chars, public). Every node
+    /// must use the same value. Required with `share_seal.secret_file`; on the legacy master it is
+    /// derived (and, if set, checked). `rutli-cosigner seal split-legacy` prints the value a legacy
+    /// cluster already uses; a new cluster generates one (`openssl rand -hex 32`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commitment_key: Option<String>,
+}
+
+impl HostedKeysConfig {
+    pub fn commitment_key_bytes(&self) -> crate::Result<Option<[u8; 32]>> {
+        self.commitment_key.as_deref().map(|h| hex32("hosted_keys.commitment_key", h)).transpose()
+    }
+}
+
+/// Parse a 32-byte public value given as 64 hex chars.
+fn hex32(field: &str, value: &str) -> crate::Result<[u8; 32]> {
+    hex::decode(value.trim())
+        .ok()
+        .and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())
+        .ok_or_else(|| crate::DaemonError::Config(format!("{field} must be 64 hex chars (32 bytes)")))
 }
 
 /// Room for one `verify-key --sign-test` of a cluster up to 3-of-5 per minute, and little else.
@@ -142,12 +162,22 @@ fn default_decrypt_rate_limit() -> u32 {
     DEFAULT_DECRYPT_RATE_LIMIT_PER_MIN
 }
 
-/// Where the share-sealing master secret comes from. The secret must be injected at runtime (secret
-/// manager, systemd credential, enclave bootstrap) — never stored in this config file or on disk.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Where this node's seal keys come from — exactly one of the two. Never the keys themselves: this
+/// config file is not secret.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ShareSealConfig {
-    /// Name of the environment variable holding the master secret (e.g. `openssl rand -hex 32`).
-    pub secret_env: String,
+    /// Path of this node's seal bundle (`crate::seal::NodeSealBundle`): its own DEK and hosted-key
+    /// distribution seed, nothing of any other node. Mount it from a per-node secret as a file
+    /// (0400/0440), never through an env var. Requires a `dist_public_key` on every peer and
+    /// `hosted_keys.commitment_key` when hosted keys are on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_file: Option<PathBuf>,
+    /// **Deprecated (legacy):** name of the environment variable holding the one master secret every
+    /// node derives its keys from. Anything that can read that secret (or exec into any node and
+    /// read its env) can derive every node's DEK. Kept so existing clusters run unchanged until
+    /// they migrate (`rutli-cosigner seal split-legacy`, docs/runbook-per-node-seal.md).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_env: Option<String>,
 }
 
 /// Mutual-TLS material for the cosigner mesh (and the driver→cluster hop). All peers and the driver
@@ -177,6 +207,25 @@ pub struct PeerConfig {
     pub identifier: u16,
     /// gRPC endpoint of the peer (e.g. http://host:port). Ignored for this node itself.
     pub endpoint: String,
+    /// The peer's hosted-key distribution public key (64 hex chars, public), pinned. Required for
+    /// every peer when this node runs on a seal bundle (`share_seal.secret_file`) with hosted keys
+    /// on: such a node cannot derive its peers' keys. This node's own entry is checked against its
+    /// seal keys at startup. Printed by `rutli-cosigner seal split-legacy` / `seal inspect`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dist_public_key: Option<String>,
+}
+
+impl PeerConfig {
+    pub fn new(identifier: u16, endpoint: impl Into<String>) -> Self {
+        Self { identifier, endpoint: endpoint.into(), dist_public_key: None }
+    }
+
+    pub fn dist_public_key_bytes(&self) -> crate::Result<Option<[u8; 32]>> {
+        self.dist_public_key
+            .as_deref()
+            .map(|h| hex32(&format!("peer {} dist_public_key", self.identifier), h))
+            .transpose()
+    }
 }
 
 impl Config {
@@ -323,10 +372,52 @@ impl Config {
                 )));
             }
         }
+        if let Some(seal) = &self.share_seal {
+            if seal.secret_env.is_some() == seal.secret_file.is_some() {
+                return Err(Config(
+                    "share_seal needs exactly one of secret_file (a per-node seal bundle) or \
+                     secret_env (the legacy shared master)"
+                        .into(),
+                ));
+            }
+        }
+        // Pinned distribution keys: well-formed, and one per node (two nodes with one key would
+        // let either open the other's envelopes).
+        let mut seen_keys = std::collections::HashSet::new();
+        for p in &self.peers {
+            if let Some(k) = p.dist_public_key_bytes()? {
+                if !seen_keys.insert(k) {
+                    return Err(Config(format!(
+                        "peer {} has the same dist_public_key as another peer",
+                        p.identifier
+                    )));
+                }
+            }
+        }
+        let hosted_on = self.hosted_keys.as_ref().map(|h| h.enabled).unwrap_or(false);
+        if let Some(h) = &self.hosted_keys {
+            h.commitment_key_bytes()?;
+        }
+        let on_bundle = self.share_seal.as_ref().is_some_and(|s| s.secret_file.is_some());
+        if hosted_on && on_bundle {
+            if let Some(p) = self.peers.iter().find(|p| p.dist_public_key.is_none()) {
+                return Err(Config(format!(
+                    "peer {} has no dist_public_key — with share_seal.secret_file and hosted keys \
+                     on, every peer's distribution key must be pinned (rutli-cosigner seal \
+                     split-legacy / seal inspect print them)",
+                    p.identifier
+                )));
+            }
+            if self.hosted_keys.as_ref().and_then(|h| h.commitment_key.as_ref()).is_none() {
+                return Err(Config(
+                    "hosted_keys.commitment_key is required with share_seal.secret_file".into(),
+                ));
+            }
+        }
         // Hosted keys are whole private keys at rest on every node. Refusing to hold them
         // unsealed is the whole point of the feature — an unsealed replica would be strictly worse
         // than the HSM delegate it replaces.
-        if self.hosted_keys.as_ref().map(|h| h.enabled).unwrap_or(false) {
+        if hosted_on {
             if self.share_seal.is_none() {
                 return Err(Config(
                     "hosted_keys.enabled requires share_seal — cluster-hosted private keys are \
@@ -357,9 +448,9 @@ mod tests {
             threshold: 2,
             data_dir: "/tmp/x".into(),
             peers: vec![
-                PeerConfig { identifier: 1, endpoint: "https://a:9101".into() },
-                PeerConfig { identifier: 2, endpoint: "https://b:9101".into() },
-                PeerConfig { identifier: 3, endpoint: "https://c:9101".into() },
+                PeerConfig::new(1, "https://a:9101"),
+                PeerConfig::new(2, "https://b:9101"),
+                PeerConfig::new(3, "https://c:9101"),
             ],
             tls,
             share_seal: None,
@@ -479,7 +570,7 @@ mod tests {
     #[test]
     fn this_node_listed_twice_is_rejected() {
         let mut c = base(None, None);
-        c.peers.push(PeerConfig { identifier: 1, endpoint: "https://a2:9101".into() });
+        c.peers.push(PeerConfig::new(1, "https://a2:9101"));
         let e = c.validate().unwrap_err().to_string();
         assert!(e.contains("this node's identifier 1"), "{e}");
     }
@@ -532,12 +623,15 @@ mod hosted_config_tests {
             threshold: 2,
             data_dir: "/tmp/x".into(),
             peers: vec![
-                PeerConfig { identifier: 1, endpoint: "http://a:9101".into() },
-                PeerConfig { identifier: 2, endpoint: "http://b:9101".into() },
-                PeerConfig { identifier: 3, endpoint: "http://c:9101".into() },
+                PeerConfig::new(1, "http://a:9101"),
+                PeerConfig::new(2, "http://b:9101"),
+                PeerConfig::new(3, "http://c:9101"),
             ],
             tls: None,
-            share_seal: seal.then(|| ShareSealConfig { secret_env: "RUTLI_SEAL_SECRET".into() }),
+            share_seal: seal.then(|| ShareSealConfig {
+                secret_env: Some("RUTLI_SEAL_SECRET".into()),
+                secret_file: None,
+            }),
             signer_allowlist: None,
             peer_allowlist: None,
             metrics_listen: None,
@@ -555,6 +649,7 @@ mod hosted_config_tests {
             write_quorum: quorum,
             anti_entropy_interval_secs: 300,
             decrypt_rate_limit_per_min: DEFAULT_DECRYPT_RATE_LIMIT_PER_MIN,
+            commitment_key: None,
         }
     }
 
@@ -589,6 +684,74 @@ mod hosted_config_tests {
         let mut off = hosted(true, 2);
         off.decrypt_rate_limit_per_min = 0;
         cfg(Some(off), true).validate().unwrap();
+    }
+
+    const K1: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const K2: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    const K3: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+
+    fn on_bundle(mut c: Config) -> Config {
+        c.share_seal = Some(ShareSealConfig { secret_env: None, secret_file: Some("/run/rutli/seal/node.json".into()) });
+        c
+    }
+
+    #[test]
+    fn share_seal_takes_exactly_one_source() {
+        let mut c = cfg(None, true);
+        c.validate().unwrap();
+        c.share_seal = Some(ShareSealConfig::default());
+        assert!(c.validate().unwrap_err().to_string().contains("exactly one"));
+        c.share_seal = Some(ShareSealConfig {
+            secret_env: Some("S".into()),
+            secret_file: Some("/f".into()),
+        });
+        assert!(c.validate().is_err(), "both sources at once is ambiguous");
+        on_bundle(cfg(None, false)).validate().unwrap();
+    }
+
+    #[test]
+    fn a_legacy_secret_env_config_still_parses() {
+        // The soak's rendered ConfigMap: must keep loading unchanged until it migrates.
+        let c: Config = serde_json::from_str(
+            r#"{"identifier":1,"listen":"127.0.0.1:9101","threshold":2,"data_dir":"/tmp/x",
+                "peers":[{"identifier":1,"endpoint":"http://a:9101"},
+                         {"identifier":2,"endpoint":"http://b:9101"}],
+                "share_seal":{"secret_env":"RUTLI_SEAL_SECRET"},
+                "hosted_keys":{"enabled":true}}"#,
+        )
+        .unwrap();
+        assert_eq!(c.share_seal.as_ref().unwrap().secret_env.as_deref(), Some("RUTLI_SEAL_SECRET"));
+        c.validate().unwrap();
+    }
+
+    #[test]
+    fn a_bundle_with_hosted_keys_needs_every_pin_and_the_commitment_key() {
+        let mut c = on_bundle(cfg(Some(hosted(true, 2)), false));
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("dist_public_key"), "{e}");
+        for (p, k) in c.peers.iter_mut().zip([K1, K2, K3]) {
+            p.dist_public_key = Some(k.into());
+        }
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("commitment_key"), "{e}");
+        c.hosted_keys.as_mut().unwrap().commitment_key = Some(K1.into());
+        c.validate().unwrap();
+        // The legacy master derives them, so it needs neither.
+        cfg(Some(hosted(true, 2)), true).validate().unwrap();
+    }
+
+    #[test]
+    fn pins_must_be_well_formed_and_distinct() {
+        let mut c = cfg(Some(hosted(true, 2)), true);
+        c.peers[0].dist_public_key = Some("abcd".into());
+        assert!(c.validate().is_err(), "short key");
+        c.peers[0].dist_public_key = Some(K1.into());
+        c.peers[1].dist_public_key = Some(K1.into());
+        assert!(c.validate().unwrap_err().to_string().contains("same dist_public_key"));
+        c.peers[1].dist_public_key = Some(K2.into());
+        c.validate().unwrap();
+        c.hosted_keys.as_mut().unwrap().commitment_key = Some("zz".into());
+        assert!(c.validate().is_err());
     }
 
     #[test]

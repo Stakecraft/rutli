@@ -511,7 +511,25 @@ async fn replicate_to(
     key: &crate::hosted::HostedKey,
     public_der: &[u8],
 ) -> Result<()> {
-    let (recipient, recipient_pub) = peer.node_info().await?;
+    let (recipient, reported_pub) = peer.node_info().await?;
+    // Wrap only to the key pinned for that roster slot, never to whatever the peer reports: a
+    // peer answering under another node's number, or with a key other than its pin (a wrong seal
+    // bundle mounted, an impostor), gets nothing.
+    let expected = crate::hosted::identifier_index(peer.identifier())?;
+    if recipient != expected {
+        return Err(DaemonError::Disagreement(format!(
+            "peer {expected} reports itself as node {recipient} — refusing to replicate {key_id} to it"
+        )));
+    }
+    let recipient_pub = node.dist_public_key_for(recipient)?;
+    if reported_pub != recipient_pub {
+        return Err(DaemonError::Disagreement(format!(
+            "peer {recipient} reports distribution key {}, but its pinned key is {} — wrong seal \
+             bundle on that node, or a wrong pin here; refusing to replicate {key_id} to it",
+            hex::encode(reported_pub),
+            hex::encode(recipient_pub)
+        )));
+    }
     let wrapped = node.hosted_wrap_for(key_id, key, recipient, &recipient_pub)?;
     let commitment = peer
         .replicate_key(ceremony_id, key_id, key.spec.as_str(), public_der, &wrapped)
