@@ -1404,6 +1404,23 @@ fn backup_command(cfg: &Config, out: &std::path::Path) -> Result<()> {
         let segments = copy_journal(&journal, &out.join("journal"))?;
         println!("backed up {segments} sign-journal segment(s) to {}", out.join("journal").display());
     }
+    // The break-glass "cleared delete intent" markers (empty files): `restore` merges them, so a
+    // node restored after an undelete keeps ignoring that tombstone (audit F7).
+    let cleared = src.join(rutli_cosigner::keystore::CLEARED_DIR);
+    if cleared.is_dir() {
+        let dst = out.join(rutli_cosigner::keystore::CLEARED_DIR);
+        std::fs::create_dir_all(&dst)?;
+        let mut markers = 0;
+        for entry in std::fs::read_dir(&cleared)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if entry.file_type()?.is_file() && !name.to_string_lossy().starts_with('.') {
+                std::fs::copy(entry.path(), dst.join(&name))?;
+                markers += 1;
+            }
+        }
+        println!("backed up {markers} cleared-delete-intent marker(s) to {}", dst.display());
+    }
     if cfg.share_seal.is_none() {
         tracing::warn!("shares are NOT sealed — this backup contains plaintext key shares");
     }
