@@ -5,6 +5,16 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.4.0-rc.2] — 2026-10-16
+
+_Release candidate, pre-audit: for soak and review, not for production key custody._
+
+Highlights: optional carry of the protocol signing and ECIES keys (roadmap B6: `rutli-dealer split-key
+--expect-usage`, envelope v3 — pre-B6 bundles are refused — and `rutli-cosigner verify-hosted`); ECIES
+failover past a cosigner with the wrong shared secret, and the per-node decrypt rate limit documented
+(C2); a `verify-key` TLS probe; zero-downtime CA rotation with the `cluster_id` pin; the migration
+roadmap's two flows.
+
 ### Added
 - **Zero-downtime cluster CA rotation (`docs/ca-rotation.md`).** A runbook to move a live cluster to
   a new mTLS CA — including when the old CA's private key is lost — by trusting a bundle of the old
@@ -165,6 +175,9 @@ All notable changes to Rütli are documented here. Format loosely follows
   headroom n-fold under one-leader routing).
 
 ### Upgrade notes (breaking)
+- **Run the dealer and the cosigners from the same release.** rc.1 cosigners refuse version 3 share
+  bundles (what rc.2's `rutli-dealer` writes), and rc.2 cosigners refuse version 2 bundles (rc.1's
+  dealer). A split ceremony in flight across the upgrade is re-run with the new dealer.
 - The first start of this release writes `data_dir/cluster-id` with the id the node already runs
   under; nothing else changes. From then on a cosigner whose effective cluster id changes refuses
   to start. A dev setup that regenerates its CA on an existing data volume (e.g.
@@ -893,6 +906,7 @@ not audited. Do not place production authority keys behind it.
 - HSM backend validated only against SoftHSM.
 - No third-party security audit.
 
+[0.4.0-rc.2]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.2
 [0.4.0-rc.1]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.1
 [0.3.2]: https://github.com/Stakecraft/rutli/releases/tag/v0.3.2
 [0.3.1]: https://github.com/Stakecraft/rutli/releases/tag/v0.3.1
