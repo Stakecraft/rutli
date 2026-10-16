@@ -23,10 +23,14 @@ annotations, NetworkPolicy ingress for pods labelled `rutli.io/scraper: "true"`)
 | `rutli_sign_requests_total` | counter | `result`=ok\|error | Leader-side `Signer.Sign` outcomes |
 | `rutli_sign_duration_seconds` | histogram | `result` | Leader-side `Signer.Sign` latency. Buckets (s): 0.01, 0.025, 0.05, 0.075, 0.1, 0.15, 0.25, 0.5, 1, 2.5, 5, 10 — see [Sign latency histogram](#sign-latency-histogram) |
 | `rutli_ceremony_requests_total` | counter | `kind`=dkg\|refresh, `result` | Key-ceremony outcomes (rare; any `error` needs investigation before retrying) |
+| `rutli_ceremonies_staged` | gauge | — | Two-phase DKG/refresh ceremonies staged on this node and not yet resolved (the resolver is waiting on a peer). Non-zero for up to a minute during a ceremony; must be 0 before the next ceremony or rollout step |
 | `rutli_ceremonies_split` | gauge | — | Ceremonies this node aborted while a peer reports them COMMITTED with this node's outcome, staged share still quarantined (audit F3). Must be 0; > 0 means a cosigner equivocated — `docs/ceremonies.md`, "A split ceremony" |
 | `rutli_ceremony_equivocations_total` | counter | — | Ceremonies a peer reported COMMITTED while another reported ABORTED (impossible with crash faults) |
 | `rutli_ceremony_unknown_refused_total` | counter | — | No-votes for unknown ceremony ids or orphaned sessions this node refused to record because a cap was reached (audit F2) — a peer asking about many made-up ceremonies |
 | `rutli_ceremony_unknown_no_votes` | gauge | — | No-votes held for ceremony ids peers asked about that this node never knew (capped, garbage-collected after 30 days) |
+| `rutli_epoch_mismatch_total` | counter | — | Sign round-1 refusals because the leader signs with another sharing (epoch, PKP digest) of the key than this node committed (audit H1/M1): two nodes hold different epochs of one key |
+| `rutli_stale_share` | gauge | `key` | `1` while this node's share of `key` is older than a committed sharing a peer holds (typically a restore from an old backup); the node refuses to sign or lead for that key. Else `0` |
+| `rutli_nonce_markers` | gauge | — | Burned-session nonce markers on this node after the last prune pass (audit L4); each costs an inode on the key volume, bounded by the sign rate over the retention window |
 | `rutli_sign_round1_skips_total` | counter | — | Peers skipped in sign round 1 — the quorum-margin canary: skips mean you are signing with less headroom than you deployed |
 | `rutli_sign_aborts_total` | counter | — | Given-up signatures (leader aborted the in-flight session on the quorum) |
 | `rutli_pending_sign_sessions` | gauge | — | In-flight round-1 sessions held on this node; hovers near 0 in a healthy cluster |
@@ -55,7 +59,8 @@ with driver failover that can be any of them, so always aggregate across instanc
 Hosted-key metrics appear on every node, because hosted keys are **replicated whole keys, not FROST
 shares**: each node holds the same material, serves its own decrypts, and counts them locally. (The
 FROST share itself is never listed, replicated or counted per-key — two nodes holding one share
-would silently break the threshold.) No key id is ever used as a label; the label sets above are
+would silently break the threshold.) No hosted-key id is ever used as a label (only
+`rutli_stale_share` carries a key id: a FROST key, a handful per cluster); the label sets above are
 exhaustive. Three collection details matter when writing rules:
 
 - `rutli_hosted_keys` is refreshed at the end of this node's own anti-entropy sweep and whenever a
@@ -126,7 +131,13 @@ sum(rate(rutli_sign_duration_seconds_sum{result="ok"}[1h]))
   round-1 skips as `increase(…[5m])` per leader (the counter climbs on the healthy nodes, so the
   instance that stays flat while a readiness row is red is the one being skipped around),
   throughput, p50/p95/p99 latency (`histogram_quantile` over the buckets — empty for cosigners
-  up to 0.3.1, see above), pending sessions, aborts, ceremonies.
+  up to 0.3.1, see above), pending sessions, aborts, ceremonies. Three rows for the audit
+  remediation series: *Signing policy & sign journal* (policy refusals by reason, signs without an
+  intent or `signer_acl` entry, rate-limited shares, journal errors), *Ceremonies & share epochs*
+  (staged and split ceremonies, equivocations, a per-(node, key) share-freshness timeline from
+  `rutli_stale_share`, epoch mismatches), and *Key store* (`rutli_keyfiles` by format and DEK,
+  `rutli_nonce_markers`). Each panel's description names the alert that fires on it. CI parses
+  every dashboard query with promtool (`scripts/ci-prometheus-rules.sh`).
 
 ## What to watch (2-of-3 cluster)
 
