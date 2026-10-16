@@ -1183,3 +1183,29 @@ async fn a_failed_delivery_tells_the_leader_only_its_category() {
     assert!(err.contains("node 3") && err.contains("recipient has no such session"), "{err}");
     assert!(!err.contains("unknown dkg session"), "the recipient's text leaked to the leader: {err}");
 }
+
+/// Pre-existing (review): a peer could fence a FROST key as a hosted-key "genkey"/"delkey" and
+/// stall its signing; and round 1 without an intent could open sessions without bound.
+#[tokio::test]
+async fn hosted_key_fences_never_cover_a_frost_key_and_pending_sign_sessions_are_bounded() {
+    let rig = Rig::new();
+    let group = run_dkg(&rig.peers, KEY).await.unwrap();
+    for kind in ["genkey", "delkey"] {
+        let err = rig.nodes[0].ceremony_fence(&format!("{kind}-evil"), KEY, kind).unwrap_err();
+        assert!(matches!(err, DaemonError::CeremonyRefused(_)), "{kind}: {err:?}");
+    }
+    rig.every_pair_signs(&group).await;
+
+    let n = &rig.nodes[0];
+    let max = rutli_cosigner::node::MAX_PENDING_SIGN_SESSIONS_PER_KEY;
+    let ctx = rutli_cosigner::node::Round1Ctx::default();
+    for i in 0..max {
+        n.sign_round1(KEY, &format!("flood-{i}"), &ctx).unwrap();
+    }
+    let err = n.sign_round1(KEY, "flood-x", &ctx).unwrap_err();
+    assert!(matches!(err, DaemonError::NotServing(_)), "{err:?}");
+    for i in 0..max {
+        n.abort_sign(KEY, &format!("flood-{i}"));
+    }
+    rig.every_pair_signs(&group).await;
+}
