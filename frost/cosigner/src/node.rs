@@ -2522,7 +2522,7 @@ impl Node {
     /// here — whoever forwarded it — and replace the key with a tombstone that retains its material
     /// for the grace period; on a node that lacks the key, record the tombstone so the key can never
     /// arrive. `expiry`: [`crate::intent::Expiry::Enforce`] for a live delete (DeleteKey, PurgeKey),
-    /// `Ignore` for a tombstone a peer propagates. A tombstone never applies to a copy created or
+    /// `Propagated` for a tombstone a peer propagates. A tombstone never applies to a copy created or
     /// undeleted after its intent was issued.
     pub fn hosted_apply_tombstone(
         &self,
@@ -2546,12 +2546,18 @@ impl Node {
             return Ok(TombstoneOutcome::Already);
         }
         let grace_ms = u64::try_from(self.delete_grace.as_millis()).unwrap_or(u64::MAX);
+        // A propagated tombstone keeps the original deletion time (checked against its intent's
+        // validity by every node it reaches next — audit F7); the grace period runs from now.
+        let deleted_at_ms = match expiry {
+            crate::intent::Expiry::Propagated { deleted_at_ms } => deleted_at_ms,
+            crate::intent::Expiry::Enforce => now,
+        };
         let tombstone = |info: DeletedKeyInfo, retained: Option<crate::hosted::HostedKey>| crate::hosted::Tombstone {
             key_id: key_id.to_string(),
             spec: info.spec,
             created_at: info.created_at,
             commitment: hex::encode(info.commitment),
-            deleted_at_ms: now,
+            deleted_at_ms,
             purge_after_ms: now.saturating_add(grace_ms),
             delete_intent: hex::encode(intent.encode_to_vec()),
             retained: if grace_ms == 0 { None } else { retained },

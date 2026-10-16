@@ -1098,9 +1098,12 @@ pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<(usiz
                 }
             };
             let info = crate::node::DeletedKeyInfo { spec: t.spec.clone(), created_at: t.created_at, commitment: t.commitment.clone() };
+            let deleted_at_ms = t.deleted_at_ms;
             let id = t.key_id.clone();
             match node
-                .blocking(move |n| n.hosted_apply_tombstone(&id, &intent, crate::intent::Expiry::Ignore, Some(&info)))
+                .blocking(move |n| {
+                    n.hosted_apply_tombstone(&id, &intent, crate::intent::Expiry::Propagated { deleted_at_ms }, Some(&info))
+                })
                 .await
             {
                 Ok(crate::node::TombstoneOutcome::Already) => {}

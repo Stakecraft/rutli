@@ -70,12 +70,108 @@ pub fn delete_digest(key_id: &str) -> [u8; 32] {
 }
 
 /// Whether a check of an intent's validity window applies in full ([`Expiry::Enforce`]: a live
-/// request) or only its sanity ([`Expiry::Ignore`]: a tombstone a peer propagates days later,
+/// request) or as of the delete ([`Expiry::Propagated`]: a tombstone a peer propagates days later,
 /// whose intent expired long ago but was valid when the delete happened).
+///
+/// A propagated tombstone (audit F7) is accepted only if its deletion time lies within its
+/// intent's validity window (skew included), and the intent was issued no earlier than this node
+/// last saw its signer's delete capability change ([`DeleteGrants`]) — so an intent that was refused
+/// when made (the driver signs one for every Canton `deleteKey`, normally without the delete role)
+/// cannot be replayed into a delete once the role is granted later.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Expiry {
     Enforce,
-    Ignore,
+    Propagated { deleted_at_ms: u64 },
+}
+
+/// When this node last saw each delete-role CN's delete capability change (granted, its ACL, the
+/// approval threshold or the approver set), from `data_dir/delete-policy.json` (audit F7). A CN
+/// already on the role when the file was first written counts as "since 0" (no restriction: the
+/// grant predates what this node can know, and a restored node must still receive the tombstones
+/// it missed); every later change counts from the start that saw it.
+#[derive(Clone, Debug, Default)]
+pub struct DeleteGrants {
+    since_ms: HashMap<String, u64>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default)]
+struct GrantsFile {
+    #[serde(default)]
+    signers: std::collections::BTreeMap<String, GrantEntry>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, PartialEq, Eq)]
+struct GrantEntry {
+    fingerprint: String,
+    since_ms: u64,
+}
+
+impl DeleteGrants {
+    /// Load `path`, compare every delete-role CN's capability fingerprint under `policy` and
+    /// `approvers`, record what changed as of `now_ms`, and write the file back (atomically) if
+    /// anything did.
+    pub fn load_and_update(path: &std::path::Path, policy: &DeletePolicy, approvers: &SigningPolicyConfig, now_ms: u64) -> Result<Self> {
+        let existing: Option<GrantsFile> = match std::fs::read(path) {
+            Ok(bytes) => Some(serde_json::from_slice(&bytes).map_err(|e| {
+                DaemonError::Config(format!("{} does not parse ({e}) — move it aside to reset it", path.display()))
+            })?),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e.into()),
+        };
+        let first = existing.is_none();
+        let old = existing.unwrap_or_default();
+        let mut approver_keys: Vec<(String, String)> =
+            approvers.approvers.iter().map(|a| (a.id.clone(), a.public_key_spki_b64.trim().to_string())).collect();
+        approver_keys.sort();
+        let mut new = GrantsFile::default();
+        for cn in &policy.allowlist {
+            let mut acl = policy.acl.get(cn).cloned();
+            if let Some(a) = acl.as_mut() {
+                a.sort();
+            }
+            let fingerprint = hex::encode(Sha256::digest(
+                serde_json::to_vec(&(acl, policy.approval_threshold, &approver_keys)).expect("serializes"),
+            ));
+            let since_ms = match old.signers.get(cn) {
+                Some(e) if e.fingerprint == fingerprint => e.since_ms,
+                _ if first => 0,
+                _ => now_ms,
+            };
+            new.signers.insert(cn.clone(), GrantEntry { fingerprint, since_ms });
+        }
+        if first || new.signers != old.signers {
+            for (cn, e) in &new.signers {
+                if e.since_ms == now_ms && !first {
+                    tracing::warn!(
+                        cn,
+                        "hosted-key delete capability of this client changed: peers' tombstones whose delete \
+                         intent it issued before now are no longer accepted by anti-entropy (re-issue such a delete)"
+                    );
+                }
+            }
+            let tmp = path.with_extension("json.tmp");
+            {
+                use std::io::Write;
+                let mut f = std::fs::File::create(&tmp)?;
+                f.write_all(&serde_json::to_vec_pretty(&new)?)?;
+                f.sync_all()?;
+            }
+            std::fs::rename(&tmp, path)?;
+            if let Some(dir) = path.parent() {
+                std::fs::File::open(dir)?.sync_all()?;
+            }
+        }
+        Ok(Self { since_ms: new.signers.into_iter().map(|(cn, e)| (cn, e.since_ms)).collect() })
+    }
+
+    /// For tests: explicit grant times.
+    pub fn from_map(since_ms: HashMap<String, u64>) -> Self {
+        Self { since_ms }
+    }
+
+    fn since(&self, cn: &str) -> u64 {
+        self.since_ms.get(cn).copied().unwrap_or(0)
+    }
 }
 
 /// Who may delete hosted keys (`hosted_keys.delete_*`): a role of its own, so the driver
@@ -215,6 +311,7 @@ pub struct IntentVerifier {
     approvers: HashMap<String, [u8; 32]>,
     policy: SigningPolicyConfig,
     delete: DeletePolicy,
+    delete_grants: DeleteGrants,
 }
 
 impl IntentVerifier {
@@ -254,6 +351,7 @@ impl IntentVerifier {
             approvers,
             policy: policy.clone(),
             delete: DeletePolicy::default(),
+            delete_grants: DeleteGrants::default(),
         })
     }
 
@@ -261,6 +359,17 @@ impl IntentVerifier {
     pub fn with_delete_policy(mut self, delete: DeletePolicy) -> Self {
         self.delete = delete;
         self
+    }
+
+    /// When each delete-role CN's capability last changed ([`DeleteGrants`]).
+    pub fn with_delete_grants(mut self, grants: DeleteGrants) -> Self {
+        self.delete_grants = grants;
+        self
+    }
+
+    /// Who may delete hosted keys here.
+    pub fn delete_policy(&self) -> &DeletePolicy {
+        &self.delete
     }
 
     /// Whether any client may delete hosted keys here.
@@ -368,7 +477,7 @@ impl IntentVerifier {
     /// Verify a hosted-key delete intent for `key_id` at `now_ms` (audit M2): signed by a client on
     /// the delete role (`hosted_keys.delete_allowlist`, never merely the signer role), for this
     /// cluster, purpose `delete-key`, this key and its [`delete_digest`], within its validity
-    /// (unless [`Expiry::Ignore`]: a propagated tombstone), the delete ACL, and the delete
+    /// (or, for [`Expiry::Propagated`], as of the delete — see there), the delete ACL, and the delete
     /// approvals. Every failure is [`DaemonError::PolicyRefused`].
     pub fn verify_delete(&self, signed: &pb::SignedIntent, key_id: &str, now_ms: u64, expiry: Expiry) -> Result<VerifiedIntent> {
         if !self.deletes_enabled() {
@@ -405,13 +514,38 @@ impl IntentVerifier {
         match expiry {
             Expiry::Enforce => self.check_times_with(intent.issued_at_ms, intent.not_after_ms, now_ms, refused_delete)?,
             // Long expired is fine for a propagated tombstone; a validity window that was never
-            // acceptable, or an issue time in the future, is not.
-            Expiry::Ignore => {
+            // acceptable, an issue time in the future, or a deletion outside the window is not.
+            Expiry::Propagated { deleted_at_ms } => {
                 if intent.not_after_ms < intent.issued_at_ms
                     || intent.not_after_ms - intent.issued_at_ms > self.max_lifetime_ms
                     || intent.issued_at_ms > now_ms.saturating_add(self.skew_ms)
                 {
                     return Err(refused_delete("expiry", "the intent's validity window is not acceptable".into()));
+                }
+                if deleted_at_ms.saturating_add(self.skew_ms) < intent.issued_at_ms
+                    || deleted_at_ms > intent.not_after_ms.saturating_add(self.skew_ms)
+                    || deleted_at_ms > now_ms.saturating_add(self.skew_ms)
+                {
+                    return Err(refused_delete(
+                        "expiry",
+                        format!(
+                            "the tombstone says {key_id} was deleted at {deleted_at_ms} ms, outside its delete intent's \
+                             validity [{}, {}] ms",
+                            intent.issued_at_ms, intent.not_after_ms
+                        ),
+                    ));
+                }
+                let since = self.delete_grants.since(&cn);
+                if intent.issued_at_ms.saturating_add(self.skew_ms) < since {
+                    return Err(refused_delete(
+                        "policy-changed",
+                        format!(
+                            "the delete intent for {key_id} was issued at {} ms, before this node's delete policy \
+                             for {cn:?} last changed ({since} ms) — a tombstone from before that change is not \
+                             accepted from peers; re-issue the delete if it is still wanted",
+                            intent.issued_at_ms
+                        ),
+                    ));
                 }
             }
         }
@@ -634,6 +768,38 @@ mod tests {
     }
 
     pub const GOLDEN_DELETE_REQUEST_ID: &str = "5d1234a946bdaaad6c6103902b7fa4b6a92468e9dba71346504832a6f6335c1a";
+
+    /// Audit F7: the grant ledger counts a CN present at first write as "since 0", every later
+    /// change of its delete capability (granted, ACL, threshold, approvers) from the start that saw
+    /// it, and forgets a CN removed from the role (a re-grant is a change).
+    #[test]
+    fn delete_grants_record_when_a_capability_changed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("delete-policy.json");
+        let cfg = SigningPolicyConfig::default();
+        let policy = |cns: &[&str], threshold: u32| DeletePolicy {
+            allowlist: cns.iter().map(|c| c.to_string()).collect(),
+            acl: HashMap::new(),
+            approval_threshold: threshold,
+        };
+        let g = DeleteGrants::load_and_update(&path, &policy(&["operator"], 0), &cfg, 100).unwrap();
+        assert_eq!(g.since("operator"), 0, "present at first write");
+        let g = DeleteGrants::load_and_update(&path, &policy(&["operator"], 0), &cfg, 200).unwrap();
+        assert_eq!(g.since("operator"), 0, "unchanged");
+        let g = DeleteGrants::load_and_update(&path, &policy(&["operator", "driver"], 0), &cfg, 300).unwrap();
+        assert_eq!((g.since("operator"), g.since("driver")), (0, 300), "a grant");
+        let g = DeleteGrants::load_and_update(&path, &policy(&["operator", "driver"], 1), &cfg, 400).unwrap();
+        assert_eq!((g.since("operator"), g.since("driver")), (400, 400), "the threshold changed for everyone");
+        let mut acl = policy(&["operator", "driver"], 1);
+        acl.acl.insert("driver".into(), vec!["rutli-a-".into()]);
+        let g = DeleteGrants::load_and_update(&path, &acl, &cfg, 500).unwrap();
+        assert_eq!((g.since("operator"), g.since("driver")), (400, 500), "an ACL change");
+        DeleteGrants::load_and_update(&path, &policy(&["operator"], 1), &cfg, 600).unwrap();
+        let g = DeleteGrants::load_and_update(&path, &acl, &cfg, 700).unwrap();
+        assert_eq!(g.since("driver"), 700, "removed, then granted again");
+        std::fs::write(&path, b"{ torn").unwrap();
+        assert!(DeleteGrants::load_and_update(&path, &acl, &cfg, 800).is_err(), "never silently reset");
+    }
 
     /// Parity with the driver's `FrostIntentSigner.deleteDigest` (FrostSigningIntentSpec pins it).
     #[test]

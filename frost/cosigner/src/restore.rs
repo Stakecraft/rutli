@@ -58,6 +58,10 @@ pub struct Plan {
     pub skipped: Vec<(String, String)>,
     /// Keys installed under the break-glass.
     pub broke_glass: Vec<String>,
+    /// Break-glass "cleared delete intent" markers (`keys/.cleared/<key>.<intent digest>`) in the
+    /// backup, to merge into this node's (audit F7): without them a node restored after an
+    /// undelete would accept the cleared tombstone again from a peer.
+    pub cleared: Vec<String>,
 }
 
 /// The identity a refusal prints and a break-glass must name.
@@ -99,7 +103,7 @@ pub fn plan(ks: &KeyStore, from: &Path, force: bool, break_glass: Option<&BreakG
         files.push(entry.path());
     }
     files.sort();
-    let mut plan = Plan::default();
+    let mut plan = Plan { cleared: cleared_markers(&from.join(crate::keystore::CLEARED_DIR))?, ..Plan::default() };
     let mut refusals = Vec::new();
     for path in files {
         let key_id = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
@@ -126,6 +130,30 @@ pub fn plan(ks: &KeyStore, from: &Path, force: bool, break_glass: Option<&BreakG
         )));
     }
     Ok(plan)
+}
+
+/// The marker names in a backup's `.cleared/`: `<key id>.<64 hex>`, anything else ignored.
+fn cleared_markers(dir: &Path) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    if !dir.is_dir() {
+        return Ok(out);
+    }
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let valid = entry.file_type()?.is_file()
+            && name.split_once('.').is_some_and(|(k, d)| {
+                !k.is_empty()
+                    && k.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                    && d.len() == 64
+                    && d.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+            });
+        if valid {
+            out.push(name);
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 enum Decision {
@@ -227,6 +255,19 @@ fn decide(
 /// fault injection for tests — fail after the staging copy, before any rename.
 pub fn apply(ks: &KeyStore, plan: &Plan, crash_after_staging: bool) -> Result<usize> {
     sweep_staging(ks)?;
+    // Markers only ever add a refusal (a cleared intent's tombstone is ignored), so they are merged:
+    // created if missing, never removed.
+    if !plan.cleared.is_empty() {
+        let dir = ks.dir().join(crate::keystore::CLEARED_DIR);
+        crate::keystore::ensure_private_dir(&dir)?;
+        for name in &plan.cleared {
+            let path = dir.join(name);
+            if !path.exists() {
+                crate::keystore::private_file(&path, true)?.sync_all()?;
+            }
+        }
+        std::fs::File::open(&dir)?.sync_all()?;
+    }
     if plan.install.is_empty() {
         return Ok(0);
     }

@@ -121,8 +121,10 @@ data:
   backup-loop.sh: |
     #!/bin/sh
     # Daily at $DAILY_AT_UTC: tar this node's committed, sealed key files (keys/*.json; never
-    # dotfiles, nonce markers or staged files) and its sign journals (journal/<key>/*.jsonl, the
-    # node's own record of every signature share it released — audit-cross-check reads them), and
+    # dotfiles, nonce markers or staged files), its break-glass cleared-delete-intent markers
+    # (keys/.cleared/*, empty files; `restore` merges them — audit F7) and its sign journals
+    # (journal/<key>/*.jsonl, the node's own record of every signature share it released —
+    # audit-cross-check reads them), and
     # hand the tar to ship.sh. Never the seal bundle or the TLS key: this container mounts neither.
     # One BACKUP_OK or BACKUP_FAILED line per run. Never exits: a dead sidecar would make the pod
     # unready.
@@ -152,6 +154,15 @@ data:
         fi
         journals=$(find "$stage/journal" -type f -name '*.jsonl' 2>/dev/null | wc -l | tr -d ' ')
       fi
+      cleared=0
+      if [ -d /data/keys/.cleared ]; then
+        # Marker names are <key id>.<hex digest>, so word splitting is safe.
+        mkdir -p "$stage/.cleared" || { echo "BACKUP_FAILED node=${NODE_ID} reason=stage"; rm -rf "$stage"; return; }
+        for m in $(cd /data/keys/.cleared && find . -maxdepth 1 -type f ! -name '.*' | sed 's|^\./||'); do
+          cp -p "/data/keys/.cleared/$m" "$stage/.cleared/$m" || { echo "BACKUP_FAILED node=${NODE_ID} reason=cleared-copy"; rm -rf "$stage"; return; }
+        done
+        cleared=$(find "$stage/.cleared" -type f | wc -l | tr -d ' ')
+      fi
       if ! tar -C "$stage" -cf "$tar" .; then
         echo "BACKUP_FAILED node=${NODE_ID} reason=tar"; rm -rf "$stage" "$tar"; return
       fi
@@ -159,7 +170,7 @@ data:
       n=$(echo "$files" | wc -l | tr -d ' ')
       bytes=$(wc -c < "$tar" | tr -d ' ')
       if sh /destination/ship.sh "$tar" "${NODE_ID}"; then
-        echo "BACKUP_OK node=${NODE_ID} files=${n} journal_segments=${journals} bytes=${bytes} dest=pvc stamp=${stamp}"
+        echo "BACKUP_OK node=${NODE_ID} files=${n} journal_segments=${journals} cleared_markers=${cleared} bytes=${bytes} dest=pvc stamp=${stamp}"
       else
         echo "BACKUP_FAILED node=${NODE_ID} reason=ship files=${n} bytes=${bytes} stamp=${stamp}"
       fi
