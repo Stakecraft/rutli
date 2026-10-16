@@ -30,6 +30,7 @@ private static final long serialVersionUID = 0L;
     ceremonyId_ = "";
     keyId_ = "";
     kind_ = "";
+    expectedPkpDigest_ = com.google.protobuf.ByteString.EMPTY;
   }
 
   public static final com.google.protobuf.Descriptors.Descriptor
@@ -128,7 +129,7 @@ private static final long serialVersionUID = 0L;
   private volatile java.lang.Object kind_ = "";
   /**
    * <pre>
-   * "dkg" or "refresh"
+   * "dkg", "refresh", "genkey" or "delkey"
    * </pre>
    *
    * <code>string kind = 3;</code>
@@ -149,7 +150,7 @@ private static final long serialVersionUID = 0L;
   }
   /**
    * <pre>
-   * "dkg" or "refresh"
+   * "dkg", "refresh", "genkey" or "delkey"
    * </pre>
    *
    * <code>string kind = 3;</code>
@@ -168,6 +169,33 @@ private static final long serialVersionUID = 0L;
     } else {
       return (com.google.protobuf.ByteString) ref;
     }
+  }
+
+  public static final int EXPECTED_EPOCH_FIELD_NUMBER = 4;
+  private long expectedEpoch_ = 0L;
+  /**
+   * <pre>
+   * refresh: the sharing the leader saw on every node. A node holding another (epoch, PKP digest)
+   * refuses. Empty digest = no expectation (DKG, hosted-key fences).
+   * </pre>
+   *
+   * <code>uint64 expected_epoch = 4;</code>
+   * @return The expectedEpoch.
+   */
+  @java.lang.Override
+  public long getExpectedEpoch() {
+    return expectedEpoch_;
+  }
+
+  public static final int EXPECTED_PKP_DIGEST_FIELD_NUMBER = 5;
+  private com.google.protobuf.ByteString expectedPkpDigest_ = com.google.protobuf.ByteString.EMPTY;
+  /**
+   * <code>bytes expected_pkp_digest = 5;</code>
+   * @return The expectedPkpDigest.
+   */
+  @java.lang.Override
+  public com.google.protobuf.ByteString getExpectedPkpDigest() {
+    return expectedPkpDigest_;
   }
 
   private byte memoizedIsInitialized = -1;
@@ -193,6 +221,12 @@ private static final long serialVersionUID = 0L;
     if (!com.google.protobuf.GeneratedMessage.isStringEmpty(kind_)) {
       com.google.protobuf.GeneratedMessage.writeString(output, 3, kind_);
     }
+    if (expectedEpoch_ != 0L) {
+      output.writeUInt64(4, expectedEpoch_);
+    }
+    if (!expectedPkpDigest_.isEmpty()) {
+      output.writeBytes(5, expectedPkpDigest_);
+    }
     getUnknownFields().writeTo(output);
   }
 
@@ -210,6 +244,14 @@ private static final long serialVersionUID = 0L;
     }
     if (!com.google.protobuf.GeneratedMessage.isStringEmpty(kind_)) {
       size += com.google.protobuf.GeneratedMessage.computeStringSize(3, kind_);
+    }
+    if (expectedEpoch_ != 0L) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeUInt64Size(4, expectedEpoch_);
+    }
+    if (!expectedPkpDigest_.isEmpty()) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeBytesSize(5, expectedPkpDigest_);
     }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
@@ -232,6 +274,10 @@ private static final long serialVersionUID = 0L;
         .equals(other.getKeyId())) return false;
     if (!getKind()
         .equals(other.getKind())) return false;
+    if (getExpectedEpoch()
+        != other.getExpectedEpoch()) return false;
+    if (!getExpectedPkpDigest()
+        .equals(other.getExpectedPkpDigest())) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -249,6 +295,11 @@ private static final long serialVersionUID = 0L;
     hash = (53 * hash) + getKeyId().hashCode();
     hash = (37 * hash) + KIND_FIELD_NUMBER;
     hash = (53 * hash) + getKind().hashCode();
+    hash = (37 * hash) + EXPECTED_EPOCH_FIELD_NUMBER;
+    hash = (53 * hash) + com.google.protobuf.Internal.hashLong(
+        getExpectedEpoch());
+    hash = (37 * hash) + EXPECTED_PKP_DIGEST_FIELD_NUMBER;
+    hash = (53 * hash) + getExpectedPkpDigest().hashCode();
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -383,6 +434,8 @@ private static final long serialVersionUID = 0L;
       ceremonyId_ = "";
       keyId_ = "";
       kind_ = "";
+      expectedEpoch_ = 0L;
+      expectedPkpDigest_ = com.google.protobuf.ByteString.EMPTY;
       return this;
     }
 
@@ -425,6 +478,12 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000004) != 0)) {
         result.kind_ = kind_;
       }
+      if (((from_bitField0_ & 0x00000008) != 0)) {
+        result.expectedEpoch_ = expectedEpoch_;
+      }
+      if (((from_bitField0_ & 0x00000010) != 0)) {
+        result.expectedPkpDigest_ = expectedPkpDigest_;
+      }
     }
 
     @java.lang.Override
@@ -453,6 +512,12 @@ private static final long serialVersionUID = 0L;
         kind_ = other.kind_;
         bitField0_ |= 0x00000004;
         onChanged();
+      }
+      if (other.getExpectedEpoch() != 0L) {
+        setExpectedEpoch(other.getExpectedEpoch());
+      }
+      if (other.getExpectedPkpDigest() != com.google.protobuf.ByteString.EMPTY) {
+        setExpectedPkpDigest(other.getExpectedPkpDigest());
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -495,6 +560,16 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000004;
               break;
             } // case 26
+            case 32: {
+              expectedEpoch_ = input.readUInt64();
+              bitField0_ |= 0x00000008;
+              break;
+            } // case 32
+            case 42: {
+              expectedPkpDigest_ = input.readBytes();
+              bitField0_ |= 0x00000010;
+              break;
+            } // case 42
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -659,7 +734,7 @@ private static final long serialVersionUID = 0L;
     private java.lang.Object kind_ = "";
     /**
      * <pre>
-     * "dkg" or "refresh"
+     * "dkg", "refresh", "genkey" or "delkey"
      * </pre>
      *
      * <code>string kind = 3;</code>
@@ -679,7 +754,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * "dkg" or "refresh"
+     * "dkg", "refresh", "genkey" or "delkey"
      * </pre>
      *
      * <code>string kind = 3;</code>
@@ -700,7 +775,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * "dkg" or "refresh"
+     * "dkg", "refresh", "genkey" or "delkey"
      * </pre>
      *
      * <code>string kind = 3;</code>
@@ -717,7 +792,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * "dkg" or "refresh"
+     * "dkg", "refresh", "genkey" or "delkey"
      * </pre>
      *
      * <code>string kind = 3;</code>
@@ -731,7 +806,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * "dkg" or "refresh"
+     * "dkg", "refresh", "genkey" or "delkey"
      * </pre>
      *
      * <code>string kind = 3;</code>
@@ -744,6 +819,85 @@ private static final long serialVersionUID = 0L;
       checkByteStringIsUtf8(value);
       kind_ = value;
       bitField0_ |= 0x00000004;
+      onChanged();
+      return this;
+    }
+
+    private long expectedEpoch_ ;
+    /**
+     * <pre>
+     * refresh: the sharing the leader saw on every node. A node holding another (epoch, PKP digest)
+     * refuses. Empty digest = no expectation (DKG, hosted-key fences).
+     * </pre>
+     *
+     * <code>uint64 expected_epoch = 4;</code>
+     * @return The expectedEpoch.
+     */
+    @java.lang.Override
+    public long getExpectedEpoch() {
+      return expectedEpoch_;
+    }
+    /**
+     * <pre>
+     * refresh: the sharing the leader saw on every node. A node holding another (epoch, PKP digest)
+     * refuses. Empty digest = no expectation (DKG, hosted-key fences).
+     * </pre>
+     *
+     * <code>uint64 expected_epoch = 4;</code>
+     * @param value The expectedEpoch to set.
+     * @return This builder for chaining.
+     */
+    public Builder setExpectedEpoch(long value) {
+
+      expectedEpoch_ = value;
+      bitField0_ |= 0x00000008;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * refresh: the sharing the leader saw on every node. A node holding another (epoch, PKP digest)
+     * refuses. Empty digest = no expectation (DKG, hosted-key fences).
+     * </pre>
+     *
+     * <code>uint64 expected_epoch = 4;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearExpectedEpoch() {
+      bitField0_ = (bitField0_ & ~0x00000008);
+      expectedEpoch_ = 0L;
+      onChanged();
+      return this;
+    }
+
+    private com.google.protobuf.ByteString expectedPkpDigest_ = com.google.protobuf.ByteString.EMPTY;
+    /**
+     * <code>bytes expected_pkp_digest = 5;</code>
+     * @return The expectedPkpDigest.
+     */
+    @java.lang.Override
+    public com.google.protobuf.ByteString getExpectedPkpDigest() {
+      return expectedPkpDigest_;
+    }
+    /**
+     * <code>bytes expected_pkp_digest = 5;</code>
+     * @param value The expectedPkpDigest to set.
+     * @return This builder for chaining.
+     */
+    public Builder setExpectedPkpDigest(com.google.protobuf.ByteString value) {
+      if (value == null) { throw new NullPointerException(); }
+      expectedPkpDigest_ = value;
+      bitField0_ |= 0x00000010;
+      onChanged();
+      return this;
+    }
+    /**
+     * <code>bytes expected_pkp_digest = 5;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearExpectedPkpDigest() {
+      bitField0_ = (bitField0_ & ~0x00000010);
+      expectedPkpDigest_ = getDefaultInstance().getExpectedPkpDigest();
       onChanged();
       return this;
     }

@@ -615,7 +615,23 @@ impl Peer for PeerSvc {
                 )))
             }
         };
-        self.node.ceremony_fence(&r.ceremony_id, &r.key_id, kind).map_err(Status::from)?;
+        match kind {
+            // The share-writing ceremonies take the two-phase fence (staged ceremonies, the
+            // leader's expected sharing); it reads the key store.
+            "dkg" | "refresh" => {
+                let kind = crate::node::CeremonyKind::parse(kind).map_err(Status::from)?;
+                let expect = match r.expected_pkp_digest.len() {
+                    0 => None,
+                    32 => Some((r.expected_epoch, r.expected_pkp_digest.as_slice().try_into().expect("32"))),
+                    _ => return Err(Status::invalid_argument("expected_pkp_digest must be 32 bytes")),
+                };
+                self.node
+                    .blocking(move |n| n.ceremony_begin(&r.ceremony_id, &r.key_id, kind, expect))
+                    .await
+                    .map_err(Status::from)?;
+            }
+            _ => self.node.ceremony_fence(&r.ceremony_id, &r.key_id, kind).map_err(Status::from)?,
+        }
         Ok(Response::new(pb::CeremonyFenceReply {}))
     }
 
@@ -667,7 +683,7 @@ impl Peer for PeerSvc {
             .blocking(move |n| n.dkg_part3(&r.dkg_id, &round1_map, &round2_for_me))
             .await
             .map_err(Status::from)?;
-        Ok(Response::new(pb::DkgPart3Reply { group_verifying_key: key.to_vec() }))
+        Ok(Response::new(pb::DkgPart3Reply { group_verifying_key: key.group_key.to_vec() }))
     }
 
     async fn refresh_part1(
@@ -708,7 +724,7 @@ impl Peer for PeerSvc {
             .blocking(move |n| n.refresh_part3(&r.dkg_id, &round1_map, &round2_for_me))
             .await
             .map_err(Status::from)?;
-        Ok(Response::new(pb::DkgPart3Reply { group_verifying_key: key.to_vec() }))
+        Ok(Response::new(pb::DkgPart3Reply { group_verifying_key: key.group_key.to_vec() }))
     }
 
     // -- hosted-key replication (mesh only; peer_allowlist gates every one of these) --
@@ -831,6 +847,41 @@ impl Peer for PeerSvc {
         let key_id = req.into_inner().key_id;
         let reply = self.node.blocking(move |n| n.key_epoch(&key_id)).await.map_err(Status::from)?;
         Ok(Response::new(reply))
+    }
+
+    async fn ceremony_commit(
+        &self,
+        req: Request<pb::CeremonyCommitRequest>,
+    ) -> Result<Response<pb::CeremonyStatusReply>, Status> {
+        self.authorize(&req)?;
+        let id = req.into_inner().ceremony_id;
+        // Detached: a caller that stops waiting must not cut a commit between the promotion and
+        // the record (the startup repair would finish it, but there is no need to rely on that).
+        let node = self.node.clone();
+        let info = crate::ceremony::detach(async move { crate::ceremony::resolve(&node, &id).await })
+            .await
+            .map_err(Status::from)?;
+        Ok(Response::new(crate::peer::status_to_pb(&info)))
+    }
+
+    async fn ceremony_status(
+        &self,
+        req: Request<pb::CeremonyStatusRequest>,
+    ) -> Result<Response<pb::CeremonyStatusReply>, Status> {
+        self.authorize(&req)?;
+        let id = req.into_inner().ceremony_id;
+        let info = self.node.blocking(move |n| n.ceremony_status(&id)).await.map_err(Status::from)?;
+        Ok(Response::new(crate::peer::status_to_pb(&info)))
+    }
+
+    async fn ceremony_abort(
+        &self,
+        req: Request<pb::CeremonyAbortRequest>,
+    ) -> Result<Response<pb::CeremonyStatusReply>, Status> {
+        self.authorize(&req)?;
+        let id = req.into_inner().ceremony_id;
+        let info = self.node.blocking(move |n| n.ceremony_abort(&id)).await.map_err(Status::from)?;
+        Ok(Response::new(crate::peer::status_to_pb(&info)))
     }
 }
 

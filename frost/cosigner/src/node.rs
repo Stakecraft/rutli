@@ -20,18 +20,57 @@ use rutli_frost_core::nonce_store::NonceStore;
 use rutli_frost_core::refresh::RefreshParticipant;
 use rutli_frost_core::session::{aggregate, Cosigner};
 
-use crate::ceremony_record::{CeremonyRecord, CeremonyRecords, RecordState};
+use crate::ceremony_record::{CeremonyRecord, CeremonyRecords, Decision, RecordState, StatusInfo};
 use crate::keystore::{KeyStore, Share};
 use crate::{DaemonError, Result};
 
-struct DkgState {
-    key_id: String,
-    participant: DkgParticipant,
+/// The all-node ceremonies that write FROST shares, both two-phase (see [`crate::ceremony_record`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CeremonyKind {
+    Dkg,
+    Refresh,
 }
 
-struct RefreshState {
+impl CeremonyKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CeremonyKind::Dkg => "dkg",
+            CeremonyKind::Refresh => "refresh",
+        }
+    }
+
+    pub fn parse(kind: &str) -> Result<Self> {
+        match kind {
+            "dkg" => Ok(CeremonyKind::Dkg),
+            "refresh" => Ok(CeremonyKind::Refresh),
+            other => Err(DaemonError::Config(format!(
+                "ceremony kind must be \"dkg\" or \"refresh\", got {other:?}"
+            ))),
+        }
+    }
+}
+
+enum Participant {
+    Dkg(DkgParticipant),
+    Refresh(RefreshParticipant),
+}
+
+/// One ceremony this node takes part in, between part 1 and its vote. Memory only: a restart
+/// drops it, and the node then votes no ([`Node::ceremony_status`]).
+struct Session {
     key_id: String,
-    participant: RefreshParticipant,
+    kind: CeremonyKind,
+    /// `None` while part 3 runs: the session is finishing and is no longer abortable.
+    participant: Option<Participant>,
+    started: Instant,
+}
+
+/// Ceremony sessions and votes under one lock, so "no session and no record" is decided
+/// atomically with writing the no-vote that answer implies.
+#[derive(Default)]
+struct CeremonyBook {
+    sessions: std::collections::HashMap<String, Session>,
+    records: BTreeMap<String, CeremonyRecord>,
 }
 
 /// A per-key ceremony guard: only one DKG/refresh may be in progress for a given key at a time.
@@ -59,15 +98,17 @@ pub struct Node {
     /// Key-store readiness verdict (see [`crate::health`]), shared with Health and the monitor.
     keystore_health: Arc<crate::health::KeystoreHealth>,
     cosigners: Mutex<std::collections::HashMap<String, Arc<Cosigner>>>,
-    dkg_sessions: Mutex<std::collections::HashMap<String, DkgState>>,
-    refresh_sessions: Mutex<std::collections::HashMap<String, RefreshState>>,
     // key_id -> the ceremony currently allowed to (re)write that key's share.
     ceremonies: Mutex<std::collections::HashMap<String, CeremonyGuard>>,
     ceremony_orphan_timeout: Duration,
-    /// This node's durable ceremony votes (see [`crate::ceremony_record`]), cached in memory and
+    /// This node's durable ceremony votes (see [`crate::ceremony_record`]), cached in `book` and
     /// written through to `keys/.ceremonies/`. One lock: every vote change is serialized.
     record_store: CeremonyRecords,
-    records: Mutex<BTreeMap<String, CeremonyRecord>>,
+    book: Mutex<CeremonyBook>,
+    /// The other cosigners, as this node dials them (per-peer TLS names). Set once by the daemon
+    /// after building the roster; the ceremony resolver talks to peers directly through it, never
+    /// through the leader.
+    mesh: std::sync::OnceLock<Vec<Arc<dyn crate::peer::PeerApi>>>,
     /// Set when hosted (non-FROST) keys are enabled: this node's derived wrapping key plus the
     /// cluster identity envelopes are bound to. `None` disables every hosted-key operation.
     hosted: Option<HostedCtx>,
@@ -137,12 +178,11 @@ impl Node {
             keystore,
             keystore_health,
             cosigners: Mutex::new(Default::default()),
-            dkg_sessions: Mutex::new(Default::default()),
-            refresh_sessions: Mutex::new(Default::default()),
             ceremonies: Mutex::new(Default::default()),
             ceremony_orphan_timeout,
             record_store,
-            records: Mutex::new(records),
+            book: Mutex::new(CeremonyBook { sessions: Default::default(), records }),
+            mesh: std::sync::OnceLock::new(),
             hosted: None,
         };
         if let Err(e) = node.recover_ceremonies() {
@@ -160,7 +200,8 @@ impl Node {
     ///   outcome the node crashed between promoting it and recording COMMITTED, so the record is
     ///   completed; anything else is reported and left STAGED for an operator.
     pub fn recover_ceremonies(&self) -> Result<()> {
-        let mut records = self.records.lock().expect("records lock");
+        let mut book = self.book.lock().expect("ceremony lock");
+        let records = &mut book.records;
         for (key_id, ceremony_id) in self.keystore.list_staged()? {
             let voted_yes = records
                 .get(&ceremony_id)
@@ -216,14 +257,30 @@ impl Node {
 
     /// This node's record for `ceremony_id`, if it has voted in it.
     pub fn ceremony_record(&self, ceremony_id: &str) -> Option<CeremonyRecord> {
-        self.records.lock().expect("records lock").get(ceremony_id).cloned()
+        self.book.lock().expect("ceremony lock").records.get(ceremony_id).cloned()
+    }
+
+    /// Every ceremony record this node holds.
+    pub fn all_records(&self) -> Vec<CeremonyRecord> {
+        self.book.lock().expect("ceremony lock").records.values().cloned().collect()
+    }
+
+    /// Staged share files on disk, as `(key_id, ceremony_id)`.
+    pub fn staged_share_files(&self) -> Result<Vec<(String, String)>> {
+        self.keystore.list_staged()
+    }
+
+    /// This node's key-store directory (`data_dir/keys`).
+    pub fn key_store_dir(&self) -> &std::path::Path {
+        self.keystore.dir()
     }
 
     /// Every ceremony this node has voted yes on and not yet resolved.
     pub fn staged_records(&self) -> Vec<CeremonyRecord> {
-        self.records
+        self.book
             .lock()
-            .expect("records lock")
+            .expect("ceremony lock")
+            .records
             .values()
             .filter(|r| r.state == RecordState::Staged)
             .cloned()
@@ -286,8 +343,9 @@ impl Node {
             preempted
         }; // ceremonies lock released before touching the session maps (avoid nested locks)
         if let Some(stale) = preempted {
-            self.dkg_sessions.lock().expect("dkg lock").remove(&stale);
-            self.refresh_sessions.lock().expect("refresh lock").remove(&stale);
+            // Its session is dropped; this node's vote on it is no (recorded the first time anyone
+            // asks — see `ceremony_status`).
+            self.book.lock().expect("ceremony lock").sessions.remove(&stale);
         }
         Ok(())
     }
@@ -624,7 +682,572 @@ impl Node {
         Ok(aggregate(message, commitments, shares, self.cosigner(key_id)?.public_key_package())?)
     }
 
-    // -- DKG peer ops --
+    // -- two-phase DKG / refresh (see crate::ceremony_record for the state machine) --
+
+    /// Attach the mesh: every roster peer as this node dials it. Self entries are dropped (a node
+    /// never asks itself over the mesh). Set once.
+    pub fn set_mesh(&self, peers: Vec<Arc<dyn crate::peer::PeerApi>>) -> Result<()> {
+        let me = self.identifier;
+        let others: Vec<_> = peers.into_iter().filter(|p| p.identifier() != me).collect();
+        self.mesh
+            .set(others)
+            .map_err(|_| DaemonError::Config("the node's mesh is already set".into()))
+    }
+
+    pub fn has_mesh(&self) -> bool {
+        self.mesh.get().is_some()
+    }
+
+    /// The mesh peer with configured identifier `id`, if this node has one.
+    pub fn mesh_peer(&self, id: u16) -> Option<Arc<dyn crate::peer::PeerApi>> {
+        let want = Identifier::try_from(id).ok()?;
+        self.mesh.get()?.iter().find(|p| p.identifier() == want).cloned()
+    }
+
+    /// This node's configured identifier as a number.
+    pub fn index(&self) -> Result<u16> {
+        crate::hosted::identifier_index(self.identifier)
+    }
+
+    /// The fence for a DKG or refresh: [`Node::ceremony_fence`] plus the two-phase rules. Refuses
+    /// while a ceremony for `key_id` is staged here (it must resolve first), a DKG over an
+    /// existing key, and a refresh whose leader saw a different sharing than this node holds
+    /// (`expect` = the leader's (epoch, PKP digest)) — a refresh must start from one sharing on
+    /// every node, or it would fold fresh zero-shares into mixed epochs (H1).
+    pub fn ceremony_begin(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        kind: CeremonyKind,
+        expect: Option<(u64, [u8; 32])>,
+    ) -> Result<()> {
+        crate::keystore::validate_ceremony_id(ceremony_id)?;
+        self.refuse_if_staged(key_id)?;
+        match kind {
+            CeremonyKind::Dkg => {
+                if self.keystore.exists(key_id) {
+                    return Err(DaemonError::KeyExists(key_id.to_string()));
+                }
+            }
+            CeremonyKind::Refresh => {
+                let share = self.keystore.load(key_id)?;
+                if let Some((epoch, digest)) = expect {
+                    let mine = share.pkp_digest()?;
+                    if share.epoch != epoch || mine != digest {
+                        return Err(DaemonError::CeremonyRefused(format!(
+                            "refresh of {key_id}: this node holds epoch {} (pkp {}…) but the leader \
+                             expects epoch {epoch} (pkp {}…) — the nodes are not on one sharing",
+                            share.epoch,
+                            &hex::encode(mine)[..12],
+                            &hex::encode(digest)[..12]
+                        )));
+                    }
+                }
+            }
+        }
+        self.ceremony_fence(ceremony_id, key_id, kind.as_str())
+    }
+
+    fn refuse_if_staged(&self, key_id: &str) -> Result<()> {
+        let book = self.book.lock().expect("ceremony lock");
+        if let Some(r) =
+            book.records.values().find(|r| r.state == RecordState::Staged && r.key_id == key_id)
+        {
+            return Err(DaemonError::CeremonyRefused(format!(
+                "ceremony {} for {key_id} is staged on this node and not yet resolved — its \
+                 resolver must commit or abort it first",
+                r.ceremony_id
+            )));
+        }
+        Ok(())
+    }
+
+    /// Part 1 of either ceremony: take the guard, start the session, return the round-1 package.
+    fn start_session(&self, ceremony_id: &str, key_id: &str, kind: CeremonyKind) -> Result<round1::Package> {
+        crate::keystore::validate_ceremony_id(ceremony_id)?;
+        self.refuse_if_staged(key_id)?;
+        self.acquire_ceremony(key_id, ceremony_id, kind.as_str())?;
+        let mut participant = match kind {
+            CeremonyKind::Dkg => {
+                Participant::Dkg(DkgParticipant::new(self.identifier, self.max_signers, self.min_signers))
+            }
+            CeremonyKind::Refresh => Participant::Refresh(RefreshParticipant::new(
+                self.identifier,
+                self.max_signers,
+                self.min_signers,
+            )),
+        };
+        let package = match &mut participant {
+            Participant::Dkg(p) => p.part1(),
+            Participant::Refresh(p) => p.part1(),
+        };
+        let package = match package {
+            Ok(p) => p,
+            Err(e) => {
+                self.release_ceremony(key_id, ceremony_id);
+                return Err(e.into());
+            }
+        };
+        let mut book = self.book.lock().expect("ceremony lock");
+        // A ceremony id is used once per node: a node that already voted on it (or answered for
+        // it as unknown, which is a no-vote) never starts it again.
+        if book.records.contains_key(ceremony_id) || book.sessions.contains_key(ceremony_id) {
+            drop(book);
+            self.release_ceremony(key_id, ceremony_id);
+            return Err(DaemonError::CeremonyRefused(format!(
+                "ceremony id {ceremony_id} was already used on this node"
+            )));
+        }
+        book.sessions.insert(
+            ceremony_id.to_string(),
+            Session { key_id: key_id.to_string(), kind, participant: Some(participant), started: Instant::now() },
+        );
+        Ok(package)
+    }
+
+    /// The key id of live session `ceremony_id` of `kind`.
+    fn session_key(&self, ceremony_id: &str, kind: CeremonyKind) -> Result<String> {
+        let book = self.book.lock().expect("ceremony lock");
+        match book.sessions.get(ceremony_id) {
+            Some(s) if s.kind == kind => Ok(s.key_id.clone()),
+            _ => Err(DaemonError::UnknownDkg(ceremony_id.into())),
+        }
+    }
+
+    /// Record a no-vote for `ceremony_id` unless this node already recorded a vote. Caller holds
+    /// the ceremony lock.
+    fn record_abort_locked(&self, book: &mut CeremonyBook, ceremony_id: &str, reason: &str) -> Result<()> {
+        if book.records.contains_key(ceremony_id) {
+            return Ok(());
+        }
+        let rec = CeremonyRecord::aborted(ceremony_id, reason);
+        self.record_store.write(None, &rec)?;
+        book.records.insert(ceremony_id.to_string(), rec);
+        Ok(())
+    }
+
+    /// Drop a failed session and vote no on it. Best effort on the vote: a peer asking later gets
+    /// the same answer from [`Node::ceremony_status`].
+    fn fail_session(&self, ceremony_id: &str, key_id: &str, reason: &str) {
+        {
+            let mut book = self.book.lock().expect("ceremony lock");
+            book.sessions.remove(ceremony_id);
+            if let Err(e) = self.record_abort_locked(&mut book, ceremony_id, reason) {
+                tracing::warn!(ceremony_id, error = %e, "could not record an aborted ceremony");
+            }
+        }
+        self.release_ceremony(key_id, ceremony_id);
+    }
+
+    /// Run part 2 of either ceremony against the session's participant.
+    fn session_part2(
+        &self,
+        ceremony_id: &str,
+        kind: CeremonyKind,
+        round1_map: &BTreeMap<Identifier, round1::Package>,
+    ) -> Result<BTreeMap<Identifier, round2::Package>> {
+        let key_id = self.session_key(ceremony_id, kind)?;
+        self.assert_owns(&key_id, ceremony_id)?; // refuse if a newer ceremony superseded this one
+        let others = without_self(round1_map, self.identifier);
+        let result = {
+            let mut book = self.book.lock().expect("ceremony lock");
+            let session =
+                book.sessions.get_mut(ceremony_id).ok_or_else(|| DaemonError::UnknownDkg(ceremony_id.into()))?;
+            match session.participant.as_mut() {
+                Some(Participant::Dkg(p)) => p.part2(&others).map_err(DaemonError::from),
+                Some(Participant::Refresh(p)) => p.part2(&others).map_err(DaemonError::from),
+                None => Err(DaemonError::CeremonyRefused(format!("ceremony {ceremony_id} is finishing"))),
+            }
+        };
+        if let Err(e) = &result {
+            self.fail_session(ceremony_id, &key_id, &format!("part 2 failed: {e}"));
+        }
+        result
+    }
+
+    /// Part 3 of either ceremony: compute the new share (`finish`), then vote yes durably — the
+    /// staged share first, fsynced, then the STAGED record. Any failure votes no instead. The
+    /// guard is released either way; the share only goes live on commit ([`Node::apply_resolution`]).
+    fn finish_session(
+        &self,
+        ceremony_id: &str,
+        kind: CeremonyKind,
+        roster: Vec<u16>,
+        round1_digest: Option<[u8; 32]>,
+        finish: impl FnOnce(&str, Participant) -> Result<(Share, Option<KeyVersion>)>,
+    ) -> Result<StagedOutcome> {
+        let (key_id, participant) = {
+            let mut book = self.book.lock().expect("ceremony lock");
+            let session = match book.sessions.get_mut(ceremony_id) {
+                Some(s) if s.kind == kind => s,
+                _ => return Err(DaemonError::UnknownDkg(ceremony_id.into())),
+            };
+            let participant = session.participant.take().ok_or_else(|| {
+                DaemonError::CeremonyRefused(format!("ceremony {ceremony_id} is already finishing"))
+            })?;
+            (session.key_id.clone(), participant)
+        };
+        // Ownership is the load-bearing guard: a ceremony preempted after the orphan timeout must
+        // NOT stage, or a stale leader could split shares.
+        let staged = self
+            .assert_owns(&key_id, ceremony_id)
+            .and_then(|_| finish(&key_id, participant))
+            .and_then(|(share, old)| self.stage_vote(ceremony_id, kind, &key_id, roster, round1_digest, share, old));
+        if let Err(e) = &staged {
+            // No STAGED record exists, so the staged share (if written) is nobody's yes-vote.
+            let _ = self.keystore.discard_staged(&key_id, ceremony_id);
+            self.fail_session(ceremony_id, &key_id, &format!("part 3 failed: {e}"));
+        } else {
+            self.release_ceremony(&key_id, ceremony_id);
+        }
+        staged
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn stage_vote(
+        &self,
+        ceremony_id: &str,
+        kind: CeremonyKind,
+        key_id: &str,
+        roster: Vec<u16>,
+        round1_digest: Option<[u8; 32]>,
+        share: Share,
+        old: Option<(u64, [u8; 32])>,
+    ) -> Result<StagedOutcome> {
+        let outcome = StagedOutcome {
+            new_epoch: share.epoch,
+            new_pkp_digest: share.pkp_digest()?,
+            group_key: group_verifying_key_bytes(&share.public_key_package)?,
+        };
+        self.keystore.stage(key_id, ceremony_id, &share)?;
+        let now = crate::ceremony_record::now_ms();
+        let rec = CeremonyRecord {
+            ceremony_id: ceremony_id.to_string(),
+            state: RecordState::Staged,
+            key_id: key_id.to_string(),
+            kind: kind.as_str().to_string(),
+            roster,
+            old_epoch: old.map(|o| o.0).unwrap_or(0),
+            old_pkp_digest: old.map(|o| hex::encode(o.1)).unwrap_or_default(),
+            new_epoch: outcome.new_epoch,
+            new_pkp_digest: hex::encode(outcome.new_pkp_digest),
+            group_key: hex::encode(outcome.group_key),
+            round1_digest: round1_digest.map(hex::encode).unwrap_or_default(),
+            reason: String::new(),
+            peers_settled: false,
+            created_ms: now,
+            updated_ms: now,
+        };
+        let mut book = self.book.lock().expect("ceremony lock");
+        // `write` refuses if a vote already exists (a no-vote recorded meanwhile stays a no-vote).
+        self.record_store.write(book.records.get(ceremony_id), &rec)?;
+        book.records.insert(ceremony_id.to_string(), rec);
+        book.sessions.remove(ceremony_id);
+        tracing::info!(
+            ceremony_id,
+            key_id,
+            kind = kind.as_str(),
+            epoch = outcome.new_epoch,
+            "ceremony staged (yes-vote recorded); committing once every node confirms"
+        );
+        Ok(outcome)
+    }
+
+    /// DKG part 3's computation: the new share at [`FIRST_EPOCH`].
+    fn dkg_share(
+        &self,
+        key_id: &str,
+        participant: Participant,
+        round1_map: &BTreeMap<Identifier, round1::Package>,
+        round2_for_me: &BTreeMap<Identifier, round2::Package>,
+    ) -> Result<(Share, Option<KeyVersion>)> {
+        let Participant::Dkg(mut p) = participant else {
+            return Err(DaemonError::CeremonyRefused("not a DKG session".into()));
+        };
+        // Re-check under the ceremony guard: refuse if the key was provisioned meanwhile.
+        if self.keystore.exists(key_id) {
+            return Err(DaemonError::KeyExists(key_id.to_string()));
+        }
+        let others = without_self(round1_map, self.identifier);
+        let (key_package, public_key_package) = p.part3(&others, round2_for_me)?;
+        let share = Share {
+            key_package,
+            public_key_package,
+            origin: None,
+            epoch: FIRST_EPOCH,
+            key_id: key_id.to_string(),
+        };
+        Ok((share, None))
+    }
+
+    /// Refresh part 3's computation: the old share with the zero-sharing folded in, at the old
+    /// epoch + 1, and the (epoch, PKP digest) it replaces.
+    fn refresh_share(
+        &self,
+        key_id: &str,
+        participant: Participant,
+        round1_map: &BTreeMap<Identifier, round1::Package>,
+        round2_for_me: &BTreeMap<Identifier, round2::Package>,
+    ) -> Result<(Share, Option<KeyVersion>)> {
+        let Participant::Refresh(mut p) = participant else {
+            return Err(DaemonError::CeremonyRefused("not a refresh session".into()));
+        };
+        let old = self.keystore.load(key_id)?;
+        let old_group = group_verifying_key_bytes(&old.public_key_package)?;
+        let old_version = (old.epoch, old.pkp_digest()?);
+        // A dealt key's provenance survives the refresh, which is counted: after the first one, the
+        // dealer's copies of the shares no longer combine with the live ones.
+        let origin = old.origin.clone().map(|mut o| {
+            o.refresh_count += 1;
+            o
+        });
+        let others = without_self(round1_map, self.identifier);
+        let (key_package, public_key_package) =
+            p.part3(&others, round2_for_me, old.public_key_package, old.key_package)?;
+        if group_verifying_key_bytes(&public_key_package)? != old_group {
+            // Never stage a share whose group key drifted — that would change the node identity.
+            return Err(DaemonError::Disagreement(format!(
+                "refresh changed the group key for {key_id} — aborting"
+            )));
+        }
+        let share = Share {
+            key_package,
+            public_key_package,
+            origin,
+            epoch: old_version.0 + 1,
+            key_id: key_id.to_string(),
+        };
+        Ok((share, Some(old_version)))
+    }
+
+    /// What this node can say about `ceremony_id` (`Peer.CeremonyStatus`): its recorded vote, or
+    /// IN_PROGRESS while the session lives. With neither, it durably votes no **before** answering
+    /// ABORTED — so the answer can never change later — and the same for a session orphaned past
+    /// the orphan timeout (its leader is gone; part 3 will never come).
+    pub fn ceremony_status(&self, ceremony_id: &str) -> Result<StatusInfo> {
+        crate::keystore::validate_ceremony_id(ceremony_id)?;
+        let mut release = None;
+        let info = {
+            let mut book = self.book.lock().expect("ceremony lock");
+            if let Some(r) = book.records.get(ceremony_id) {
+                return Ok(StatusInfo::from_record(r));
+            }
+            match book.sessions.get(ceremony_id) {
+                Some(s) if s.participant.is_none() || s.started.elapsed() < self.ceremony_orphan_timeout => {
+                    return Ok(StatusInfo::in_progress());
+                }
+                Some(_) => {
+                    let s = book.sessions.remove(ceremony_id).expect("present");
+                    release = Some(s.key_id);
+                    self.record_abort_locked(&mut book, ceremony_id, "orphaned: no part 3 within the orphan timeout")?;
+                }
+                None => self.record_abort_locked(
+                    &mut book,
+                    ceremony_id,
+                    "unknown here: no session and no record when a peer asked",
+                )?,
+            }
+            StatusInfo::from_record(book.records.get(ceremony_id).expect("just recorded"))
+        };
+        if let Some(key_id) = release {
+            self.release_ceremony(&key_id, ceremony_id);
+        }
+        Ok(info)
+    }
+
+    /// The leader gives up on `ceremony_id` (`Peer.CeremonyAbort`). Only a session still in memory
+    /// is dropped (with a durable no-vote); a recorded vote is never changed by the leader's word —
+    /// a STAGED node aborts only on evidence from its peers ([`crate::ceremony::resolve`]).
+    pub fn ceremony_abort(&self, ceremony_id: &str) -> Result<StatusInfo> {
+        crate::keystore::validate_ceremony_id(ceremony_id)?;
+        let mut release = None;
+        let info = {
+            let mut book = self.book.lock().expect("ceremony lock");
+            if let Some(r) = book.records.get(ceremony_id) {
+                return Ok(StatusInfo::from_record(r));
+            }
+            if let Some(s) = book.sessions.get(ceremony_id) {
+                if s.participant.is_none() {
+                    return Ok(StatusInfo::in_progress()); // part 3 running; it will vote
+                }
+                release = book.sessions.remove(ceremony_id).map(|s| s.key_id);
+            }
+            self.record_abort_locked(&mut book, ceremony_id, "aborted by the ceremony leader")?;
+            StatusInfo::from_record(book.records.get(ceremony_id).expect("just recorded"))
+        };
+        if let Some(key_id) = release {
+            self.release_ceremony(&key_id, ceremony_id);
+        }
+        Ok(info)
+    }
+
+    /// Apply the resolver's verdict to a STAGED ceremony: commit (promote the staged share, then
+    /// record COMMITTED) or abort (delete it, then record ABORTED). A record that is not STAGED is
+    /// returned unchanged — resolution is idempotent and a terminal vote never changes.
+    pub fn apply_resolution(&self, ceremony_id: &str, decision: &Decision) -> Result<StatusInfo> {
+        let mut book = self.book.lock().expect("ceremony lock");
+        let rec = book
+            .records
+            .get(ceremony_id)
+            .cloned()
+            .ok_or_else(|| DaemonError::UnknownDkg(ceremony_id.into()))?;
+        if rec.state != RecordState::Staged {
+            return Ok(StatusInfo::from_record(&rec));
+        }
+        let (state, reason) = match decision {
+            Decision::Wait(_) => return Ok(StatusInfo::from_record(&rec)),
+            Decision::Commit => {
+                self.commit_staged(&rec)?;
+                (RecordState::Committed, String::new())
+            }
+            Decision::Abort(why) => {
+                self.keystore.discard_staged(&rec.key_id, ceremony_id)?;
+                (RecordState::Aborted, why.clone())
+            }
+        };
+        let done = CeremonyRecord {
+            state,
+            reason,
+            updated_ms: crate::ceremony_record::now_ms(),
+            ..rec.clone()
+        };
+        self.record_store.write(Some(&rec), &done)?;
+        book.records.insert(ceremony_id.to_string(), done.clone());
+        drop(book);
+        if state == RecordState::Committed {
+            // The next sign loads the committed share.
+            self.cosigners.lock().expect("cosigners lock").remove(&rec.key_id);
+            tracing::info!(ceremony_id, key_id = %rec.key_id, epoch = rec.new_epoch, "ceremony committed");
+        } else {
+            tracing::warn!(ceremony_id, key_id = %rec.key_id, reason = %done.reason, "ceremony aborted");
+        }
+        metrics::counter!(crate::metrics::CEREMONY_RESOLUTIONS, "result" => state.as_str()).increment(1);
+        Ok(StatusInfo::from_record(&done))
+    }
+
+    /// Make a STAGED ceremony's share live. DKG: create-once (a different key appearing under the
+    /// id refuses the commit). Refresh: replace the live share only if it is still exactly the one
+    /// the refresh started from. A share already promoted by an interrupted commit counts as done.
+    fn commit_staged(&self, rec: &CeremonyRecord) -> Result<()> {
+        let is_outcome = |s: &Share| -> Result<bool> {
+            Ok(s.epoch == rec.new_epoch && hex::encode(s.pkp_digest()?) == rec.new_pkp_digest)
+        };
+        if !self.keystore.has_staged(&rec.key_id, &rec.ceremony_id)? {
+            return match self.keystore.load(&rec.key_id) {
+                Ok(live) if is_outcome(&live)? => Ok(()),
+                _ => Err(DaemonError::Disagreement(format!(
+                    "ceremony {}: the staged share for {} is missing — cannot commit",
+                    rec.ceremony_id, rec.key_id
+                ))),
+            };
+        }
+        match CeremonyKind::parse(&rec.kind)? {
+            CeremonyKind::Dkg => match self.keystore.promote_staged(&rec.key_id, &rec.ceremony_id, false)? {
+                crate::keystore::Promotion::Promoted => Ok(()),
+                crate::keystore::Promotion::TargetExists => {
+                    if is_outcome(&self.keystore.load(&rec.key_id)?)? {
+                        self.keystore.discard_staged(&rec.key_id, &rec.ceremony_id)
+                    } else {
+                        Err(DaemonError::Disagreement(format!(
+                            "ceremony {}: a different key appeared under {} — refusing to commit \
+                             over it",
+                            rec.ceremony_id, rec.key_id
+                        )))
+                    }
+                }
+            },
+            CeremonyKind::Refresh => {
+                let live = self.keystore.load(&rec.key_id)?;
+                if is_outcome(&live)? {
+                    return self.keystore.discard_staged(&rec.key_id, &rec.ceremony_id);
+                }
+                if live.epoch != rec.old_epoch || hex::encode(live.pkp_digest()?) != rec.old_pkp_digest {
+                    return Err(DaemonError::Disagreement(format!(
+                        "ceremony {}: the live share of {} (epoch {}) is not the one this refresh \
+                         started from (epoch {}) — refusing to replace it",
+                        rec.ceremony_id, rec.key_id, live.epoch, rec.old_epoch
+                    )));
+                }
+                self.keystore.promote_staged(&rec.key_id, &rec.ceremony_id, true)?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Whether this node has a staged or committed ceremony record for `key_id`.
+    pub fn has_ceremony_for(&self, key_id: &str) -> bool {
+        self.book
+            .lock()
+            .expect("ceremony lock")
+            .records
+            .values()
+            .any(|r| r.key_id == key_id && r.state != RecordState::Aborted)
+    }
+
+    /// Delete this node's file for `key_id` and its (empty) nonce directory — the last step of
+    /// [`crate::ceremony::discard_partial_key`], which checks everything else first. Refuses if
+    /// any signing session was ever burned for the key here.
+    pub fn discard_local_key(&self, key_id: &str) -> Result<()> {
+        let nonces = self.keystore.nonce_dir(key_id);
+        if nonces.try_exists()? && std::fs::read_dir(&nonces)?.next().is_some() {
+            return Err(DaemonError::CeremonyRefused(format!(
+                "{key_id} has signed on this node (nonce markers in {}) — refusing to discard it",
+                nonces.display()
+            )));
+        }
+        self.keystore.delete(key_id)?;
+        if nonces.try_exists()? {
+            std::fs::remove_dir(&nonces)?;
+        }
+        self.cosigners.lock().expect("cosigners lock").remove(key_id);
+        tracing::warn!(key_id, "discarded this node's file for a legacy partial DKG key");
+        Ok(())
+    }
+
+    /// Terminal records not yet known to be settled on every peer.
+    pub fn unsettled_records(&self) -> Vec<CeremonyRecord> {
+        self.book
+            .lock()
+            .expect("ceremony lock")
+            .records
+            .values()
+            .filter(|r| r.is_terminal() && !r.peers_settled && !r.roster.is_empty())
+            .cloned()
+            .collect()
+    }
+
+    /// Note that every peer has resolved `ceremony_id` too.
+    pub fn mark_settled(&self, ceremony_id: &str) -> Result<()> {
+        let mut book = self.book.lock().expect("ceremony lock");
+        let Some(rec) = book.records.get(ceremony_id).cloned() else { return Ok(()) };
+        if !rec.is_terminal() || rec.peers_settled {
+            return Ok(());
+        }
+        let done = CeremonyRecord { peers_settled: true, updated_ms: crate::ceremony_record::now_ms(), ..rec.clone() };
+        self.record_store.write(Some(&rec), &done)?;
+        book.records.insert(ceremony_id.to_string(), done);
+        Ok(())
+    }
+
+    /// Delete terminal records older than `older_than` that nobody can still ask about: settled
+    /// ones, and no-votes that never named a roster (unknown ids). Returns how many.
+    pub fn gc_records(&self, older_than: Duration) -> Result<usize> {
+        let cutoff = crate::ceremony_record::now_ms().saturating_sub(older_than.as_millis() as u64);
+        let mut book = self.book.lock().expect("ceremony lock");
+        let old: Vec<String> = book
+            .records
+            .values()
+            .filter(|r| r.is_terminal() && (r.peers_settled || r.roster.is_empty()) && r.updated_ms < cutoff)
+            .map(|r| r.ceremony_id.clone())
+            .collect();
+        for id in &old {
+            self.record_store.remove(id)?;
+            book.records.remove(id);
+        }
+        Ok(old.len())
+    }
+
+    // -- relay transport (pre-C1 wire shape; replaced by direct delivery) --
 
     pub fn dkg_part1(&self, dkg_id: &str, key_id: &str) -> Result<round1::Package> {
         // `…frost-import-…` ids belong to the split ceremony. Refusing them here, on every node and
@@ -638,22 +1261,7 @@ impl Node {
         if self.keystore.exists(key_id) {
             return Err(DaemonError::KeyExists(key_id.to_string()));
         }
-        // Serialize against any other DKG/refresh for this key (prevents split-brain shares).
-        self.acquire_ceremony(key_id, dkg_id, "dkg")?;
-        let mut participant = DkgParticipant::new(self.identifier, self.max_signers, self.min_signers);
-        match participant.part1() {
-            Ok(package) => {
-                self.dkg_sessions
-                    .lock()
-                    .expect("dkg lock")
-                    .insert(dkg_id.to_string(), DkgState { key_id: key_id.to_string(), participant });
-                Ok(package)
-            }
-            Err(e) => {
-                self.release_ceremony(key_id, dkg_id);
-                Err(e.into())
-            }
-        }
+        self.start_session(dkg_id, key_id, CeremonyKind::Dkg)
     }
 
     pub fn dkg_part2(
@@ -661,88 +1269,28 @@ impl Node {
         dkg_id: &str,
         round1_map: &BTreeMap<Identifier, round1::Package>,
     ) -> Result<BTreeMap<Identifier, round2::Package>> {
-        let key_id = self.dkg_key_id(dkg_id)?;
-        self.assert_owns(&key_id, dkg_id)?; // refuse if a newer ceremony superseded this one
-        let mut sessions = self.dkg_sessions.lock().expect("dkg lock");
-        let result = {
-            let state = sessions.get_mut(dkg_id).ok_or_else(|| DaemonError::UnknownDkg(dkg_id.into()))?;
-            let others = without_self(round1_map, self.identifier);
-            state.participant.part2(&others)
-        };
-        match result {
-            Ok(packages) => Ok(packages),
-            Err(e) => {
-                sessions.remove(dkg_id); // prune the failed ceremony's session (no leak)
-                drop(sessions);
-                self.release_ceremony(&key_id, dkg_id);
-                Err(e.into())
-            }
-        }
+        self.session_part2(dkg_id, CeremonyKind::Dkg, round1_map)
     }
 
+    /// Stage this node's new share and vote yes. Returns the group key; the share is not live
+    /// until the ceremony commits.
     pub fn dkg_part3(
         &self,
         dkg_id: &str,
         round1_map: &BTreeMap<Identifier, round1::Package>,
         round2_for_me: &BTreeMap<Identifier, round2::Package>,
-    ) -> Result<[u8; 32]> {
-        let mut state = {
-            let mut sessions = self.dkg_sessions.lock().expect("dkg lock");
-            sessions.remove(dkg_id).ok_or_else(|| DaemonError::UnknownDkg(dkg_id.into()))?
-        };
-        // Ownership is the load-bearing guard: a ceremony preempted after the orphan timeout must
-        // NOT persist, or a stale leader could clobber/split shares (esp. on refresh).
-        let outcome = self
-            .assert_owns(&state.key_id, dkg_id)
-            .and_then(|_| self.finish_dkg(&mut state, round1_map, round2_for_me));
-        self.release_ceremony(&state.key_id, dkg_id); // no-op if we no longer own it
-        outcome
+    ) -> Result<StagedOutcome> {
+        let roster = roster_of(round1_map)?;
+        self.finish_session(dkg_id, CeremonyKind::Dkg, roster, None, |key_id, participant| {
+            self.dkg_share(key_id, participant, round1_map, round2_for_me)
+        })
     }
-
-    fn dkg_key_id(&self, dkg_id: &str) -> Result<String> {
-        self.dkg_sessions
-            .lock()
-            .expect("dkg lock")
-            .get(dkg_id)
-            .map(|s| s.key_id.clone())
-            .ok_or_else(|| DaemonError::UnknownDkg(dkg_id.into()))
-    }
-
-    fn finish_dkg(
-        &self,
-        state: &mut DkgState,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-        round2_for_me: &BTreeMap<Identifier, round2::Package>,
-    ) -> Result<[u8; 32]> {
-        // Re-check under the ceremony guard: refuse if the key was provisioned meanwhile.
-        if self.keystore.exists(&state.key_id) {
-            return Err(DaemonError::KeyExists(state.key_id.clone()));
-        }
-        let others = without_self(round1_map, self.identifier);
-        let (key_package, public_key_package) = state.participant.part3(&others, round2_for_me)?;
-
-        let share = Share {
-            key_package,
-            public_key_package: public_key_package.clone(),
-            origin: None,
-            epoch: FIRST_EPOCH,
-            key_id: state.key_id.clone(),
-        };
-        // create, not save: fails if the file appeared since the check above (an import-share run
-        // in the pod, a racing ceremony) instead of overwriting it.
-        self.keystore.create(&state.key_id, &share)?;
-        // Drop any cached cosigner so it is reloaded fresh from the saved share.
-        self.cosigners.lock().expect("cosigners lock").remove(&state.key_id);
-        Ok(group_verifying_key_bytes(&public_key_package)?)
-    }
-
-    // -- proactive refresh peer ops (same three-part shape as DKG) --
 
     pub fn refresh_part1(&self, refresh_id: &str, key_id: &str) -> Result<round1::Package> {
         if !self.keystore.exists(key_id) {
             return Err(DaemonError::UnknownKey(key_id.to_string()));
         }
-        // Reverse fence + acquire (idempotent if the orchestrator already fenced with this id).
+        // Reverse fence (idempotent if the orchestrator already fenced with this id).
         let pending = self.pending_sign_count(key_id);
         if pending > 0 {
             return Err(DaemonError::SignInProgress {
@@ -751,22 +1299,7 @@ impl Node {
                 pending,
             });
         }
-        // Serialize against any other DKG/refresh for this key (prevents split-brain shares).
-        self.acquire_ceremony(key_id, refresh_id, "refresh")?;
-        let mut participant = RefreshParticipant::new(self.identifier, self.max_signers, self.min_signers);
-        match participant.part1() {
-            Ok(package) => {
-                self.refresh_sessions
-                    .lock()
-                    .expect("refresh lock")
-                    .insert(refresh_id.to_string(), RefreshState { key_id: key_id.to_string(), participant });
-                Ok(package)
-            }
-            Err(e) => {
-                self.release_ceremony(key_id, refresh_id);
-                Err(e.into())
-            }
-        }
+        self.start_session(refresh_id, key_id, CeremonyKind::Refresh)
     }
 
     pub fn refresh_part2(
@@ -774,24 +1307,7 @@ impl Node {
         refresh_id: &str,
         round1_map: &BTreeMap<Identifier, round1::Package>,
     ) -> Result<BTreeMap<Identifier, round2::Package>> {
-        let key_id = self.refresh_key_id(refresh_id)?;
-        self.assert_owns(&key_id, refresh_id)?;
-        let mut sessions = self.refresh_sessions.lock().expect("refresh lock");
-        let result = {
-            let state =
-                sessions.get_mut(refresh_id).ok_or_else(|| DaemonError::UnknownDkg(refresh_id.into()))?;
-            let others = without_self(round1_map, self.identifier);
-            state.participant.part2(&others)
-        };
-        match result {
-            Ok(packages) => Ok(packages),
-            Err(e) => {
-                sessions.remove(refresh_id);
-                drop(sessions);
-                self.release_ceremony(&key_id, refresh_id);
-                Err(e.into())
-            }
-        }
+        self.session_part2(refresh_id, CeremonyKind::Refresh, round1_map)
     }
 
     pub fn refresh_part3(
@@ -799,70 +1315,31 @@ impl Node {
         refresh_id: &str,
         round1_map: &BTreeMap<Identifier, round1::Package>,
         round2_for_me: &BTreeMap<Identifier, round2::Package>,
-    ) -> Result<[u8; 32]> {
-        let mut state = {
-            let mut sessions = self.refresh_sessions.lock().expect("refresh lock");
-            sessions.remove(refresh_id).ok_or_else(|| DaemonError::UnknownDkg(refresh_id.into()))?
-        };
-        // The load-bearing check for refresh: a superseded refresh must not rewrite shares.
-        let outcome = self
-            .assert_owns(&state.key_id, refresh_id)
-            .and_then(|_| self.finish_refresh(&mut state, round1_map, round2_for_me));
-        self.release_ceremony(&state.key_id, refresh_id);
-        outcome
+    ) -> Result<StagedOutcome> {
+        let roster = roster_of(round1_map)?;
+        self.finish_session(refresh_id, CeremonyKind::Refresh, roster, None, |key_id, participant| {
+            self.refresh_share(key_id, participant, round1_map, round2_for_me)
+        })
     }
+}
 
-    fn refresh_key_id(&self, refresh_id: &str) -> Result<String> {
-        self.refresh_sessions
-            .lock()
-            .expect("refresh lock")
-            .get(refresh_id)
-            .map(|s| s.key_id.clone())
-            .ok_or_else(|| DaemonError::UnknownDkg(refresh_id.into()))
-    }
+/// A sharing of a key as nodes compare it: (epoch, PKP digest).
+pub type KeyVersion = (u64, [u8; 32]);
 
-    fn finish_refresh(
-        &self,
-        state: &mut RefreshState,
-        round1_map: &BTreeMap<Identifier, round1::Package>,
-        round2_for_me: &BTreeMap<Identifier, round2::Package>,
-    ) -> Result<[u8; 32]> {
-        let old = self.keystore.load(&state.key_id)?;
-        let old_group = group_verifying_key_bytes(&old.public_key_package)?;
-        // A dealt key's provenance survives the refresh, which is counted: after the first one, the
-        // dealer's copies of the shares no longer combine with the live ones.
-        let origin = old.origin.clone().map(|mut o| {
-            o.refresh_count += 1;
-            o
-        });
-        let others = without_self(round1_map, self.identifier);
-        let (key_package, public_key_package) = state.participant.part3(
-            &others,
-            round2_for_me,
-            old.public_key_package,
-            old.key_package,
-        )?;
+/// What a node staged in part 3: the outcome every node must agree on before anyone commits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StagedOutcome {
+    pub new_epoch: u64,
+    pub new_pkp_digest: [u8; 32],
+    pub group_key: [u8; 32],
+}
 
-        let new_group = group_verifying_key_bytes(&public_key_package)?;
-        if new_group != old_group {
-            // Never persist a share whose group key drifted — that would change the node identity.
-            return Err(DaemonError::Disagreement(format!(
-                "refresh changed the group key for {} — aborting",
-                state.key_id
-            )));
-        }
-
-        let share = Share {
-            key_package,
-            public_key_package,
-            origin,
-            epoch: old.epoch + 1,
-            key_id: state.key_id.clone(),
-        };
-        self.keystore.save(&state.key_id, &share)?;
-        self.cosigners.lock().expect("cosigners lock").remove(&state.key_id);
-        Ok(new_group)
-    }
+/// The configured identifiers of a round-1 map's participants, ascending.
+fn roster_of(round1_map: &BTreeMap<Identifier, round1::Package>) -> Result<Vec<u16>> {
+    let mut roster =
+        round1_map.keys().map(|&id| crate::hosted::identifier_index(id)).collect::<Result<Vec<_>>>()?;
+    roster.sort_unstable();
+    Ok(roster)
 }
 
 /// Hosted keys may never live under an id reserved for the split ceremony (`…frost-import-…`).

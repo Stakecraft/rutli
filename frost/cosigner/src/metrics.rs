@@ -22,6 +22,10 @@ pub const SIGN_REQUESTS: &str = "rutli_sign_requests_total";
 pub const SIGN_DURATION: &str = "rutli_sign_duration_seconds";
 /// Key-ceremony outcomes. Labels: `kind` = "dkg" | "refresh", `result` = "ok" | "error".
 pub const CEREMONY_REQUESTS: &str = "rutli_ceremony_requests_total";
+/// Two-phase ceremonies this node resolved, by `result` (committed | aborted).
+pub const CEREMONY_RESOLUTIONS: &str = "rutli_ceremony_resolutions_total";
+/// STAGED ceremonies on this node that are not yet resolved (resolver waiting on a peer).
+pub const CEREMONIES_STAGED: &str = "rutli_ceremonies_staged";
 /// Peers skipped during sign round 1 (unreachable or refusing) — a quorum-margin canary.
 pub const SIGN_ROUND1_SKIPS: &str = "rutli_sign_round1_skips_total";
 /// Leader-issued aborts of in-flight sign sessions (one per given-up signature).
@@ -104,6 +108,10 @@ fn prime() {
             metrics::counter!(CEREMONY_REQUESTS, "kind" => kind, "result" => result).absolute(0);
         }
     }
+    for result in ["committed", "aborted"] {
+        metrics::counter!(CEREMONY_RESOLUTIONS, "result" => result).absolute(0);
+    }
+    metrics::gauge!(CEREMONIES_STAGED).set(0.0);
     metrics::counter!(SIGN_ROUND1_SKIPS).absolute(0);
     metrics::counter!(ANTI_ENTROPY_REPAIRS).absolute(0);
     metrics::counter!(ANTI_ENTROPY_CONFLICTS).absolute(0);
@@ -123,6 +131,8 @@ pub fn describe() {
     describe_counter!(SIGN_REQUESTS, "Leader-side Sign RPC outcomes, by result");
     describe_histogram!(SIGN_DURATION, Unit::Seconds, "Leader-side Sign RPC latency, by result");
     describe_counter!(CEREMONY_REQUESTS, "DKG/refresh ceremony outcomes, by kind and result");
+    describe_counter!(CEREMONY_RESOLUTIONS, "Two-phase ceremonies resolved on this node, by result");
+    describe_gauge!(CEREMONIES_STAGED, "Staged (yes-voted, unresolved) ceremonies on this node");
     describe_counter!(SIGN_ROUND1_SKIPS, "Peers skipped during sign round 1 (quorum-margin canary)");
     describe_counter!(SIGN_ABORTS, "Aborted in-flight sign sessions (one per given-up signature)");
     describe_gauge!(PENDING_SIGN_SESSIONS, "In-flight round-1 sign sessions held on this node");

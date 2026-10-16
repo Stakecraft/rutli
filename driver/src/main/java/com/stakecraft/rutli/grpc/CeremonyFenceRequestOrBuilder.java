@@ -35,7 +35,7 @@ public interface CeremonyFenceRequestOrBuilder extends
 
   /**
    * <pre>
-   * "dkg" or "refresh"
+   * "dkg", "refresh", "genkey" or "delkey"
    * </pre>
    *
    * <code>string kind = 3;</code>
@@ -44,7 +44,7 @@ public interface CeremonyFenceRequestOrBuilder extends
   java.lang.String getKind();
   /**
    * <pre>
-   * "dkg" or "refresh"
+   * "dkg", "refresh", "genkey" or "delkey"
    * </pre>
    *
    * <code>string kind = 3;</code>
@@ -52,4 +52,21 @@ public interface CeremonyFenceRequestOrBuilder extends
    */
   com.google.protobuf.ByteString
       getKindBytes();
+
+  /**
+   * <pre>
+   * refresh: the sharing the leader saw on every node. A node holding another (epoch, PKP digest)
+   * refuses. Empty digest = no expectation (DKG, hosted-key fences).
+   * </pre>
+   *
+   * <code>uint64 expected_epoch = 4;</code>
+   * @return The expectedEpoch.
+   */
+  long getExpectedEpoch();
+
+  /**
+   * <code>bytes expected_pkp_digest = 5;</code>
+   * @return The expectedPkpDigest.
+   */
+  com.google.protobuf.ByteString getExpectedPkpDigest();
 }

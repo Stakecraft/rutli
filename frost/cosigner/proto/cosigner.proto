@@ -104,6 +104,17 @@ service Peer {
   // staged here. Public values only. The leader asks every node before a DKG (idempotent retry)
   // or a refresh (every node must be on the same sharing).
   rpc KeyEpoch(KeyEpochRequest) returns (KeyEpochReply);
+  // Resolve a ceremony this node STAGED, now: it asks every roster node for its vote DIRECTLY and
+  // commits only if all of them hold a yes-vote for the same outcome, aborts only on a no-vote or a
+  // divergent one, else stays STAGED (its background resolver keeps asking). The caller's word is
+  // never evidence. Returns where the ceremony stands on this node afterwards.
+  rpc CeremonyCommit(CeremonyCommitRequest) returns (CeremonyStatusReply);
+  // This node's vote on a ceremony. A node with neither a session nor a record durably votes
+  // ABORTED before it answers, so an answer never changes later.
+  rpc CeremonyStatus(CeremonyStatusRequest) returns (CeremonyStatusReply);
+  // The leader gives up: drops this node's in-memory session (recording ABORTED). A recorded vote
+  // (STAGED included) is returned unchanged.
+  rpc CeremonyAbort(CeremonyAbortRequest) returns (CeremonyStatusReply);
 }
 
 message HealthRequest {}
@@ -192,8 +203,12 @@ message AbortSignReply {}
 message CeremonyFenceRequest {
   string ceremony_id = 1;
   string key_id = 2;
-  // "dkg" or "refresh"
+  // "dkg", "refresh", "genkey" or "delkey"
   string kind = 3;
+  // refresh: the sharing the leader saw on every node. A node holding another (epoch, PKP digest)
+  // refuses. Empty digest = no expectation (DKG, hosted-key fences).
+  uint64 expected_epoch = 4;
+  bytes expected_pkp_digest = 5;
 }
 message CeremonyFenceReply {}
 
@@ -366,4 +381,24 @@ message KeyEpochReply {
   string staged_ceremony_id = 7;
   uint64 staged_new_epoch = 8;
   bytes staged_new_pkp_digest = 9;
+}
+
+enum CeremonyState {
+  CEREMONY_STATE_UNSPECIFIED = 0;
+  CEREMONY_STATE_IN_PROGRESS = 1;  // session in memory, before this node's part 3
+  CEREMONY_STATE_STAGED = 2;       // yes-vote: new share staged, waiting for every node
+  CEREMONY_STATE_COMMITTED = 3;
+  CEREMONY_STATE_ABORTED = 4;      // no-vote: this node will never commit it
+}
+message CeremonyCommitRequest { string ceremony_id = 1; }
+message CeremonyStatusRequest { string ceremony_id = 1; }
+message CeremonyAbortRequest { string ceremony_id = 1; }
+message CeremonyStatusReply {
+  CeremonyState state = 1;
+  // STAGED / COMMITTED: the outcome voted for — every node must report the same to commit.
+  string key_id = 2;
+  string kind = 3;
+  uint64 new_epoch = 4;
+  bytes new_pkp_digest = 5;
+  bytes round1_digest = 6;
 }

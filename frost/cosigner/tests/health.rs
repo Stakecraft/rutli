@@ -136,6 +136,7 @@ async fn healthy_leaders_sign_around_a_peer_whose_key_store_broke() {
         .collect();
     let peers: Peers =
         nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
     run_dkg(&peers, "k").await.unwrap();
     let msg = canton_digest();
     sign(&nodes[0], &peers, "k", &msg).await.unwrap(); // node 1 now has its share cached
@@ -187,6 +188,7 @@ async fn a_sick_participant_refuses_the_ceremony_fence_so_a_refresh_never_half_a
         .collect();
     let peers: Peers =
         nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
     run_dkg(&peers, "k").await.unwrap();
     let share = |i: u16| std::fs::read(tmp.path().join(format!("node-{i}")).join("k.json")).unwrap();
     let before: Vec<Vec<u8>> = (1..=3).map(share).collect();

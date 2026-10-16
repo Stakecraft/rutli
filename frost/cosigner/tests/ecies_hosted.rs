@@ -57,6 +57,7 @@ fn hosted_cluster(tmp: &tempfile::TempDir) -> (Vec<Arc<Node>>, Peers) {
     }
     let peers: Peers =
         nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
     (nodes, peers)
 }
 

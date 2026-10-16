@@ -209,6 +209,42 @@ enum Command {
         #[command(subcommand)]
         command: SealCommand,
     },
+    /// Two-phase DKG/refresh ceremonies on this node (docs/ceremonies.md). Run with this node's
+    /// daemon STOPPED (the instance lock is taken); it talks to the other cosigners over the mesh
+    /// with this node's certificate.
+    Ceremony {
+        #[command(subcommand)]
+        command: CeremonyCommand,
+    },
+    /// Delete this node's file for a LEGACY partial DKG key — one an interrupted DKG from before
+    /// two-phase ceremonies left on fewer than all nodes, wedging every retry of its id (audit M5).
+    /// Run on each holder with its daemon stopped. Refuses unless: the key is a DKG share at epoch
+    /// 0 here with the confirmed group key, no node holds it at a committed epoch or has a ceremony
+    /// for it staged, every other node answers and fewer than all hold it, and it never signed
+    /// here. Only discard a key Canton never registered — a 2-of-3 key held by two nodes can sign.
+    DiscardPartialKey {
+        #[arg(long)]
+        key_id: String,
+        /// The key's group verifying key (64 hex chars), as `verify-key` or the DKG reply shows it.
+        #[arg(long)]
+        confirm_group_key: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum CeremonyCommand {
+    /// Resolve a STAGED ceremony on this node now: ask every roster node for its vote, commit only
+    /// if all voted yes for the same outcome, abort only on a no-vote. The daemon's background
+    /// resolver does the same every 30 s; this is for an operator who wants it now.
+    Resolve {
+        #[arg(long)]
+        ceremony_id: String,
+        /// BREAK-GLASS: treat these roster nodes as PERMANENTLY lost (their disks gone). Commits if
+        /// any reachable node committed the ceremony, otherwise aborts it. Never name a node that
+        /// may come back: it would hold a share nobody else can combine with.
+        #[arg(long, value_delimiter = ',')]
+        assume_lost: Vec<u16>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -298,6 +334,12 @@ async fn main() -> Result<()> {
             return verify_hosted_command(&cfg, &key_id, &expect_fingerprint, json).await
         }
         Some(Command::Health) => health_command(&cfg),
+        Some(Command::Ceremony { command: CeremonyCommand::Resolve { ceremony_id, assume_lost } }) => {
+            return ceremony_resolve_command(&cfg, &ceremony_id, &assume_lost).await
+        }
+        Some(Command::DiscardPartialKey { key_id, confirm_group_key }) => {
+            return discard_partial_key_command(&cfg, &key_id, &confirm_group_key).await
+        }
         _ => {}
     }
     tracing::info!(identifier = cfg.identifier, listen = %cfg.listen, "starting cosigner");
@@ -492,6 +534,10 @@ async fn main() -> Result<()> {
         }
     }
     peers.sort_by_key(|p| identifier_index(p.identifier()));
+    // The mesh: the ceremony resolver asks every peer for its vote directly (never through a
+    // leader). A pass now completes anything a crash left STAGED, then every 30 s.
+    node.set_mesh(peers.clone())?;
+    rutli_cosigner::ceremony::spawn_resolver(node.clone(), rutli_cosigner::ceremony::RESOLVER_INTERVAL);
 
     let allowed_cns = cfg.signer_allowlist.as_ref().map(|v| {
         Arc::new(v.iter().cloned().collect::<std::collections::HashSet<String>>())
@@ -601,6 +647,62 @@ async fn main() -> Result<()> {
         .add_service(PeerServer::new(peer))
         .serve_with_shutdown(addr, shutdown())
         .await?;
+    Ok(())
+}
+
+/// An offline node for the ceremony commands: this node's key store (sealed if configured), its
+/// ceremony records (loaded and crash-repaired by `Node::new`), and the mesh, dialled with this
+/// node's certificate under each peer's TLS name. The caller holds the instance lock.
+fn offline_ceremony_node(cfg: &Config) -> Result<Arc<Node>> {
+    let sealer = cfg.share_seal.as_ref().map(|_| offline_sealer(cfg)).transpose()?;
+    let keystore = KeyStore::open_with_sealer(cfg.data_dir.join("keys"), sealer)?;
+    let node = Arc::new(Node::new(ident(cfg.identifier)?, cfg.max_signers(), cfg.threshold, keystore));
+    let tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose()?;
+    let mut mesh: Vec<Arc<dyn PeerApi>> = Vec::new();
+    for p in cfg.peers.iter().filter(|p| p.identifier != cfg.identifier) {
+        let client_tls = tls.as_ref().map(|t| t.client_for(&p.server_name()));
+        mesh.push(Arc::new(GrpcPeer::connect_lazy(ident(p.identifier)?, &p.endpoint, client_tls)?));
+    }
+    node.set_mesh(mesh)?;
+    Ok(node)
+}
+
+/// `ceremony resolve`: see [`CeremonyCommand::Resolve`].
+async fn ceremony_resolve_command(cfg: &Config, ceremony_id: &str, assume_lost: &[u16]) -> Result<()> {
+    let _lock = rutli_cosigner::instance_lock::InstanceLock::acquire(&cfg.data_dir)?;
+    let node = offline_ceremony_node(cfg)?;
+    let rec = node
+        .ceremony_record(ceremony_id)
+        .ok_or_else(|| DaemonError::Config(format!("this node has no record of ceremony {ceremony_id}")))?;
+    let info = if assume_lost.is_empty() {
+        rutli_cosigner::ceremony::resolve(&node, ceremony_id).await?
+    } else {
+        rutli_cosigner::ceremony::resolve_assume_lost(&node, ceremony_id, assume_lost).await?
+    };
+    println!(
+        "ceremony {ceremony_id} ({} of {}): {} on this node (was {})",
+        rec.kind,
+        rec.key_id,
+        info.phase.as_str(),
+        rec.state.as_str()
+    );
+    Ok(())
+}
+
+/// `discard-partial-key`: see [`Command::DiscardPartialKey`].
+async fn discard_partial_key_command(cfg: &Config, key_id: &str, confirm_group_key: &str) -> Result<()> {
+    let _lock = rutli_cosigner::instance_lock::InstanceLock::acquire(&cfg.data_dir)?;
+    let confirm: [u8; 32] = hex::decode(confirm_group_key.trim())
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .ok_or_else(|| DaemonError::Config("--confirm-group-key must be 64 hex characters".into()))?;
+    let node = offline_ceremony_node(cfg)?;
+    let report = rutli_cosigner::ceremony::discard_partial_key(&node, key_id, &confirm).await?;
+    println!(
+        "discarded this node's file for {} (holders were {:?}); run this on every other holder, \
+         then retry the DKG",
+        report.key_id, report.holders
+    );
     Ok(())
 }
 

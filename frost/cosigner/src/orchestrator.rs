@@ -13,7 +13,8 @@ use frost::round1::SigningCommitments;
 use frost::round2::SignatureShare;
 use frost::Identifier;
 
-use crate::node::Node;
+use crate::ceremony_record::Phase;
+use crate::node::{CeremonyKind, Node};
 use crate::peer::PeerApi;
 use crate::{DaemonError, Result};
 
@@ -25,114 +26,302 @@ pub type Peers = Vec<Arc<dyn PeerApi>>;
 pub const CANTON_DIGEST_LEN: usize = 34;
 
 /// Coordinate a full DKG across every peer and return the agreed 32-byte group verifying key.
-/// Every peer persists its own share; the whole private key is never assembled anywhere.
+/// Every peer stages its own share and commits it only once every node has confirmed, directly
+/// with every other node, that all staged the same outcome (see [`crate::ceremony_record`]); the
+/// whole private key is never assembled anywhere.
+///
+/// Idempotent by key id (audit M5): a retry for a key every node has committed returns it; a retry
+/// while a ceremony for it is still resolving answers UNAVAILABLE (the driver fails over, Canton
+/// retries); a legacy partial key (files on some nodes only, from before two-phase ceremonies) is
+/// refused with the operator path.
+///
+/// The ceremony runs as its own task: a caller that stops waiting (driver deadline, client
+/// cancel) cannot cut it between nodes.
 pub async fn run_dkg(peers: &Peers, key_id: &str) -> Result<[u8; 32]> {
+    let (peers, key_id) = (peers.clone(), key_id.to_owned());
+    crate::ceremony::detach(async move { run_dkg_attached(&peers, &key_id).await }).await
+}
+
+async fn run_dkg_attached(peers: &Peers, key_id: &str) -> Result<[u8; 32]> {
     // Every peer refuses too (fence and part 1); this just answers before touching the mesh.
     if crate::share_delivery::is_reserved_for_import(key_id) {
         return Err(DaemonError::ReservedKeyId(key_id.to_string()));
     }
+    let views = key_views(peers, key_id).await?;
+    if let Some(existing) = dkg_preflight(peers, key_id, &views).await? {
+        return Ok(existing);
+    }
     let dkg_id = new_id("dkg");
-    fence_all(peers, &dkg_id, key_id, "dkg").await?;
+    fence_all(peers, &dkg_id, key_id, CeremonyKind::Dkg, None).await?;
+    let staged = dkg_stage(peers, &dkg_id, key_id).await;
+    finish_ceremony(peers, &dkg_id, key_id, staged).await
+}
 
+/// Parts 1–3 of a DKG: every node ends with a staged share and a STAGED vote, or the error.
+async fn dkg_stage(peers: &Peers, dkg_id: &str, key_id: &str) -> Result<[u8; 32]> {
     // Part 1: every peer commits and broadcasts.
     let mut round1_map = BTreeMap::new();
     for p in peers {
-        match p.dkg_part1(&dkg_id, key_id).await {
-            Ok(pkg) => {
-                round1_map.insert(p.identifier(), pkg);
-            }
-            Err(e) => {
-                release_all(peers, &dkg_id, key_id).await;
-                return Err(e);
-            }
-        }
+        round1_map.insert(p.identifier(), p.dkg_part1(dkg_id, key_id).await?);
     }
-
     // Part 2: every peer processes the full round-1 set → per-recipient round-2 packages.
     let mut outbox: BTreeMap<Identifier, BTreeMap<Identifier, round2::Package>> = BTreeMap::new();
     for p in peers {
-        outbox.insert(p.identifier(), p.dkg_part2(&dkg_id, &round1_map).await?);
+        outbox.insert(p.identifier(), p.dkg_part2(dkg_id, &round1_map).await?);
     }
-
-    // Part 3: route each round-2 package to its recipient and finalize.
+    // Part 3: route each round-2 package to its recipient; each stages and votes.
     let mut group_key: Option<[u8; 32]> = None;
     for p in peers {
-        let me = p.identifier();
-        let mut inbox: BTreeMap<Identifier, round2::Package> = BTreeMap::new();
-        for (&from, packages) in outbox.iter() {
-            if from == me {
-                continue;
-            }
-            let pkg = packages.get(&me).ok_or_else(|| {
-                DaemonError::Disagreement(format!("missing round2 package from {from:?} to {me:?}"))
-            })?;
-            inbox.insert(from, pkg.clone());
-        }
-        let gk = p.dkg_part3(&dkg_id, &round1_map, &inbox).await?;
-        match group_key {
-            None => group_key = Some(gk),
-            Some(prev) if prev != gk => {
-                return Err(DaemonError::Disagreement("peers derived different group keys".into()))
-            }
-            _ => {}
-        }
+        let inbox = inbox_for(&outbox, p.identifier())?;
+        let gk = p.dkg_part3(dkg_id, &round1_map, &inbox).await?;
+        agree(&mut group_key, gk, "peers derived different group keys")?;
     }
     group_key.ok_or_else(|| DaemonError::Config("no peers configured for DKG".into()))
 }
 
 /// Coordinate a proactive refresh across every peer. Same three-part exchange as DKG, but each
-/// peer folds the fresh zero-sharing into its existing share. The group public key is unchanged
-/// (verified by every node); shares stolen before this refresh become useless. Requires all peers
-/// (like DKG) — refresh is a scheduled ceremony, not a per-request path.
+/// peer folds the fresh zero-sharing into its existing share, at the next epoch. The group public
+/// key is unchanged (verified by every node); shares stolen before this refresh become useless.
+/// Requires all peers, all on one sharing (same epoch and PKP digest) — a refresh over mixed
+/// epochs is refused, never attempted.
 ///
-/// Before any crypto, every peer takes the per-key ceremony fence so **no node** can start a new
-/// sign mid-refresh. If any peer still has in-flight sign nonces, the fence fails and is rolled
-/// back cluster-wide (`SignInProgress`).
+/// Two-phase like DKG: no node replaces its share until every node has confirmed, directly, that
+/// all staged the same new sharing. A failure at any point leaves every node on the old epoch (or,
+/// after the first commit, lets every node's resolver finish the new one) — never a mix (H1).
 pub async fn run_refresh(peers: &Peers, key_id: &str) -> Result<[u8; 32]> {
-    let refresh_id = new_id("refresh");
-    fence_all(peers, &refresh_id, key_id, "refresh").await?;
+    let (peers, key_id) = (peers.clone(), key_id.to_owned());
+    crate::ceremony::detach(async move { run_refresh_attached(&peers, &key_id).await }).await
+}
 
+async fn run_refresh_attached(peers: &Peers, key_id: &str) -> Result<[u8; 32]> {
+    let views = key_views(peers, key_id).await?;
+    let expect = refresh_preflight(peers, key_id, &views).await?;
+    let refresh_id = new_id("refresh");
+    fence_all(peers, &refresh_id, key_id, CeremonyKind::Refresh, Some(expect)).await?;
+    let staged = refresh_stage(peers, &refresh_id, key_id).await;
+    finish_ceremony(peers, &refresh_id, key_id, staged).await
+}
+
+async fn refresh_stage(peers: &Peers, refresh_id: &str, key_id: &str) -> Result<[u8; 32]> {
     let mut round1_map = BTreeMap::new();
     for p in peers {
-        match p.refresh_part1(&refresh_id, key_id).await {
-            Ok(pkg) => {
-                round1_map.insert(p.identifier(), pkg);
-            }
-            Err(e) => {
-                release_all(peers, &refresh_id, key_id).await;
-                return Err(e);
-            }
-        }
+        round1_map.insert(p.identifier(), p.refresh_part1(refresh_id, key_id).await?);
     }
-
     let mut outbox: BTreeMap<Identifier, BTreeMap<Identifier, round2::Package>> = BTreeMap::new();
     for p in peers {
-        outbox.insert(p.identifier(), p.refresh_part2(&refresh_id, &round1_map).await?);
+        outbox.insert(p.identifier(), p.refresh_part2(refresh_id, &round1_map).await?);
     }
-
     let mut group_key: Option<[u8; 32]> = None;
     for p in peers {
-        let me = p.identifier();
-        let mut inbox: BTreeMap<Identifier, round2::Package> = BTreeMap::new();
-        for (&from, packages) in outbox.iter() {
-            if from == me {
-                continue;
-            }
-            let pkg = packages.get(&me).ok_or_else(|| {
-                DaemonError::Disagreement(format!("missing refresh package from {from:?} to {me:?}"))
-            })?;
-            inbox.insert(from, pkg.clone());
-        }
-        let gk = p.refresh_part3(&refresh_id, &round1_map, &inbox).await?;
-        match group_key {
-            None => group_key = Some(gk),
-            Some(prev) if prev != gk => {
-                return Err(DaemonError::Disagreement("refresh diverged the group key".into()))
-            }
-            _ => {}
-        }
+        let inbox = inbox_for(&outbox, p.identifier())?;
+        let gk = p.refresh_part3(refresh_id, &round1_map, &inbox).await?;
+        agree(&mut group_key, gk, "refresh diverged the group key")?;
     }
     group_key.ok_or_else(|| DaemonError::Config("no peers configured for refresh".into()))
+}
+
+fn inbox_for(
+    outbox: &BTreeMap<Identifier, BTreeMap<Identifier, round2::Package>>,
+    me: Identifier,
+) -> Result<BTreeMap<Identifier, round2::Package>> {
+    let mut inbox = BTreeMap::new();
+    for (&from, packages) in outbox.iter() {
+        if from == me {
+            continue;
+        }
+        let pkg = packages.get(&me).ok_or_else(|| {
+            DaemonError::Disagreement(format!("missing round2 package from {from:?} to {me:?}"))
+        })?;
+        inbox.insert(from, pkg.clone());
+    }
+    Ok(inbox)
+}
+
+fn agree(seen: &mut Option<[u8; 32]>, gk: [u8; 32], what: &str) -> Result<()> {
+    match seen {
+        None => *seen = Some(gk),
+        Some(prev) if *prev != gk => return Err(DaemonError::Disagreement(what.into())),
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Every peer's [`crate::pb::KeyEpochReply`] for `key_id`, by identifier. A ceremony needs every
+/// node, so a peer that cannot answer refuses the ceremony before anything starts.
+async fn key_views(peers: &Peers, key_id: &str) -> Result<Vec<(u16, crate::pb::KeyEpochReply)>> {
+    let mut views = Vec::new();
+    for p in peers {
+        let id = crate::hosted::identifier_index(p.identifier())?;
+        match p.key_epoch(key_id).await {
+            Ok(v) => views.push((id, v)),
+            Err(e) => {
+                return Err(DaemonError::NotServing(format!(
+                    "cosigner {id} cannot report its state for {key_id} ({e}) — a DKG/refresh needs \
+                     every node"
+                )))
+            }
+        }
+    }
+    Ok(views)
+}
+
+/// Ask every node holding a STAGED ceremony for `key_id` to resolve it now, then answer
+/// UNAVAILABLE: the caller retries once it has settled.
+async fn resolving(peers: &Peers, key_id: &str, views: &[(u16, crate::pb::KeyEpochReply)]) -> DaemonError {
+    let ids: std::collections::BTreeSet<&str> =
+        views.iter().filter(|(_, v)| v.staged).map(|(_, v)| v.staged_ceremony_id.as_str()).collect();
+    for id in &ids {
+        for p in peers {
+            let _ = p.ceremony_commit(id).await;
+        }
+    }
+    DaemonError::NotServing(format!(
+        "a ceremony for {key_id} ({}) is staged and still resolving — retry shortly",
+        ids.into_iter().collect::<Vec<_>>().join(", ")
+    ))
+}
+
+/// The DKG idempotency decision (M5). `Some(group key)`: already committed everywhere.
+async fn dkg_preflight(
+    peers: &Peers,
+    key_id: &str,
+    views: &[(u16, crate::pb::KeyEpochReply)],
+) -> Result<Option<[u8; 32]>> {
+    if views.iter().any(|(_, v)| v.staged) {
+        return Err(resolving(peers, key_id, views).await);
+    }
+    let holders: Vec<u16> = views.iter().filter(|(_, v)| v.present).map(|(id, _)| *id).collect();
+    if holders.is_empty() {
+        return Ok(None);
+    }
+    if let Some((id, v)) = views.iter().find(|(_, v)| v.present && v.origin != "dkg") {
+        tracing::debug!(node = id, origin = %v.origin, "DKG over a non-DKG key refused");
+        return Err(DaemonError::KeyExists(key_id.to_string()));
+    }
+    if holders.len() < views.len() {
+        return Err(DaemonError::CeremonyRefused(format!(
+            "{key_id} exists on cosigners {holders:?} only — a partial key from an interrupted DKG \
+             before two-phase ceremonies (or a node that lost its file). If no node holds it at an \
+             epoch >= 1 and Canton never registered it, remove it with `rutli-cosigner \
+             discard-partial-key` on each holder (docs/ceremonies.md); otherwise restore the lost \
+             share"
+        )));
+    }
+    let first = &views[0].1;
+    let same = views.iter().all(|(_, v)| {
+        v.epoch == first.epoch && v.pkp_digest == first.pkp_digest && v.group_verifying_key == first.group_verifying_key
+    });
+    if !same {
+        return Err(DaemonError::CeremonyRefused(format!(
+            "{key_id} exists on every node but they hold different sharings — refusing (verify-key \
+             shows which)"
+        )));
+    }
+    let gk: [u8; 32] = first
+        .group_verifying_key
+        .as_slice()
+        .try_into()
+        .map_err(|_| DaemonError::Disagreement("group key not 32 bytes".into()))?;
+    tracing::info!(key_id, epoch = first.epoch, "DKG retry for a committed key: returning it");
+    Ok(Some(gk))
+}
+
+/// The refresh precondition: every node holds `key_id` on one sharing and nothing is staged.
+/// Returns that sharing's (epoch, PKP digest), which every node re-checks at its fence.
+async fn refresh_preflight(
+    peers: &Peers,
+    key_id: &str,
+    views: &[(u16, crate::pb::KeyEpochReply)],
+) -> Result<(u64, [u8; 32])> {
+    if views.iter().any(|(_, v)| v.staged) {
+        return Err(resolving(peers, key_id, views).await);
+    }
+    if let Some((id, _)) = views.iter().find(|(_, v)| !v.present) {
+        return Err(DaemonError::UnknownKey(format!("{key_id} (absent on cosigner {id})")));
+    }
+    if let Some((id, v)) = views.iter().find(|(_, v)| v.origin == "hosted") {
+        return Err(DaemonError::CeremonyRefused(format!(
+            "{key_id} is a cluster-hosted key on cosigner {id}, not a FROST share ({})",
+            v.origin
+        )));
+    }
+    let first = &views[0].1;
+    if let Some((id, v)) = views.iter().find(|(_, v)| v.epoch != first.epoch || v.pkp_digest != first.pkp_digest) {
+        return Err(DaemonError::CeremonyRefused(format!(
+            "refusing to refresh {key_id}: cosigner {id} is on epoch {} but cosigner {} is on epoch {} \
+             (or their sharings differ) — the nodes must hold one sharing (verify-key shows which)",
+            v.epoch, views[0].0, first.epoch
+        )));
+    }
+    let digest: [u8; 32] = first
+        .pkp_digest
+        .as_slice()
+        .try_into()
+        .map_err(|_| DaemonError::Disagreement("pkp digest not 32 bytes".into()))?;
+    Ok((first.epoch, digest))
+}
+
+/// After the staging phase: on success, drive the commit; on failure, abort every in-memory
+/// session (a STAGED vote is untouched by that), let every STAGED node resolve on its peers'
+/// evidence, release the fences, and return the error.
+async fn finish_ceremony(peers: &Peers, ceremony_id: &str, key_id: &str, staged: Result<[u8; 32]>) -> Result<[u8; 32]> {
+    match staged {
+        Ok(group_key) => {
+            commit_everywhere(peers, ceremony_id, key_id).await?;
+            Ok(group_key)
+        }
+        Err(e) => {
+            tracing::warn!(ceremony_id, key_id, error = %e, "ceremony failed before every node staged; aborting");
+            for p in peers {
+                if let Err(err) = p.ceremony_abort(ceremony_id).await {
+                    tracing::debug!(peer = ?p.identifier(), error = %err, "ceremony abort failed");
+                }
+            }
+            for p in peers {
+                let _ = p.ceremony_commit(ceremony_id).await; // resolves STAGED nodes to ABORTED
+            }
+            release_all(peers, ceremony_id, key_id).await;
+            Err(e)
+        }
+    }
+}
+
+/// How many times the leader asks every node to resolve before leaving the rest to the nodes'
+/// own resolvers.
+const COMMIT_ROUNDS: u32 = 5;
+
+/// Ask every node to resolve the ceremony (each confirms with every other node itself) until all
+/// report COMMITTED. Any ABORTED: the ceremony failed everywhere (no node committed — a node aborts
+/// only on evidence that makes committing impossible). Still STAGED somewhere after the retries
+/// (a node unreachable): UNAVAILABLE — the nodes finish on their own, and a retry sees the result.
+async fn commit_everywhere(peers: &Peers, ceremony_id: &str, key_id: &str) -> Result<()> {
+    let mut pending = Vec::new();
+    for round in 0..COMMIT_ROUNDS {
+        pending.clear();
+        for p in peers {
+            let id = crate::hosted::identifier_index(p.identifier())?;
+            match p.ceremony_commit(ceremony_id).await {
+                Ok(s) if s.phase == Phase::Committed => {}
+                Ok(s) if s.phase == Phase::Aborted => {
+                    return Err(DaemonError::Disagreement(format!(
+                        "ceremony {ceremony_id} for {key_id} aborted on cosigner {id} — no node \
+                         changed its share"
+                    )))
+                }
+                Ok(s) => pending.push(format!("cosigner {id}: {}", s.phase.as_str())),
+                Err(e) => pending.push(format!("cosigner {id}: {e}")),
+            }
+        }
+        if pending.is_empty() {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100 << round)).await;
+    }
+    Err(DaemonError::NotServing(format!(
+        "ceremony {ceremony_id} for {key_id} is staged but not yet committed everywhere ({}); every \
+         node's resolver completes it — retry to confirm",
+        pending.join("; ")
+    )))
 }
 
 /// Coordinate one signature. Selects a threshold-sized quorum, tolerating peers that fail round 1
@@ -277,10 +466,16 @@ async fn abort_sign(chosen: &[&Arc<dyn PeerApi>], key_id: &str, session_id: &str
 
 /// Take the per-key ceremony guard on every peer before DKG/refresh crypto. Rolls back on the
 /// first refusal so a partial fence never sticks.
-async fn fence_all(peers: &Peers, ceremony_id: &str, key_id: &str, kind: &'static str) -> Result<()> {
+async fn fence_all(
+    peers: &Peers,
+    ceremony_id: &str,
+    key_id: &str,
+    kind: CeremonyKind,
+    expect: Option<(u64, [u8; 32])>,
+) -> Result<()> {
     let mut fenced: Vec<&Arc<dyn PeerApi>> = Vec::new();
     for p in peers {
-        match p.ceremony_fence(ceremony_id, key_id, kind).await {
+        match p.ceremony_begin(ceremony_id, key_id, kind, expect).await {
             Ok(()) => fenced.push(p),
             Err(e) => {
                 for q in &fenced {

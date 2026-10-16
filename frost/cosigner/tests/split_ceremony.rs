@@ -137,6 +137,7 @@ fn signer_svc(node: &Arc<Node>, peers: &Peers) -> rutli_cosigner::service::Signe
 }
 
 fn local_peers(nodes: &[Arc<Node>]) -> Peers {
+    rutli_cosigner::peer::wire_local_mesh(nodes).unwrap();
     nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect()
 }
 

@@ -168,6 +168,8 @@ async fn mesh_with(mode: impl Fn(u16) -> SealMode, pin_override: impl Fn(u16) ->
                 )
             });
         }
+        // The ceremony mesh: each node reaches its peers over gRPC, as the daemon wires it.
+        node.set_mesh(view.clone()).unwrap();
         peers.push(view);
     }
 
@@ -421,4 +423,28 @@ async fn fetch_key_identifies_the_caller_by_an_exact_cn_only() {
     let (_, _, wrapped) = caller.fetch_key("rutli-enc-exact").await.unwrap();
     assert_eq!(wrapped.recipient, 2);
     handle.abort();
+}
+
+#[tokio::test]
+async fn dkg_and_refresh_commit_on_every_node_over_mtls_grpc() {
+    // Two-phase DKG and refresh over real sockets: each node's commit is decided by asking every
+    // peer directly (CeremonyStatus over its own mTLS client), whichever node leads.
+    let m = mesh().await;
+    let key = "frost-grpc-2pc";
+    let group = rutli_cosigner::orchestrator::run_dkg(&m.peers[1], key).await.unwrap();
+    for leader in [2usize, 0] {
+        assert_eq!(rutli_cosigner::orchestrator::run_refresh(&m.peers[leader], key).await.unwrap(), group);
+    }
+    let digest = m.nodes[0].key_epoch(key).unwrap().pkp_digest;
+    for n in &m.nodes {
+        let v = n.key_epoch(key).unwrap();
+        assert_eq!((v.epoch, v.staged), (3, false), "DKG then two refreshes");
+        assert_eq!(v.pkp_digest, digest);
+        assert!(n.staged_records().is_empty());
+    }
+    // A retried DKG returns the committed key (M5).
+    assert_eq!(rutli_cosigner::orchestrator::run_dkg(&m.peers[0], key).await.unwrap(), group);
+    let msg = rutli_frost_core::dealer::canton_test_message(b"after grpc refresh");
+    let sig = rutli_cosigner::orchestrator::sign(&m.nodes[0], &m.peers[0], key, &msg).await.unwrap();
+    assert!(rutli_cosigner::verify_key::signature_verifies(&group, &msg, &sig));
 }
