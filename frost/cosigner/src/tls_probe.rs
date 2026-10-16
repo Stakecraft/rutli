@@ -15,7 +15,8 @@
 //! half of all runs locally, either way.)
 //!
 //! [`TlsProbe::refusal`] removes the race: it connects with the same trust anchors, client
-//! certificate and server name as the gRPC client, completes the handshake, **writes nothing**, and
+//! certificate and server name as the gRPC client (the peer's own name, [`TlsProbe::refusal_as`]),
+//! completes the handshake, **writes nothing**, and
 //! reads until the node either sends data (it accepted us: no TLS-level refusal) or fails the read
 //! (its alert, or a reset). Nothing written, nothing to race with.
 
@@ -72,10 +73,26 @@ impl TlsProbe {
     /// node's alert, e.g. `received fatal alert: UnknownCA`). `None` when the node accepts the
     /// client, or cannot be reached at all (the RPC error already says so), or does not answer.
     pub async fn refusal(&self, endpoint: &str) -> Option<String> {
+        self.refusal_named(endpoint, None).await
+    }
+
+    /// [`TlsProbe::refusal`], verifying the node under `server_name` — the roster peer's own
+    /// [`crate::config::PeerConfig::server_name`], exactly as the gRPC client dials it (audit M3) —
+    /// instead of `tls.domain`. Without it, a probe of a node whose certificate no longer carries the
+    /// shared `rutli-cosigner` name would report a name mismatch instead of the node's real alert.
+    pub async fn refusal_as(&self, endpoint: &str, server_name: &str) -> Option<String> {
+        self.refusal_named(endpoint, Some(server_name)).await
+    }
+
+    async fn refusal_named(&self, endpoint: &str, server_name: Option<&str>) -> Option<String> {
         let uri: tonic::codegen::http::Uri = endpoint.parse().ok()?;
         let host = uri.host()?.trim_start_matches('[').trim_end_matches(']').to_string();
         let port = uri.port_u16().unwrap_or(443);
-        let name = ServerName::try_from(self.domain.clone().unwrap_or_else(|| host.clone())).ok()?;
+        let name = server_name
+            .map(str::to_string)
+            .or_else(|| self.domain.clone())
+            .unwrap_or_else(|| host.clone());
+        let name = ServerName::try_from(name).ok()?;
         let tcp = tokio::time::timeout(PROBE_TIMEOUT, tokio::net::TcpStream::connect((host.as_str(), port)))
             .await
             .ok()?

@@ -81,7 +81,7 @@ grpc() {
     -v "$PROTO_ABS:/proto:ro" \
     "$GRPC_IMG" \
     -cacert /certs/ca.crt -cert /certs/driver.crt -key /certs/driver.key \
-    -servername rutli-cosigner \
+    -servername cosigner1 \
     -import-path /proto -proto cosigner.proto \
     "$@"
 }

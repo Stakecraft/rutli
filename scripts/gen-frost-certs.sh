@@ -4,7 +4,9 @@
 # HostedKeyStatus and CeremonySignTest only, via operator_allowlist). Every cert is signed by the CA (the sole trust
 # anchor). Cosigner certs carry a SAN of `cosignerN` and `127.0.0.1` so they work in Docker and
 # locally, and the CN `cosignerN` (N = the node's configured identifier) — the identity the Peer
-# API's FetchKey and the split ceremony's request signatures rely on.
+# API's FetchKey and the split ceremony's request signatures rely on. Peers and the driver verify
+# each node under its own name `cosignerN` (PeerConfig.tls_server_name / the driver's per-endpoint
+# tls-name), so no cert carries a name shared with another node.
 #
 #   scripts/gen-frost-certs.sh [N] [OUT_DIR]      (defaults: N=3, OUT_DIR=deploy/frost/certs)
 #
@@ -158,17 +160,18 @@ wanted() { # name — is it in RUTLI_CERTS?
 for i in $(seq 1 "$N"); do
   wanted "cosigner$i" || continue
   echo "Generating cert for cosigner$i..."
-  # Every cosigner cert carries the SHARED SAN `rutli-cosigner` in addition to its own name. The
-  # driver/cosigner TLS `domain` is a single global verification name applied to every peer dial, so
-  # the mesh verifies peers against this shared SAN (works regardless of the actual DNS/pod name —
-  # Docker service `cosignerN`, k8s pod `cosigner-N.rutli-cosigner`, etc.).
-  gen_cert "cosigner$i" "subjectAltName=DNS:rutli-cosigner,DNS:cosigner$i,DNS:cosigner-$((i-1)),DNS:localhost,IP:127.0.0.1" \
+  # Only this node's own names. Certs issued before 0.4.0-rc.2 also carried a SHARED SAN
+  # `rutli-cosigner`, when one global TLS `domain` verified every peer — which let any cosigner cert
+  # verify as any peer (audit M3). Clients now dial `cosignerN` (whatever the DNS name: Docker
+  # service, k8s Service), so the shared SAN is no longer issued; old certs keep working because
+  # they carry `cosignerN` too, and nothing verifies the shared name any more.
+  gen_cert "cosigner$i" "subjectAltName=DNS:cosigner$i,DNS:cosigner-$((i-1)),DNS:localhost,IP:127.0.0.1" \
     "serverAuth,clientAuth" # a cosigner is both mTLS server and client (the mesh)
 done
 
 if wanted driver; then
   echo "Generating driver client cert..."
-  gen_cert "driver" "subjectAltName=DNS:rutli-cosigner,DNS:driver,DNS:localhost,IP:127.0.0.1" "clientAuth"
+  gen_cert "driver" "subjectAltName=DNS:driver,DNS:localhost,IP:127.0.0.1" "clientAuth"
 fi
 
 if wanted operator; then

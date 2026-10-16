@@ -192,7 +192,10 @@ pub struct TlsConfig {
     pub cert: PathBuf,
     /// PEM private key for `cert`.
     pub key: PathBuf,
-    /// Expected TLS server-name (SNI/SAN) when dialing peers. Peer endpoints use `https://`.
+    /// TLS server name the operator CLI (`refresh`, `verify-key`) verifies when it dials a target
+    /// that is not a roster peer. **Not** used for the mesh: each peer is dialled with its own
+    /// [`PeerConfig::server_name`], so a cosigner certificate can never stand in for another node
+    /// (audit M3). The old shared `rutli-cosigner` SAN is accepted here but no longer needed.
     #[serde(default)]
     pub domain: Option<String>,
     /// Accept an expired or not-yet-valid CA in `ca_cert` (it is still refused if it is not a CA).
@@ -213,11 +216,38 @@ pub struct PeerConfig {
     /// seal keys at startup. Printed by `rutli-cosigner seal split-legacy` / `seal inspect`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dist_public_key: Option<String>,
+    /// The TLS server name (certificate SAN) this peer must present when dialled. Defaults to
+    /// `cosigner<identifier>`, which every certificate from scripts/gen-frost-certs.sh carries.
+    /// Per peer, never one shared name: with a shared name any cosigner certificate verifies as any
+    /// peer, so a node holding one cert could answer for another (audit M3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_server_name: Option<String>,
+    /// The client-certificate Common Name this peer presents when it calls this node. Defaults to
+    /// `cosigner<identifier>`. A mesh caller is identified by an EXACT match on this, never by
+    /// parsing digits out of whatever CN it has.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_client_cn: Option<String>,
 }
 
 impl PeerConfig {
     pub fn new(identifier: u16, endpoint: impl Into<String>) -> Self {
-        Self { identifier, endpoint: endpoint.into(), dist_public_key: None }
+        Self {
+            identifier,
+            endpoint: endpoint.into(),
+            dist_public_key: None,
+            tls_server_name: None,
+            tls_client_cn: None,
+        }
+    }
+
+    /// The server name to verify when dialling this peer.
+    pub fn server_name(&self) -> String {
+        self.tls_server_name.clone().unwrap_or_else(|| format!("cosigner{}", self.identifier))
+    }
+
+    /// The client-certificate CN this peer calls with.
+    pub fn client_cn(&self) -> String {
+        self.tls_client_cn.clone().unwrap_or_else(|| format!("cosigner{}", self.identifier))
     }
 
     pub fn dist_public_key_bytes(&self) -> crate::Result<Option<[u8; 32]>> {
@@ -258,6 +288,11 @@ impl Config {
             Some(t) => crate::wrap::cluster_id_from_ca(&std::fs::read(&t.ca_cert)?),
             None => "plaintext-dev".to_string(),
         })
+    }
+
+    /// Mesh caller identity: client-certificate CN → roster identifier, exact match only.
+    pub fn peer_identities(&self) -> std::collections::HashMap<String, u16> {
+        self.peers.iter().map(|p| (p.client_cn(), p.identifier)).collect()
     }
 
     pub fn load(path: &std::path::Path) -> crate::Result<Self> {
@@ -339,6 +374,46 @@ impl Config {
                  cert CNs permitted to call the mesh Peer API (typically every cosigner)"
                     .into(),
             ));
+        }
+        // Mesh identities: one server name and one client CN per node. Two peers sharing either
+        // would make them interchangeable on the wire — the hole per-peer names close (M3).
+        let mut names = std::collections::HashSet::new();
+        let mut cns = std::collections::HashSet::new();
+        for p in &self.peers {
+            if !names.insert(p.server_name()) {
+                return Err(Config(format!(
+                    "tls_server_name {:?} (peer {}) is used by more than one peer",
+                    p.server_name(),
+                    p.identifier
+                )));
+            }
+            if !cns.insert(p.client_cn()) {
+                return Err(Config(format!(
+                    "tls_client_cn {:?} (peer {}) is used by more than one peer",
+                    p.client_cn(),
+                    p.identifier
+                )));
+            }
+        }
+        // The mesh allowlist is exactly the roster's client CNs: a CN on it that names no roster
+        // node could drive the raw FROST rounds as nobody in particular, and a roster node missing
+        // from it could not take part.
+        if self.tls.is_some() {
+            if let Some(allow) = &self.peer_allowlist {
+                let allow: std::collections::HashSet<&String> = allow.iter().collect();
+                let roster: std::collections::HashSet<&String> = cns.iter().collect();
+                if allow != roster {
+                    let mut extra: Vec<_> = allow.difference(&roster).collect();
+                    let mut missing: Vec<_> = roster.difference(&allow).collect();
+                    extra.sort();
+                    missing.sort();
+                    return Err(Config(format!(
+                        "peer_allowlist must list exactly the roster's client CNs (cosigner<id> \
+                         unless a peer sets tls_client_cn): not in the roster {extra:?}, roster \
+                         nodes missing {missing:?}"
+                    )));
+                }
+            }
         }
         // The Signer API and the mesh Peer API are separate roles: a CN in both would put a
         // cosigner cert on the Signer API (or the driver on the raw FROST rounds).
@@ -502,6 +577,56 @@ mod tests {
         c.peer_allowlist = Some(vec![]);
         assert!(c.validate().is_err(), "empty peer_allowlist under TLS must fail");
         c.peer_allowlist = Some(vec!["cosigner1".into(), "cosigner2".into(), "cosigner3".into()]);
+        c.validate().unwrap();
+    }
+
+    fn mesh_ok() -> Config {
+        let mut c = base(Some(tls()), Some(vec!["driver".into()]));
+        c.peer_allowlist = Some(vec!["cosigner1".into(), "cosigner2".into(), "cosigner3".into()]);
+        c
+    }
+
+    #[test]
+    fn each_peer_is_dialled_and_identified_by_its_own_name() {
+        let c = mesh_ok();
+        c.validate().unwrap();
+        assert_eq!(c.peers[1].server_name(), "cosigner2");
+        assert_eq!(c.peers[1].client_cn(), "cosigner2");
+        assert_eq!(c.peer_identities().get("cosigner3"), Some(&3));
+        assert_eq!(c.peer_identities().get("cosigner03"), None, "exact match only");
+        // The legacy tls.domain is not a mesh name.
+        assert_ne!(c.peers[0].server_name(), "rutli-cosigner");
+    }
+
+    #[test]
+    fn mesh_names_must_be_unique() {
+        let mut c = mesh_ok();
+        c.peers[2].tls_server_name = Some("cosigner2".into());
+        assert!(c.validate().unwrap_err().to_string().contains("tls_server_name"));
+        let mut c = mesh_ok();
+        c.peers[0].tls_server_name = Some("rutli-cosigner".into());
+        c.peers[1].tls_server_name = Some("rutli-cosigner".into());
+        assert!(c.validate().is_err(), "one shared name for two peers is exactly M3");
+        let mut c = mesh_ok();
+        c.peers[2].tls_client_cn = Some("cosigner2".into());
+        assert!(c.validate().unwrap_err().to_string().contains("tls_client_cn"));
+    }
+
+    #[test]
+    fn the_peer_allowlist_is_exactly_the_roster() {
+        let mut c = mesh_ok();
+        c.peer_allowlist = Some(vec!["cosigner1".into(), "cosigner2".into()]);
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("missing") && e.contains("cosigner3"), "{e}");
+        c.peer_allowlist =
+            Some(vec!["cosigner1".into(), "cosigner2".into(), "cosigner3".into(), "cosigner4".into()]);
+        let e = c.validate().unwrap_err().to_string();
+        assert!(e.contains("cosigner4"), "{e}");
+        // A custom client CN must be what the allowlist names.
+        let mut c = mesh_ok();
+        c.peers[2].tls_client_cn = Some("node-c.example".into());
+        assert!(c.validate().is_err());
+        c.peer_allowlist = Some(vec!["cosigner1".into(), "cosigner2".into(), "node-c.example".into()]);
         c.validate().unwrap();
     }
 

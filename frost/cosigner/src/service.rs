@@ -511,6 +511,10 @@ pub struct PeerSvc {
     /// it on `threshold` nodes can aggregate a signature over an arbitrary message, bypassing the
     /// Signer API's Canton-digest guard and the ceremony fence.
     pub allowed_cns: Option<Arc<HashSet<String>>>,
+    /// Caller identity for the handlers that act on *who* is calling (FetchKey): client-cert CN →
+    /// roster identifier, exact match ([`crate::config::Config::peer_identities`]). `None` falls
+    /// back to the strict `cosigner<N>` rule ([`crate::request_auth::identifier_from_cn`]).
+    pub peer_ids: Option<Arc<std::collections::HashMap<String, u16>>>,
 }
 
 impl PeerSvc {
@@ -518,8 +522,8 @@ impl PeerSvc {
         authorize_cn(self.allowed_cns.as_deref(), req, "Peer")
     }
 
-    /// The node identifier of the authenticated caller, taken from its client-cert CN
-    /// (`cosigner<N>`, as issued by scripts/gen-frost-certs.sh).
+    /// The node identifier of the authenticated caller, taken from its client-cert CN: the roster
+    /// node whose configured `tls_client_cn` (default `cosigner<N>`) it equals exactly.
     ///
     /// Read from the certificate, never from the request body: otherwise any allowlisted peer
     /// could ask for key material wrapped to a node of its choosing.
@@ -530,13 +534,17 @@ impl PeerSvc {
                  must be identified by its certificate",
             )
         })?;
-        cn.trim_start_matches(|c: char| !c.is_ascii_digit())
-            .parse::<u16>()
-            .map_err(|_| {
-                Status::permission_denied(format!(
-                    "peer certificate CN '{cn}' does not name a cosigner (expected e.g. cosigner2)"
-                ))
-            })
+        // Exact match only. Parsing digits out of the CN (as before) let `cosigner-2`, `xcosigner2`
+        // or `cosigner02` all pass as node 2 — any allowlisted spelling could claim another node.
+        let id = match &self.peer_ids {
+            Some(ids) => ids.get(&cn).copied(),
+            None => crate::request_auth::identifier_from_cn(&cn),
+        };
+        id.ok_or_else(|| {
+            Status::permission_denied(format!(
+                "peer certificate CN '{cn}' is not the configured client CN of any roster node"
+            ))
+        })
     }
 }
 

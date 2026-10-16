@@ -43,6 +43,10 @@ enum Command {
         /// Signer endpoint to drive the refresh (default: the first peer in the roster).
         #[arg(long)]
         target: Option<String>,
+        /// TLS server name the target must present. Default: that peer's `tls_server_name`
+        /// (`cosigner<id>`) when the target is a roster endpoint, else `tls.domain`.
+        #[arg(long)]
+        tls_server_name: Option<String>,
     },
     /// Copy this node's (sealed) key shares to a backup directory. Run with the node stopped.
     Backup {
@@ -259,7 +263,9 @@ async fn main() -> Result<()> {
     let cfg = Config::load(&config_path)?;
 
     match args.command {
-        Some(Command::Refresh { key_id, target }) => return refresh_command(&cfg, &key_id, target).await,
+        Some(Command::Refresh { key_id, target, tls_server_name }) => {
+            return refresh_command(&cfg, &key_id, target, tls_server_name).await
+        }
         Some(Command::Backup { out }) => return backup_command(&cfg, &out),
         Some(Command::ExportKey { key_id, out, passphrase_env, unsafe_plaintext }) => {
             return export_key_command(&cfg, &key_id, &out, passphrase_env.as_deref(), unsafe_plaintext)
@@ -378,7 +384,11 @@ async fn main() -> Result<()> {
     if let Some(t) = &tls {
         // Every anchor of the trust file (2 while a CA rotation's bundle is live), validated by
         // `tls::load`: CA certificates only, valid now unless tls.allow_expired_ca.
-        tracing::info!(ca_certs = t.anchors.len(), "mutual TLS enabled (cluster CA trust anchors)");
+        tracing::info!(
+            ca_certs = t.anchors.len(),
+            "mutual TLS enabled (cluster CA trust anchors); each peer is verified under its own \
+             server name (tls_server_name, default cosigner<id>)"
+        );
         for (index, a) in t.anchors.iter().enumerate() {
             tracing::info!(
                 index,
@@ -475,7 +485,9 @@ async fn main() -> Result<()> {
         if p.identifier == cfg.identifier {
             peers.push(Arc::new(LocalPeer::new(node.clone())));
         } else {
-            let client_tls = tls.as_ref().map(|t| t.client.clone());
+            // Per-peer server name (M3): peer 2 must present cosigner2's certificate, so another
+            // node's certificate cannot answer at peer 2's endpoint.
+            let client_tls = tls.as_ref().map(|t| t.client_for(&p.server_name()));
             peers.push(Arc::new(GrpcPeer::connect_lazy(ident(p.identifier)?, &p.endpoint, client_tls)?));
         }
     }
@@ -572,7 +584,7 @@ async fn main() -> Result<()> {
         decrypt_limiter,
         ceremony_test_limiter,
     };
-    let peer = PeerSvc { node, allowed_cns: peer_cns };
+    let peer = PeerSvc { node, allowed_cns: peer_cns, peer_ids: Some(Arc::new(cfg.peer_identities())) };
 
     let addr = cfg
         .listen
@@ -593,7 +605,12 @@ async fn main() -> Result<()> {
 }
 
 /// Operator command: connect to a running cosigner and drive a proactive refresh.
-async fn refresh_command(cfg: &Config, key_id: &str, target: Option<String>) -> Result<()> {
+async fn refresh_command(
+    cfg: &Config,
+    key_id: &str,
+    target: Option<String>,
+    tls_server_name: Option<String>,
+) -> Result<()> {
     let endpoint = target
         .or_else(|| cfg.peers.iter().find(|p| p.identifier != cfg.identifier).map(|p| p.endpoint.clone()))
         .or_else(|| cfg.peers.first().map(|p| p.endpoint.clone()))
@@ -602,7 +619,19 @@ async fn refresh_command(cfg: &Config, key_id: &str, target: Option<String>) -> 
     let mut ep = tonic::transport::Endpoint::from_shared(endpoint.clone())
         .map_err(|e| DaemonError::Config(format!("bad endpoint {endpoint}: {e}")))?;
     if let Some(tls_cfg) = &cfg.tls {
-        ep = ep.tls_config(rutli_cosigner::tls::load(tls_cfg)?.client)?;
+        let tls = rutli_cosigner::tls::load(tls_cfg)?;
+        let same = |a: &str, b: &str| {
+            a.trim().trim_end_matches('/').eq_ignore_ascii_case(b.trim().trim_end_matches('/'))
+        };
+        let name = tls_server_name
+            .or_else(|| cfg.peers.iter().find(|p| same(&p.endpoint, &endpoint)).map(|p| p.server_name()))
+            .or_else(|| tls_cfg.domain.clone())
+            .ok_or_else(|| {
+                DaemonError::Config(format!(
+                    "{endpoint} is not a roster endpoint: pass --tls-server-name (e.g. cosigner1)"
+                ))
+            })?;
+        ep = ep.tls_config(tls.client_for(&name))?;
     }
     tracing::info!(%endpoint, %key_id, "triggering proactive share refresh");
     let mut client = SignerClient::new(ep.connect().await?);
@@ -626,7 +655,7 @@ async fn verify_key_command(
     use rutli_cosigner::pb::{CeremonySignTestRequest, KeyStatusRequest};
     use rutli_cosigner::verify_key::{check_views, sign_test_plan, NodeView};
 
-    let client_tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose()?.map(|t| t.client);
+    let tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose()?;
     let probe = cfg.tls.as_ref().map(rutli_cosigner::tls_probe::TlsProbe::new).transpose()?;
     let mut peers = cfg.peers.clone();
     peers.sort_by_key(|p| p.identifier);
@@ -635,13 +664,15 @@ async fn verify_key_command(
     let mut views = Vec::new();
     let mut clients = Vec::new();
     for p in &peers {
-        let client = signer_client(&p.endpoint, client_tls.clone()).await;
+        // Each node verified under its own name, so one node's certificate cannot answer for
+        // another and make an inconsistent cluster look consistent.
+        let client = signer_client(&p.endpoint, tls.as_ref().map(|t| t.client_for(&p.server_name()))).await;
         let status = match &client {
             Ok(c) => match c.clone().key_status(KeyStatusRequest { key_id: key_id.to_string() }).await {
                 Ok(r) => Ok(r.into_inner()),
-                Err(s) => Err(explain_status(&s, probe.as_ref(), &p.endpoint).await),
+                Err(s) => Err(explain_status(&s, probe.as_ref(), &p.endpoint, &p.server_name()).await),
             },
-            Err(e) => Err(explain_unreachable(e, probe.as_ref(), &p.endpoint).await),
+            Err(e) => Err(explain_unreachable(e, probe.as_ref(), &p.endpoint, &p.server_name()).await),
         };
         views.push(NodeView { identifier: p.identifier, endpoint: p.endpoint.clone(), status });
         clients.push((p.identifier, client));
@@ -652,10 +683,11 @@ async fn verify_key_command(
         if report.ok {
             // Every t-subset, leader rotating: every share and every possible quorum is exercised.
             let clients: std::collections::BTreeMap<u16, _> = clients.into_iter().collect();
-            let endpoints: std::collections::BTreeMap<u16, &str> =
-                peers.iter().map(|p| (p.identifier, p.endpoint.as_str())).collect();
+            let endpoints: std::collections::BTreeMap<u16, (&str, String)> =
+                peers.iter().map(|p| (p.identifier, (p.endpoint.as_str(), p.server_name()))).collect();
             for (leader, signers) in sign_test_plan(&roster, cfg.threshold) {
-                let endpoint = endpoints[&leader];
+                let (endpoint, server_name) = &endpoints[&leader];
+                let endpoint = *endpoint;
                 let result = match &clients[&leader] {
                     Ok(c) => match c
                         .clone()
@@ -669,9 +701,9 @@ async fn verify_key_command(
                             let r = r.into_inner();
                             Ok((r.message, r.signature))
                         }
-                        Err(s) => Err(explain_status(&s, probe.as_ref(), endpoint).await),
+                        Err(s) => Err(explain_status(&s, probe.as_ref(), endpoint, server_name).await),
                     },
-                    Err(e) => Err(explain_unreachable(e, probe.as_ref(), endpoint).await),
+                    Err(e) => Err(explain_unreachable(e, probe.as_ref(), endpoint, server_name).await),
                 };
                 report.record_signature(leader, &signers, result);
             }
@@ -735,13 +767,16 @@ async fn verify_hosted_command(cfg: &Config, key_id: &str, expect_fingerprint: &
     use rutli_cosigner::pb::HostedKeyStatusRequest;
     use rutli_cosigner::verify_hosted::{check_hosted_views, HostedView};
 
-    let client_tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose()?.map(|t| t.client);
+    let tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose()?;
     let mut peers = cfg.peers.clone();
     peers.sort_by_key(|p| p.identifier);
     let roster: Vec<u16> = peers.iter().map(|p| p.identifier).collect();
     let mut views = Vec::new();
     for p in &peers {
-        let status = match signer_client(&p.endpoint, client_tls.clone()).await {
+        // Each node verified under its own name (M3), so one node's certificate cannot answer for
+        // another and make a key missing on one node look present everywhere.
+        let client_tls = tls.as_ref().map(|t| t.client_for(&p.server_name()));
+        let status = match signer_client(&p.endpoint, client_tls).await {
             Ok(mut c) => c
                 .hosted_key_status(HostedKeyStatusRequest { key_id: key_id.to_string() })
                 .await
@@ -813,12 +848,13 @@ async fn explain_status(
     s: &tonic::Status,
     probe: Option<&rutli_cosigner::tls_probe::TlsProbe>,
     endpoint: &str,
+    server_name: &str,
 ) -> String {
     let text = status_text(s);
     if std::error::Error::source(s).is_none() {
         return text;
     }
-    with_tls_refusal(text, probe, endpoint).await
+    with_tls_refusal(text, probe, endpoint, server_name).await
 }
 
 /// `unreachable: …` for a failed connect, plus the node's TLS refusal if it gives one.
@@ -826,25 +862,28 @@ async fn explain_unreachable(
     e: &DaemonError,
     probe: Option<&rutli_cosigner::tls_probe::TlsProbe>,
     endpoint: &str,
+    server_name: &str,
 ) -> String {
     let text = format!("unreachable: {}", error_chain(e));
     match e {
-        DaemonError::Transport(_) => with_tls_refusal(text, probe, endpoint).await,
+        DaemonError::Transport(_) => with_tls_refusal(text, probe, endpoint, server_name).await,
         _ => text,
     }
 }
 
+/// The probe verifies the node under `server_name`, the peer's own name (M3), as the RPC did.
 async fn with_tls_refusal(
     text: String,
     probe: Option<&rutli_cosigner::tls_probe::TlsProbe>,
     endpoint: &str,
+    server_name: &str,
 ) -> String {
     // The RPC already carried the alert: nothing to add.
     if text.contains("fatal alert") {
         return text;
     }
     match probe {
-        Some(p) => match p.refusal(endpoint).await {
+        Some(p) => match p.refusal_as(endpoint, server_name).await {
             Some(r) => format!("{text} (TLS probe: {r})"),
             None => text,
         },

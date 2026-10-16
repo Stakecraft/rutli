@@ -29,10 +29,11 @@ impl Ca {
         Self { cert: p.self_signed(&key).unwrap(), key }
     }
 
-    /// Writes `<name>.crt` / `<name>.key` under `dir` for a leaf with CN `cn`.
+    /// Writes `<name>.crt` / `<name>.key` under `dir` for a leaf with CN `cn` and that same name as
+    /// its SAN — a node is dialled under its own name (`cosigner<id>`, audit M3), never a shared one.
     fn leaf(&self, dir: &std::path::Path, name: &str, cn: &str) {
         let key = KeyPair::generate().unwrap();
-        let mut p = CertificateParams::new(vec!["rutli-cosigner".to_string()]).unwrap();
+        let mut p = CertificateParams::new(vec![cn.to_string()]).unwrap();
         p.distinguished_name.push(DnType::CommonName, cn);
         p.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         p.extended_key_usages =
