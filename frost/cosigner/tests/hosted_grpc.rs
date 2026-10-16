@@ -41,10 +41,13 @@ const N: u16 = 3;
 const T: u16 = 2;
 const MASTER: &[u8] = b"hosted key cluster master secret for tests";
 const CLUSTER: &str = "testcluster00000";
-/// The SAN every cosigner cert carries, and the name peers dial with (the endpoints are IPs).
-const SAN: &str = "rutli-cosigner";
 
 struct Mesh {
+    /// Each node's `https://127.0.0.1:<port>`, by index.
+    endpoints: Vec<String>,
+    /// Each node's TLS material, by index.
+    tls: Vec<rutli_cosigner::tls::Tls>,
+    ca: (rcgen::Certificate, KeyPair),
     nodes: Vec<Arc<Node>>,
     /// `peers[i]` is node `i`'s view of the cluster: itself as `LocalPeer`, the rest over gRPC.
     peers: Vec<Peers>,
@@ -60,9 +63,11 @@ impl Drop for Mesh {
     }
 }
 
+/// A cert with CN `cn` and that same name as its only SAN — what gen-frost-certs.sh issues now
+/// (`cosigner<N>`, no shared name). Peers dial by that name; the endpoints are IPs.
 fn write_tls(dir: &std::path::Path, ca: &(rcgen::Certificate, KeyPair), cn: &str) -> TlsConfig {
     let key = KeyPair::generate().unwrap();
-    let mut params = CertificateParams::new(vec![SAN.to_string()]).unwrap();
+    let mut params = CertificateParams::new(vec![cn.to_string()]).unwrap();
     params.distinguished_name.push(DnType::CommonName, cn);
     let cert = params.signed_by(&key, &ca.0, &ca.1).unwrap();
     let (cert_path, key_path, ca_path) =
@@ -70,7 +75,7 @@ fn write_tls(dir: &std::path::Path, ca: &(rcgen::Certificate, KeyPair), cn: &str
     std::fs::write(&cert_path, cert.pem()).unwrap();
     std::fs::write(&key_path, key.serialize_pem()).unwrap();
     std::fs::write(&ca_path, ca.0.pem()).unwrap();
-    TlsConfig { ca_cert: ca_path, cert: cert_path, key: key_path, domain: Some(SAN.to_string()), allow_expired_ca: false }
+    TlsConfig { ca_cert: ca_path, cert: cert_path, key: key_path, domain: None, allow_expired_ca: false }
 }
 
 /// How a test node gets its seal keys.
@@ -146,6 +151,8 @@ async fn mesh_with(mode: impl Fn(u16) -> SealMode, pin_override: impl Fn(u16) ->
     let peer_cns: Arc<HashSet<String>> =
         Arc::new((1..=N).map(|i| format!("cosigner{i}")).collect());
     let signer_cns: Arc<HashSet<String>> = Arc::new(["driver".to_string()].into());
+    let peer_ids: Arc<std::collections::HashMap<String, u16>> =
+        Arc::new((1..=N).map(|i| (format!("cosigner{i}"), i)).collect());
 
     let mut peers = Vec::new();
     for (i, node) in nodes.iter().enumerate() {
@@ -155,7 +162,10 @@ async fn mesh_with(mode: impl Fn(u16) -> SealMode, pin_override: impl Fn(u16) ->
             view.push(if i == j {
                 Arc::new(LocalPeer::new(node.clone())) as Arc<dyn PeerApi>
             } else {
-                Arc::new(GrpcPeer::connect_lazy(id, ep, Some(tls[i].client.clone())).unwrap())
+                Arc::new(
+                    GrpcPeer::connect_lazy(id, ep, Some(tls[i].client_for(&format!("cosigner{}", j + 1))))
+                        .unwrap(),
+                )
             });
         }
         peers.push(view);
@@ -172,7 +182,11 @@ async fn mesh_with(mode: impl Fn(u16) -> SealMode, pin_override: impl Fn(u16) ->
             decrypt_limiter: Arc::new(DecryptRateLimiter::new(0)),
             ceremony_test_limiter: Arc::new(DecryptRateLimiter::new(0)),
         };
-        let peer = PeerSvc { node: nodes[i].clone(), allowed_cns: Some(peer_cns.clone()) };
+        let peer = PeerSvc {
+            node: nodes[i].clone(),
+            allowed_cns: Some(peer_cns.clone()),
+            peer_ids: Some(peer_ids.clone()),
+        };
         let server = tonic::transport::Server::builder()
             .tls_config(tls[i].server.clone())
             .unwrap()
@@ -183,7 +197,7 @@ async fn mesh_with(mode: impl Fn(u16) -> SealMode, pin_override: impl Fn(u16) ->
             let _ = server.await;
         }));
     }
-    Mesh { nodes, peers, servers, _tmp: tmp }
+    Mesh { endpoints, tls, ca, nodes, peers, servers, _tmp: tmp }
 }
 
 #[tokio::test]
@@ -337,4 +351,74 @@ async fn a_node_never_wraps_to_a_key_other_than_the_pinned_one() {
     .unwrap();
     assert_eq!(replicas, 2, "node 3 must be refused, nodes 1 and 2 still make the quorum");
     assert!(!m.nodes[2].hosted_exists("rutli-sym-pinned"));
+}
+
+#[tokio::test]
+async fn a_peer_endpoint_answered_by_another_nodes_certificate_is_refused() {
+    // M3: node 1 believes peer 2 lives at node 3's address (DNS hijack, a mis-pointed Service, a
+    // compromised node 3 squatting). Node 3's certificate is cluster-CA-signed and allowlisted, but
+    // it is not cosigner2's, so the handshake fails — under the old shared `rutli-cosigner` name it
+    // would have verified.
+    let m = mesh().await;
+    let impostor = GrpcPeer::connect_lazy(
+        Identifier::try_from(2u16).unwrap(),
+        &m.endpoints[2],
+        Some(m.tls[0].client_for("cosigner2")),
+    )
+    .unwrap();
+    assert!(impostor.node_info().await.is_err(), "node 3 must not pass as peer 2");
+    // The same endpoint dialled under its own name works (the refusal is the name, not the socket).
+    let honest = GrpcPeer::connect_lazy(
+        Identifier::try_from(3u16).unwrap(),
+        &m.endpoints[2],
+        Some(m.tls[0].client_for("cosigner3")),
+    )
+    .unwrap();
+    assert_eq!(honest.node_info().await.unwrap().0, 3);
+}
+
+#[tokio::test]
+async fn fetch_key_identifies_the_caller_by_an_exact_cn_only() {
+    // A cert whose CN merely CONTAINS a node number (`cosigner-2`, `xcosigner2`, `cosigner02`) was
+    // read as node 2 by the old digit-stripping parser, so an allowlisted odd spelling could pull
+    // key material wrapped to another node. Now only the configured CN names a node.
+    let m = mesh().await;
+    m.nodes[0].hosted_generate("rutli-enc-exact", HostedSpec::Rsa2048).unwrap();
+
+    // Serve node 1 again with a loose allowlist that also admits the odd spellings.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ep = format!("https://{}", listener.local_addr().unwrap());
+    let odd = ["cosigner-2", "xcosigner2", "cosigner02"];
+    let allowed: Arc<HashSet<String>> = Arc::new(
+        (1..=N).map(|i| format!("cosigner{i}")).chain(odd.iter().map(|s| s.to_string())).collect(),
+    );
+    let peer = PeerSvc {
+        node: m.nodes[0].clone(),
+        allowed_cns: Some(allowed),
+        peer_ids: Some(Arc::new((1..=N).map(|i| (format!("cosigner{i}"), i)).collect())),
+    };
+    let server = tonic::transport::Server::builder()
+        .tls_config(m.tls[0].server.clone())
+        .unwrap()
+        .add_service(PeerServer::new(peer))
+        .serve_with_incoming(TcpListenerStream::new(listener));
+    let handle = tokio::spawn(async move {
+        let _ = server.await;
+    });
+
+    let tmp = tempfile::tempdir().unwrap();
+    for cn in odd {
+        let tls = rutli_cosigner::tls::load(&write_tls(tmp.path(), &m.ca, cn)).unwrap();
+        let caller = GrpcPeer::connect_lazy(Identifier::try_from(1u16).unwrap(), &ep, Some(tls.client_for("cosigner1")))
+            .unwrap();
+        let e = caller.fetch_key("rutli-enc-exact").await.err().expect("odd CN must be refused");
+        assert!(e.to_string().contains("not the configured client CN"), "{cn}: {e}");
+    }
+    // The exact CN still works over the same server.
+    let tls = rutli_cosigner::tls::load(&write_tls(tmp.path(), &m.ca, "cosigner2")).unwrap();
+    let caller = GrpcPeer::connect_lazy(Identifier::try_from(1u16).unwrap(), &ep, Some(tls.client_for("cosigner1")))
+        .unwrap();
+    let (_, _, wrapped) = caller.fetch_key("rutli-enc-exact").await.unwrap();
+    assert_eq!(wrapped.recipient, 2);
+    handle.abort();
 }

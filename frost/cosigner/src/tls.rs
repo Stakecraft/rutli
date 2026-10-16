@@ -37,10 +37,23 @@ pub fn subject_cn(cert: &x509_parser::certificate::X509Certificate<'_>) -> Optio
 }
 
 pub struct Tls {
+    /// Client config with `tls.domain` as the server name, if one is configured: for operator
+    /// commands dialling a target that is not a roster peer. Never used for the mesh.
     pub client: ClientTlsConfig,
+    /// CA + identity, no server name. [`Tls::client_for`] adds the one name a given peer must have.
+    client_base: ClientTlsConfig,
     pub server: ServerTlsConfig,
     /// The validated trust anchors of `ca_cert`, in file order — for the startup log.
     pub anchors: Vec<crate::trust::TrustAnchor>,
+}
+
+impl Tls {
+    /// The client config for dialling a server that must present `server_name` (a peer's
+    /// [`crate::config::PeerConfig::server_name`]). One per peer: a shared name would let any
+    /// cosigner certificate answer for any peer (audit M3).
+    pub fn client_for(&self, server_name: &str) -> ClientTlsConfig {
+        self.client_base.clone().domain_name(server_name.to_string())
+    }
 }
 
 /// Load the CA + this node's identity from disk and build the client/server TLS configs. Refuses a
@@ -54,14 +67,15 @@ pub fn load(cfg: &TlsConfig) -> Result<Tls> {
     let ca = Certificate::from_pem(crate::trust::to_pem(&anchors));
     let identity = Identity::from_pem(read_pem(&cfg.cert)?, read_pem(&cfg.key)?);
 
-    let mut client = ClientTlsConfig::new().ca_certificate(ca.clone()).identity(identity.clone());
-    if let Some(domain) = &cfg.domain {
-        client = client.domain_name(domain.clone());
-    }
+    let client_base = ClientTlsConfig::new().ca_certificate(ca.clone()).identity(identity.clone());
+    let client = match &cfg.domain {
+        Some(domain) => client_base.clone().domain_name(domain.clone()),
+        None => client_base.clone(),
+    };
 
     let server = ServerTlsConfig::new().identity(identity).client_ca_root(ca);
 
-    Ok(Tls { client, server, anchors })
+    Ok(Tls { client, client_base, server, anchors })
 }
 
 /// Read a PEM file, reporting *which* file failed and why.

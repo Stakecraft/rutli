@@ -35,7 +35,8 @@ use tokio_stream::wrappers::TcpListenerStream;
 const MASTER: &[u8] = b"tls rotation test master secret";
 /// The cluster id is pinned, so it is the same before, during and after the rotation.
 const CLUSTER: &str = "453bb4aea2088bb5";
-const SAN: &str = "rutli-cosigner";
+/// The server name node 1 is dialled under: its own (`PeerConfig::server_name`), never a shared one.
+const NODE1: &str = "cosigner1";
 
 struct Ca {
     cert: rcgen::Certificate,
@@ -53,10 +54,11 @@ impl Ca {
         Self { cert: p.self_signed(&key).unwrap(), key }
     }
 
-    /// A cosigner leaf: CN `cn`, SAN `rutli-cosigner`, serverAuth + clientAuth.
+    /// A cosigner leaf: CN `cn` and the same name as its SAN (as gen-frost-certs.sh issues it: each
+    /// node is dialled under its own name, audit M3), serverAuth + clientAuth.
     fn leaf(&self, cn: &str) -> (String, String) {
         let key = KeyPair::generate().unwrap();
-        let mut p = CertificateParams::new(vec![SAN.to_string()]).unwrap();
+        let mut p = CertificateParams::new(vec![cn.to_string()]).unwrap();
         p.distinguished_name.push(DnType::CommonName, cn);
         p.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         p.extended_key_usages =
@@ -76,7 +78,7 @@ fn tls_files(dir: &Path, name: &str, issuer: &Ca, cn: &str, trust: &[&Ca]) -> Tl
     std::fs::write(&cert_path, cert).unwrap();
     std::fs::write(&key_path, key).unwrap();
     std::fs::write(&ca_path, bundle).unwrap();
-    TlsConfig { ca_cert: ca_path, cert: cert_path, key: key_path, domain: Some(SAN.to_string()), allow_expired_ca: false }
+    TlsConfig { ca_cert: ca_path, cert: cert_path, key: key_path, domain: None, allow_expired_ca: false }
 }
 
 /// Node 1 serves the Peer API with `server`'s TLS; node 2 dials it with `client`'s TLS and asks
@@ -85,8 +87,13 @@ fn tls_files(dir: &Path, name: &str, issuer: &Ca, cn: &str, trust: &[&Ca]) -> Tl
 async fn node_info(dir: &Path, server: &TlsConfig, client: &TlsConfig) -> Result<u16, String> {
     let (endpoint, serving) = serve(dir, server).await;
     let client_tls = rutli_cosigner::tls::load(client).unwrap();
-    let peer =
-        GrpcPeer::connect_lazy(Identifier::try_from(1u16).unwrap(), &endpoint, Some(client_tls.client)).unwrap();
+    // Node 1 dialled under its own name, as the daemon dials every peer (M3).
+    let peer = GrpcPeer::connect_lazy(
+        Identifier::try_from(1u16).unwrap(),
+        &endpoint,
+        Some(client_tls.client_for(NODE1)),
+    )
+    .unwrap();
     let result = peer.node_info().await.map(|(id, _)| id).map_err(|e| format!("{e:?}"));
     serving.abort();
     result
@@ -103,7 +110,8 @@ async fn serve(dir: &Path, server: &TlsConfig) -> (String, tokio::task::JoinHand
             .unwrap(),
     );
     let peer_cns: Arc<HashSet<String>> = Arc::new((1..=3).map(|i| format!("cosigner{i}")).collect());
-    let svc = PeerSvc { node, allowed_cns: Some(peer_cns) };
+    let peer_ids = Arc::new((1..=3u16).map(|i| (format!("cosigner{i}"), i)).collect());
+    let svc = PeerSvc { node, allowed_cns: Some(peer_cns), peer_ids: Some(peer_ids) };
 
     let server_tls = rutli_cosigner::tls::load(server).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -134,19 +142,19 @@ async fn the_tls_probe_reports_how_a_node_refuses_a_client_and_nothing_otherwise
 
     let old_client = TlsProbe::new(&tls_files(dir, "c-old", &old, "operator", &[&old, &new])).unwrap();
     for _ in 0..20 {
-        let r = old_client.refusal(&endpoint).await;
+        let r = old_client.refusal_as(&endpoint, NODE1).await;
         assert!(r.as_deref().is_some_and(|r| r.contains("received fatal alert: UnknownCA")), "{r:?}");
     }
     let new_client = TlsProbe::new(&tls_files(dir, "c-new", &new, "operator", &[&old, &new])).unwrap();
-    assert_eq!(new_client.refusal(&endpoint).await, None, "an accepted client is not refused");
+    assert_eq!(new_client.refusal_as(&endpoint, NODE1).await, None, "an accepted client is not refused");
     // The client side refusing the node (it trusts only the old CA) is a handshake failure.
     let old_trust = TlsProbe::new(&tls_files(dir, "c-oldtrust", &old, "operator", &[&old])).unwrap();
-    let r = old_trust.refusal(&endpoint).await;
+    let r = old_trust.refusal_as(&endpoint, NODE1).await;
     assert!(r.as_deref().is_some_and(|r| r.contains("handshake failed") && r.contains("UnknownIssuer")), "{r:?}");
 
     serving.abort();
     let _ = serving.await;
-    assert_eq!(old_client.refusal(&endpoint).await, None, "a node that is down has no TLS detail");
+    assert_eq!(old_client.refusal_as(&endpoint, NODE1).await, None, "a node that is down has no TLS detail");
 }
 
 #[tokio::test]
@@ -221,7 +229,7 @@ fn tls_files_raw(dir: &Path, name: &str, (cert, key): (String, String), trust: S
     std::fs::write(&cert_path, cert).unwrap();
     std::fs::write(&key_path, key).unwrap();
     std::fs::write(&ca_path, trust).unwrap();
-    TlsConfig { ca_cert: ca_path, cert: cert_path, key: key_path, domain: Some(SAN.to_string()), allow_expired_ca: false }
+    TlsConfig { ca_cert: ca_path, cert: cert_path, key: key_path, domain: None, allow_expired_ca: false }
 }
 
 fn load_err(cfg: &TlsConfig) -> String {
@@ -242,14 +250,14 @@ async fn a_leaf_in_the_trust_file_is_refused_at_load_and_cannot_issue_a_peer_ide
     let ca = Ca::new("rutli-frost-cluster-ca");
     // Cosigner 1's leaf, mistakenly concatenated into the trust file.
     let leaf_key = KeyPair::generate().unwrap();
-    let mut lp = CertificateParams::new(vec![SAN.to_string()]).unwrap();
+    let mut lp = CertificateParams::new(vec!["cosigner1".to_string()]).unwrap();
     lp.distinguished_name.push(DnType::CommonName, "cosigner1");
     lp.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     lp.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth, ExtendedKeyUsagePurpose::ClientAuth];
     let leaf = lp.signed_by(&leaf_key, &ca.cert, &ca.key).unwrap();
     // The cosigner1.key holder mints "cosigner2", issued by the leaf.
     let forged_key = KeyPair::generate().unwrap();
-    let mut fp = CertificateParams::new(vec![SAN.to_string()]).unwrap();
+    let mut fp = CertificateParams::new(vec!["cosigner2".to_string()]).unwrap();
     fp.distinguished_name.push(DnType::CommonName, "cosigner2");
     fp.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     fp.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth, ExtendedKeyUsagePurpose::ClientAuth];

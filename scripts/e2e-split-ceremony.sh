@@ -89,7 +89,7 @@ wait_healthy() {
 cli() { RUST_LOG=off "$COSIGNER" "$@"; }
 grpc() {
   grpcurl -cacert "$WORK/certs/ca.crt" -cert "$WORK/certs/driver.crt" -key "$WORK/certs/driver.key" \
-    -servername rutli-cosigner -import-path "$REPO/frost/cosigner/proto" -proto cosigner.proto "$@"
+    -servername cosigner1 -import-path "$REPO/frost/cosigner/proto" -proto cosigner.proto "$@"
 }
 expect_dkg_refused() {
   if out="$(grpc -d "{\"key_id\":\"$KEY_ID\"}" "127.0.0.1:$((BASE_PORT + 1))" rutli.cosigner.v1.Signer/Dkg 2>&1)"; then
@@ -187,7 +187,7 @@ echo "verify-key OK (operator cert): 3/3 nodes, digest $DIGEST, quorums {1,2} {1
 step "   the operator cert cannot Sign an arbitrary digest (only the ceremony test digest)"
 MSG_B64="$(printf '\022\040%s' "$(printf 'x%.0s' $(seq 1 32))" | base64)"
 if out="$(grpcurl -cacert "$WORK/certs/ca.crt" -cert "$WORK/certs/operator.crt" -key "$WORK/certs/operator.key" \
-  -servername rutli-cosigner -import-path "$REPO/frost/cosigner/proto" -proto cosigner.proto \
+  -servername cosigner1 -import-path "$REPO/frost/cosigner/proto" -proto cosigner.proto \
   -d "{\"key_id\":\"$KEY_ID\",\"message\":\"$MSG_B64\"}" "127.0.0.1:$((BASE_PORT + 1))" \
   rutli.cosigner.v1.Signer/Sign 2>&1)"; then fail "the operator cert signed an arbitrary digest"; fi
 grep -q "PermissionDenied" <<<"$out" || fail "operator Sign refused for the wrong reason: $out"
