@@ -165,19 +165,29 @@ first, or every sign is refused.
 
 ## Approving hosted-key deletes
 
-Hosted-key deletes (audit M2) use the same approvers and the same request-id scheme, enforced at
-every cosigner and nowhere else: `hosted_keys.delete_approval_threshold` on every node (0 = none; at
-least 1 is recommended in production, decision P8) names how many distinct `signing_policy.approvers`
-must approve. The digest an approver signs for is the delete digest of the key,
-SHA-256(`"rutli-delete-key-v1\n"` ‖ key id), so a delete approval can never serve as a signing approval
-or vice versa. The delete role itself is `hosted_keys.delete_allowlist` (`docs/hosted-keys.md`,
-Delete).
+Hosted-key deletes (audit M2) use the same approvers, enforced at every cosigner and nowhere else:
+`hosted_keys.delete_approval_threshold` on every node (0 = none; at least 1 is recommended in
+production, decision P8) names how many distinct `signing_policy.approvers` must approve. The delete
+role itself is `hosted_keys.delete_allowlist` (`docs/hosted-keys.md`, Delete).
+
+A delete approval is **domain-separated** from a signing approval (audit F6): its request id is
+computed over the key field `delete:<key id>` instead of the bare key id —
+`hex(SHA-256("delete:" ‖ key id ‖ SHA-256(delete digest) ‖ nonce))`, with the delete digest
+SHA-256(`"rutli-delete-key-v1\n"` ‖ key id). Key ids never contain `:`, so no signing request id is
+ever a delete's, and an approver shown a "sign" request can never be approving a delete (or vice
+versa). `ApproveCli approve` reads the operation from that authenticated keyId — it prints
+`operation = DELETE hosted key <id>` or `operation = SIGN with key <id>` — checks a delete's digest is
+the delete digest of that key, and refuses a request whose `operation` field contradicts its id. The
+signing request id is unchanged (the driver's format; golden vectors on both sides). Delete approvals
+collected by an older `rutli-cosigner` (bare key id) are refused by upgraded nodes: re-issue the
+delete.
 
 ```sh
 # the delete-role operator (its certificate in the client config):
 rutli-cosigner --config client-operator.json delete-hosted-key --key-id <id> \
   --approvals-inbox /var/rutli/approvals --approvals 2
-# each approver, from the same inbox (it shows keyId and the digest it recomputes the id from):
+# each approver, from the same inbox (it shows the operation — DELETE hosted key <id> — keyId and
+# the digest it recomputes the id from):
 java -cp rutli-driver.jar com.stakecraft.rutli.policy.ApproveCli approve \
   --inbox /var/rutli/approvals --id alice --key alice.key --request <requestId>
 ```

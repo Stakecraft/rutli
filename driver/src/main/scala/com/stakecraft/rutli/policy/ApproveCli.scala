@@ -26,6 +26,7 @@ import scala.util.Using
   *
   *   # authorize: sign pending requests in the inbox with alice's key. Each request's id is
   *   # recomputed from the displayed keyId/digest/nonce first; a mismatch is refused, not signed.
+  *   # The operation (SIGN, or a hosted-key DELETE: keyId "delete:<key>") is shown and checked.
   *   java -cp rutli-driver.jar com.stakecraft.rutli.policy.ApproveCli approve \
   *     --inbox /var/rutli/approvals --id alice --key alice.key [--request <id> | --all]
   * }}}
@@ -99,12 +100,14 @@ object ApproveCli {
       val digest = field(json, "digest")
       val nonce = field(json, "nonce")
       val ts = field(json, "ts")
+      val op = operationOf(keyId, digest, field(json, "operation"))
       // Surface the bound digest before the approver signs — SoD is cryptographic only if humans
       // verify they are approving the intended operation, not a swapped request id.
       println(s"pending request:")
+      println(s"  operation = ${op.fold(identity, _.describe)}")
       println(s"  requestId = $requestId")
       println(s"  keyId     = $keyId")
-      println(s"  digest    = $digest   (SHA-256 of the bytes Canton asked to sign)")
+      println(s"  digest    = $digest   (${op.fold(_ => "?", _.digestMeaning)})")
       println(s"  nonce     = $nonce")
       println(s"  ts        = $ts")
       if (!requestIdMatches(requestId, keyId, digest, nonce)) {
@@ -112,6 +115,9 @@ object ApproveCli {
           s"REFUSING $reqFile: requestId does not equal SHA-256(keyId ‖ digest ‖ nonce) of the fields shown " +
             "above — the file was tampered with or is malformed. Not signing."
         )
+        refused += reqFile
+      } else if (op.isLeft) {
+        Console.err.println(s"REFUSING $reqFile: ${op.left.getOrElse("")}. Not signing.")
         refused += reqFile
       } else {
         val sig = Signature.getInstance("Ed25519")
@@ -129,6 +135,38 @@ object ApproveCli {
     }
     ApproveResult(approved.result(), refused.result())
   }
+
+  /** What a pending request authorizes, read from the fields its requestId is computed over
+    * (audit F6): a keyId `delete:<key>` is a hosted-key DELETE (key ids never contain ':'), anything
+    * else a SIGN. Never from the unauthenticated `operation` field — which may only agree. */
+  sealed trait Operation { def describe: String; def digestMeaning: String }
+  final case class SignWith(keyId: String) extends Operation {
+    def describe = s"SIGN with key $keyId"
+    def digestMeaning = "SHA-256 of the bytes Canton asked to sign"
+  }
+  final case class DeleteHostedKey(keyId: String) extends Operation {
+    def describe = s"DELETE hosted key $keyId (tombstoned cluster-wide)"
+    def digestMeaning = "SHA-256 of the key's delete digest — checked"
+  }
+
+  val DeletePrefix = "delete:"
+
+  /** The operation, or why the request is refused: a delete whose digest is not its key's delete
+    * digest, or an `operation` field that contradicts what the requestId binds. */
+  def operationOf(keyId: String, digestHex: String, claimed: String): Either[String, Operation] =
+    if (keyId.startsWith(DeletePrefix)) {
+      val target = keyId.drop(DeletePrefix.length)
+      val expected = FileApprovalGate.hex(
+        FileApprovalGate.sha256(com.stakecraft.rutli.backend.FrostIntentSigner.deleteDigest(target))
+      )
+      if (target.isEmpty || target.contains(':')) Left(s"malformed delete key id '$keyId'")
+      else if (digestHex != expected) Left(s"the digest is not the delete digest of $target")
+      else if (claimed.nonEmpty && claimed != "delete-hosted-key")
+        Left(s"it claims operation '$claimed' but its requestId binds a DELETE of $target")
+      else Right(DeleteHostedKey(target))
+    } else if (claimed.nonEmpty && claimed != "sign")
+      Left(s"it claims operation '$claimed' but its requestId binds a SIGN with $keyId (an old-format delete request? re-issue it)")
+    else Right(SignWith(keyId))
 
   /** True iff `requestId` is exactly what the gate derives from these fields. */
   def requestIdMatches(requestId: String, keyId: String, digestHex: String, nonceHex: String): Boolean =
