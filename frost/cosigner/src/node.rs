@@ -120,6 +120,12 @@ pub const FIRST_EPOCH: u64 = 1;
 pub const MAX_UNKNOWN_NO_VOTES_PER_ASKER: usize = 256;
 pub const MAX_UNKNOWN_NO_VOTES: usize = 1024;
 
+/// Most sign sessions (between round 1 and round 2) held in memory per key. Real signs hold a
+/// session for milliseconds; a peer opening round 1 after round 1 (without an intent, while
+/// `require_intent` is off, nothing else limits it) is refused here instead of growing memory
+/// until the pending-session TTL.
+pub const MAX_PENDING_SIGN_SESSIONS_PER_KEY: usize = 1024;
+
 /// Most ceremony sessions (between part 1 and the vote) held in memory at once. A part 1 beyond
 /// it first drops sessions orphaned past the orphan timeout, then is refused.
 pub const MAX_CEREMONY_SESSIONS: usize = 64;
@@ -527,6 +533,15 @@ impl Node {
         if kind == "dkg" && crate::share_delivery::is_reserved_for_import(key_id) {
             return Err(DaemonError::ReservedKeyId(key_id.to_string()));
         }
+        // A hosted-key fence never covers a FROST share: without this any peer could fence the
+        // namespace key as a "genkey"/"delkey" and stall its signing (renewably, by re-fencing).
+        if matches!(kind, "genkey" | "delkey") {
+            if let Ok(crate::keystore::Record::Frost(_)) = self.keystore.load_record(key_id) {
+                return Err(DaemonError::CeremonyRefused(format!(
+                    "{key_id} is a FROST share here — a hosted-key {kind} never fences it"
+                )));
+            }
+        }
         let pending = self.pending_sign_count(key_id);
         if pending > 0 {
             return Err(DaemonError::SignInProgress {
@@ -906,6 +921,16 @@ impl Node {
         // Refusing here makes leaders skip it and sign with the rest.
         self.refuse_if_keystore_down()?;
         let cached = self.cached(key_id)?;
+        if cached.cosigner.pending_count() >= MAX_PENDING_SIGN_SESSIONS_PER_KEY {
+            self.prune_expired_sign_sessions();
+            let pending = cached.cosigner.pending_count();
+            if pending >= MAX_PENDING_SIGN_SESSIONS_PER_KEY {
+                tracing::warn!(key_id, pending, "refusing sign round 1: too many sessions waiting for round 2");
+                return Err(DaemonError::NotServing(format!(
+                    "{pending} sign sessions for {key_id} are waiting for round 2 on this node — refusing more"
+                )));
+            }
+        }
         self.check_epoch(key_id, &cached, ctx)?;
         let mut binding = ctx.binding(key_id)?;
         // The signing policy (audit C2), before any nonce exists: what authorizes this session.
