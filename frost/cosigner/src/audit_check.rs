@@ -15,6 +15,12 @@
 //! * **in the driver audit (outcome=ok), missing from every journal supplied** — a journal was lost
 //!   or rolled back, or not all journals were supplied (`--min-journals` raises the bar to the
 //!   threshold when every node's journal is given);
+//! * **one request id journaled over more messages than the driver audited signs for it** — the
+//!   driver draws a fresh request id for every sign and binds exactly one message to it, so the
+//!   extra messages were signed outside the driver with its certificate. Journal entries are keyed
+//!   on the authorized operation `(key, request id, message)`, as the cosigners charge them (a
+//!   charge is `r:<request id>:<intent sha256>`), not on the bare client-chosen request id: re-using
+//!   an audited request id for another digest does not hide behind the audited sign;
 //! * **cosigner entries without an intent** (`purpose: no-intent`) — signatures nobody can
 //!   attribute, expected only before `signing_policy.require_intent` is on (`--allow-no-intent`).
 //!
@@ -183,18 +189,24 @@ pub fn cross_check(audit: &DriverAudit, journals: &[(String, Vec<JournalEntry>)]
         audit.signs.iter().filter(|s| s.request_id.is_some()).count(),
         if audit.torn_tail { "; a torn final line (crash mid-append) ignored" } else { "" }
     ));
-    // Driver side, by (key, request id).
-    let mut driver: BTreeMap<(String, String), &DriverSign> = BTreeMap::new();
+    // Driver side, by (key, request id): its best line (an ok one if any) and how many sign lines
+    // name it. The driver audit carries no digest, but the driver draws a fresh random request id
+    // for every sign and binds one message to it, so each line stands for one authorized message.
+    let mut driver: BTreeMap<(String, String), (&DriverSign, usize)> = BTreeMap::new();
     for s in &audit.signs {
         if let Some(rid) = &s.request_id {
-            let slot = driver.entry((s.key_id.clone(), rid.clone())).or_insert(s);
-            if s.ok && !slot.ok {
-                *slot = s;
+            let slot = driver.entry((s.key_id.clone(), rid.clone())).or_insert((s, 0));
+            slot.1 += 1;
+            if s.ok && !slot.0.ok {
+                slot.0 = s;
             }
         }
     }
-    // Cosigner side: request -> journals that recorded it; the earliest entry per key and journal.
-    let mut journaled: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    // Cosigner side, keyed on the authorized operation: (key, request id) -> message -> journals
+    // that recorded it. Retries of one driver call re-sign the intent (a new intent hash) but keep
+    // the request id and the message, so the message, not the intent hash, is what one driver sign
+    // pins. Plus the earliest entry per key.
+    let mut journaled: BTreeMap<(String, String), BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
     let mut first_ts: BTreeMap<String, u64> = BTreeMap::new();
     let mut no_intent: BTreeMap<(String, String), (usize, u64, u64)> = BTreeMap::new();
     let mut skipped_old = 0usize;
@@ -214,7 +226,12 @@ pub fn cross_check(audit: &DriverAudit, journals: &[(String, Vec<JournalEntry>)]
                         skipped_old += 1;
                         continue;
                     }
-                    journaled.entry((e.key_id.clone(), e.request_id.clone())).or_default().insert(label.clone());
+                    journaled
+                        .entry((e.key_id.clone(), e.request_id.clone()))
+                        .or_default()
+                        .entry(e.digest.clone())
+                        .or_default()
+                        .insert(label.clone());
                 }
                 PURPOSE_NO_INTENT => {
                     let n = no_intent.entry((label.clone(), e.key_id.clone())).or_insert((0, e.ts_ms, e.ts_ms));
@@ -230,20 +247,39 @@ pub fn cross_check(audit: &DriverAudit, journals: &[(String, Vec<JournalEntry>)]
         r.info(format!("{skipped_old} journal entr(ies) older than the driver audit log's first entry: not compared"));
     }
 
-    // 1. Journaled at a cosigner, absent from the driver audit.
-    for ((key, rid), labels) in &journaled {
-        if !driver.contains_key(&(key.clone(), rid.clone())) {
-            r.flag(format!(
-                "key {key} request {rid} was signed at {} but is not in the driver audit log — the \
-                 driver audit tail was truncated, or a signature was made outside the driver with its \
-                 certificate",
-                labels.iter().cloned().collect::<Vec<_>>().join(", ")
-            ));
+    let join = |labels: &BTreeSet<String>| labels.iter().cloned().collect::<Vec<_>>().join(", ");
+    // 1. Journaled at a cosigner, absent from the driver audit — every message of the request id —
+    // or journaled over more messages than the driver audited signs for that request id.
+    for ((key, rid), by_message) in &journaled {
+        match driver.get(&(key.clone(), rid.clone())) {
+            None => {
+                for (message, labels) in by_message {
+                    r.flag(format!(
+                        "key {key} request {rid} was signed at {} (message {message}) but is not in the \
+                         driver audit log — the driver audit tail was truncated, or a signature was made \
+                         outside the driver with its certificate",
+                        join(labels)
+                    ));
+                }
+            }
+            Some((s, lines)) if by_message.len() > *lines => {
+                r.flag(format!(
+                    "key {key} request {rid} was signed over {} different messages ({}) but the driver \
+                     audit log holds {lines} sign(s) for it (seq {}) — the driver binds one message to \
+                     each request id, so at least {} of them were signed outside the driver with its \
+                     certificate",
+                    by_message.len(),
+                    by_message.iter().map(|(m, l)| format!("{m} at {}", join(l))).collect::<Vec<_>>().join("; "),
+                    s.seq,
+                    by_message.len() - lines
+                ));
+            }
+            Some(_) => {}
         }
     }
     // 2. In the driver audit (ok), journaled by too few cosigners.
     let mut skipped_retention = 0usize;
-    for ((key, rid), s) in &driver {
+    for ((key, rid), (s, _)) in &driver {
         if !s.ok {
             continue;
         }
@@ -251,7 +287,12 @@ pub fn cross_check(audit: &DriverAudit, journals: &[(String, Vec<JournalEntry>)]
             skipped_retention += 1;
             continue;
         }
-        let n = journaled.get(&(key.clone(), rid.clone())).map(|l| l.len()).unwrap_or(0);
+        // The most journals holding any one message of the request (several messages are flagged
+        // above).
+        let n = journaled
+            .get(&(key.clone(), rid.clone()))
+            .and_then(|m| m.values().map(BTreeSet::len).max())
+            .unwrap_or(0);
         if n < opts.min_journals {
             r.flag(format!(
                 "key {key} request {rid} (driver audit seq {}) signed ok but is in {n} of the supplied \
@@ -363,5 +404,55 @@ mod tests {
         assert_eq!((s.key_id.as_str(), s.request_id.as_deref(), s.ok), ("frost-ns", Some("00ff"), true));
         let f = parse_sign(4, 9, "keyId=k algo=Ed25519 inBytes=34 intent=none outcome=failed error=intent=xx").unwrap();
         assert_eq!((f.request_id, f.ok), (None, false));
+    }
+
+    fn journaled(node: u16, request: &str, message: &str, ts_ms: u64) -> JournalEntry {
+        JournalEntry {
+            ts_ms,
+            node,
+            key_id: "frost-ns".into(),
+            purpose: PURPOSE_SIGN.into(),
+            request_id: request.into(),
+            // Each intent names its own digest, so its hash (the charge) differs too.
+            intent_sha256: hex::encode(Sha256::digest(format!("{request}/{message}"))),
+            digest: message.into(),
+            ..Default::default()
+        }
+    }
+
+    fn signed(seq: u64, request: &str) -> DriverSign {
+        DriverSign { seq, ts_ms: 1_000 + seq, key_id: "frost-ns".into(), request_id: Some(request.into()), ok: true }
+    }
+
+    #[test]
+    fn one_request_id_over_two_messages_is_two_operations() {
+        let (rid, m1, m2) = ("a".repeat(32), "11".repeat(34), "22".repeat(34));
+        let audit = DriverAudit { entries: 1, signs: vec![signed(1, &rid)], first_ts_ms: Some(1_000), torn_tail: false };
+        let opts = Options { min_journals: 2, allow_no_intent: false };
+
+        // The audited sign, journaled by both nodes (a retry re-signs the intent: same request id and
+        // message, another intent hash) — consistent.
+        let mut retry = journaled(2, &rid, &m1, 2_100);
+        retry.intent_sha256 = "ff".repeat(32);
+        let honest = vec![("n1".to_string(), vec![journaled(1, &rid, &m1, 2_000)]), ("n2".to_string(), vec![retry])];
+        let r = cross_check(&audit, &honest, &opts);
+        assert_eq!(r.discrepancies, 0, "{:#?}", r.lines);
+
+        // A second intent re-using the audited request id for another digest (signed outside the
+        // driver with its certificate): a distinct entry, and the driver audit line covers only one.
+        let mut reused = honest.clone();
+        reused[0].1.push(journaled(1, &rid, &m2, 3_000));
+        let r = cross_check(&audit, &reused, &opts);
+        assert_eq!(r.discrepancies, 1, "{:#?}", r.lines);
+        let line = r.lines.iter().find(|l| l.starts_with("DISCREPANCY")).unwrap();
+        assert!(line.contains("signed over 2 different messages") && line.contains(&m1) && line.contains(&m2), "{line}");
+        assert!(line.contains("driver audit log holds 1 sign(s)"), "{line}");
+
+        // Without the driver line both messages are reported, each on its own.
+        let none = DriverAudit { signs: vec![], ..audit };
+        let r = cross_check(&none, &reused, &Options::default());
+        let missing: Vec<_> = r.lines.iter().filter(|l| l.contains("is not in the driver audit log")).collect();
+        assert_eq!(missing.len(), 2, "{:#?}", r.lines);
+        assert!(missing.iter().any(|l| l.contains(&m1)) && missing.iter().any(|l| l.contains(&m2)), "{missing:#?}");
     }
 }
