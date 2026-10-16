@@ -12,8 +12,9 @@ resources:
   # Services, PVCs, backup sidecars, the config, NetworkPolicy and PDB.
   - cosigner.yaml
   - client-config.yaml
-  # Opt-in: cronjob-refresh.yaml needs KEY_ID — and must NOT run until the ceremony fixes (audit
-  # C1/H1) ship; see its header. There is no backup CronJob: each pod's backup sidecar does it.
+  # Opt-in: cronjob-refresh.yaml needs KEY_ID and the refresher's cert (rutli-refresher-tls), and
+  # every cosigner on 0.4.0-rc.2+; see its header. There is no backup CronJob: each pod's backup
+  # sidecar does it.
   # - cronjob-refresh.yaml
 images:
   - name: ghcr.io/stakecraft/rutli-cosigner

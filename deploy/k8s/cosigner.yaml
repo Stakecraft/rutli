@@ -198,6 +198,7 @@ data:
       "share_seal": { "secret_file": "/run/rutli/seal/node.json" },
       "signer_allowlist": ["driver"],
       "operator_allowlist": ["operator"],
+      "refresh_allowlist": ["refresher"],
       "peer_allowlist": ["cosigner1","cosigner2","cosigner3"]
     }
   cosigner-2.json: |
@@ -220,6 +221,7 @@ data:
       "share_seal": { "secret_file": "/run/rutli/seal/node.json" },
       "signer_allowlist": ["driver"],
       "operator_allowlist": ["operator"],
+      "refresh_allowlist": ["refresher"],
       "peer_allowlist": ["cosigner1","cosigner2","cosigner3"]
     }
   cosigner-3.json: |
@@ -242,6 +244,7 @@ data:
       "share_seal": { "secret_file": "/run/rutli/seal/node.json" },
       "signer_allowlist": ["driver"],
       "operator_allowlist": ["operator"],
+      "refresh_allowlist": ["refresher"],
       "peer_allowlist": ["cosigner1","cosigner2","cosigner3"]
     }
 ---

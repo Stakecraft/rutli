@@ -106,6 +106,12 @@ data:
       {{- if $.Values.operatorAllowlist }}
       "operator_allowlist": {{ $.Values.operatorAllowlist | toJson }},
       {{- end }}
+      {{- if $.Values.refreshAllowlist }}
+      "refresh_allowlist": {{ $.Values.refreshAllowlist | toJson }},
+      {{- end }}
+      {{- if $.Values.signingPolicy }}
+      "signing_policy": {{ $.Values.signingPolicy | toJson }},
+      {{- end }}
       "peer_allowlist": {{ $peerAllow | toJson }}
     }
 {{- end }}
@@ -149,6 +155,12 @@ data:
       "signer_allowlist": {{ $allow | toJson }},
       {{- if $.Values.operatorAllowlist }}
       "operator_allowlist": {{ $.Values.operatorAllowlist | toJson }},
+      {{- end }}
+      {{- if $.Values.refreshAllowlist }}
+      "refresh_allowlist": {{ $.Values.refreshAllowlist | toJson }},
+      {{- end }}
+      {{- if $.Values.signingPolicy }}
+      "signing_policy": {{ $.Values.signingPolicy | toJson }},
       {{- end }}
       "peer_allowlist": {{ $peerAllow | toJson }}
     }

@@ -1,9 +1,11 @@
 # Copyright 2026 StakeCraft
 # SPDX-License-Identifier: Apache-2.0
 #
-# Client-side configs for the operator CLI run as Jobs: the driver role (cronjob-refresh.yaml:
-# refresh) and the operator role (job-verify-key.example.yaml: verify-key, and verify-hosted the
-# same way). Only the roster, threshold and tls block are used; each presents its own client cert,
+# Client-side configs for the operator CLI run as Jobs: the refresher role (cronjob-refresh.yaml:
+# refresh — Refresh and KeyStatus only, never Sign; audit C2), the operator role
+# (job-verify-key.example.yaml: verify-key, and verify-hosted the same way), and the driver role
+# (client-driver.json: kept for clusters that still refresh with the driver certificate while
+# signing_policy.signer_may_refresh is on — move them to the refresher). Only the roster, threshold and tls block are used; each presents its own client cert,
 # never a cosigner key.
 # identifier/listen/data_dir are placeholders the parser requires. Each node is dialled at its
 # per-node Service and verified under its own TLS name (cosigner<id>, the default).
@@ -28,6 +30,23 @@ data:
       "signer_allowlist": ["driver"],
       "peer_allowlist": ["cosigner1", "cosigner2", "cosigner3"],
       "operator_allowlist": ["operator"]
+    }
+  client-refresher.json: |
+    {
+      "identifier": 1,
+      "listen": "127.0.0.1:0",
+      "threshold": 2,
+      "data_dir": "/tmp",
+      "peers": [
+        { "identifier": 1, "endpoint": "https://rutli-node-1.rutli.svc:9101" },
+        { "identifier": 2, "endpoint": "https://rutli-node-2.rutli.svc:9101" },
+        { "identifier": 3, "endpoint": "https://rutli-node-3.rutli.svc:9101" }
+      ],
+      "tls": { "ca_cert": "/certs/ca.crt", "cert": "/certs/refresher.crt", "key": "/certs/refresher.key" },
+      "signer_allowlist": ["driver"],
+      "peer_allowlist": ["cosigner1", "cosigner2", "cosigner3"],
+      "operator_allowlist": ["operator"],
+      "refresh_allowlist": ["refresher"]
     }
   client-operator.json: |
     {

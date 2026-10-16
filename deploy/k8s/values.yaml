@@ -8,6 +8,8 @@ replicaCount: 3
 threshold: 2
 signerAllowlist: [driver]
 operatorAllowlist: [operator]
+# The refresh CronJob's certificate (cronjob-refresh.yaml): Refresh + KeyStatus, never Sign.
+refreshAllowlist: [refresher]
 # Cluster-hosted keys need per-cluster public values (hostedKeys.commitmentKey and each node's
 # distPublicKey), which a checked-in manifest cannot know. Enable them by rendering with your own
 # values (README §5), or with the chart.
