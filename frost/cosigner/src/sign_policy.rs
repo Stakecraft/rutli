@@ -45,7 +45,9 @@ pub struct SignGuard {
     require_intent: bool,
     /// The sign test at this node, as a peer: the operator role must not loop it on any node.
     sign_test_limiter: crate::ratelimit::DecryptRateLimiter,
-    sessions: Mutex<HashMap<String, (Instant, SessionAuth)>>,
+    /// (key id, session id) -> what authorized it. Keyed by both: a session id is the leader's
+    /// choice, so the same id opened for another key must never stand in for this one.
+    sessions: Mutex<HashMap<(String, String), (Instant, SessionAuth)>>,
     last_absent_warning: AtomicU64,
 }
 
@@ -132,23 +134,23 @@ impl SignGuard {
         Ok(SessionAuth::NoIntent)
     }
 
-    /// Remember what authorized `session_id` (after its round 1 succeeded).
-    pub fn remember(&self, session_id: &str, auth: SessionAuth) {
+    /// Remember what authorized `session_id` of `key_id` (after its round 1 succeeded).
+    pub fn remember(&self, key_id: &str, session_id: &str, auth: SessionAuth) {
         let mut s = self.sessions();
         s.retain(|_, (started, _)| started.elapsed() < rutli_frost_core::session::PENDING_TTL);
-        s.insert(session_id.to_string(), (Instant::now(), auth));
+        s.insert((key_id.to_string(), session_id.to_string()), (Instant::now(), auth));
     }
 
-    /// What authorized `session_id`, removed (round 2 runs once).
-    pub fn take(&self, session_id: &str) -> Option<SessionAuth> {
-        self.sessions().remove(session_id).map(|(_, a)| a)
+    /// What authorized `session_id` of `key_id`, removed (round 2 runs once).
+    pub fn take(&self, key_id: &str, session_id: &str) -> Option<SessionAuth> {
+        self.sessions().remove(&(key_id.to_string(), session_id.to_string())).map(|(_, a)| a)
     }
 
-    pub fn forget(&self, session_id: &str) {
-        self.sessions().remove(session_id);
+    pub fn forget(&self, key_id: &str, session_id: &str) {
+        self.sessions().remove(&(key_id.to_string(), session_id.to_string()));
     }
 
-    fn sessions(&self) -> std::sync::MutexGuard<'_, HashMap<String, (Instant, SessionAuth)>> {
+    fn sessions(&self) -> std::sync::MutexGuard<'_, HashMap<(String, String), (Instant, SessionAuth)>> {
         // A panicking holder leaves at worst a stale entry; dropping them all fails closed (those
         // sessions are refused at round 2 when an intent is required, else signed without one).
         self.sessions.lock().unwrap_or_else(|p| {

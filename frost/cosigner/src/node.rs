@@ -821,7 +821,7 @@ impl Node {
         }
         let result = cached.cosigner.round1(session_id, binding);
         if let (Ok(_), Some(g), Some(auth)) = (&result, &self.sign_guard, auth) {
-            g.remember(session_id, auth);
+            g.remember(key_id, session_id, auth);
         }
         self.update_pending_gauge();
         Ok(result?)
@@ -900,7 +900,7 @@ impl Node {
         let result = match &self.sign_guard {
             None => cosigner.round2(session_id, key_id, message, commitments, intent_digest.as_ref()).map_err(DaemonError::from),
             Some(g) => {
-                let auth = match g.take(session_id) {
+                let auth = match g.take(key_id, session_id) {
                     Some(a) => a,
                     None if g.require_intent() => {
                         cosigner.abort(session_id);
@@ -937,7 +937,7 @@ impl Node {
     /// never held nonces for it (cosigner not cached, or round2 already burned the session).
     pub fn abort_sign(&self, key_id: &str, session_id: &str) {
         if let Some(g) = &self.sign_guard {
-            g.forget(session_id);
+            g.forget(key_id, session_id);
         }
         let cached = self.cache().get(key_id).cloned();
         if let Some(c) = cached {
