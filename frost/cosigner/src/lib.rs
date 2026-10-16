@@ -35,6 +35,7 @@ pub mod orchestrator;
 pub mod peer;
 pub mod ratelimit;
 pub mod request_auth;
+pub mod restore;
 pub mod seal;
 pub mod service;
 pub mod share_delivery;
