@@ -17,7 +17,7 @@ use frost::round2::SignatureShare;
 use frost::Identifier;
 
 use crate::ceremony_record::{Outcome, Phase, StatusInfo};
-use crate::node::{CeremonyKind, Node, StagedOutcome};
+use crate::node::{CeremonyKind, Node, Round1Ctx, StagedOutcome};
 use crate::pb::peer_client::PeerClient;
 use crate::pb;
 use crate::Result;
@@ -28,7 +28,10 @@ use crate::Result;
 #[async_trait]
 pub trait PeerApi: Send + Sync {
     fn identifier(&self) -> Identifier;
-    async fn sign_round1(&self, key_id: &str, session_id: &str) -> Result<SigningCommitments>;
+    /// Sign round 1. `ctx` is what the leader declares for the session (its sharing of the key);
+    /// a refusal because of it is [`crate::DaemonError::EpochMismatch`] or
+    /// [`crate::DaemonError::StaleShare`] over every transport.
+    async fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &Round1Ctx) -> Result<SigningCommitments>;
     async fn sign_round2(
         &self,
         key_id: &str,
@@ -199,9 +202,9 @@ impl PeerApi for LocalPeer {
     fn identifier(&self) -> Identifier {
         self.node.identifier
     }
-    async fn sign_round1(&self, key_id: &str, session_id: &str) -> Result<SigningCommitments> {
-        let (key_id, session_id) = (key_id.to_owned(), session_id.to_owned());
-        self.node.blocking(move |n| n.sign_round1(&key_id, &session_id)).await
+    async fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &Round1Ctx) -> Result<SigningCommitments> {
+        let (key_id, session_id, ctx) = (key_id.to_owned(), session_id.to_owned(), ctx.clone());
+        self.node.blocking(move |n| n.sign_round1(&key_id, &session_id, &ctx)).await
     }
     async fn sign_round2(
         &self,
@@ -409,15 +412,18 @@ impl PeerApi for GrpcPeer {
         self.identifier
     }
 
-    async fn sign_round1(&self, key_id: &str, session_id: &str) -> Result<SigningCommitments> {
+    async fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &Round1Ctx) -> Result<SigningCommitments> {
         let reply = self
             .client
             .clone()
             .sign_round1(pb::SignRound1Request {
                 key_id: key_id.into(),
                 session_id: session_id.into(),
+                epoch: ctx.leader_view.map(|v| v.0).unwrap_or(0),
+                pkp_digest: ctx.leader_view.map(|v| v.1.to_vec()).unwrap_or_default(),
             })
-            .await?
+            .await
+            .map_err(|s| crate::DaemonError::from_peer_status(s, key_id, ctx.leader_view))?
             .into_inner();
         Ok(serde_json::from_slice(&reply.commitments)?)
     }

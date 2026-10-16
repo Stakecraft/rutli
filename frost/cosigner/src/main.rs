@@ -419,7 +419,15 @@ async fn main() -> Result<()> {
         }
         Err(e) => tracing::warn!(error = %e, "could not check for unrefreshed imported keys"),
     }
-    let mut node = Node::new(identifier, cfg.max_signers(), cfg.threshold, keystore);
+    let mut node = Node::new(identifier, cfg.max_signers(), cfg.threshold, keystore)
+        .with_require_epoch_match(cfg.signing_policy.require_epoch_match);
+    if !cfg.signing_policy.require_epoch_match {
+        tracing::info!(
+            "signing_policy.require_epoch_match is off: sign round 1 from a leader that names no \
+             sharing (a release before epochs) is accepted with a warning — turn it on once every \
+             cosigner runs this release"
+        );
+    }
 
     // Load mTLS material once (if configured). Plaintext otherwise (dev only).
     let tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose()?;
@@ -538,6 +546,9 @@ async fn main() -> Result<()> {
     // leader). A pass now completes anything a crash left STAGED, then every 30 s.
     node.set_mesh(peers.clone())?;
     rutli_cosigner::ceremony::spawn_resolver(node.clone(), rutli_cosigner::ceremony::RESOLVER_INTERVAL);
+    // Stale-share check (audit M1): compare this node's sharing of every FROST key with the peers'
+    // now and every few minutes; a share found behind is refused for signing until current.
+    rutli_cosigner::epoch_check::spawn(node.clone());
 
     let allowed_cns = cfg.signer_allowlist.as_ref().map(|v| {
         Arc::new(v.iter().cloned().collect::<std::collections::HashSet<String>>())

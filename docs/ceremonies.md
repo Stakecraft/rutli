@@ -58,6 +58,39 @@ epochs existed, or installed by the split ceremony, reads as 0. `verify-key` rep
 epoch and flags a mix. A refresh is refused unless every node reports the same epoch and PKP
 digest (`Peer.KeyEpoch`).
 
+### Signing across epochs
+
+Shares of different sharings never combine, so signing is epoch-aware (audit H1, M1):
+
+* **Round 1 names the sharing.** The leader sends its own `(epoch, PKP digest)` for the key in
+  `SignRound1`. A node whose committed share differs refuses with FAILED_PRECONDITION and the
+  trailer `rutli-error: epoch-mismatch` (carrying its own `rutli-epoch` / `rutli-pkp-digest`),
+  counts `rutli_epoch_mismatch_total` and logs an ERROR. It never signs from a mismatched epoch.
+  A leader on a release before epochs sends no sharing: the check is skipped with a warning and
+  `rutli_epoch_check_skipped_total`, unless `signing_policy.require_epoch_match` is set (then it
+  is refused). Turn that flag on once every cosigner runs this release.
+* **Stale-share check.** At startup and every 5 minutes (every 30 s while a peer has not
+  answered) each node compares its sharing of every FROST key with its peers' (`Peer.KeyEpoch`).
+  It marks a key **stale** when its own COMMITTED ceremony record names a newer epoch than its
+  share, or when a peer holds the same group key at a newer committed epoch, no peer holds this
+  node's sharing, and this node has no staged vote for the newer one. A stale node refuses every
+  round 1 for the key (`rutli-error: stale-share`), refuses to lead it (UNAVAILABLE, so the driver
+  fails over), and reports `stale` in `KeyEpoch`, `KeyStatus` and `verify-key`; the gauge
+  `rutli_stale_share{key}` is 1. This catches a restore from an old backup, a volume snapshot
+  rollback and backup mix-ups. A node that is only waiting to commit (it voted for the newer
+  sharing) is not stale: its resolver commits it. Recovery is restoring a current backup of that
+  node (daemon stopped) or re-enrolling it; the mark clears by itself once the share is current.
+* **Quorum selection with retry.** The leader tries t-subsets of the roster, itself first, then
+  by identifier. Each attempt is a fresh session: a new session id and fresh round-1 commitments
+  from every member, never reused across subsets. A member that fails round 1 or round 2, or whose
+  signature share fails verification at aggregation (frost's cheater detection names it;
+  `rutli_invalid_signature_shares_total`), is excluded for the rest of the request; the session is
+  aborted on the members still holding nonces, and the next subset without an excluded member is
+  tried (`rutli_sign_retries_total`). At most 10 attempts within 45 s. If `t` peers report one
+  sharing that is not older than the leader's, the leader is the odd one out and answers
+  UNAVAILABLE so the driver fails over to a node on the cluster's sharing. When no subset can
+  sign, the answer is UNAVAILABLE (`could not reach signing threshold`).
+
 ### Idempotent DKG
 
 `Signer.Dkg` for a key id first asks every node (`KeyEpoch`):
@@ -135,7 +168,10 @@ by two nodes **can sign**: discard it only if Canton never registered it.
 
 ## Rolling upgrades
 
-Signing works across versions. **DKG and refresh do not**: a leader refuses a ceremony unless every
+Signing works across versions. A leader of this release sends its sharing in round 1; an older
+node ignores it (and does not check epochs), and a node of this release accepts round 1 from an
+older leader with a warning while `signing_policy.require_epoch_match` is off (the default in this
+release). A stale node refuses round 1 from leaders of either release. **DKG and refresh do not**: a leader refuses a ceremony unless every
 node reports ceremony protocol ≥ 2 (`Peer.NodeInfo`), and an upgraded node refuses the protocol-1
 RPCs (`DkgPart*`/`RefreshPart*`, which handed round-2 shares to the leader). Upgrade every cosigner
 before running a DKG or refresh; pause any refresh CronJob and onboarding DKGs during the roll.

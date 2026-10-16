@@ -102,4 +102,26 @@ public interface KeyEpochReplyOrBuilder extends
    * @return The stagedNewPkpDigest.
    */
   com.google.protobuf.ByteString getStagedNewPkpDigest();
+
+  /**
+   * <pre>
+   * This node found its own share stale (see KeyStatusReply.stale) and refuses to sign with it.
+   * </pre>
+   *
+   * <code>bool stale = 10;</code>
+   * @return The stale.
+   */
+  boolean getStale();
+
+  /**
+   * <code>string stale_reason = 11;</code>
+   * @return The staleReason.
+   */
+  java.lang.String getStaleReason();
+  /**
+   * <code>string stale_reason = 11;</code>
+   * @return The bytes for staleReason.
+   */
+  com.google.protobuf.ByteString
+      getStaleReasonBytes();
 }

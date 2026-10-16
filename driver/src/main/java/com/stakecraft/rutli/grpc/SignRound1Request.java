@@ -29,6 +29,7 @@ private static final long serialVersionUID = 0L;
   private SignRound1Request() {
     keyId_ = "";
     sessionId_ = "";
+    pkpDigest_ = com.google.protobuf.ByteString.EMPTY;
   }
 
   public static final com.google.protobuf.Descriptors.Descriptor
@@ -122,6 +123,38 @@ private static final long serialVersionUID = 0L;
     }
   }
 
+  public static final int EPOCH_FIELD_NUMBER = 4;
+  private long epoch_ = 0L;
+  /**
+   * <pre>
+   * Field 3 is kept for the signing intent (audit C2), 6 for its purpose.
+   * The leader's sharing of key_id: its committed epoch and PKP digest. A node whose own committed
+   * share differs refuses (FAILED_PRECONDITION, trailer rutli-error=epoch-mismatch carrying its own
+   * rutli-epoch / rutli-pkp-digest) and never signs from a mismatched epoch. An empty pkp_digest is
+   * a leader that predates epochs: the check is skipped with a warning unless the node sets
+   * signing_policy.require_epoch_match. A node that found its own share stale at its epoch check
+   * refuses every round 1 for the key (rutli-error=stale-share).
+   * </pre>
+   *
+   * <code>uint64 epoch = 4;</code>
+   * @return The epoch.
+   */
+  @java.lang.Override
+  public long getEpoch() {
+    return epoch_;
+  }
+
+  public static final int PKP_DIGEST_FIELD_NUMBER = 5;
+  private com.google.protobuf.ByteString pkpDigest_ = com.google.protobuf.ByteString.EMPTY;
+  /**
+   * <code>bytes pkp_digest = 5;</code>
+   * @return The pkpDigest.
+   */
+  @java.lang.Override
+  public com.google.protobuf.ByteString getPkpDigest() {
+    return pkpDigest_;
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -142,6 +175,12 @@ private static final long serialVersionUID = 0L;
     if (!com.google.protobuf.GeneratedMessage.isStringEmpty(sessionId_)) {
       com.google.protobuf.GeneratedMessage.writeString(output, 2, sessionId_);
     }
+    if (epoch_ != 0L) {
+      output.writeUInt64(4, epoch_);
+    }
+    if (!pkpDigest_.isEmpty()) {
+      output.writeBytes(5, pkpDigest_);
+    }
     getUnknownFields().writeTo(output);
   }
 
@@ -156,6 +195,14 @@ private static final long serialVersionUID = 0L;
     }
     if (!com.google.protobuf.GeneratedMessage.isStringEmpty(sessionId_)) {
       size += com.google.protobuf.GeneratedMessage.computeStringSize(2, sessionId_);
+    }
+    if (epoch_ != 0L) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeUInt64Size(4, epoch_);
+    }
+    if (!pkpDigest_.isEmpty()) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeBytesSize(5, pkpDigest_);
     }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
@@ -176,6 +223,10 @@ private static final long serialVersionUID = 0L;
         .equals(other.getKeyId())) return false;
     if (!getSessionId()
         .equals(other.getSessionId())) return false;
+    if (getEpoch()
+        != other.getEpoch()) return false;
+    if (!getPkpDigest()
+        .equals(other.getPkpDigest())) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -191,6 +242,11 @@ private static final long serialVersionUID = 0L;
     hash = (53 * hash) + getKeyId().hashCode();
     hash = (37 * hash) + SESSION_ID_FIELD_NUMBER;
     hash = (53 * hash) + getSessionId().hashCode();
+    hash = (37 * hash) + EPOCH_FIELD_NUMBER;
+    hash = (53 * hash) + com.google.protobuf.Internal.hashLong(
+        getEpoch());
+    hash = (37 * hash) + PKP_DIGEST_FIELD_NUMBER;
+    hash = (53 * hash) + getPkpDigest().hashCode();
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -324,6 +380,8 @@ private static final long serialVersionUID = 0L;
       bitField0_ = 0;
       keyId_ = "";
       sessionId_ = "";
+      epoch_ = 0L;
+      pkpDigest_ = com.google.protobuf.ByteString.EMPTY;
       return this;
     }
 
@@ -363,6 +421,12 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000002) != 0)) {
         result.sessionId_ = sessionId_;
       }
+      if (((from_bitField0_ & 0x00000004) != 0)) {
+        result.epoch_ = epoch_;
+      }
+      if (((from_bitField0_ & 0x00000008) != 0)) {
+        result.pkpDigest_ = pkpDigest_;
+      }
     }
 
     @java.lang.Override
@@ -386,6 +450,12 @@ private static final long serialVersionUID = 0L;
         sessionId_ = other.sessionId_;
         bitField0_ |= 0x00000002;
         onChanged();
+      }
+      if (other.getEpoch() != 0L) {
+        setEpoch(other.getEpoch());
+      }
+      if (other.getPkpDigest() != com.google.protobuf.ByteString.EMPTY) {
+        setPkpDigest(other.getPkpDigest());
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -423,6 +493,16 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000002;
               break;
             } // case 18
+            case 32: {
+              epoch_ = input.readUInt64();
+              bitField0_ |= 0x00000004;
+              break;
+            } // case 32
+            case 42: {
+              pkpDigest_ = input.readBytes();
+              bitField0_ |= 0x00000008;
+              break;
+            } // case 42
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -580,6 +660,100 @@ private static final long serialVersionUID = 0L;
       checkByteStringIsUtf8(value);
       sessionId_ = value;
       bitField0_ |= 0x00000002;
+      onChanged();
+      return this;
+    }
+
+    private long epoch_ ;
+    /**
+     * <pre>
+     * Field 3 is kept for the signing intent (audit C2), 6 for its purpose.
+     * The leader's sharing of key_id: its committed epoch and PKP digest. A node whose own committed
+     * share differs refuses (FAILED_PRECONDITION, trailer rutli-error=epoch-mismatch carrying its own
+     * rutli-epoch / rutli-pkp-digest) and never signs from a mismatched epoch. An empty pkp_digest is
+     * a leader that predates epochs: the check is skipped with a warning unless the node sets
+     * signing_policy.require_epoch_match. A node that found its own share stale at its epoch check
+     * refuses every round 1 for the key (rutli-error=stale-share).
+     * </pre>
+     *
+     * <code>uint64 epoch = 4;</code>
+     * @return The epoch.
+     */
+    @java.lang.Override
+    public long getEpoch() {
+      return epoch_;
+    }
+    /**
+     * <pre>
+     * Field 3 is kept for the signing intent (audit C2), 6 for its purpose.
+     * The leader's sharing of key_id: its committed epoch and PKP digest. A node whose own committed
+     * share differs refuses (FAILED_PRECONDITION, trailer rutli-error=epoch-mismatch carrying its own
+     * rutli-epoch / rutli-pkp-digest) and never signs from a mismatched epoch. An empty pkp_digest is
+     * a leader that predates epochs: the check is skipped with a warning unless the node sets
+     * signing_policy.require_epoch_match. A node that found its own share stale at its epoch check
+     * refuses every round 1 for the key (rutli-error=stale-share).
+     * </pre>
+     *
+     * <code>uint64 epoch = 4;</code>
+     * @param value The epoch to set.
+     * @return This builder for chaining.
+     */
+    public Builder setEpoch(long value) {
+
+      epoch_ = value;
+      bitField0_ |= 0x00000004;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * Field 3 is kept for the signing intent (audit C2), 6 for its purpose.
+     * The leader's sharing of key_id: its committed epoch and PKP digest. A node whose own committed
+     * share differs refuses (FAILED_PRECONDITION, trailer rutli-error=epoch-mismatch carrying its own
+     * rutli-epoch / rutli-pkp-digest) and never signs from a mismatched epoch. An empty pkp_digest is
+     * a leader that predates epochs: the check is skipped with a warning unless the node sets
+     * signing_policy.require_epoch_match. A node that found its own share stale at its epoch check
+     * refuses every round 1 for the key (rutli-error=stale-share).
+     * </pre>
+     *
+     * <code>uint64 epoch = 4;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearEpoch() {
+      bitField0_ = (bitField0_ & ~0x00000004);
+      epoch_ = 0L;
+      onChanged();
+      return this;
+    }
+
+    private com.google.protobuf.ByteString pkpDigest_ = com.google.protobuf.ByteString.EMPTY;
+    /**
+     * <code>bytes pkp_digest = 5;</code>
+     * @return The pkpDigest.
+     */
+    @java.lang.Override
+    public com.google.protobuf.ByteString getPkpDigest() {
+      return pkpDigest_;
+    }
+    /**
+     * <code>bytes pkp_digest = 5;</code>
+     * @param value The pkpDigest to set.
+     * @return This builder for chaining.
+     */
+    public Builder setPkpDigest(com.google.protobuf.ByteString value) {
+      if (value == null) { throw new NullPointerException(); }
+      pkpDigest_ = value;
+      bitField0_ |= 0x00000008;
+      onChanged();
+      return this;
+    }
+    /**
+     * <code>bytes pkp_digest = 5;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearPkpDigest() {
+      bitField0_ = (bitField0_ & ~0x00000008);
+      pkpDigest_ = getDefaultInstance().getPkpDigest();
       onChanged();
       return this;
     }

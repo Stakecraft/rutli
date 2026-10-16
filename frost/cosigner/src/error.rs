@@ -100,6 +100,25 @@ pub enum DaemonError {
     #[error("split ceremony: {0}")]
     Ceremony(String),
 
+    /// Sign round 1: the leader signs with another sharing of `key_id` than the one this node
+    /// committed (`peer` = the refusing node's own (epoch, PKP digest)). Shares of different
+    /// sharings never combine, and a node never signs from a mismatched epoch (audit H1/M1).
+    /// FAILED_PRECONDITION with the `rutli-error: epoch-mismatch` trailer (see
+    /// [`DaemonError::from_peer_status`]), so a leader can tell it from any other refusal and learn
+    /// the peer's sharing.
+    #[error(
+        "epoch mismatch for {key_id}: this node holds epoch {} (pkp {}…) but the leader signs with \
+         epoch {} (pkp {}…) — refusing to sign from a different sharing",
+        .peer.0, short(&.peer.1), .leader.0, short(&.leader.1)
+    )]
+    EpochMismatch { key_id: String, peer: KeyVersion, leader: KeyVersion },
+
+    /// This node's epoch check found its share of `key_id` stale (`peer` = its own (epoch, PKP
+    /// digest)), so it refuses to sign or lead for the key. FAILED_PRECONDITION with the
+    /// `rutli-error: stale-share` trailer.
+    #[error("stale share for {key_id} (this node holds epoch {}): {reason}", .peer.0)]
+    StaleShare { key_id: String, peer: KeyVersion, reason: String },
+
     /// The key id is reserved for the split ceremony (`…frost-import-…`): DKG may never mint it.
     #[error(
         "key id {0} is reserved for imported keys (contains \"frost-import-\") — DKG refuses it; \
@@ -108,9 +127,73 @@ pub enum DaemonError {
     ReservedKeyId(String),
 }
 
+/// A sharing of a FROST key as nodes compare it: (epoch, PKP digest). Same as
+/// [`crate::node::KeyVersion`].
+pub type KeyVersion = (u64, [u8; 32]);
+
+fn short(digest: &[u8; 32]) -> String {
+    hex::encode(&digest[..6])
+}
+
+/// Trailer naming a machine-readable refusal reason on a Peer RPC error (`epoch-mismatch`,
+/// `stale-share`), with the refusing node's own sharing in [`EPOCH_TRAILER`] and
+/// [`PKP_DIGEST_TRAILER`].
+pub const ERROR_TRAILER: &str = "rutli-error";
+pub const EPOCH_TRAILER: &str = "rutli-epoch";
+pub const PKP_DIGEST_TRAILER: &str = "rutli-pkp-digest";
+const EPOCH_MISMATCH: &str = "epoch-mismatch";
+const STALE_SHARE: &str = "stale-share";
+
+fn with_view(code: tonic::Code, message: String, reason: &'static str, view: &KeyVersion) -> tonic::Status {
+    let mut md = tonic::metadata::MetadataMap::new();
+    md.insert(ERROR_TRAILER, tonic::metadata::MetadataValue::from_static(reason));
+    // Decimal digits and lowercase hex are always valid ASCII metadata values.
+    if let Ok(v) = view.0.to_string().parse() {
+        md.insert(EPOCH_TRAILER, v);
+    }
+    if let Ok(v) = hex::encode(view.1).parse() {
+        md.insert(PKP_DIGEST_TRAILER, v);
+    }
+    tonic::Status::with_metadata(code, message, md)
+}
+
+impl DaemonError {
+    /// The typed error behind a peer's `SignRound1` refusal: [`DaemonError::EpochMismatch`] or
+    /// [`DaemonError::StaleShare`] when the status carries the [`ERROR_TRAILER`] (with the peer's
+    /// own sharing), else the plain status. `leader` is the sharing the caller sent.
+    pub fn from_peer_status(status: tonic::Status, key_id: &str, leader: Option<KeyVersion>) -> Self {
+        let md = status.metadata();
+        let reason = md.get(ERROR_TRAILER).and_then(|v| v.to_str().ok()).map(str::to_owned);
+        let view = || -> Option<KeyVersion> {
+            let epoch = md.get(EPOCH_TRAILER)?.to_str().ok()?.parse().ok()?;
+            let digest = hex::decode(md.get(PKP_DIGEST_TRAILER)?.to_str().ok()?).ok()?;
+            Some((epoch, digest.try_into().ok()?))
+        };
+        match (reason.as_deref(), view()) {
+            (Some(EPOCH_MISMATCH), Some(peer)) => DaemonError::EpochMismatch {
+                key_id: key_id.to_owned(),
+                peer,
+                leader: leader.unwrap_or_default(),
+            },
+            (Some(STALE_SHARE), Some(peer)) => DaemonError::StaleShare {
+                key_id: key_id.to_owned(),
+                peer,
+                reason: status.message().to_owned(),
+            },
+            _ => DaemonError::Status(status),
+        }
+    }
+}
+
 impl From<DaemonError> for tonic::Status {
     fn from(e: DaemonError) -> Self {
         match e {
+            DaemonError::EpochMismatch { peer, .. } => {
+                with_view(tonic::Code::FailedPrecondition, e.to_string(), EPOCH_MISMATCH, &peer)
+            }
+            DaemonError::StaleShare { peer, .. } => {
+                with_view(tonic::Code::FailedPrecondition, e.to_string(), STALE_SHARE, &peer)
+            }
             DaemonError::UnknownKey(_) | DaemonError::UnknownDkg(_) => {
                 tonic::Status::not_found(e.to_string())
             }
@@ -140,5 +223,40 @@ impl From<DaemonError> for tonic::Status {
             }
             _ => tonic::Status::internal(e.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A peer's refusal survives the wire: the leader gets the typed error back, with the peer's
+    /// own sharing, from nothing but the gRPC status.
+    #[test]
+    fn epoch_refusals_round_trip_through_a_grpc_status() {
+        let (peer, leader) = ((3, [7u8; 32]), (4, [9u8; 32]));
+        let status = tonic::Status::from(DaemonError::EpochMismatch { key_id: "k".into(), peer, leader });
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        match DaemonError::from_peer_status(status, "k", Some(leader)) {
+            DaemonError::EpochMismatch { key_id, peer: p, leader: l } => {
+                assert_eq!((key_id.as_str(), p, l), ("k", peer, leader));
+            }
+            other => panic!("got {other:?}"),
+        }
+
+        let status = tonic::Status::from(DaemonError::StaleShare {
+            key_id: "k".into(),
+            peer,
+            reason: "peer 2 holds epoch 4".into(),
+        });
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert!(matches!(
+            DaemonError::from_peer_status(status, "k", Some(leader)),
+            DaemonError::StaleShare { peer: p, .. } if p == peer
+        ));
+
+        // Any other refusal stays a plain status (an older peer, another reason).
+        let plain = tonic::Status::failed_precondition("something else");
+        assert!(matches!(DaemonError::from_peer_status(plain, "k", None), DaemonError::Status(_)));
     }
 }

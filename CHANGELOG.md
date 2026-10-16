@@ -6,8 +6,9 @@ All notable changes to Rütli are documented here. Format loosely follows
 ## [Unreleased]
 
 Builds on 0.4.0-rc.2. Audit remediation batch C phase 1: confidential, two-phase DKG/refresh with
-share epochs (audit C1, H1, M5). Still to come in batch C: the sign-time epoch check and quorum
-retry, cosigner-enforced signing intents (C2), key-file v2 and restore — see the warnings below.
+share epochs (audit C1, H1, M5), and batch C phase 2: sign-time epoch checks, stale-share detection
+and quorum retry (H1, M1). Still to come in batch C: cosigner-enforced signing intents (C2),
+key-file v2 and restore — see the warnings below.
 
 ### Upgrade notes (operators must act or know)
 - **DKG and refresh need every cosigner on this release (ceremony protocol 2), and are refused on a
@@ -23,15 +24,36 @@ retry, cosigner-enforced signing intents (C2), key-file v2 and restore — see t
   leader** (audit C1): the leader received every round-2 package. A DKG key's secret was computable
   by it, and a refresh cannot repair that. A refresh on this release re-isolates the shares of a
   dealt (split-ceremony) key. Generate or split mainnet keys only on this release or later.
-- **Sign-time epoch checks are not in this release yet.** A ceremony can no longer leave mixed
-  epochs, but a node restored from a pre-refresh backup is not yet detected at sign time (batch C
-  phase 2); keep restoring only current backups.
+- **Signing is epoch-checked (audit H1, M1).** A leader sends its sharing (epoch, PKP digest) in
+  sign round 1 and a node on another sharing refuses (FAILED_PRECONDITION, `rutli-error:
+  epoch-mismatch`). A node that finds its own share behind the cluster at startup or in its
+  5-minute check (a restore from an old backup, a snapshot rollback) marks the key stale and
+  refuses to sign or lead it until its share is current. Rolling upgrade: a node of this release
+  accepts round 1 from an older leader (which sends no sharing) with a warning and
+  `rutli_epoch_check_skipped_total`; set `signing_policy.require_epoch_match: true` once every
+  cosigner runs this release. New alerts: `RutliStaleShare`, `RutliEpochMismatch`,
+  `RutliInvalidSignatureShare` (`deploy/monitoring`).
+- **A Sign that cannot find a working quorum now answers UNAVAILABLE** (`could not reach signing
+  threshold`) after trying every t-subset it can, instead of passing up the failing cosigner's own
+  error code; the driver fails over on it.
 - **A retried `Dkg` for a committed key now returns it** instead of ALREADY_EXISTS (audit M5), and a
   retry while a ceremony is resolving answers UNAVAILABLE. A key id left on only some nodes by an
   interrupted DKG on an older release answers FAILED_PRECONDITION; clear it with
   `rutli-cosigner discard-partial-key` (`docs/ceremonies.md`).
 
 ### Security
+- **Epoch-matched signing quorums with retry (audit H1, M1).** The leader signs only with its own
+  sharing of the key, which every participant checks in round 1; a node never signs from a
+  mismatched epoch. Each node compares its sharing with its peers' at startup and every 5 minutes
+  (`Peer.KeyEpoch`) and marks a share it finds behind as **stale** (also on its own commit record
+  alone): a stale node refuses round 1 and leading, reports `stale` in `KeyEpoch`, `KeyStatus` and
+  `verify-key`, and sets `rutli_stale_share{key}`. The leader tries t-subsets in a deterministic
+  order (itself first), each a fresh session with fresh commitments; a cosigner that fails round 1
+  or 2 or returns a share that fails verification (frost cheater detection) is excluded and the
+  next subset is tried, at most 10 attempts within 45 s. A leader that `t` peers outvote on the
+  sharing fails over (UNAVAILABLE). New metrics: `rutli_epoch_mismatch_total`,
+  `rutli_epoch_check_skipped_total`, `rutli_stale_share`, `rutli_sign_retries_total`,
+  `rutli_invalid_signature_shares_total`.
 - **DKG and refresh round-2 packages never reach the leader (audit C1, ceremony protocol 2).** Each
   node delivers its round-2 packages directly to their recipients over the mTLS mesh
   (`Peer.CeremonyDeliver`): the sender dials the recipient under its own TLS name, the recipient

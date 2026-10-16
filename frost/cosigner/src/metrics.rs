@@ -32,6 +32,23 @@ pub const SIGN_ROUND1_SKIPS: &str = "rutli_sign_round1_skips_total";
 pub const SIGN_ABORTS: &str = "rutli_sign_aborts_total";
 /// In-flight (round-1, not yet round-2) sign sessions currently held on this node.
 pub const PENDING_SIGN_SESSIONS: &str = "rutli_pending_sign_sessions";
+/// Sign round-1 refusals on this node because the leader signed with another sharing of the key
+/// than this node committed (audit H1/M1). Any increase means two nodes hold different epochs of
+/// one key: alert on it.
+pub const EPOCH_MISMATCH: &str = "rutli_epoch_mismatch_total";
+/// Sign round-1 requests from a leader that sent no sharing (a release before epochs): the epoch
+/// check was skipped. Expected only during a rolling upgrade.
+pub const EPOCH_CHECK_SKIPPED: &str = "rutli_epoch_check_skipped_total";
+/// 1 while this node's epoch check finds its share of `key` stale (a peer holds a newer committed
+/// sharing this node never voted for — typically a restore from an old backup), else 0. A stale
+/// node refuses to sign or lead for the key. Labels: `key`. Alert on any 1.
+pub const STALE_SHARE: &str = "rutli_stale_share";
+/// Sign attempts beyond the first within one Sign request: a t-subset failed and the leader
+/// retried with another (fresh session, fresh commitments).
+pub const SIGN_RETRIES: &str = "rutli_sign_retries_total";
+/// Signature shares that failed verification at aggregation (attributed to a cosigner and routed
+/// around). Any increase means a cosigner returned a bad share: alert on it.
+pub const INVALID_SIGNATURE_SHARES: &str = "rutli_invalid_signature_shares_total";
 /// Hosted keys repaired by anti-entropy (pulled here or pushed to a peer).
 pub const ANTI_ENTROPY_REPAIRS: &str = "rutli_anti_entropy_repairs_total";
 /// Hosted keys found with *different* material on two nodes under one id. Any increase is a
@@ -113,6 +130,10 @@ fn prime() {
     }
     metrics::gauge!(CEREMONIES_STAGED).set(0.0);
     metrics::counter!(SIGN_ROUND1_SKIPS).absolute(0);
+    metrics::counter!(EPOCH_MISMATCH).absolute(0);
+    metrics::counter!(EPOCH_CHECK_SKIPPED).absolute(0);
+    metrics::counter!(SIGN_RETRIES).absolute(0);
+    metrics::counter!(INVALID_SIGNATURE_SHARES).absolute(0);
     metrics::counter!(ANTI_ENTROPY_REPAIRS).absolute(0);
     metrics::counter!(ANTI_ENTROPY_CONFLICTS).absolute(0);
     metrics::gauge!(HOSTED_KEYS).set(0.0);
@@ -134,6 +155,11 @@ pub fn describe() {
     describe_counter!(CEREMONY_RESOLUTIONS, "Two-phase ceremonies resolved on this node, by result");
     describe_gauge!(CEREMONIES_STAGED, "Staged (yes-voted, unresolved) ceremonies on this node");
     describe_counter!(SIGN_ROUND1_SKIPS, "Peers skipped during sign round 1 (quorum-margin canary)");
+    describe_counter!(EPOCH_MISMATCH, "Sign round-1 refusals: the leader signed with another sharing (epoch)");
+    describe_counter!(EPOCH_CHECK_SKIPPED, "Sign round-1 requests without the leader's sharing (pre-epoch leader)");
+    describe_gauge!(STALE_SHARE, "1 while this node's share of the key is stale (refuses to sign), else 0");
+    describe_counter!(SIGN_RETRIES, "Sign attempts beyond the first (a t-subset failed; retried with another)");
+    describe_counter!(INVALID_SIGNATURE_SHARES, "Signature shares that failed verification at aggregation");
     describe_counter!(SIGN_ABORTS, "Aborted in-flight sign sessions (one per given-up signature)");
     describe_gauge!(PENDING_SIGN_SESSIONS, "In-flight round-1 sign sessions held on this node");
     describe_counter!(ANTI_ENTROPY_REPAIRS, "Hosted keys repaired by anti-entropy");

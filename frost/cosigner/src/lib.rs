@@ -19,6 +19,7 @@ pub mod ceremony;
 pub mod ceremony_record;
 pub mod cluster_identity;
 pub mod config;
+pub mod epoch_check;
 pub mod error;
 pub mod export;
 pub mod health;

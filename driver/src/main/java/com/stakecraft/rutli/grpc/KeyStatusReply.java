@@ -415,6 +415,23 @@ private static final long serialVersionUID = 0L;
     return epoch_;
   }
 
+  public static final int STALE_FIELD_NUMBER = 15;
+  private boolean stale_ = false;
+  /**
+   * <pre>
+   * This node's epoch check found its share stale (a peer holds a newer committed sharing of the
+   * same group key that this node never voted for, e.g. after a restore from an old backup). A
+   * stale node refuses to sign or lead for the key until its share is current again.
+   * </pre>
+   *
+   * <code>bool stale = 15;</code>
+   * @return The stale.
+   */
+  @java.lang.Override
+  public boolean getStale() {
+    return stale_;
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -470,6 +487,9 @@ private static final long serialVersionUID = 0L;
     }
     if (epoch_ != 0L) {
       output.writeUInt64(14, epoch_);
+    }
+    if (stale_ != false) {
+      output.writeBool(15, stale_);
     }
     getUnknownFields().writeTo(output);
   }
@@ -531,6 +551,10 @@ private static final long serialVersionUID = 0L;
       size += com.google.protobuf.CodedOutputStream
         .computeUInt64Size(14, epoch_);
     }
+    if (stale_ != false) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeBoolSize(15, stale_);
+    }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
     return size;
@@ -574,6 +598,8 @@ private static final long serialVersionUID = 0L;
         .equals(other.getRecordedUsage())) return false;
     if (getEpoch()
         != other.getEpoch()) return false;
+    if (getStale()
+        != other.getStale()) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -616,6 +642,9 @@ private static final long serialVersionUID = 0L;
     hash = (37 * hash) + EPOCH_FIELD_NUMBER;
     hash = (53 * hash) + com.google.protobuf.Internal.hashLong(
         getEpoch());
+    hash = (37 * hash) + STALE_FIELD_NUMBER;
+    hash = (53 * hash) + com.google.protobuf.Internal.hashBoolean(
+        getStale());
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -761,6 +790,7 @@ private static final long serialVersionUID = 0L;
       carriedFor_ = "";
       recordedUsage_ = "";
       epoch_ = 0L;
+      stale_ = false;
       return this;
     }
 
@@ -836,6 +866,9 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00002000) != 0)) {
         result.epoch_ = epoch_;
       }
+      if (((from_bitField0_ & 0x00004000) != 0)) {
+        result.stale_ = stale_;
+      }
     }
 
     @java.lang.Override
@@ -901,6 +934,9 @@ private static final long serialVersionUID = 0L;
       }
       if (other.getEpoch() != 0L) {
         setEpoch(other.getEpoch());
+      }
+      if (other.getStale() != false) {
+        setStale(other.getStale());
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -998,6 +1034,11 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00002000;
               break;
             } // case 112
+            case 120: {
+              stale_ = input.readBool();
+              bitField0_ |= 0x00004000;
+              break;
+            } // case 120
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -1848,6 +1889,56 @@ private static final long serialVersionUID = 0L;
     public Builder clearEpoch() {
       bitField0_ = (bitField0_ & ~0x00002000);
       epoch_ = 0L;
+      onChanged();
+      return this;
+    }
+
+    private boolean stale_ ;
+    /**
+     * <pre>
+     * This node's epoch check found its share stale (a peer holds a newer committed sharing of the
+     * same group key that this node never voted for, e.g. after a restore from an old backup). A
+     * stale node refuses to sign or lead for the key until its share is current again.
+     * </pre>
+     *
+     * <code>bool stale = 15;</code>
+     * @return The stale.
+     */
+    @java.lang.Override
+    public boolean getStale() {
+      return stale_;
+    }
+    /**
+     * <pre>
+     * This node's epoch check found its share stale (a peer holds a newer committed sharing of the
+     * same group key that this node never voted for, e.g. after a restore from an old backup). A
+     * stale node refuses to sign or lead for the key until its share is current again.
+     * </pre>
+     *
+     * <code>bool stale = 15;</code>
+     * @param value The stale to set.
+     * @return This builder for chaining.
+     */
+    public Builder setStale(boolean value) {
+
+      stale_ = value;
+      bitField0_ |= 0x00004000;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * This node's epoch check found its share stale (a peer holds a newer committed sharing of the
+     * same group key that this node never voted for, e.g. after a restore from an old backup). A
+     * stale node refuses to sign or lead for the key until its share is current again.
+     * </pre>
+     *
+     * <code>bool stale = 15;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearStale() {
+      bitField0_ = (bitField0_ & ~0x00004000);
+      stale_ = false;
       onChanged();
       return this;
     }

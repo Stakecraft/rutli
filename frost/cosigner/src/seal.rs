@@ -618,6 +618,7 @@ mod tests {
             }),
             cluster_id: None,
             cluster_id_change_allowed: false,
+            signing_policy: Default::default(),
         }
     }
 

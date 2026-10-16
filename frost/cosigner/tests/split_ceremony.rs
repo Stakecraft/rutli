@@ -251,7 +251,7 @@ impl PeerApi for DownPeer {
     fn identifier(&self) -> Identifier {
         self.0
     }
-    async fn sign_round1(&self, _: &str, _: &str) -> DaemonResult<SigningCommitments> {
+    async fn sign_round1(&self, _: &str, _: &str, _: &rutli_cosigner::node::Round1Ctx) -> DaemonResult<SigningCommitments> {
         down()
     }
     async fn sign_round2(

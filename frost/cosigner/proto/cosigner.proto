@@ -180,6 +180,10 @@ message KeyStatusReply {
   // Which sharing this node holds: 1 after DKG, +1 per committed refresh; 0 for a share written
   // before epochs existed or installed by the split ceremony. Nodes must agree.
   uint64 epoch = 14;
+  // This node's epoch check found its share stale (a peer holds a newer committed sharing of the
+  // same group key that this node never voted for, e.g. after a restore from an old backup). A
+  // stale node refuses to sign or lead for the key until its share is current again.
+  bool stale = 15;
 }
 
 message RefreshPart1Request {
@@ -196,6 +200,15 @@ message SignReply { bytes signature = 1; } // 64-byte Ed25519 signature
 message SignRound1Request {
   string key_id = 1;
   string session_id = 2;
+  // Field 3 is kept for the signing intent (audit C2), 6 for its purpose.
+  // The leader's sharing of key_id: its committed epoch and PKP digest. A node whose own committed
+  // share differs refuses (FAILED_PRECONDITION, trailer rutli-error=epoch-mismatch carrying its own
+  // rutli-epoch / rutli-pkp-digest) and never signs from a mismatched epoch. An empty pkp_digest is
+  // a leader that predates epochs: the check is skipped with a warning unless the node sets
+  // signing_policy.require_epoch_match. A node that found its own share stale at its epoch check
+  // refuses every round 1 for the key (rutli-error=stale-share).
+  uint64 epoch = 4;
+  bytes pkp_digest = 5;
 }
 message SignRound1Reply { bytes commitments = 1; } // json SigningCommitments
 
@@ -400,6 +413,9 @@ message KeyEpochReply {
   string staged_ceremony_id = 7;
   uint64 staged_new_epoch = 8;
   bytes staged_new_pkp_digest = 9;
+  // This node found its own share stale (see KeyStatusReply.stale) and refuses to sign with it.
+  bool stale = 10;
+  string stale_reason = 11;
 }
 
 enum CeremonyState {

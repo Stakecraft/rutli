@@ -113,7 +113,13 @@ pub struct Node {
     keystore: KeyStore,
     /// Key-store readiness verdict (see [`crate::health`]), shared with Health and the monitor.
     keystore_health: Arc<crate::health::KeystoreHealth>,
-    cosigners: Mutex<std::collections::HashMap<String, Arc<Cosigner>>>,
+    /// Loaded signing state per key: the share's cosigner and the sharing it belongs to.
+    cosigners: Mutex<std::collections::HashMap<String, CachedKey>>,
+    /// Keys whose share this node's epoch check found stale ([`crate::epoch_check`]): round 1 and
+    /// leading are refused for them until a check finds the share current again.
+    stale: Mutex<std::collections::HashMap<String, StaleMark>>,
+    /// `signing_policy.require_epoch_match`: refuse round 1 from a leader that names no sharing.
+    require_epoch_match: bool,
     // key_id -> the ceremony currently allowed to (re)write that key's share.
     ceremonies: Mutex<std::collections::HashMap<String, CeremonyGuard>>,
     ceremony_orphan_timeout: Duration,
@@ -194,6 +200,8 @@ impl Node {
             keystore,
             keystore_health,
             cosigners: Mutex::new(Default::default()),
+            stale: Mutex::new(Default::default()),
+            require_epoch_match: false,
             ceremonies: Mutex::new(Default::default()),
             ceremony_orphan_timeout,
             record_store,
@@ -323,6 +331,10 @@ impl Node {
             Err(DaemonError::UnknownKey(_)) => {}
             Err(e) => return Err(e),
         }
+        if let Some(mark) = self.stale_mark(key_id) {
+            reply.stale = true;
+            reply.stale_reason = mark.reason;
+        }
         if let Some(r) = self.staged_records().into_iter().find(|r| r.key_id == key_id) {
             reply.staged = true;
             reply.staged_ceremony_id = r.ceremony_id;
@@ -429,6 +441,11 @@ impl Node {
 
     /// Load (and cache) this node's cosigner state for `key_id`.
     fn cosigner(&self, key_id: &str) -> Result<Arc<Cosigner>> {
+        Ok(self.cached(key_id)?.cosigner)
+    }
+
+    /// Load (and cache) this node's signing state for `key_id`, with the sharing it belongs to.
+    fn cached(&self, key_id: &str) -> Result<CachedKey> {
         {
             let map = self.cosigners.lock().expect("cosigners lock");
             if let Some(c) = map.get(key_id) {
@@ -436,17 +453,77 @@ impl Node {
             }
         }
         let share = self.keystore.load(key_id)?;
+        let view = (share.epoch, share.pkp_digest()?);
         let nonce_store = NonceStore::open(self.keystore.nonce_dir(key_id))?;
-        let cosigner = Arc::new(Cosigner::new(
-            share.key_package,
-            share.public_key_package,
-            nonce_store,
-        ));
+        let cached = CachedKey {
+            cosigner: Arc::new(Cosigner::new(share.key_package, share.public_key_package, nonce_store)),
+            view,
+        };
         self.cosigners
             .lock()
             .expect("cosigners lock")
-            .insert(key_id.to_string(), cosigner.clone());
-        Ok(cosigner)
+            .insert(key_id.to_string(), cached.clone());
+        Ok(cached)
+    }
+
+    /// Apply `signing_policy.require_epoch_match` (see [`crate::config::SigningPolicyConfig`]).
+    pub fn with_require_epoch_match(mut self, require: bool) -> Self {
+        self.require_epoch_match = require;
+        self
+    }
+
+    /// What a leader needs to sign with `key_id`: threshold, its own sharing, its stale mark.
+    pub fn signing_view(&self, key_id: &str) -> Result<SigningView> {
+        let c = self.cached(key_id)?;
+        Ok(SigningView { threshold: c.cosigner.min_signers(), view: c.view, stale: self.stale_mark(key_id) })
+    }
+
+    /// This node's stale mark for `key_id`, if its epoch check found the share stale.
+    pub fn stale_mark(&self, key_id: &str) -> Option<StaleMark> {
+        self.stale.lock().expect("stale lock").get(key_id).cloned()
+    }
+
+    /// Record the epoch check's verdict for `key_id`: `Some` marks the share stale (round 1 and
+    /// leading refused), `None` clears a mark. Keeps `rutli_stale_share{key}` in step.
+    pub fn set_stale(&self, key_id: &str, mark: Option<StaleMark>) {
+        let mut stale = self.stale.lock().expect("stale lock");
+        let changed = match &mark {
+            Some(m) => stale.insert(key_id.to_string(), m.clone()).as_ref() != Some(m),
+            None => stale.remove(key_id).is_some(),
+        };
+        drop(stale);
+        metrics::gauge!(crate::metrics::STALE_SHARE, "key" => key_id.to_string())
+            .set(if mark.is_some() { 1.0 } else { 0.0 });
+        match (&mark, changed) {
+            (Some(m), true) => tracing::error!(
+                key_id,
+                own_epoch = m.own_epoch,
+                newer_epoch = m.newer_epoch,
+                reason = %m.reason,
+                "this node's share is STALE — refusing to sign or lead for the key until it is \
+                 current (restore a current backup or re-enrol the node; docs/ceremonies.md)"
+            ),
+            (None, true) => tracing::info!(key_id, "share no longer stale"),
+            _ => {}
+        }
+    }
+
+    /// The newest epoch a COMMITTED ceremony record of this node says `key_id` reached, if any.
+    /// A live share older than that was rolled back under the node (a restore from an old backup).
+    pub fn committed_epoch(&self, key_id: &str) -> Option<u64> {
+        self.book
+            .lock()
+            .expect("ceremony lock")
+            .records
+            .values()
+            .filter(|r| r.key_id == key_id && r.state == RecordState::Committed)
+            .map(|r| r.new_epoch)
+            .max()
+    }
+
+    /// Every FROST key id this node holds a share for.
+    pub fn frost_key_ids(&self) -> Result<Vec<String>> {
+        self.keystore.list_frost()
     }
 
     pub fn has_key(&self, key_id: &str) -> bool {
@@ -552,6 +629,7 @@ impl Node {
             public_key_package: serde_json::to_vec(pkp)?,
             origin: "dkg".into(),
             epoch: share.epoch,
+            stale: self.stale_mark(key_id).is_some(),
             ..Default::default()
         };
         if let Some(o) = &share.origin {
@@ -592,7 +670,7 @@ impl Node {
 
     // -- signing peer ops --
 
-    pub fn sign_round1(&self, key_id: &str, session_id: &str) -> Result<SigningCommitments> {
+    pub fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &Round1Ctx) -> Result<SigningCommitments> {
         // Fence signing against a DKG/refresh in progress for this key: refresh rewrites the share
         // and evicts the cached cosigner, so a NEW sign must not start mid-ceremony. (An already
         // in-flight sign that passed round1 will fail cleanly at round2 if the share was refreshed
@@ -610,9 +688,46 @@ impl Node {
         // this node, which with identifier-ordered peers is every leader (2026-10-07 incident).
         // Refusing here makes leaders skip it and sign with the rest.
         self.refuse_if_keystore_down()?;
-        let result = self.cosigner(key_id)?.round1(session_id);
+        let cached = self.cached(key_id)?;
+        self.check_epoch(key_id, &cached, ctx)?;
+        let result = cached.cosigner.round1(session_id);
         self.update_pending_gauge();
         Ok(result?)
+    }
+
+    /// Round 1's epoch rules (audit H1/M1): never sign from a stale share, and never from another
+    /// sharing than the leader's — shares of different sharings never combine, so a mixed quorum
+    /// can only fail, and an old sharing must not be revived.
+    fn check_epoch(&self, key_id: &str, cached: &CachedKey, ctx: &Round1Ctx) -> Result<()> {
+        if let Some(mark) = self.stale_mark(key_id) {
+            return Err(DaemonError::StaleShare {
+                key_id: key_id.to_string(),
+                peer: cached.view,
+                reason: mark.reason,
+            });
+        }
+        match ctx.leader_view {
+            Some(leader) if leader != cached.view => {
+                metrics::counter!(crate::metrics::EPOCH_MISMATCH).increment(1);
+                let err = DaemonError::EpochMismatch { key_id: key_id.to_string(), peer: cached.view, leader };
+                tracing::error!(key_id, error = %err, "sign round 1 refused: the leader signs with another sharing");
+                Err(err)
+            }
+            Some(_) => Ok(()),
+            None if self.require_epoch_match => Err(DaemonError::CeremonyRefused(format!(
+                "sign round 1 for {key_id}: the leader did not say which sharing (epoch) it signs \
+                 with, and signing_policy.require_epoch_match is set — upgrade that cosigner"
+            ))),
+            None => {
+                metrics::counter!(crate::metrics::EPOCH_CHECK_SKIPPED).increment(1);
+                tracing::warn!(
+                    key_id,
+                    "sign round 1 from a leader that sends no sharing (an older release): epoch check \
+                     skipped — expected only during a rolling upgrade"
+                );
+                Ok(())
+            }
+        }
     }
 
     pub fn sign_round2(
@@ -644,7 +759,7 @@ impl Node {
     pub fn abort_sign(&self, key_id: &str, session_id: &str) {
         let cached = self.cosigners.lock().expect("cosigners lock").get(key_id).cloned();
         if let Some(c) = cached {
-            c.abort(session_id);
+            c.cosigner.abort(session_id);
         }
         self.update_pending_gauge();
     }
@@ -656,7 +771,7 @@ impl Node {
             .lock()
             .expect("cosigners lock")
             .get(key_id)
-            .map(|c| c.pending_count())
+            .map(|c| c.cosigner.pending_count())
             .unwrap_or(0)
     }
 
@@ -668,7 +783,7 @@ impl Node {
             .lock()
             .expect("cosigners lock")
             .values()
-            .map(|c| c.prune_expired())
+            .map(|c| c.cosigner.prune_expired())
             .sum();
         if pruned > 0 {
             tracing::debug!(pruned, "dropped expired in-flight sign sessions");
@@ -678,7 +793,7 @@ impl Node {
 
     /// In-flight sign sessions across all cached keys on this node.
     pub fn pending_sign_total(&self) -> usize {
-        self.cosigners.lock().expect("cosigners lock").values().map(|c| c.pending_count()).sum()
+        self.cosigners.lock().expect("cosigners lock").values().map(|c| c.cosigner.pending_count()).sum()
     }
 
     /// Keep the pending-sessions gauge in step after any round1/round2/abort. No-op without an
@@ -712,6 +827,14 @@ impl Node {
 
     pub fn has_mesh(&self) -> bool {
         self.mesh.get().is_some()
+    }
+
+    /// Configured identifiers of this node's mesh peers (empty before the mesh is attached).
+    pub fn mesh_ids(&self) -> Vec<u16> {
+        self.mesh
+            .get()
+            .map(|m| m.iter().filter_map(|p| crate::hosted::identifier_index(p.identifier()).ok()).collect())
+            .unwrap_or_default()
     }
 
     /// The mesh peer with configured identifier `id`, if this node has one.
@@ -1356,8 +1479,12 @@ impl Node {
         book.records.insert(ceremony_id.to_string(), done.clone());
         drop(book);
         if state == RecordState::Committed {
-            // The next sign loads the committed share.
+            // The next sign loads the committed share, which is newer than anything a stale mark
+            // was measured against.
             self.cosigners.lock().expect("cosigners lock").remove(&rec.key_id);
+            if self.stale_mark(&rec.key_id).is_some() {
+                self.set_stale(&rec.key_id, None);
+            }
             tracing::info!(ceremony_id, key_id = %rec.key_id, epoch = rec.new_epoch, "ceremony committed");
         } else {
             tracing::warn!(ceremony_id, key_id = %rec.key_id, reason = %done.reason, "ceremony aborted");
@@ -1512,7 +1639,40 @@ impl Node {
 }
 
 /// A sharing of a key as nodes compare it: (epoch, PKP digest).
-pub type KeyVersion = (u64, [u8; 32]);
+pub type KeyVersion = crate::error::KeyVersion;
+
+/// A key's loaded signing state: its [`Cosigner`] and the sharing (epoch, PKP digest) of the share
+/// it was built from — what sign round 1 compares against the leader's.
+#[derive(Clone)]
+struct CachedKey {
+    cosigner: Arc<Cosigner>,
+    view: KeyVersion,
+}
+
+/// What a leader declares in sign round 1 (`SignRound1Request` beyond key and session).
+#[derive(Clone, Debug, Default)]
+pub struct Round1Ctx {
+    /// The sharing the leader signs with. `None`: a leader from before epochs, which sends none.
+    pub leader_view: Option<KeyVersion>,
+}
+
+/// Why this node treats its share of a key as stale ([`crate::epoch_check`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StaleMark {
+    /// The epoch of this node's share when it was found stale.
+    pub own_epoch: u64,
+    /// The newer committed epoch that makes it stale.
+    pub newer_epoch: u64,
+    pub reason: String,
+}
+
+/// What a leader needs to sign with key K: the threshold, its own sharing, and whether it is stale.
+#[derive(Clone, Debug)]
+pub struct SigningView {
+    pub threshold: u16,
+    pub view: KeyVersion,
+    pub stale: Option<StaleMark>,
+}
 
 /// What a node staged in part 3: the outcome every node must agree on before anyone commits.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

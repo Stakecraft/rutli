@@ -32,4 +32,26 @@ public interface SignRound1RequestOrBuilder extends
    */
   com.google.protobuf.ByteString
       getSessionIdBytes();
+
+  /**
+   * <pre>
+   * Field 3 is kept for the signing intent (audit C2), 6 for its purpose.
+   * The leader's sharing of key_id: its committed epoch and PKP digest. A node whose own committed
+   * share differs refuses (FAILED_PRECONDITION, trailer rutli-error=epoch-mismatch carrying its own
+   * rutli-epoch / rutli-pkp-digest) and never signs from a mismatched epoch. An empty pkp_digest is
+   * a leader that predates epochs: the check is skipped with a warning unless the node sets
+   * signing_policy.require_epoch_match. A node that found its own share stale at its epoch check
+   * refuses every round 1 for the key (rutli-error=stale-share).
+   * </pre>
+   *
+   * <code>uint64 epoch = 4;</code>
+   * @return The epoch.
+   */
+  long getEpoch();
+
+  /**
+   * <code>bytes pkp_digest = 5;</code>
+   * @return The pkpDigest.
+   */
+  com.google.protobuf.ByteString getPkpDigest();
 }

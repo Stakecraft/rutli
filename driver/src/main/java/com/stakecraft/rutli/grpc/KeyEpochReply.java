@@ -32,6 +32,7 @@ private static final long serialVersionUID = 0L;
     origin_ = "";
     stagedCeremonyId_ = "";
     stagedNewPkpDigest_ = com.google.protobuf.ByteString.EMPTY;
+    staleReason_ = "";
   }
 
   public static final com.google.protobuf.Descriptors.Descriptor
@@ -230,6 +231,60 @@ private static final long serialVersionUID = 0L;
     return stagedNewPkpDigest_;
   }
 
+  public static final int STALE_FIELD_NUMBER = 10;
+  private boolean stale_ = false;
+  /**
+   * <pre>
+   * This node found its own share stale (see KeyStatusReply.stale) and refuses to sign with it.
+   * </pre>
+   *
+   * <code>bool stale = 10;</code>
+   * @return The stale.
+   */
+  @java.lang.Override
+  public boolean getStale() {
+    return stale_;
+  }
+
+  public static final int STALE_REASON_FIELD_NUMBER = 11;
+  @SuppressWarnings("serial")
+  private volatile java.lang.Object staleReason_ = "";
+  /**
+   * <code>string stale_reason = 11;</code>
+   * @return The staleReason.
+   */
+  @java.lang.Override
+  public java.lang.String getStaleReason() {
+    java.lang.Object ref = staleReason_;
+    if (ref instanceof java.lang.String) {
+      return (java.lang.String) ref;
+    } else {
+      com.google.protobuf.ByteString bs = 
+          (com.google.protobuf.ByteString) ref;
+      java.lang.String s = bs.toStringUtf8();
+      staleReason_ = s;
+      return s;
+    }
+  }
+  /**
+   * <code>string stale_reason = 11;</code>
+   * @return The bytes for staleReason.
+   */
+  @java.lang.Override
+  public com.google.protobuf.ByteString
+      getStaleReasonBytes() {
+    java.lang.Object ref = staleReason_;
+    if (ref instanceof java.lang.String) {
+      com.google.protobuf.ByteString b = 
+          com.google.protobuf.ByteString.copyFromUtf8(
+              (java.lang.String) ref);
+      staleReason_ = b;
+      return b;
+    } else {
+      return (com.google.protobuf.ByteString) ref;
+    }
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -270,6 +325,12 @@ private static final long serialVersionUID = 0L;
     }
     if (!stagedNewPkpDigest_.isEmpty()) {
       output.writeBytes(9, stagedNewPkpDigest_);
+    }
+    if (stale_ != false) {
+      output.writeBool(10, stale_);
+    }
+    if (!com.google.protobuf.GeneratedMessage.isStringEmpty(staleReason_)) {
+      com.google.protobuf.GeneratedMessage.writeString(output, 11, staleReason_);
     }
     getUnknownFields().writeTo(output);
   }
@@ -314,6 +375,13 @@ private static final long serialVersionUID = 0L;
       size += com.google.protobuf.CodedOutputStream
         .computeBytesSize(9, stagedNewPkpDigest_);
     }
+    if (stale_ != false) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeBoolSize(10, stale_);
+    }
+    if (!com.google.protobuf.GeneratedMessage.isStringEmpty(staleReason_)) {
+      size += com.google.protobuf.GeneratedMessage.computeStringSize(11, staleReason_);
+    }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
     return size;
@@ -347,6 +415,10 @@ private static final long serialVersionUID = 0L;
         != other.getStagedNewEpoch()) return false;
     if (!getStagedNewPkpDigest()
         .equals(other.getStagedNewPkpDigest())) return false;
+    if (getStale()
+        != other.getStale()) return false;
+    if (!getStaleReason()
+        .equals(other.getStaleReason())) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -380,6 +452,11 @@ private static final long serialVersionUID = 0L;
         getStagedNewEpoch());
     hash = (37 * hash) + STAGED_NEW_PKP_DIGEST_FIELD_NUMBER;
     hash = (53 * hash) + getStagedNewPkpDigest().hashCode();
+    hash = (37 * hash) + STALE_FIELD_NUMBER;
+    hash = (53 * hash) + com.google.protobuf.Internal.hashBoolean(
+        getStale());
+    hash = (37 * hash) + STALE_REASON_FIELD_NUMBER;
+    hash = (53 * hash) + getStaleReason().hashCode();
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -520,6 +597,8 @@ private static final long serialVersionUID = 0L;
       stagedCeremonyId_ = "";
       stagedNewEpoch_ = 0L;
       stagedNewPkpDigest_ = com.google.protobuf.ByteString.EMPTY;
+      stale_ = false;
+      staleReason_ = "";
       return this;
     }
 
@@ -580,6 +659,12 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000100) != 0)) {
         result.stagedNewPkpDigest_ = stagedNewPkpDigest_;
       }
+      if (((from_bitField0_ & 0x00000200) != 0)) {
+        result.stale_ = stale_;
+      }
+      if (((from_bitField0_ & 0x00000400) != 0)) {
+        result.staleReason_ = staleReason_;
+      }
     }
 
     @java.lang.Override
@@ -624,6 +709,14 @@ private static final long serialVersionUID = 0L;
       }
       if (other.getStagedNewPkpDigest() != com.google.protobuf.ByteString.EMPTY) {
         setStagedNewPkpDigest(other.getStagedNewPkpDigest());
+      }
+      if (other.getStale() != false) {
+        setStale(other.getStale());
+      }
+      if (!other.getStaleReason().isEmpty()) {
+        staleReason_ = other.staleReason_;
+        bitField0_ |= 0x00000400;
+        onChanged();
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -696,6 +789,16 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000100;
               break;
             } // case 74
+            case 80: {
+              stale_ = input.readBool();
+              bitField0_ |= 0x00000200;
+              break;
+            } // case 80
+            case 90: {
+              staleReason_ = input.readStringRequireUtf8();
+              bitField0_ |= 0x00000400;
+              break;
+            } // case 90
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -1157,6 +1260,122 @@ private static final long serialVersionUID = 0L;
     public Builder clearStagedNewPkpDigest() {
       bitField0_ = (bitField0_ & ~0x00000100);
       stagedNewPkpDigest_ = getDefaultInstance().getStagedNewPkpDigest();
+      onChanged();
+      return this;
+    }
+
+    private boolean stale_ ;
+    /**
+     * <pre>
+     * This node found its own share stale (see KeyStatusReply.stale) and refuses to sign with it.
+     * </pre>
+     *
+     * <code>bool stale = 10;</code>
+     * @return The stale.
+     */
+    @java.lang.Override
+    public boolean getStale() {
+      return stale_;
+    }
+    /**
+     * <pre>
+     * This node found its own share stale (see KeyStatusReply.stale) and refuses to sign with it.
+     * </pre>
+     *
+     * <code>bool stale = 10;</code>
+     * @param value The stale to set.
+     * @return This builder for chaining.
+     */
+    public Builder setStale(boolean value) {
+
+      stale_ = value;
+      bitField0_ |= 0x00000200;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * This node found its own share stale (see KeyStatusReply.stale) and refuses to sign with it.
+     * </pre>
+     *
+     * <code>bool stale = 10;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearStale() {
+      bitField0_ = (bitField0_ & ~0x00000200);
+      stale_ = false;
+      onChanged();
+      return this;
+    }
+
+    private java.lang.Object staleReason_ = "";
+    /**
+     * <code>string stale_reason = 11;</code>
+     * @return The staleReason.
+     */
+    public java.lang.String getStaleReason() {
+      java.lang.Object ref = staleReason_;
+      if (!(ref instanceof java.lang.String)) {
+        com.google.protobuf.ByteString bs =
+            (com.google.protobuf.ByteString) ref;
+        java.lang.String s = bs.toStringUtf8();
+        staleReason_ = s;
+        return s;
+      } else {
+        return (java.lang.String) ref;
+      }
+    }
+    /**
+     * <code>string stale_reason = 11;</code>
+     * @return The bytes for staleReason.
+     */
+    public com.google.protobuf.ByteString
+        getStaleReasonBytes() {
+      java.lang.Object ref = staleReason_;
+      if (ref instanceof String) {
+        com.google.protobuf.ByteString b = 
+            com.google.protobuf.ByteString.copyFromUtf8(
+                (java.lang.String) ref);
+        staleReason_ = b;
+        return b;
+      } else {
+        return (com.google.protobuf.ByteString) ref;
+      }
+    }
+    /**
+     * <code>string stale_reason = 11;</code>
+     * @param value The staleReason to set.
+     * @return This builder for chaining.
+     */
+    public Builder setStaleReason(
+        java.lang.String value) {
+      if (value == null) { throw new NullPointerException(); }
+      staleReason_ = value;
+      bitField0_ |= 0x00000400;
+      onChanged();
+      return this;
+    }
+    /**
+     * <code>string stale_reason = 11;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearStaleReason() {
+      staleReason_ = getDefaultInstance().getStaleReason();
+      bitField0_ = (bitField0_ & ~0x00000400);
+      onChanged();
+      return this;
+    }
+    /**
+     * <code>string stale_reason = 11;</code>
+     * @param value The bytes for staleReason to set.
+     * @return This builder for chaining.
+     */
+    public Builder setStaleReasonBytes(
+        com.google.protobuf.ByteString value) {
+      if (value == null) { throw new NullPointerException(); }
+      checkByteStringIsUtf8(value);
+      staleReason_ = value;
+      bitField0_ |= 0x00000400;
       onChanged();
       return this;
     }
