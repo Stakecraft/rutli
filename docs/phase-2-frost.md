@@ -55,8 +55,12 @@
 > A real consensus layer would only be warranted later if the cluster must self-manage membership or
 > coordinate proactive refresh without an external trigger; revisit then, not before.
 >
-> - **Share sealing (software, done):** shares stored as AES-256-GCM envelopes, per-node key via
->   HKDF from an operator-injected secret (`share_seal.secret_env`). Closes the at-rest exposure;
+> - **Share sealing (software, done):** shares stored as AES-256-GCM envelopes under a per-node
+>   key. Since 0.4.0-rc.2 each node reads its own **seal bundle** file (`share_seal.secret_file`:
+>   that node's DEK and hosted-key distribution seed only; `rutli-cosigner seal new-node` /
+>   `seal split-legacy`), with peers' distribution keys pinned in config. The legacy shared master
+>   (`share_seal.secret_env`, per-node keys via HKDF) still works but lets whoever reads it derive
+>   every node's key (audit C3; docs/runbook-per-node-seal.md). Closes the at-rest exposure;
 >   enclave/HSM sealing (which also protects share memory during signing) plugs into the same seam.
 >
 > - **Proactive share refresh (done):** `Signer.Refresh` RPC / `rutli-cosigner refresh` — dealer-free
@@ -333,9 +337,12 @@ exposure from the FROST round packages that normally travel there. Transport mTL
 - A service-mesh sidecar (Istio, Linkerd) terminating TLS on the pod's behalf would see the
   plaintext private key. That is an ordinary, unremarkable Kubernetes deployment, not an exotic
   attack.
-- The cluster CA also signs the **driver's** certificate, and every cosigner certificate carries the
-  same shared `rutli-cosigner` SAN. As *Who can call which API* above puts it, the transport proves
-  cluster membership, not identity — it cannot tell peer 2 from peer 3.
+- The cluster CA also signs the **driver's** certificate, and certificates before 0.4.0-rc.2 carry
+  the same shared `rutli-cosigner` SAN. As *Who can call which API* above puts it, the transport
+  proved cluster membership, not identity. Since rc.2 each peer is dialled under its own name
+  (`cosigner<id>`) and a mesh caller is identified by its exact client CN (audit M3), which tells
+  peer 2 from peer 3 at the transport too; the envelope below still binds material to the
+  recipient underneath any TLS-terminating proxy.
 
 Key material is therefore sealed to **one specific recipient node** underneath the TLS, HPKE-style:
 

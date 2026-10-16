@@ -11,8 +11,30 @@ The Rütli driver only ever receives an **opaque pre-hashed payload** from Canto
 digest — see `docs/wire-contract.md`). So approval is expressed over the **KMS key**, not
 transaction semantics: an approver authorizes "a signature by key *X* over digest *D*", not "add
 party Y". Richer, content-aware approval would require context Canton does not pass at the KMS-driver
-layer. Be honest about this with auditors; it is still a strong control (nothing signs with the
-gated key without a fresh, cryptographically-attributable human quorum).
+layer. Be honest about this with auditors.
+
+### Where approvals are enforced — today, only in the driver
+
+> ⚠️ **Approvals do not yet bind at the cosigners.** The quorum is checked inside the Rütli driver,
+> in the Canton participant's process, before it calls the cluster. The cosigners themselves never
+> see an approval and sign any well-formed request from an allowed caller. So, until cosigner-side
+> intent enforcement lands (a driver-signed intent carrying the approval proof, verified by every
+> participating cosigner before it releases a signature share — planned in the audit remediation),
+> the gate can be bypassed by:
+>
+> - **anyone holding the driver's client certificate and key** (CN on `signer_allowlist`): they can
+>   call `Signer.Sign` on any cosigner directly, without the driver, its approval gate or its
+>   signing journal;
+> - **a compromised cosigner**: its mesh certificate can drive the raw signing rounds on its peers
+>   (`peer_allowlist` admits it by design), so it can obtain the other shares it needs for a
+>   threshold signature over a digest of its choosing.
+>
+> What the gate does give today: the participant itself — Canton, the driver, anyone who can only
+> make the *node* request a signature — cannot sign with a gated key without the quorum, and every
+> decision is in the hash-chained audit log. Treat it as a control on the participant, not on the
+> cluster. Protect the driver key accordingly (it is, for now, a signing credential for every
+> non-gated *and* gated key), and do not describe approvals to auditors as cluster-enforced until the
+> intent enforcement ships.
 
 ## Model
 
@@ -27,7 +49,8 @@ gated key without a fresh, cryptographically-attributable human quorum).
   every signature against the configured keys and counts **each approver at most once** — separation
   of duties is cryptographic, not advisory.
 - The `sign` call blocks (up to `timeout`) until the threshold is met, then proceeds to the backend
-  (for the namespace key: quorum approval happens *before* the FROST threshold signature). No quorum
+  (for the namespace key: quorum approval happens *before* the FROST threshold signature, in the
+  driver — the cosigners do not check it yet; see above). No quorum
   in time → the operation fails non-retryably, and the outcome is written to the audit log.
 
 Default is **no gating** — nodes bootstrap and low-value keys sign without interaction. Operators opt
