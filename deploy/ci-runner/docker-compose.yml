@@ -1,0 +1,18 @@
+# Started by scripts/ci-runner-up.sh. One runner, one job at a time.
+#
+# Jobs talk to the HOST docker daemon (frost-tls-smoke runs `docker compose` with bind mounts of
+# repo paths). Bind-mount sources resolve on the host, so the job work dir is mounted at the SAME
+# absolute path inside the runner as on the host — otherwise those mounts would point at nothing.
+services:
+  runner:
+    build: .
+    image: rutli-ci-runner:local
+    restart: unless-stopped
+    environment:
+      RUNNER_TOKEN: ${RUNNER_TOKEN:-}
+      RUNNER_NAME: ${RUNNER_NAME:-rutli-ci-local}
+      RUNNER_LABELS: rutli-ci
+      RUNNER_WORKDIR: ${RUNNER_WORKDIR:?set by scripts/ci-runner-up.sh}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${RUNNER_WORKDIR}:${RUNNER_WORKDIR}

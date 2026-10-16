@@ -13,10 +13,12 @@ env:
   CANTON_TAG: v3.6.1
   SBT_OPTS: "-Xmx4g -Xss8m"
 
+# Every job runs on `vars.CI_RUNNER` when that repository variable is set (e.g. `rutli-ci`, the
+# self-hosted runner in deploy/ci-runner), otherwise on GitHub's `ubuntu-latest`.
 jobs:
   test:
     name: Unit tests + assembly
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -56,7 +58,7 @@ jobs:
 
   frost:
     name: FROST core (Rust)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -72,7 +74,7 @@ jobs:
 
   deploy-policy:
     name: Deploy manifests policy (Helm + kustomize)
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
@@ -84,7 +86,7 @@ jobs:
 
   frost-tls-smoke:
     name: FROST TLS cluster smoke
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - name: mTLS + sealed-share compose smoke (Health / DKG / Sign)
@@ -92,7 +94,7 @@ jobs:
 
   conformance:
     name: Canton conformance suite
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     # Heavy (publishes a large slice of Canton locally) — run on schedule/manual, not per-PR.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
