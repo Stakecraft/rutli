@@ -2,7 +2,8 @@
 # CI gate for the alert rules: `promtool check rules` on deploy/monitoring/prometheus-rules.yml (the
 # source of truth the compose/soak stacks load) and on the rule groups of the rendered
 # PrometheusRule (deploy/monitoring/k8s/prometheusrule.yaml), which must also be the current render
-# of the former. Duplicate rules are fatal (--lint-fatal).
+# of the former. Duplicate rules are fatal (--lint-fatal). Every PromQL expression of the Grafana
+# dashboard (deploy/monitoring/grafana-dashboard.json) is parsed the same way, as recording rules.
 #
 #   scripts/ci-prometheus-rules.sh     (from anywhere; needs python3 + PyYAML, yq v4, and docker
 #                                       or PROMTOOL=/path/to/promtool)
@@ -44,3 +45,26 @@ kind="$(yq -N '.kind' "$M/k8s/prometheusrule.yaml")"
 [ "$kind" = "PrometheusRule" ] || { echo "k8s/prometheusrule.yaml: kind is '$kind', not PrometheusRule" >&2; exit 1; }
 yq '{"groups": .spec.groups}' "$M/k8s/prometheusrule.yaml" >"$OUT/prometheusrule-groups.yml"
 promtool check rules --lint=duplicate-rules --lint-fatal "$OUT/prometheusrule-groups.yml"
+
+echo "==> promtool parses every grafana-dashboard.json query"
+python3 - "$M/grafana-dashboard.json" >"$OUT/dashboard-queries.yml" <<'PY'
+import json, sys
+
+def panels(ps):
+    for p in ps:
+        yield p
+        yield from panels(p.get("panels", []))
+
+d = json.load(open(sys.argv[1]))
+rules, ids = [], set()
+for p in panels(d["panels"]):
+    if p["id"] in ids:
+        sys.exit(f"grafana-dashboard.json: duplicate panel id {p['id']}")
+    ids.add(p["id"])
+    for t in p.get("targets", []):
+        rules.append({"record": f"dashboard:panel{p['id']}:{t['refId']}", "expr": t["expr"]})
+if not rules:
+    sys.exit("grafana-dashboard.json: no queries found")
+json.dump({"groups": [{"name": "grafana-dashboard", "rules": rules}]}, sys.stdout, indent=1)
+PY
+promtool check rules "$OUT/dashboard-queries.yml"

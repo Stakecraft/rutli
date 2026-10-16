@@ -19,6 +19,10 @@
 #   rutli_epoch_mismatch_total                                       counter
 #   rutli_epoch_check_skipped_total                                  counter
 #   rutli_stale_share{key=...}                                       gauge (0|1)
+#   rutli_ceremonies_staged                                          gauge
+#   rutli_ceremonies_split                                           gauge
+#   rutli_ceremony_equivocations_total                               counter
+#   rutli_nonce_markers                                              gauge
 #   rutli_lock_poison_recoveries_total{lock=...}                     counter
 #   rutli_pending_sign_sessions                                      gauge
 #   rutli_keystore_unreadable                                        gauge (0|1)
