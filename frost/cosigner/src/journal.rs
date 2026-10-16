@@ -23,12 +23,23 @@
 //! journal refuse to open, and with it this node's signing for that key (fail closed — other
 //! nodes keep the cluster signing).
 //!
+//! **I/O errors.** An append that fails anywhere after the segment is opened (a partial write, an
+//! fsync error on a hung volume) is rolled back to the last acknowledged length (`set_len`, best
+//! effort), and the key's open journal is dropped from memory, so the next use reopens it from
+//! disk: a torn tail is truncated there, a complete line whose fsync merely reported an error is
+//! taken as the head — never a second entry with the same `seq`/`prev`, which would fork the chain
+//! and make the key's journal refuse to open after the next restart. A per-key lock poisoned by a
+//! panic mid-append is treated the same way.
+//!
 //! **Rate limit.** The per-key ceiling (per minute, per rolling 24 h) is charged when an entry is
-//! appended for a *new* charge id — the intent's request id, or the session for a sign without an
-//! intent — so the t-subset retries and leader failovers of one driver call share one charge, and
-//! a replayed intent costs nothing more but is capped at `max_shares_per_request` releases. The
-//! state is rebuilt from the journal's last 24 h on first use after a restart, so a restart does
-//! not reset the limit.
+//! appended for a *new* charge id — the intent's request id **and** the SHA-256 of the intent
+//! bytes, or the session for a sign without an intent — so the t-subset retries and leader
+//! failovers of one driver call (one signed intent, forwarded unchanged) share one charge, and a
+//! replayed intent costs nothing more but is capped at `max_shares_per_request` releases. A client
+//! that re-uses one request id for another digest signs another intent, which is a new charge (the
+//! request id is chosen by the client; binding only it would let one id amortize any number of
+//! digests). The state is rebuilt from the journal's last 24 h on first use after a restart, so a
+//! restart does not reset the limit.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Write;
@@ -95,10 +106,11 @@ impl JournalEntry {
     }
 
     /// What the rate limit charges this entry to (`None`: not charged — the sign test has its own
-    /// limiter).
+    /// limiter). An intent's charge binds the authorized operation, not just the client-chosen
+    /// request id: `r:<request id>:<intent sha256>` (audit R1).
     fn charge_id(&self) -> Option<String> {
         match self.purpose.as_str() {
-            PURPOSE_SIGN => Some(format!("r:{}", self.request_id)),
+            PURPOSE_SIGN => Some(format!("r:{}:{}", self.request_id, self.intent_sha256)),
             PURPOSE_NO_INTENT => Some(format!("s:{}", self.session_id)),
             _ => None,
         }
@@ -136,7 +148,31 @@ pub struct SignJournal {
     node: u16,
     retention: Retention,
     keys: Mutex<HashMap<String, Arc<Mutex<KeyJournal>>>>,
+    /// Injected I/O faults (tests only), consumed one per append.
+    #[cfg(test)]
+    faults: Mutex<VecDeque<Fault>>,
 }
+
+/// An I/O fault a test injects into the next append.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fault {
+    /// Half the line is written, then the write fails (ENOSPC/EIO mid-write).
+    PartialWrite,
+    /// The whole line is written, then the fsync fails (and the rollback works).
+    SyncFails,
+    /// The whole line is written, the fsync fails, and so does the rollback's `set_len` (a hung
+    /// volume): the line stays on disk without being acknowledged.
+    SyncAndRollbackFail,
+    /// A partial write whose rollback fails too: a torn tail stays on disk.
+    PartialWriteNoRollback,
+}
+
+#[cfg(test)]
+type FaultArg = Fault;
+/// No faults outside tests.
+#[cfg(not(test))]
+type FaultArg = std::convert::Infallible;
 
 /// One key's open journal plus its rate-limit ledger.
 struct KeyJournal {
@@ -149,6 +185,10 @@ struct KeyJournal {
     charges: VecDeque<(u64, String)>,
     /// Shares released per charge id within the same window.
     shares: HashMap<String, u32>,
+    /// An append failed (or a holder panicked) after touching the segment: memory may no longer
+    /// match the disk, so nobody may append through this instance again — it is evicted and the
+    /// next use reopens the journal from disk.
+    broken: bool,
 }
 
 impl SignJournal {
@@ -157,7 +197,14 @@ impl SignJournal {
     pub fn open(dir: impl Into<PathBuf>, node: u16, retention: Retention) -> Result<Self> {
         let dir = dir.into();
         std::fs::create_dir_all(&dir)?;
-        Ok(Self { dir, node, retention, keys: Mutex::new(HashMap::new()) })
+        Ok(Self {
+            dir,
+            node,
+            retention,
+            keys: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            faults: Mutex::new(VecDeque::new()),
+        })
     }
 
     pub fn dir(&self) -> &Path {
@@ -175,13 +222,54 @@ impl SignJournal {
         Ok(k)
     }
 
+    /// Drop `key_id`'s open journal if it is still `k` (a broken or poisoned instance): the next
+    /// use reopens it from disk.
+    fn evict(&self, key_id: &str, k: &Arc<Mutex<KeyJournal>>) {
+        let mut keys = self.keys.lock().unwrap_or_else(|p| p.into_inner());
+        if keys.get(key_id).is_some_and(|cur| Arc::ptr_eq(cur, k)) {
+            keys.remove(key_id);
+        }
+    }
+
     /// Charge (if `entry` has a new charge id) against `limits`, then append `entry` durably — or
     /// refuse with [`DaemonError::RateLimited`] and append nothing. `seq`, `ts_ms`, `node`, `prev`
     /// and `hash` are filled in here. The check and the append are one step per key.
-    pub fn append_charged(&self, mut entry: JournalEntry, limits: Limits, now_ms: u64) -> Result<JournalEntry> {
-        let key = self.key(&entry.key_id, now_ms)?;
-        let mut guard = key.lock().unwrap_or_else(|p| p.into_inner());
-        let k = &mut *guard;
+    pub fn append_charged(&self, entry: JournalEntry, limits: Limits, now_ms: u64) -> Result<JournalEntry> {
+        // A broken or poisoned instance is evicted and the journal reopened from disk; twice in a
+        // row means the disk itself is the problem, and the caller gets the error.
+        for _ in 0..2 {
+            let key = self.key(&entry.key_id, now_ms)?;
+            let mut guard = match key.lock() {
+                Ok(g) => g,
+                Err(poisoned) => {
+                    // A holder panicked mid-append: its write may or may not be on disk.
+                    let mut g = poisoned.into_inner();
+                    g.broken = true;
+                    drop(g);
+                    self.evict(&entry.key_id, &key);
+                    crate::sync::note("sign_journal", "reopened");
+                    continue;
+                }
+            };
+            if guard.broken {
+                drop(guard);
+                self.evict(&entry.key_id, &key);
+                continue;
+            }
+            let result = self.charge_and_append(&mut guard, entry.clone(), limits, now_ms);
+            if guard.broken {
+                drop(guard);
+                self.evict(&entry.key_id, &key);
+            }
+            return result;
+        }
+        Err(DaemonError::Journal(format!(
+            "sign journal of {} could not be reopened after an I/O error — refusing to sign with this key on this node",
+            entry.key_id
+        )))
+    }
+
+    fn charge_and_append(&self, k: &mut KeyJournal, mut entry: JournalEntry, limits: Limits, now_ms: u64) -> Result<JournalEntry> {
         k.prune(now_ms);
         if let Some(id) = entry.charge_id() {
             match k.shares.get(&id) {
@@ -216,7 +304,11 @@ impl SignJournal {
         }
         entry.node = self.node;
         entry.ts_ms = now_ms;
-        let written = k.append(entry, self.retention, now_ms)?;
+        #[cfg(test)]
+        let fault = self.faults.lock().unwrap().pop_front();
+        #[cfg(not(test))]
+        let fault = None;
+        let written = k.append(entry, self.retention, now_ms, fault)?;
         if let Some(id) = written.charge_id() {
             let n = k.shares.entry(id.clone()).or_insert(0);
             if *n == 0 {
@@ -302,6 +394,7 @@ impl KeyJournal {
             head,
             charges: VecDeque::new(),
             shares: HashMap::new(),
+            broken: false,
         };
         for e in recent.iter().filter(|e| e.ts_ms + DAY_MS > now_ms) {
             if let Some(id) = e.charge_id() {
@@ -326,7 +419,16 @@ impl KeyJournal {
         }
     }
 
-    fn append(&mut self, mut entry: JournalEntry, retention: Retention, now_ms: u64) -> Result<JournalEntry> {
+    /// Append one entry durably. On any error after the segment is touched the file is cut back to
+    /// the last acknowledged length (best effort) and this instance is marked broken, so the caller
+    /// evicts it and the next append reopens the journal from disk (see the module doc).
+    fn append(
+        &mut self,
+        mut entry: JournalEntry,
+        retention: Retention,
+        now_ms: u64,
+        #[allow(unused_variables)] fault: Option<FaultArg>,
+    ) -> Result<JournalEntry> {
         if self.current_len >= SEGMENT_BYTES {
             let next = self.dir.join(segment_name(self.seq + 1));
             std::fs::File::create(&next)?.sync_all()?;
@@ -341,8 +443,34 @@ impl KeyJournal {
         let mut line = serde_json::to_vec(&entry)?;
         line.push(b'\n');
         let mut f = std::fs::OpenOptions::new().append(true).open(&self.current)?;
-        f.write_all(&line)?;
-        f.sync_data()?;
+        let written = (|| -> std::io::Result<()> {
+            #[cfg(test)]
+            if matches!(fault, Some(Fault::PartialWrite) | Some(Fault::PartialWriteNoRollback)) {
+                f.write_all(&line[..line.len() / 2])?;
+                return Err(std::io::Error::other("injected: partial write"));
+            }
+            f.write_all(&line)?;
+            #[cfg(test)]
+            if matches!(fault, Some(Fault::SyncFails) | Some(Fault::SyncAndRollbackFail)) {
+                return Err(std::io::Error::other("injected: fsync failed"));
+            }
+            f.sync_data()
+        })();
+        if let Err(e) = written {
+            self.broken = true;
+            #[cfg(test)]
+            let skip_rollback = matches!(fault, Some(Fault::SyncAndRollbackFail) | Some(Fault::PartialWriteNoRollback));
+            #[cfg(not(test))]
+            let skip_rollback = false;
+            let rolled_back = !skip_rollback && f.set_len(self.current_len).and_then(|()| f.sync_all()).is_ok();
+            tracing::error!(
+                file = %self.current.display(),
+                error = %e,
+                rolled_back,
+                "sign journal append failed — the share is refused; the journal is reopened from disk on next use"
+            );
+            return Err(e.into());
+        }
         self.current_len += line.len() as u64;
         self.seq = entry.seq;
         self.head = entry.hash.clone();
@@ -547,6 +675,98 @@ mod tests {
             j.append_charged(e, LIMITS, t0 + DAY_MS + 3 * MINUTE_MS + i).unwrap();
         }
         assert_eq!(read_key_dir(&tmp.path().join("k")).unwrap().entries.len(), 17);
+    }
+
+    /// Audit R1: the charge binds the authorized operation. One request id re-used for two intents
+    /// over different digests is two charges; the same signed intent again (a t-subset retry or a
+    /// leader failover forwards it unchanged) is still one.
+    #[test]
+    fn one_request_id_for_two_digests_is_two_charges() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t0 = 1_800_000_000_000u64;
+        let limits = Limits { per_min: 2, per_day: 100, max_shares_per_charge: 3 };
+        let j = SignJournal::open(tmp.path(), 1, KEEP).unwrap();
+        let intent = |digest: &str, intent_sha: &str| {
+            let mut e = entry("k", "0f".repeat(16).as_str());
+            e.digest = digest.into();
+            e.intent_sha256 = intent_sha.into();
+            e
+        };
+        let a = intent(&"12".repeat(34), &"aa".repeat(32));
+        let b = intent(&"13".repeat(34), &"bb".repeat(32));
+        j.append_charged(a.clone(), limits, t0).unwrap();
+        // Retries / failovers of the same intent: no new charge.
+        j.append_charged(a.clone(), limits, t0 + 1).unwrap();
+        j.append_charged(a.clone(), limits, t0 + 2).unwrap();
+        // Same request id, another digest: a second charge (the minute's limit of 2 is now full).
+        j.append_charged(b.clone(), limits, t0 + 3).unwrap();
+        let c = intent(&"14".repeat(34), &"cc".repeat(32));
+        assert!(
+            matches!(j.append_charged(c, limits, t0 + 4), Err(DaemonError::RateLimited(_))),
+            "a third digest under the same request id is a third charge, refused by the per-minute limit"
+        );
+        // The per-charge share cap applies to each intent separately.
+        assert!(matches!(j.append_charged(a, limits, t0 + 5), Err(DaemonError::RateLimited(_))));
+        j.append_charged(b, limits, t0 + 6).unwrap();
+        let k = j.keys.lock().unwrap().get("k").unwrap().clone();
+        let k = k.lock().unwrap();
+        assert_eq!(k.charges.len(), 2, "two slots: {:?}", k.charges);
+    }
+
+    /// Audit F1: an append that fails after touching the segment never leaves the file and the
+    /// in-memory head out of step: the next appends continue the chain, and the journal reopens.
+    #[test]
+    fn a_failed_append_rolls_back_and_the_chain_stays_intact() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t0 = 1_800_000_000_000u64;
+        let unlimited = Limits { per_min: 0, per_day: 0, max_shares_per_charge: u32::MAX };
+        let j = SignJournal::open(tmp.path(), 1, KEEP).unwrap();
+        j.append_charged(entry("k", "a"), unlimited, t0).unwrap();
+
+        // 1. A partial write: refused, the torn half is cut back, the next append is seq 2.
+        j.faults.lock().unwrap().push_back(Fault::PartialWrite);
+        assert!(matches!(j.append_charged(entry("k", "b"), unlimited, t0 + 1), Err(DaemonError::Io(_))));
+        assert_eq!(read_key_dir(&tmp.path().join("k")).unwrap().torn_tail_bytes, 0, "rolled back");
+        assert_eq!(j.append_charged(entry("k", "b"), unlimited, t0 + 2).unwrap().seq, 2);
+
+        // 2. An fsync error after a full write, rollback works: the line is gone, seq 3 is next.
+        j.faults.lock().unwrap().push_back(Fault::SyncFails);
+        assert!(j.append_charged(entry("k", "c"), unlimited, t0 + 3).is_err());
+        assert_eq!(read_key_dir(&tmp.path().join("k")).unwrap().entries.len(), 2);
+        assert_eq!(j.append_charged(entry("k", "c"), unlimited, t0 + 4).unwrap().seq, 3);
+
+        // 3. An fsync error and a failed rollback (hung volume): the complete line stays on disk
+        // unacknowledged. The instance was evicted, so the next append reopens from disk, takes
+        // that line as the head and continues after it — never a second seq 4.
+        j.faults.lock().unwrap().push_back(Fault::SyncAndRollbackFail);
+        assert!(j.append_charged(entry("k", "d"), unlimited, t0 + 5).is_err());
+        assert_eq!(read_key_dir(&tmp.path().join("k")).unwrap().entries.len(), 4, "the unacknowledged line stayed");
+        assert_eq!(j.append_charged(entry("k", "e"), unlimited, t0 + 6).unwrap().seq, 5);
+
+        // 4. A partial write whose rollback fails too: the torn tail stays until the reopen cuts it.
+        j.faults.lock().unwrap().push_back(Fault::PartialWriteNoRollback);
+        assert!(j.append_charged(entry("k", "f"), unlimited, t0 + 7).is_err());
+        assert!(read_key_dir(&tmp.path().join("k")).unwrap().torn_tail_bytes > 0);
+        assert_eq!(j.append_charged(entry("k", "f"), unlimited, t0 + 8).unwrap().seq, 6);
+
+        // 5. A holder panicking mid-append poisons the per-key lock: evicted and reopened.
+        let key = j.key("k", t0 + 9).unwrap();
+        let k2 = key.clone();
+        let _ = std::thread::spawn(move || {
+            let _g = k2.lock().unwrap();
+            panic!("injected: a holder panics mid-append");
+        })
+        .join();
+        assert!(key.is_poisoned());
+        assert_eq!(j.append_charged(entry("k", "g"), unlimited, t0 + 10).unwrap().seq, 7);
+
+        let report = read_key_dir(&tmp.path().join("k")).unwrap();
+        assert_eq!(report.entries.iter().map(|e| e.seq).collect::<Vec<_>>(), vec![1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(report.torn_tail_bytes, 0);
+        drop(j);
+        // A restart opens it cleanly and continues.
+        let j = SignJournal::open(tmp.path(), 1, KEEP).unwrap();
+        assert_eq!(j.append_charged(entry("k", "h"), unlimited, t0 + 11).unwrap().seq, 8);
     }
 
     #[test]
