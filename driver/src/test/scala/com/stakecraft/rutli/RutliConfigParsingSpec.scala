@@ -51,6 +51,15 @@ class RutliConfigParsingSpec extends AnyWordSpec with Matchers {
       )
     }
 
+    "read sign-intents (audit F5), on by default" in {
+      parse("""backend = "frost"
+        frost = { endpoint = "c1:9101" }""").frost.map(_.signIntentsEnabled) shouldBe Some(true)
+      parse("""backend = "frost"
+        frost = { endpoint = "c1:9101", sign-intents = off }""").frost.map(_.signIntentsEnabled) shouldBe Some(false)
+      parse("""backend = "frost"
+        frost = { endpoint = "c1:9101", sign-intents = on }""").frost.map(_.signIntentsEnabled) shouldBe Some(true)
+    }
+
     "read key-prefix" in {
       val c = parse("""
         backend = "frost"
