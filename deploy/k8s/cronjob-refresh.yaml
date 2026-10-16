@@ -1,16 +1,27 @@
 # Copyright 2026 StakeCraft
 # SPDX-License-Identifier: Apache-2.0
 #
-# DO NOT ENABLE YET: until the ceremony fixes ship (audit C1: the leader sees every round-2 package;
-# H1: a refresh interrupted between nodes can leave mixed share epochs), a refresh is a risk to the
-# key, not a mitigation. See docs/runbook-per-node-seal.md.
+# Enable only on a cluster where EVERY cosigner runs 0.4.0-rc.2 or later (ceremony protocol 2: the
+# leader never sees a round-2 package, audit C1; two-phase commit, audit H1). Never on a mixed
+# cluster. See docs/ceremonies.md.
 #
 # Example: weekly proactive share refresh. Runs against one Signer endpoint; the leader fences the
 # key cluster-wide, so drain heavy topology traffic first (or accept SignInProgress retries).
-# Set KEY_ID to the FROST key (e.g. frost-participant1-namespace). Runs as the driver role (CN
-# `driver`, on signer_allowlist): it mounts ONLY the driver's cert/key (Secret rutli-driver-tls,
-# kubernetes.io/tls) and the CA (rutli-cosigner-ca) — never a cosigner key — with the client config
-# client-driver.json from rutli-client-config (client-config.yaml).
+# Set KEY_ID to the FROST key (e.g. frost-participant1-namespace).
+#
+# Runs as the REFRESHER role (audit C2): a certificate on the cosigners' `refresh_allowlist`, which
+# may call Refresh and KeyStatus and nothing else — never Sign. It mounts ONLY that cert/key (Secret
+# rutli-refresher-tls, kubernetes.io/tls) and the CA (rutli-cosigner-ca) — never the driver's or a
+# cosigner's key — with client-refresher.json from rutli-client-config (client-config.yaml).
+# `scripts/gen-frost-certs.sh` issues `refresher.{crt,key}`.
+#
+# No refresher certificate yet (a cluster whose CA key is lost, until docs/ca-rotation.md issues
+# one)? Use the operator certificate: put its CN in the cosigners' `refresh_allowlist` too
+# (`refreshAllowlist: [operator]` in the chart; the operator role cannot sign either), create the
+# Secret from operator.{crt,key} under the name rutli-refresher-tls, and change client-refresher.json's
+# cert paths to the operator files. Do NOT use the driver certificate: once
+# `signing_policy.signer_may_refresh` is off (the target state) the cosigners refuse it, and a job
+# that carries the driver key is a signing credential sitting in a CronJob.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -44,7 +55,7 @@ spec:
                 - -c
                 - |
                   set -eu
-                  rutli-cosigner --config /config/client-driver.json \
+                  rutli-cosigner --config /config/client-refresher.json \
                     refresh --key-id "$KEY_ID" \
                     --target https://rutli-node-1.rutli.svc:9101
               securityContext:
@@ -66,7 +77,7 @@ spec:
                 sources:
                   - secret: { name: rutli-cosigner-ca, items: [{ key: ca.crt, path: ca.crt }] }
                   - secret:
-                      name: rutli-driver-tls
-                      items: [{ key: tls.crt, path: driver.crt }, { key: tls.key, path: driver.key }]
+                      name: rutli-refresher-tls
+                      items: [{ key: tls.crt, path: refresher.crt }, { key: tls.key, path: refresher.key }]
             - name: tmp
               emptyDir: {}

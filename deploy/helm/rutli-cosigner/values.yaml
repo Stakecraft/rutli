@@ -115,6 +115,30 @@ peerAllowlist: []
 # the driver cert). Must not share a CN with signerAllowlist or peerAllowlist.
 operatorAllowlist: []
 
+# Client cert CNs of the refresher role (audit C2): Refresh + KeyStatus only, never Sign — the
+# certificate the refresh CronJob carries. May be the operator CN (both roles cannot sign), e.g.
+# [operator] until a `refresher` certificate is issued (gen-frost-certs.sh issues one). Must not share
+# a CN with signerAllowlist or peerAllowlist. Empty = no refresher role (the driver role keeps
+# Refresh while signingPolicy.signer_may_refresh is on).
+refreshAllowlist: []
+
+# Cosigner-side signing policy (audit C2), written into every node's config as `signing_policy`
+# verbatim — snake_case keys exactly as docs/approval-quorum.md documents them. Empty = defaults:
+# signing intents verified when present but not required, no ACLs or pins, 300/min and 20000/day
+# per key, journal kept 90 days / 64 MiB per key. Switch enforcement on (require_intent,
+# signer_acl_required, signer_may_refresh: false) only after every cosigner AND the driver run this
+# release. Example:
+#   signingPolicy:
+#     require_intent: true
+#     signer_acl_required: true
+#     signer_may_refresh: false
+#     signer_acl: { driver: ["participant1-"] }
+#     signer_pins: { driver: ["<sha256 of the driver cert's SPKI>"] }
+#     rate_limits: [{ key_id_prefix: "participant1-frost-namespace", per_min: 10, per_day: 200 }]
+#     rules: [{ key_id_prefix: "participant1-frost-namespace", mode: quorum, threshold: 2 }]
+#     approvers: [{ id: alice, public_key_spki_b64: "MCowBQYDK2VwAyEA..." }]
+signingPolicy: {}
+
 # topology=legacy only: the tls.domain written into each config. Since 0.4.0-rc.2 the cosigners
 # verify each peer under its own name (cosigner<id>) whatever this says; it only remains the
 # fallback name for operator commands against a non-roster target.

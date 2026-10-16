@@ -12,7 +12,7 @@ cosigner.yaml          GENERATED from the Helm chart (scripts/render-k8s.sh + va
                        PVC and a backup PVC; the config, headless Service, NetworkPolicy, PDB
 values.yaml            the chart values cosigner.yaml is rendered with
 client-config.yaml     client configs for the operator CLI Jobs (driver / operator role)
-cronjob-refresh.yaml   opt-in, NOT YET: weekly proactive share refresh (driver cert only)
+cronjob-refresh.yaml   opt-in: weekly proactive share refresh (refresher cert only — never the driver's)
 job-verify-key.example.yaml  split ceremony: one-off verify-key with a temporary operator cert
 secrets.example.yaml   shape of the Secrets you create out-of-band (never commit real ones)
 kustomization.yaml     applies namespace + cosigner.yaml + client-config.yaml
@@ -159,8 +159,12 @@ seal bundle, so one node must not be able to act as, or decrypt for, another.
 - **Residual risk, stated plainly:** anyone with `get secrets` in this namespace, or cluster-admin,
   still reads every node's Secret. Restrict `secrets` RBAC to the people who could run the ceremony
   anyway; for genuinely separate trust domains run each cosigner in its own cluster/account.
-- The refresh CronJob mounts only the driver's cert (`rutli-driver-tls`); the operator cert for
+- The refresh CronJob mounts only the refresher's cert (`rutli-refresher-tls`, CN on
+  `refresh_allowlist`: Refresh and KeyStatus, never Sign — audit C2); the operator cert for
   `verify-key` is never a standing Secret (`job-verify-key.example.yaml` creates and deletes it).
+- Every signature needs a driver-signed intent that each participating node verifies itself, once
+  `signing_policy.require_intent` is on (docs/approval-quorum.md); each node journals every share it
+  releases under `data_dir/journal` (`rutli-cosigner audit-cross-check`, docs/audit-cross-check.md).
 - Each node verifies each peer under the peer's own TLS name (`cosigner<id>`) and identifies a mesh
   caller by its exact client CN (audit M3); the driver does the same per endpoint (§4).
 - Certificates and bundles are read at startup: after rotating a Secret, restart that pod.
@@ -196,7 +200,8 @@ rm -rf $d
 ```
 
 Then, once every pod is Ready and signing, delete `rutli-cosigner-tls`. If you run the refresh
-CronJob, create `rutli-driver-tls` from the driver's cert first. The `ca.crt` bytes must not change
+CronJob, create `rutli-refresher-tls` from the refresher's cert first (or the operator's, see the
+CronJob's header). The `ca.crt` bytes must not change
 (the split ceremony's cluster id is a hash of them), which copying it as above guarantees.
 
 
@@ -219,11 +224,12 @@ and mounts the same volume read-only. A CSI volume snapshot is fine (storage lay
   destination, render with `backup.destination.type: script` and per-node credentials (chart
   README, "Backups"). There is no backup CronJob and no `pods/exec` RBAC: the exec-based backup of
   earlier releases could read every node's seal secret (audit C3).
-- **Proactive refresh**: **not until the ceremony fixes ship** (audit C1/H1 — see
-  `docs/runbook-per-node-seal.md`). Then: `rutli-cosigner --config /config/client-driver.json refresh --key-id frost-<participant>-namespace`
-  with the driver's identity (a cosigner cert is not on `signer_allowlist`) — same key, rotated
-  shares. Example CronJob: `cronjob-refresh.yaml` (set `KEY_ID`; mounts only `rutli-driver-tls`).
-  Refresh fences signing cluster-wide; avoid topology bursts mid-refresh.
+- **Proactive refresh**: only with every cosigner on 0.4.0-rc.2 or later (ceremony protocol 2,
+  audit C1/H1). `rutli-cosigner --config /config/client-refresher.json refresh --key-id frost-<participant>-namespace`
+  with the refresher's identity (`refresh_allowlist`; the driver role keeps Refresh only while
+  `signing_policy.signer_may_refresh` is on) — same key, rotated shares. Example CronJob:
+  `cronjob-refresh.yaml` (set `KEY_ID`; mounts only `rutli-refresher-tls`). Refresh fences signing
+  cluster-wide; avoid topology bursts mid-refresh.
 - **Restore** a replaced node: its data PVC is empty → copy the newest tar out of its backup PVC
   and restore through the cosigner's own container (`docs/disaster-recovery.md`), then delete the
   pod so the daemon reopens its key store. Or (once shipped) repair from `t` survivors.

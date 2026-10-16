@@ -172,12 +172,32 @@ Verify:
   ```
 - A fresh copy of the state still passes `StateCheck` (step 2), with more entries.
 
+### Signing intents (audit C2) on the soak
+
+rc.2 cosigners start in verify-if-present mode, and the rc.2 driver signs an intent for every FROST
+sign. After step 4, check on Grafana or `/metrics` that `rutli_sign_intent_absent_total` stops
+growing on all three nodes, and that the journals hold the driver's signs:
+
+```sh
+for o in 0 1 2; do kubectl -n rutli exec rutli-cosigner-$o -c cosigner -- sh -c 'tail -qn1 /data/journal/*/*.jsonl'; done
+# each line: "purpose":"sign", a request_id, "signer_cn":"driver"
+```
+
+Then, as a separate change once the soak has run clean on intents, set `signingPolicy` in
+`deploy/soak/cosigner-values.yaml` (`docs/approval-quorum.md`, "Switching enforcement on"). The CA key
+is lost, so **pin the driver key** (`signer_pins`, the only revocation the soak has). Give the soak's
+key prefix an ACL (`signer_acl`). If an operator certificate Secret exists, add it to
+`operatorAllowlist` and `refreshAllowlist` and run refreshes with it. Otherwise keep
+`signer_may_refresh` on until the CA rotation issues a `refresher` certificate. Flip `require_intent`
+last, with a rolling restart (`# [MUTATES]`, user only).
+
 ## 5. Rollback
 
 - Cosigners: `helm -n rutli rollback rutli $REV_RC1` (`# [MUTATES]`). Shares, config and sealing are
   unchanged by rc.2, so nothing else is needed.
 - Driver: put the rc.1 jar and the previous `frost` block back and restart the participant. The
-  audit-log and journal formats are unchanged; anything rc.2 appended stays readable.
+  audit-log and journal formats are unchanged; anything rc.2 appended stays readable. An rc.1 driver
+  sends no signing intents, so roll `signingPolicy.require_intent` back to false first.
 
 ## 6. Remove the exec-based backup (the user runs this)
 

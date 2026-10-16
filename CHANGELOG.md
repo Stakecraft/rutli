@@ -6,11 +6,38 @@ All notable changes to Rütli are documented here. Format loosely follows
 ## [Unreleased]
 
 Builds on 0.4.0-rc.2. Audit remediation batch C phase 1: confidential, two-phase DKG/refresh with
-share epochs (audit C1, H1, M5), and batch C phase 2: sign-time epoch checks, stale-share detection
-and quorum retry (H1, M1). Still to come in batch C: cosigner-enforced signing intents (C2),
-key-file v2 and restore — see the warnings below.
+share epochs (audit C1, H1, M5), batch C phase 2: sign-time epoch checks, stale-share detection and
+quorum retry (H1, M1), and batch C phase 3: cosigner-enforced signing intents, approvals, rate
+limits and sign journals (C2) with the audit cross-check. Still to come in batch C: key-file v2,
+authorized hosted-key deletes and restore — see the warnings below.
 
 ### Upgrade notes (operators must act or know)
+- **Signing intents (audit C2): cosigners first, then the driver, then switch enforcement on.** This
+  release's cosigners verify a driver-signed intent when one is present and accept a sign without
+  one (counted in `rutli_sign_intent_absent_total`); this release's driver signs one for every FROST
+  sign with its mTLS key. The order is in `docs/approval-quorum.md` ("Switching enforcement on"):
+  every cosigner → the driver → policy (approver rules matching the driver's, `signer_acl`,
+  `signer_pins`) → flip `signing_policy.require_intent`, `signer_acl_required` and
+  `signer_may_refresh: false` on **every** node. Until the last node enforces, approvals still bind
+  only in the driver. A driver rollback needs `require_intent` off first. The driver learns the
+  cluster id from `Capabilities` (new `cluster_id`) or `frost.cluster-id`; a cosigner whose clock is
+  off by more than `clock_skew_secs` (120 s) refuses every intent — watch NTP.
+- **Every cosigner now journals every signature share it releases** under `data_dir/journal`
+  (hash-chained, fsynced before the share leaves; 4 MiB segments, 90 days / 64 MiB per key by
+  default). A corrupt journal makes that node refuse to sign with the key (the others keep signing).
+- **Per-key sign rate limits are on by default: 300/min and 20 000/day per key, per node**, charged
+  once per driver request. Far above a namespace key's traffic and a DevNet validator's protocol-key
+  traffic; a refusal is RESOURCE_EXHAUSTED (non-retryable in the driver,
+  `rutli_sign_rate_limited_total`). Size `sign_rate_limit_per_min`/`_per_day` for busier protocol
+  keys and put a tight `rate_limits` rule on namespace keys.
+- **The refresh CronJob now runs as a refresher** (`refresh_allowlist`: Refresh + KeyStatus, never
+  Sign; `deploy/k8s/cronjob-refresh.yaml` mounts `rutli-refresher-tls`, `client-refresher.json`;
+  `gen-frost-certs.sh` issues `refresher.{crt,key}`). Until a refresher certificate exists (the
+  soak's CA key is lost), put the operator CN in `refresh_allowlist` too and use its certificate. The
+  driver role keeps `Refresh` while `signing_policy.signer_may_refresh` is on (the default).
+- **A Sign refused by the signing policy at the members answers that refusal** (PERMISSION_DENIED
+  with `rutli-error: policy-refused`, or RESOURCE_EXHAUSTED), not UNAVAILABLE, so the driver does not
+  fail over through every node on it.
 - **DKG and refresh need every cosigner on this release (ceremony protocol 2), and are refused on a
   mixed-version cluster.** A leader refuses to start unless every node reports protocol 2
   (`Peer.NodeInfo.ceremony_protocol`), and an upgraded node refuses the old relayed RPCs
@@ -42,6 +69,38 @@ key-file v2 and restore — see the warnings below.
   `rutli-cosigner discard-partial-key` (`docs/ceremonies.md`).
 
 ### Security
+- **Cosigner-enforced signing policy (audit C2).** Every FROST sign carries a `SignedIntent` the
+  driver signs with its mTLS leaf key (`"rutli-intent-v1\n" ‖ SignIntent`: cluster id, key, the
+  34-byte digest, a 16-byte request id, issued/not-after, approval nonce and approver signatures).
+  Every participating cosigner verifies it **independently** before it commits to a nonce: chain to
+  the cluster CA (the split-ceremony request rule, now shared), clientAuth, CN on its
+  `signer_allowlist`, optional SPKI pins (`signer_pins`, revocation without the CA), signature,
+  cluster, purpose, key, digest, expiry (generous skew), the signer's key ACL (`signer_acl`), and
+  M-of-N approvals by its own configured approvers over the driver's `requestId` (golden vector
+  shared with `FileApprovalGate.requestIdFor`). The session is bound to the intent digest and its
+  message; round 2 re-checks digest, message and expiry, then charges the per-key rate limit (once
+  per request id, rebuilt from the journal after a restart; `max_shares_per_request` caps a replayed
+  intent) and appends to the durable hash-chained sign journal **before** the nonce marker burns
+  (`Cosigner::round2_guarded`). The leader also binds the intent to the Signer caller's certificate
+  (CN and key). A compromised cosigner or leader can no longer obtain a share for a digest the
+  driver did not authorize, and a stolen driver certificate cannot sign gated keys, keys outside its
+  ACL, beyond the rate limits, unjournaled, or (with `signer_may_refresh` off) refresh. The split
+  ceremony's sign test needs no intent: each node accepts it only for its own provenance test
+  digest. New metrics: `rutli_sign_intent_absent_total`, `rutli_sign_policy_refusals_total{reason}`,
+  `rutli_sign_rate_limited_total`, `rutli_signer_acl_absent_total`,
+  `rutli_sign_journal_entries_total`, `rutli_sign_journal_errors_total`. Proto: `SignRequest.intent`,
+  `SignRound1Request.intent`/`purpose`, `SignRound2Request.intent_digest`,
+  `CapabilitiesReply.cluster_id`, messages `SignIntent`, `SignedIntent`, `IntentApproval`.
+- **Driver: intents and approval proofs.** `FrostIntentSigner` signs with `frost.tls.cert`/`key`;
+  the same intent goes to every leader a sign fails over to; `ApprovalGate.authorizeWithProof`
+  hands the collected approvals to `KmsBackend.sign(…, approval)`; the sign's audit entry notes
+  `intent=<request id>`. New optional `frost.cluster-id`.
+- **`rutli-cosigner audit-cross-check`** compares the driver's audit log with every node's sign
+  journal (both chains verified): a signature a cosigner journaled that the driver audit lacks
+  (audit tail truncated, or signing outside the driver — closes the L1 anchor gap), an audited one
+  no journal holds, and intent-less signatures. `docs/audit-cross-check.md`.
+- **Refresher role**: `refresh_allowlist` (Refresh + KeyStatus only); may coincide with the operator
+  CN, never with the signer or mesh roles.
 - **Epoch-matched signing quorums with retry (audit H1, M1).** The leader signs only with its own
   sharing of the key, which every participant checks in round 1; a node never signs from a
   mismatched epoch. Each node compares its sharing with its peers' at startup and every 5 minutes

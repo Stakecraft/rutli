@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Generate a mutual-TLS trust domain for a FROST cluster: one cluster CA, a cert per cosigner, and
-# a client cert for the driver and one for the operator (verify-key and verify-hosted: KeyStatus,
-# HostedKeyStatus and CeremonySignTest only, via operator_allowlist). Every cert is signed by the CA (the sole trust
+# a client cert for the driver, one for the operator (verify-key and verify-hosted: KeyStatus,
+# HostedKeyStatus and CeremonySignTest only, via operator_allowlist) and one for the refresher (the
+# refresh CronJob: Refresh and KeyStatus only, via refresh_allowlist — never Sign). Every cert is signed by the CA (the sole trust
 # anchor). Cosigner certs carry a SAN of `cosignerN` and `127.0.0.1` so they work in Docker and
 # locally, and the CN `cosignerN` (N = the node's configured identifier) — the identity the Peer
 # API's FetchKey and the split ceremony's request signatures rely on. Peers and the driver verify
@@ -24,7 +25,7 @@
 #                       `+` or `=` would add name attributes).
 #   RUTLI_CA_DAYS=<n>   Validity of a NEW CA in days (default 825). Leaves are always 825 days.
 #   RUTLI_CERTS="..."   Space-separated subset of the certs to issue, among `cosigner1..N driver
-#                       operator` (default: all of them).
+#                       operator refresher` (default: all of them).
 #   RUTLI_FORCE=1       Overwrite what is already in OUT_DIR: a ca.key or a key-less ca.crt when
 #                       minting a new CA, a different ca.crt when reusing one, or any leaf key
 #                       about to be issued. Without it the script refuses all of these.
@@ -67,7 +68,7 @@ case "$CA_DAYS" in '' | *[!0-9]* | 0) die "RUTLI_CA_DAYS must be a positive inte
   || die "RUTLI_CA_CN must be 1-64 of [A-Za-z0-9._-], starting with a letter or digit, got '$CA_CN'"
 
 # Which certs to issue. Validated before anything is written.
-ALL_CERTS="$(for i in $(seq 1 "$N"); do printf 'cosigner%s ' "$i"; done)driver operator"
+ALL_CERTS="$(for i in $(seq 1 "$N"); do printf 'cosigner%s ' "$i"; done)driver operator refresher"
 CERTS="${RUTLI_CERTS:-$ALL_CERTS}"
 for c in $CERTS; do
   case " $ALL_CERTS " in
@@ -179,6 +180,11 @@ if wanted operator; then
   gen_cert "operator" "subjectAltName=DNS:operator,DNS:localhost,IP:127.0.0.1" "clientAuth"
 fi
 
+if wanted refresher; then
+  echo "Generating refresher client cert..."
+  gen_cert "refresher" "subjectAltName=DNS:refresher,DNS:localhost,IP:127.0.0.1" "clientAuth"
+fi
+
 rm -f ca.srl
 # Certificates are public; keys stay 0600 (umask 077 above).
 chmod 644 ./*.crt
@@ -208,7 +214,8 @@ else
 fi
 echo "Point each cosigner config's tls { ca_cert, cert, key } at ca.crt / cosignerN.{crt,key},"
 echo "the driver's frost.tls at ca.crt / driver.{crt,key}, and the operator's verify-key config at"
-echo "ca.crt / operator.{crt,key} (CN operator, listed in operator_allowlist)."
+echo "ca.crt / operator.{crt,key} (CN operator, listed in operator_allowlist), and the refresh job's"
+echo "at ca.crt / refresher.{crt,key} (CN refresher, listed in refresh_allowlist)."
 echo
 echo "ca.crt sha256:              $CA_SHA256"
 echo "cluster_id (if unpinned):   $(printf '%s' "$CA_SHA256" | cut -c1-16)"
