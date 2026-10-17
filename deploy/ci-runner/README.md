@@ -24,7 +24,9 @@ it under the repo's Settings → Actions → Runners.
   socket, and that amounts to root on the Docker VM. Use the runner only for this private repo
   and trusted branches. Never attach it to a public repository: fork pull requests would run
   arbitrary code on your machine.
-- **One job at a time.** CI is slower than on GitHub's parallel runners.
+- **One job at a time.** CI is slower than on GitHub's parallel runners. The image limits cargo
+  to 4 parallel jobs with line-table debug info, so that a few-GiB Docker VM does not OOM-kill
+  the linker. If you can, give Docker Desktop at least 8 GiB.
 - **The runner's architecture is the host's.** On Apple silicon that is arm64. All jobs work
   there, except the `conformance` job's `dpm` download, which is amd64 only. That job runs on
   schedule or manual dispatch, not on pull requests. For full parity, run the runner on a Linux
