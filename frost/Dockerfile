@@ -7,6 +7,9 @@ WORKDIR /src
 COPY . .
 # Only the daemon. rutli-dealer (the split ceremony's dealer) is deliberately neither built nor
 # shipped here: a dealer must never run where a share lives (docs/split-ceremony.md).
+# Bounded parallelism: an emulated (QEMU) cross-arch build on a small builder can OOM at link time.
+ARG CARGO_BUILD_JOBS=4
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 RUN cargo build --release -p rutli-cosigner --bin rutli-cosigner
 
 FROM debian:stable-slim
