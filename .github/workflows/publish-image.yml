@@ -18,7 +18,7 @@ env:
 
 jobs:
   build-push:
-    runs-on: ubuntu-latest
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
     permissions:
       contents: read
       packages: write
@@ -58,5 +58,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          build-args: |
+            CARGO_BUILD_JOBS=${{ vars.CI_RUNNER != '' && '2' || '4' }}
+          # The GitHub cache service is not used on a self-hosted runner (it may be unavailable there).
+          cache-from: ${{ vars.CI_RUNNER == '' && 'type=gha' || '' }}
+          cache-to: ${{ vars.CI_RUNNER == '' && 'type=gha,mode=max' || '' }}
