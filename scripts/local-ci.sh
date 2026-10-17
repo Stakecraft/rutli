@@ -2,9 +2,10 @@
 # Run the CI jobs of .github/workflows/ci.yml on a workstation (macOS or Linux), in the same order,
 # for when GitHub Actions is unavailable or before pushing. Stops at the first failing job.
 #
-# Usage (from repo root):  scripts/local-ci.sh [rust|driver|deploy|smoke|all]   (default: all)
+# Usage (from repo root):  scripts/local-ci.sh [rust|driver|deploy|rules|smoke|all]   (default: all)
 #
-# Needs: Rust stable, JDK 17 + sbt, helm (v3 or v4) and kubectl (for kustomize), Docker (smoke).
+# Needs: Rust stable, JDK 17 + sbt, helm (v3 or v4) and kubectl (for kustomize), Docker (rules,
+# smoke), yq v4 and python3 with PyYAML (rules).
 # The Canton KMS driver API is not on Maven Central: the first run publishes it to the local ivy
 # cache with scripts/publish-canton-deps.sh (CANTON_TAG as in ci.yml).
 set -euo pipefail
@@ -34,6 +35,11 @@ deploy() {
   scripts/ci-deploy-policy.sh
 }
 
+rules() {
+  step "Alert rules (promtool)"
+  scripts/ci-prometheus-rules.sh
+}
+
 smoke() {
   step "FROST TLS cluster smoke (docker compose)"
   scripts/ci-frost-tls-smoke.sh
@@ -43,8 +49,9 @@ case "$WHAT" in
   rust) rust ;;
   driver) driver ;;
   deploy) deploy ;;
+  rules) rules ;;
   smoke) smoke ;;
-  all) rust; driver; deploy; smoke ;;
-  *) echo "usage: $0 [rust|driver|deploy|smoke|all]" >&2; exit 2 ;;
+  all) rust; driver; deploy; rules; smoke ;;
+  *) echo "usage: $0 [rust|driver|deploy|rules|smoke|all]" >&2; exit 2 ;;
 esac
 printf '\n==> local CI: %s passed\n' "$WHAT"
