@@ -37,6 +37,9 @@ cleanup() {
   rc=$?
   [ "$rc" -ne 0 ] && diagnose
   "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+  # The certs dir is 0700 and was chowned to the container uid: remove it, or a persistent
+  # (self-hosted) runner's next checkout fails with EACCES while cleaning the workspace.
+  sudo rm -rf "$CERTS" 2>/dev/null || rm -rf "$CERTS" 2>/dev/null || true
   return $rc
 }
 trap cleanup EXIT
