@@ -16,6 +16,7 @@ restore (M1), and the threat model (`docs/security/threat-model.md`). Batch C is
 
 Every step on **every** node before the next; a flag is only as strong as the most lenient node a
 quorum can reach. Pause the refresh CronJob and onboarding DKGs from step 1 until step 2 is done.
+The DevNet soak's walk-through of these steps (legacy topology): `docs/runbook-rc3-soak-rollout.md`.
 
 0. **Before any batch C image: measure each key's sign rate** (audit F8). The per-key sign rate
    limit is **on by default from step 1** (300/min, 20 000/day per key, per node) and a refusal is

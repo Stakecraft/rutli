@@ -205,6 +205,10 @@ Verify:
 
 ### Signing intents (audit C2) on the soak
 
+> **Superseded.** Signing intents, sign journals and `signingPolicy` ship in 0.4.0-rc.3 (batch C),
+> not in rc.2: the rc.2 binaries have none of them. The soak's batch C rollout is
+> [runbook-rc3-soak-rollout.md](runbook-rc3-soak-rollout.md); read "rc.2" below as "rc.3".
+
 rc.2 cosigners start in verify-if-present mode, and the rc.2 driver signs an intent for every FROST
 sign. After step 4, check on Grafana or `/metrics` that `rutli_sign_intent_absent_total` stops
 growing on all three nodes, and that the journals hold the driver's signs:
@@ -266,6 +270,9 @@ back, `docs/disaster-recovery.md` §1).
 
 [runbook-per-node-seal.md](runbook-per-node-seal.md): per-node seal bundles, one StatefulSet per
 node, per-node Services for the driver, and the backup sidecar. Record this upgrade in the soak log.
+
+**Next: rc.3** — [runbook-rc3-soak-rollout.md](runbook-rc3-soak-rollout.md) rolls batch C out to the
+soak (it can run before or after the per-node migration; DEK rotation needs the migration first).
 
 Then the rest of batch C, in the order `CHANGELOG.md` gives ("Rollout order across batch C"): flip
 the signing-policy switches; key-file v2 (`keyfile.cluster_uuid`, then `write_version: 2`); a DEK
