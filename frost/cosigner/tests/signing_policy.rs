@@ -783,6 +783,12 @@ async fn a_replayed_intent_is_capped_per_request() {
 #[tokio::test]
 async fn a_node_that_cannot_journal_releases_no_share() {
     use std::os::unix::fs::PermissionsExt;
+    // The failure is injected by making the journal segment read-only, which root ignores.
+    // SAFETY: geteuid has no preconditions and touches no memory.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipped: running as root, a read-only journal segment would still be writable");
+        return;
+    }
     let tmp = tempfile::tempdir().unwrap();
     let (ids, nodes) = local(tmp.path(), &strict()).await;
     let msg = digest(b"journal first");

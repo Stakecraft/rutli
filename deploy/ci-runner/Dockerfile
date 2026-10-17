@@ -1,4 +1,5 @@
-# Self-hosted GitHub Actions runner for Stakecraft/rutli CI (label `rutli-ci`).
+# Self-hosted GitHub Actions runner for Stakecraft/rutli CI (label `rutli-ci`). Jobs run as the
+# unprivileged `runner` user (see entrypoint.sh), as on GitHub's hosted runners.
 # Adds what ci.yml expects from the GitHub ubuntu image: a C toolchain for cargo, jq, yq v4,
 # kubectl, openssl, python3, and the docker CLI + compose plugin (jobs drive the HOST daemon
 # through the mounted socket — see docker-compose.yml for the matching work-dir mount).
