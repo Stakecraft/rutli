@@ -5,6 +5,10 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.4.0-rc.3] — 2026-10-18
+
+_Release candidate, pre-audit: for soak and review, not for production key custody. Wire change: upgrade every cosigner, then the driver (see "Rollout order across batch C" below)._
+
 Builds on 0.4.0-rc.2. Audit remediation batch C phase 1: confidential, two-phase DKG/refresh with
 share epochs (audit C1, H1, M5), batch C phase 2: sign-time epoch checks, stale-share detection and
 quorum retry (H1, M1), batch C phase 3: cosigner-enforced signing intents, approvals, rate limits
@@ -1340,6 +1344,7 @@ not audited. Do not place production authority keys behind it.
 - HSM backend validated only against SoftHSM.
 - No third-party security audit.
 
+[0.4.0-rc.3]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.3
 [0.4.0-rc.2]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.2
 [0.4.0-rc.1]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.1
 [0.3.2]: https://github.com/Stakecraft/rutli/releases/tag/v0.3.2
