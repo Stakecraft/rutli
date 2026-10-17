@@ -4,7 +4,7 @@ The driver's hash-chained audit log (`audit-log-path`) shows edits and reorderin
 that entries are missing from its end. A shorter log still has a valid chain. A signature made with a
 stolen driver certificate, outside the driver, never reaches that log at all.
 
-Since 0.4.0-rc.2 each cosigner keeps its own record of every signature it takes part in: the **sign
+Since 0.4.0-rc.3 each cosigner keeps its own record of every signature it takes part in: the **sign
 journal** (`data_dir/journal/<key_id>/*.jsonl`). It is append-only and hash-chained, and each entry is
 fsynced before the signature share leaves the node. A journal entry carries the request id of the
 driver's signing intent and the message signed. The driver writes the same id into the sign's audit
