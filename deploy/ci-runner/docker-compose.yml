@@ -1,8 +1,15 @@
 # Started by scripts/ci-runner-up.sh. One runner, one job at a time.
 #
-# Jobs talk to the HOST docker daemon (frost-tls-smoke runs `docker compose` with bind mounts of
-# repo paths). Bind-mount sources resolve on the host, so the job work dir is mounted at the SAME
-# absolute path inside the runner as on the host — otherwise those mounts would point at nothing.
+# !! Run this ONLY against the isolated Colima VM's daemon (docker --context colima-rutli-ci ...),
+# !! which scripts/ci-runner-up.sh does for you. Never against Docker Desktop or any daemon that can
+# !! see your home directory: the runner mounts that daemon's socket, so every CI job is root on it
+# !! and could bind-mount and read anything the daemon's host shares (on Docker Desktop: /Users).
+#
+# Jobs talk to that daemon (frost-tls-smoke runs `docker compose` with bind mounts of repo paths).
+# Bind-mount sources resolve on the daemon's host, so the job work dir is mounted at the SAME
+# absolute path inside the runner as on the daemon's host — otherwise those mounts would point at
+# nothing. RUNNER_WORKDIR is therefore a path INSIDE the VM (default /var/lib/rutli-ci/work,
+# created by the script), not a path on your Mac.
 services:
   runner:
     build: .
@@ -12,7 +19,7 @@ services:
       RUNNER_TOKEN: ${RUNNER_TOKEN:-}
       RUNNER_NAME: ${RUNNER_NAME:-rutli-ci-local}
       RUNNER_LABELS: rutli-ci
-      RUNNER_WORKDIR: ${RUNNER_WORKDIR:?set by scripts/ci-runner-up.sh}
+      RUNNER_WORKDIR: ${RUNNER_WORKDIR:?set by scripts/ci-runner-up.sh (a path inside the VM)}
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - ${RUNNER_WORKDIR}:${RUNNER_WORKDIR}
+      - /var/run/docker.sock:/var/run/docker.sock   # the VM's socket, because of the context
+      - ${RUNNER_WORKDIR}:${RUNNER_WORKDIR}          # a path in the VM
