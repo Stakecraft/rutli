@@ -1067,7 +1067,9 @@ async fn ceremony_sessions_in_memory_are_bounded() {
 /// is not recorded, and a node STAGED in such a ceremony waits instead of acting on a refusal.
 #[tokio::test]
 async fn orphaned_session_no_votes_are_capped_and_a_refusal_is_not_evidence() {
-    let rig = Rig::build(std::time::Duration::from_millis(200), Some((0, 0)));
+    // The orphan timeout must outlast parts 1-3 on a loaded CI runner.
+    let orphan = std::time::Duration::from_secs(2);
+    let rig = Rig::build(orphan, Some((0, 0)));
     let group = run_dkg(&rig.peers, KEY).await.unwrap();
     let ceremony_id = "refresh-capped-orphans";
     let v = rig.nodes[0].key_epoch(KEY).unwrap();
@@ -1085,7 +1087,7 @@ async fn orphaned_session_no_votes_are_capped_and_a_refusal_is_not_evidence() {
     }
     // Only node 1 stages; the leader is gone; nodes 2 and 3 orphan but may record no no-vote.
     rig.peers[0].ceremony_part3(ceremony_id, &digest).await.unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    tokio::time::sleep(orphan + std::time::Duration::from_millis(250)).await;
     for _ in 0..3 {
         resolve_pending(&rig.nodes[0]).await;
     }
@@ -1330,18 +1332,22 @@ async fn signing_continues_through_every_phase_of_a_refresh_and_across_its_commi
 /// the orphan timeout.
 #[tokio::test]
 async fn a_fence_only_guard_expires_after_the_fence_timeout_and_a_new_ceremony_takes_the_key() {
-    let fence = std::time::Duration::from_millis(300);
+    // Generous: the "still fresh" check below must run inside the fence on a loaded CI runner
+    // (a 300 ms fence expired before the first refresh attempt on an 8-vCPU parallel run).
+    let fence = std::time::Duration::from_secs(3);
     let rig = Rig::with_fence_timeout(fence);
     let group = run_dkg(&rig.peers, KEY).await.unwrap();
+    let fenced_at = std::time::Instant::now();
     for p in &rig.peers {
         p.ceremony_begin("refresh-abandoned", KEY, CeremonyKind::Refresh, expect_of(&rig), None).await.unwrap();
     }
     // While it is fresh it holds off another ceremony (signing is unaffected either way).
     let err = run_refresh(&rig.peers, KEY).await.unwrap_err();
+    assert!(fenced_at.elapsed() < fence, "the fence expired before it was probed; raise `fence`");
     assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "{err:?}");
     rig.every_pair_signs(&group).await;
 
-    tokio::time::sleep(fence + std::time::Duration::from_millis(50)).await;
+    tokio::time::sleep((fence + std::time::Duration::from_millis(250)).saturating_sub(fenced_at.elapsed())).await;
     assert_eq!(run_refresh(&rig.peers, KEY).await.unwrap(), group);
     assert_eq!(rig.epochs(), vec![2, 2, 2]);
     rig.every_pair_signs(&group).await;
@@ -1350,7 +1356,7 @@ async fn a_fence_only_guard_expires_after_the_fence_timeout_and_a_new_ceremony_t
     let n = &rig.nodes[0];
     n.ceremony_begin("refresh-with-session", KEY, CeremonyKind::Refresh, expect_of(&rig), None).unwrap();
     n.ceremony_part1("refresh-with-session", KEY, CeremonyKind::Refresh, &[1, 2, 3], None).unwrap();
-    tokio::time::sleep(fence + std::time::Duration::from_millis(50)).await;
+    tokio::time::sleep(fence + std::time::Duration::from_millis(250)).await;
     let err = n.ceremony_begin("refresh-next", KEY, CeremonyKind::Refresh, expect_of(&rig), None).unwrap_err();
     assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "{err:?}");
 }
@@ -1359,7 +1365,7 @@ async fn a_fence_only_guard_expires_after_the_fence_timeout_and_a_new_ceremony_t
 /// so a fence repeated every so often held the key forever).
 #[tokio::test]
 async fn re_fencing_under_the_same_id_does_not_extend_the_guard() {
-    let fence = std::time::Duration::from_millis(400);
+    let fence = std::time::Duration::from_secs(2);
     let rig = Rig::with_fence_timeout(fence);
     run_dkg(&rig.peers, KEY).await.unwrap();
     let n = &rig.nodes[0];
@@ -1367,14 +1373,15 @@ async fn re_fencing_under_the_same_id_does_not_extend_the_guard() {
     n.ceremony_begin("refresh-renewed", KEY, CeremonyKind::Refresh, expect_of(&rig), None).unwrap();
     let err = n.ceremony_begin("refresh-other", KEY, CeremonyKind::Refresh, expect_of(&rig), None).unwrap_err();
     assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "{err:?}");
+    assert!(started.elapsed() < fence, "the fence expired before it was probed; raise `fence`");
     // A second DKG/refresh fence under the same id is refused outright (a second leader for one
     // ceremony, ceremony intents)...
     let err = n.ceremony_begin("refresh-renewed", KEY, CeremonyKind::Refresh, expect_of(&rig), None).unwrap_err();
     assert!(matches!(&err, DaemonError::CeremonyRefused(m) if m.contains("second")), "{err:?}");
-    // ...and re-taking the guard under that id (the raw fence) every 100 ms, past the timeout, never
+    // ...and re-taking the guard under that id (the raw fence) every 500 ms, past the timeout, never
     // extends it: the last one lands well inside a would-be reset.
-    while started.elapsed() < fence + std::time::Duration::from_millis(100) {
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    while started.elapsed() < fence + std::time::Duration::from_millis(500) {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         n.ceremony_fence("refresh-renewed", KEY, "refresh").unwrap();
     }
     n.ceremony_begin("refresh-other", KEY, CeremonyKind::Refresh, expect_of(&rig), None).unwrap();
