@@ -1067,8 +1067,8 @@ async fn ceremony_sessions_in_memory_are_bounded() {
 /// is not recorded, and a node STAGED in such a ceremony waits instead of acting on a refusal.
 #[tokio::test]
 async fn orphaned_session_no_votes_are_capped_and_a_refusal_is_not_evidence() {
-    // The orphan timeout must outlast parts 1-3 on a loaded CI runner.
-    let orphan = std::time::Duration::from_secs(2);
+    // The orphan timeout must outlast the setup DKG and parts 1-3 on a loaded CI runner.
+    let orphan = std::time::Duration::from_secs(5);
     let rig = Rig::build(orphan, Some((0, 0)));
     let group = run_dkg(&rig.peers, KEY).await.unwrap();
     let ceremony_id = "refresh-capped-orphans";
@@ -1337,17 +1337,20 @@ async fn a_fence_only_guard_expires_after_the_fence_timeout_and_a_new_ceremony_t
     let fence = std::time::Duration::from_secs(3);
     let rig = Rig::with_fence_timeout(fence);
     let group = run_dkg(&rig.peers, KEY).await.unwrap();
-    let fenced_at = std::time::Instant::now();
+    // Freshness is judged from the FIRST peer's fence (the earliest to expire); the wait for expiry
+    // from the LAST peer's (the latest to expire).
+    let first_fenced = std::time::Instant::now();
     for p in &rig.peers {
         p.ceremony_begin("refresh-abandoned", KEY, CeremonyKind::Refresh, expect_of(&rig), None).await.unwrap();
     }
+    let last_fenced = std::time::Instant::now();
     // While it is fresh it holds off another ceremony (signing is unaffected either way).
     let err = run_refresh(&rig.peers, KEY).await.unwrap_err();
-    assert!(fenced_at.elapsed() < fence, "the fence expired before it was probed; raise `fence`");
+    assert!(first_fenced.elapsed() < fence, "the fence expired before it was probed; raise `fence`");
     assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "{err:?}");
     rig.every_pair_signs(&group).await;
 
-    tokio::time::sleep((fence + std::time::Duration::from_millis(250)).saturating_sub(fenced_at.elapsed())).await;
+    tokio::time::sleep((fence + std::time::Duration::from_millis(250)).saturating_sub(last_fenced.elapsed())).await;
     assert_eq!(run_refresh(&rig.peers, KEY).await.unwrap(), group);
     assert_eq!(rig.epochs(), vec![2, 2, 2]);
     rig.every_pair_signs(&group).await;
