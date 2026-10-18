@@ -62,7 +62,7 @@ merge; target 0.4.0 before the external audit). "Residual" = accepted and docume
 | DS-CR10 | LOW | `audit-cross-check` keyed on the bare request id. | batch C. |
 
 ### Residuals (accepted, documented in docs/security/threat-model.md)
-- A compromised cosigner can fence a key with kind "refresh" and stall its signing (≤ 15 min, renewable).
+- ~~A compromised cosigner can fence a key with kind "refresh" and stall its signing (≤ 15 min, renewable).~~ Corrected and fixed: on 0.4.0-rc.3 the stall had no time limit. A fence never followed by part 1 never expired, and a re-fence under the same id restarted its timer, so signing on that key stayed down on the fenced nodes until a pod restart. Fixed in 0.4.0-rc.4 (L1): a DKG/refresh guard no longer blocks signing, a fence alone is orphaned after 60 s, and re-fencing never extends a guard. Still open until ceremony intents (step 2): a compromised cosigner can lead ceremonies no client asked for, which lets it split the key (DS-CR4) at will and hold off other ceremonies.
 - Byzantine ceremony split for n=3 (DS-CR4): availability only.
 - One Kubernetes cluster and cluster-admin for all cosigners is a single trust domain (decision P10).
 - No HPKE layer on round-2 delivery: no TLS-terminating service mesh may sit between cosigners (decision P3).

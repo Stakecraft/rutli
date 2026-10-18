@@ -10,9 +10,11 @@ epochs) and M5 (a partial DKG wedged a deterministic key id).
 The node the request reaches leads, but it only coordinates. Every node — the leader included,
 as a participant — does the following:
 
-1. **Fence.** Take the per-key guard; refuse if a ceremony for the key is staged and unresolved,
-   a DKG over an existing key, or a refresh whose leader saw a different `(epoch, PKP digest)`
-   than this node holds. Refuse a leader below ceremony protocol 2.
+1. **Fence.** Take the per-key guard; refuse a ceremony id this node already holds a record for,
+   a ceremony for a key that has one staged and unresolved, a DKG over an existing key, or a
+   refresh whose leader saw a different `(epoch, PKP digest)` than this node holds. Refuse a leader
+   below ceremony protocol 2. The guard serializes ceremonies for the key; it does **not** pause
+   signing (see [Signing during a ceremony](#signing-during-a-ceremony)).
 2. **Part 1.** Check that the roster the leader names is exactly this node's own roster; return
    the round-1 package (public).
 3. **Part 2.** Check the leader's round-1 map: exactly the roster, and this node's own package
@@ -33,6 +35,48 @@ as a participant — does the following:
    DKG; for refresh an atomic replace, only if the live share is still the one the refresh started
    from) and records COMMITTED. It aborts only on direct evidence: a node voted ABORTED, or staged
    a different outcome. A recorded vote never leaves COMMITTED or ABORTED.
+
+### Signing during a ceremony
+
+Since 0.4.0-rc.4, signing goes on while a DKG or refresh runs, from the fence through commit. Up to
+rc.3 any held guard refused sign round 1 for the key, and a refresh was refused while a node had
+sign nonces in flight. That was a leftover of ceremony protocol 1, where part 3 overwrote the live
+share. Under protocol 2 it is not needed:
+
+* The fence and parts 1–3 never touch the live share or the loaded signing state. Part 3 reads the
+  live share and writes only the staged share and the STAGED vote.
+* The live share changes only at commit, and the guard is already released by then. Signing across
+  a commit was therefore always possible, and it is handled. The commit evicts the loaded share.
+  Round 1 checks the leader's `(epoch, PKP digest)`. A sign whose round 1 ran before the commit
+  fails cleanly at round 2 on that node, because the new signing state has no session for it, and
+  the leader retries on another subset.
+* Nonces are never reused. Round-1 nonces live only in memory with the share that made them and
+  are dropped with it, and each session burns a durable marker.
+* A DKG has no live key to sign with.
+
+What this means for operators: a weekly refresh no longer pauses signing, so there is no need to
+drain topology traffic first. Expect a few leader-side retries (`rutli_sign_aborts_total`) on a
+busy key around the moment a refresh commits.
+
+### Guard timeouts
+
+Each guard is timed from the moment its ceremony first takes it. If the same ceremony id fences
+again or runs its own part 1, the timer keeps running from that first moment. Up to rc.3, re-fencing
+under the same id restarted the timer, so the guard could be held forever. A guard that has timed out
+is *orphaned*: the next ceremony for the key preempts it and drops its session. A preempted ceremony
+can never stage, because part 2 and part 3 check that it still owns the guard.
+
+| Guard | Orphaned after |
+|---|---|
+| DKG/refresh fence never followed by part 1 (leader died, or a peer fenced on its own) | 60 s |
+| DKG/refresh with a session (part 1 ran) | 15 min |
+| Hosted-key genkey/delkey | 15 min |
+
+The guard is released at part 3, or when the ceremony fails cleanly, so in practice these timeouts
+only matter for a leader that died. Up to rc.3 a fence that was never followed by part 1 had no
+timeout at all for signing: until the pod restarted, that node refused to sign with the key.
+
+### Votes on unknown and orphaned ceremonies
 
 A node that is asked about a ceremony it has neither a session nor a record for durably votes
 ABORTED before answering, so its answer can never change later. A session orphaned past the

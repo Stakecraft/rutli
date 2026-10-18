@@ -5,6 +5,33 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Security
+
+- **A ceremony fence can no longer stall signing** (ceremony-fence residual, L1 of the remediation).
+  On 0.4.0-rc.3 a DKG/refresh guard refused every sign round 1 for its key. A fence that was never
+  followed by part 1 never expired, and a re-fence under the same ceremony id restarted its timer.
+  Any peer, or an honest leader dying between fence and part 1, could therefore stop a key's signing
+  on the fenced nodes until a pod restart. That residual was documented as "≤ 15 min", which was
+  wrong. Now:
+  - DKG/refresh guards no longer block signing.
+  - A fence with no part 1 is orphaned (preemptible by the next ceremony) after 60 s
+    (`CEREMONY_FENCE_TIMEOUT`). A guard with a session keeps the 15-minute orphan timeout.
+  - The same ceremony id taking its guard again never extends it, and cannot change its kind.
+  - The fence refuses a ceremony id the node already holds a record for, as part 1 does.
+
+  A superseded ceremony still can never stage. Still open until ceremony intents (step 2): a
+  compromised cosigner can lead ceremonies no client asked for. See
+  `docs/security/threat-model.md`.
+
+### Changed
+
+- **Signing no longer pauses during a DKG or refresh**, and a refresh is no longer refused while
+  sign nonces are in flight (the "reverse fence"; the `SignInProgress` error is gone). Part 3 only
+  stages, and the live share changes at commit, as before. A sign whose round 1 ran before the
+  commit fails at round 2 on that node and is retried on another subset; nonces are never reused.
+  Operators no longer need to drain topology traffic before a refresh (`docs/ceremonies.md`,
+  "Signing during a ceremony").
+
 ## [0.4.0-rc.3] — 2026-10-18
 
 _Release candidate, pre-audit: for soak and review, not for production key custody. Wire change: upgrade every cosigner, then the driver (see "Rollout order across batch C" below)._

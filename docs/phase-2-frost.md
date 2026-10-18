@@ -193,8 +193,9 @@ DKG and refresh rewrite a key's shares, so they must never overlap or clobber a 
   brand-new key and **destroy the non-rotatable namespace key**.
 - **One ceremony per key at a time.** Each node holds a per-key ceremony guard: a second DKG or
   refresh for the same key (a different ceremony id) is refused (`CeremonyInProgress`) until the
-  first releases at part 3, or its guard expires (orphan timeout, for a leader that died
-  mid-ceremony). This prevents two overlapping ceremonies from leaving nodes with shares on
+  first releases at part 3, or its guard is orphaned (a leader that died mid-ceremony: 60 s for a
+  fence never followed by part 1, 15 min once part 1 ran; re-fencing under the same id never extends
+  it — see `docs/ceremonies.md`, "Guard timeouts"). This prevents two overlapping ceremonies from leaving nodes with shares on
   *different* sharing polynomials — which share the group key but cannot sign together (split-brain).
 - **The driver never auto-retries DKG.** `FrostBackend` fails a DKG over to another endpoint only on
   a connection-level `UNAVAILABLE`, never on `DEADLINE_EXCEEDED` — a slow-but-succeeding ceremony
@@ -206,12 +207,14 @@ DKG and refresh rewrite a key's shares, so they must never overlap or clobber a 
   clearing its session, every `part2`/`part3` re-checks that the calling ceremony still owns the
   key's guard; a superseded one is refused (`CeremonySuperseded`) and never writes — this is the
   load-bearing safety for refresh, which would otherwise split/clobber shares.
-- **Signing is fenced cluster-wide during a ceremony.** Before any DKG/refresh crypto, the leader
-  takes the per-key guard on **every** peer (`CeremonyFence`), so no node can start a new `sign`
-  mid-ceremony — not just the leader. The reverse fence also applies: if any peer still holds
-  in-flight sign nonces for that key, the fence fails (`SignInProgress`) and is rolled back
-  cluster-wide. A sign already past round 1 when a refresh somehow lands still fails cleanly at
-  round 2 (its nonces went with the old cosigner) — never a silent bad signature.
+- **Signing is not fenced by a ceremony (since 0.4.0-rc.4).** Before any DKG/refresh crypto the
+  leader takes the per-key guard on **every** peer (`CeremonyFence`), which serializes ceremonies.
+  It no longer refuses signs. Up to rc.3 it did, together with a reverse fence over in-flight sign
+  nonces (`SignInProgress`), a leftover of ceremony protocol 1, where part 3 overwrote the live
+  share. Under protocol 2, part 3 only stages and the live share changes at commit, after the guard
+  is released. A sign already past round 1 when a refresh commits fails cleanly at round 2 (its
+  nonces went with the old cosigner) and is retried: never a silent bad signature, never a reused
+  nonce (`docs/ceremonies.md`, "Signing during a ceremony").
 
 Concurrent ceremonies therefore fail closed (refused, retry later), never corrupt. Ordinary
 signing is otherwise independent — each signature uses a fresh session id.

@@ -5,8 +5,9 @@
 # leader never sees a round-2 package, audit C1; two-phase commit, audit H1). Never on a mixed
 # cluster. See docs/ceremonies.md.
 #
-# Example: weekly proactive share refresh. Runs against one Signer endpoint; the leader fences the
-# key cluster-wide, so drain heavy topology traffic first (or accept SignInProgress retries).
+# Example: weekly proactive share refresh. Runs against one Signer endpoint. From 0.4.0-rc.4
+# signing goes on during the refresh (no need to drain topology traffic; a few signs in flight at
+# the commit are retried by their leader). On rc.3 and earlier the fence paused signing for the key.
 # Set KEY_ID to the FROST key (e.g. frost-participant1-namespace).
 #
 # Runs as the REFRESHER role (audit C2): a certificate on the cosigners' `refresh_allowlist`, which
