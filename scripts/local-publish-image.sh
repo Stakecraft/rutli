@@ -26,7 +26,10 @@ VERSION="${REF#v}"
 [ "$(git rev-parse HEAD)" = "$(git rev-parse "$REF^{commit}")" ] || { echo "HEAD is not $REF" >&2; exit 1; }
 
 docker buildx inspect "$BUILDER" >/dev/null 2>&1 || docker buildx create --name "$BUILDER" --driver docker-container >/dev/null
-docker buildx inspect "$BUILDER" --bootstrap | grep -q 'linux/arm64' || { echo "builder $BUILDER lacks linux/arm64" >&2; exit 1; }
+# Capture first, then grep: `... | grep -q` under pipefail fails falsely, because grep -q exits at
+# the first match, docker then dies of SIGPIPE and the pipeline reports its non-zero status.
+BUILDER_INFO="$(docker buildx inspect "$BUILDER" --bootstrap)" || { echo "cannot bootstrap builder $BUILDER" >&2; exit 1; }
+grep -q 'linux/arm64' <<<"$BUILDER_INFO" || { echo "builder $BUILDER lacks linux/arm64" >&2; exit 1; }
 
 REVISION="$(git rev-parse HEAD)"
 CREATED="$(git log -1 --format=%cI "$REF")"
