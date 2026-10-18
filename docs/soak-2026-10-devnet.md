@@ -172,6 +172,36 @@ verdict is **GO pending** (destruction and teardown below are still open).
 - Still open from the audit: C1 (DKG/refresh round 2 via the leader) and C2 (no cosigner-side signing policy) — batch C.
   The soak's DKG-born keys are treated as leader-exposed; **no refresh** until batch C.
 
+**Planned event: soak to 0.4.0-rc.3 (audit batch C), phases 1–3, 2026-10-18 09:10 → 13:57 UTC.** Runbook
+[runbook-rc3-soak-rollout.md](runbook-rc3-soak-rollout.md), legacy topology. Batch C settings live in
+[`deploy/soak/cosigner-values-batch-c.yaml`](../deploy/soak/cosigner-values-batch-c.yaml).
+- Pre-flight (07:45Z): cosigners rev 8 (rc.2), participant rev 7 (not 5: two upgrades on 2026-10-16); all 6 key files
+  per node `v1`/sealed (3 are the offboarded `b4-` keys); driver config without approvals, prefix or cluster id;
+  `StateCheck` with the rc.3 jar OK (23 434 / 23 408 entries); soak-check PASS; clocks within 3 s; no CronJob in
+  `rutli`; manual sealed-key tars of all three nodes taken off-cluster.
+- Sign rates from the audit log (2026-10-07..18): `frost-signing` busiest minute 42, busiest full day 2 801;
+  `frost-namespace` 3 / 7. Rules: namespace 10/min, 200/day; signing 600/min, 100 000/day.
+- Phase 1 (09:10Z): `helm upgrade` → rev 9, image `0.4.0-rc.3@sha256:f4d92758…31e8`, rolled 2 → 1 → 0. Every node:
+  cluster id `453bb4aea2088bb5` (derived from `ca.crt`), `key-file format write_version=1 accept_v1=true`,
+  `ceremonies_staged` 0, no stale share, journal errors 0, `verify-key` ok for both FROST keys (epoch 0, one
+  `pkp_digest`). Two `epoch check skipped` on node 3 during the roll (rc.2 leader), as expected. Monitoring
+  re-applied with the batch C rules and dashboard rows (09:47Z); `rate_limited` 0.
+- Phase 2 (T2 = 09:49:59Z): driver jar `8cc421fb…e421` swapped in by atomic rename (rc.2 jar kept as
+  `rutli-driver.jar.rc2`), `frost.cluster-id = "453bb4aea2088bb5"` added, participant rev 8 (start ≈ 20 s). Logs:
+  `Loaded driver rutli (API v1) build 0.4.0-rc.3`, `signing intents are signed by O=rutli,CN=driver`; signs carry
+  `msg=` and `intent=`; cosigners journal `purpose:"sign"`, `signer_cn:"driver"`; 15 min later intent-absent 0,
+  policy refusals 0, sign errors 0, `sig-verify=failed` 0; `StateCheck` OK (23 681 / 23 655).
+- Phase 3 (10:15Z → 13:57Z): `signer_acl { driver: [frost-, rutli-] }` and `signer_pins { driver: [1c20597e…76fe] }`
+  (the participant's and the workstation's driver certificate share the key) → rev 10 (ConfigMap only); canary
+  restarts node 2 (watched 15 min: refusals 0, retries 0, errors 0) → node 3 → node 1. All nodes
+  `acl_entries=1 pinned_cns=1`; `verify-key` from the workstation still ok (pinned).
+- Alerts: `RutliSignIntentAbsent` (≈10:48–10:50Z) and `RutliSignerAclAbsent` (10:47Z → ≈14:57Z, the node 1/3 restarts
+  were delayed) fired as the runbook predicts (1 h window, `for: 1h`). `RutliHostedKeyReplicaShortfall` went pending
+  after the node 1 restart: `rutli_hosted_keys` reads 0 until the node's first anti-entropy pass (≈ 5 min), then 2.
+- Rollback points: cosigners `helm -n rutli rollback rutli 9` (phase 3) / `8` (phase 1); participant rev 7 + the
+  `.rc2` jar. Next: phase 4 (`require_intent`, `signer_acl_required`, `signer_may_refresh: false`) on a later day after
+  a clean soak-check, then phase 5 (`audit-cross-check`).
+
 ## Drill calendar
 
 | Week | Drill | Status |

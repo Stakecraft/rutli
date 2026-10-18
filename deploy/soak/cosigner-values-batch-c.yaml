@@ -1,0 +1,16 @@
+# Batch C settings for the LIVE DevNet soak (release rutli, namespace rutli), added phase by phase
+# by docs/runbook-rc3-soak-rollout.md. Pass it LAST:
+#   -f <exported values> -f deploy/soak/cosigner-values.yaml -f deploy/soak/cosigner-values-batch-c.yaml
+signingPolicy:
+  rate_limits: # the FIRST matching prefix wins: the namespace key's rule goes first
+    # measured 2026-10-18 (audit 2026-10-07..18): busiest minute 3, busiest day 7
+    - {key_id_prefix: "frost-namespace", per_min: 10, per_day: 200}
+    # measured 2026-10-18: busiest minute 42, busiest full day 2801 -> max(600, 420), max(100000, 28010)
+    - {key_id_prefix: "frost-signing", per_min: 600, per_day: 100000}
+  signer_acl:
+    driver:
+      - frost-
+      - rutli-
+  signer_pins:
+    driver:
+      - 1c20597ee5024fde51187233c56e8946d1e5fa8878b8c87941a598a508bd76fe
