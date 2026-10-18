@@ -699,6 +699,14 @@ async fn abort_sign(chosen: &[&Arc<dyn PeerApi>], key_id: &str, session_id: &str
 
 /// Take the per-key ceremony guard on every peer before DKG/refresh crypto. Rolls back on the
 /// first refusal so a partial fence never sticks.
+///
+/// For a ceremony led for a client intent, the rollback also aborts the ceremony id on every peer:
+/// a fence writes no durable record, so without this the intent's id would stay unused everywhere
+/// and another node (a compromised cosigner that refused its own fence, say) could lead the same
+/// ceremony itself with the still-valid intent. The abort records a durable no-vote for the id on
+/// every reachable node (an unknown id's no-vote, under the per-asker cap), so the intent is spent.
+/// A client retries with a fresh intent (the driver and `rutli-cosigner refresh` mint one per
+/// attempt).
 async fn fence_all(
     peers: &Peers,
     ceremony_id: &str,
@@ -714,6 +722,13 @@ async fn fence_all(
             Err(e) => {
                 for q in &fenced {
                     let _ = q.ceremony_release(ceremony_id, key_id).await;
+                }
+                if intent.is_some() {
+                    for q in peers {
+                        if let Err(err) = q.ceremony_abort(ceremony_id).await {
+                            tracing::debug!(peer = ?q.identifier(), error = %err, "abort after a refused fence failed");
+                        }
+                    }
                 }
                 return Err(e);
             }

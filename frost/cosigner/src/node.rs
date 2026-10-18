@@ -636,6 +636,12 @@ impl Node {
     /// of ceremony protocol 1, where part 3 overwrote the live share. Under protocol 2 part 3 only
     /// stages; see [`Node::sign_round1`] for why signing and ceremonies may overlap.
     pub fn ceremony_fence(&self, ceremony_id: &str, key_id: &str, kind: &'static str) -> Result<()> {
+        self.fence_created(ceremony_id, key_id, kind).map(|_| ())
+    }
+
+    /// [`Node::ceremony_fence`], returning whether this call created the guard (`false`: this
+    /// ceremony id already held it).
+    fn fence_created(&self, ceremony_id: &str, key_id: &str, kind: &'static str) -> Result<bool> {
         // A DKG/refresh participant persists a share at the very end. On a read-only remount
         // `exists()`/`load()` still work, so without this the ceremony would fail only at this
         // node's final save — after the nodes before it had already persisted theirs: a half-applied
@@ -659,7 +665,7 @@ impl Node {
                 )));
             }
         }
-        self.acquire_ceremony(key_id, ceremony_id, kind).map(|_| ())
+        self.acquire_ceremony(key_id, ceremony_id, kind)
     }
 
     /// Roll back a fence taken by [`ceremony_fence`] (partial cluster fence / aborted ceremony).
@@ -1353,7 +1359,17 @@ impl Node {
                 }
             }
         }
-        self.ceremony_fence(ceremony_id, key_id, kind.as_str())
+        // One fence per ceremony per node: a second fence under an id that already holds the guard
+        // here is a second leader for the same ceremony — under ceremony intents, two leaders
+        // presenting one client intent. Refused, never joined: two leaders must never drive one
+        // ceremony id. (A re-fence never extended a guard either; now it is refused outright.)
+        if !self.fence_created(ceremony_id, key_id, kind.as_str())? {
+            return Err(DaemonError::CeremonyRefused(format!(
+                "ceremony {ceremony_id} already holds the guard for {key_id} on this node — a second \
+                 fence under one ceremony id (a second leader for one client intent) is refused"
+            )));
+        }
+        Ok(())
     }
 
     /// The client authorization of a DKG/refresh this node is asked to fence or start (refresh-fence
