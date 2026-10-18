@@ -9,7 +9,7 @@ DevNet soak, in the order `CHANGELOG.md` gives ("Rollout order across batch C", 
 **Every cluster step below is for the operator (the user) to run.** Nothing here was run against the
 cluster while writing it. Commands marked `# [MUTATES]` change the cluster or the participant;
 everything else is read-only. Release values not known at writing time are placeholders:
-`0.4.0-rc.3`, `<DIGEST_RC3>` (cosigner image index digest), `<JAR_SHA_RC3>` (sha256 of the rc.3
+`0.4.0-rc.3`, `sha256:f4d92758cc1b7f8036fdabe67aab79ac60bce6499e549f853ca160efb1b631e8` (cosigner image index digest), `8cc421fb7d0c5285baae4908b8afe06066175d374c68399170991e16bf29e421` (sha256 of the rc.3
 `rutli-driver.jar`).
 
 ## The soak as it stands (2026-10-16, after rc.2)
@@ -87,9 +87,9 @@ the line.
 
 ## Prerequisites
 
-- rc.3 published: cosigner image `ghcr.io/stakecraft/rutli-cosigner:0.4.0-rc.3@<DIGEST_RC3>`
+- rc.3 published: cosigner image `ghcr.io/stakecraft/rutli-cosigner:0.4.0-rc.3@sha256:f4d92758cc1b7f8036fdabe67aab79ac60bce6499e549f853ca160efb1b631e8`
   (digest-pinned in `deploy/helm/rutli-cosigner/values.yaml` by the release commit) and
-  `rutli-driver.jar` (sha256 `<JAR_SHA_RC3>`).
+  `rutli-driver.jar` (sha256 `8cc421fb7d0c5285baae4908b8afe06066175d374c68399170991e16bf29e421`).
 - This repository checked out **at the v0.4.0-rc.3 release commit**; `rutli-cosigner` 0.4.0-rc.3 built
   on the workstation (`cargo build --release -p rutli-cosigner` in `frost/`); Java 17; `kubectl`,
   `helm` 3, `openssl`, `jq`, `yq`, `curl`; `grpcurl` for the phase-4 negative test.
@@ -311,7 +311,7 @@ diff <(grep -v '^#' $D/live.yaml) <(grep -v '^#' $D/rc3.yaml)
 
 Expected differences only:
 
-- the image `0.4.0-rc.2@sha256:dfb5c859…` → `0.4.0-rc.3@<DIGEST_RC3>` in the `tls-select` init
+- the image `0.4.0-rc.2@sha256:dfb5c859…` → `0.4.0-rc.3@sha256:f4d92758cc1b7f8036fdabe67aab79ac60bce6499e549f853ca160efb1b631e8` in the `tls-select` init
   container and the `cosigner` container;
 - the chart/app version labels (`helm.sh/chart`, `app.kubernetes.io/version`);
 - in each `cosigner-<i>.json`: `"delete_grace_secs": 604800` appended to `hosted_keys` (the rc.3
@@ -339,7 +339,7 @@ DKG/refresh would be refused (mixed cluster) — none is scheduled.
 ```bash
 for o in 0 1 2; do
   echo "== node $((o+1))"
-  kubectl -n rutli get pod rutli-cosigner-$o -o jsonpath='{.status.containerStatuses[?(@.name=="cosigner")].imageID}{"\n"}'   # …@<DIGEST_RC3>
+  kubectl -n rutli get pod rutli-cosigner-$o -o jsonpath='{.status.containerStatuses[?(@.name=="cosigner")].imageID}{"\n"}'   # …@sha256:f4d92758cc1b7f8036fdabe67aab79ac60bce6499e549f853ca160efb1b631e8
   kubectl -n rutli logs rutli-cosigner-$o -c cosigner | grep -E 'signing policy|cluster id |key-file format|legacy SHARED master|require_intent is off|require_epoch_match is off|plaintext|refus' | head -20
 done
 ```
@@ -466,7 +466,7 @@ kubectl cp rutli-driver-0.4.0-rc.3.jar $PNS/rutli-kms-rc3:/bundle/rutli-driver.j
 kubectl -n $PNS exec rutli-kms-rc3 -- sh -c 'cd /bundle && ls -ln && sha256sum rutli-driver.jar rutli-driver.jar.rc2 rutli-driver.jar.rc3'
 ```
 
-**Stop if** `rutli-driver.jar.rc3` is not `<JAR_SHA_RC3>`, or `rutli-driver.jar` and
+**Stop if** `rutli-driver.jar.rc3` is not `8cc421fb7d0c5285baae4908b8afe06066175d374c68399170991e16bf29e421`, or `rutli-driver.jar` and
 `rutli-driver.jar.rc2` differ (the rollback copy must be the jar that runs now, `04d3a19b…`). Keep
 the helper pod for 2.4.
 
@@ -487,7 +487,7 @@ set `sign-intents` (default `on`).
 ### 2.4 Swap and restart  `# [MUTATES]`, signing gap ≈ the participant's start time
 
 ```bash
-kubectl -n $PNS exec rutli-kms-rc3 -- sh -c 'cd /bundle && mv rutli-driver.jar.rc3 rutli-driver.jar && sha256sum rutli-driver.jar'   # [MUTATES] = <JAR_SHA_RC3>
+kubectl -n $PNS exec rutli-kms-rc3 -- sh -c 'cd /bundle && mv rutli-driver.jar.rc3 rutli-driver.jar && sha256sum rutli-driver.jar'   # [MUTATES] = 8cc421fb7d0c5285baae4908b8afe06066175d374c68399170991e16bf29e421
 kubectl -n $PNS delete pod rutli-kms-rc3                                                                  # [MUTATES]
 helm -n $PNS upgrade participant oci://ghcr.io/digital-asset/decentralized-canton-sync/helm/splice-participant \
   --version 0.9.0 -f $D/participant-values.rc3.yaml                                                       # [MUTATES] restarts the participant (Recreate)
@@ -1081,7 +1081,7 @@ with the delete-role certificate> delete-hosted-key --key-id <id> [--approvals-i
 ## Final verification checklist
 
 - [ ] `helm -n rutli history rutli`: rc.3 revisions for phases 1, 3, 4 (and 6) recorded; rollback targets known.
-- [ ] Every cosigner pod runs `0.4.0-rc.3@<DIGEST_RC3>` and logs `signing policy … require_intent=true signer_acl_required=true signer_may_refresh=false acl_entries=1 pinned_cns=1`, no `require_epoch_match is off`.
+- [ ] Every cosigner pod runs `0.4.0-rc.3@sha256:f4d92758cc1b7f8036fdabe67aab79ac60bce6499e549f853ca160efb1b631e8` and logs `signing policy … require_intent=true signer_acl_required=true signer_may_refresh=false acl_entries=1 pinned_cns=1`, no `require_epoch_match is off`.
 - [ ] Rendered config on every node: `signing_policy.rate_limits` (namespace first), `signer_acl.driver = ["frost-","rutli-"]`, `signer_pins.driver = [<DRIVER_PIN>]`, the four switches; no `refresh_allowlist`; `hosted_keys` without `delete_allowlist`.
 - [ ] `verify-key` for `frost-namespace` and `frost-signing`: `ok`, one epoch, one PKP digest, no stale node.
 - [ ] `rutli_ceremonies_staged` 0, `rutli_stale_share` 0, `rutli_sign_journal_errors_total` 0, `rutli_sign_rate_limited_total` flat, `rutli_sign_intent_absent_total` flat, `rutli_signer_acl_absent_total` flat, `rutli_epoch_check_skipped_total` flat.
