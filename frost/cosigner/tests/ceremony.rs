@@ -274,6 +274,15 @@ impl Rig {
 
     /// `caps`: the unknown-ceremony no-vote caps (per asker, total) of every node (audit F2).
     fn build(orphan: std::time::Duration, caps: Option<(usize, usize)>) -> Self {
+        Self::build_with(orphan, caps, None)
+    }
+
+    /// Every node's fence-only guard timeout is `fence` (default: the production 60 s).
+    fn with_fence_timeout(fence: std::time::Duration) -> Self {
+        Self::build_with(std::time::Duration::from_secs(900), None, Some(fence))
+    }
+
+    fn build_with(orphan: std::time::Duration, caps: Option<(usize, usize)>, fence: Option<std::time::Duration>) -> Self {
         let tmp = tempfile::tempdir().unwrap();
         let nodes: Vec<Arc<Node>> = (1..=N)
             .map(|i| {
@@ -282,6 +291,9 @@ impl Rig {
                     .with_regather_delay(std::time::Duration::from_millis(10));
                 if let Some((per_asker, total)) = caps {
                     node = node.with_unknown_no_vote_caps(per_asker, total);
+                }
+                if let Some(fence) = fence {
+                    node = node.with_ceremony_fence_timeout(fence);
                 }
                 Arc::new(node)
             })
@@ -968,7 +980,7 @@ async fn a_repeated_part1_keeps_the_live_session_and_its_guard() {
     n.ceremony_begin("dkg-twice", KEY, CeremonyKind::Dkg, None).unwrap();
     n.ceremony_part1("dkg-twice", KEY, CeremonyKind::Dkg, &[1, 2, 3]).unwrap();
     assert!(n.ceremony_part1("dkg-twice", KEY, CeremonyKind::Dkg, &[1, 2, 3]).is_err());
-    // Still fenced by the live ceremony: another one for the key is refused, and so is a sign.
+    // Still held by the live ceremony: another one for the key is refused.
     let err = n.ceremony_begin("dkg-other", KEY, CeremonyKind::Dkg, None).unwrap_err();
     assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "{err:?}");
     assert_eq!(n.ceremony_status("dkg-twice").unwrap().phase, Phase::InProgress);
@@ -1216,4 +1228,170 @@ async fn hosted_key_fences_never_cover_a_frost_key_and_pending_sign_sessions_are
         n.abort_sign(KEY, &format!("flood-{i}"));
     }
     rig.every_pair_signs(&group).await;
+}
+
+// ── signing is not fenced by DKG/refresh; guard hygiene (0.4.0-rc.4) ──
+
+/// Every 2-subset signs; returns the signatures (each verified under `group`).
+async fn sign_every_pair(rig: &Rig, group: &[u8; 32], tag: &str) -> Vec<Vec<u8>> {
+    let mut sigs = Vec::new();
+    for (a, b) in [(0usize, 1usize), (0, 2), (1, 2)] {
+        let pair: Peers = vec![rig.peers[a].clone(), rig.peers[b].clone()];
+        let msg = rutli_frost_core::dealer::canton_test_message(format!("{tag} {a}{b}").as_bytes());
+        let sig = sign(&rig.nodes[a], &pair, KEY, &msg).await.unwrap_or_else(|e| panic!("{tag} {a}{b}: {e}"));
+        assert!(rutli_cosigner::verify_key::signature_verifies(group, &msg, &sig), "{tag} {a}{b}");
+        sigs.push(sig.to_vec());
+    }
+    sigs
+}
+
+fn expect_of(rig: &Rig) -> Option<(u64, [u8; 32])> {
+    let v = rig.nodes[0].key_epoch(KEY).unwrap();
+    Some((v.epoch, v.pkp_digest.as_slice().try_into().unwrap()))
+}
+
+/// Signing goes on between the fence and every part of a refresh and across its commit; part 3
+/// only stages (the live share file is byte-identical until commit); a sign begun before the fence
+/// completes after part 3; no two signatures share a nonce commitment.
+#[tokio::test]
+async fn signing_continues_through_every_phase_of_a_refresh_and_across_its_commit() {
+    let rig = Rig::new();
+    let group = run_dkg(&rig.peers, KEY).await.unwrap();
+    let live = |rig: &Rig| (0..N as usize).map(|i| std::fs::read(rig.share_file(i)).unwrap()).collect::<Vec<_>>();
+    let before = live(&rig);
+    let mut sigs = sign_every_pair(&rig, &group, "before").await;
+
+    // A sign whose round 1 runs before the fence; its round 2 comes after part 3.
+    let early_msg = rutli_frost_core::dealer::canton_test_message(b"early");
+    let ctx = rutli_cosigner::node::Round1Ctx {
+        leader_view: Some(rig.nodes[0].signing_view(KEY).unwrap().view),
+        ..Default::default()
+    };
+    let mut early = BTreeMap::new();
+    for n in &rig.nodes[..2] {
+        early.insert(n.identifier, n.sign_round1(KEY, "early", &ctx).unwrap());
+    }
+
+    let id = "refresh-while-signing";
+    for p in &rig.peers {
+        p.ceremony_begin(id, KEY, CeremonyKind::Refresh, expect_of(&rig)).await.unwrap();
+    }
+    sigs.extend(sign_every_pair(&rig, &group, "fenced").await);
+    let mut map = BTreeMap::new();
+    for p in &rig.peers {
+        map.insert(p.identifier(), p.ceremony_part1(id, KEY, CeremonyKind::Refresh, &[1, 2, 3]).await.unwrap());
+    }
+    sigs.extend(sign_every_pair(&rig, &group, "part1").await);
+    let mut digest = [0u8; 32];
+    for p in &rig.peers {
+        digest = p.ceremony_part2(id, &map).await.unwrap().round1_digest;
+    }
+    sigs.extend(sign_every_pair(&rig, &group, "part2").await);
+    for p in &rig.peers {
+        p.ceremony_part3(id, &digest).await.unwrap();
+    }
+    // Part 3 staged a share and a yes-vote on every node, and wrote nothing live.
+    assert_eq!(live(&rig), before, "part 3 must never write the live share");
+    assert_eq!(rig.epochs(), vec![1, 1, 1]);
+    for n in &rig.nodes {
+        assert_eq!(n.ceremony_record(id).unwrap().state, RecordState::Staged);
+        assert!(n.staged_share_files().unwrap().iter().any(|(k, c)| k == KEY && c == id));
+    }
+    sigs.extend(sign_every_pair(&rig, &group, "staged").await);
+
+    // The early sign completes on the unchanged live share.
+    let shares: BTreeMap<_, _> = rig.nodes[..2]
+        .iter()
+        .map(|n| (n.identifier, n.sign_round2(KEY, "early", &early_msg, &early).unwrap()))
+        .collect();
+    let pkp = KeyStore::open(rig.nodes[0].key_store_dir()).unwrap().load(KEY).unwrap().public_key_package;
+    let signing_package = frost_ed25519::SigningPackage::new(early.clone(), &early_msg);
+    let sig = frost_ed25519::aggregate(&signing_package, &shares, &pkp).unwrap().serialize().unwrap();
+    assert!(rutli_cosigner::verify_key::signature_verifies(&group, &early_msg, &sig));
+    sigs.push(sig);
+
+    // Commit: the live share changes now, and signing goes on at epoch 2.
+    for p in &rig.peers {
+        assert_eq!(p.ceremony_commit(id).await.unwrap().phase, Phase::Committed);
+    }
+    assert_eq!(rig.epochs(), vec![2, 2, 2]);
+    assert!(live(&rig).iter().zip(&before).all(|(a, b)| a != b), "commit replaced every live share");
+    sigs.extend(sign_every_pair(&rig, &group, "committed").await);
+
+    // No nonce was ever used twice: every signature has its own R.
+    let rs: std::collections::BTreeSet<Vec<u8>> = sigs.iter().map(|s| s[..32].to_vec()).collect();
+    assert_eq!(rs.len(), sigs.len(), "a nonce commitment repeated");
+}
+
+/// A fence never followed by part 1 (a leader that died, or a peer fencing on its own) is orphaned
+/// after the short fence timeout, so the next ceremony takes the key; a guard with a session keeps
+/// the orphan timeout.
+#[tokio::test]
+async fn a_fence_only_guard_expires_after_the_fence_timeout_and_a_new_ceremony_takes_the_key() {
+    let fence = std::time::Duration::from_millis(300);
+    let rig = Rig::with_fence_timeout(fence);
+    let group = run_dkg(&rig.peers, KEY).await.unwrap();
+    for p in &rig.peers {
+        p.ceremony_begin("refresh-abandoned", KEY, CeremonyKind::Refresh, expect_of(&rig)).await.unwrap();
+    }
+    // While it is fresh it holds off another ceremony (signing is unaffected either way).
+    let err = run_refresh(&rig.peers, KEY).await.unwrap_err();
+    assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "{err:?}");
+    rig.every_pair_signs(&group).await;
+
+    tokio::time::sleep(fence + std::time::Duration::from_millis(50)).await;
+    assert_eq!(run_refresh(&rig.peers, KEY).await.unwrap(), group);
+    assert_eq!(rig.epochs(), vec![2, 2, 2]);
+    rig.every_pair_signs(&group).await;
+
+    // A guard whose part 1 ran is a live session: the fence timeout does not apply to it.
+    let n = &rig.nodes[0];
+    n.ceremony_begin("refresh-with-session", KEY, CeremonyKind::Refresh, expect_of(&rig)).unwrap();
+    n.ceremony_part1("refresh-with-session", KEY, CeremonyKind::Refresh, &[1, 2, 3]).unwrap();
+    tokio::time::sleep(fence + std::time::Duration::from_millis(50)).await;
+    let err = n.ceremony_begin("refresh-next", KEY, CeremonyKind::Refresh, expect_of(&rig)).unwrap_err();
+    assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "{err:?}");
+}
+
+/// Re-sending a fence under the same ceremony id keeps the guard's original start (rc.3 reset it,
+/// so a fence repeated every so often held the key forever).
+#[tokio::test]
+async fn re_fencing_under_the_same_id_does_not_extend_the_guard() {
+    let fence = std::time::Duration::from_millis(400);
+    let rig = Rig::with_fence_timeout(fence);
+    run_dkg(&rig.peers, KEY).await.unwrap();
+    let n = &rig.nodes[0];
+    let started = std::time::Instant::now();
+    n.ceremony_begin("refresh-renewed", KEY, CeremonyKind::Refresh, expect_of(&rig)).unwrap();
+    let err = n.ceremony_begin("refresh-other", KEY, CeremonyKind::Refresh, expect_of(&rig)).unwrap_err();
+    assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "{err:?}");
+    // Re-fence every 100 ms, past the timeout; the last one lands well inside a would-be reset.
+    while started.elapsed() < fence + std::time::Duration::from_millis(100) {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        n.ceremony_begin("refresh-renewed", KEY, CeremonyKind::Refresh, expect_of(&rig)).unwrap();
+    }
+    n.ceremony_begin("refresh-other", KEY, CeremonyKind::Refresh, expect_of(&rig)).unwrap();
+    // The preempted id's part 1 is refused: the key is held by the newer fence.
+    let err = n.ceremony_part1("refresh-renewed", KEY, CeremonyKind::Refresh, &[1, 2, 3]).unwrap_err();
+    assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "{err:?}");
+    // The same id cannot change kind under its guard either.
+    assert!(matches!(n.ceremony_fence("refresh-other", KEY, "dkg"), Err(DaemonError::CeremonyRefused(_))));
+}
+
+/// The fence refuses a ceremony id this node already holds a record for (part 1 always did), so a
+/// used id never even takes the guard.
+#[tokio::test]
+async fn a_fence_for_a_ceremony_id_with_a_record_is_refused_and_takes_no_guard() {
+    let rig = Rig::new();
+    let group = run_dkg(&rig.peers, KEY).await.unwrap();
+    let dkg_id = rig.the_ceremony(0, "dkg");
+    let n = &rig.nodes[0];
+    // A committed id, and an id this node voted no on as unknown.
+    assert_eq!(n.ceremony_status("refresh-unknown").unwrap().phase, Phase::Aborted);
+    for id in [dkg_id.as_str(), "refresh-unknown"] {
+        let err = n.ceremony_begin(id, KEY, CeremonyKind::Refresh, expect_of(&rig)).unwrap_err();
+        assert!(matches!(&err, DaemonError::CeremonyRefused(m) if m.contains("already used")), "{id}: {err:?}");
+    }
+    // No guard was left behind: a refresh runs at once.
+    assert_eq!(run_refresh(&rig.peers, KEY).await.unwrap(), group);
 }

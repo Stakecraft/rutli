@@ -95,9 +95,10 @@ service Peer {
   // Best-effort: drop an in-flight sign session so its round-1 nonces are freed immediately
   // instead of lingering until the pending-TTL sweep. Sent by the leader when a sign gives up.
   rpc AbortSign(AbortSignRequest) returns (AbortSignReply);
-  // Cluster-wide ceremony fence: take the per-key guard on every peer BEFORE DKG/refresh crypto,
-  // so no node can start a new sign while the ceremony is in flight. Release rolls back a partial
-  // fence if a later peer refuses (e.g. has in-flight signs).
+  // Cluster-wide ceremony fence: take the per-key guard on every peer BEFORE DKG/refresh crypto
+  // (or a hosted-key write), so no other ceremony for the key can start while this one is in
+  // flight. It does not pause signing (since 0.4.0-rc.4). Release rolls back a partial fence if a
+  // later peer refuses.
   rpc CeremonyFence(CeremonyFenceRequest) returns (CeremonyFenceReply);
   rpc CeremonyRelease(CeremonyReleaseRequest) returns (CeremonyReleaseReply);
 

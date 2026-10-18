@@ -506,8 +506,11 @@ async fn a_superseded_refresh_cannot_persist_after_orphan_preempt() {
         .unwrap();
 }
 
+/// Until 0.4.0-rc.3 a DKG/refresh fence refused every new sign on the key; a fence never followed by
+/// part 1 (a peer fencing on its own, or a leader dying in between) stalled that key's signing until
+/// a restart. A ceremony now only stages until commit, so signing goes on under the fence.
 #[tokio::test]
-async fn sign_is_refused_on_every_node_after_cluster_wide_refresh_fence() {
+async fn signing_continues_on_every_node_under_a_cluster_wide_refresh_fence() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = cluster(&tmp);
     let group_key = run_dkg(&peers, KEY_ID).await.unwrap();
@@ -517,42 +520,64 @@ async fn sign_is_refused_on_every_node_after_cluster_wide_refresh_fence() {
         n.ceremony_fence("refresh-1", KEY_ID, "refresh").unwrap();
     }
 
-    // A new sign is refused on EVERY node — not just the leader that started the ceremony.
+    // Every node still joins a quorum, and the cluster signs.
     for (i, n) in nodes.iter().enumerate() {
-        let err = n.sign_round1(KEY_ID, &format!("sign-during-refresh-{i}"), &Default::default()).unwrap_err();
-        assert!(
-            matches!(err, DaemonError::CeremonyInProgress { .. }),
-            "node {i}: got {err:?}"
-        );
+        let session = format!("sign-during-refresh-{i}");
+        n.sign_round1(KEY_ID, &session, &Default::default()).unwrap_or_else(|e| panic!("node {i}: {e:?}"));
+        n.abort_sign(KEY_ID, &session);
     }
+    let msg = canton_digest(b"under a refresh fence");
+    let sig = sign(&nodes[0], &peers, KEY_ID, &msg).await.unwrap();
+    ed25519_dalek::VerifyingKey::from_bytes(&group_key)
+        .unwrap()
+        .verify_strict(&msg, &ed25519_dalek::Signature::from_bytes(&sig))
+        .unwrap();
 
-    // group_key still readable; the cluster is consistent.
-    assert_eq!(nodes[0].group_key(KEY_ID).unwrap(), group_key);
-    let _ = peers; // roster present for the cluster helper
+    // The fence still serializes ceremonies: another refresh is refused until it is released.
+    assert!(matches!(run_refresh(&peers, KEY_ID).await, Err(DaemonError::CeremonyInProgress { .. })));
+    for n in &nodes {
+        n.ceremony_release("refresh-1", KEY_ID);
+    }
+    assert_eq!(run_refresh(&peers, KEY_ID).await.unwrap(), group_key);
 }
 
+/// Until 0.4.0-rc.3 a refresh was refused while any node held sign nonces for the key (the
+/// "reverse fence"). Now it runs; a sign whose round 1 ran before the commit fails cleanly at round 2
+/// (the commit evicted the cosigner holding its nonces), and the leader's retry signs on the new
+/// sharing.
 #[tokio::test]
-async fn refresh_is_refused_while_a_sign_is_in_flight_on_any_node() {
+async fn a_refresh_runs_over_an_in_flight_sign_which_then_fails_cleanly_and_is_retried() {
+    use rutli_cosigner::node::Round1Ctx;
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = cluster(&tmp);
     let group_key = run_dkg(&peers, KEY_ID).await.unwrap();
+    let msg = canton_digest(b"spans a commit");
 
-    // Node 1 has an in-flight sign (round1 done, round2 not yet).
-    nodes[1].sign_round1(KEY_ID, "in-flight", &Default::default()).unwrap();
-    assert_eq!(nodes[1].pending_sign_count(KEY_ID), 1);
+    // Nodes 1 and 2 have an in-flight sign at epoch 1 (round 1 done, round 2 not yet).
+    let ctx = Round1Ctx { leader_view: Some(nodes[0].signing_view(KEY_ID).unwrap().view), ..Default::default() };
+    let mut commitments = BTreeMap::new();
+    for n in &nodes[..2] {
+        commitments.insert(n.identifier, n.sign_round1(KEY_ID, "in-flight", &ctx).unwrap());
+        assert_eq!(n.pending_sign_count(KEY_ID), 1);
+    }
 
-    // Cluster refresh must fail at the fence (reverse fence), not mutate shares under the sign.
-    let err = run_refresh(&peers, KEY_ID).await.unwrap_err();
-    assert!(matches!(err, DaemonError::SignInProgress { .. }), "got {err:?}");
+    // The refresh is not held off by it, and commits on every node.
+    assert_eq!(run_refresh(&peers, KEY_ID).await.unwrap(), group_key);
+    for n in &nodes {
+        assert_eq!(n.key_epoch(KEY_ID).unwrap().epoch, 2);
+    }
 
-    // Partial fence rolled back: a node with no pending signs accepts a new round1 (not stuck
-    // behind a leftover ceremony guard from the aborted refresh).
-    assert!(nodes[0].sign_round1(KEY_ID, "after-rollback", &Default::default()).is_ok());
-    assert!(nodes[2].sign_round1(KEY_ID, "after-rollback-2", &Default::default()).is_ok());
+    // Round 2 of the old session fails on both members: its nonces went with the evicted cosigner,
+    // so they can never be used (or reused) — nothing is pending on the new one.
+    for n in &nodes[..2] {
+        assert!(n.sign_round2(KEY_ID, "in-flight", &msg, &commitments).is_err());
+        assert_eq!(n.pending_sign_count(KEY_ID), 0);
+    }
+    // A round 1 still naming the old sharing is refused (epoch check), not mixed into the new one.
+    let err = nodes[1].sign_round1(KEY_ID, "stale-view", &ctx).unwrap_err();
+    assert!(matches!(err, DaemonError::EpochMismatch { .. }), "got {err:?}");
 
-    // Abort the in-flight session and confirm the cluster still signs under the same group key.
-    nodes[1].abort_sign(KEY_ID, "in-flight");
-    let msg = canton_digest(b"after reverse-fence");
+    // The retry signs on the refreshed sharing, verifiable under the unchanged group key.
     let sig = sign(&nodes[0], &peers, KEY_ID, &msg).await.unwrap();
     ed25519_dalek::VerifyingKey::from_bytes(&group_key)
         .unwrap()
