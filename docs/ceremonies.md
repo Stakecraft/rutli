@@ -48,8 +48,12 @@ share. Under protocol 2 it is not needed:
 * The live share changes only at commit, and the guard is already released by then. Signing across
   a commit was therefore always possible, and it is handled. The commit evicts the loaded share.
   Round 1 checks the leader's `(epoch, PKP digest)`. A sign whose round 1 ran before the commit
-  fails cleanly at round 2 on that node, because the new signing state has no session for it, and
-  the leader retries on another subset.
+  ends one of two ways. If every member's round 2 had already picked up the old signing state, the
+  shares are all from the old sharing and combine into a valid signature under the unchanged group
+  key. If a member's round 2 starts after the commit, it fails cleanly, because the new signing
+  state has no session for it. The leader's retries in that same sign still name the sharing it
+  saw before the commit, so round 1 refuses them, and the sign fails with UNAVAILABLE. The next
+  sign (the driver's failover, or the client's retry) uses fresh sessions on the new sharing.
 * Nonces are never reused. Round-1 nonces live only in memory with the share that made them and
   are dropped with it, and each session burns a durable marker.
 * A DKG has no live key to sign with.

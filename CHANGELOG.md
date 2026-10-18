@@ -31,7 +31,8 @@ All notable changes to Rütli are documented here. Format loosely follows
 - **Signing no longer pauses during a DKG or refresh**, and a refresh is no longer refused while
   sign nonces are in flight (the "reverse fence"; the `SignInProgress` error is gone). Part 3 only
   stages, and the live share changes at commit, as before. A sign whose round 1 ran before the
-  commit fails at round 2 on that node and is retried on another subset; nonces are never reused.
+  commit either completes on the old sharing (every member's round 2 had already started) or fails
+  cleanly at round 2, and the next sign uses the new sharing; nonces are never reused.
   Operators no longer need to drain topology traffic before a refresh (`docs/ceremonies.md`,
   "Signing during a ceremony").
 
