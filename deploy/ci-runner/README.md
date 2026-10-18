@@ -59,8 +59,34 @@ The VM is created with exactly:
 
 ```bash
 colima start --profile rutli-ci --cpu 4 --memory 8 --disk 60 --vm-type vz --arch aarch64 \
-  --runtime docker --mount ~/.rutli-ci-empty
+  --runtime docker --mount ~/.rutli-ci-empty --vz-rosetta
 ```
+
+`--vz-rosetta` enables Apple's Rosetta for amd64 containers. It is required for the release image
+build (`publish-image.yml`, linux/amd64 + linux/arm64): under QEMU user emulation the amd64 Rust
+link step crashes (`linking with cc failed: signal: 11 (SIGSEGV)`). The script refuses to continue
+on a VM without a Rosetta handler (`RUTLI_CI_ROSETTA=0` skips that check for arm64-only use).
+
+**A VM created before this change has no Rosetta.** Enable it in place (the disk and the
+read-only mount are kept; Colima stores the profile config in `~/.colima/rutli-ci/colima.yaml`,
+where this sets `rosetta: true`). It needs a full stop and start, not a restart:
+
+```bash
+colima stop -p rutli-ci
+colima start -p rutli-ci --vz-rosetta
+scripts/ci-runner-up.sh        # re-verifies mounts and Rosetta, re-registers the runner
+```
+
+If the handler still does not show up, `scripts/ci-runner-down.sh --delete-vm` and re-run
+`scripts/ci-runner-up.sh` to recreate the VM with Rosetta. Verify:
+
+```bash
+colima ssh -p rutli-ci -- ls /proc/sys/fs/binfmt_misc/                                   # lists: rosetta
+docker --context colima-rutli-ci run --rm --platform linux/amd64 alpine:3.20 uname -m   # x86_64
+```
+
+Rosetta adds one more virtiofs mount in the VM, `rosetta` on `/mnt/lima-rosetta`. It holds only
+Apple's translator binary, no host files, and the mount check accepts exactly that one.
 
 Overrides: `RUNNER_REPO`, `RUNNER_NAME` (default `rutli-ci-isolated`), `RUNNER_WORKDIR` (a path
 inside the VM under `/var/lib/rutli-ci/`), `RUTLI_CI_PROFILE`, `RUTLI_CI_CPU`,
@@ -69,7 +95,7 @@ inside the VM under `/var/lib/rutli-ci/`), `RUTLI_CI_PROFILE`, `RUTLI_CI_CPU`,
 Check the isolation by hand at any time:
 
 ```bash
-colima ssh -p rutli-ci -- mount | grep virtiofs        # one line: the empty dir, ro
+colima ssh -p rutli-ci -- mount | grep virtiofs        # the empty dir (ro) and the rosetta share
 docker --context colima-rutli-ci run --rm -v $HOME/.kube:/x:ro alpine:3.20 ls /x   # lists nothing
 ```
 
@@ -111,7 +137,7 @@ gh api -X DELETE repos/Stakecraft/rutli/actions/runners/$id
 - **One job at a time.** CI is slower than on GitHub's parallel runners.
 - **The architecture is arm64** (Apple silicon, `--arch aarch64`). All jobs work there, except
   the `conformance` job's `dpm` download, which is amd64 only. That job runs on schedule or
-  manual dispatch, not on pull requests. amd64 image builds run under emulation and are slow.
+  manual dispatch, not on pull requests. amd64 image builds run under Rosetta emulation and are slower than native.
   For full parity, use a Linux amd64 host.
 - **`actions/cache` and artifact upload still use GitHub's service.** If that is blocked, they
   only warn. No job depends on them.

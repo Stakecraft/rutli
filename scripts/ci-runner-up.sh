@@ -13,7 +13,8 @@
 # anything but the empty dir read-only, then runs the compose file against the VM's daemon only.
 # Re-running re-registers the runner (the token changes, so the container is recreated).
 # Env overrides: RUNNER_REPO, RUNNER_NAME, RUNNER_WORKDIR (path inside the VM),
-#   RUTLI_CI_PROFILE / RUTLI_CI_CPU / RUTLI_CI_MEMORY (GiB) / RUTLI_CI_DISK (GiB).
+#   RUTLI_CI_PROFILE / RUTLI_CI_CPU / RUTLI_CI_MEMORY (GiB) / RUTLI_CI_DISK (GiB),
+#   RUTLI_CI_ROSETTA=0 to accept a VM without Rosetta (default: required, for amd64 image builds).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 # shellcheck source=scripts/ci-runner-lib.sh
@@ -35,20 +36,23 @@ trap restore_context EXIT
 mkdir -p "$CI_EMPTY_DIR"
 [[ -z "$(ls -A "$CI_EMPTY_DIR")" ]] || die "$CI_EMPTY_DIR must be empty"
 
-# 2. Create / start the VM.
+# 2. Create / start the VM. New VMs get Rosetta (--vz-rosetta) for amd64 image builds.
+ROSETTA_FLAG=()
+[[ "$CI_ROSETTA" == 0 ]] || ROSETTA_FLAG=(--vz-rosetta)
 case "$(vm_state)" in
   Running) echo "VM '$CI_PROFILE' already running" ;;
   Stopped) echo "starting VM '$CI_PROFILE'"; colima start --profile "$CI_PROFILE" ;;
   MISSING)
     echo "creating VM '$CI_PROFILE' (${CI_CPU} CPU / ${CI_MEMORY} GiB / ${CI_DISK} GiB disk)"
     colima start --profile "$CI_PROFILE" --cpu "$CI_CPU" --memory "$CI_MEMORY" --disk "$CI_DISK" \
-      --vm-type vz --arch aarch64 --runtime docker --mount "$CI_EMPTY_DIR"
+      --vm-type vz --arch aarch64 --runtime docker --mount "$CI_EMPTY_DIR" ${ROSETTA_FLAG[@]+"${ROSETTA_FLAG[@]}"}
     ;;
 esac
 # `colima start` switches docker's current context to the VM; the EXIT trap switches it back.
 
 # 3. Hard gates: only the empty dir, read-only; docker context is the VM's own.
 verify_vm_mounts
+verify_rosetta
 verify_context
 D=(docker --context "$CI_CONTEXT")
 "${D[@]}" info >/dev/null || die "cannot reach the VM's docker daemon"
