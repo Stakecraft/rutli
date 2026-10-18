@@ -301,12 +301,17 @@ impl Signer for SignerSvc {
     }
 
     async fn dkg(&self, req: Request<pb::DkgRequest>) -> Result<Response<pb::DkgReply>, Status> {
-        self.authorize_key(&req, |r| &r.key_id)?;
-        let key_id = req.into_inner().key_id;
+        let caller = self.authorize(&req)?;
+        self.check_acl(caller.as_ref(), &req.get_ref().key_id)?;
+        let r = req.into_inner();
+        // The ceremony intent, checked here first for a clear refusal from the leader (and so an
+        // intent cannot be replayed through another client's connection). Every node checks it
+        // again before it takes the guard.
+        self.check_ceremony_intent(caller.as_ref(), crate::node::CeremonyKind::Dkg, &r.key_id, r.intent.as_ref())?;
         // A node whose key store failed its readiness probe declines to lead (UNAVAILABLE, so the
         // driver picks another leader) rather than start a ceremony it cannot persist.
         let result = match self.node.refuse_if_keystore_down() {
-            Ok(()) => orchestrator::run_dkg(&self.peers, &key_id).await,
+            Ok(()) => orchestrator::run_dkg_with_intent(&self.peers, &r.key_id, r.intent).await,
             Err(e) => Err(e),
         };
         record_ceremony("dkg", result.is_ok());
@@ -347,8 +352,11 @@ impl Signer for SignerSvc {
     ) -> Result<Response<pb::RefreshReply>, Status> {
         let key_id = req.get_ref().key_id.clone();
         self.authorize_refresh(&req, &key_id)?;
+        let caller = caller_of(&req);
+        let intent = req.into_inner().intent;
+        self.check_ceremony_intent(caller.as_ref(), crate::node::CeremonyKind::Refresh, &key_id, intent.as_ref())?;
         let result = match self.node.refuse_if_keystore_down() {
-            Ok(()) => orchestrator::run_refresh(&self.peers, &key_id).await,
+            Ok(()) => orchestrator::run_refresh_with_intent(&self.peers, &key_id, intent).await,
             Err(e) => Err(e),
         };
         record_ceremony("refresh", result.is_ok());
@@ -650,6 +658,54 @@ impl SignerSvc {
         Ok(())
     }
 
+    /// The leader's own check of a `Dkg`/`Refresh` request's ceremony intent: valid here (role,
+    /// pin, cluster, kind, key, validity) and signed by the very client calling (CN and certificate
+    /// key). No intent: refused when this node requires one, else every node decides. Not
+    /// load-bearing — every node verifies the intent before it takes the guard — but it gives the
+    /// client a clear refusal and stops a captured intent from being replayed through another
+    /// client's connection.
+    fn check_ceremony_intent(
+        &self,
+        caller: Option<&crate::intent::Caller>,
+        kind: crate::node::CeremonyKind,
+        key_id: &str,
+        intent: Option<&pb::SignedIntent>,
+    ) -> Result<(), Status> {
+        let Some(g) = &self.sign_guard else { return Ok(()) };
+        let Some(signed) = intent else {
+            if g.require_ceremony_intent() {
+                return Err(Status::from(crate::intent::refused_ceremony(
+                    "missing",
+                    format!(
+                        "{} of {key_id} carries no ceremony intent and this node requires one \
+                         (signing_policy.require_ceremony_intent) — upgrade the driver (DKG) or run \
+                         rutli-cosigner refresh from this release",
+                        kind.as_str()
+                    ),
+                )));
+            }
+            return Ok(());
+        };
+        let ceremony_id = crate::intent::ceremony_id_of(signed, kind).map_err(Status::from)?;
+        let v = g
+            .verifier()
+            .verify_ceremony(signed, kind, key_id, &ceremony_id, crate::intent::now_ms())
+            .map_err(Status::from)?;
+        if let Some(c) = caller {
+            if c.cn != v.signer_cn || c.spki_sha256 != v.signer_spki_sha256 {
+                return Err(Status::from(crate::intent::refused_ceremony(
+                    "signer",
+                    format!(
+                        "the ceremony intent is signed by {:?}, but the caller is {:?} with another \
+                         certificate key — an intent is only valid on its signer's own connection",
+                        v.signer_cn, c.cn
+                    ),
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Charge one decryption against `key_id`'s budget, or refuse.
     ///
     /// Applies to every decrypt path (RSA `Decrypt`, `SymmetricDecrypt`, ECIES `EcdhDerive`) and
@@ -660,6 +716,35 @@ impl SignerSvc {
             metrics::counter!(crate::metrics::DECRYPT_RATE_LIMITED).increment(1);
             Status::from(crate::DaemonError::RateLimited(limited.to_string()))
         })
+    }
+}
+
+/// The mTLS identity of a request's caller, if it presented a certificate.
+fn caller_of<T>(req: &Request<T>) -> Option<crate::intent::Caller> {
+    req.peer_certs().and_then(|certs| certs.first().and_then(|leaf| crate::intent::Caller::from_leaf_der(leaf.as_ref())))
+}
+
+/// A DKG/refresh fence or part 1 a mesh peer asked for and this node refused on its ceremony
+/// intent: the peer led a ceremony no authorized client signed for (or one an older leader drops
+/// the intent of, when this node requires one). Logged with the asking peer, a compromise signal.
+fn warn_if_intent_refused<T>(
+    result: &crate::Result<T>,
+    asker: Option<&str>,
+    step: &str,
+    ceremony_id: &str,
+    key_id: &str,
+) {
+    if let Err(crate::DaemonError::PolicyRefused(why)) = result {
+        if why.starts_with("ceremony intent refused") {
+            tracing::warn!(
+                asker = asker.unwrap_or("<unauthenticated>"),
+                ceremony_id,
+                key_id,
+                reason = %why,
+                "ceremony {step} refused: the leading peer carried no valid client ceremony intent — \
+                 if that peer runs this release, investigate it as compromised"
+            );
+        }
     }
 }
 
@@ -812,7 +897,7 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::CeremonyFenceRequest>,
     ) -> Result<Response<pb::CeremonyFenceReply>, Status> {
-        self.authorize(&req)?;
+        let asker = self.authorize(&req)?;
         let r = req.into_inner();
         // The guard stores a &'static str, so the wire value is mapped to a known one rather than
         // leaked through — an unknown kind is a protocol error, not something to fence on.
@@ -842,10 +927,20 @@ impl Peer for PeerSvc {
                     32 => Some((r.expected_epoch, r.expected_pkp_digest.as_slice().try_into().expect("32"))),
                     _ => return Err(Status::invalid_argument("expected_pkp_digest must be 32 bytes")),
                 };
-                self.node
-                    .blocking(move |n| n.ceremony_begin(&r.ceremony_id, &r.key_id, kind, expect))
-                    .await
-                    .map_err(Status::from)?;
+                let (ceremony_id, key_id) = (r.ceremony_id.clone(), r.key_id.clone());
+                let result = self
+                    .node
+                    .blocking(move |n| n.ceremony_begin(&r.ceremony_id, &r.key_id, kind, expect, r.intent.as_ref()))
+                    .await;
+                warn_if_intent_refused(&result, asker.as_deref(), "fence", &ceremony_id, &key_id);
+                result.map_err(Status::from)?;
+            }
+            // Hosted-key fences are not client-intent gated (a cosigner can block a hosted id's
+            // generation or deletion anyway, by refusing); an intent there is a protocol error.
+            _ if r.intent.is_some() => {
+                return Err(Status::invalid_argument(format!(
+                    "a ceremony intent is only valid on a dkg or refresh fence, not {kind}"
+                )))
             }
             _ => self.node.ceremony_fence(&r.ceremony_id, &r.key_id, kind).map_err(Status::from)?,
         }
@@ -901,7 +996,7 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::CeremonyPart1Request>,
     ) -> Result<Response<pb::CeremonyPart1Reply>, Status> {
-        self.authorize(&req)?;
+        let asker = self.authorize(&req)?;
         let r = req.into_inner();
         if r.protocol < crate::ceremony::CEREMONY_PROTOCOL {
             return Err(old_leader(r.protocol));
@@ -912,11 +1007,11 @@ impl Peer for PeerSvc {
             .iter()
             .map(|&i| u16::try_from(i).map_err(|_| Status::invalid_argument("roster identifier out of range")))
             .collect::<Result<_, _>>()?;
-        let package = self
-            .node
-            .blocking(move |n| n.ceremony_part1(&r.ceremony_id, &r.key_id, kind, &roster))
-            .await
-            .map_err(Status::from)?;
+        let (ceremony_id, key_id) = (r.ceremony_id.clone(), r.key_id.clone());
+        let result =
+            self.node.blocking(move |n| n.ceremony_part1(&r.ceremony_id, &r.key_id, kind, &roster, r.intent.as_ref())).await;
+        warn_if_intent_refused(&result, asker.as_deref(), "part 1", &ceremony_id, &key_id);
+        let package = result.map_err(Status::from)?;
         Ok(Response::new(pb::CeremonyPart1Reply { round1_package: json(&package)? }))
     }
 

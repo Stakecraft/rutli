@@ -29,7 +29,7 @@ use rutli_cosigner::intent::{self, IntentVerifier};
 use rutli_cosigner::journal::{read_key_dir, Retention, SignJournal};
 use rutli_cosigner::keystore::KeyStore;
 use rutli_cosigner::node::{Node, Round1Ctx};
-use rutli_cosigner::orchestrator::{run_dkg, sign_with_intent, Peers};
+use rutli_cosigner::orchestrator::{run_dkg, run_dkg_with_intent, sign_with_intent, Peers};
 use rutli_cosigner::pb;
 use rutli_cosigner::pb::peer_client::PeerClient;
 use rutli_cosigner::pb::peer_server::PeerServer;
@@ -138,6 +138,11 @@ fn unsigned(key: &str, msg: &[u8], request: u8, issued: u64, not_after: u64) -> 
     }
 }
 
+/// A ceremony intent for `kind` of `key`, signed by `who`, request id 16×`rid`.
+fn ceremony_by(ids: &Ids, who: &str, kind: rutli_cosigner::node::CeremonyKind, key: &str, rid: u8) -> pb::SignedIntent {
+    sign(ids, who, intent::ceremony_intent(CLUSTER, kind, key, [rid; 16], now_ms(), 120_000))
+}
+
 fn sign(ids: &Ids, who: &str, i: pb::SignIntent) -> pb::SignedIntent {
     intent::sign_intent(&ids.signer(who), &i).unwrap()
 }
@@ -167,7 +172,8 @@ fn guard(root: &Path, ids: &Ids, i: u16, policy: &SigningPolicyConfig) -> Arc<Si
         ["driver".to_string(), "tenant".to_string()],
         policy,
     )
-    .unwrap();
+    .unwrap()
+    .with_refreshers(["refresher".to_string()]);
     let journal = SignJournal::open(
         root.join(format!("node-{i}")).join("journal"),
         i,
@@ -196,7 +202,13 @@ async fn cluster_with(policy: impl Fn(&Ids, u16) -> SigningPolicyConfig, refresh
     let nodes: Vec<Arc<Node>> = (1..=N).map(|i| open_node(&root, &ids, i, &policy(&ids, i))).collect();
     rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
     let local: Peers = nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
-    run_dkg(&local, KEY).await.unwrap();
+    if policy(&ids, 1).require_ceremony_intent {
+        run_dkg_with_intent(&local, KEY, Some(ceremony_by(&ids, "driver", rutli_cosigner::node::CeremonyKind::Dkg, KEY, 0xd0)))
+            .await
+            .unwrap();
+    } else {
+        run_dkg(&local, KEY).await.unwrap();
+    }
 
     let mut listeners = Vec::new();
     for _ in 0..N {
@@ -854,4 +866,102 @@ async fn a_sign_test_round_for_another_message_is_refused_at_the_peer() {
     // A DKG key has no split-ceremony provenance, so there is no test digest at all.
     assert!(s.code() == tonic::Code::FailedPrecondition || s.code() == tonic::Code::PermissionDenied, "{s:?}");
     assert_eq!(c.nodes[0].pending_sign_count(KEY), 0);
+}
+
+// ── ceremony intents over gRPC ───────────────────────────────────────────────────────────────
+
+/// `require_ceremony_intent` over real mTLS: the refresher's signed refresh runs; the same call
+/// without an intent, or with the intent of another client (an intent is valid only on its
+/// signer's own connection), is refused by the leader; the driver's DKG of a new key needs its
+/// own DKG intent too.
+#[tokio::test]
+async fn signer_dkg_and_refresh_need_the_callers_own_ceremony_intent() {
+    use rutli_cosigner::node::CeremonyKind::{Dkg, Refresh};
+    let policy = SigningPolicyConfig { require_ceremony_intent: true, signer_may_refresh: false, ..Default::default() };
+    let c = cluster(|_| policy.clone(), Some(vec!["refresher".into()])).await;
+    let group = c.group_key().to_vec();
+    let refresh = |intent| pb::RefreshRequest { key_id: KEY.into(), intent };
+
+    denied(c.signer("refresher", 0).await.refresh(refresh(None)).await, "carries no ceremony intent");
+    // A signer-role refresh intent (tenant), presented by the refresher: refused on its own merits
+    // (signer_may_refresh off) before the caller check would refuse it.
+    denied(
+        c.signer("refresher", 0).await.refresh(refresh(Some(ceremony_by(&c.ids, "tenant", Refresh, KEY, 1)))).await,
+        "signer_may_refresh is off",
+    );
+    let before = c.nodes[0].key_epoch(KEY).unwrap().epoch;
+    let reply = c.signer("refresher", 1).await.refresh(refresh(Some(ceremony_by(&c.ids, "refresher", Refresh, KEY, 2)))).await.unwrap();
+    assert_eq!(reply.into_inner().group_verifying_key, group);
+    for n in &c.nodes {
+        assert_eq!(n.key_epoch(KEY).unwrap().epoch, before + 1);
+        assert!(n.ceremony_record(&intent::ceremony_id_for(Refresh, &[2; 16])).is_some());
+    }
+    // The same intent again: one intent, one ceremony.
+    let again = c.signer("refresher", 2).await.refresh(refresh(Some(ceremony_by(&c.ids, "refresher", Refresh, KEY, 2)))).await;
+    assert!(again.as_ref().is_err_and(|s| s.message().contains("already used")), "{again:?}");
+
+    // DKG: the driver's own intent runs it; tenant's intent on the driver's connection is refused.
+    let key = "frost-participant1-second";
+    let dkg = |intent| pb::DkgRequest { key_id: key.into(), intent };
+    denied(c.signer("driver", 0).await.dkg(dkg(None)).await, "carries no ceremony intent");
+    denied(
+        c.signer("driver", 0).await.dkg(dkg(Some(ceremony_by(&c.ids, "tenant", Dkg, key, 3)))).await,
+        "only valid on its signer's own connection",
+    );
+    c.signer("driver", 0).await.dkg(dkg(Some(ceremony_by(&c.ids, "driver", Dkg, key, 4)))).await.unwrap();
+    assert!(c.nodes[2].key_epoch(key).unwrap().present);
+}
+
+/// A compromised cosigner on the mesh: a DKG/refresh fence or part 1 without a valid client intent
+/// is refused by an enforcing honest node (PERMISSION_DENIED); an intent on a hosted-key fence is a
+/// protocol error.
+#[tokio::test]
+async fn a_cosigner_cannot_fence_an_honest_peer_without_a_client_intent() {
+    let policy = SigningPolicyConfig { require_ceremony_intent: true, ..Default::default() };
+    let c = cluster(|_| policy.clone(), Some(vec!["refresher".into()])).await;
+    let mut attacker = c.peer_as("cosigner3", 0).await;
+    let e = c.nodes[0].key_epoch(KEY).unwrap();
+    let fence = |intent: Option<pb::SignedIntent>, id: &str| pb::CeremonyFenceRequest {
+        ceremony_id: id.into(),
+        key_id: KEY.into(),
+        kind: "refresh".into(),
+        expected_epoch: e.epoch,
+        expected_pkp_digest: e.pkp_digest.clone(),
+        protocol: rutli_cosigner::ceremony::CEREMONY_PROTOCOL,
+        intent,
+    };
+    denied(attacker.ceremony_fence(fence(None, "refresh-attacker")).await, "carries no ceremony intent");
+    // Its own certificate cannot sign one either.
+    let own = ceremony_by(&c.ids, "cosigner3", rutli_cosigner::node::CeremonyKind::Refresh, KEY, 5);
+    denied(
+        attacker.ceremony_fence(fence(Some(own.clone()), &intent::ceremony_id_for(rutli_cosigner::node::CeremonyKind::Refresh, &[5; 16]))).await,
+        "signed by \"cosigner3\"",
+    );
+    denied(
+        attacker
+            .ceremony_part1(pb::CeremonyPart1Request {
+                ceremony_id: "refresh-attacker".into(),
+                key_id: KEY.into(),
+                kind: "refresh".into(),
+                roster: vec![1, 2, 3],
+                protocol: rutli_cosigner::ceremony::CEREMONY_PROTOCOL,
+                intent: None,
+            })
+            .await,
+        "carries no ceremony intent",
+    );
+    let hosted = attacker
+        .ceremony_fence(pb::CeremonyFenceRequest {
+            ceremony_id: "g".into(),
+            key_id: "rutli-hosted".into(),
+            kind: "genkey".into(),
+            intent: Some(own),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(hosted.code(), tonic::Code::InvalidArgument, "{hosted:?}");
+    // Nothing was fenced: the refresher's real refresh runs at once.
+    let ok = ceremony_by(&c.ids, "refresher", rutli_cosigner::node::CeremonyKind::Refresh, KEY, 6);
+    c.signer("refresher", 0).await.refresh(pb::RefreshRequest { key_id: KEY.into(), intent: Some(ok) }).await.unwrap();
 }

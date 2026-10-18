@@ -38,11 +38,28 @@ pub const CANTON_DIGEST_LEN: usize = 34;
 /// The ceremony runs as its own task: a caller that stops waiting (driver deadline, client
 /// cancel) cannot cut it between nodes.
 pub async fn run_dkg(peers: &Peers, key_id: &str) -> Result<[u8; 32]> {
-    let (peers, key_id) = (peers.clone(), key_id.to_owned());
-    crate::ceremony::detach(async move { run_dkg_attached(&peers, &key_id).await }).await
+    run_dkg_with_intent(peers, key_id, None).await
 }
 
-async fn run_dkg_attached(peers: &Peers, key_id: &str) -> Result<[u8; 32]> {
+/// [`run_dkg`] for a client's ceremony intent (refresh-fence remediation, layer L2): the ceremony
+/// id is the one the intent names (`dkg-<hex(request_id)>`), and the intent goes, unchanged, with
+/// the fence and part 1 to every node, which verifies it itself before it takes the guard. Without
+/// an intent (an older client) the id is random and every node decides whether it accepts that
+/// (`signing_policy.require_ceremony_intent`).
+pub async fn run_dkg_with_intent(peers: &Peers, key_id: &str, intent: Option<pb::SignedIntent>) -> Result<[u8; 32]> {
+    let (peers, key_id) = (peers.clone(), key_id.to_owned());
+    crate::ceremony::detach(async move { run_dkg_attached(&peers, &key_id, intent.as_ref()).await }).await
+}
+
+/// The ceremony id for a ceremony of `kind` led for `intent` (its own id), or a random one.
+fn ceremony_id(kind: CeremonyKind, intent: Option<&pb::SignedIntent>) -> Result<String> {
+    match intent {
+        Some(i) => crate::intent::ceremony_id_of(i, kind),
+        None => Ok(new_id(kind.as_str())),
+    }
+}
+
+async fn run_dkg_attached(peers: &Peers, key_id: &str, intent: Option<&pb::SignedIntent>) -> Result<[u8; 32]> {
     // Every peer refuses too (fence and part 1); this just answers before touching the mesh.
     if crate::share_delivery::is_reserved_for_import(key_id) {
         return Err(DaemonError::ReservedKeyId(key_id.to_string()));
@@ -52,23 +69,29 @@ async fn run_dkg_attached(peers: &Peers, key_id: &str) -> Result<[u8; 32]> {
     if let Some(existing) = dkg_preflight(peers, key_id, &views).await? {
         return Ok(existing);
     }
-    let dkg_id = new_id("dkg");
-    fence_all(peers, &dkg_id, key_id, CeremonyKind::Dkg, None).await?;
-    let staged = ceremony_stage(peers, &dkg_id, key_id, CeremonyKind::Dkg).await;
+    let dkg_id = ceremony_id(CeremonyKind::Dkg, intent)?;
+    fence_all(peers, &dkg_id, key_id, CeremonyKind::Dkg, None, intent).await?;
+    let staged = ceremony_stage(peers, &dkg_id, key_id, CeremonyKind::Dkg, intent).await;
     finish_ceremony(peers, &dkg_id, key_id, staged).await
 }
 
 /// Parts 1–3 of a DKG or refresh (ceremony protocol 2): every node ends with a staged share and a
 /// STAGED vote, or the error. The leader handles only public values — round-1 packages, digests,
 /// the staged outcome; round-2 packages go node to node ([`crate::ceremony::part2_and_deliver`]).
-async fn ceremony_stage(peers: &Peers, ceremony_id: &str, key_id: &str, kind: CeremonyKind) -> Result<[u8; 32]> {
+async fn ceremony_stage(
+    peers: &Peers,
+    ceremony_id: &str,
+    key_id: &str,
+    kind: CeremonyKind,
+    intent: Option<&pb::SignedIntent>,
+) -> Result<[u8; 32]> {
     let mut roster =
         peers.iter().map(|p| crate::hosted::identifier_index(p.identifier())).collect::<Result<Vec<_>>>()?;
     roster.sort_unstable();
     // Part 1: every node commits; the leader collects the (public) round-1 packages.
     let mut round1_map = BTreeMap::new();
     for p in peers {
-        round1_map.insert(p.identifier(), p.ceremony_part1(ceremony_id, key_id, kind, &roster).await?);
+        round1_map.insert(p.identifier(), p.ceremony_part1(ceremony_id, key_id, kind, &roster, intent).await?);
     }
     // Part 2: every node checks the map, then delivers its round-2 packages to their recipients
     // itself. The leader learns only each node's digest of the map. Equal digests are checked here
@@ -135,17 +158,27 @@ async fn require_ceremony_protocol(peers: &Peers) -> Result<()> {
 /// all staged the same new sharing. A failure at any point leaves every node on the old epoch (or,
 /// after the first commit, lets every node's resolver finish the new one) — never a mix (H1).
 pub async fn run_refresh(peers: &Peers, key_id: &str) -> Result<[u8; 32]> {
-    let (peers, key_id) = (peers.clone(), key_id.to_owned());
-    crate::ceremony::detach(async move { run_refresh_attached(&peers, &key_id).await }).await
+    run_refresh_with_intent(peers, key_id, None).await
 }
 
-async fn run_refresh_attached(peers: &Peers, key_id: &str) -> Result<[u8; 32]> {
+/// [`run_refresh`] for a client's ceremony intent: as [`run_dkg_with_intent`], with the id
+/// `refresh-<hex(request_id)>`.
+pub async fn run_refresh_with_intent(
+    peers: &Peers,
+    key_id: &str,
+    intent: Option<pb::SignedIntent>,
+) -> Result<[u8; 32]> {
+    let (peers, key_id) = (peers.clone(), key_id.to_owned());
+    crate::ceremony::detach(async move { run_refresh_attached(&peers, &key_id, intent.as_ref()).await }).await
+}
+
+async fn run_refresh_attached(peers: &Peers, key_id: &str, intent: Option<&pb::SignedIntent>) -> Result<[u8; 32]> {
     require_ceremony_protocol(peers).await?;
     let views = key_views(peers, key_id).await?;
     let expect = refresh_preflight(peers, key_id, &views).await?;
-    let refresh_id = new_id("refresh");
-    fence_all(peers, &refresh_id, key_id, CeremonyKind::Refresh, Some(expect)).await?;
-    let staged = ceremony_stage(peers, &refresh_id, key_id, CeremonyKind::Refresh).await;
+    let refresh_id = ceremony_id(CeremonyKind::Refresh, intent)?;
+    fence_all(peers, &refresh_id, key_id, CeremonyKind::Refresh, Some(expect), intent).await?;
+    let staged = ceremony_stage(peers, &refresh_id, key_id, CeremonyKind::Refresh, intent).await;
     finish_ceremony(peers, &refresh_id, key_id, staged).await
 }
 
@@ -672,10 +705,11 @@ async fn fence_all(
     key_id: &str,
     kind: CeremonyKind,
     expect: Option<(u64, [u8; 32])>,
+    intent: Option<&pb::SignedIntent>,
 ) -> Result<()> {
     let mut fenced: Vec<&Arc<dyn PeerApi>> = Vec::new();
     for p in peers {
-        match p.ceremony_begin(ceremony_id, key_id, kind, expect).await {
+        match p.ceremony_begin(ceremony_id, key_id, kind, expect, intent).await {
             Ok(()) => fenced.push(p),
             Err(e) => {
                 for q in &fenced {

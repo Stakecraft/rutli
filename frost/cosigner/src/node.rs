@@ -1300,13 +1300,28 @@ impl Node {
     /// different sharing than this node holds (`expect` = the leader's (epoch, PKP digest)) — a
     /// refresh must start from one sharing on every node, or it would fold fresh zero-shares into
     /// mixed epochs (H1).
+    ///
+    /// First of all, before any of that and before the guard: the client's ceremony intent
+    /// ([`Node::authorize_ceremony`]) — so a peer that leads a ceremony no authorized client asked
+    /// for takes no guard and opens no session here.
     pub fn ceremony_begin(
         &self,
         ceremony_id: &str,
         key_id: &str,
         kind: CeremonyKind,
         expect: Option<(u64, [u8; 32])>,
+        intent: Option<&crate::pb::SignedIntent>,
     ) -> Result<()> {
+        if let Some(v) = self.authorize_ceremony(kind, key_id, ceremony_id, intent)? {
+            tracing::info!(
+                ceremony_id,
+                key_id,
+                requested_by = %v.signer_cn,
+                role = ?v.role,
+                "{} fence: ceremony intent verified",
+                kind.as_str()
+            );
+        }
         crate::keystore::validate_ceremony_id(ceremony_id)?;
         if self.book()?.records.contains_key(ceremony_id) {
             return Err(DaemonError::CeremonyRefused(format!(
@@ -1337,6 +1352,24 @@ impl Node {
             }
         }
         self.ceremony_fence(ceremony_id, key_id, kind.as_str())
+    }
+
+    /// The client authorization of a DKG/refresh this node is asked to fence or start (refresh-fence
+    /// remediation, layer L2): the ceremony intent verified by this node itself — signer role and
+    /// pin, cluster, kind, key, validity, and `ceremony_id` == the id it names — or, without one,
+    /// refused when `signing_policy.require_ceremony_intent` is on (else accepted and counted).
+    /// `Ok(None)`: no intent (accepted), or no signing policy at all (plaintext dev, test rigs).
+    fn authorize_ceremony(
+        &self,
+        kind: CeremonyKind,
+        key_id: &str,
+        ceremony_id: &str,
+        intent: Option<&crate::pb::SignedIntent>,
+    ) -> Result<Option<crate::intent::VerifiedCeremony>> {
+        match &self.sign_guard {
+            Some(g) => g.authorize_ceremony(kind, key_id, ceremony_id, intent),
+            None => Ok(None),
+        }
     }
 
     fn refuse_if_staged(&self, key_id: &str) -> Result<()> {
@@ -1484,15 +1517,19 @@ impl Node {
         Ok(())
     }
 
-    /// Part 1 (ceremony protocol 2): check the leader's roster, take the guard, start the session,
-    /// return this node's round-1 package (public; the leader broadcasts the full map in part 2).
+    /// Part 1 (ceremony protocol 2): check the client's ceremony intent again (part 1 is
+    /// stateless; the id binding ties it to the fence's guard), check the leader's roster, take the
+    /// guard, start the session, return this node's round-1 package (public; the leader broadcasts
+    /// the full map in part 2).
     pub fn ceremony_part1(
         &self,
         ceremony_id: &str,
         key_id: &str,
         kind: CeremonyKind,
         roster: &[u16],
+        intent: Option<&crate::pb::SignedIntent>,
     ) -> Result<round1::Package> {
+        self.authorize_ceremony(kind, key_id, ceremony_id, intent)?;
         let old = match kind {
             CeremonyKind::Dkg => {
                 // `…frost-import-…` ids belong to the split ceremony. Refusing them here, on every
@@ -2351,12 +2388,12 @@ impl Node {
     /// [`Node::ceremony_part1`] for a DKG over this node's own roster (every identifier `1..=n`, or
     /// itself plus its mesh). Convenience for tools and tests.
     pub fn dkg_part1(&self, dkg_id: &str, key_id: &str) -> Result<round1::Package> {
-        self.ceremony_part1(dkg_id, key_id, CeremonyKind::Dkg, &self.own_roster()?)
+        self.ceremony_part1(dkg_id, key_id, CeremonyKind::Dkg, &self.own_roster()?, None)
     }
 
     /// [`Node::ceremony_part1`] for a refresh over this node's own roster.
     pub fn refresh_part1(&self, refresh_id: &str, key_id: &str) -> Result<round1::Package> {
-        self.ceremony_part1(refresh_id, key_id, CeremonyKind::Refresh, &self.own_roster()?)
+        self.ceremony_part1(refresh_id, key_id, CeremonyKind::Refresh, &self.own_roster()?, None)
     }
 
     fn own_roster(&self) -> Result<Vec<u16>> {
@@ -3095,7 +3132,7 @@ mod guard_tests {
         *n.hooks.after_part1_acquire.lock().unwrap() =
             Some(Box::new(move |node: &Node| *b.lock().unwrap() = Some(break_book(node))));
 
-        assert!(n.ceremony_part1("dkg-a", "k", CeremonyKind::Dkg, &[1, 2, 3]).is_err());
+        assert!(n.ceremony_part1("dkg-a", "k", CeremonyKind::Dkg, &[1, 2, 3], None).is_err());
         mend_book(broken.lock().unwrap().as_ref().expect("the hook ran"));
 
         assert_eq!(guard(&n, "k"), Some(("dkg-a".to_string(), false)), "kept, and fence-only");
@@ -3120,12 +3157,12 @@ mod guard_tests {
         *n.hooks.after_part1_acquire.lock().unwrap() =
             Some(Box::new(move |node: &Node| *b.lock().unwrap() = Some(break_book(node))));
 
-        assert!(n.ceremony_part1("dkg-a", "k", CeremonyKind::Dkg, &[1, 2, 3]).is_err());
+        assert!(n.ceremony_part1("dkg-a", "k", CeremonyKind::Dkg, &[1, 2, 3], None).is_err());
         mend_book(broken.lock().unwrap().as_ref().expect("the hook ran"));
         assert_eq!(guard(&n, "k"), None, "released");
 
         // The key is free at once, and a part 1 that succeeds marks the guard with its session.
-        n.ceremony_part1("dkg-b", "k", CeremonyKind::Dkg, &[1, 2, 3]).unwrap();
+        n.ceremony_part1("dkg-b", "k", CeremonyKind::Dkg, &[1, 2, 3], None).unwrap();
         assert_eq!(guard(&n, "k"), Some(("dkg-b".to_string(), true)));
         assert!(n.book().unwrap().sessions.contains_key("dkg-b"));
     }
@@ -3139,7 +3176,7 @@ mod guard_tests {
         let fence_timeout = Duration::from_millis(300);
         let n = node(&tmp, fence_timeout);
         n.ceremony_fence("dkg-a", "k", "dkg").unwrap();
-        n.ceremony_part1("dkg-a", "k", CeremonyKind::Dkg, &[1, 2, 3]).unwrap();
+        n.ceremony_part1("dkg-a", "k", CeremonyKind::Dkg, &[1, 2, 3], None).unwrap();
         assert_eq!(guard(&n, "k"), Some(("dkg-a".to_string(), true)));
         // A hosted-key guard, marked by hand to show recovery leaves its kind alone (hosted guards
         // never carry a session in practice).

@@ -99,13 +99,15 @@ pub trait PeerApi: Send + Sync {
         Err(crate::DaemonError::Config("this peer does not report key epochs".into()))
     }
     /// The DKG/refresh fence ([`Node::ceremony_begin`]): the per-key guard plus the two-phase
-    /// rules; `expect` is the leader's view of the sharing a refresh starts from.
+    /// rules; `expect` is the leader's view of the sharing a refresh starts from; `intent` the
+    /// client's ceremony intent, forwarded unchanged (every node verifies it itself).
     async fn ceremony_begin(
         &self,
         _ceremony_id: &str,
         _key_id: &str,
         _kind: CeremonyKind,
         _expect: Option<(u64, [u8; 32])>,
+        _intent: Option<&pb::SignedIntent>,
     ) -> Result<()> {
         Err(unsupported("two-phase ceremonies"))
     }
@@ -130,13 +132,15 @@ pub trait PeerApi: Send + Sync {
     async fn ceremony_protocol(&self) -> Result<u32> {
         Err(unsupported("ceremony protocol negotiation"))
     }
-    /// Part 1 ([`Node::ceremony_part1`]): this peer's round-1 package (public).
+    /// Part 1 ([`Node::ceremony_part1`]): this peer's round-1 package (public). `intent` as on
+    /// [`PeerApi::ceremony_begin`], verified again by the peer.
     async fn ceremony_part1(
         &self,
         _ceremony_id: &str,
         _key_id: &str,
         _kind: CeremonyKind,
         _roster: &[u16],
+        _intent: Option<&pb::SignedIntent>,
     ) -> Result<round1::Package> {
         Err(unsupported("ceremony protocol 2"))
     }
@@ -346,9 +350,10 @@ impl PeerApi for LocalPeer {
         key_id: &str,
         kind: CeremonyKind,
         expect: Option<(u64, [u8; 32])>,
+        intent: Option<&pb::SignedIntent>,
     ) -> Result<()> {
-        let (ceremony_id, key_id) = (ceremony_id.to_owned(), key_id.to_owned());
-        self.node.blocking(move |n| n.ceremony_begin(&ceremony_id, &key_id, kind, expect)).await
+        let (ceremony_id, key_id, intent) = (ceremony_id.to_owned(), key_id.to_owned(), intent.cloned());
+        self.node.blocking(move |n| n.ceremony_begin(&ceremony_id, &key_id, kind, expect, intent.as_ref())).await
     }
 
     async fn ceremony_commit(&self, ceremony_id: &str) -> Result<StatusInfo> {
@@ -377,9 +382,11 @@ impl PeerApi for LocalPeer {
         key_id: &str,
         kind: CeremonyKind,
         roster: &[u16],
+        intent: Option<&pb::SignedIntent>,
     ) -> Result<round1::Package> {
-        let (ceremony_id, key_id, roster) = (ceremony_id.to_owned(), key_id.to_owned(), roster.to_vec());
-        self.node.blocking(move |n| n.ceremony_part1(&ceremony_id, &key_id, kind, &roster)).await
+        let (ceremony_id, key_id, roster, intent) =
+            (ceremony_id.to_owned(), key_id.to_owned(), roster.to_vec(), intent.cloned());
+        self.node.blocking(move |n| n.ceremony_part1(&ceremony_id, &key_id, kind, &roster, intent.as_ref())).await
     }
 
     async fn ceremony_part2(
@@ -634,6 +641,7 @@ impl PeerApi for GrpcPeer {
         key_id: &str,
         kind: CeremonyKind,
         expect: Option<(u64, [u8; 32])>,
+        intent: Option<&pb::SignedIntent>,
     ) -> Result<()> {
         self.client
             .clone()
@@ -644,7 +652,7 @@ impl PeerApi for GrpcPeer {
                 expected_epoch: expect.map(|e| e.0).unwrap_or(0),
                 expected_pkp_digest: expect.map(|e| e.1.to_vec()).unwrap_or_default(),
                 protocol: crate::ceremony::CEREMONY_PROTOCOL,
-                intent: None,
+                intent: intent.cloned(),
             })
             .await?;
         Ok(())
@@ -690,6 +698,7 @@ impl PeerApi for GrpcPeer {
         key_id: &str,
         kind: CeremonyKind,
         roster: &[u16],
+        intent: Option<&pb::SignedIntent>,
     ) -> Result<round1::Package> {
         let reply = self
             .client
@@ -700,7 +709,7 @@ impl PeerApi for GrpcPeer {
                 kind: kind.as_str().into(),
                 roster: roster.iter().map(|&i| u32::from(i)).collect(),
                 protocol: crate::ceremony::CEREMONY_PROTOCOL,
-                intent: None,
+                intent: intent.cloned(),
             })
             .await?
             .into_inner();
