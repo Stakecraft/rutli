@@ -79,7 +79,10 @@ can never stage, because part 2 and part 3 check that it still owns the guard.
 Part 1 marks the guard as having a session under the same lock, and at the same moment, as it
 creates the session. A part 1 that fails before that point leaves the leader's fence as it found it
 (fence-only, 60 s; the leader's abort releases it sooner), and releases a guard it took itself
-because no fence preceded it.
+because no fence preceded it. Likewise, when a node rebuilds its ceremony state after a request
+panicked while holding it (the in-memory sessions are dropped, as on a restart), every DKG/refresh
+guard that had a session goes back to fence-only. The leader's next part fails on that node, and
+the leader's abort releases the fence. If the leader is dead, the fence timeout frees the key.
 
 The guard is released at part 3, or when the ceremony fails cleanly, so in practice these timeouts
 only matter for a leader that died. Up to rc.3 a fence that was never followed by part 1 had no
