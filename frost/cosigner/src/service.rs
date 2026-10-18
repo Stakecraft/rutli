@@ -736,11 +736,28 @@ fn warn_if_intent_refused<T>(
 ) {
     if let Err(crate::DaemonError::PolicyRefused(why)) = result {
         if why.starts_with("ceremony intent refused") {
+            // At most once a minute per asking peer: the refusal is counted every time
+            // (rutli_ceremony_intent_refusals_total); the log line names who to investigate.
+            let asker = asker.unwrap_or("<unauthenticated>");
+            let minute = crate::intent::now_ms() / 60_000;
+            {
+                static LAST: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>> =
+                    std::sync::Mutex::new(None);
+                let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
+                let map = last.get_or_insert_with(Default::default);
+                // Askers are allowlisted mesh CNs, so this stays small; bound it anyway.
+                if map.len() > 64 {
+                    map.clear();
+                }
+                if map.insert(asker.to_string(), minute) == Some(minute) {
+                    return;
+                }
+            }
             tracing::warn!(
-                asker = asker.unwrap_or("<unauthenticated>"),
+                asker,
                 ceremony_id,
                 key_id,
-                reason = %why,
+                reason = ?why,
                 "ceremony {step} refused: the leading peer carried no valid client ceremony intent — \
                  if that peer runs this release, investigate it as compromised"
             );

@@ -1144,7 +1144,37 @@ pub fn validate_ceremony_id(ceremony_id: &str) -> Result<()> {
         || ceremony_id.len() > 128
         || !ceremony_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
-        return Err(DaemonError::Config(format!("invalid ceremony id: {ceremony_id:?}")));
+        // Never echo an unbounded id back (a peer's request, a log line).
+        let shown: String = ceremony_id.chars().take(64).collect();
+        return Err(DaemonError::Config(format!(
+            "invalid ceremony id: {shown:?}{} ({} bytes)",
+            if ceremony_id.len() > shown.len() { "…" } else { "" },
+            ceremony_id.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Longest key id a DKG/refresh request may name ([`validate_key_id`]): far above any real id
+/// (`<prefix>frost-<name>`), and short enough that a hostile peer cannot make a node log or echo a
+/// large payload.
+pub const MAX_CEREMONY_KEY_ID_LEN: usize = 200;
+
+/// A key id a DKG/refresh request may name: what a key file may be called (ASCII alphanumerics,
+/// `-`, `_`), at most [`MAX_CEREMONY_KEY_ID_LEN`] characters. Pure: the ceremony entry points run it
+/// before anything else, so a peer's malformed id is refused before it reaches a log line or a
+/// refusal message.
+pub fn validate_key_id(key_id: &str) -> Result<()> {
+    if key_id.is_empty()
+        || key_id.len() > MAX_CEREMONY_KEY_ID_LEN
+        || !key_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        let shown: String = key_id.chars().take(64).collect();
+        return Err(DaemonError::Config(format!(
+            "invalid key id {shown:?}{} ({} bytes)",
+            if key_id.len() > shown.len() { "…" } else { "" },
+            key_id.len()
+        )));
     }
     Ok(())
 }

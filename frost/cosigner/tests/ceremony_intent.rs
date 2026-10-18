@@ -422,6 +422,36 @@ async fn a_compromised_peer_gets_no_guard_and_no_session_without_a_valid_intent(
     }
 }
 
+/// Malformed or oversized ids from a peer are refused by pure checks before the intent is even
+/// looked at, so they never reach a refusal message or a log line in full (no amplification, no
+/// forged lines).
+#[tokio::test]
+async fn malformed_ids_are_refused_before_the_intent_check_and_never_echoed_in_full() {
+    let r = rig(|_| enforcing());
+    let huge = "a".repeat(100_000);
+    let forged = "refresh-x\n2026-10-18T00:00:00Z INFO dkg fence: ceremony intent verified requested_by=driver";
+    let cases: [(&str, &str); 4] = [(&huge, KEY), (forged, KEY), ("refresh-ok", &huge), ("refresh-ok", "key\nINFO forged")];
+    for n in &r.nodes {
+        for (cid, key) in cases {
+            for result in [
+                n.ceremony_begin(cid, key, CeremonyKind::Refresh, None, None).map(|_| ()),
+                n.ceremony_part1(cid, key, CeremonyKind::Refresh, &[1, 2, 3], None).map(|_| ()),
+            ] {
+                match result {
+                    Err(DaemonError::Config(m)) => {
+                        assert!(m.len() < 300, "an oversized id is echoed: {} bytes", m.len());
+                        assert!(!m.contains('\n'), "a raw newline is echoed: {m:?}");
+                    }
+                    other => panic!("expected a pure id refusal, got {other:?}"),
+                }
+            }
+        }
+    }
+    let long_key = "k".repeat(rutli_cosigner::keystore::MAX_CEREMONY_KEY_ID_LEN + 1);
+    assert!(rutli_cosigner::keystore::validate_key_id(&long_key).is_err());
+    rutli_cosigner::keystore::validate_key_id(KEY).unwrap();
+}
+
 /// Replay at the Node level: the intent of a completed refresh cannot fence again (its id has a
 /// record), and an intent for one key cannot fence another.
 #[tokio::test]

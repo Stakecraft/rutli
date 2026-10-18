@@ -1312,6 +1312,9 @@ impl Node {
         expect: Option<(u64, [u8; 32])>,
         intent: Option<&crate::pb::SignedIntent>,
     ) -> Result<()> {
+        // Pure checks first: a malformed or oversized id never reaches a refusal message or a log.
+        crate::keystore::validate_ceremony_id(ceremony_id)?;
+        crate::keystore::validate_key_id(key_id)?;
         if let Some(v) = self.authorize_ceremony(kind, key_id, ceremony_id, intent)? {
             tracing::info!(
                 ceremony_id,
@@ -1322,7 +1325,6 @@ impl Node {
                 kind.as_str()
             );
         }
-        crate::keystore::validate_ceremony_id(ceremony_id)?;
         if self.book()?.records.contains_key(ceremony_id) {
             return Err(DaemonError::CeremonyRefused(format!(
                 "ceremony id {ceremony_id} was already used on this node"
@@ -1529,6 +1531,8 @@ impl Node {
         roster: &[u16],
         intent: Option<&crate::pb::SignedIntent>,
     ) -> Result<round1::Package> {
+        crate::keystore::validate_ceremony_id(ceremony_id)?;
+        crate::keystore::validate_key_id(key_id)?;
         self.authorize_ceremony(kind, key_id, ceremony_id, intent)?;
         let old = match kind {
             CeremonyKind::Dkg => {
