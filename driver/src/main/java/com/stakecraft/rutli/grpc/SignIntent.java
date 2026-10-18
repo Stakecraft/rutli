@@ -8,8 +8,11 @@ package com.stakecraft.rutli.grpc;
 /**
  * <pre>
  * What a client authorizes: one signature by key_id over digest, until not_after_ms — or, with
- * purpose "delete-key", the deletion of hosted key key_id. Carried serialized inside
- * SignedIntent.intent, so the verified bytes are exactly the signed bytes.
+ * purpose "delete-key", the deletion of hosted key key_id — or, with purpose "dkg" / "refresh", one
+ * DKG / share refresh of key_id (a ceremony intent: digest and approvals empty; the ceremony id is
+ * "&lt;purpose&gt;-" ‖ hex(request_id), so one intent names exactly one ceremony on every node). Carried
+ * serialized inside SignedIntent.intent, so the verified bytes are exactly the signed bytes. The
+ * purpose separates the domains: no node accepts an intent of one purpose for another.
  * </pre>
  *
  * Protobuf type {@code rutli.cosigner.v1.SignIntent}
@@ -122,7 +125,7 @@ private static final long serialVersionUID = 0L;
   private volatile java.lang.Object purpose_ = "";
   /**
    * <pre>
-   * "sign" | "delete-key"
+   * "sign" | "delete-key" | "dkg" | "refresh"
    * </pre>
    *
    * <code>string purpose = 3;</code>
@@ -143,7 +146,7 @@ private static final long serialVersionUID = 0L;
   }
   /**
    * <pre>
-   * "sign" | "delete-key"
+   * "sign" | "delete-key" | "dkg" | "refresh"
    * </pre>
    *
    * <code>string purpose = 3;</code>
@@ -209,6 +212,7 @@ private static final long serialVersionUID = 0L;
    * <pre>
    * "sign": exactly the 34-byte Canton digest the signature is over. "delete-key": the 32 bytes
    * SHA-256("rutli-delete-key-v1&#92;n" ‖ key_id) (approvals are over this digest, like a sign's).
+   * "dkg" / "refresh": empty.
    * </pre>
    *
    * <code>bytes digest = 5;</code>
@@ -578,8 +582,11 @@ private static final long serialVersionUID = 0L;
   /**
    * <pre>
    * What a client authorizes: one signature by key_id over digest, until not_after_ms — or, with
-   * purpose "delete-key", the deletion of hosted key key_id. Carried serialized inside
-   * SignedIntent.intent, so the verified bytes are exactly the signed bytes.
+   * purpose "delete-key", the deletion of hosted key key_id — or, with purpose "dkg" / "refresh", one
+   * DKG / share refresh of key_id (a ceremony intent: digest and approvals empty; the ceremony id is
+   * "&lt;purpose&gt;-" ‖ hex(request_id), so one intent names exactly one ceremony on every node). Carried
+   * serialized inside SignedIntent.intent, so the verified bytes are exactly the signed bytes. The
+   * purpose separates the domains: no node accepts an intent of one purpose for another.
    * </pre>
    *
    * Protobuf type {@code rutli.cosigner.v1.SignIntent}
@@ -1017,7 +1024,7 @@ private static final long serialVersionUID = 0L;
     private java.lang.Object purpose_ = "";
     /**
      * <pre>
-     * "sign" | "delete-key"
+     * "sign" | "delete-key" | "dkg" | "refresh"
      * </pre>
      *
      * <code>string purpose = 3;</code>
@@ -1037,7 +1044,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * "sign" | "delete-key"
+     * "sign" | "delete-key" | "dkg" | "refresh"
      * </pre>
      *
      * <code>string purpose = 3;</code>
@@ -1058,7 +1065,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * "sign" | "delete-key"
+     * "sign" | "delete-key" | "dkg" | "refresh"
      * </pre>
      *
      * <code>string purpose = 3;</code>
@@ -1075,7 +1082,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * "sign" | "delete-key"
+     * "sign" | "delete-key" | "dkg" | "refresh"
      * </pre>
      *
      * <code>string purpose = 3;</code>
@@ -1089,7 +1096,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * "sign" | "delete-key"
+     * "sign" | "delete-key" | "dkg" | "refresh"
      * </pre>
      *
      * <code>string purpose = 3;</code>
@@ -1183,6 +1190,7 @@ private static final long serialVersionUID = 0L;
      * <pre>
      * "sign": exactly the 34-byte Canton digest the signature is over. "delete-key": the 32 bytes
      * SHA-256("rutli-delete-key-v1&#92;n" ‖ key_id) (approvals are over this digest, like a sign's).
+     * "dkg" / "refresh": empty.
      * </pre>
      *
      * <code>bytes digest = 5;</code>
@@ -1196,6 +1204,7 @@ private static final long serialVersionUID = 0L;
      * <pre>
      * "sign": exactly the 34-byte Canton digest the signature is over. "delete-key": the 32 bytes
      * SHA-256("rutli-delete-key-v1&#92;n" ‖ key_id) (approvals are over this digest, like a sign's).
+     * "dkg" / "refresh": empty.
      * </pre>
      *
      * <code>bytes digest = 5;</code>
@@ -1213,6 +1222,7 @@ private static final long serialVersionUID = 0L;
      * <pre>
      * "sign": exactly the 34-byte Canton digest the signature is over. "delete-key": the 32 bytes
      * SHA-256("rutli-delete-key-v1&#92;n" ‖ key_id) (approvals are over this digest, like a sign's).
+     * "dkg" / "refresh": empty.
      * </pre>
      *
      * <code>bytes digest = 5;</code>

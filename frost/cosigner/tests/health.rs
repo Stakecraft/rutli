@@ -82,7 +82,7 @@ async fn unreadable_keys_dir_makes_health_not_serving() {
         Request::new(SignRequest { key_id: "some-key".into(), message: canton_digest(), intent: None }),
     )
     .await;
-    let led_dkg = Signer::dkg(&svc, Request::new(DkgRequest { key_id: "new-key".into() })).await;
+    let led_dkg = Signer::dkg(&svc, Request::new(DkgRequest { key_id: "new-key".into(), intent: None })).await;
     // Every other store-touching RPC answers the same way — above all never NOT_FOUND / "does not
     // exist" for a key the node merely cannot read (Canton would believe it gone).
     let group_key =

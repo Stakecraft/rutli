@@ -523,10 +523,10 @@ async fn the_refresher_refreshes_but_never_signs_and_the_driver_stops_refreshing
         c.signer("refresher", 0).await.sign(pb::SignRequest { key_id: KEY.into(), message: msg.clone(), intent: Some(by_driver) }).await,
         "not permitted",
     );
-    denied(c.signer("driver", 0).await.refresh(pb::RefreshRequest { key_id: KEY.into() }).await, "may not call Refresh");
+    denied(c.signer("driver", 0).await.refresh(pb::RefreshRequest { key_id: KEY.into(), intent: None }).await, "may not call Refresh");
     c.signer("refresher", 0).await.key_status(pb::KeyStatusRequest { key_id: KEY.into() }).await.unwrap();
     let before = c.nodes[0].key_epoch(KEY).unwrap().epoch;
-    let reply = c.signer("refresher", 0).await.refresh(pb::RefreshRequest { key_id: KEY.into() }).await.unwrap();
+    let reply = c.signer("refresher", 0).await.refresh(pb::RefreshRequest { key_id: KEY.into(), intent: None }).await.unwrap();
     assert_eq!(reply.into_inner().group_verifying_key, c.group_key().to_vec());
     assert_eq!(c.nodes[0].key_epoch(KEY).unwrap().epoch, before + 1);
 }

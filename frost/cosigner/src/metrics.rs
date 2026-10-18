@@ -71,6 +71,14 @@ pub const SIGNER_ACL_ABSENT: &str = "rutli_signer_acl_absent_total";
 pub const SIGN_JOURNAL_ENTRIES: &str = "rutli_sign_journal_entries_total";
 /// Sign journal failures (corrupt on open, append failed): the share was refused.
 pub const SIGN_JOURNAL_ERRORS: &str = "rutli_sign_journal_errors_total";
+/// Counter, label `reason`: DKG/refresh ceremony intents this node refused — at the fence or part 1
+/// of a ceremony a peer leads, or as leader on Signer.Dkg/Refresh (certificate, signer, pin,
+/// signature, cluster, purpose, key, expiry, acl, malformed, ceremony-id, missing). A refusal on the
+/// mesh path means a leader asked for a ceremony no authorized client requested: alert on it.
+pub const CEREMONY_INTENT_REFUSALS: &str = "rutli_ceremony_intent_refusals_total";
+/// Counter: DKG/refresh fences and part 1s this node accepted without a ceremony intent (a leader
+/// or client that predates them), because `signing_policy.require_ceremony_intent` is off.
+pub const CEREMONY_INTENT_ABSENT: &str = "rutli_ceremony_intent_absent_total";
 /// Counter, label `reason`: hosted-key delete intents this node refused (audit M2) — on DeleteKey,
 /// on a peer's PurgeKey, and on a tombstone a peer propagated in anti-entropy. A forged or
 /// unauthorized tombstone shows up here.
@@ -194,6 +202,7 @@ fn prime() {
     metrics::counter!(DECRYPT_RATE_LIMITED).absolute(0);
     metrics::counter!(CEREMONY_SIGN_TEST_RATE_LIMITED).absolute(0);
     metrics::counter!(SIGN_INTENT_ABSENT).absolute(0);
+    metrics::counter!(CEREMONY_INTENT_ABSENT).absolute(0);
     metrics::counter!(SIGN_RATE_LIMITED).absolute(0);
     metrics::counter!(SIGNER_ACL_ABSENT).absolute(0);
     metrics::counter!(SIGN_JOURNAL_ENTRIES).absolute(0);
@@ -219,6 +228,11 @@ pub fn describe() {
     describe_counter!(SIGN_ROUND1_SKIPS, "Peers skipped during sign round 1 (quorum-margin canary)");
     describe_counter!(SIGN_INTENT_ABSENT, "Sign rounds accepted without a signing intent (require_intent off)");
     describe_counter!(SIGN_POLICY_REFUSALS, "Signing-policy refusals at this node, by reason");
+    describe_counter!(CEREMONY_INTENT_REFUSALS, "DKG/refresh ceremony intents refused at this node, by reason");
+    describe_counter!(
+        CEREMONY_INTENT_ABSENT,
+        "DKG/refresh fences and part 1s accepted without a ceremony intent (require_ceremony_intent off)"
+    );
     describe_counter!(SIGN_RATE_LIMITED, "Signature shares refused by the per-key sign rate limit or share cap");
     describe_counter!(SIGNER_ACL_ABSENT, "Key operations by a client CN without a signer_acl entry");
     describe_counter!(SIGN_JOURNAL_ENTRIES, "Sign journal entries appended (one per released share)");

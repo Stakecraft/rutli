@@ -728,6 +728,9 @@ async fn main() -> Result<()> {
             cfg.signer_allowlist.clone().unwrap_or_default(),
             policy,
         )?;
+        // The refresher role signs refresh ceremony intents (verified at every node, not only at the
+        // node the refresh job calls).
+        verifier = verifier.with_refreshers(cfg.refresh_allowlist.clone().unwrap_or_default());
         if let Some(h) = cfg.hosted_keys.as_ref().filter(|h| h.enabled) {
             let delete = rutli_cosigner::intent::DeletePolicy::from_config(h);
             // When each delete-role CN's capability last changed (audit F7): peers' tombstones whose
@@ -770,6 +773,7 @@ async fn main() -> Result<()> {
         )?;
         tracing::info!(
             require_intent = policy.require_intent,
+            require_ceremony_intent = policy.require_ceremony_intent,
             signer_acl_required = policy.signer_acl_required,
             signer_may_refresh = policy.signer_may_refresh,
             acl_entries = policy.signer_acl.len(),
@@ -786,6 +790,14 @@ async fn main() -> Result<()> {
                 "signing_policy.require_intent is off: a signature without a client-signed intent is \
                  accepted (counted in rutli_sign_intent_absent_total) — turn it on, on every node, once \
                  every cosigner and the driver run this release (docs/approval-quorum.md)"
+            );
+        }
+        if !policy.require_ceremony_intent {
+            tracing::warn!(
+                "signing_policy.require_ceremony_intent is off: a DKG or refresh without a client-signed \
+                 ceremony intent is accepted (counted in rutli_ceremony_intent_absent_total), so a \
+                 compromised cosigner can start one on this node — turn it on, on every node, once the \
+                 driver and the refresh job run this release (docs/approval-quorum.md)"
             );
         }
         if policy.signer_may_refresh {
@@ -1116,7 +1128,7 @@ async fn refresh_command(
     }
     tracing::info!(%endpoint, %key_id, "triggering proactive share refresh");
     let mut client = SignerClient::new(ep.connect().await?);
-    let reply = client.refresh(RefreshRequest { key_id: key_id.to_string() }).await?.into_inner();
+    let reply = client.refresh(RefreshRequest { key_id: key_id.to_string(), intent: None }).await?.into_inner();
     println!(
         "refresh complete — group key unchanged: {}",
         hex::encode(reply.group_verifying_key)
