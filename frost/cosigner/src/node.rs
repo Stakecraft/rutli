@@ -194,6 +194,20 @@ pub struct Node {
     unknown_no_vote_caps: (usize, usize),
     /// See [`MIXED_EVIDENCE_REGATHER`].
     regather_delay: Duration,
+    #[cfg(test)]
+    hooks: TestHooks,
+}
+
+#[cfg(test)]
+type OnceHook = Box<dyn FnOnce(&Node) + Send>;
+
+/// Fault and pause seams for this crate's unit tests, absent from every other build (the same
+/// approach as the sign journal's injected faults).
+#[cfg(test)]
+#[derive(Default)]
+struct TestHooks {
+    /// Run once by part 1 right after it took the ceremony guard, before it builds the session.
+    after_part1_acquire: Mutex<Option<OnceHook>>,
 }
 
 /// What a node holds under a hosted key id.
@@ -303,6 +317,8 @@ impl Node {
             delete_grace: Duration::from_secs(crate::config::DEFAULT_DELETE_GRACE_SECS),
             unknown_no_vote_caps: (MAX_UNKNOWN_NO_VOTES_PER_ASKER, MAX_UNKNOWN_NO_VOTES),
             regather_delay: MIXED_EVIDENCE_REGATHER,
+            #[cfg(test)]
+            hooks: TestHooks::default(),
         };
         if !records_loaded {
             // Without the votes the repair cannot tell an orphaned staged share from one this node
@@ -479,16 +495,19 @@ impl Node {
         Ok(reply)
     }
 
-    /// Reserve `key_id` for ceremony `owner` (`session`: the owner's part 1 is taking it, not only
-    /// a fence). Fails if a *different*, non-orphaned ceremony holds it — this is what serializes
-    /// concurrent DKG/refresh and prevents split-brain shares. When it preempts an *orphaned* guard
-    /// ([`Node::guard_orphaned`]), it also drops that old ceremony's leftover session state so its
-    /// stale part 2/part 3 cannot proceed.
+    /// Reserve `key_id` for ceremony `owner`, as a fence (no session: part 1 marks that itself,
+    /// atomically with creating the session — see [`Node::mark_session`]). Fails if a *different*,
+    /// non-orphaned ceremony holds it — this is what serializes concurrent DKG/refresh and prevents
+    /// split-brain shares. When it preempts an *orphaned* guard ([`Node::guard_orphaned`]), it also
+    /// drops that old ceremony's leftover session state so its stale part 2/part 3 cannot proceed.
     ///
     /// The same owner taking the guard again keeps it as it is — in particular its `started`, so a
     /// fence repeated under one ceremony id never extends it (before 0.4.0-rc.4 it reset the timer,
     /// and a fence re-sent under the same id held the key forever).
-    fn acquire_ceremony(&self, key_id: &str, owner: &str, kind: &'static str, session: bool) -> Result<()> {
+    ///
+    /// Returns whether this call created the guard (`false`: `owner` already held it), so a caller
+    /// that fails afterwards can put things back exactly as they were.
+    fn acquire_ceremony(&self, key_id: &str, owner: &str, kind: &'static str) -> Result<bool> {
         let preempted: Option<String> = {
             let mut guards = self.guards();
             let preempted = match guards.get_mut(key_id) {
@@ -499,8 +518,7 @@ impl Node {
                             cur.kind
                         )));
                     }
-                    cur.session |= session;
-                    return Ok(());
+                    return Ok(false);
                 }
                 Some(cur) => {
                     if !self.guard_orphaned(cur) {
@@ -516,7 +534,7 @@ impl Node {
             };
             guards.insert(
                 key_id.to_string(),
-                CeremonyGuard { owner: owner.to_string(), kind, started: Instant::now(), session },
+                CeremonyGuard { owner: owner.to_string(), kind, started: Instant::now(), session: false },
             );
             preempted
         }; // ceremonies lock released before touching the session maps (avoid nested locks)
@@ -525,7 +543,26 @@ impl Node {
             // asks — see `ceremony_status`).
             self.book()?.sessions.remove(&stale);
         }
-        Ok(())
+        Ok(true)
+    }
+
+    /// Mark `owner`'s guard on `key_id` as backed by a ceremony session. Part 1 calls it with the
+    /// book locked, immediately before inserting the session, so a guard says `session` exactly
+    /// when a session exists: a guard marked earlier and left behind by a part 1 that failed before
+    /// the insert would be judged by the orphan timeout instead of [`CEREMONY_FENCE_TIMEOUT`], and
+    /// block DKG/refresh (and hosted-key writes) for the key for 15 minutes instead of one.
+    ///
+    /// Lock order: the book, then the guards. Nothing takes the book while holding the guards
+    /// (every guard critical section is a single map operation), so this cannot deadlock.
+    fn mark_session(&self, key_id: &str, owner: &str) -> Result<()> {
+        match self.guards().get_mut(key_id) {
+            Some(g) if g.owner == owner => {
+                g.session = true;
+                Ok(())
+            }
+            // Preempted since part 1 took it (only possible for a fence already past its timeout).
+            _ => Err(DaemonError::CeremonySuperseded { key_id: key_id.to_string(), owner: owner.to_string() }),
+        }
     }
 
     /// Whether `guard` is orphaned, i.e. the next ceremony for its key may preempt it: a DKG/refresh
@@ -593,7 +630,7 @@ impl Node {
                 )));
             }
         }
-        self.acquire_ceremony(key_id, ceremony_id, kind, false)
+        self.acquire_ceremony(key_id, ceremony_id, kind).map(|_| ())
     }
 
     /// Roll back a fence taken by [`ceremony_fence`] (partial cluster fence / aborted ceremony).
@@ -622,6 +659,9 @@ impl Node {
     /// fails closed: other ceremonies for that key are refused until the ceremony releases it or it
     /// is orphaned and preempted — the same as a leader that crashed mid-ceremony. Signing never
     /// consults the guards.
+    ///
+    /// Lock order: may be taken while holding the book ([`Node::mark_session`]); the book is never
+    /// taken while holding this.
     fn guards(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, CeremonyGuard>> {
         crate::sync::recover(&self.ceremonies, "ceremony_guards")
     }
@@ -1271,6 +1311,21 @@ impl Node {
     }
 
     /// Part 1 of either ceremony: take the guard, start the session, return the round-1 package.
+    ///
+    /// The guard is all or nothing. On success it is held and marked as having a session — marked
+    /// under the book lock, immediately before the session is inserted ([`Node::mark_session`]).
+    /// On any failure after it was taken, it is left exactly as this call found it:
+    ///  * **Created by this call** (this node was never fenced for the ceremony, or its fence was
+    ///    released or preempted meanwhile): released. Nothing else owns it — no leader fenced this
+    ///    node under this id — so leaving it would only block the key's next ceremony until the
+    ///    fence timeout, for a part 1 that never happened.
+    ///  * **Already held by this ceremony** (its leader's fence, [`Node::ceremony_begin`]): kept,
+    ///    still fence-only. The fence is the leader's cluster-wide reservation, and its lifetime is
+    ///    the leader's to end: the leader's abort path releases every fence (`release_all`), and a
+    ///    leader that died is covered by [`CEREMONY_FENCE_TIMEOUT`] — which applies precisely because
+    ///    the guard was never marked. Dropping it here would unfence this one node while the leader
+    ///    still counts it as fenced, and its retained cost is bounded by that short timeout.
+    ///    A repeated part 1 also lands here: the live session keeps its guard (already marked).
     fn start_session(
         &self,
         ceremony_id: &str,
@@ -1281,7 +1336,29 @@ impl Node {
     ) -> Result<round1::Package> {
         crate::keystore::validate_ceremony_id(ceremony_id)?;
         self.refuse_if_staged(key_id)?;
-        self.acquire_ceremony(key_id, ceremony_id, kind.as_str(), true)?;
+        let created = self.acquire_ceremony(key_id, ceremony_id, kind.as_str())?;
+        let result = self.open_session(ceremony_id, key_id, kind, roster, old);
+        if result.is_err() && created {
+            self.release_ceremony(key_id, ceremony_id);
+        }
+        result
+    }
+
+    /// The body of [`Node::start_session`] once the guard is held (fence-only): build the
+    /// participant and its round-1 package, then — under one book lock — check the ceremony id,
+    /// mark the guard and insert the session. Leaves the guard for its caller to restore on error.
+    fn open_session(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        kind: CeremonyKind,
+        roster: Vec<u16>,
+        old: Option<KeyVersion>,
+    ) -> Result<round1::Package> {
+        #[cfg(test)]
+        if let Some(hook) = crate::sync::recover(&self.hooks.after_part1_acquire, "test_hook").take() {
+            hook(self);
+        }
         let mut participant = match kind {
             CeremonyKind::Dkg => {
                 Participant::Dkg(DkgParticipant::new(self.identifier, self.max_signers, self.min_signers))
@@ -1295,17 +1372,8 @@ impl Node {
         let package = match &mut participant {
             Participant::Dkg(p) => p.part1(),
             Participant::Refresh(p) => p.part1(),
-        };
-        let (package, own_round1) = match package.map_err(DaemonError::from).and_then(|p| {
-            let bytes = p.serialize()?;
-            Ok((p, bytes))
-        }) {
-            Ok(p) => p,
-            Err(e) => {
-                self.release_ceremony(key_id, ceremony_id);
-                return Err(e);
-            }
-        };
+        }?;
+        let own_round1 = package.serialize()?;
         let mut book = self.book()?;
         // A ceremony id is used once per node: a node that already voted on it (or answered for
         // it as unknown, which is a no-vote) never starts it again.
@@ -1316,37 +1384,32 @@ impl Node {
             )));
         }
         if book.records.contains_key(ceremony_id) {
-            drop(book);
-            self.release_ceremony(key_id, ceremony_id);
             return Err(DaemonError::CeremonyRefused(format!(
                 "ceremony id {ceremony_id} was already used on this node"
             )));
         }
         if book.sessions.len() >= MAX_CEREMONY_SESSIONS {
             let orphans = self.drop_orphaned_sessions_locked(&mut book);
-            if book.sessions.len() >= MAX_CEREMONY_SESSIONS {
-                drop(book);
-                self.release_ceremony(key_id, ceremony_id);
-                for (k, c) in orphans {
-                    self.release_ceremony(&k, &c);
-                }
-                return Err(DaemonError::NotServing(format!(
-                    "{MAX_CEREMONY_SESSIONS} ceremony sessions are already in progress on this node — retry later"
-                )));
-            }
+            let full = book.sessions.len() >= MAX_CEREMONY_SESSIONS;
             drop(book);
             for (k, c) in orphans {
                 self.release_ceremony(&k, &c);
             }
+            if full {
+                return Err(DaemonError::NotServing(format!(
+                    "{MAX_CEREMONY_SESSIONS} ceremony sessions are already in progress on this node — retry later"
+                )));
+            }
             book = self.book()?;
             if book.sessions.contains_key(ceremony_id) || book.records.contains_key(ceremony_id) {
-                drop(book);
-                self.release_ceremony(key_id, ceremony_id);
                 return Err(DaemonError::CeremonyRefused(format!(
                     "ceremony id {ceremony_id} was already used on this node"
                 )));
             }
         }
+        // From here on nothing can fail between marking the guard and inserting the session, and
+        // both happen under this book lock.
+        self.mark_session(key_id, ceremony_id)?;
         book.sessions.insert(
             ceremony_id.to_string(),
             Session {
@@ -2935,5 +2998,92 @@ mod poison_tests {
         // touches the ceremony guards, so this is what recovers that lock.
         assert_eq!(crate::orchestrator::run_refresh(&peers, "k").await.unwrap(), group);
         assert!(!n.ceremonies.is_poisoned());
+    }
+}
+
+#[cfg(test)]
+mod guard_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    /// Make the book's next lock fail the way a real fault does: poisoned, with its votes
+    /// unreadable (the record directory replaced by a file), so the rebuild in [`Node::book`] fails.
+    fn break_book(node: &Node) -> PathBuf {
+        let dir = node.keystore.ceremony_dir();
+        let aside = dir.with_extension("aside");
+        if dir.exists() {
+            std::fs::rename(&dir, &aside).unwrap();
+        }
+        std::fs::write(&dir, b"not a directory").unwrap();
+        crate::sync::poison(&node.book);
+        dir
+    }
+
+    fn mend_book(dir: &Path) {
+        std::fs::remove_file(dir).unwrap();
+        let aside = dir.with_extension("aside");
+        if aside.exists() {
+            std::fs::rename(&aside, dir).unwrap();
+        }
+    }
+
+    fn guard(node: &Node, key_id: &str) -> Option<(String, bool)> {
+        node.guards().get(key_id).map(|g| (g.owner.clone(), g.session))
+    }
+
+    fn node(tmp: &tempfile::TempDir, fence_timeout: Duration) -> Node {
+        let ks = KeyStore::open(tmp.path().join("n1")).unwrap();
+        Node::new(Identifier::try_from(1).unwrap(), 3, 2, ks).with_ceremony_fence_timeout(fence_timeout)
+    }
+
+    /// A part 1 that fails between taking the guard and creating its session (here: the book
+    /// cannot be locked) must not leave the guard marked as having a session. Before 0.4.0-rc.4 it
+    /// did, and the leader's fence was then judged by the 15-minute orphan timeout instead of the
+    /// fence timeout, blocking the key's DKG/refresh (and hosted-key writes) for 15 minutes. The
+    /// leader's fence stays a fence: it still serializes, and it expires after the fence timeout.
+    #[test]
+    fn a_part1_failing_before_its_session_exists_leaves_the_leaders_fence_fence_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fence_timeout = Duration::from_millis(300);
+        let n = node(&tmp, fence_timeout);
+        n.ceremony_fence("dkg-a", "k", "dkg").unwrap();
+        let broken: Arc<Mutex<Option<PathBuf>>> = Arc::default();
+        let b = broken.clone();
+        *n.hooks.after_part1_acquire.lock().unwrap() =
+            Some(Box::new(move |node: &Node| *b.lock().unwrap() = Some(break_book(node))));
+
+        assert!(n.ceremony_part1("dkg-a", "k", CeremonyKind::Dkg, &[1, 2, 3]).is_err());
+        mend_book(broken.lock().unwrap().as_ref().expect("the hook ran"));
+
+        assert_eq!(guard(&n, "k"), Some(("dkg-a".to_string(), false)), "kept, and fence-only");
+        assert!(n.book().unwrap().sessions.is_empty());
+        // Still the leader's fence: another ceremony is refused within the fence timeout...
+        let refused = n.ceremony_fence("dkg-b", "k", "dkg");
+        assert!(matches!(refused, Err(DaemonError::CeremonyInProgress { .. })), "{refused:?}");
+        // ...and preempts it after the fence timeout, not the 15-minute orphan timeout.
+        std::thread::sleep(fence_timeout + Duration::from_millis(50));
+        n.ceremony_fence("dkg-b", "k", "dkg").unwrap();
+        assert_eq!(guard(&n, "k"), Some(("dkg-b".to_string(), false)));
+    }
+
+    /// The same failure on a part 1 that took the guard itself (no fence for its ceremony on this
+    /// node) releases it: nothing else owns it. A part 1 that succeeds holds the guard marked.
+    #[test]
+    fn a_part1_failing_before_its_session_exists_releases_a_guard_it_created() {
+        let tmp = tempfile::tempdir().unwrap();
+        let n = node(&tmp, CEREMONY_FENCE_TIMEOUT);
+        let broken: Arc<Mutex<Option<PathBuf>>> = Arc::default();
+        let b = broken.clone();
+        *n.hooks.after_part1_acquire.lock().unwrap() =
+            Some(Box::new(move |node: &Node| *b.lock().unwrap() = Some(break_book(node))));
+
+        assert!(n.ceremony_part1("dkg-a", "k", CeremonyKind::Dkg, &[1, 2, 3]).is_err());
+        mend_book(broken.lock().unwrap().as_ref().expect("the hook ran"));
+        assert_eq!(guard(&n, "k"), None, "released");
+
+        // The key is free at once, and a part 1 that succeeds marks the guard with its session.
+        n.ceremony_part1("dkg-b", "k", CeremonyKind::Dkg, &[1, 2, 3]).unwrap();
+        assert_eq!(guard(&n, "k"), Some(("dkg-b".to_string(), true)));
+        assert!(n.book().unwrap().sessions.contains_key("dkg-b"));
     }
 }

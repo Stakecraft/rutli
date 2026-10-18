@@ -69,8 +69,13 @@ can never stage, because part 2 and part 3 check that it still owns the guard.
 | Guard | Orphaned after |
 |---|---|
 | DKG/refresh fence never followed by part 1 (leader died, or a peer fenced on its own) | 60 s |
-| DKG/refresh with a session (part 1 ran) | 15 min |
+| DKG/refresh with a session (part 1 created it) | 15 min |
 | Hosted-key genkey/delkey | 15 min |
+
+Part 1 marks the guard as having a session under the same lock, and at the same moment, as it
+creates the session. A part 1 that fails before that point leaves the leader's fence as it found it
+(fence-only, 60 s; the leader's abort releases it sooner), and releases a guard it took itself
+because no fence preceded it.
 
 The guard is released at part 3, or when the ceremony fails cleanly, so in practice these timeouts
 only matter for a leader that died. Up to rc.3 a fence that was never followed by part 1 had no

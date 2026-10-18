@@ -17,6 +17,9 @@ All notable changes to Rütli are documented here. Format loosely follows
   - A fence with no part 1 is orphaned (preemptible by the next ceremony) after 60 s
     (`CEREMONY_FENCE_TIMEOUT`). A guard with a session keeps the 15-minute orphan timeout.
   - The same ceremony id taking its guard again never extends it, and cannot change its kind.
+  - A guard counts as having a session only once part 1 has created it: a part 1 that fails earlier
+    leaves its leader's fence fence-only (60 s), and releases a guard it took itself. Before, such a
+    failure left the fence on the 15-minute orphan timeout.
   - The fence refuses a ceremony id the node already holds a record for, as part 1 does.
 
   A superseded ceremony still can never stage. Still open until ceremony intents (step 2): a
