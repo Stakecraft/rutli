@@ -149,9 +149,10 @@ impl PeerApi for Faulty {
         key_id: &str,
         kind: CeremonyKind,
         expect: Option<(u64, [u8; 32])>,
+        intent: Option<&pb::SignedIntent>,
     ) -> Result<()> {
         self.gate()?;
-        self.inner.ceremony_begin(ceremony_id, key_id, kind, expect).await
+        self.inner.ceremony_begin(ceremony_id, key_id, kind, expect, intent).await
     }
     async fn ceremony_commit(&self, ceremony_id: &str) -> Result<StatusInfo> {
         self.gate()?;
@@ -196,9 +197,10 @@ impl PeerApi for Faulty {
         key_id: &str,
         kind: CeremonyKind,
         roster: &[u16],
+        intent: Option<&pb::SignedIntent>,
     ) -> Result<round1::Package> {
         self.gate()?;
-        let r = self.inner.ceremony_part1(ceremony_id, key_id, kind, roster).await;
+        let r = self.inner.ceremony_part1(ceremony_id, key_id, kind, roster, intent).await;
         if let Ok(p) = &r {
             self.note(format!("part1 {ceremony_id} {key_id} {roster:?} -> {}", serde_json::to_string(p).unwrap()));
         }
@@ -473,7 +475,7 @@ async fn a_node_lost_after_staging_is_waited_for_then_everyone_commits() {
     let msg = rutli_frost_core::dealer::canton_test_message(b"while staged");
     let sig = sign(&rig.nodes[0], &pair, KEY, &msg).await.unwrap();
     assert!(rutli_cosigner::verify_key::signature_verifies(&group, &msg, &sig));
-    assert!(rig.nodes[0].ceremony_begin("refresh-next", KEY, CeremonyKind::Refresh, None).is_err());
+    assert!(rig.nodes[0].ceremony_begin("refresh-next", KEY, CeremonyKind::Refresh, None, None).is_err());
 
     // Node 3 returns (its staged vote survived): every resolver commits.
     rig.sw[2].down_after_part3.store(false, Ordering::SeqCst);
@@ -624,7 +626,7 @@ async fn refresh_refuses_nodes_on_mixed_epochs() {
     // A node refuses a leader whose view of the sharing differs from its own, too.
     let mine = rig.nodes[0].key_epoch(KEY).unwrap();
     let digest: [u8; 32] = mine.pkp_digest.as_slice().try_into().unwrap();
-    let err = rig.nodes[1].ceremony_begin("refresh-x", KEY, CeremonyKind::Refresh, Some((1, digest))).unwrap_err();
+    let err = rig.nodes[1].ceremony_begin("refresh-x", KEY, CeremonyKind::Refresh, Some((1, digest)), None).unwrap_err();
     assert!(matches!(err, DaemonError::CeremonyRefused(_)), "{err:?}");
     // At sign time the node on the other epoch never joins a quorum (audit H1): a pair that needs
     // it cannot sign, the pair on one sharing still does.
@@ -775,11 +777,11 @@ async fn equivocate(
         (v.epoch, v.pkp_digest.as_slice().try_into().unwrap())
     });
     for p in &rig.peers {
-        p.ceremony_begin(&ceremony_id, KEY, kind, expect).await.unwrap();
+        p.ceremony_begin(&ceremony_id, KEY, kind, expect, None).await.unwrap();
     }
     let mut map = BTreeMap::new();
     for p in &rig.peers {
-        map.insert(p.identifier(), p.ceremony_part1(&ceremony_id, KEY, kind, &[1, 2, 3]).await.unwrap());
+        map.insert(p.identifier(), p.ceremony_part1(&ceremony_id, KEY, kind, &[1, 2, 3], None).await.unwrap());
     }
     let mut digests = Vec::new();
     for (i, p) in rig.peers.iter().enumerate() {
@@ -863,11 +865,11 @@ async fn a_node_refuses_a_map_with_a_forged_package_of_its_own_or_a_foreign_dige
     // An honest map, but the leader hands part 3 a digest that is not the nodes' own.
     let ceremony_id = "dkg-wrong-digest";
     for p in &rig.peers {
-        p.ceremony_begin(ceremony_id, KEY, CeremonyKind::Dkg, None).await.unwrap();
+        p.ceremony_begin(ceremony_id, KEY, CeremonyKind::Dkg, None, None).await.unwrap();
     }
     let mut map = BTreeMap::new();
     for p in &rig.peers {
-        map.insert(p.identifier(), p.ceremony_part1(ceremony_id, KEY, CeremonyKind::Dkg, &[1, 2, 3]).await.unwrap());
+        map.insert(p.identifier(), p.ceremony_part1(ceremony_id, KEY, CeremonyKind::Dkg, &[1, 2, 3], None).await.unwrap());
     }
     for p in &rig.peers {
         p.ceremony_part2(ceremony_id, &map).await.unwrap();
@@ -883,8 +885,8 @@ async fn a_round2_delivery_is_bound_to_its_real_sender_and_recipient() {
     let rig = Rig::new();
     let ceremony_id = "dkg-deliveries";
     for p in &rig.peers {
-        p.ceremony_begin(ceremony_id, KEY, CeremonyKind::Dkg, None).await.unwrap();
-        p.ceremony_part1(ceremony_id, KEY, CeremonyKind::Dkg, &[1, 2, 3]).await.unwrap();
+        p.ceremony_begin(ceremony_id, KEY, CeremonyKind::Dkg, None, None).await.unwrap();
+        p.ceremony_part1(ceremony_id, KEY, CeremonyKind::Dkg, &[1, 2, 3], None).await.unwrap();
     }
     let pkg = |b: u8| {
         let mut bytes = [0u8; 32];
@@ -917,11 +919,11 @@ async fn a_leader_dying_before_every_part3_leaves_one_staged_node_that_aborts_on
     let v = rig.nodes[0].key_epoch(KEY).unwrap();
     let expect = Some((v.epoch, v.pkp_digest.as_slice().try_into().unwrap()));
     for p in &rig.peers {
-        p.ceremony_begin(ceremony_id, KEY, CeremonyKind::Refresh, expect).await.unwrap();
+        p.ceremony_begin(ceremony_id, KEY, CeremonyKind::Refresh, expect, None).await.unwrap();
     }
     let mut map = BTreeMap::new();
     for p in &rig.peers {
-        map.insert(p.identifier(), p.ceremony_part1(ceremony_id, KEY, CeremonyKind::Refresh, &[1, 2, 3]).await.unwrap());
+        map.insert(p.identifier(), p.ceremony_part1(ceremony_id, KEY, CeremonyKind::Refresh, &[1, 2, 3], None).await.unwrap());
     }
     let mut digest = [0u8; 32];
     for p in &rig.peers {
@@ -968,7 +970,7 @@ async fn a_cluster_with_an_old_protocol_node_refuses_ceremonies_loudly() {
 async fn a_ceremony_over_a_roster_other_than_the_nodes_own_is_refused() {
     let rig = Rig::new();
     for roster in [&[1u16, 2][..], &[1, 2, 3, 4], &[1, 2, 4]] {
-        let err = rig.nodes[0].ceremony_part1("dkg-roster", KEY, CeremonyKind::Dkg, roster).unwrap_err();
+        let err = rig.nodes[0].ceremony_part1("dkg-roster", KEY, CeremonyKind::Dkg, roster, None).unwrap_err();
         assert!(matches!(err, DaemonError::CeremonyRefused(_)), "{roster:?}: {err:?}");
     }
 }
@@ -977,11 +979,11 @@ async fn a_ceremony_over_a_roster_other_than_the_nodes_own_is_refused() {
 async fn a_repeated_part1_keeps_the_live_session_and_its_guard() {
     let rig = Rig::new();
     let n = &rig.nodes[0];
-    n.ceremony_begin("dkg-twice", KEY, CeremonyKind::Dkg, None).unwrap();
-    n.ceremony_part1("dkg-twice", KEY, CeremonyKind::Dkg, &[1, 2, 3]).unwrap();
-    assert!(n.ceremony_part1("dkg-twice", KEY, CeremonyKind::Dkg, &[1, 2, 3]).is_err());
+    n.ceremony_begin("dkg-twice", KEY, CeremonyKind::Dkg, None, None).unwrap();
+    n.ceremony_part1("dkg-twice", KEY, CeremonyKind::Dkg, &[1, 2, 3], None).unwrap();
+    assert!(n.ceremony_part1("dkg-twice", KEY, CeremonyKind::Dkg, &[1, 2, 3], None).is_err());
     // Still held by the live ceremony: another one for the key is refused.
-    let err = n.ceremony_begin("dkg-other", KEY, CeremonyKind::Dkg, None).unwrap_err();
+    let err = n.ceremony_begin("dkg-other", KEY, CeremonyKind::Dkg, None, None).unwrap_err();
     assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "{err:?}");
     assert_eq!(n.ceremony_status("dkg-twice").unwrap().phase, Phase::InProgress);
 }
@@ -1071,11 +1073,11 @@ async fn orphaned_session_no_votes_are_capped_and_a_refusal_is_not_evidence() {
     let v = rig.nodes[0].key_epoch(KEY).unwrap();
     let expect = Some((v.epoch, v.pkp_digest.as_slice().try_into().unwrap()));
     for p in &rig.peers {
-        p.ceremony_begin(ceremony_id, KEY, CeremonyKind::Refresh, expect).await.unwrap();
+        p.ceremony_begin(ceremony_id, KEY, CeremonyKind::Refresh, expect, None).await.unwrap();
     }
     let mut map = BTreeMap::new();
     for p in &rig.peers {
-        map.insert(p.identifier(), p.ceremony_part1(ceremony_id, KEY, CeremonyKind::Refresh, &[1, 2, 3]).await.unwrap());
+        map.insert(p.identifier(), p.ceremony_part1(ceremony_id, KEY, CeremonyKind::Refresh, &[1, 2, 3], None).await.unwrap());
     }
     let mut digest = [0u8; 32];
     for p in &rig.peers {
@@ -1191,11 +1193,11 @@ async fn a_failed_delivery_tells_the_leader_only_its_category() {
     let rig = Rig::new();
     let ceremony_id = "dkg-delivery-category";
     for p in &rig.peers {
-        p.ceremony_begin(ceremony_id, KEY, CeremonyKind::Dkg, None).await.unwrap();
+        p.ceremony_begin(ceremony_id, KEY, CeremonyKind::Dkg, None, None).await.unwrap();
     }
     let mut map = BTreeMap::new();
     for p in &rig.peers {
-        map.insert(p.identifier(), p.ceremony_part1(ceremony_id, KEY, CeremonyKind::Dkg, &[1, 2, 3]).await.unwrap());
+        map.insert(p.identifier(), p.ceremony_part1(ceremony_id, KEY, CeremonyKind::Dkg, &[1, 2, 3], None).await.unwrap());
     }
     // Node 3 drops its session: node 1's delivery to it fails there with "unknown dkg session …".
     rig.peers[2].ceremony_abort(ceremony_id).await.unwrap();
@@ -1274,12 +1276,12 @@ async fn signing_continues_through_every_phase_of_a_refresh_and_across_its_commi
 
     let id = "refresh-while-signing";
     for p in &rig.peers {
-        p.ceremony_begin(id, KEY, CeremonyKind::Refresh, expect_of(&rig)).await.unwrap();
+        p.ceremony_begin(id, KEY, CeremonyKind::Refresh, expect_of(&rig), None).await.unwrap();
     }
     sigs.extend(sign_every_pair(&rig, &group, "fenced").await);
     let mut map = BTreeMap::new();
     for p in &rig.peers {
-        map.insert(p.identifier(), p.ceremony_part1(id, KEY, CeremonyKind::Refresh, &[1, 2, 3]).await.unwrap());
+        map.insert(p.identifier(), p.ceremony_part1(id, KEY, CeremonyKind::Refresh, &[1, 2, 3], None).await.unwrap());
     }
     sigs.extend(sign_every_pair(&rig, &group, "part1").await);
     let mut digest = [0u8; 32];
@@ -1332,7 +1334,7 @@ async fn a_fence_only_guard_expires_after_the_fence_timeout_and_a_new_ceremony_t
     let rig = Rig::with_fence_timeout(fence);
     let group = run_dkg(&rig.peers, KEY).await.unwrap();
     for p in &rig.peers {
-        p.ceremony_begin("refresh-abandoned", KEY, CeremonyKind::Refresh, expect_of(&rig)).await.unwrap();
+        p.ceremony_begin("refresh-abandoned", KEY, CeremonyKind::Refresh, expect_of(&rig), None).await.unwrap();
     }
     // While it is fresh it holds off another ceremony (signing is unaffected either way).
     let err = run_refresh(&rig.peers, KEY).await.unwrap_err();
@@ -1346,10 +1348,10 @@ async fn a_fence_only_guard_expires_after_the_fence_timeout_and_a_new_ceremony_t
 
     // A guard whose part 1 ran is a live session: the fence timeout does not apply to it.
     let n = &rig.nodes[0];
-    n.ceremony_begin("refresh-with-session", KEY, CeremonyKind::Refresh, expect_of(&rig)).unwrap();
-    n.ceremony_part1("refresh-with-session", KEY, CeremonyKind::Refresh, &[1, 2, 3]).unwrap();
+    n.ceremony_begin("refresh-with-session", KEY, CeremonyKind::Refresh, expect_of(&rig), None).unwrap();
+    n.ceremony_part1("refresh-with-session", KEY, CeremonyKind::Refresh, &[1, 2, 3], None).unwrap();
     tokio::time::sleep(fence + std::time::Duration::from_millis(50)).await;
-    let err = n.ceremony_begin("refresh-next", KEY, CeremonyKind::Refresh, expect_of(&rig)).unwrap_err();
+    let err = n.ceremony_begin("refresh-next", KEY, CeremonyKind::Refresh, expect_of(&rig), None).unwrap_err();
     assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "{err:?}");
 }
 
@@ -1362,17 +1364,17 @@ async fn re_fencing_under_the_same_id_does_not_extend_the_guard() {
     run_dkg(&rig.peers, KEY).await.unwrap();
     let n = &rig.nodes[0];
     let started = std::time::Instant::now();
-    n.ceremony_begin("refresh-renewed", KEY, CeremonyKind::Refresh, expect_of(&rig)).unwrap();
-    let err = n.ceremony_begin("refresh-other", KEY, CeremonyKind::Refresh, expect_of(&rig)).unwrap_err();
+    n.ceremony_begin("refresh-renewed", KEY, CeremonyKind::Refresh, expect_of(&rig), None).unwrap();
+    let err = n.ceremony_begin("refresh-other", KEY, CeremonyKind::Refresh, expect_of(&rig), None).unwrap_err();
     assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "{err:?}");
     // Re-fence every 100 ms, past the timeout; the last one lands well inside a would-be reset.
     while started.elapsed() < fence + std::time::Duration::from_millis(100) {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        n.ceremony_begin("refresh-renewed", KEY, CeremonyKind::Refresh, expect_of(&rig)).unwrap();
+        n.ceremony_begin("refresh-renewed", KEY, CeremonyKind::Refresh, expect_of(&rig), None).unwrap();
     }
-    n.ceremony_begin("refresh-other", KEY, CeremonyKind::Refresh, expect_of(&rig)).unwrap();
+    n.ceremony_begin("refresh-other", KEY, CeremonyKind::Refresh, expect_of(&rig), None).unwrap();
     // The preempted id's part 1 is refused: the key is held by the newer fence.
-    let err = n.ceremony_part1("refresh-renewed", KEY, CeremonyKind::Refresh, &[1, 2, 3]).unwrap_err();
+    let err = n.ceremony_part1("refresh-renewed", KEY, CeremonyKind::Refresh, &[1, 2, 3], None).unwrap_err();
     assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "{err:?}");
     // The same id cannot change kind under its guard either.
     assert!(matches!(n.ceremony_fence("refresh-other", KEY, "dkg"), Err(DaemonError::CeremonyRefused(_))));
@@ -1389,7 +1391,7 @@ async fn a_fence_for_a_ceremony_id_with_a_record_is_refused_and_takes_no_guard()
     // A committed id, and an id this node voted no on as unknown.
     assert_eq!(n.ceremony_status("refresh-unknown").unwrap().phase, Phase::Aborted);
     for id in [dkg_id.as_str(), "refresh-unknown"] {
-        let err = n.ceremony_begin(id, KEY, CeremonyKind::Refresh, expect_of(&rig)).unwrap_err();
+        let err = n.ceremony_begin(id, KEY, CeremonyKind::Refresh, expect_of(&rig), None).unwrap_err();
         assert!(matches!(&err, DaemonError::CeremonyRefused(m) if m.contains("already used")), "{id}: {err:?}");
     }
     // No guard was left behind: a refresh runs at once.

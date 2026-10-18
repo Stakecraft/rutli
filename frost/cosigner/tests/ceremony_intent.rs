@@ -249,3 +249,278 @@ fn ceremony_and_signing_intents_cannot_stand_in_for_each_other() {
 }
 
 use prost::Message as _;
+
+// ── every node enforces it ─────────────────────────────────────────────────────────────────────
+
+use std::sync::Arc;
+
+use frost_ed25519::Identifier;
+use rutli_cosigner::journal::{Retention, SignJournal};
+use rutli_cosigner::keystore::KeyStore;
+use rutli_cosigner::node::Node;
+use rutli_cosigner::orchestrator::{run_dkg, run_dkg_with_intent, run_refresh, run_refresh_with_intent, Peers};
+use rutli_cosigner::peer::{LocalPeer, PeerApi};
+use rutli_cosigner::sign_policy::SignGuard;
+
+struct Rig {
+    ids: Ids,
+    nodes: Vec<Arc<Node>>,
+    peers: Peers,
+    _tmp: tempfile::TempDir,
+}
+
+fn guard_for(ids: &Ids, root: &std::path::Path, i: u16, policy: &SigningPolicyConfig) -> Arc<SignGuard> {
+    let journal =
+        SignJournal::open(root.join(format!("journal-{i}")), i, Retention { days: 90, max_bytes: 64 << 20 }).unwrap();
+    Arc::new(SignGuard::new(Arc::new(ids.verifier(policy)), journal, 10))
+}
+
+/// Three in-process nodes (2-of-3), node `i` on `policy(i)`, wired as a mesh.
+fn rig(policy: impl Fn(u16) -> SigningPolicyConfig) -> Rig {
+    let tmp = tempfile::tempdir().unwrap();
+    let ids = Ids::new();
+    let nodes: Vec<Arc<Node>> = (1..=3u16)
+        .map(|i| {
+            let ks = KeyStore::open(tmp.path().join(format!("n{i}"))).unwrap();
+            Arc::new(
+                Node::new(Identifier::try_from(i).unwrap(), 3, 2, ks)
+                    .with_sign_guard(guard_for(&ids, tmp.path(), i, &policy(i))),
+            )
+        })
+        .collect();
+    rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
+    let peers: Peers = nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    Rig { ids, nodes, peers, _tmp: tmp }
+}
+
+fn enforcing() -> SigningPolicyConfig {
+    SigningPolicyConfig { require_ceremony_intent: true, signer_may_refresh: false, ..Default::default() }
+}
+
+impl Rig {
+    /// The sharing every node holds of `key` (what a refresh fence expects).
+    fn expect(&self, key: &str) -> Option<(u64, [u8; 32])> {
+        let e = self.nodes[0].key_epoch(key).unwrap();
+        e.present.then(|| (e.epoch, e.pkp_digest.as_slice().try_into().unwrap()))
+    }
+
+    /// Prove node `n` holds no guard for `key` (and so took none): a fresh, valid ceremony fences
+    /// it at once — a fence-only guard of another ceremony would refuse it for a minute — and is
+    /// released again.
+    async fn assert_unguarded(&self, n: usize, kind: CeremonyKind, key: &str, rid: u8) {
+        let who = if kind == CeremonyKind::Dkg { "driver" } else { "refresher" };
+        let i = self.ids.ceremony(who, kind, key, rid);
+        let cid = id(kind, rid);
+        self.peers[n].ceremony_begin(&cid, key, kind, self.expect(key), Some(&i)).await.unwrap();
+        self.peers[n].ceremony_release(&cid, key).await.unwrap();
+    }
+}
+
+/// The end-to-end path: a DKG and a refresh run only with intents on enforcing nodes, each under
+/// the id its intent names; the same refresh without one is refused by every node.
+#[tokio::test]
+async fn enforcing_nodes_run_a_dkg_and_a_refresh_only_with_a_client_intent() {
+    let r = rig(|_| enforcing());
+    assert!(matches!(run_dkg(&r.peers, KEY).await, Err(DaemonError::PolicyRefused(_))));
+    let dkg = r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1);
+    let group = run_dkg_with_intent(&r.peers, KEY, Some(dkg)).await.unwrap();
+    for n in &r.nodes {
+        assert!(n.ceremony_record(&id(CeremonyKind::Dkg, 1)).is_some(), "the DKG ran under its intent's id");
+    }
+    refused_with(run_refresh(&r.peers, KEY).await, "carries no ceremony intent");
+    let refresh = r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2);
+    assert_eq!(run_refresh_with_intent(&r.peers, KEY, Some(refresh.clone())).await.unwrap(), group);
+    for n in &r.nodes {
+        assert_eq!(n.committed_epoch(KEY), Some(2));
+        assert!(n.ceremony_record(&id(CeremonyKind::Refresh, 2)).is_some());
+    }
+    // Replayed: the id it names is spent on every node — one intent, one ceremony.
+    let err = run_refresh_with_intent(&r.peers, KEY, Some(refresh)).await.unwrap_err();
+    assert!(matches!(err, DaemonError::CeremonyRefused(ref m) if m.contains("already used")), "{err:?}");
+    // A signed refresh intent cannot run a DKG, nor a DKG intent a refresh.
+    let wrong = r.ids.ceremony("refresher", CeremonyKind::Dkg, KEY, 3);
+    refused_with(run_refresh_with_intent(&r.peers, KEY, Some(wrong)).await, "purpose");
+    assert_eq!(r.nodes[0].committed_epoch(KEY), Some(2));
+}
+
+/// A compromised cosigner (its share, its certificate, the Peer API of every honest node) calls
+/// the fence and part 1 directly, for a refresh and for a DKG, with no intent, a forged one, one
+/// signed by a key that may not ask (its own cosigner certificate, the operator), the wrong kind,
+/// an expired one, another cluster's, and a valid one under another ceremony id. Every honest
+/// node refuses each before it takes a guard or opens a session.
+#[tokio::test]
+async fn a_compromised_peer_gets_no_guard_and_no_session_without_a_valid_intent() {
+    let r = rig(|_| enforcing());
+    run_dkg_with_intent(&r.peers, KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    let now = intent::now_ms();
+    for (kind, key) in [(CeremonyKind::Refresh, KEY), (CeremonyKind::Dkg, "frost-participant1-new")] {
+        let who = if kind == CeremonyKind::Dkg { "driver" } else { "refresher" };
+        let other = if kind == CeremonyKind::Dkg { CeremonyKind::Refresh } else { CeremonyKind::Dkg };
+        let base = intent::ceremony_intent(CLUSTER, kind, key, [9; 16], now, 120_000);
+        let mut forged = r.ids.sign_raw(who, &base);
+        forged.intent = pb::SignIntent { request_id: vec![8; 16], ..base.clone() }.encode_to_vec();
+        let attempts: Vec<(&str, String, Option<pb::SignedIntent>, &str)> = vec![
+            ("none", format!("{}-attacker", kind.as_str()), None, "carries no ceremony intent"),
+            ("forged", id(kind, 8), Some(forged), "signature"),
+            ("cosigner cert", id(kind, 9), Some(r.ids.sign_raw("cosigner3", &base)), "signed by \"cosigner3\""),
+            ("operator", id(kind, 9), Some(r.ids.sign_raw("operator", &base)), "signed by \"operator\""),
+            (
+                "wrong kind",
+                id(kind, 9),
+                Some(r.ids.sign_raw(who, &intent::ceremony_intent(CLUSTER, other, key, [9; 16], now, 120_000))),
+                "purpose",
+            ),
+            (
+                "expired",
+                id(kind, 9),
+                Some(r.ids.sign_raw(who, &pb::SignIntent { issued_at_ms: now - 900_000, not_after_ms: now - 780_000, ..base.clone() })),
+                "expired",
+            ),
+            (
+                "wrong cluster",
+                id(kind, 9),
+                Some(r.ids.sign_raw(who, &pb::SignIntent { cluster_id: "othercluster0000".into(), ..base.clone() })),
+                "cluster",
+            ),
+            ("another id", id(kind, 10), Some(r.ids.sign_raw(who, &base)), "names ceremony"),
+        ];
+        for n in 0..3 {
+            let records = r.nodes[n].all_records().len();
+            for (what, cid, i, why) in &attempts {
+                let fence = r.nodes[n].ceremony_begin(cid, key, kind, r.expect(key), i.as_ref());
+                assert!(matches!(&fence, Err(DaemonError::PolicyRefused(m)) if m.contains(why)), "{what} fence on node {}: {fence:?}", n + 1);
+                let part1 = r.nodes[n].ceremony_part1(cid, key, kind, &[1, 2, 3], i.as_ref());
+                assert!(matches!(&part1, Err(DaemonError::PolicyRefused(m)) if m.contains(why)), "{what} part 1 on node {}: {part1:?}", n + 1);
+                assert!(r.nodes[n].ceremony_record(cid).is_none(), "{what}: no vote, no record");
+            }
+            assert_eq!(r.nodes[n].all_records().len(), records);
+            r.assert_unguarded(n, kind, key, 20 + n as u8).await;
+        }
+    }
+    // Nothing changed: the key is on its DKG epoch everywhere.
+    for n in &r.nodes {
+        assert_eq!(n.committed_epoch(KEY), Some(1));
+    }
+}
+
+/// Replay at the Node level: the intent of a completed refresh cannot fence again (its id has a
+/// record), and an intent for one key cannot fence another.
+#[tokio::test]
+async fn a_spent_or_misdirected_intent_cannot_fence_again() {
+    let r = rig(|_| enforcing());
+    run_dkg_with_intent(&r.peers, KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    let refresh = r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2);
+    run_refresh_with_intent(&r.peers, KEY, Some(refresh.clone())).await.unwrap();
+    for n in &r.nodes {
+        let err = n.ceremony_begin(&id(CeremonyKind::Refresh, 2), KEY, CeremonyKind::Refresh, r.expect(KEY), Some(&refresh)).unwrap_err();
+        assert!(matches!(err, DaemonError::CeremonyRefused(ref m) if m.contains("already used")), "{err:?}");
+        let err = n.ceremony_part1(&id(CeremonyKind::Refresh, 2), KEY, CeremonyKind::Refresh, &[1, 2, 3], Some(&refresh)).unwrap_err();
+        assert!(matches!(err, DaemonError::CeremonyRefused(ref m) if m.contains("already used")), "{err:?}");
+        refused_with(
+            n.ceremony_begin(&id(CeremonyKind::Refresh, 2), "frost-participant1-other", CeremonyKind::Refresh, None, Some(&refresh)),
+            "intent is for key",
+        );
+    }
+}
+
+/// Who may refresh, at every node: the refresher; the driver only while `signer_may_refresh`; the
+/// operator never (unless it is on refresh_allowlist).
+#[tokio::test]
+async fn only_the_refresher_role_refreshes_unless_signer_may_refresh() {
+    let r = rig(|_| enforcing());
+    let group =
+        run_dkg_with_intent(&r.peers, KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    refused_with(
+        run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("driver", CeremonyKind::Refresh, KEY, 2))).await,
+        "signer_may_refresh is off",
+    );
+    refused_with(
+        run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("operator", CeremonyKind::Refresh, KEY, 3))).await,
+        "signed by \"operator\"",
+    );
+    assert_eq!(
+        run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 4))).await.unwrap(),
+        group
+    );
+    // With signer_may_refresh, the driver may.
+    let lenient_role = rig(|_| SigningPolicyConfig { require_ceremony_intent: true, ..Default::default() });
+    let group = run_dkg_with_intent(&lenient_role.peers, KEY, Some(lenient_role.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)))
+        .await
+        .unwrap();
+    let by_driver = lenient_role.ids.ceremony("driver", CeremonyKind::Refresh, KEY, 2);
+    assert_eq!(run_refresh_with_intent(&lenient_role.peers, KEY, Some(by_driver)).await.unwrap(), group);
+}
+
+/// SPKI pins are checked by every node on the intent's signer (before, only the called node checked
+/// the caller's pin): a revoked driver key is refused by each node itself, and one node that pins it
+/// out is enough to refuse the ceremony.
+#[tokio::test]
+async fn a_pinned_out_key_is_refused_at_every_node() {
+    let r = rig(|_| enforcing());
+    let pin = r.ids.spki_sha256("driver");
+    let pinned = |pin: &str| {
+        let mut p = enforcing();
+        p.signer_pins.insert("driver".into(), vec![pin.to_string()]);
+        p
+    };
+    // Re-open the nodes' guards with the pin: every node, then only node 3.
+    for only_node3 in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let nodes: Vec<Arc<Node>> = (1..=3u16)
+            .map(|i| {
+                let ks = KeyStore::open(tmp.path().join(format!("n{i}"))).unwrap();
+                let policy = if !only_node3 || i == 3 { pinned(&pin) } else { enforcing() };
+                Arc::new(Node::new(Identifier::try_from(i).unwrap(), 3, 2, ks).with_sign_guard(guard_for(&r.ids, tmp.path(), i, &policy)))
+            })
+            .collect();
+        rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
+        let peers: Peers = nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+        let stolen = r.ids.ceremony("driver-2", CeremonyKind::Dkg, KEY, 1);
+        if only_node3 {
+            refused_with(run_dkg_with_intent(&peers, KEY, Some(stolen)).await, "not pinned");
+            // Nodes 1 and 2 were fenced first and released by the leader's rollback.
+            for p in &peers[..2] {
+                p.ceremony_begin(&id(CeremonyKind::Dkg, 2), KEY, CeremonyKind::Dkg, None, Some(&r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 2))).await.unwrap();
+                p.ceremony_release(&id(CeremonyKind::Dkg, 2), KEY).await.unwrap();
+            }
+        } else {
+            for n in &nodes {
+                refused_with(n.ceremony_begin(&id(CeremonyKind::Dkg, 1), KEY, CeremonyKind::Dkg, None, Some(&stolen)), "not pinned");
+                refused_with(n.ceremony_part1(&id(CeremonyKind::Dkg, 1), KEY, CeremonyKind::Dkg, &[1, 2, 3], Some(&stolen)), "not pinned");
+            }
+        }
+        // The pinned key runs it.
+        run_dkg_with_intent(&peers, KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 3))).await.unwrap();
+    }
+}
+
+/// Verify-if-present (`require_ceremony_intent` off, this release's default): a ceremony without an
+/// intent is accepted and counted; a present one is verified in full and refused if invalid.
+#[tokio::test]
+async fn without_enforcement_an_absent_intent_is_counted_and_a_present_one_verified() {
+    let r = rig(|_| SigningPolicyConfig::default());
+    let group = run_dkg(&r.peers, KEY).await.unwrap();
+    assert_eq!(run_refresh(&r.peers, KEY).await.unwrap(), group);
+    // A present but invalid intent is refused by every node.
+    refused_with(
+        run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("operator", CeremonyKind::Refresh, KEY, 1))).await,
+        "signed by \"operator\"",
+    );
+    let mut forged = r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2);
+    forged.signature[8] ^= 1;
+    refused_with(run_refresh_with_intent(&r.peers, KEY, Some(forged)).await, "signature");
+    assert_eq!(run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 3))).await.unwrap(), group);
+
+    // The counters, on one node's guard.
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let g = r.nodes[0].sign_guard().unwrap().clone();
+    metrics::with_local_recorder(&recorder, || {
+        assert!(g.authorize_ceremony(CeremonyKind::Refresh, KEY, "refresh-legacy", None).unwrap().is_none());
+        let bad = r.ids.ceremony("cosigner2", CeremonyKind::Refresh, KEY, 4);
+        assert!(g.authorize_ceremony(CeremonyKind::Refresh, KEY, &id(CeremonyKind::Refresh, 4), Some(&bad)).is_err());
+    });
+    let out = handle.render();
+    assert!(out.contains("rutli_ceremony_intent_absent_total 1"), "{out}");
+    assert!(out.contains(r#"rutli_ceremony_intent_refusals_total{reason="signer"} 1"#), "{out}");
+}
