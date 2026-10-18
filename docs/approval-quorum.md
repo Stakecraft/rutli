@@ -160,11 +160,23 @@ order:
    `signer_may_refresh: false` (and `require_epoch_match: true` from batch C phase 2). From the moment
    the **last** node enforces, a compromised cosigner or a driver-key thief without approvals can no
    longer sign a gated key, and nothing signs without a journaled intent.
+   **Ceremony intents** (0.4.0-rc.4): `require_ceremony_intent: true`, once the driver release that
+   signs DKG intents runs and the refresh CronJob's image is this release (its
+   `rutli-cosigner refresh` signs refresh intents). First check that
+   `rutli_ceremony_intent_absent_total` no longer grows after a DKG or refresh. Each node that
+   enforces then refuses, on its own, any DKG/refresh fence or part 1 without a valid ceremony
+   intent naming exactly that ceremony. So a compromised cosigner can no longer start ceremonies on
+   it (`docs/ceremonies.md`, "Ceremony intents"). The flag works per node: an older leader drops
+   the intent and is refused by an enforcing node, so enforce only after the whole cluster runs this
+   release. Where only the driver certificate can refresh (no refresher certificate yet, as on the
+   DevNet soak, whose CA key is lost), a refresh needs `signer_may_refresh: true` and the CLI pointed
+   at the driver certificate; that is today's constraint, unchanged by intents.
 5. Schedule `rutli-cosigner audit-cross-check` (weekly, and after any incident). From now on, do not
    pass `--allow-no-intent`: an intent-less journal entry is an unexplained signature.
 
-Rollback: turning a flag off is immediate (restart). A driver downgrade needs `require_intent` off
-first, or every sign is refused.
+Rollback: turning a flag off is immediate (restart). A driver downgrade needs `require_intent` (and
+`require_ceremony_intent`) off first, or every sign (and DKG) is refused. Same for a refresh CronJob
+image older than this release.
 
 ## Approving hosted-key deletes
 

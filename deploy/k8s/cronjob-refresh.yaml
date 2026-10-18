@@ -16,6 +16,12 @@
 # cosigner's key — with client-refresher.json from rutli-client-config (client-config.yaml).
 # `scripts/gen-frost-certs.sh` issues `refresher.{crt,key}`.
 #
+# From 0.4.0-rc.4 `rutli-cosigner refresh` signs a ceremony intent with that same certificate, which
+# every cosigner verifies before it fences (docs/ceremonies.md, "Ceremony intents"); with
+# `signing_policy.require_ceremony_intent` on, an older image's intent-less refresh is refused. Pin
+# the image to the cosigners' release. Set `cluster_id` in client-refresher.json to skip the
+# cluster-id probe (otherwise a majority of the roster's Capabilities decides it).
+#
 # No refresher certificate yet (a cluster whose CA key is lost, until docs/ca-rotation.md issues
 # one)? Use the operator certificate: put its CN in the cosigners' `refresh_allowlist` too
 # (`refreshAllowlist: [operator]` in the chart; the operator role cannot sign either), create the

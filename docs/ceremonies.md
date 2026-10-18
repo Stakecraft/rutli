@@ -10,6 +10,9 @@ epochs) and M5 (a partial DKG wedged a deterministic key id).
 The node the request reaches leads, but it only coordinates. Every node — the leader included,
 as a participant — does the following:
 
+0. **Ceremony intent.** At the fence and again at part 1, before anything else: verify the
+   client's ceremony intent, which the leader forwards unchanged (see
+   [Ceremony intents](#ceremony-intents)). A refused intent takes no guard and opens no session.
 1. **Fence.** Take the per-key guard; refuse a ceremony id this node already holds a record for,
    a ceremony for a key that has one staged and unresolved, a DKG over an existing key, or a
    refresh whose leader saw a different `(epoch, PKP digest)` than this node holds. Refuse a leader
@@ -35,6 +38,65 @@ as a participant — does the following:
    DKG; for refresh an atomic replace, only if the live share is still the one the refresh started
    from) and records COMMITTED. It aborts only on direct evidence: a node voted ABORTED, or staged
    a different outcome. A recorded vote never leaves COMMITTED or ABORTED.
+
+### Ceremony intents
+
+Since 0.4.0-rc.4 a DKG or refresh can carry the requesting client's **ceremony intent**: the
+signing intent message (`SignIntent`, see [approval-quorum.md](approval-quorum.md)) with purpose
+`dkg` or `refresh`, the cluster id, the key, a 16-byte random request id and a validity of at most
+`intent_max_lifetime_secs`, with no digest and no approvals. The client signs it with its mTLS
+certificate key. The driver signs one for every DKG (`generateSigningKeyPair`), and
+`rutli-cosigner refresh` (the refresh CronJob) signs one with the certificate of its client config.
+
+**Every node** verifies the intent itself, at the fence and again at part 1, before it takes the
+guard or opens a session:
+
+* the certificate chains to the cluster CA and allows clientAuth;
+* the signer's role fits the kind. For a DKG, the CN must be on `signer_allowlist` (the driver)
+  and within its `signer_acl`. For a refresh, it must be on `refresh_allowlist`, or on
+  `signer_allowlist` while `signing_policy.signer_may_refresh` is on (then within its
+  `signer_acl`). The operator role and cosigner certificates can never sign one, unless the
+  operator CN is also listed in `refresh_allowlist`;
+* its key matches the CN's `signer_pins`, if the CN has any. Until now pins were checked only
+  at the node the client called; for ceremonies they now hold at every node;
+* the signature covers exactly the intent bytes; the cluster, the purpose (= the kind) and the key
+  match; the intent has not expired;
+* the ceremony id the leader runs is exactly the one the intent names: `<kind>-<hex(request_id)>`.
+
+That last rule makes an intent single-use. Ceremony ids are used once per node (durable ceremony
+records, checked at the fence and at part 1), so replaying an intent finds its ceremony already run,
+or never started, on every node. An intent cannot be reused for another key, kind or cluster, and
+a leader cannot mint or alter one. The leader also checks the intent on `Signer.Dkg`/`Refresh` and
+requires the intent's signer (CN and certificate key) to be the caller on that connection. This
+gives the client a clear refusal, and an intent cannot be replayed through another client's
+connection.
+
+**Enforcement:** `signing_policy.require_ceremony_intent` (needs TLS). It is off in this release:
+a node accepts a ceremony without an intent and counts it in `rutli_ceremony_intent_absent_total`
+(alert `RutliCeremonyIntentAbsent`, info), but an intent that is present is always verified in full.
+With the flag on, a ceremony without a valid intent is refused. From then on, a compromised cosigner
+can no longer start a DKG or refresh on that node, so it can no longer split, churn epochs or grow
+ceremony records at will. Refusals are counted in `rutli_ceremony_intent_refusals_total{reason}`
+(alert `RutliCeremonyIntentRefused`). A refusal on the mesh path is logged with the asking peer's CN:
+a cosigner on this release that leads ceremonies nobody signed for is a compromise signal. The switch
+order is in [approval-quorum.md](approval-quorum.md#switching-enforcement-on).
+
+What an intent does **not** bind, and why:
+
+* **Approvals.** None for DKG or refresh. A refresh cannot change or leak the key, and a DKG mints
+  a new id.
+* **The roster.** Every node already requires the leader's roster to be its own.
+* **The expected `(epoch, PKP digest)` of a refresh.** Replay is already one-shot through the
+  ceremony id. Binding the sharing would make the refresh client read `KeyStatus` first. This is
+  a possible later hardening (follow-up).
+* **A separate refresh ACL.** The refresher role has no per-key ACL, as on `Signer.Refresh`; a
+  driver refresh uses its `signer_acl`. `refresh_acl` is not introduced (follow-up if a
+  multi-tenant cluster needs per-tenant refreshers).
+
+Hosted-key genkey/delkey fences are not intent-gated. A cosigner can block a hosted id's
+generation or deletion anyway, by refusing. An intent on such a fence is a protocol error. What a
+compromised cosigner keeps is listed in the [threat model](security/threat-model.md): the n-of-n
+veto, and the split (DS-CR4) of a ceremony a client **did** ask for.
 
 ### Signing during a ceremony
 
@@ -306,6 +368,12 @@ release). A stale node refuses round 1 from leaders of either release. **DKG and
 node reports ceremony protocol ≥ 2 (`Peer.NodeInfo`), and an upgraded node refuses the protocol-1
 RPCs (`DkgPart*`/`RefreshPart*`, which handed round-2 shares to the leader). Upgrade every cosigner
 before running a DKG or refresh; pause any refresh CronJob and onboarding DKGs during the roll.
+
+Ceremony intents need no protocol bump. They are new optional fields that an older node ignores. An
+older leader drops them: a node of this release then sees a ceremony without an intent, which it
+accepts and counts while `require_ceremony_intent` is off and refuses once it is on. So turn the
+flag on only after every cosigner, the driver and the refresh job run this release. To roll back,
+turn the flag off first.
 
 Every key generated or refreshed on a release before ceremony protocol 2 must be treated as
 exposed to that ceremony's leader (audit C1). A post-upgrade refresh re-isolates the shares of a
