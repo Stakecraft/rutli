@@ -423,9 +423,20 @@ enum SealCommand {
     },
 }
 
+/// Whether log lines may carry ANSI colour codes: only on a terminal, and never when `NO_COLOR` is
+/// set to a non-empty value (<https://no-color.org>). In k8s and files the codes would sit between
+/// the structured fields and break `grep`.
+fn ansi_enabled(stdout_is_tty: bool, no_color: Option<String>) -> bool {
+    stdout_is_tty && !no_color.is_some_and(|v| !v.is_empty())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
+        .with_ansi(ansi_enabled(
+            std::io::IsTerminal::is_terminal(&std::io::stdout()),
+            std::env::var("NO_COLOR").ok(),
+        ))
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info".into()),
@@ -2435,6 +2446,15 @@ async fn shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ansi_only_on_a_terminal_and_without_no_color() {
+        assert!(ansi_enabled(true, None));
+        assert!(ansi_enabled(true, Some(String::new()))); // NO_COLOR= (empty) does not count
+        assert!(!ansi_enabled(true, Some("1".into())));
+        assert!(!ansi_enabled(false, None)); // k8s logs, files, pipes
+        assert!(!ansi_enabled(false, Some("1".into())));
+    }
 
     #[test]
     fn backup_copies_key_files_but_never_dotfiles() {

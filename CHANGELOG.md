@@ -85,6 +85,13 @@ Rollback: turn the flag off first.
   Operators no longer need to drain topology traffic before a refresh (`docs/ceremonies.md`,
   "Signing during a ceremony").
 
+### Fixed
+
+- **Cosigner logs are plain when stdout is not a terminal.** The daemon's `tracing_subscriber::fmt()`
+  emitted ANSI colour codes even into k8s logs and files, which broke `grep` on structured fields
+  (`acl_entries=…`, `cluster id`) and put escape sequences into stored logs. Colour is now on only
+  when stdout is a terminal, and `NO_COLOR` (any non-empty value) turns it off there too.
+
 ## [0.4.0-rc.3] — 2026-10-18
 
 _Release candidate, pre-audit: for soak and review, not for production key custody. Wire change: upgrade every cosigner, then the driver (see "Rollout order across batch C" below)._
