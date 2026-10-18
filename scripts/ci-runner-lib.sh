@@ -6,6 +6,10 @@ CI_PROFILE="${RUTLI_CI_PROFILE:-rutli-ci}"
 CI_CPU="${RUTLI_CI_CPU:-4}"
 CI_MEMORY="${RUTLI_CI_MEMORY:-8}"
 CI_DISK="${RUTLI_CI_DISK:-60}"
+# Rosetta (Apple's amd64 translation) for the VM. QEMU user emulation segfaults the amd64 Rust link
+# step of the release image build, so image builds need Rosetta. Set RUTLI_CI_ROSETTA=0 to opt out
+# (arm64-only CI jobs work without it).
+CI_ROSETTA="${RUTLI_CI_ROSETTA:-1}"
 CI_EMPTY_DIR="${RUTLI_CI_EMPTY_DIR:-$HOME/.rutli-ci-empty}"
 CI_CONTEXT="colima-${CI_PROFILE}"
 CI_PROJECT="${RUTLI_CI_PROJECT:-rutli-ci-isolated}"
@@ -47,6 +51,8 @@ verify_vm_mounts() {
   while IFS= read -r line; do
     [[ "$line" =~ type\ (virtiofs|9p|fuse\.sshfs|sshfs)\  ]] || continue
     mp="${line#* on }"; mp="${mp%% type *}"
+    # Rosetta's own share (Apple's translator binary, no host files) is not a host mount.
+    [[ "${line%% on *}" == rosetta && "$mp" == /mnt/lima-rosetta ]] && continue
     opts="${line##*\(}"; opts="${opts%\)*}"
     n=$((n + 1))
     [[ "$mp" == "$CI_EMPTY_DIR" ]] \
@@ -64,4 +70,35 @@ verify_context() {
     || die "docker context '$CI_CONTEXT' does not exist (is the Colima profile '$CI_PROFILE' running?)"
   [[ "$host" == *".colima/${CI_PROFILE}/docker.sock" ]] \
     || die "docker context '$CI_CONTEXT' points at '$host', not the Colima profile's socket — refusing."
+}
+
+# True when the VM has Rosetta registered as a binfmt handler for amd64 binaries.
+# Capture-then-grep: `ls | grep -q` under pipefail fails falsely (grep -q exits early, ls gets SIGPIPE).
+vm_has_rosetta() {
+  local handlers
+  handlers="$(colima ssh -p "$CI_PROFILE" -- ls /proc/sys/fs/binfmt_misc/ 2>/dev/null)" || return 1
+  grep -qx rosetta <<<"$handlers"
+}
+
+# Refuse to continue without Rosetta (unless opted out); print the exact fix for an existing VM.
+verify_rosetta() {
+  if [[ "$CI_ROSETTA" == 0 ]]; then
+    echo "warning: Rosetta check skipped (RUTLI_CI_ROSETTA=0); amd64 image builds will use QEMU and may segfault" >&2
+    return 0
+  fi
+  vm_has_rosetta && return 0
+  cat >&2 <<MSG
+error: VM '$CI_PROFILE' has no Rosetta handler in binfmt_misc. The release image build
+(linux/amd64 + linux/arm64) segfaults at the amd64 link step under QEMU emulation.
+Enable Rosetta on the existing VM (keeps its disk and its read-only empty-dir mount):
+
+  scripts/ci-runner-down.sh                  # optional: remove the runner container first
+  colima stop -p $CI_PROFILE
+  colima start -p $CI_PROFILE --vz-rosetta   # persists 'rosetta: true' in ~/.colima/$CI_PROFILE/colima.yaml
+
+then re-run scripts/ci-runner-up.sh. If that does not take effect, delete and recreate the VM
+(scripts/ci-runner-down.sh --delete-vm), which now creates it with --vz-rosetta.
+Needs macOS 13+ on Apple silicon. To skip this check: RUTLI_CI_ROSETTA=0.
+MSG
+  exit 1
 }
