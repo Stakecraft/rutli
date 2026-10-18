@@ -52,7 +52,8 @@ verify_vm_mounts() {
     [[ "$line" =~ type\ (virtiofs|9p|fuse\.sshfs|sshfs)\  ]] || continue
     mp="${line#* on }"; mp="${mp%% type *}"
     # Rosetta's own share (Apple's translator binary, no host files) is not a host mount.
-    [[ "${line%% on *}" == rosetta && "$mp" == /mnt/lima-rosetta ]] && continue
+    # Rosetta share (colima --vz-rosetta): source "vz-rosetta" (colima 0.10) or "rosetta" (lima), fixed mountpoint.
+    [[ ( "${line%% on *}" == vz-rosetta || "${line%% on *}" == rosetta ) && "$mp" == /mnt/lima-rosetta ]] && continue
     opts="${line##*\(}"; opts="${opts%\)*}"
     n=$((n + 1))
     [[ "$mp" == "$CI_EMPTY_DIR" ]] \
