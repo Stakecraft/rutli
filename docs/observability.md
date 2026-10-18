@@ -84,7 +84,8 @@ rate, never on its absence.
 The signing-policy, delete and tombstone series are not primed: they first appear when they first
 count, so their rules (`deploy/monitoring/prometheus-rules.yml`: `RutliSignPolicyRefusals`,
 `RutliSignIntentAbsent`, `RutliSignRateLimited`, `RutliSignerAclAbsent`, `RutliSignJournalErrors`,
-`RutliDeleteIntentRefused`, `RutliHostedKeyDeleted`) alert on increases. `rutli_keyfiles` is set
+`RutliDeleteIntentRefused`, `RutliHostedKeyDeleted`, `RutliCeremonyIntentRefused`,
+`RutliCeremonyIntentAbsent`) alert on increases. `rutli_keyfiles` is set
 once per start (`RutliKeyFilesUnopenable`, `RutliKeyFileMigrationPending`).
 
 Published latency snapshots and how to reproduce them: [`performance.md`](performance.md).

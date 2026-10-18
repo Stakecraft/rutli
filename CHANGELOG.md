@@ -24,9 +24,52 @@ All notable changes to Rütli are documented here. Format loosely follows
     those sessions had marked go back to fence-only.
   - The fence refuses a ceremony id the node already holds a record for, as part 1 does.
 
-  A superseded ceremony still can never stage. Still open until ceremony intents (step 2): a
-  compromised cosigner can lead ceremonies no client asked for. See
-  `docs/security/threat-model.md`.
+  A superseded ceremony still can never stage. See `docs/security/threat-model.md`.
+- **Ceremony intents: a DKG or refresh happens only when an authorized client asked for it** (L2).
+  A DKG or refresh now carries the client's signed **ceremony intent**. It reuses
+  `SignIntent`/`SignedIntent` with the purposes `dkg` and `refresh`, which are domain-separated
+  from `sign` and `delete-key`. The driver signs one for every DKG, and `rutli-cosigner refresh`
+  (the refresh CronJob) signs one with its client certificate. **Every node** verifies it at the
+  fence and at part 1, before it takes the guard or opens a session:
+  - the chain to the cluster CA;
+  - the signer's role: DKG by the signer role within its `signer_acl`; refresh by
+    `refresh_allowlist`, or by the signer role while `signer_may_refresh`. Operator and cosigner
+    certificates are refused;
+  - the SPKI pin. Pins are now checked at every node for ceremonies, not only at the node called;
+  - the cluster, purpose, key and validity;
+  - that the ceremony id is the one the intent names, `<kind>-<hex(request_id)>`. One intent
+    therefore runs at most one ceremony, enforced by the durable per-node ceremony records.
+
+  The leader also requires the intent's signer to be the mTLS caller. Enforcement:
+  `signing_policy.require_ceremony_intent`. It is off in this release (verify-if-present: an
+  absent intent is accepted and counted, a present one is always verified). With it on, a
+  compromised cosigner can no longer start a DKG or refresh on an honest node, so it can no longer
+  split the key at will, churn epochs or grow ceremony records. No approvals for DKG/refresh.
+  Deferred: binding the expected `(epoch, PKP digest)` into refresh intents, and a per-key refresh
+  ACL (`docs/ceremonies.md`, "Ceremony intents").
+
+### Added
+
+- Proto: `DkgRequest.intent`, `RefreshRequest.intent`, `CeremonyFenceRequest.intent`,
+  `CeremonyPart1Request.intent` (optional fields; **no ceremony protocol bump**, older nodes ignore
+  them). `signing_policy.require_ceremony_intent` (needs TLS). Metrics
+  `rutli_ceremony_intent_refusals_total{reason}` and `rutli_ceremony_intent_absent_total`; alerts
+  `RutliCeremonyIntentRefused` (warning) and `RutliCeremonyIntentAbsent` (info). A fence or part 1
+  refused on its intent is logged with the asking peer's CN. An intent on a hosted-key
+  genkey/delkey fence is `INVALID_ARGUMENT`.
+- `rutli-cosigner refresh` learns the cluster id from the client config's `cluster_id`, or else from
+  a majority (at least two agreeing) of the roster's `Capabilities`, and prints the ceremony id.
+- Driver: `FrostIntentSigner.signCeremony`; the DKG request carries a ceremony intent (gated like
+  signing intents: `frost.sign-intents`, TLS, a known cluster id).
+
+### Rollout (ceremony intents)
+
+1. Every cosigner on this release (flag off).
+2. The driver release, and the refresh CronJob image at the same release.
+3. `signing_policy.require_ceremony_intent: true` on every node, by rolling restart.
+   `rutli_ceremony_intent_absent_total` must have stopped growing first.
+
+Rollback: turn the flag off first.
 
 ### Changed
 

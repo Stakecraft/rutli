@@ -15,8 +15,8 @@ The statements below hold for a cluster where:
   `CHANGELOG.md`), on a cluster uniformly upgraded **before** any DKG or refresh
   (`ceremony_protocol` 2 on every node);
 - the enforcement switches are on, identically, on every node: `signing_policy.require_intent`,
-  `signer_acl_required`, `signer_may_refresh: false`, `require_epoch_match` (`docs/approval-quorum.md`,
-  "Switching enforcement on");
+  `require_ceremony_intent`, `signer_acl_required`, `signer_may_refresh: false`, `require_epoch_match`
+  (`docs/approval-quorum.md`, "Switching enforcement on");
 - key files are written in format v2 (`keyfile.write_version: 2`, `cluster_uuid` set) and the
   legacy shared seal master has been retired: per-node seal bundles, DEKs rotated
   (`seal rotate-dek`), the master escrowed offline and then destroyed (decision P1);
@@ -99,11 +99,30 @@ is refused beyond). It **cannot pause signing** by fencing a key for a ceremony 
 DKG/refresh guard no longer blocks sign round 1, see `docs/ceremonies.md`, "Signing during a
 ceremony"). Up to rc.3 it could, and with no time limit: a fence that was never followed by part 1
 stopped that key's signing on the fenced nodes until they restarted. That was earlier documented as
-"≤ 15 min", which was wrong. Residual until ceremony intents ship: any peer may still lead a
-DKG/refresh that no client asked for (that is, start one at will). With n = 3 it can use such a
-ceremony to split the key (above), and it can hold off other ceremonies for the key, for 60 s with a
-bare fence or 15 min with a session at a time. Like any participant, it can veto every ceremony by
-refusing to take part.
+"≤ 15 min", which was wrong.
+
+It **cannot start a DKG or refresh** that no client asked for (since 0.4.0-rc.4, with
+`require_ceremony_intent` on). Every node verifies, at the fence and at part 1, a client-signed
+ceremony intent before it takes the guard or opens a session. The intent must be signed by the
+driver for a DKG, or by the refresher for a refresh (the driver only while `signer_may_refresh`). It
+names the ceremony id, so one intent runs at most one ceremony (`docs/ceremonies.md`, "Ceremony
+intents"). The cosigner holds no key that can sign one, cannot alter one, and cannot replay one into
+a second ceremony or onto another key, kind or cluster. So it can no longer split the key at will,
+churn epochs, or grow ceremony records on honest nodes. What remains:
+
+- it can split (above) a DKG or refresh that a client **did** ask for and that it takes part in;
+- during an observed intent's validity (at most `intent_max_lifetime_secs` + skew), it can re-fence
+  that intent's key on a node where the real ceremony never got past the fence. That has no
+  signing effect and holds off that key's ceremonies, which it can do anyway;
+- like any participant, it can veto every ceremony, onboarding DKGs included, by refusing to take
+  part (n-of-n);
+- hosted-key genkey/delkey fences are not intent-gated: it can block a hosted id's generation or
+  deletion, as it can by refusing.
+
+Without `require_ceremony_intent` (this release's default), a ceremony without an intent is still
+accepted and counted (`RutliCeremonyIntentAbsent`), and the residual is as on rc.3. Any peer can
+then lead a DKG or refresh at will, split it, and hold off other ceremonies for 60 s with a bare
+fence or 15 min with a session at a time.
 
 ### Holder of the driver certificate and key (bypassing the driver)
 
@@ -111,16 +130,25 @@ refusing to take part.
 with every share journaled on every participating node (`audit-cross-check` exposes signatures the
 driver audit log lacks); decrypt with hosted keys within `decrypt_rate_limit_per_min` per node.
 
-**Cannot:** sign a gated key without `M` approver signatures; refresh (`signer_may_refresh: false`);
+**Can also** run a DKG of a new id inside its `signer_acl` prefixes (it signs the ceremony intent
+every node verifies).
+
+**Cannot:** sign a gated key without `M` approver signatures; refresh (`signer_may_refresh: false`,
+checked by every node on the ceremony intent);
 use another tenant's prefixes; delete hosted keys (unless an operator put the driver CN on
 `hosted_keys.delete_allowlist`, which is off by default — and then only recoverably, within the
 grace period, and with approvals if `delete_approval_threshold` is set). Revocation without the CA:
-replace the SPKI pin (`signing_policy.signer_pins`).
+replace the SPKI pin (`signing_policy.signer_pins`); for ceremony intents, every node checks the pin,
+not only the node it calls.
 
 ### Holder of the refresher certificate
 
-Can trigger refreshes (`Refresh`, `KeyStatus`). A refresh re-randomizes shares under the same group
-key; it can be used to cause load or to abort, not to learn anything or change the key. Cannot sign.
+Can trigger refreshes (`Refresh`, `KeyStatus`; each refresh needs a ceremony intent signed with this
+certificate, verified by every node). A refresh re-randomizes shares under the same group key; it can
+be used to cause load or to abort, not to learn anything or change the key. Together with a
+compromised cosigner, every refresh it requests is a split opportunity (DS-CR4). Cannot sign, cannot
+run a DKG. Revoked by replacing its SPKI pin or removing its CN from `refresh_allowlist`. There is no
+per-key refresh ACL (follow-up).
 
 ### Holder of the operator certificate
 
@@ -220,6 +248,10 @@ keys stay test material.
 - A driver-key thief signs non-gated keys within the ACL and rate limits (bounded and journaled,
   not prevented).
 - No defence against a TLS-terminating mesh (P3) or a memory snapshot of a running cosigner (L7).
+- With n = 3, a compromised cosigner can split (DS-CR4) any DKG or refresh it takes part in, but
+  with `require_ceremony_intent` on only one a client asked for. It can veto every ceremony,
+  onboarding DKGs included (n-of-n). Not bound into a refresh intent yet: the expected
+  `(epoch, PKP digest)` (follow-up).
 - Deletion is not erasure: tombstones retain material for the grace period by design, and old
   backups keep every key they captured until the DEK that sealed them is dropped.
 - Keys from earlier releases are leader-exposed (P9).

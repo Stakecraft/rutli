@@ -213,6 +213,38 @@ spec:
           can still obtain shares for arbitrary digests. Finish the rollout: upgrade the driver, then
           set require_intent on every node (docs/approval-quorum.md, Switching enforcement on). On a cluster
           that already enforces, this alert should never fire.'
+    - alert: RutliCeremonyIntentRefused
+      expr: sum by (instance, reason) (increase(rutli_ceremony_intent_refusals_total[15m])) > 0
+      for: 0m
+      labels:
+        severity: warning
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }} refused a DKG/refresh ceremony intent ({{ $labels.reason\
+          \ }})"
+        description: "{{ $labels.instance }} refused to fence or start a DKG or refresh (reason {{ $labels.reason\
+          \ }}). On the mesh path (the cosigner log says 'ceremony fence refused' / 'ceremony part 1 refused'\
+          \ and names the asking peer) a cosigner led a ceremony no authorized client signed for: missing\
+          \ with signing_policy.require_ceremony_intent on means either a leader on an older release (it\
+          \ drops the intent: finish the rollout) or that peer is compromised; signer, certificate, signature,\
+          \ pin, cluster, purpose, key, ceremony-id mean something presented an intent this node did not\
+          \ accept \u2014 investigate the asking cosigner. At the leader (Signer.Dkg/Refresh): signer\
+          \ = a refresh by the driver with signer_may_refresh off, or an intent replayed through another\
+          \ client's connection; missing = an old driver or refresh CLI; expiry = clock skew (NTP). docs/ceremonies.md,\
+          \ Ceremony intents."
+    - alert: RutliCeremonyIntentAbsent
+      expr: increase(rutli_ceremony_intent_absent_total[1h]) > 0
+      for: 0m
+      labels:
+        severity: info
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }} ran a DKG/refresh without a client ceremony\
+          \ intent"
+        description: '{{ $labels.instance }} took part in a DKG or refresh that carried no client-signed
+          ceremony intent, accepted because signing_policy.require_ceremony_intent is off. That is the
+          transition state of this release: a compromised cosigner can still start (and split) ceremonies
+          on this node. Once the driver and the refresh job run this release, set require_ceremony_intent
+          on every node (docs/approval-quorum.md, Switching enforcement on). On a cluster that enforces,
+          this never fires.'
     - alert: RutliSignRateLimited
       expr: increase(rutli_sign_rate_limited_total[10m]) > 0
       for: 0m
