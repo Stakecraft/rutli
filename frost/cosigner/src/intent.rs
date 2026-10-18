@@ -921,6 +921,24 @@ pub fn ceremony_intent(
     }
 }
 
+/// The cluster id a client believes from its roster's `Capabilities.cluster_id` answers (empty
+/// ones ignored): the value at least two answers agree on (the lone node of a one-node roster
+/// counts alone) and that more answers report than any other value — the driver's rule (audit F5),
+/// so one compromised or misconfigured cosigner cannot set the id its honest peers then refuse.
+pub fn agree_on_cluster_id(answers: &[String], roster_len: usize) -> Option<String> {
+    let required = if roster_len <= 1 { 1 } else { 2 };
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for a in answers.iter().filter(|a| !a.is_empty()) {
+        *counts.entry(a.as_str()).or_default() += 1;
+    }
+    let mut ranked: Vec<(&str, usize)> = counts.into_iter().collect();
+    ranked.sort_by_key(|r| std::cmp::Reverse(r.1));
+    match ranked.as_slice() {
+        [(id, n), rest @ ..] if *n >= required && rest.first().is_none_or(|(_, m)| m < n) => Some(id.to_string()),
+        _ => None,
+    }
+}
+
 /// A fresh random request id.
 pub fn new_request_id() -> [u8; REQUEST_ID_LEN] {
     let mut id = [0u8; REQUEST_ID_LEN];
@@ -1036,6 +1054,19 @@ mod tests {
         assert!(matches!(ceremony_id_of(&signed, CeremonyKind::Dkg), Err(DaemonError::PolicyRefused(_))));
         assert!(ceremony_id_of(&pb::SignedIntent::default(), CeremonyKind::Dkg).is_err());
         assert!(ceremony_id_of(&pb::SignedIntent { intent: vec![0xff; 3], ..Default::default() }, CeremonyKind::Dkg).is_err());
+    }
+
+    /// `rutli-cosigner refresh` learns the cluster id like the driver: a majority of at least two.
+    #[test]
+    fn the_cluster_id_is_what_a_majority_of_the_roster_reports() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        assert_eq!(agree_on_cluster_id(&s(&["a", "a", "a"]), 3).as_deref(), Some("a"));
+        assert_eq!(agree_on_cluster_id(&s(&["a", "a", "b"]), 3).as_deref(), Some("a"));
+        assert_eq!(agree_on_cluster_id(&s(&["a", ""]), 3), None, "one answer is one cosigner's word");
+        assert_eq!(agree_on_cluster_id(&s(&["a", "b"]), 3), None);
+        assert_eq!(agree_on_cluster_id(&s(&["a", "a", "b", "b"]), 5), None, "a tie is no majority");
+        assert_eq!(agree_on_cluster_id(&s(&["a"]), 1).as_deref(), Some("a"), "a one-node dev roster");
+        assert_eq!(agree_on_cluster_id(&s(&[]), 3), None);
     }
 
     /// Parity with the driver's `FrostIntentSigner.deleteDigest` (FrostSigningIntentSpec pins it).

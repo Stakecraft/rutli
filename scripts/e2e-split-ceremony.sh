@@ -8,8 +8,11 @@
 # Imports B1's throwaway Canton 3.6.1 namespace key (frost/canton-key/testdata) and checks, in
 # order: DKG on the import id is refused (ALREADY_EXISTS) before and after; share-recipient on the
 # running nodes; the dealer; import-share --dry-run then for real; an identical re-import is a
-# no-op; the startup warning for an unrefreshed dealt key; verify-key --sign-test; refresh by the
-# refresher role (the driver's refresh refused: signer_may_refresh off, audit C2); verify-key again
+# no-op; the startup warning for an unrefreshed dealt key; verify-key --sign-test; then
+# require_ceremony_intent on (every node): a refresh without a ceremony intent and a cosigner's
+# intent-less fence are refused, and the refresher role's refresh — whose CLI signs a ceremony
+# intent with its client certificate — runs on every node under the intent's ceremony id (the
+# driver's refresh refused: signer_may_refresh off, audit C2); verify-key again
 # (new digest, refresh count 1); a re-import after refresh is refused; restart of every node then
 # verify-key; a Sign with one node down and no signing intent (accepted: require_intent off, the
 # rolling-upgrade mode, journaled as no-intent), verified independently by OpenSSL; then
@@ -94,6 +97,7 @@ wait_healthy() {
   fail "node $1 did not become healthy"
 }
 cli() { RUST_LOG=off "$COSIGNER" "$@"; }
+plainlog() { sed $'s/\x1b\\[[0-9;]*m//g' "$WORK/node$1.log"; } # node N's log without ANSI colours
 grpc() {
   grpcurl -cacert "$WORK/certs/ca.crt" -cert "$WORK/certs/driver.crt" -key "$WORK/certs/driver.key" \
     -servername cosigner1 -import-path "$REPO/frost/cosigner/proto" -proto cosigner.proto "$@"
@@ -203,7 +207,31 @@ echo "operator Sign -> PermissionDenied"
 step "   DKG is still refused for the installed id"
 expect_dkg_refused "installed"
 
-step "6. refresh (refresher role; the operator and — signer_may_refresh off — the driver are refused)"
+step "6. require_ceremony_intent on (every node); refresh by the refresher role, which signs a ceremony intent"
+for i in 1 2 3; do
+  jq '.signing_policy.require_ceremony_intent = true' "$WORK/c$i.json" >"$WORK/c$i.json.new" && mv "$WORK/c$i.json.new" "$WORK/c$i.json"
+done
+for i in 1 2 3; do stop "$i"; done
+for i in 1 2 3; do start "$i"; done
+for i in 1 2 3; do wait_healthy "$i"; done
+# A refresh without a ceremony intent (an old CLI, or any raw client) is refused by the leader…
+if out="$(grpcurl -cacert "$WORK/certs/ca.crt" -cert "$WORK/certs/refresher.crt" -key "$WORK/certs/refresher.key" \
+  -servername cosigner1 -import-path "$REPO/frost/cosigner/proto" -proto cosigner.proto \
+  -d "{\"key_id\":\"$KEY_ID\"}" "127.0.0.1:$((BASE_PORT + 1))" rutli.cosigner.v1.Signer/Refresh 2>&1)"; then
+  fail "a refresh without a ceremony intent succeeded under require_ceremony_intent"
+fi
+grep -q "carries no ceremony intent" <<<"$out" || fail "intent-less refresh refused for the wrong reason: $out"
+echo "intent-less Refresh -> refused"
+# …and a compromised cosigner (cosigner3's certificate) cannot fence an honest node for one.
+if out="$(grpcurl -cacert "$WORK/certs/ca.crt" -cert "$WORK/certs/cosigner3.crt" -key "$WORK/certs/cosigner3.key" \
+  -servername cosigner1 -import-path "$REPO/frost/cosigner/proto" -proto cosigner.proto \
+  -d "{\"ceremony_id\":\"refresh-attacker\",\"key_id\":\"$KEY_ID\",\"kind\":\"refresh\",\"protocol\":2}" \
+  "127.0.0.1:$((BASE_PORT + 1))" rutli.cosigner.v1.Peer/CeremonyFence 2>&1)"; then
+  fail "a cosigner fenced an honest node without a ceremony intent"
+fi
+grep -q "carries no ceremony intent" <<<"$out" || fail "intent-less fence refused for the wrong reason: $out"
+plainlog 1 | grep -q 'asker="cosigner3"' || fail "node 1 did not log the asking peer of the refused fence"
+echo "cosigner3 intent-less CeremonyFence -> refused (and logged with the asker)"
 if cli --config "$WORK/operator.json" refresh --key-id "$KEY_ID" >/dev/null 2>&1; then
   fail "the operator role could run a refresh"
 fi
@@ -214,6 +242,13 @@ grep -q "may not call Refresh" <<<"$out" || fail "driver refresh refused for the
 echo "driver refresh -> refused (signer_may_refresh off)"
 out="$(cli --config "$WORK/refresher.json" refresh --key-id "$KEY_ID")"
 grep -q "$GROUP" <<<"$out" || fail "refresh changed the group key: $out"
+RID="$(awk '$1 == "ceremony" {print $2; exit}' <<<"$out")"
+[[ "$RID" =~ ^refresh-[0-9a-f]{32}$ ]] || fail "the refresh CLI printed no intent ceremony id: $out"
+for i in 1 2 3; do
+  plainlog "$i" | grep "ceremony intent verified" | grep "\"$RID\"" | grep -q "requested_by=refresher" \
+    || fail "node $i did not verify the refresher's ceremony intent for $RID"
+done
+echo "refresh under ceremony intent $RID, verified on every node"
 if out="$(grpcurl -cacert "$WORK/certs/ca.crt" -cert "$WORK/certs/refresher.crt" -key "$WORK/certs/refresher.key" \
   -servername cosigner1 -import-path "$REPO/frost/cosigner/proto" -proto cosigner.proto \
   -d "{\"key_id\":\"$KEY_ID\",\"message\":\"$MSG_B64\"}" "127.0.0.1:$((BASE_PORT + 1))" \
