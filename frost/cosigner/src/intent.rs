@@ -495,6 +495,17 @@ impl IntentVerifier {
 
     /// The SPKI pins: a pinned CN acts only with a pinned key.
     pub fn check_pin(&self, cn: &str, spki_sha256: &[u8; 32]) -> Result<()> {
+        self.check_pin_with(cn, spki_sha256, refused)
+    }
+
+    /// [`IntentVerifier::check_pin`], refused (and counted) as `refused` says: a delete or a
+    /// ceremony intent's pin refusal is that kind's refusal, not a signing-policy one.
+    fn check_pin_with(
+        &self,
+        cn: &str,
+        spki_sha256: &[u8; 32],
+        refused: fn(&'static str, String) -> DaemonError,
+    ) -> Result<()> {
         match self.pins.get(cn) {
             Some(pins) if !pins.contains(spki_sha256) => Err(refused(
                 "pin",
@@ -530,7 +541,7 @@ impl IntentVerifier {
         }
         let cn = leaf.cn.clone().ok_or_else(|| refuse("certificate", "the signing certificate has no CN".into()))?;
         role(&cn).map_err(|why| refuse("signer", why))?;
-        self.check_pin(&cn, &leaf.spki_sha256)?;
+        self.check_pin_with(&cn, &leaf.spki_sha256, refuse)?;
         let mut msg = Vec::with_capacity(INTENT_CONTEXT.len() + signed.intent.len());
         msg.extend_from_slice(INTENT_CONTEXT);
         msg.extend_from_slice(&signed.intent);
