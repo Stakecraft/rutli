@@ -93,11 +93,14 @@ the line.
 - This repository checked out **at the v0.4.0-rc.3 release commit**; `rutli-cosigner` 0.4.0-rc.3 built
   on the workstation (`cargo build --release -p rutli-cosigner` in `frost/`); Java 17; `kubectl`,
   `helm` 3, `openssl`, `jq`, `yq`, `curl`; `grpcurl` for the phase-4 negative test.
-- The workstation client config with the **driver** certificate that was used for `verify-key` in the
-  rc.2 rollout (the soak has no operator certificate), endpoints `https://127.0.0.1:19101..19103` for
-  identifiers 1–3. Below it is `$D/client-driver.json`.
+- A client config with the **driver** certificate for `verify-key` (the soak has no operator
+  certificate), endpoints `https://127.0.0.1:19101..19103` for identifiers 1–3. The workstation no
+  longer holds a driver key or `client-driver.json`: fetch the material from the participant pod and
+  build the config as shown after the shell setup below. It ends up as `$D/client-driver.json`.
 - The Canton fingerprints of the two FROST keys: `<FP_NAMESPACE>` (`12203286…22ea`, the party's
-  namespace) and `<FP_SIGNING>` (from `participant.keys.secret.list()` or the soak records).
+  namespace) and the soak's `frost-signing` key, fingerprint
+  `122060d65c8fd0bc7712ddfc73ae799206b126bff81de132d4ebd8e244a0e708d198` (also in
+  `participant.keys.secret.list()` and the soak records).
 - All three cosigners Ready; the participant healthy; last `soak-check` PASS.
 
 Work in a private, short-lived directory, and set the shared variables in every shell you use:
@@ -107,9 +110,35 @@ umask 077
 D=$(mktemp -d /dev/shm/rutli-rc3.XXXXXX 2>/dev/null || mktemp -d)
 PNS=stakecraft-devnet-rutli-01
 cd <repo>                                   # at the v0.4.0-rc.3 release commit
-cp <your driver-cert client config> $D/client-driver.json
 echo "D=$D"                                 # keep it: later phases reuse files in $D
 ```
+
+The driver client certificate comes from the participant pod (still under the `umask 077` above,
+into `$D` only):
+
+```bash
+mkdir -p $D/tls $D/client-data
+for f in ca.crt driver.crt driver.key; do
+  kubectl -n "$PNS" exec deploy/participant -c participant -- cat /rutli-certs/$f > $D/tls/$f
+done
+# JSON, so absolute paths ($D is expanded here by jq --arg, not by the CLI)
+jq -n --arg d "$D" '{
+  identifier: 1, listen: "127.0.0.1:0", threshold: 2, data_dir: ($d + "/client-data"),
+  peers: [ {identifier:1, endpoint:"https://127.0.0.1:19101"},
+           {identifier:2, endpoint:"https://127.0.0.1:19102"},
+           {identifier:3, endpoint:"https://127.0.0.1:19103"} ],
+  tls: {ca_cert: ($d + "/tls/ca.crt"), cert: ($d + "/tls/driver.crt"), key: ($d + "/tls/driver.key"),
+        domain: "rutli-cosigner"},
+  signer_allowlist: ["driver"], peer_allowlist: ["cosigner1","cosigner2","cosigner3"],
+  operator_allowlist: ["operator"] }' > $D/client-driver.json
+```
+
+`$D/tls/driver.key` is the **live driver private key** (it signs on the soak). Keep it in `$D` only
+for this session, never commit or copy it elsewhere, and delete it securely when you are done (and
+before leaving the workstation): `rm -P $D/tls/driver.key` on macOS, `shred -u $D/tls/driver.key` on
+Linux, then remove `$D`. `$D/client-driver.json` holds only paths and endpoints. The field names are
+those of `Config` in `frost/cosigner/src/config.rs` (same template as `docs/ca-rotation.md`
+`client_cfg`).
 
 Helpers used throughout (port-forwards die when a pod restarts: run `pf_start` again after each):
 
@@ -142,7 +171,7 @@ soakcheck() { local j=rc3-$1-$(date -u +%m%d%H%M)
 ```bash
 helm -n rutli history rutli | tail -3                  # current REVISION must be 8 (rc.2); note it as REV_RC2
 kubectl -n rutli get pods -o wide                      # rutli-cosigner-0/1/2, 3/3 Ready, three hosts
-helm -n $PNS history participant | tail -3             # current REVISION (expect 5): note it as REV_P_RC2
+helm -n $PNS history participant | tail -3             # note the current REVISION as REV_P_RC2 (it was 7 on 2026-10-18: the rc.2 rollout added 6 and 7)
 kubectl -n $PNS get deploy participant -o jsonpath='{.spec.strategy.type}{"\n"}'   # Recreate
 soakcheck p0                                           # PASS
 ```
@@ -152,7 +181,7 @@ soakcheck p0                                           # PASS
 
 ```bash
 REV_RC2=8          # or what history showed
-REV_P_RC2=5        # or what history showed
+REV_P_RC2=<n>      # the participant revision history showed; phase 2 rolls back to it
 ```
 
 ### 0.2 Capture everything a rollback needs
@@ -295,7 +324,26 @@ for o in 0 1 2; do
 done
 ```
 
-Move the three tars off-cluster, apart from the seal master. **Stop if** a tar is empty.
+`tar` may print `file changed as we read it` for the `*.nonces` directories and exit 1. That is
+expected: round-2 nonce markers churn while signing, and the sealed `keys/*.json` files are what
+matter. The markers are not needed for restore (`rutli-cosigner backup` copies only the key files
+and journals, `docs/disaster-recovery.md` §1; a lost or old nonce store cannot cause nonce reuse,
+`docs/phase-2-frost.md`), so it is safe to leave them out (the `kubectl exec` line of the loop above becomes):
+
+```bash
+kubectl -n rutli exec rutli-cosigner-$o -c cosigner -- tar -C /data --exclude='*.nonces' -cf - keys > $D/pre-rc3-node$((o+1))-keys.tar
+```
+
+(If the image's `tar` has no `--exclude`, keep the form above and accept the exit 1.) Either way,
+check that the archive lists every key file, comparing with the count on the pod:
+
+```bash
+tar -tf $D/pre-rc3-node1-keys.tar | grep -c '\.json$'
+kubectl -n rutli exec rutli-cosigner-0 -c cosigner -- sh -c 'ls /data/keys/*.json | wc -l'     # same number
+```
+
+Move the three tars off-cluster, apart from the seal master. **Stop if** a tar is empty or its
+`.json` count differs from the pod's.
 
 ---
 
@@ -352,6 +400,10 @@ legacy-shared-master warning and the `require_intent is off` / `require_epoch_ma
 **Stop if** a node runs another digest, logs another cluster id, or names a plaintext/refused key
 file.
 
+`rate_per_min=300` / `rate_per_day=20000` in that line are the defaults for keys that no rule
+matches. The `rate_limits` prefix rules are separate config and are not echoed in the line: verify
+them in the rendered config JSON instead.
+
 The rendered config carries the rate rules:
 
 ```bash
@@ -370,7 +422,7 @@ m rutli_stale_share                        # 0 for every key (or absent)
 m rutli_keyfiles                           # format="v1",dek="current" only; no plaintext/unknown/previous
 m rutli_sign_journal_errors_total          # 0
 for k in frost-namespace frost-signing; do
-  fp=$([ $k = frost-namespace ] && echo '<FP_NAMESPACE>' || echo '<FP_SIGNING>')
+  fp=$([ $k = frost-namespace ] && echo '<FP_NAMESPACE>' || echo '122060d65c8fd0bc7712ddfc73ae799206b126bff81de132d4ebd8e244a0e708d198')
   rutli-cosigner --config $D/client-driver.json verify-key --key-id $k --expect-fingerprint $fp --json \
     | jq '{key_id, ok, epoch, pkp_digest, problems, nodes: [.nodes[] | {identifier, epoch, stale, pkp_digest}]}'
 done
@@ -547,7 +599,7 @@ these DKG keys (the secret does not change). Skip it unless you want the drill.
 pf_start
 rutli-cosigner --config $D/client-driver.json refresh --key-id frost-signing          # [MUTATES] new sharing, same group key
 m rutli_ceremonies_staged                                                             # back to 0 within ~1 min
-rutli-cosigner --config $D/client-driver.json verify-key --key-id frost-signing --expect-fingerprint <FP_SIGNING> --json | jq '{ok, epoch, pkp_digest}'   # epoch 1, one digest
+rutli-cosigner --config $D/client-driver.json verify-key --key-id frost-signing --expect-fingerprint 122060d65c8fd0bc7712ddfc73ae799206b126bff81de132d4ebd8e244a0e708d198 --json | jq '{ok, epoch, pkp_digest}'   # epoch 1, one digest
 for o in 0 1 2; do kubectl -n rutli exec rutli-cosigner-$o -c cosigner -- tar -C /data -cf - keys journal > $D/post-refresh-node$((o+1)).tar; done   # the old tars now hold an older epoch
 ```
 
@@ -1016,7 +1068,7 @@ releases"). Nothing in this runbook destroys or replaces them. Options, as a reh
 production cutover would need:
 
 - **Protocol key (`frost-signing`): rotate it.** Canton rotates staged with no signing gap
-  (`docs/key-rotation.md`): `participant.keys.secret.rotate_node_key(<FP_SIGNING>, "<new name>")`
+  (`docs/key-rotation.md`): `participant.keys.secret.rotate_node_key(122060d65c8fd0bc7712ddfc73ae799206b126bff81de132d4ebd8e244a0e708d198, "<new name>")`
   makes the driver run a fresh DKG under ceremony protocol 2 (new id `frost-<new name>`) and Canton
   signs the OwnerToKeyMapping change with the namespace key. Before it: the new id must be inside the
   ACL (`frost-` covers it) and should match a `rate_limits` rule — name it `signing-…` so
