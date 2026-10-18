@@ -64,9 +64,15 @@ guard or opens a session:
 * the ceremony id the leader runs is exactly the one the intent names: `<kind>-<hex(request_id)>`.
 
 That last rule makes an intent single-use. Ceremony ids are used once per node (durable ceremony
-records, checked at the fence and at part 1), so replaying an intent finds its ceremony already run,
-or never started, on every node. An intent cannot be reused for another key, kind or cluster, and
-a leader cannot mint or alter one. The leader also checks the intent on `Signer.Dkg`/`Refresh` and
+records, checked at the fence and at part 1). A ceremony that fails spends its id on every node it
+reached, even when it fails at the fence: the leader's rollback then aborts the id everywhere,
+which records a durable no-vote. A node also refuses a second fence under an id whose guard it
+already holds, so two leaders can never drive one ceremony id. Replaying an intent therefore finds
+its id spent. The exception is a ceremony whose leader died before it could spend the id: a node
+can then run that same requested ceremony once, within the intent's validity. So clients mint a
+fresh intent per attempt: the driver does so for every failover leader, and `rutli-cosigner
+refresh` for every run. An intent cannot be reused for another key, kind or cluster, and a leader
+cannot mint or alter one. The leader also checks the intent on `Signer.Dkg`/`Refresh` and
 requires the intent's signer (CN and certificate key) to be the caller on that connection. This
 gives the client a clear refusal, and an intent cannot be replayed through another client's
 connection.
@@ -75,8 +81,10 @@ connection.
 a node accepts a ceremony without an intent and counts it in `rutli_ceremony_intent_absent_total`
 (alert `RutliCeremonyIntentAbsent`, info), but an intent that is present is always verified in full.
 With the flag on, a ceremony without a valid intent is refused. From then on, a compromised cosigner
-can no longer start a DKG or refresh on that node, so it can no longer split, churn epochs or grow
-ceremony records at will. Refusals are counted in `rutli_ceremony_intent_refusals_total{reason}`
+can no longer start a DKG or refresh on that node. So it can no longer split the key or churn
+epochs at will. The ceremony records it can still make a node write are the no-votes for
+unknown ids it asks about (`CeremonyStatus`/`Abort`/`Commit`), bounded by the per-asker and total
+caps (audit F2). Refusals are counted in `rutli_ceremony_intent_refusals_total{reason}`
 (alert `RutliCeremonyIntentRefused`). A refusal on the mesh path is logged with the asking peer's CN:
 a cosigner on this release that leads ceremonies nobody signed for is a compromise signal. The switch
 order is in [approval-quorum.md](approval-quorum.md#switching-enforcement-on).

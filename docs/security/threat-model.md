@@ -107,13 +107,18 @@ ceremony intent before it takes the guard or opens a session. The intent must be
 driver for a DKG, or by the refresher for a refresh (the driver only while `signer_may_refresh`). It
 names the ceremony id, so one intent runs at most one ceremony (`docs/ceremonies.md`, "Ceremony
 intents"). The cosigner holds no key that can sign one, cannot alter one, and cannot replay one into
-a second ceremony or onto another key, kind or cluster. So it can no longer split the key at will,
-churn epochs, or grow ceremony records on honest nodes. What remains:
+a second ceremony or onto another key, kind or cluster. A ceremony that fails, even at the fence,
+spends its id on every node it reached, and a second leader for one id is refused at the fence. So
+it can no longer split the key or churn epochs at will. The ceremony records it can make an honest
+node write are still the no-votes for unknown ids (`CeremonyStatus`/`Abort`/`Commit`), bounded by
+the per-asker and total caps (F2). What remains:
 
 - it can split (above) a DKG or refresh that a client **did** ask for and that it takes part in;
-- during an observed intent's validity (at most `intent_max_lifetime_secs` + skew), it can re-fence
-  that intent's key on a node where the real ceremony never got past the fence. That has no
-  signing effect and holds off that key's ceremonies, which it can do anyway;
+- it can stop a requested ceremony: by refusing (n-of-n), or by presenting its intent as a second
+  leader, which fails and spends the id. It can never take that ceremony over;
+- if the leader of a requested ceremony dies before it can spend the id, it can lead that same
+  ceremony once, within the intent's validity (at most `intent_max_lifetime_secs` + skew). That is
+  a ceremony the client asked for, and the split residual above applies to it;
 - like any participant, it can veto every ceremony, onboarding DKGs included, by refusing to take
   part (n-of-n);
 - hosted-key genkey/delkey fences are not intent-gated: it can block a hosted id's generation or
