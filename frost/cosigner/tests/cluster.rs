@@ -542,11 +542,15 @@ async fn signing_continues_on_every_node_under_a_cluster_wide_refresh_fence() {
 }
 
 /// Until 0.4.0-rc.3 a refresh was refused while any node held sign nonces for the key (the
-/// "reverse fence"). Now it runs; a sign whose round 1 ran before the commit fails cleanly at round 2
-/// (the commit evicted the cosigner holding its nonces), and the leader's retry signs on the new
-/// sharing.
+/// "reverse fence"). Now it runs over a sign whose round 1 ran before the commit. A round 2 for that
+/// sign that *starts after* the commit evicted the cosigner holding its nonces fails cleanly on every
+/// member, and the sign, retried as a new sign (fresh sessions), succeeds on the new sharing.
+///
+/// A round 2 that had already taken the old cosigner before the commit evicted it (all-old and
+/// mixed quorums) is covered by the unit tests in `node::sign_across_commit_tests`, which need a
+/// test-only pause inside round 2.
 #[tokio::test]
-async fn a_refresh_runs_over_an_in_flight_sign_which_then_fails_cleanly_and_is_retried() {
+async fn a_round2_started_after_a_refresh_evicted_the_cosigner_fails_cleanly_and_the_sign_is_retried() {
     use rutli_cosigner::node::Round1Ctx;
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = cluster(&tmp);
@@ -577,7 +581,7 @@ async fn a_refresh_runs_over_an_in_flight_sign_which_then_fails_cleanly_and_is_r
     let err = nodes[1].sign_round1(KEY_ID, "stale-view", &ctx).unwrap_err();
     assert!(matches!(err, DaemonError::EpochMismatch { .. }), "got {err:?}");
 
-    // The retry signs on the refreshed sharing, verifiable under the unchanged group key.
+    // Retried as a new sign: it signs on the refreshed sharing, under the unchanged group key.
     let sig = sign(&nodes[0], &peers, KEY_ID, &msg).await.unwrap();
     ed25519_dalek::VerifyingKey::from_bytes(&group_key)
         .unwrap()

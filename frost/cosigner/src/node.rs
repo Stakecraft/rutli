@@ -200,6 +200,8 @@ pub struct Node {
 
 #[cfg(test)]
 type OnceHook = Box<dyn FnOnce(&Node) + Send>;
+#[cfg(test)]
+type SessionHook = Arc<dyn Fn(&str, &str) + Send + Sync>;
 
 /// Fault and pause seams for this crate's unit tests, absent from every other build (the same
 /// approach as the sign journal's injected faults).
@@ -208,6 +210,9 @@ type OnceHook = Box<dyn FnOnce(&Node) + Send>;
 struct TestHooks {
     /// Run once by part 1 right after it took the ceremony guard, before it builds the session.
     after_part1_acquire: Mutex<Option<OnceHook>>,
+    /// Run by sign round 2, with the key id and session id, right after it took its handle on the
+    /// cached cosigner and before using it (a refresh commit may evict that cosigner meanwhile).
+    after_round2_cosigner: Mutex<Option<SessionHook>>,
 }
 
 /// What a node holds under a hosted key id.
@@ -996,8 +1001,11 @@ impl Node {
         //  * the live share changes only at commit (`commit_staged`), which runs after part 3 has
         //    already released the guard — so signing across a commit was always possible, and is
         //    handled: commit evicts the cached cosigner, round 1 is checked against the leader's
-        //    sharing (`check_epoch`), and a sign whose round 1 ran before the commit fails cleanly
-        //    at round 2 (the fresh `Cosigner` has no session for it) and is retried by the leader;
+        //    sharing (`check_epoch`), and a sign whose round 1 ran before the commit either
+        //    completes on the old sharing (every member's round 2 already held the evicted
+        //    `Cosigner`; the group key is unchanged) or fails cleanly at round 2 on a member whose
+        //    round 2 started after the commit (the fresh `Cosigner` has no session for it), and the
+        //    next sign runs on the new sharing (see `sign_across_commit_tests`);
         //  * nonces are never reused: round-1 nonces live only in the `Cosigner` that made them and
         //    are dropped with it, and every session burns a durable marker shared by any instance;
         //  * DKG has no live key to sign with.
@@ -1108,6 +1116,13 @@ impl Node {
             });
         }
         let cosigner = self.cosigner(key_id)?;
+        #[cfg(test)]
+        {
+            let hook = crate::sync::recover(&self.hooks.after_round2_cosigner, "test_hook").clone();
+            if let Some(hook) = hook {
+                hook(key_id, session_id);
+            }
+        }
         let result = match &self.sign_guard {
             None => cosigner.round2(session_id, key_id, message, commitments, intent_digest.as_ref()).map_err(DaemonError::from),
             Some(g) => {
@@ -3085,5 +3100,182 @@ mod guard_tests {
         n.ceremony_part1("dkg-b", "k", CeremonyKind::Dkg, &[1, 2, 3]).unwrap();
         assert_eq!(guard(&n, "k"), Some(("dkg-b".to_string(), true)));
         assert!(n.book().unwrap().sessions.contains_key("dkg-b"));
+    }
+}
+
+/// A sign whose round 2 already holds the old cosigner when a refresh commit evicts it (the commit
+/// evicts the cache entry, not the `Arc` an in-flight call cloned). Made deterministic by pausing
+/// round 2 right after that clone until the refresh has committed on every node.
+#[cfg(test)]
+mod sign_across_commit_tests {
+    use super::*;
+    use crate::orchestrator::{run_dkg, run_refresh, sign};
+    use crate::peer::{LocalPeer, PeerApi};
+    use rutli_frost_core::nonce_store::NonceStore;
+    use std::sync::Condvar;
+
+    const KEY: &str = "k";
+
+    fn cluster(tmp: &tempfile::TempDir) -> (Vec<Arc<Node>>, Vec<Arc<dyn PeerApi>>) {
+        let nodes: Vec<Arc<Node>> = (1..=3u16)
+            .map(|i| {
+                let ks = KeyStore::open(tmp.path().join(format!("n{i}"))).unwrap();
+                Arc::new(Node::new(Identifier::try_from(i).unwrap(), 3, 2, ks))
+            })
+            .collect();
+        crate::peer::wire_local_mesh(&nodes).unwrap();
+        let peers = nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+        (nodes, peers)
+    }
+
+    /// Round 2 calls that reach the hook park here until the gate opens.
+    #[derive(Default)]
+    struct Gate {
+        state: Mutex<(Vec<String>, bool)>, // (sessions parked so far, open)
+        cv: Condvar,
+    }
+
+    impl Gate {
+        fn park(&self, session_id: &str) {
+            let mut s = self.state.lock().unwrap();
+            s.0.push(session_id.to_string());
+            self.cv.notify_all();
+            let (_s, timeout) =
+                self.cv.wait_timeout_while(s, Duration::from_secs(30), |s| !s.1).unwrap();
+            assert!(!timeout.timed_out(), "the gate was never opened");
+        }
+
+        async fn parked(&self, n: usize) -> Vec<String> {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let parked = self.state.lock().unwrap().0.clone();
+                if parked.len() >= n {
+                    return parked;
+                }
+                assert!(Instant::now() < deadline, "only {} round 2 call(s) parked, expected {n}", parked.len());
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+
+        fn open(&self) {
+            self.state.lock().unwrap().1 = true;
+            self.cv.notify_all();
+        }
+    }
+
+    /// Park round 2 on `node` for `session` (any session: `None`) once it holds its cosigner.
+    fn pause_round2(node: &Node, gate: &Arc<Gate>, session: Option<&'static str>) {
+        let gate = gate.clone();
+        *node.hooks.after_round2_cosigner.lock().unwrap() = Some(Arc::new(move |_key: &str, s: &str| {
+            if session.is_none_or(|want| want == s) {
+                gate.park(s);
+            }
+        }));
+    }
+
+    fn assert_burned_once(node: &Node, session: &str) {
+        let store = NonceStore::open(node.keystore.nonce_dir(KEY)).unwrap();
+        assert!(store.is_consumed(session).unwrap(), "node {:?} burned {session}", node.identifier);
+        assert!(
+            matches!(store.consume(session), Err(rutli_frost_core::CoreError::NonceReuse(_))),
+            "a second burn of {session} is refused"
+        );
+    }
+
+    /// Every member of an in-flight quorum cloned the old cosigner before the commit: each releases
+    /// its share from the old sharing, the shares aggregate (with the leader's new public key
+    /// package — a refresh keeps the group key) into a signature valid under the unchanged group
+    /// key, and each member's nonce marker is burned exactly once: the session can get no further
+    /// share from the new cosigner or any other instance.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_all_old_round2_in_flight_across_a_refresh_commit_completes_without_nonce_reuse() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (nodes, peers) = cluster(&tmp);
+        let group = run_dkg(&peers, KEY).await.unwrap();
+        let msg = rutli_frost_core::dealer::canton_test_message(b"round 2 spans a commit");
+        let session = "in-flight";
+        let old_view = nodes[0].signing_view(KEY).unwrap().view;
+        let ctx = Round1Ctx { leader_view: Some(old_view), ..Default::default() };
+        let mut commitments = BTreeMap::new();
+        for n in &nodes[..2] {
+            commitments.insert(n.identifier, n.sign_round1(KEY, session, &ctx).unwrap());
+        }
+
+        let gate = Arc::new(Gate::default());
+        let members: Vec<_> = nodes[..2]
+            .iter()
+            .map(|n| {
+                pause_round2(n, &gate, Some(session));
+                let (n, commitments) = (n.clone(), commitments.clone());
+                std::thread::spawn(move || n.sign_round2(KEY, session, &msg, &commitments))
+            })
+            .collect();
+        gate.parked(2).await;
+
+        // The refresh commits on every node, evicting the cosigners both round 2 calls hold.
+        assert_eq!(run_refresh(&peers, KEY).await.unwrap(), group);
+        for n in &nodes {
+            let v = n.signing_view(KEY).unwrap().view;
+            assert_eq!(v.0, old_view.0 + 1);
+            assert_ne!(v.1, old_view.1, "a new sharing");
+            assert_eq!(n.pending_sign_count(KEY), 0, "the new cosigner holds no old nonces");
+        }
+
+        gate.open();
+        let mut shares = BTreeMap::new();
+        for (n, h) in nodes[..2].iter().zip(members) {
+            shares.insert(n.identifier, h.join().unwrap().expect("the old cosigner signs its own session"));
+        }
+        let sig = nodes[0].aggregate(KEY, &msg, &commitments, &shares).unwrap();
+        assert!(crate::verify_key::signature_verifies(&group, &msg, &sig));
+
+        let new_ctx = Round1Ctx { leader_view: Some(nodes[0].signing_view(KEY).unwrap().view), ..Default::default() };
+        for n in &nodes[..2] {
+            assert_burned_once(n, session);
+            assert!(n.sign_round2(KEY, session, &msg, &commitments).is_err(), "no second share");
+            assert!(n.sign_round1(KEY, session, &new_ctx).is_err(), "no fresh nonces for a burned session");
+            assert_eq!(n.pending_sign_count(KEY), 0);
+        }
+    }
+
+    /// The leader's own round 2 cloned the old cosigner before the commit; the next member's
+    /// round 2 starts after it, on the new cosigner, which has no session for it. The attempt fails
+    /// cleanly: no signature, only the old member's marker burned (once), nothing left pending.
+    ///
+    /// The leader does retry in the same call, with a fresh session on another subset, but that
+    /// round 1 is refused by the epoch check — the leader's view of the sharing predates the
+    /// commit — so the call gives up (`ThresholdNotMet`: one member excluded at round 2, the other
+    /// at the retry's round 1). The next sign, with fresh sessions on the new sharing, succeeds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_mixed_round2_across_a_refresh_commit_fails_cleanly_and_a_fresh_sign_succeeds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (nodes, peers) = cluster(&tmp);
+        let group = run_dkg(&peers, KEY).await.unwrap();
+        let msg = rutli_frost_core::dealer::canton_test_message(b"mixed across a commit");
+
+        let gate = Arc::new(Gate::default());
+        pause_round2(&nodes[0], &gate, None);
+        let leading = {
+            let (leader, peers) = (nodes[0].clone(), peers.clone());
+            tokio::spawn(async move { sign(&leader, &peers, KEY, &msg).await })
+        };
+        let session = gate.parked(1).await.remove(0);
+        assert_eq!(run_refresh(&peers, KEY).await.unwrap(), group);
+        *nodes[0].hooks.after_round2_cosigner.lock().unwrap() = None;
+        gate.open();
+
+        let err = leading.await.unwrap().unwrap_err();
+        assert!(matches!(err, DaemonError::ThresholdNotMet { needed: 2, got: 1 }), "{err:?}");
+        // Node 1 (the leader) released its old share; node 2's round 2 found no session on its new
+        // cosigner and burned nothing; its old nonces went with the evicted cosigner.
+        assert_burned_once(&nodes[0], &session);
+        let store = NonceStore::open(nodes[1].keystore.nonce_dir(KEY)).unwrap();
+        assert!(!store.is_consumed(&session).unwrap());
+        for n in &nodes {
+            assert_eq!(n.pending_sign_count(KEY), 0);
+        }
+
+        let sig = sign(&nodes[0], &peers, KEY, &msg).await.unwrap();
+        assert!(crate::verify_key::signature_verifies(&group, &msg, &sig));
     }
 }
