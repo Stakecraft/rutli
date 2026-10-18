@@ -25,7 +25,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # GitHub-hosted only: the self-hosted runner VM emulates amd64 with Rosetta, and installing
+      # QEMU binfmt handlers there would take precedence and bring back the link-step segfaults.
       - name: Set up QEMU
+        if: vars.CI_RUNNER == ''
         uses: docker/setup-qemu-action@v3
 
       - name: Set up Buildx
