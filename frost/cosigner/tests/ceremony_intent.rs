@@ -207,8 +207,27 @@ fn ceremony_intents_honour_the_key_acl_and_the_spki_pins() {
     let mut pinned = SigningPolicyConfig::default();
     pinned.signer_pins.insert("driver".into(), vec![ids.spki_sha256("driver")]);
     pinned.signer_pins.insert("refresher".into(), vec![ids.spki_sha256("driver")]); // not its key
-    let v = ids.verifier(&pinned);
+    let v = ids.verifier(&pinned).with_delete_policy(intent::DeletePolicy {
+        allowlist: ["driver".to_string()].into(),
+        ..Default::default()
+    });
     v.verify_ceremony(&ids.ceremony("driver", Dkg, KEY, 5), Dkg, KEY, &id(Dkg, 5), now).unwrap();
+    // The same pin refuses a delete intent as a delete refusal (not a signing-policy one).
+    let delete = pb::SignIntent {
+        version: 1,
+        cluster_id: CLUSTER.into(),
+        purpose: "delete-key".into(),
+        key_id: "rutli-enc-1".into(),
+        digest: intent::delete_digest("rutli-enc-1").to_vec(),
+        request_id: vec![1; 16],
+        issued_at_ms: now,
+        not_after_ms: now + 60_000,
+        ..Default::default()
+    };
+    match v.verify_delete(&ids.sign_raw("driver-2", &delete), "rutli-enc-1", now, intent::Expiry::Enforce) {
+        Err(DaemonError::PolicyRefused(m)) => assert!(m.starts_with("delete intent refused") && m.contains("not pinned"), "{m}"),
+        other => panic!("{other:?}"),
+    }
     refused_with(v.verify_ceremony(&ids.ceremony("driver-2", Dkg, KEY, 6), Dkg, KEY, &id(Dkg, 6), now), "not pinned");
     refused_with(
         v.verify_ceremony(&ids.ceremony("refresher", Refresh, KEY, 7), Refresh, KEY, &id(Refresh, 7), now),
@@ -488,6 +507,19 @@ async fn a_pinned_out_key_is_refused_at_every_node() {
                 refused_with(n.ceremony_begin(&id(CeremonyKind::Dkg, 1), KEY, CeremonyKind::Dkg, None, Some(&stolen)), "not pinned");
                 refused_with(n.ceremony_part1(&id(CeremonyKind::Dkg, 1), KEY, CeremonyKind::Dkg, &[1, 2, 3], Some(&stolen)), "not pinned");
             }
+            // A pin refusal of a ceremony intent is a ceremony-intent refusal: its message (what the
+            // peer handler matches to log the asking peer) and its counter (what
+            // RutliCeremonyIntentRefused alerts on) — not the signing policy's.
+            let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+            let handle = recorder.handle();
+            let g = nodes[0].sign_guard().unwrap().clone();
+            let err = metrics::with_local_recorder(&recorder, || {
+                g.authorize_ceremony(CeremonyKind::Dkg, KEY, &id(CeremonyKind::Dkg, 1), Some(&stolen)).unwrap_err()
+            });
+            assert!(matches!(&err, DaemonError::PolicyRefused(m) if m.starts_with("ceremony intent refused") && m.contains("not pinned")), "{err:?}");
+            let out = handle.render();
+            assert!(out.contains(r#"rutli_ceremony_intent_refusals_total{reason="pin"} 1"#), "{out}");
+            assert!(!out.contains("rutli_sign_policy_refusals_total"), "{out}");
         }
         // The pinned key runs it.
         run_dkg_with_intent(&peers, KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 3))).await.unwrap();
