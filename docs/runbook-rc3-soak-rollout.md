@@ -162,6 +162,11 @@ soakcheck() { local j=rc3-$1-$(date -u +%m%d%H%M)
     && kubectl -n monitoring wait --for=condition=complete job/$j --timeout=300s; kubectl -n monitoring logs job/$j | tail -20; }
 ```
 
+The cosigner (≤ rc.3) writes ANSI colour codes between log fields even in k8s, so every `kubectl logs …
+| grep` of cosigner fields below first strips them with `sed 's/\x1b\[[0-9;]*m//g'` (otherwise `grep -o
+'acl_entries=…'` and `grep -m1 'cluster id '` can miss or return escape bytes). From the next release logs are
+plain when stdout is not a TTY (`NO_COLOR` is honoured), and the `sed` is then a harmless no-op.
+
 ---
 
 ## Phase 0 — Pre-flight (read-only)
@@ -388,7 +393,7 @@ DKG/refresh would be refused (mixed cluster) — none is scheduled.
 for o in 0 1 2; do
   echo "== node $((o+1))"
   kubectl -n rutli get pod rutli-cosigner-$o -o jsonpath='{.status.containerStatuses[?(@.name=="cosigner")].imageID}{"\n"}'   # …@sha256:f4d92758cc1b7f8036fdabe67aab79ac60bce6499e549f853ca160efb1b631e8
-  kubectl -n rutli logs rutli-cosigner-$o -c cosigner | grep -E 'signing policy|cluster id |key-file format|legacy SHARED master|require_intent is off|require_epoch_match is off|plaintext|refus' | head -20
+  kubectl -n rutli logs rutli-cosigner-$o -c cosigner | sed 's/\x1b\[[0-9;]*m//g' | grep -E 'signing policy|cluster id |key-file format|legacy SHARED master|require_intent is off|require_epoch_match is off|plaintext|refus' | head -20
 done
 ```
 
@@ -399,6 +404,10 @@ config`); `key-file format write_version=1 accept_v1=true cluster_uuid=<unset>`;
 legacy-shared-master warning and the `require_intent is off` / `require_epoch_match is off` notices.
 **Stop if** a node runs another digest, logs another cluster id, or names a plaintext/refused key
 file.
+
+After a cosigner restart `rutli_hosted_keys` reads 0 until the first anti-entropy pass (~5 min), so
+`RutliHostedKeyReplicaShortfall` goes pending. It has `for: 20m`, so it should not fire: expected,
+don't stop. Stop only if it is still short after ~20 min.
 
 `rate_per_min=300` / `rate_per_day=20000` in that line are the defaults for keys that no rule
 matches. The `rate_limits` prefix rules are separate config and are not echoed in the line: verify
@@ -490,7 +499,7 @@ the cluster id; pin it (`frost.cluster-id`, `RutliConfig.scala`) so no cosigner'
 ```bash
 for o in 0 1 2; do
   kubectl -n rutli exec rutli-cosigner-$o -c cosigner -- cat /data/cluster-id
-  kubectl -n rutli logs rutli-cosigner-$o -c cosigner | grep -m1 'cluster id '
+  kubectl -n rutli logs rutli-cosigner-$o -c cosigner | sed 's/\x1b\[[0-9;]*m//g' | grep -m1 'cluster id '
 done
 kubectl -n rutli get secret rutli-cosigner-ca -o jsonpath='{.data.ca\.crt}' | base64 -d | shasum -a 256 | cut -c1-16
 ```
@@ -699,7 +708,7 @@ Restart node 2 first and watch it for 15 minutes:
 ```bash
 kubectl -n rutli delete pod rutli-cosigner-1                                   # [MUTATES] node 2
 kubectl -n rutli wait --for=condition=Ready pod/rutli-cosigner-1 --timeout=300s
-kubectl -n rutli logs rutli-cosigner-1 -c cosigner | grep -E 'signing policy'  # acl_entries=1 pinned_cns=1, require_intent=false
+kubectl -n rutli logs rutli-cosigner-1 -c cosigner | sed 's/\x1b\[[0-9;]*m//g' | grep -E 'signing policy'  # acl_entries=1 pinned_cns=1, require_intent=false
 ```
 
 During those 15 minutes, node 2 takes part in most signatures (the leader's first 2-subset is
@@ -718,10 +727,14 @@ Then node 3, then node 1 (the leader), each followed by the same checks:
 kubectl -n rutli delete pod rutli-cosigner-2 && kubectl -n rutli wait --for=condition=Ready pod/rutli-cosigner-2 --timeout=300s   # [MUTATES] node 3
 kubectl -n rutli get pods                                                     # 3/3 Ready before the next one
 kubectl -n rutli delete pod rutli-cosigner-0 && kubectl -n rutli wait --for=condition=Ready pod/rutli-cosigner-0 --timeout=300s   # [MUTATES] node 1
-for o in 0 1 2; do kubectl -n rutli logs rutli-cosigner-$o -c cosigner | grep 'signing policy'; done   # all: acl_entries=1 pinned_cns=1
+for o in 0 1 2; do kubectl -n rutli logs rutli-cosigner-$o -c cosigner | sed 's/\x1b\[[0-9;]*m//g' | grep 'signing policy'; done   # all: acl_entries=1 pinned_cns=1
 pf_start
 rutli-cosigner --config $D/client-driver.json verify-key --key-id frost-namespace --expect-fingerprint <FP_NAMESPACE> --json | jq '{ok, problems}'   # still ok: the workstation key is pinned
 ```
+
+After each restart `rutli_hosted_keys` reads 0 until the first anti-entropy pass (~5 min) and
+`RutliHostedKeyReplicaShortfall` goes pending; it has `for: 20m` so it should not fire — expected,
+don't stop; stop only if it is still short after ~20 min.
 
 Hosted keys still decrypt (`rutli_hosted_key_ops_total{result="error"}` flat) — the `rutli-` ACL
 entry covers them. **Stop and roll back** on any `reason="pin"`/`"acl"` refusal, sign or decrypt
@@ -777,7 +790,7 @@ The config validation refuses `signer_acl_required` without an ACL entry for eve
 
 ```bash
 kubectl -n rutli delete pod rutli-cosigner-1 && kubectl -n rutli wait --for=condition=Ready pod/rutli-cosigner-1 --timeout=300s   # [MUTATES]
-kubectl -n rutli logs rutli-cosigner-1 -c cosigner | grep -E 'signing policy|require_intent is off|require_epoch_match is off|signer_may_refresh is on'
+kubectl -n rutli logs rutli-cosigner-1 -c cosigner | sed 's/\x1b\[[0-9;]*m//g' | grep -E 'signing policy|require_intent is off|require_epoch_match is off|signer_may_refresh is on'
 #   signing policy … require_intent=true signer_acl_required=true signer_may_refresh=false …
 #   and NONE of the three "is off"/"is on" notices
 pq 'sum by (pod, reason) (increase(rutli_sign_policy_refusals_total[15m]))'   # empty after 15 min
@@ -785,7 +798,7 @@ pq 'sum by (pod) (increase(rutli_sign_requests_total{result="error"}[15m]))'   #
 kubectl -n rutli delete pod rutli-cosigner-2 && kubectl -n rutli wait --for=condition=Ready pod/rutli-cosigner-2 --timeout=300s   # [MUTATES]
 kubectl -n rutli get pods
 kubectl -n rutli delete pod rutli-cosigner-0 && kubectl -n rutli wait --for=condition=Ready pod/rutli-cosigner-0 --timeout=300s   # [MUTATES]
-for o in 0 1 2; do kubectl -n rutli logs rutli-cosigner-$o -c cosigner | grep 'signing policy'; done
+for o in 0 1 2; do kubectl -n rutli logs rutli-cosigner-$o -c cosigner | sed 's/\x1b\[[0-9;]*m//g' | grep 'signing policy'; done
 ```
 
 ### 4.4 Positive test: real signs succeed
@@ -953,7 +966,7 @@ Per node, in the order node 2 → node 3 → node 1:
 ```bash
 o=1; i=$((o+1))                                                               # then o=2, then o=0
 kubectl -n rutli delete pod rutli-cosigner-$o && kubectl -n rutli wait --for=condition=Ready pod/rutli-cosigner-$o --timeout=300s   # [MUTATES]
-kubectl -n rutli logs rutli-cosigner-$o -c cosigner | grep -E 'key-file format|re-sealed key files'   # write_version=2 cluster_uuid=<uuid>; re-sealed count=<n files>
+kubectl -n rutli logs rutli-cosigner-$o -c cosigner | sed 's/\x1b\[[0-9;]*m//g' | grep -E 'key-file format|re-sealed key files'   # write_version=2 cluster_uuid=<uuid>; re-sealed count=<n files>
 kubectl -n rutli exec rutli-cosigner-$o -c cosigner -- rutli-cosigner --config /config/cosigner-$i.json keyfile status
 #   node <i> — writes v2 (cluster_uuid <uuid>), current DEK <id>
 #   … every file "v2, current DEK" … "<n> file(s): 0 not yet v2, 0 under a previous DEK"
@@ -1018,7 +1031,7 @@ kubectl -n rutli delete pod rutli-cosigner-n$i-0 && kubectl -n rutli wait --for=
 ### 7.2 Verify the re-seal
 
 ```bash
-kubectl -n rutli logs rutli-cosigner-n$i-0 -c cosigner | grep -E 're-sealed key files|share sealing enabled'
+kubectl -n rutli logs rutli-cosigner-n$i-0 -c cosigner | sed 's/\x1b\[[0-9;]*m//g' | grep -E 're-sealed key files|share sealing enabled'
 kubectl -n rutli exec rutli-cosigner-n$i-0 -c cosigner -- rutli-cosigner --config /config/cosigner-$i.json keyfile status
 #   current DEK <NEW>; every file "v2, current DEK"; "0 under a previous DEK — the previous DEK(s) can be dropped … after a backup"
 ```
