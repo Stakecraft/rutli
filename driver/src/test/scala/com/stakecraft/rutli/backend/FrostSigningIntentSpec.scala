@@ -69,9 +69,12 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
     val signs = new ConcurrentLinkedQueue[SignRequest]()
     val deletes = new ConcurrentLinkedQueue[DeleteKeyRequest]()
     val dkgs = new ConcurrentLinkedQueue[DkgRequest]()
+    /** Fail this many DKGs with UNAVAILABLE (a leader the driver fails over from). */
+    @volatile var failDkgs = 0
     override def dkg(req: DkgRequest, obs: StreamObserver[DkgReply]): Unit = {
       dkgs.add(req)
-      obs.onNext(DkgReply.newBuilder().setGroupVerifyingKey(ByteString.copyFrom(GroupRaw)).build()); obs.onCompleted()
+      if (failDkgs > 0) { failDkgs -= 1; obs.onError(Status.UNAVAILABLE.withDescription("test: down").asRuntimeException()) }
+      else { obs.onNext(DkgReply.newBuilder().setGroupVerifyingKey(ByteString.copyFrom(GroupRaw)).build()); obs.onCompleted() }
     }
     override def deleteKey(req: DeleteKeyRequest, obs: StreamObserver[DeleteKeyReply]): Unit = {
       deletes.add(req)
@@ -317,6 +320,20 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
         i.getRequestId.size shouldBe 16
         (i.getNotAfterMs - i.getIssuedAtMs) shouldBe 180000L
         math.abs(i.getIssuedAtMs - System.currentTimeMillis()) should be < 60000L
+      } finally b.close()
+    }
+
+    "present a FRESH ceremony intent to every leader it fails over to (a failed ceremony burns its id)" in {
+      val first = new Recorder(Cluster)
+      first.failDkgs = 1
+      val second = new Recorder(Cluster)
+      val b = backend(Seq(serve("cosigner1", first) -> "cosigner1", serve("cosigner2", second) -> "cosigner2"))
+      try {
+        val keyId = Await.result(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("fo")), 20.seconds)
+        val a = first.dkgs.asScala.toList.loneElement
+        val c = second.dkgs.asScala.toList.loneElement
+        Seq(a, c).foreach { r => r.getKeyId shouldBe keyId; verifies(r.getIntent) shouldBe true }
+        decode(a.getIntent).getRequestId should not be decode(c.getIntent).getRequestId
       } finally b.close()
     }
 
