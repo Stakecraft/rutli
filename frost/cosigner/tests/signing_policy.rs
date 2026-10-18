@@ -890,14 +890,16 @@ async fn signer_dkg_and_refresh_need_the_callers_own_ceremony_intent() {
         "signer_may_refresh is off",
     );
     let before = c.nodes[0].key_epoch(KEY).unwrap().epoch;
-    let reply = c.signer("refresher", 1).await.refresh(refresh(Some(ceremony_by(&c.ids, "refresher", Refresh, KEY, 2)))).await.unwrap();
+    let signed = ceremony_by(&c.ids, "refresher", Refresh, KEY, 2);
+    let reply = c.signer("refresher", 1).await.refresh(refresh(Some(signed.clone()))).await.unwrap();
     assert_eq!(reply.into_inner().group_verifying_key, group);
     for n in &c.nodes {
         assert_eq!(n.key_epoch(KEY).unwrap().epoch, before + 1);
         assert!(n.ceremony_record(&intent::ceremony_id_for(Refresh, &[2; 16])).is_some());
     }
-    // The same intent again: one intent, one ceremony.
-    let again = c.signer("refresher", 2).await.refresh(refresh(Some(ceremony_by(&c.ids, "refresher", Refresh, KEY, 2)))).await;
+    // The very same signed intent again (byte for byte), through another leader: one intent, one
+    // ceremony.
+    let again = c.signer("refresher", 2).await.refresh(refresh(Some(signed))).await;
     assert!(again.as_ref().is_err_and(|s| s.message().contains("already used")), "{again:?}");
 
     // DKG: the driver's own intent runs it; tenant's intent on the driver's connection is refused.
