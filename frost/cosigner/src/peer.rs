@@ -644,6 +644,7 @@ impl PeerApi for GrpcPeer {
                 expected_epoch: expect.map(|e| e.0).unwrap_or(0),
                 expected_pkp_digest: expect.map(|e| e.1.to_vec()).unwrap_or_default(),
                 protocol: crate::ceremony::CEREMONY_PROTOCOL,
+                intent: None,
             })
             .await?;
         Ok(())
@@ -699,6 +700,7 @@ impl PeerApi for GrpcPeer {
                 kind: kind.as_str().into(),
                 roster: roster.iter().map(|&i| u32::from(i)).collect(),
                 protocol: crate::ceremony::CEREMONY_PROTOCOL,
+                intent: None,
             })
             .await?
             .into_inner();

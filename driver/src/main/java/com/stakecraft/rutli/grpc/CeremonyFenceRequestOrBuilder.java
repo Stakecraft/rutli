@@ -79,4 +79,49 @@ public interface CeremonyFenceRequestOrBuilder extends
    * @return The protocol.
    */
   int getProtocol();
+
+  /**
+   * <pre>
+   * dkg/refresh: the client's ceremony intent (DkgRequest.intent / RefreshRequest.intent),
+   * forwarded unchanged. This node verifies it itself — signature, chain to the cluster CA, the
+   * signer's role (dkg: signer_allowlist + signer_acl; refresh: refresh_allowlist, or the signer
+   * role while signer_may_refresh) and SPKI pin, cluster, purpose == kind, key, validity — and that
+   * ceremony_id is the one the intent names, before it takes the guard. Refused on genkey/delkey.
+   * Absent (a leader that predates ceremony intents): accepted, counted, unless the node sets
+   * signing_policy.require_ceremony_intent. No protocol bump: an older node ignores the field.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 7;</code>
+   * @return Whether the intent field is set.
+   */
+  boolean hasIntent();
+  /**
+   * <pre>
+   * dkg/refresh: the client's ceremony intent (DkgRequest.intent / RefreshRequest.intent),
+   * forwarded unchanged. This node verifies it itself — signature, chain to the cluster CA, the
+   * signer's role (dkg: signer_allowlist + signer_acl; refresh: refresh_allowlist, or the signer
+   * role while signer_may_refresh) and SPKI pin, cluster, purpose == kind, key, validity — and that
+   * ceremony_id is the one the intent names, before it takes the guard. Refused on genkey/delkey.
+   * Absent (a leader that predates ceremony intents): accepted, counted, unless the node sets
+   * signing_policy.require_ceremony_intent. No protocol bump: an older node ignores the field.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 7;</code>
+   * @return The intent.
+   */
+  com.stakecraft.rutli.grpc.SignedIntent getIntent();
+  /**
+   * <pre>
+   * dkg/refresh: the client's ceremony intent (DkgRequest.intent / RefreshRequest.intent),
+   * forwarded unchanged. This node verifies it itself — signature, chain to the cluster CA, the
+   * signer's role (dkg: signer_allowlist + signer_acl; refresh: refresh_allowlist, or the signer
+   * role while signer_may_refresh) and SPKI pin, cluster, purpose == kind, key, validity — and that
+   * ceremony_id is the one the intent names, before it takes the guard. Refused on genkey/delkey.
+   * Absent (a leader that predates ceremony intents): accepted, counted, unless the node sets
+   * signing_policy.require_ceremony_intent. No protocol bump: an older node ignores the field.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 7;</code>
+   */
+  com.stakecraft.rutli.grpc.SignedIntentOrBuilder getIntentOrBuilder();
 }

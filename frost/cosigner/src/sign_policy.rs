@@ -16,13 +16,21 @@
 //!   [`rutli_frost_core::session::Cosigner::round2_guarded`] after every binding check and before
 //!   the nonce marker burns: the per-key rate limit is charged (once per intent request id) and the
 //!   share is journaled durably. Nothing is released that is not journaled.
+//!
+//! And to every DKG/refresh it takes part in ([`SignGuard::authorize_ceremony`], at the fence and
+//! at part 1, before the ceremony guard or any session exists): the client's ceremony intent is
+//! verified in full ([`crate::intent::IntentVerifier::verify_ceremony`]), including that the
+//! ceremony id is the one it names; a ceremony without one is refused when
+//! `require_ceremony_intent` is on, else accepted and counted.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::intent::{refused, IntentVerifier, VerifiedIntent};
+use crate::intent::{refused, refused_ceremony, IntentVerifier, VerifiedCeremony, VerifiedIntent};
+use crate::node::CeremonyKind;
+use crate::pb;
 use crate::journal::{JournalEntry, Limits, SignJournal};
 use crate::node::Round1Ctx;
 use crate::{DaemonError, Result};
@@ -43,12 +51,14 @@ pub struct SignGuard {
     verifier: Arc<IntentVerifier>,
     journal: SignJournal,
     require_intent: bool,
+    require_ceremony_intent: bool,
     /// The sign test at this node, as a peer: the operator role must not loop it on any node.
     sign_test_limiter: crate::ratelimit::DecryptRateLimiter,
     /// (key id, session id) -> what authorized it. Keyed by both: a session id is the leader's
     /// choice, so the same id opened for another key must never stand in for this one.
     sessions: Mutex<HashMap<(String, String), (Instant, SessionAuth)>>,
     last_absent_warning: AtomicU64,
+    last_ceremony_absent_warning: AtomicU64,
 }
 
 impl SignGuard {
@@ -58,13 +68,16 @@ impl SignGuard {
         sign_test_per_min: u32,
     ) -> Self {
         let require_intent = verifier.policy().require_intent;
+        let require_ceremony_intent = verifier.policy().require_ceremony_intent;
         Self {
             verifier,
             journal,
             require_intent,
+            require_ceremony_intent,
             sign_test_limiter: crate::service::ceremony_sign_test_limiter(sign_test_per_min),
             sessions: Mutex::new(HashMap::new()),
             last_absent_warning: AtomicU64::new(0),
+            last_ceremony_absent_warning: AtomicU64::new(0),
         }
     }
 
@@ -78,6 +91,52 @@ impl SignGuard {
 
     pub fn require_intent(&self) -> bool {
         self.require_intent
+    }
+
+    pub fn require_ceremony_intent(&self) -> bool {
+        self.require_ceremony_intent
+    }
+
+    /// A DKG/refresh fence or part 1 for `ceremony_id` of `key_id`: the client's ceremony intent,
+    /// verified ([`IntentVerifier::verify_ceremony`]); `None` = none was carried and this node
+    /// accepts that (`require_ceremony_intent` off; counted and logged at most once a minute).
+    pub fn authorize_ceremony(
+        &self,
+        kind: CeremonyKind,
+        key_id: &str,
+        ceremony_id: &str,
+        intent: Option<&pb::SignedIntent>,
+    ) -> Result<Option<VerifiedCeremony>> {
+        if let Some(signed) = intent {
+            return self
+                .verifier
+                .verify_ceremony(signed, kind, key_id, ceremony_id, crate::intent::now_ms())
+                .map(Some);
+        }
+        if self.require_ceremony_intent {
+            return Err(refused_ceremony(
+                "missing",
+                format!(
+                    "{} {ceremony_id} of {key_id} carries no ceremony intent and this node requires one \
+                     (signing_policy.require_ceremony_intent) — the client or the leading cosigner predates \
+                     ceremony intents, or no client asked for this ceremony",
+                    kind.as_str()
+                ),
+            ));
+        }
+        metrics::counter!(crate::metrics::CEREMONY_INTENT_ABSENT).increment(1);
+        let now = crate::intent::now_ms() / 60_000;
+        if self.last_ceremony_absent_warning.swap(now, Ordering::Relaxed) != now {
+            tracing::warn!(
+                key_id,
+                ceremony_id,
+                "{} without a ceremony intent accepted (signing_policy.require_ceremony_intent is off) — \
+                 expected only until the driver and the refresh job run a release that signs them; then \
+                 turn require_ceremony_intent on",
+                kind.as_str()
+            );
+        }
+        Ok(None)
     }
 
     /// Round 1 for `key_id`: what authorizes this session, or a refusal. `own_test_message` is this

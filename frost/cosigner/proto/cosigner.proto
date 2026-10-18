@@ -150,11 +150,24 @@ message GroupKeyRequest { string key_id = 1; }
 message GroupKeyReply { bytes group_verifying_key = 1; } // 32-byte RFC 8032 Ed25519 key
 
 // Coordinate a distributed key generation across the whole configured cluster.
-message DkgRequest { string key_id = 1; }
+message DkgRequest {
+  string key_id = 1;
+  // The client's ceremony intent (purpose "dkg", this key_id): every cosigner verifies it before it
+  // takes the ceremony guard or opens a session, and the ceremony id is derived from it
+  // ("dkg-" ‖ hex(request_id)), so one intent runs at most one ceremony. The leader also requires
+  // its signer to be the mTLS caller. Absent from a client that predates ceremony intents:
+  // accepted (rutli_ceremony_intent_absent_total) unless signing_policy.require_ceremony_intent.
+  SignedIntent intent = 2;
+}
 message DkgReply { bytes group_verifying_key = 1; }
 
 // Proactively refresh shares for a key (same group key, re-randomized shares).
-message RefreshRequest { string key_id = 1; }
+message RefreshRequest {
+  string key_id = 1;
+  // The client's ceremony intent (purpose "refresh"); see DkgRequest.intent. Signed by a
+  // refresh_allowlist certificate, or the signer role's while signing_policy.signer_may_refresh.
+  SignedIntent intent = 2;
+}
 message RefreshReply { bytes group_verifying_key = 1; } // unchanged; returned for confirmation
 
 message CeremonySignTestRequest {
@@ -213,15 +226,19 @@ message SignRequest {
 }
 
 // What a client authorizes: one signature by key_id over digest, until not_after_ms — or, with
-// purpose "delete-key", the deletion of hosted key key_id. Carried serialized inside
-// SignedIntent.intent, so the verified bytes are exactly the signed bytes.
+// purpose "delete-key", the deletion of hosted key key_id — or, with purpose "dkg" / "refresh", one
+// DKG / share refresh of key_id (a ceremony intent: digest and approvals empty; the ceremony id is
+// "<purpose>-" ‖ hex(request_id), so one intent names exactly one ceremony on every node). Carried
+// serialized inside SignedIntent.intent, so the verified bytes are exactly the signed bytes. The
+// purpose separates the domains: no node accepts an intent of one purpose for another.
 message SignIntent {
   uint32 version = 1;            // 1
   string cluster_id = 2;         // the cosigners' cluster id (Capabilities.cluster_id) — no cross-cluster replay
-  string purpose = 3;            // "sign" | "delete-key"
+  string purpose = 3;            // "sign" | "delete-key" | "dkg" | "refresh"
   string key_id = 4;
   // "sign": exactly the 34-byte Canton digest the signature is over. "delete-key": the 32 bytes
   // SHA-256("rutli-delete-key-v1\n" ‖ key_id) (approvals are over this digest, like a sign's).
+  // "dkg" / "refresh": empty.
   bytes digest = 5;
   bytes request_id = 6;          // 16 random bytes; one per driver sign call, the same across leader failover
   uint64 issued_at_ms = 7;       // Unix epoch milliseconds
@@ -304,6 +321,14 @@ message CeremonyFenceRequest {
   bytes expected_pkp_digest = 5;
   // The leader's ceremony protocol. A node refuses a DKG/refresh fence below its own (2).
   uint32 protocol = 6;
+  // dkg/refresh: the client's ceremony intent (DkgRequest.intent / RefreshRequest.intent),
+  // forwarded unchanged. This node verifies it itself — signature, chain to the cluster CA, the
+  // signer's role (dkg: signer_allowlist + signer_acl; refresh: refresh_allowlist, or the signer
+  // role while signer_may_refresh) and SPKI pin, cluster, purpose == kind, key, validity — and that
+  // ceremony_id is the one the intent names, before it takes the guard. Refused on genkey/delkey.
+  // Absent (a leader that predates ceremony intents): accepted, counted, unless the node sets
+  // signing_policy.require_ceremony_intent. No protocol bump: an older node ignores the field.
+  SignedIntent intent = 7;
 }
 message CeremonyFenceReply {}
 
@@ -531,6 +556,9 @@ message CeremonyPart1Request {
   string kind = 3;              // "dkg" | "refresh"
   repeated uint32 roster = 4;   // every participant; must be exactly the node's own roster
   uint32 protocol = 5;          // the leader's ceremony protocol (2)
+  // The ceremony intent, as on CeremonyFenceRequest.intent: verified again here (part 1 opens the
+  // session), before the guard or any session exists.
+  SignedIntent intent = 6;
 }
 message CeremonyPart1Reply { bytes round1_package = 1; }  // json round1::Package (public)
 

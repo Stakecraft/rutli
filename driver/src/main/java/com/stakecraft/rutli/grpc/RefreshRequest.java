@@ -47,6 +47,7 @@ private static final long serialVersionUID = 0L;
             com.stakecraft.rutli.grpc.RefreshRequest.class, com.stakecraft.rutli.grpc.RefreshRequest.Builder.class);
   }
 
+  private int bitField0_;
   public static final int KEY_ID_FIELD_NUMBER = 1;
   @SuppressWarnings("serial")
   private volatile java.lang.Object keyId_ = "";
@@ -86,6 +87,47 @@ private static final long serialVersionUID = 0L;
     }
   }
 
+  public static final int INTENT_FIELD_NUMBER = 2;
+  private com.stakecraft.rutli.grpc.SignedIntent intent_;
+  /**
+   * <pre>
+   * The client's ceremony intent (purpose "refresh"); see DkgRequest.intent. Signed by a
+   * refresh_allowlist certificate, or the signer role's while signing_policy.signer_may_refresh.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 2;</code>
+   * @return Whether the intent field is set.
+   */
+  @java.lang.Override
+  public boolean hasIntent() {
+    return ((bitField0_ & 0x00000001) != 0);
+  }
+  /**
+   * <pre>
+   * The client's ceremony intent (purpose "refresh"); see DkgRequest.intent. Signed by a
+   * refresh_allowlist certificate, or the signer role's while signing_policy.signer_may_refresh.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 2;</code>
+   * @return The intent.
+   */
+  @java.lang.Override
+  public com.stakecraft.rutli.grpc.SignedIntent getIntent() {
+    return intent_ == null ? com.stakecraft.rutli.grpc.SignedIntent.getDefaultInstance() : intent_;
+  }
+  /**
+   * <pre>
+   * The client's ceremony intent (purpose "refresh"); see DkgRequest.intent. Signed by a
+   * refresh_allowlist certificate, or the signer role's while signing_policy.signer_may_refresh.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 2;</code>
+   */
+  @java.lang.Override
+  public com.stakecraft.rutli.grpc.SignedIntentOrBuilder getIntentOrBuilder() {
+    return intent_ == null ? com.stakecraft.rutli.grpc.SignedIntent.getDefaultInstance() : intent_;
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -103,6 +145,9 @@ private static final long serialVersionUID = 0L;
     if (!com.google.protobuf.GeneratedMessage.isStringEmpty(keyId_)) {
       com.google.protobuf.GeneratedMessage.writeString(output, 1, keyId_);
     }
+    if (((bitField0_ & 0x00000001) != 0)) {
+      output.writeMessage(2, getIntent());
+    }
     getUnknownFields().writeTo(output);
   }
 
@@ -114,6 +159,10 @@ private static final long serialVersionUID = 0L;
     size = 0;
     if (!com.google.protobuf.GeneratedMessage.isStringEmpty(keyId_)) {
       size += com.google.protobuf.GeneratedMessage.computeStringSize(1, keyId_);
+    }
+    if (((bitField0_ & 0x00000001) != 0)) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeMessageSize(2, getIntent());
     }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
@@ -132,6 +181,11 @@ private static final long serialVersionUID = 0L;
 
     if (!getKeyId()
         .equals(other.getKeyId())) return false;
+    if (hasIntent() != other.hasIntent()) return false;
+    if (hasIntent()) {
+      if (!getIntent()
+          .equals(other.getIntent())) return false;
+    }
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -145,6 +199,10 @@ private static final long serialVersionUID = 0L;
     hash = (19 * hash) + getDescriptor().hashCode();
     hash = (37 * hash) + KEY_ID_FIELD_NUMBER;
     hash = (53 * hash) + getKeyId().hashCode();
+    if (hasIntent()) {
+      hash = (37 * hash) + INTENT_FIELD_NUMBER;
+      hash = (53 * hash) + getIntent().hashCode();
+    }
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -268,19 +326,30 @@ private static final long serialVersionUID = 0L;
 
     // Construct using com.stakecraft.rutli.grpc.RefreshRequest.newBuilder()
     private Builder() {
-
+      maybeForceBuilderInitialization();
     }
 
     private Builder(
         com.google.protobuf.GeneratedMessage.BuilderParent parent) {
       super(parent);
-
+      maybeForceBuilderInitialization();
+    }
+    private void maybeForceBuilderInitialization() {
+      if (com.google.protobuf.GeneratedMessage
+              .alwaysUseFieldBuilders) {
+        getIntentFieldBuilder();
+      }
     }
     @java.lang.Override
     public Builder clear() {
       super.clear();
       bitField0_ = 0;
       keyId_ = "";
+      intent_ = null;
+      if (intentBuilder_ != null) {
+        intentBuilder_.dispose();
+        intentBuilder_ = null;
+      }
       return this;
     }
 
@@ -317,6 +386,14 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000001) != 0)) {
         result.keyId_ = keyId_;
       }
+      int to_bitField0_ = 0;
+      if (((from_bitField0_ & 0x00000002) != 0)) {
+        result.intent_ = intentBuilder_ == null
+            ? intent_
+            : intentBuilder_.build();
+        to_bitField0_ |= 0x00000001;
+      }
+      result.bitField0_ |= to_bitField0_;
     }
 
     @java.lang.Override
@@ -335,6 +412,9 @@ private static final long serialVersionUID = 0L;
         keyId_ = other.keyId_;
         bitField0_ |= 0x00000001;
         onChanged();
+      }
+      if (other.hasIntent()) {
+        mergeIntent(other.getIntent());
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -367,6 +447,13 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000001;
               break;
             } // case 10
+            case 18: {
+              input.readMessage(
+                  getIntentFieldBuilder().getBuilder(),
+                  extensionRegistry);
+              bitField0_ |= 0x00000002;
+              break;
+            } // case 18
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -454,6 +541,172 @@ private static final long serialVersionUID = 0L;
       bitField0_ |= 0x00000001;
       onChanged();
       return this;
+    }
+
+    private com.stakecraft.rutli.grpc.SignedIntent intent_;
+    private com.google.protobuf.SingleFieldBuilder<
+        com.stakecraft.rutli.grpc.SignedIntent, com.stakecraft.rutli.grpc.SignedIntent.Builder, com.stakecraft.rutli.grpc.SignedIntentOrBuilder> intentBuilder_;
+    /**
+     * <pre>
+     * The client's ceremony intent (purpose "refresh"); see DkgRequest.intent. Signed by a
+     * refresh_allowlist certificate, or the signer role's while signing_policy.signer_may_refresh.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.SignedIntent intent = 2;</code>
+     * @return Whether the intent field is set.
+     */
+    public boolean hasIntent() {
+      return ((bitField0_ & 0x00000002) != 0);
+    }
+    /**
+     * <pre>
+     * The client's ceremony intent (purpose "refresh"); see DkgRequest.intent. Signed by a
+     * refresh_allowlist certificate, or the signer role's while signing_policy.signer_may_refresh.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.SignedIntent intent = 2;</code>
+     * @return The intent.
+     */
+    public com.stakecraft.rutli.grpc.SignedIntent getIntent() {
+      if (intentBuilder_ == null) {
+        return intent_ == null ? com.stakecraft.rutli.grpc.SignedIntent.getDefaultInstance() : intent_;
+      } else {
+        return intentBuilder_.getMessage();
+      }
+    }
+    /**
+     * <pre>
+     * The client's ceremony intent (purpose "refresh"); see DkgRequest.intent. Signed by a
+     * refresh_allowlist certificate, or the signer role's while signing_policy.signer_may_refresh.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.SignedIntent intent = 2;</code>
+     */
+    public Builder setIntent(com.stakecraft.rutli.grpc.SignedIntent value) {
+      if (intentBuilder_ == null) {
+        if (value == null) {
+          throw new NullPointerException();
+        }
+        intent_ = value;
+      } else {
+        intentBuilder_.setMessage(value);
+      }
+      bitField0_ |= 0x00000002;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * The client's ceremony intent (purpose "refresh"); see DkgRequest.intent. Signed by a
+     * refresh_allowlist certificate, or the signer role's while signing_policy.signer_may_refresh.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.SignedIntent intent = 2;</code>
+     */
+    public Builder setIntent(
+        com.stakecraft.rutli.grpc.SignedIntent.Builder builderForValue) {
+      if (intentBuilder_ == null) {
+        intent_ = builderForValue.build();
+      } else {
+        intentBuilder_.setMessage(builderForValue.build());
+      }
+      bitField0_ |= 0x00000002;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * The client's ceremony intent (purpose "refresh"); see DkgRequest.intent. Signed by a
+     * refresh_allowlist certificate, or the signer role's while signing_policy.signer_may_refresh.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.SignedIntent intent = 2;</code>
+     */
+    public Builder mergeIntent(com.stakecraft.rutli.grpc.SignedIntent value) {
+      if (intentBuilder_ == null) {
+        if (((bitField0_ & 0x00000002) != 0) &&
+          intent_ != null &&
+          intent_ != com.stakecraft.rutli.grpc.SignedIntent.getDefaultInstance()) {
+          getIntentBuilder().mergeFrom(value);
+        } else {
+          intent_ = value;
+        }
+      } else {
+        intentBuilder_.mergeFrom(value);
+      }
+      if (intent_ != null) {
+        bitField0_ |= 0x00000002;
+        onChanged();
+      }
+      return this;
+    }
+    /**
+     * <pre>
+     * The client's ceremony intent (purpose "refresh"); see DkgRequest.intent. Signed by a
+     * refresh_allowlist certificate, or the signer role's while signing_policy.signer_may_refresh.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.SignedIntent intent = 2;</code>
+     */
+    public Builder clearIntent() {
+      bitField0_ = (bitField0_ & ~0x00000002);
+      intent_ = null;
+      if (intentBuilder_ != null) {
+        intentBuilder_.dispose();
+        intentBuilder_ = null;
+      }
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * The client's ceremony intent (purpose "refresh"); see DkgRequest.intent. Signed by a
+     * refresh_allowlist certificate, or the signer role's while signing_policy.signer_may_refresh.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.SignedIntent intent = 2;</code>
+     */
+    public com.stakecraft.rutli.grpc.SignedIntent.Builder getIntentBuilder() {
+      bitField0_ |= 0x00000002;
+      onChanged();
+      return getIntentFieldBuilder().getBuilder();
+    }
+    /**
+     * <pre>
+     * The client's ceremony intent (purpose "refresh"); see DkgRequest.intent. Signed by a
+     * refresh_allowlist certificate, or the signer role's while signing_policy.signer_may_refresh.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.SignedIntent intent = 2;</code>
+     */
+    public com.stakecraft.rutli.grpc.SignedIntentOrBuilder getIntentOrBuilder() {
+      if (intentBuilder_ != null) {
+        return intentBuilder_.getMessageOrBuilder();
+      } else {
+        return intent_ == null ?
+            com.stakecraft.rutli.grpc.SignedIntent.getDefaultInstance() : intent_;
+      }
+    }
+    /**
+     * <pre>
+     * The client's ceremony intent (purpose "refresh"); see DkgRequest.intent. Signed by a
+     * refresh_allowlist certificate, or the signer role's while signing_policy.signer_may_refresh.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.SignedIntent intent = 2;</code>
+     */
+    private com.google.protobuf.SingleFieldBuilder<
+        com.stakecraft.rutli.grpc.SignedIntent, com.stakecraft.rutli.grpc.SignedIntent.Builder, com.stakecraft.rutli.grpc.SignedIntentOrBuilder> 
+        getIntentFieldBuilder() {
+      if (intentBuilder_ == null) {
+        intentBuilder_ = new com.google.protobuf.SingleFieldBuilder<
+            com.stakecraft.rutli.grpc.SignedIntent, com.stakecraft.rutli.grpc.SignedIntent.Builder, com.stakecraft.rutli.grpc.SignedIntentOrBuilder>(
+                getIntent(),
+                getParentForChildren(),
+                isClean());
+        intent_ = null;
+      }
+      return intentBuilder_;
     }
 
     // @@protoc_insertion_point(builder_scope:rutli.cosigner.v1.RefreshRequest)

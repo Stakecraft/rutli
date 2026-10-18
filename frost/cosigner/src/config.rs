@@ -165,8 +165,8 @@ impl KeyFileConfig {
 /// cluster is only as strict as its most lenient node that a quorum can reach, so set the same
 /// policy everywhere.
 ///
-/// **Enforcement switches** (`require_intent`, `signer_acl_required`, and `signer_may_refresh`
-/// turned off) default to the lenient side in this release, so a rolling upgrade and a driver that
+/// **Enforcement switches** (`require_intent`, `require_ceremony_intent`, `signer_acl_required`,
+/// and `signer_may_refresh` turned off) default to the lenient side in this release, so a rolling upgrade and a driver that
 /// predates intents keep working. Turn them on, on every node, once every cosigner and the driver
 /// run this release (docs/approval-quorum.md, "Switching enforcement on").
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,6 +184,14 @@ pub struct SigningPolicyConfig {
     /// Requires TLS (intents are verified against the cluster CA).
     #[serde(default)]
     pub require_intent: bool,
+    /// Refuse to take part in a DKG or refresh (its fence and part 1) without a valid client-signed
+    /// ceremony intent naming exactly that ceremony. Off: an intent that is present is verified in
+    /// full (and refused if invalid); a ceremony without one is accepted and counted in
+    /// `rutli_ceremony_intent_absent_total`. On: absence is refusal — a compromised cosigner can no
+    /// longer start a DKG or refresh on this node that no authorized client asked for. Requires
+    /// TLS. Turn it on once the driver and the refresh job run a release that signs them.
+    #[serde(default)]
+    pub require_ceremony_intent: bool,
     /// Refuse every key operation by a Signer client CN that has no `signer_acl` entry. Off: a CN
     /// without an entry may use every key (counted in `rutli_signer_acl_absent_total`).
     #[serde(default)]
@@ -246,6 +254,7 @@ impl Default for SigningPolicyConfig {
         Self {
             require_epoch_match: false,
             require_intent: false,
+            require_ceremony_intent: false,
             signer_acl_required: false,
             signer_may_refresh: true,
             signer_acl: BTreeMap::new(),
@@ -368,6 +377,12 @@ impl SigningPolicyConfig {
         if self.require_intent && !tls {
             return Err(Config(
                 "signing_policy.require_intent needs tls: intents are verified against the cluster CA".into(),
+            ));
+        }
+        if self.require_ceremony_intent && !tls {
+            return Err(Config(
+                "signing_policy.require_ceremony_intent needs tls: intents are verified against the cluster CA"
+                    .into(),
             ));
         }
         if self.intent_max_lifetime_secs == 0 || self.intent_max_lifetime_secs > 3600 {
@@ -1060,7 +1075,7 @@ mod tests {
         use super::{ApprovalRuleConfig, ApproverConfig};
         // Defaults: lenient switches, the documented limits.
         let d = SigningPolicyConfig::default();
-        assert!(!d.require_intent && !d.signer_acl_required && d.signer_may_refresh);
+        assert!(!d.require_intent && !d.require_ceremony_intent && !d.signer_acl_required && d.signer_may_refresh);
         assert_eq!((d.sign_rate_limit_per_min, d.sign_rate_limit_per_day), (300, 20_000));
         let parsed: SigningPolicyConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(parsed.max_shares_per_request, d.max_shares_per_request);
@@ -1070,6 +1085,13 @@ mod tests {
         let mut plain = base(None, None);
         plain.signing_policy.require_intent = true;
         assert!(plain.validate().unwrap_err().to_string().contains("require_intent"));
+        // So does require_ceremony_intent.
+        let mut plain = base(None, None);
+        plain.signing_policy.require_ceremony_intent = true;
+        assert!(plain.validate().unwrap_err().to_string().contains("require_ceremony_intent"));
+        let mut c = mesh_ok();
+        c.signing_policy.require_ceremony_intent = true;
+        c.validate().unwrap();
 
         let mut c = mesh_ok();
         c.signing_policy.signer_acl.insert("nobody".into(), vec!["".into()]);

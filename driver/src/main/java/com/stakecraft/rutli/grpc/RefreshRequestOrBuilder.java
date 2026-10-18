@@ -20,4 +20,34 @@ public interface RefreshRequestOrBuilder extends
    */
   com.google.protobuf.ByteString
       getKeyIdBytes();
+
+  /**
+   * <pre>
+   * The client's ceremony intent (purpose "refresh"); see DkgRequest.intent. Signed by a
+   * refresh_allowlist certificate, or the signer role's while signing_policy.signer_may_refresh.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 2;</code>
+   * @return Whether the intent field is set.
+   */
+  boolean hasIntent();
+  /**
+   * <pre>
+   * The client's ceremony intent (purpose "refresh"); see DkgRequest.intent. Signed by a
+   * refresh_allowlist certificate, or the signer role's while signing_policy.signer_may_refresh.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 2;</code>
+   * @return The intent.
+   */
+  com.stakecraft.rutli.grpc.SignedIntent getIntent();
+  /**
+   * <pre>
+   * The client's ceremony intent (purpose "refresh"); see DkgRequest.intent. Signed by a
+   * refresh_allowlist certificate, or the signer role's while signing_policy.signer_may_refresh.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 2;</code>
+   */
+  com.stakecraft.rutli.grpc.SignedIntentOrBuilder getIntentOrBuilder();
 }

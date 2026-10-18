@@ -41,6 +41,7 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 
 use crate::config::SigningPolicyConfig;
+use crate::node::CeremonyKind;
 use crate::pb;
 use crate::{DaemonError, Result};
 
@@ -55,6 +56,10 @@ pub const PURPOSE_DELETE_KEY: &str = "delete-key";
 pub const DELETE_DIGEST_CONTEXT: &[u8] = b"rutli-delete-key-v1\n";
 /// Sign round 1 for the split ceremony's `CeremonySignTest` (no intent; the node's own test digest).
 pub const PURPOSE_SIGN_TEST: &str = "sign-test";
+/// A ceremony intent for one DKG of `key_id` (see [`IntentVerifier::verify_ceremony`]).
+pub const PURPOSE_DKG: &str = "dkg";
+/// A ceremony intent for one share refresh of `key_id`.
+pub const PURPOSE_REFRESH: &str = "refresh";
 pub const REQUEST_ID_LEN: usize = 16;
 /// Far above a real intent (a few hundred bytes plus approvals), small enough to bound the work a
 /// hostile caller can make a node do before anything is verified.
@@ -258,6 +263,63 @@ pub fn sign_intent(signer: &crate::request_auth::NodeSigner, intent: &pb::SignIn
     })
 }
 
+/// The intent purpose of a ceremony kind (`dkg` / `refresh`): the same words as the kind.
+pub fn ceremony_purpose(kind: CeremonyKind) -> &'static str {
+    match kind {
+        CeremonyKind::Dkg => PURPOSE_DKG,
+        CeremonyKind::Refresh => PURPOSE_REFRESH,
+    }
+}
+
+/// The ceremony id a ceremony intent names: `<kind>-<hex(request_id)>` (e.g. `refresh-0101…`).
+/// One intent therefore names exactly one ceremony id on every node, and ceremony ids are used
+/// once per node (durable ceremony records) — so one intent runs at most one ceremony.
+pub fn ceremony_id_for(kind: CeremonyKind, request_id: &[u8; REQUEST_ID_LEN]) -> String {
+    format!("{}-{}", kind.as_str(), hex::encode(request_id))
+}
+
+/// The ceremony id `signed` names for `kind`, from its request id — **unverified**: what a leader
+/// uses to name the ceremony it runs for a client. Every node verifies the intent and the binding
+/// itself ([`IntentVerifier::verify_ceremony`]), so a leader that derives another id is refused.
+pub fn ceremony_id_of(signed: &pb::SignedIntent, kind: CeremonyKind) -> Result<String> {
+    if signed.intent.is_empty() || signed.intent.len() > MAX_INTENT_BYTES {
+        return Err(refused_ceremony("malformed", format!("intent of {} bytes", signed.intent.len())));
+    }
+    let intent = pb::SignIntent::decode(signed.intent.as_slice())
+        .map_err(|e| refused_ceremony("malformed", format!("intent does not decode: {e}")))?;
+    let request_id: [u8; REQUEST_ID_LEN] = intent
+        .request_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| refused_ceremony("malformed", format!("request id of {} bytes", intent.request_id.len())))?;
+    Ok(ceremony_id_for(kind, &request_id))
+}
+
+/// Which role a ceremony intent's signer acted in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CeremonyRole {
+    /// `signer_allowlist` (the driver): any DKG, or a refresh while `signer_may_refresh`; both
+    /// under its `signer_acl`.
+    Signer,
+    /// `refresh_allowlist`: refreshes only, no key ACL (as on `Signer.Refresh`).
+    Refresher,
+}
+
+/// A ceremony intent this node verified ([`IntentVerifier::verify_ceremony`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedCeremony {
+    pub kind: CeremonyKind,
+    pub key_id: String,
+    /// `<kind>-<hex(request_id)>`.
+    pub ceremony_id: String,
+    pub request_id: [u8; REQUEST_ID_LEN],
+    pub signer_cn: String,
+    pub signer_spki_sha256: [u8; 32],
+    pub role: CeremonyRole,
+    pub issued_at_ms: u64,
+    pub not_after_ms: u64,
+}
+
 /// An intent this node verified, with what the rest of the signature needs from it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerifiedIntent {
@@ -303,6 +365,9 @@ pub struct IntentVerifier {
     cluster_id: String,
     /// `signer_allowlist`.
     signers: HashSet<String>,
+    /// `refresh_allowlist` (top-level config): who may sign a refresh ceremony intent besides the
+    /// signer role while `signer_may_refresh`.
+    refreshers: HashSet<String>,
     acl: HashMap<String, Vec<String>>,
     acl_required: bool,
     pins: HashMap<String, Vec<[u8; 32]>>,
@@ -343,6 +408,7 @@ impl IntentVerifier {
             allow_expired_ca,
             cluster_id,
             signers: signers.into_iter().collect(),
+            refreshers: HashSet::new(),
             acl: policy.signer_acl.clone().into_iter().collect(),
             acl_required: policy.signer_acl_required,
             pins,
@@ -353,6 +419,12 @@ impl IntentVerifier {
             delete: DeletePolicy::default(),
             delete_grants: DeleteGrants::default(),
         })
+    }
+
+    /// The refresher role (`refresh_allowlist`): CNs that may sign refresh ceremony intents.
+    pub fn with_refreshers(mut self, refreshers: impl IntoIterator<Item = String>) -> Self {
+        self.refreshers = refreshers.into_iter().collect();
+        self
     }
 
     /// Who may delete hosted keys ([`DeletePolicy`]).
@@ -398,6 +470,10 @@ impl IntentVerifier {
     /// The key ACL: may client `cn` use `key_id`? A CN without an entry may use every key unless
     /// `signer_acl_required` (counted, so an operator sees the ACL is not doing anything yet).
     pub fn check_acl(&self, cn: &str, key_id: &str) -> Result<()> {
+        self.check_acl_with(cn, key_id, refused)
+    }
+
+    fn check_acl_with(&self, cn: &str, key_id: &str, refused: fn(&'static str, String) -> DaemonError) -> Result<()> {
         match self.acl.get(cn) {
             Some(prefixes) if prefixes.iter().any(|p| key_id.starts_with(p.as_str())) => Ok(()),
             Some(_) => Err(refused(
@@ -578,6 +654,95 @@ impl IntentVerifier {
         })
     }
 
+    /// Verify a ceremony intent (DKG or refresh) at `now_ms`: signed by a client in the role the
+    /// kind needs — **dkg**: the signer role (`signer_allowlist`); **refresh**: the refresher role
+    /// (`refresh_allowlist`), or the signer role while `signing_policy.signer_may_refresh` — so an
+    /// operator-only or cosigner certificate never can; its key pinned if the CN is; for this
+    /// cluster, purpose == `kind`, this key, no digest and no approvals, a 16-byte request id,
+    /// within its validity; the signer's `signer_acl` (signer role only, as on `Signer.Refresh`);
+    /// and `ceremony_id` exactly the id the intent names ([`ceremony_id_for`]). Every failure is
+    /// [`DaemonError::PolicyRefused`], counted in `rutli_ceremony_intent_refusals_total{reason}`.
+    pub fn verify_ceremony(
+        &self,
+        signed: &pb::SignedIntent,
+        kind: CeremonyKind,
+        key_id: &str,
+        ceremony_id: &str,
+        now_ms: u64,
+    ) -> Result<VerifiedCeremony> {
+        let signer_may_refresh = self.policy.signer_may_refresh;
+        let mut role = CeremonyRole::Signer;
+        let (cn, spki, intent) = self.verify_signer(
+            signed,
+            |cn| match kind {
+                CeremonyKind::Dkg if self.signers.contains(cn) => Ok(()),
+                CeremonyKind::Dkg => {
+                    Err(format!("DKG intent signed by {cn:?}, which is not on this node's signer_allowlist"))
+                }
+                CeremonyKind::Refresh if self.refreshers.contains(cn) => Ok(()),
+                CeremonyKind::Refresh if self.signers.contains(cn) && signer_may_refresh => Ok(()),
+                CeremonyKind::Refresh if self.signers.contains(cn) => Err(format!(
+                    "refresh intent signed by {cn:?}: only the refresher role (refresh_allowlist) may \
+                     refresh, signing_policy.signer_may_refresh is off"
+                )),
+                CeremonyKind::Refresh => Err(format!(
+                    "refresh intent signed by {cn:?}, which is on neither this node's refresh_allowlist \
+                     nor (with signer_may_refresh) its signer_allowlist"
+                )),
+            },
+            refused_ceremony,
+        )?;
+        if kind == CeremonyKind::Refresh && self.refreshers.contains(&cn) {
+            role = CeremonyRole::Refresher;
+        }
+        let purpose = ceremony_purpose(kind);
+        if intent.purpose != purpose {
+            return Err(refused_ceremony(
+                "purpose",
+                format!("intent purpose {:?}, expected {purpose:?}", intent.purpose),
+            ));
+        }
+        if intent.key_id != key_id {
+            return Err(refused_ceremony(
+                "key",
+                format!("intent is for key {}, the ceremony is for {key_id}", intent.key_id),
+            ));
+        }
+        if !intent.digest.is_empty() || !intent.approval_nonce.is_empty() || !intent.approvals.is_empty() {
+            return Err(refused_ceremony(
+                "malformed",
+                "a ceremony intent carries no digest and no approvals".into(),
+            ));
+        }
+        let request_id: [u8; REQUEST_ID_LEN] = intent
+            .request_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| refused_ceremony("malformed", format!("request id of {} bytes", intent.request_id.len())))?;
+        self.check_times_with(intent.issued_at_ms, intent.not_after_ms, now_ms, refused_ceremony)?;
+        if role == CeremonyRole::Signer {
+            self.check_acl_with(&cn, key_id, refused_ceremony)?;
+        }
+        let named = ceremony_id_for(kind, &request_id);
+        if ceremony_id != named {
+            return Err(refused_ceremony(
+                "ceremony-id",
+                format!("the intent names ceremony {named}, the leader runs {ceremony_id}"),
+            ));
+        }
+        Ok(VerifiedCeremony {
+            kind,
+            key_id: intent.key_id,
+            ceremony_id: named,
+            request_id,
+            signer_cn: cn,
+            signer_spki_sha256: spki,
+            role,
+            issued_at_ms: intent.issued_at_ms,
+            not_after_ms: intent.not_after_ms,
+        })
+    }
+
     /// Verify `signed` for a signature with `key_id` at `now_ms` (Unix epoch milliseconds). Every
     /// failure is [`DaemonError::PolicyRefused`].
     pub fn verify(&self, signed: &pb::SignedIntent, key_id: &str, now_ms: u64) -> Result<VerifiedIntent> {
@@ -727,6 +892,42 @@ pub fn refused_delete(reason: &'static str, msg: String) -> DaemonError {
     DaemonError::PolicyRefused(format!("delete intent refused: {msg}"))
 }
 
+/// A ceremony-intent refusal, counted by reason (`rutli_ceremony_intent_refusals_total`).
+pub fn refused_ceremony(reason: &'static str, msg: String) -> DaemonError {
+    metrics::counter!(crate::metrics::CEREMONY_INTENT_REFUSALS, "reason" => reason).increment(1);
+    DaemonError::PolicyRefused(format!("ceremony intent refused: {msg}"))
+}
+
+/// A ceremony intent for `kind` of `key_id`, unsigned: version 1, `cluster_id`, purpose = kind,
+/// `request_id`, valid from `issued_at_ms` for `lifetime_ms`. What the driver
+/// (`FrostIntentSigner.ceremonyIntent`) and `rutli-cosigner refresh` build.
+pub fn ceremony_intent(
+    cluster_id: &str,
+    kind: CeremonyKind,
+    key_id: &str,
+    request_id: [u8; REQUEST_ID_LEN],
+    issued_at_ms: u64,
+    lifetime_ms: u64,
+) -> pb::SignIntent {
+    pb::SignIntent {
+        version: INTENT_VERSION,
+        cluster_id: cluster_id.to_string(),
+        purpose: ceremony_purpose(kind).to_string(),
+        key_id: key_id.to_string(),
+        request_id: request_id.to_vec(),
+        issued_at_ms,
+        not_after_ms: issued_at_ms.saturating_add(lifetime_ms),
+        ..Default::default()
+    }
+}
+
+/// A fresh random request id.
+pub fn new_request_id() -> [u8; REQUEST_ID_LEN] {
+    let mut id = [0u8; REQUEST_ID_LEN];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut id);
+    id
+}
+
 /// Now, in Unix epoch milliseconds.
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -799,6 +1000,42 @@ mod tests {
         assert_eq!(g.since("driver"), 700, "removed, then granted again");
         std::fs::write(&path, b"{ torn").unwrap();
         assert!(DeleteGrants::load_and_update(&path, &acl, &cfg, 800).is_err(), "never silently reset");
+    }
+
+    /// Parity with the driver: `FrostIntentSigner.ceremonyIntent("c2testcluster000", "refresh",
+    /// "participant1-frost-golden", 16×0x01, 1_700_000_000_000, 120_000)` serializes to exactly these
+    /// bytes, and `FrostIntentSigner.ceremonyId` names the same ceremony (FrostSigningIntentSpec
+    /// pins both). The cosigners verify the signature over these bytes, so any serialization
+    /// difference would be a refusal, not a silent mismatch — this pins the field layout.
+    #[test]
+    fn ceremony_intents_match_the_drivers_golden_vector() {
+        let rid = [0x01; REQUEST_ID_LEN];
+        let refresh =
+            ceremony_intent("c2testcluster000", CeremonyKind::Refresh, "participant1-frost-golden", rid, 1_700_000_000_000, 120_000);
+        assert_eq!(hex::encode(refresh.encode_to_vec()), GOLDEN_REFRESH_INTENT);
+        assert_eq!(ceremony_id_for(CeremonyKind::Refresh, &rid), "refresh-01010101010101010101010101010101");
+        let dkg = ceremony_intent("c2testcluster000", CeremonyKind::Dkg, "participant1-frost-golden", rid, 1_700_000_000_000, 120_000);
+        assert_eq!(hex::encode(dkg.encode_to_vec()), GOLDEN_DKG_INTENT);
+        assert_eq!(ceremony_id_for(CeremonyKind::Dkg, &rid), "dkg-01010101010101010101010101010101");
+        // Every derived id is a valid ceremony id (charset, length).
+        crate::keystore::validate_ceremony_id(&ceremony_id_for(CeremonyKind::Refresh, &[0xff; REQUEST_ID_LEN])).unwrap();
+    }
+
+    pub const GOLDEN_REFRESH_INTENT: &str = "08011210633274657374636c75737465723030301a077265667265736822197061727469636970616e74312d66726f73742d676f6c64656e3210010101010101010101010101010101013880d095ffbc3140c0f99cffbc31";
+    pub const GOLDEN_DKG_INTENT: &str = "08011210633274657374636c75737465723030301a03646b6722197061727469636970616e74312d66726f73742d676f6c64656e3210010101010101010101010101010101013880d095ffbc3140c0f99cffbc31";
+
+    /// The leader names the ceremony from the (unverified) intent; a malformed one is refused.
+    #[test]
+    fn the_leader_derives_the_ceremony_id_from_the_intent() {
+        let i = ceremony_intent("c", CeremonyKind::Dkg, "k", [0xab; REQUEST_ID_LEN], 1, 2);
+        let signed = pb::SignedIntent { intent: i.encode_to_vec(), ..Default::default() };
+        assert_eq!(ceremony_id_of(&signed, CeremonyKind::Dkg).unwrap(), format!("dkg-{}", "ab".repeat(16)));
+        assert_eq!(ceremony_id_of(&signed, CeremonyKind::Refresh).unwrap(), format!("refresh-{}", "ab".repeat(16)));
+        let short = pb::SignIntent { request_id: vec![1; 8], ..i };
+        let signed = pb::SignedIntent { intent: short.encode_to_vec(), ..Default::default() };
+        assert!(matches!(ceremony_id_of(&signed, CeremonyKind::Dkg), Err(DaemonError::PolicyRefused(_))));
+        assert!(ceremony_id_of(&pb::SignedIntent::default(), CeremonyKind::Dkg).is_err());
+        assert!(ceremony_id_of(&pb::SignedIntent { intent: vec![0xff; 3], ..Default::default() }, CeremonyKind::Dkg).is_err());
     }
 
     /// Parity with the driver's `FrostIntentSigner.deleteDigest` (FrostSigningIntentSpec pins it).

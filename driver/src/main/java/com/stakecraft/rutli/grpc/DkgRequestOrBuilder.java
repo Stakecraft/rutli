@@ -20,4 +20,43 @@ public interface DkgRequestOrBuilder extends
    */
   com.google.protobuf.ByteString
       getKeyIdBytes();
+
+  /**
+   * <pre>
+   * The client's ceremony intent (purpose "dkg", this key_id): every cosigner verifies it before it
+   * takes the ceremony guard or opens a session, and the ceremony id is derived from it
+   * ("dkg-" ‖ hex(request_id)), so one intent runs at most one ceremony. The leader also requires
+   * its signer to be the mTLS caller. Absent from a client that predates ceremony intents:
+   * accepted (rutli_ceremony_intent_absent_total) unless signing_policy.require_ceremony_intent.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 2;</code>
+   * @return Whether the intent field is set.
+   */
+  boolean hasIntent();
+  /**
+   * <pre>
+   * The client's ceremony intent (purpose "dkg", this key_id): every cosigner verifies it before it
+   * takes the ceremony guard or opens a session, and the ceremony id is derived from it
+   * ("dkg-" ‖ hex(request_id)), so one intent runs at most one ceremony. The leader also requires
+   * its signer to be the mTLS caller. Absent from a client that predates ceremony intents:
+   * accepted (rutli_ceremony_intent_absent_total) unless signing_policy.require_ceremony_intent.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 2;</code>
+   * @return The intent.
+   */
+  com.stakecraft.rutli.grpc.SignedIntent getIntent();
+  /**
+   * <pre>
+   * The client's ceremony intent (purpose "dkg", this key_id): every cosigner verifies it before it
+   * takes the ceremony guard or opens a session, and the ceremony id is derived from it
+   * ("dkg-" ‖ hex(request_id)), so one intent runs at most one ceremony. The leader also requires
+   * its signer to be the mTLS caller. Absent from a client that predates ceremony intents:
+   * accepted (rutli_ceremony_intent_absent_total) unless signing_policy.require_ceremony_intent.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 2;</code>
+   */
+  com.stakecraft.rutli.grpc.SignedIntentOrBuilder getIntentOrBuilder();
 }

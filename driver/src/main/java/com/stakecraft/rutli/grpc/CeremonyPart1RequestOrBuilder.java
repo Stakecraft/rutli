@@ -91,4 +91,34 @@ public interface CeremonyPart1RequestOrBuilder extends
    * @return The protocol.
    */
   int getProtocol();
+
+  /**
+   * <pre>
+   * The ceremony intent, as on CeremonyFenceRequest.intent: verified again here (part 1 opens the
+   * session), before the guard or any session exists.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 6;</code>
+   * @return Whether the intent field is set.
+   */
+  boolean hasIntent();
+  /**
+   * <pre>
+   * The ceremony intent, as on CeremonyFenceRequest.intent: verified again here (part 1 opens the
+   * session), before the guard or any session exists.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 6;</code>
+   * @return The intent.
+   */
+  com.stakecraft.rutli.grpc.SignedIntent getIntent();
+  /**
+   * <pre>
+   * The ceremony intent, as on CeremonyFenceRequest.intent: verified again here (part 1 opens the
+   * session), before the guard or any session exists.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 6;</code>
+   */
+  com.stakecraft.rutli.grpc.SignedIntentOrBuilder getIntentOrBuilder();
 }
