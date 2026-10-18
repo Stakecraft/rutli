@@ -939,9 +939,10 @@ public final class PeerGrpc {
 
     /**
      * <pre>
-     * Cluster-wide ceremony fence: take the per-key guard on every peer BEFORE DKG/refresh crypto,
-     * so no node can start a new sign while the ceremony is in flight. Release rolls back a partial
-     * fence if a later peer refuses (e.g. has in-flight signs).
+     * Cluster-wide ceremony fence: take the per-key guard on every peer BEFORE DKG/refresh crypto
+     * (or a hosted-key write), so no other ceremony for the key can start while this one is in
+     * flight. It does not pause signing (since 0.4.0-rc.4). Release rolls back a partial fence if a
+     * later peer refuses.
      * </pre>
      */
     default void ceremonyFence(com.stakecraft.rutli.grpc.CeremonyFenceRequest request,
@@ -1219,9 +1220,10 @@ public final class PeerGrpc {
 
     /**
      * <pre>
-     * Cluster-wide ceremony fence: take the per-key guard on every peer BEFORE DKG/refresh crypto,
-     * so no node can start a new sign while the ceremony is in flight. Release rolls back a partial
-     * fence if a later peer refuses (e.g. has in-flight signs).
+     * Cluster-wide ceremony fence: take the per-key guard on every peer BEFORE DKG/refresh crypto
+     * (or a hosted-key write), so no other ceremony for the key can start while this one is in
+     * flight. It does not pause signing (since 0.4.0-rc.4). Release rolls back a partial fence if a
+     * later peer refuses.
      * </pre>
      */
     public void ceremonyFence(com.stakecraft.rutli.grpc.CeremonyFenceRequest request,
@@ -1482,9 +1484,10 @@ public final class PeerGrpc {
 
     /**
      * <pre>
-     * Cluster-wide ceremony fence: take the per-key guard on every peer BEFORE DKG/refresh crypto,
-     * so no node can start a new sign while the ceremony is in flight. Release rolls back a partial
-     * fence if a later peer refuses (e.g. has in-flight signs).
+     * Cluster-wide ceremony fence: take the per-key guard on every peer BEFORE DKG/refresh crypto
+     * (or a hosted-key write), so no other ceremony for the key can start while this one is in
+     * flight. It does not pause signing (since 0.4.0-rc.4). Release rolls back a partial fence if a
+     * later peer refuses.
      * </pre>
      */
     public com.stakecraft.rutli.grpc.CeremonyFenceReply ceremonyFence(com.stakecraft.rutli.grpc.CeremonyFenceRequest request) throws io.grpc.StatusException {
@@ -1734,9 +1737,10 @@ public final class PeerGrpc {
 
     /**
      * <pre>
-     * Cluster-wide ceremony fence: take the per-key guard on every peer BEFORE DKG/refresh crypto,
-     * so no node can start a new sign while the ceremony is in flight. Release rolls back a partial
-     * fence if a later peer refuses (e.g. has in-flight signs).
+     * Cluster-wide ceremony fence: take the per-key guard on every peer BEFORE DKG/refresh crypto
+     * (or a hosted-key write), so no other ceremony for the key can start while this one is in
+     * flight. It does not pause signing (since 0.4.0-rc.4). Release rolls back a partial fence if a
+     * later peer refuses.
      * </pre>
      */
     public com.stakecraft.rutli.grpc.CeremonyFenceReply ceremonyFence(com.stakecraft.rutli.grpc.CeremonyFenceRequest request) {
@@ -1999,9 +2003,10 @@ public final class PeerGrpc {
 
     /**
      * <pre>
-     * Cluster-wide ceremony fence: take the per-key guard on every peer BEFORE DKG/refresh crypto,
-     * so no node can start a new sign while the ceremony is in flight. Release rolls back a partial
-     * fence if a later peer refuses (e.g. has in-flight signs).
+     * Cluster-wide ceremony fence: take the per-key guard on every peer BEFORE DKG/refresh crypto
+     * (or a hosted-key write), so no other ceremony for the key can start while this one is in
+     * flight. It does not pause signing (since 0.4.0-rc.4). Release rolls back a partial fence if a
+     * later peer refuses.
      * </pre>
      */
     public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.CeremonyFenceReply> ceremonyFence(

@@ -89,19 +89,35 @@ struct CeremonyBook {
     records: BTreeMap<String, CeremonyRecord>,
 }
 
-/// A per-key ceremony guard: only one DKG/refresh may be in progress for a given key at a time.
-/// Owner is the ceremony id; a guard whose ceremony crashed mid-flight is preempted after the
-/// orphan timeout (an in-progress ceremony releases its guard at part3 / on clean failure, so this
-/// only ever applies to a leader that died between part1 and part3).
+/// A per-key ceremony guard: only one DKG/refresh (or hosted-key genkey/delkey) may be in progress
+/// for a given key at a time. Owner is the ceremony id. A guard whose ceremony stalled is preempted
+/// by the next ceremony once it is orphaned ([`Node::guard_orphaned`]): a DKG/refresh fence never
+/// followed by part 1 after [`CEREMONY_FENCE_TIMEOUT`], anything else after the orphan timeout (an
+/// in-progress ceremony releases its guard at part 3 / on clean failure, so that only ever applies
+/// to a leader that died between part 1 and part 3).
+///
+/// The guard serializes ceremonies; it does **not** fence signing (see [`Node::sign_round1`]).
 struct CeremonyGuard {
     owner: String,
     kind: &'static str,
+    /// When the owner first took the guard. Never moved by the same owner taking it again (its own
+    /// part 1, or a repeated fence), so no ceremony id can keep a guard alive by re-fencing.
     started: Instant,
+    /// The owner has a ceremony session on this node (part 1 ran), not just a fence.
+    session: bool,
 }
 
 /// How long an orphaned ceremony guard blocks a new ceremony for the same key. Longer than any
 /// realistic DKG/refresh round-trip; shorter than a human's patience for a crashed ceremony.
 const CEREMONY_ORPHAN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// How long a DKG/refresh fence that was never followed by part 1 blocks a new ceremony for the
+/// same key. An honest leader sends part 1 right after fencing every node (milliseconds); a fence
+/// left behind by a leader that died in between, or by a peer fencing on its own, must not hold
+/// off the refresh CronJob's quick retries for the full orphan timeout. Hosted-key fences
+/// (genkey/delkey) never have a session and keep the orphan timeout: they are held across a whole
+/// generation or delete.
+pub const CEREMONY_FENCE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How often a running node prunes expired nonce markers (and once at startup).
 pub const NONCE_PRUNE_INTERVAL: Duration = Duration::from_secs(10 * 60);
@@ -154,6 +170,8 @@ pub struct Node {
     // key_id -> the ceremony currently allowed to (re)write that key's share.
     ceremonies: Mutex<std::collections::HashMap<String, CeremonyGuard>>,
     ceremony_orphan_timeout: Duration,
+    /// See [`CEREMONY_FENCE_TIMEOUT`].
+    ceremony_fence_timeout: Duration,
     /// This node's durable ceremony votes (see [`crate::ceremony_record`]), cached in `book` and
     /// written through to `keys/.ceremonies/`. One lock: every vote change is serialized.
     record_store: CeremonyRecords,
@@ -276,6 +294,7 @@ impl Node {
             sign_guard: None,
             ceremonies: Mutex::new(Default::default()),
             ceremony_orphan_timeout,
+            ceremony_fence_timeout: CEREMONY_FENCE_TIMEOUT,
             record_store,
             book: Mutex::new(CeremonyBook { sessions: Default::default(), records }),
             mesh: std::sync::OnceLock::new(),
@@ -298,6 +317,12 @@ impl Node {
     /// Override the caps on no-votes for unknown ceremony ids (per asker, total). Tests.
     pub fn with_unknown_no_vote_caps(mut self, per_asker: usize, total: usize) -> Self {
         self.unknown_no_vote_caps = (per_asker, total);
+        self
+    }
+
+    /// Override [`CEREMONY_FENCE_TIMEOUT`]. Tests.
+    pub fn with_ceremony_fence_timeout(mut self, timeout: Duration) -> Self {
+        self.ceremony_fence_timeout = timeout;
         self
     }
 
@@ -454,16 +479,31 @@ impl Node {
         Ok(reply)
     }
 
-    /// Reserve `key_id` for ceremony `owner`. Fails if a *different*, non-orphaned ceremony holds it
-    /// — this is what serializes concurrent DKG/refresh and prevents split-brain shares. When it
-    /// preempts an *orphaned* guard (a leader that died mid-ceremony, past the timeout), it also
-    /// drops that old ceremony's leftover session state so its stale part2/part3 cannot proceed.
-    fn acquire_ceremony(&self, key_id: &str, owner: &str, kind: &'static str) -> Result<()> {
+    /// Reserve `key_id` for ceremony `owner` (`session`: the owner's part 1 is taking it, not only
+    /// a fence). Fails if a *different*, non-orphaned ceremony holds it — this is what serializes
+    /// concurrent DKG/refresh and prevents split-brain shares. When it preempts an *orphaned* guard
+    /// ([`Node::guard_orphaned`]), it also drops that old ceremony's leftover session state so its
+    /// stale part 2/part 3 cannot proceed.
+    ///
+    /// The same owner taking the guard again keeps it as it is — in particular its `started`, so a
+    /// fence repeated under one ceremony id never extends it (before 0.4.0-rc.4 it reset the timer,
+    /// and a fence re-sent under the same id held the key forever).
+    fn acquire_ceremony(&self, key_id: &str, owner: &str, kind: &'static str, session: bool) -> Result<()> {
         let preempted: Option<String> = {
             let mut guards = self.guards();
-            let preempted = match guards.get(key_id) {
-                Some(cur) if cur.owner != owner => {
-                    if cur.started.elapsed() < self.ceremony_orphan_timeout {
+            let preempted = match guards.get_mut(key_id) {
+                Some(cur) if cur.owner == owner => {
+                    if cur.kind != kind {
+                        return Err(DaemonError::CeremonyRefused(format!(
+                            "ceremony {owner} holds {key_id} as a {} ceremony, not a {kind} one",
+                            cur.kind
+                        )));
+                    }
+                    cur.session |= session;
+                    return Ok(());
+                }
+                Some(cur) => {
+                    if !self.guard_orphaned(cur) {
                         return Err(DaemonError::CeremonyInProgress {
                             key_id: key_id.to_string(),
                             kind: cur.kind,
@@ -472,11 +512,11 @@ impl Node {
                     }
                     Some(cur.owner.clone()) // orphan — preempt it
                 }
-                _ => None,
+                None => None,
             };
             guards.insert(
                 key_id.to_string(),
-                CeremonyGuard { owner: owner.to_string(), kind, started: Instant::now() },
+                CeremonyGuard { owner: owner.to_string(), kind, started: Instant::now(), session },
             );
             preempted
         }; // ceremonies lock released before touching the session maps (avoid nested locks)
@@ -488,6 +528,18 @@ impl Node {
         Ok(())
     }
 
+    /// Whether `guard` is orphaned, i.e. the next ceremony for its key may preempt it: a DKG/refresh
+    /// fence with no session after [`CEREMONY_FENCE_TIMEOUT`], any other guard after the orphan
+    /// timeout. Both measured from the owner's first acquisition.
+    fn guard_orphaned(&self, guard: &CeremonyGuard) -> bool {
+        let timeout = if !guard.session && matches!(guard.kind, "dkg" | "refresh") {
+            self.ceremony_fence_timeout
+        } else {
+            self.ceremony_orphan_timeout
+        };
+        guard.started.elapsed() >= timeout
+    }
+
     /// Release the guard for `key_id` iff `owner` still holds it.
     fn release_ceremony(&self, key_id: &str, owner: &str) {
         let mut guards = self.guards();
@@ -497,7 +549,7 @@ impl Node {
     }
 
     /// Assert ceremony `owner` still holds the guard for `key_id`. A ceremony that was preempted
-    /// (its guard taken by a newer one after the orphan timeout) must NOT persist — this is the
+    /// (its guard taken by a newer one after it was orphaned) must NOT persist — this is the
     /// load-bearing safety check against a stale leader clobbering/splitting shares on refresh.
     fn assert_owns(&self, key_id: &str, owner: &str) -> Result<()> {
         let guards = self.guards();
@@ -510,14 +562,13 @@ impl Node {
         }
     }
 
-    /// Whether a DKG/refresh ceremony currently holds `key_id` (used to fence signing).
-    fn ceremony_active(&self, key_id: &str) -> Option<&'static str> {
-        self.guards().get(key_id).map(|g| g.kind)
-    }
-
-    /// Cluster-wide fence step: take the per-key guard *before* DKG/refresh crypto so every peer
-    /// refuses new signs while the ceremony is in flight. Refuses if this node still holds
-    /// in-flight sign nonces for the key (reverse fence — drain first).
+    /// Cluster-wide fence step: take the per-key guard *before* DKG/refresh crypto (or a hosted-key
+    /// write), so no other ceremony for the key can start on any node while this one is in flight.
+    ///
+    /// It does not wait for, or refuse over, in-flight signs: up to 0.4.0-rc.3 a DKG/refresh fence
+    /// was refused while this node held sign nonces for the key (the "reverse fence"), a leftover
+    /// of ceremony protocol 1, where part 3 overwrote the live share. Under protocol 2 part 3 only
+    /// stages; see [`Node::sign_round1`] for why signing and ceremonies may overlap.
     pub fn ceremony_fence(&self, ceremony_id: &str, key_id: &str, kind: &'static str) -> Result<()> {
         // A DKG/refresh participant persists a share at the very end. On a read-only remount
         // `exists()`/`load()` still work, so without this the ceremony would fail only at this
@@ -533,8 +584,8 @@ impl Node {
         if kind == "dkg" && crate::share_delivery::is_reserved_for_import(key_id) {
             return Err(DaemonError::ReservedKeyId(key_id.to_string()));
         }
-        // A hosted-key fence never covers a FROST share: without this any peer could fence the
-        // namespace key as a "genkey"/"delkey" and stall its signing (renewably, by re-fencing).
+        // A hosted-key fence never covers a FROST share: it would serialize that key's DKG/refresh
+        // behind a hosted-key operation that can never apply to it.
         if matches!(kind, "genkey" | "delkey") {
             if let Ok(crate::keystore::Record::Frost(_)) = self.keystore.load_record(key_id) {
                 return Err(DaemonError::CeremonyRefused(format!(
@@ -542,15 +593,7 @@ impl Node {
                 )));
             }
         }
-        let pending = self.pending_sign_count(key_id);
-        if pending > 0 {
-            return Err(DaemonError::SignInProgress {
-                key_id: key_id.to_string(),
-                kind,
-                pending,
-            });
-        }
-        self.acquire_ceremony(key_id, ceremony_id, kind)
+        self.acquire_ceremony(key_id, ceremony_id, kind, false)
     }
 
     /// Roll back a fence taken by [`ceremony_fence`] (partial cluster fence / aborted ceremony).
@@ -576,8 +619,9 @@ impl Node {
 
     /// The per-key ceremony guards, **kept** as they are on poison: each critical section is one
     /// map lookup/insert/remove, so the map is consistent. A guard a panicking ceremony left behind
-    /// fails closed: signing for that key stays fenced until the ceremony releases it or the orphan
-    /// timeout preempts it — the same as a leader that crashed mid-ceremony.
+    /// fails closed: other ceremonies for that key are refused until the ceremony releases it or it
+    /// is orphaned and preempted — the same as a leader that crashed mid-ceremony. Signing never
+    /// consults the guards.
     fn guards(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, CeremonyGuard>> {
         crate::sync::recover(&self.ceremonies, "ceremony_guards")
     }
@@ -903,18 +947,23 @@ impl Node {
     // -- signing peer ops --
 
     pub fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &Round1Ctx) -> Result<SigningCommitments> {
-        // Fence signing against a DKG/refresh in progress for this key: refresh rewrites the share
-        // and evicts the cached cosigner, so a NEW sign must not start mid-ceremony. (An already
-        // in-flight sign that passed round1 will fail cleanly at round2 if the share was refreshed
-        // out from under it — the nonces are gone with the old cosigner.)
-        if let Some(kind) = self.ceremony_active(key_id) {
-            return Err(DaemonError::CeremonyInProgress {
-                key_id: key_id.to_string(),
-                kind,
-                other: "in progress".to_string(),
-            });
-        }
-        // Nor may a node whose key store failed its readiness probe ([`crate::health`]) volunteer
+        // No ceremony fence here. Up to 0.4.0-rc.3 any DKG/refresh guard on the key refused round 1;
+        // since a guard could be held by a fence alone, a peer (or a leader dying between fence and
+        // part 1) could stop this key's signing on this node until a restart. Signing and a
+        // ceremony may overlap safely under ceremony protocol 2:
+        //  * fence, parts 1–3 never touch the live share or the cached cosigner: part 3 reads the
+        //    live share and writes only a *staged* share plus its STAGED vote (`stage_vote`);
+        //  * the live share changes only at commit (`commit_staged`), which runs after part 3 has
+        //    already released the guard — so signing across a commit was always possible, and is
+        //    handled: commit evicts the cached cosigner, round 1 is checked against the leader's
+        //    sharing (`check_epoch`), and a sign whose round 1 ran before the commit fails cleanly
+        //    at round 2 (the fresh `Cosigner` has no session for it) and is retried by the leader;
+        //  * nonces are never reused: round-1 nonces live only in the `Cosigner` that made them and
+        //    are dropped with it, and every session burns a durable marker shared by any instance;
+        //  * DKG has no live key to sign with.
+        // Hosted keys never sign through here, and a hosted-key fence never covers a FROST share.
+        //
+        // A node whose key store failed its readiness probe ([`crate::health`]) may not volunteer
         // for a quorum. Round 1 can still succeed from the cached share, but round 2 must write a
         // nonce marker and would fail — sinking the signature for whichever healthy leader picked
         // this node, which with identifier-ordered peers is every leader (2026-10-07 incident).
@@ -1162,10 +1211,12 @@ impl Node {
     }
 
     /// The fence for a DKG or refresh: [`Node::ceremony_fence`] plus the two-phase rules. Refuses
-    /// while a ceremony for `key_id` is staged here (it must resolve first), a DKG over an
-    /// existing key, and a refresh whose leader saw a different sharing than this node holds
-    /// (`expect` = the leader's (epoch, PKP digest)) — a refresh must start from one sharing on
-    /// every node, or it would fold fresh zero-shares into mixed epochs (H1).
+    /// a ceremony id this node already voted on (part 1 would refuse it anyway — refusing at the
+    /// fence means a used id never even takes the guard), while a ceremony for `key_id` is staged
+    /// here (it must resolve first), a DKG over an existing key, and a refresh whose leader saw a
+    /// different sharing than this node holds (`expect` = the leader's (epoch, PKP digest)) — a
+    /// refresh must start from one sharing on every node, or it would fold fresh zero-shares into
+    /// mixed epochs (H1).
     pub fn ceremony_begin(
         &self,
         ceremony_id: &str,
@@ -1174,6 +1225,11 @@ impl Node {
         expect: Option<(u64, [u8; 32])>,
     ) -> Result<()> {
         crate::keystore::validate_ceremony_id(ceremony_id)?;
+        if self.book()?.records.contains_key(ceremony_id) {
+            return Err(DaemonError::CeremonyRefused(format!(
+                "ceremony id {ceremony_id} was already used on this node"
+            )));
+        }
         self.refuse_if_staged(key_id)?;
         match kind {
             CeremonyKind::Dkg => {
@@ -1225,7 +1281,7 @@ impl Node {
     ) -> Result<round1::Package> {
         crate::keystore::validate_ceremony_id(ceremony_id)?;
         self.refuse_if_staged(key_id)?;
-        self.acquire_ceremony(key_id, ceremony_id, kind.as_str())?;
+        self.acquire_ceremony(key_id, ceremony_id, kind.as_str(), true)?;
         let mut participant = match kind {
             CeremonyKind::Dkg => {
                 Participant::Dkg(DkgParticipant::new(self.identifier, self.max_signers, self.min_signers))
@@ -1349,10 +1405,7 @@ impl Node {
                 if !self.keystore.exists(key_id) {
                     return Err(DaemonError::UnknownKey(key_id.to_string()));
                 }
-                let pending = self.pending_sign_count(key_id);
-                if pending > 0 {
-                    return Err(DaemonError::SignInProgress { key_id: key_id.to_string(), kind: "refresh", pending });
-                }
+                // No reverse fence over in-flight signs: see `ceremony_fence`.
                 let share = self.keystore.load(key_id)?;
                 Some((share.epoch, share.pkp_digest()?))
             }
@@ -1854,7 +1907,7 @@ impl Node {
             .map(|()| StatusInfo::from_record(book.records.get(ceremony_id).expect("just recorded")))
         };
         // The orphaned session is gone either way, so its guard goes too — even when its no-vote
-        // could not be recorded (a cap): otherwise signing for the key would stay fenced.
+        // could not be recorded (a cap).
         if let Some(key_id) = release {
             self.release_ceremony(&key_id, ceremony_id);
         }
@@ -2876,9 +2929,11 @@ mod poison_tests {
         assert_eq!(n.all_records().len(), records_before + 1);
         assert!(n.key_epoch("k").unwrap().present);
         assert!(n.stale_mark("k").is_none());
-        assert!(!n.cosigners.is_poisoned() && !n.ceremonies.is_poisoned());
+        assert!(!n.cosigners.is_poisoned());
         assert!(!n.stale.is_poisoned() && !n.book.is_poisoned());
-        // A refresh (fence, guards, book, staged votes) runs end to end afterwards.
+        // A refresh (fence, guards, book, staged votes) runs end to end afterwards. Signing never
+        // touches the ceremony guards, so this is what recovers that lock.
         assert_eq!(crate::orchestrator::run_refresh(&peers, "k").await.unwrap(), group);
+        assert!(!n.ceremonies.is_poisoned());
     }
 }
