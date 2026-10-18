@@ -3144,7 +3144,7 @@ mod guard_tests {
     #[test]
     fn a_part1_failing_before_its_session_exists_leaves_the_leaders_fence_fence_only() {
         let tmp = tempfile::tempdir().unwrap();
-        let fence_timeout = Duration::from_millis(300);
+        let fence_timeout = Duration::from_secs(2); // outlasts a loaded CI runner between steps
         let n = node(&tmp, fence_timeout);
         n.ceremony_fence("dkg-a", "k", "dkg").unwrap();
         let broken: Arc<Mutex<Option<PathBuf>>> = Arc::default();
@@ -3161,7 +3161,7 @@ mod guard_tests {
         let refused = n.ceremony_fence("dkg-b", "k", "dkg");
         assert!(matches!(refused, Err(DaemonError::CeremonyInProgress { .. })), "{refused:?}");
         // ...and preempts it after the fence timeout, not the 15-minute orphan timeout.
-        std::thread::sleep(fence_timeout + Duration::from_millis(50));
+        std::thread::sleep(fence_timeout + Duration::from_millis(250));
         n.ceremony_fence("dkg-b", "k", "dkg").unwrap();
         assert_eq!(guard(&n, "k"), Some(("dkg-b".to_string(), false)));
     }
@@ -3193,7 +3193,7 @@ mod guard_tests {
     #[test]
     fn book_poison_recovery_turns_the_dropped_sessions_guards_back_into_fences() {
         let tmp = tempfile::tempdir().unwrap();
-        let fence_timeout = Duration::from_millis(300);
+        let fence_timeout = Duration::from_secs(2); // outlasts a loaded CI runner between steps
         let n = node(&tmp, fence_timeout);
         n.ceremony_fence("dkg-a", "k", "dkg").unwrap();
         n.ceremony_part1("dkg-a", "k", CeremonyKind::Dkg, &[1, 2, 3], None).unwrap();
@@ -3215,7 +3215,7 @@ mod guard_tests {
         // Still a fence within its timeout; preemptible after it, not after 15 minutes.
         let refused = n.ceremony_fence("dkg-b", "k", "dkg");
         assert!(matches!(refused, Err(DaemonError::CeremonyInProgress { .. })), "{refused:?}");
-        std::thread::sleep(fence_timeout + Duration::from_millis(50));
+        std::thread::sleep(fence_timeout + Duration::from_millis(250));
         n.ceremony_fence("dkg-b", "k", "dkg").unwrap();
         assert_eq!(guard(&n, "k"), Some(("dkg-b".to_string(), false)));
     }
