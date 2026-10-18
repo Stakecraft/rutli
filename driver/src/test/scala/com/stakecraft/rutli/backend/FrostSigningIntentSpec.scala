@@ -68,6 +68,11 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
     @volatile var accept: Option[String] = None
     val signs = new ConcurrentLinkedQueue[SignRequest]()
     val deletes = new ConcurrentLinkedQueue[DeleteKeyRequest]()
+    val dkgs = new ConcurrentLinkedQueue[DkgRequest]()
+    override def dkg(req: DkgRequest, obs: StreamObserver[DkgReply]): Unit = {
+      dkgs.add(req)
+      obs.onNext(DkgReply.newBuilder().setGroupVerifyingKey(ByteString.copyFrom(GroupRaw)).build()); obs.onCompleted()
+    }
     override def deleteKey(req: DeleteKeyRequest, obs: StreamObserver[DeleteKeyReply]): Unit = {
       deletes.add(req)
       obs.onNext(DeleteKeyReply.newBuilder().setDeleted(true).setTombstones(3).build()); obs.onCompleted()
@@ -288,6 +293,73 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
     "compute the delete digest exactly as the cosigners do (golden vector shared with intent.rs)" in {
       hex(FrostIntentSigner.deleteDigest("participant1-rutli-enc-golden")) shouldBe
         "10e118018ec6f17f27279a2c5030ae03c65ade57a2174b5f097cb4a5d00c3877"
+    }
+  }
+
+  "FrostBackend.generateSigningKeyPair" should {
+    "carry a DKG ceremony intent signed with the driver's mTLS key" in {
+      val rec = new Recorder(Cluster)
+      val b = backend(Seq(serve("cosigner1", rec) -> "cosigner1"))
+      try {
+        val keyId = Await.result(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")), 20.seconds)
+        val req = rec.dkgs.asScala.toList.loneElement
+        req.getKeyId shouldBe keyId
+        req.hasIntent shouldBe true
+        verifies(req.getIntent) shouldBe true
+        val i = decode(req.getIntent)
+        i.getVersion shouldBe 1
+        i.getPurpose shouldBe "dkg"
+        i.getClusterId shouldBe Cluster
+        i.getKeyId shouldBe keyId
+        i.getDigest.isEmpty shouldBe true
+        i.getApprovalsCount shouldBe 0
+        i.getApprovalNonce.isEmpty shouldBe true
+        i.getRequestId.size shouldBe 16
+        (i.getNotAfterMs - i.getIssuedAtMs) shouldBe 180000L
+        math.abs(i.getIssuedAtMs - System.currentTimeMillis()) should be < 60000L
+      } finally b.close()
+    }
+
+    "send no ceremony intent with frost.sign-intents = off" in {
+      val rec = new Recorder(Cluster)
+      val b = backend(Seq(serve("cosigner1", rec) -> "cosigner1"), signIntents = false)
+      try {
+        Await.result(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")), 20.seconds)
+        rec.dkgs.asScala.toList.loneElement.hasIntent shouldBe false
+      } finally b.close()
+    }
+
+    "send no ceremony intent while no cluster id is known" in {
+      val rec = new Recorder("")
+      val b = backend(Seq(serve("cosigner1", rec) -> "cosigner1"))
+      try {
+        Await.result(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")), 20.seconds)
+        rec.dkgs.asScala.toList.loneElement.hasIntent shouldBe false
+      } finally b.close()
+    }
+  }
+
+  "FrostIntentSigner ceremony intents" should {
+    val rid = Array.fill(16)(1.toByte)
+
+    "serialize exactly as the cosigners do (golden vectors shared with intent.rs)" in {
+      hex(FrostIntentSigner.ceremonyIntent("c2testcluster000", "refresh", "participant1-frost-golden", rid, 1700000000000L, 120000L).toByteArray) shouldBe
+        "08011210633274657374636c75737465723030301a077265667265736822197061727469636970616e74312d66726f73742d676f6c64656e3210010101010101010101010101010101013880d095ffbc3140c0f99cffbc31"
+      hex(FrostIntentSigner.ceremonyIntent("c2testcluster000", "dkg", "participant1-frost-golden", rid, 1700000000000L, 120000L).toByteArray) shouldBe
+        "08011210633274657374636c75737465723030301a03646b6722197061727469636970616e74312d66726f73742d676f6c64656e3210010101010101010101010101010101013880d095ffbc3140c0f99cffbc31"
+      FrostIntentSigner.ceremonyId("refresh", rid) shouldBe "refresh-01010101010101010101010101010101"
+    }
+
+    "refuse a non-ceremony purpose and a short request id" in {
+      an[IllegalArgumentException] should be thrownBy FrostIntentSigner.ceremonyIntent(Cluster, "sign", Key, rid, 1L, 1L)
+      an[IllegalArgumentException] should be thrownBy FrostIntentSigner.ceremonyIntent(Cluster, "dkg", Key, Array.fill(8)(1.toByte), 1L, 1L)
+    }
+
+    "be signed by signCeremony with the driver's key" in {
+      val signer = FrostIntentSigner.load(tls.cert, tls.key)
+      val signed = signer.signCeremony(Cluster, "refresh", Key, rid, 1700000000000L, 120000L)
+      verifies(signed) shouldBe true
+      decode(signed) shouldBe FrostIntentSigner.ceremonyIntent(Cluster, "refresh", Key, rid, 1700000000000L, 120000L)
     }
   }
 

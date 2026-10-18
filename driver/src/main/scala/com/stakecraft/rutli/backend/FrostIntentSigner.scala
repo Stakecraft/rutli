@@ -101,6 +101,22 @@ final class FrostIntentSigner private (
         .toByteArray
     )
 
+  /** Sign a ceremony intent (purpose `dkg` or `refresh`) for `keyId`: no digest, no approvals —
+    * just who is asking, for which cluster and key, and for how long. Every cosigner verifies it
+    * before it takes the ceremony guard or opens a session (role: this certificate's CN on the
+    * cosigners' `signer_allowlist` and `signer_acl`, and its SPKI pinned, for DKG). The ceremony id
+    * the cosigners derive is `purpose-hex(requestId)` ([[FrostIntentSigner.ceremonyId]]), so one
+    * intent runs at most one ceremony: a replay finds its ceremony already run. */
+  def signCeremony(
+      clusterId: String,
+      purpose: String,
+      keyId: String,
+      requestId: Array[Byte],
+      nowMillis: Long,
+      lifetimeMillis: Long,
+  ): SignedIntent =
+    signBytes(ceremonyIntent(clusterId, purpose, keyId, requestId, nowMillis, lifetimeMillis).toByteArray)
+
   private def signBytes(intent: Array[Byte]): SignedIntent = {
     val s = Signature.getInstance(jcaAlg)
     s.initSign(key)
@@ -124,6 +140,37 @@ object FrostIntentSigner {
   val Version = 1
   val PurposeSign = "sign"
   val PurposeDeleteKey = "delete-key"
+  val PurposeDkg = "dkg"
+  val PurposeRefresh = "refresh"
+
+  /** A ceremony intent (`dkg` / `refresh`), as the cosigners verify it (`intent.rs`): only version,
+    * cluster, purpose, key, request id and validity are set — digest and approvals stay empty. */
+  def ceremonyIntent(
+      clusterId: String,
+      purpose: String,
+      keyId: String,
+      requestId: Array[Byte],
+      nowMillis: Long,
+      lifetimeMillis: Long,
+  ): SignIntent = {
+    require(purpose == PurposeDkg || purpose == PurposeRefresh, s"not a ceremony purpose: $purpose")
+    require(requestId.length == RequestIdBytes, s"request id must be $RequestIdBytes bytes")
+    SignIntent
+      .newBuilder()
+      .setVersion(Version)
+      .setClusterId(clusterId)
+      .setPurpose(purpose)
+      .setKeyId(keyId)
+      .setRequestId(ByteString.copyFrom(requestId))
+      .setIssuedAtMs(nowMillis)
+      .setNotAfterMs(nowMillis + lifetimeMillis)
+      .build()
+  }
+
+  /** The ceremony id the cosigners derive from a ceremony intent: `purpose-` + lowercase hex of
+    * the request id. */
+  def ceremonyId(purpose: String, requestId: Array[Byte]): String =
+    s"$purpose-" + requestId.map("%02x".format(_)).mkString
 
   /** The digest a delete intent carries, as the cosigners compute it (`intent::delete_digest`). */
   def deleteDigest(keyId: String): Array[Byte] = {
