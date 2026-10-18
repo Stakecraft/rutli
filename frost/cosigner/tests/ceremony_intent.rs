@@ -279,6 +279,7 @@ use rutli_cosigner::keystore::KeyStore;
 use rutli_cosigner::node::Node;
 use rutli_cosigner::orchestrator::{run_dkg, run_dkg_with_intent, run_refresh, run_refresh_with_intent, Peers};
 use rutli_cosigner::peer::{LocalPeer, PeerApi};
+use rutli_cosigner::ceremony_record::{Phase, StatusInfo};
 use rutli_cosigner::sign_policy::SignGuard;
 
 struct Rig {
@@ -469,6 +470,63 @@ async fn a_spent_or_misdirected_intent_cannot_fence_again() {
             n.ceremony_begin(&id(CeremonyKind::Refresh, 2), "frost-participant1-other", CeremonyKind::Refresh, None, Some(&refresh)),
             "intent is for key",
         );
+    }
+}
+
+/// A ceremony whose fence is refused somewhere leaves its intent spent: the leader's rollback
+/// aborts the id on every node (a durable no-vote), so nobody — a compromised cosigner that refused
+/// its own fence, say — can later lead the same ceremony with the still-valid intent.
+#[tokio::test]
+async fn a_refused_fence_spends_the_intent_on_every_node() {
+    let r = rig(|_| enforcing());
+    let group =
+        run_dkg_with_intent(&r.peers, KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    // Node 3 is busy with another (valid) refresh's fence, so the leader's fence is refused there.
+    let busy = r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2);
+    r.peers[2].ceremony_begin(&id(CeremonyKind::Refresh, 2), KEY, CeremonyKind::Refresh, r.expect(KEY), Some(&busy)).await.unwrap();
+    let x = r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 3);
+    let err = run_refresh_with_intent(&r.peers, KEY, Some(x.clone())).await.unwrap_err();
+    assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "{err:?}");
+    for n in &r.nodes {
+        let rec = n.ceremony_record(&id(CeremonyKind::Refresh, 3)).expect("the refused ceremony's id is burned here");
+        assert_eq!(StatusInfo::from_record(&rec).phase, Phase::Aborted);
+    }
+    r.peers[2].ceremony_release(&id(CeremonyKind::Refresh, 2), KEY).await.unwrap();
+    // A second leader (here node 3, the one that refused) presenting the same intent gets nowhere.
+    let second: Peers = vec![r.peers[2].clone(), r.peers[0].clone(), r.peers[1].clone()];
+    let err = run_refresh_with_intent(&second, KEY, Some(x)).await.unwrap_err();
+    assert!(matches!(&err, DaemonError::CeremonyRefused(m) if m.contains("already used")), "{err:?}");
+    // A fresh intent runs.
+    let fresh = r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 4);
+    assert_eq!(run_refresh_with_intent(&r.peers, KEY, Some(fresh)).await.unwrap(), group);
+}
+
+/// Two leaders on one intent (one ceremony id): the second leader's fence is refused on a node the
+/// first already fenced — never joined — so two leaders can never drive one ceremony id.
+#[tokio::test]
+async fn two_leaders_never_drive_one_intent() {
+    let r = rig(|_| enforcing());
+    run_dkg_with_intent(&r.peers, KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    let x = r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 5);
+    let xid = id(CeremonyKind::Refresh, 5);
+    // Leader A has fenced every node for X.
+    for p in &r.peers {
+        p.ceremony_begin(&xid, KEY, CeremonyKind::Refresh, r.expect(KEY), Some(&x)).await.unwrap();
+    }
+    // Leader B, with the same intent, is refused at every node.
+    for n in &r.nodes {
+        let err = n.ceremony_begin(&xid, KEY, CeremonyKind::Refresh, r.expect(KEY), Some(&x)).unwrap_err();
+        assert!(matches!(&err, DaemonError::CeremonyRefused(m) if m.contains("second leader")), "{err:?}");
+    }
+    // Through the orchestrator, leader B's refused fence spends X on every node, which ends A's
+    // run too: a peer can stop a requested ceremony (it can always veto by refusing), never take
+    // it over.
+    let err = run_refresh_with_intent(&r.peers, KEY, Some(x.clone())).await.unwrap_err();
+    assert!(matches!(err, DaemonError::CeremonyRefused(_)), "{err:?}");
+    for n in &r.nodes {
+        assert!(n.ceremony_record(&xid).is_some());
+        let err = n.ceremony_part1(&xid, KEY, CeremonyKind::Refresh, &[1, 2, 3], Some(&x)).unwrap_err();
+        assert!(matches!(&err, DaemonError::CeremonyRefused(m) if m.contains("already used")), "{err:?}");
     }
 }
 

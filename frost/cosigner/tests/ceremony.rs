@@ -1367,10 +1367,15 @@ async fn re_fencing_under_the_same_id_does_not_extend_the_guard() {
     n.ceremony_begin("refresh-renewed", KEY, CeremonyKind::Refresh, expect_of(&rig), None).unwrap();
     let err = n.ceremony_begin("refresh-other", KEY, CeremonyKind::Refresh, expect_of(&rig), None).unwrap_err();
     assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "{err:?}");
-    // Re-fence every 100 ms, past the timeout; the last one lands well inside a would-be reset.
+    // A second DKG/refresh fence under the same id is refused outright (a second leader for one
+    // ceremony, ceremony intents)...
+    let err = n.ceremony_begin("refresh-renewed", KEY, CeremonyKind::Refresh, expect_of(&rig), None).unwrap_err();
+    assert!(matches!(&err, DaemonError::CeremonyRefused(m) if m.contains("second")), "{err:?}");
+    // ...and re-taking the guard under that id (the raw fence) every 100 ms, past the timeout, never
+    // extends it: the last one lands well inside a would-be reset.
     while started.elapsed() < fence + std::time::Duration::from_millis(100) {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        n.ceremony_begin("refresh-renewed", KEY, CeremonyKind::Refresh, expect_of(&rig), None).unwrap();
+        n.ceremony_fence("refresh-renewed", KEY, "refresh").unwrap();
     }
     n.ceremony_begin("refresh-other", KEY, CeremonyKind::Refresh, expect_of(&rig), None).unwrap();
     // The preempted id's part 1 is refused: the key is held by the newer fence.
