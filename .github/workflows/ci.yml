@@ -35,7 +35,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ivy2/local/com.daml
-          key: canton-api-${{ env.CANTON_TAG }}-v1
+          key: canton-api-${{ runner.os }}-${{ runner.arch }}-${{ env.CANTON_TAG }}-v1
 
       - name: Publish Canton kms-driver-api locally
         if: steps.canton-cache.outputs.cache-hit != 'true'
@@ -132,7 +132,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.ivy2/local/com.daml
-          key: canton-full-${{ env.CANTON_TAG }}-v1
+          key: canton-full-${{ runner.os }}-${{ runner.arch }}-${{ env.CANTON_TAG }}-v1
 
       - name: Install dpm
         if: steps.canton-cache.outputs.cache-hit != 'true'
