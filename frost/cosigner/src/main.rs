@@ -1097,6 +1097,35 @@ async fn discard_partial_key_command(cfg: &Config, key_id: &str, confirm_group_k
     Ok(())
 }
 
+/// How long `rutli-cosigner refresh`'s ceremony intent is valid: the fence and part 1 on every
+/// node happen within seconds of the call (the cosigners accept up to `intent_max_lifetime_secs`).
+const REFRESH_INTENT_LIFETIME_MS: u64 = 120_000;
+
+/// The cluster id a refresh intent names: `cluster_id` from this (client) config when set — pin
+/// it in `client-refresher.json` to skip the probe — else what a majority of the roster reports
+/// (`Capabilities.cluster_id`, each node verified under its own TLS name; [`agree_on_cluster_id`]).
+///
+/// [`agree_on_cluster_id`]: rutli_cosigner::intent::agree_on_cluster_id
+async fn refresh_cluster_id(cfg: &Config) -> Option<String> {
+    if let Some(id) = cfg.cluster_id.as_ref().filter(|id| !id.is_empty()) {
+        return Some(id.clone());
+    }
+    let tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose().ok()?;
+    let mut answers: Vec<String> = Vec::new();
+    for p in &cfg.peers {
+        let tls = tls.as_ref().map(|t| t.client_for(&p.server_name()));
+        let Ok(mut c) = signer_client(&p.endpoint, tls).await else { continue };
+        if let Ok(reply) = c.capabilities(rutli_cosigner::pb::CapabilitiesRequest {}).await {
+            answers.push(reply.into_inner().cluster_id);
+        }
+    }
+    let found = rutli_cosigner::intent::agree_on_cluster_id(&answers, cfg.peers.len());
+    if answers.iter().filter(|a| !a.is_empty()).collect::<std::collections::HashSet<_>>().len() > 1 {
+        tracing::error!(?answers, "the cosigners report DIFFERENT cluster ids — using the majority value, if any");
+    }
+    found
+}
+
 /// Operator command: connect to a running cosigner and drive a proactive refresh.
 async fn refresh_command(
     cfg: &Config,
@@ -1126,9 +1155,43 @@ async fn refresh_command(
             })?;
         ep = ep.tls_config(tls.client_for(&name))?;
     }
-    tracing::info!(%endpoint, %key_id, "triggering proactive share refresh");
+    // The ceremony intent (refresh-fence remediation, L2): signed with the very certificate this
+    // client presents, so every cosigner can check that a refresher (or, while signer_may_refresh,
+    // the driver) asked for exactly this refresh — and the leader that it is this connection's.
+    let intent = match &cfg.tls {
+        Some(t) => match refresh_cluster_id(cfg).await {
+            Some(cluster) => {
+                let signer = rutli_cosigner::request_auth::NodeSigner::from_files(&t.cert, &t.key)?;
+                let request_id = rutli_cosigner::intent::new_request_id();
+                let intent = rutli_cosigner::intent::ceremony_intent(
+                    &cluster,
+                    rutli_cosigner::node::CeremonyKind::Refresh,
+                    key_id,
+                    request_id,
+                    rutli_cosigner::intent::now_ms(),
+                    REFRESH_INTENT_LIFETIME_MS,
+                );
+                println!(
+                    "ceremony {} (intent signed by {} for cluster {cluster})",
+                    rutli_cosigner::intent::ceremony_id_for(rutli_cosigner::node::CeremonyKind::Refresh, &request_id),
+                    t.cert.display()
+                );
+                Some(rutli_cosigner::intent::sign_intent(&signer, &intent)?)
+            }
+            None => {
+                tracing::warn!(
+                    "no cluster id: cluster_id is not set in this config and the roster does not agree \
+                     on one (Capabilities) — refreshing WITHOUT a ceremony intent; cosigners with \
+                     signing_policy.require_ceremony_intent refuse it"
+                );
+                None
+            }
+        },
+        None => None,
+    };
+    tracing::info!(%endpoint, %key_id, intent = intent.is_some(), "triggering proactive share refresh");
     let mut client = SignerClient::new(ep.connect().await?);
-    let reply = client.refresh(RefreshRequest { key_id: key_id.to_string(), intent: None }).await?.into_inner();
+    let reply = client.refresh(RefreshRequest { key_id: key_id.to_string(), intent }).await?.into_inner();
     println!(
         "refresh complete — group key unchanged: {}",
         hex::encode(reply.group_verifying_key)
