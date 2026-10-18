@@ -38,13 +38,17 @@ All notable changes to Rütli are documented here. Format loosely follows
   - the SPKI pin. Pins are now checked at every node for ceremonies, not only at the node called;
   - the cluster, purpose, key and validity;
   - that the ceremony id is the one the intent names, `<kind>-<hex(request_id)>`. One intent
-    therefore runs at most one ceremony, enforced by the durable per-node ceremony records.
+    therefore runs at most one ceremony, enforced by the durable per-node ceremony records. A
+    ceremony that fails, even at the fence, spends its id on every node it reached (the leader's
+    rollback aborts it). A second fence under an id that holds the guard is refused, so two leaders
+    never drive one id. Clients mint a fresh intent per attempt (the driver per failover leader).
 
   The leader also requires the intent's signer to be the mTLS caller. Enforcement:
   `signing_policy.require_ceremony_intent`. It is off in this release (verify-if-present: an
   absent intent is accepted and counted, a present one is always verified). With it on, a
-  compromised cosigner can no longer start a DKG or refresh on an honest node, so it can no longer
-  split the key at will, churn epochs or grow ceremony records. No approvals for DKG/refresh.
+  compromised cosigner can no longer start a DKG or refresh on an honest node. So it can no longer
+  split the key or churn epochs at will. Unknown-id no-votes stay bounded by the existing caps.
+  No approvals for DKG/refresh.
   Deferred: binding the expected `(epoch, PKP digest)` into refresh intents, and a per-key refresh
   ACL (`docs/ceremonies.md`, "Ceremony intents").
 
