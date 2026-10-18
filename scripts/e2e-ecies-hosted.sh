@@ -24,9 +24,11 @@
 #      identical to the one on the old node — and rotated in as participant1's encryption key;
 #      pings again, now decrypting with the imported key;
 #   C. the driver's audit lines show ECIES decryptions with both keys and no failure; with the
-#      cosigner signing policy enforced (audit C2: require_intent, the driver's key ACL and pin),
-#      every FROST signature was journaled under a driver intent, and `audit-cross-check` finds the
-#      driver's audit log and the three cosigner journals consistent;
+#      cosigner signing policy enforced (audit C2: require_intent, the driver's key ACL and pin;
+#      require_ceremony_intent, so participant1's namespace DKG ran only because the driver signed a
+#      ceremony intent for it, verified on every cosigner), every FROST signature was journaled
+#      under a driver intent, and `audit-cross-check` finds the driver's audit log and the three
+#      cosigner journals consistent;
 #   D. (SKIP_DOWN=1 skips it) with cosigner 3 stopped, a participant configured for ECIES gets past
 #      Canton's crypto init: the driver still advertises EcP256 because a silent cosigner does not
 #      veto it. (A *fresh* participant then needs every cosigner for its namespace DKG, so D stops
@@ -108,7 +110,7 @@ CLUSTER_UUID="$(uuidgen | tr 'A-Z' 'a-z')"
 for i in 1 2 3; do
   jq --arg work "$WORK" --argjson base "$BASE_PORT" --arg cert "cosigner$i" --arg pin "$DRIVER_PIN" \
     --arg v2 "$V2_DELETES" --arg uuid "$CLUSTER_UUID" --arg prefix "$PREFIX" '
-      .signing_policy = { require_intent: true, signer_acl_required: true,
+      .signing_policy = { require_intent: true, require_ceremony_intent: true, signer_acl_required: true,
         signer_acl: { driver: ["e2e1-", "e2e2-"] }, signer_pins: { driver: [$pin] } }
     | if $v2 == "1" then
         .keyfile = { write_version: 2, accept_v1: false, cluster_uuid: $uuid }
@@ -283,6 +285,11 @@ SIGNED="$(cat "$WORK"/node*/journal/*/*.jsonl 2>/dev/null | grep -c '"purpose":"
 [ "$SIGNED" -gt 0 ] || fail "no cosigner journaled a driver-intent signature"
 NOINTENT="$(cat "$WORK"/node*/journal/*/*.jsonl | grep -c '"purpose":"no-intent"' || true)"
 [ "$NOINTENT" -eq 0 ] || fail "$NOINTENT signature(s) without an intent under require_intent"
+# require_ceremony_intent: every cosigner verified the driver's DKG ceremony intent.
+for i in 1 2 3; do
+  sed $'s/\x1b\\[[0-9;]*m//g' "$WORK/node$i.log" | grep "dkg fence: ceremony intent verified" | grep -q "requested_by=driver" \
+    || fail "cosigner $i never verified a driver DKG ceremony intent"
+done
 "$COSIGNER" audit-cross-check --driver-audit "$WORK/driver-audit.jsonl" \
   --journal "$WORK/node1/journal" --journal "$WORK/node2/journal" --journal "$WORK/node3/journal" \
   --min-journals 2 | tee "$WORK/cross-check.txt" || fail "audit-cross-check found discrepancies"

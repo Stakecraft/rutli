@@ -29,7 +29,8 @@
 #      `decryptAsymmetric keyId=…rutli-enc-imported-…` ok, nothing failed for any of them; then
 #      verify-key and verify-hosted once more.
 #   5. The cosigner signing policy (audit C2) is fully enforced throughout (require_intent, the
-#      driver's key ACL and SPKI pin, refresher-only refresh): every journal entry is a driver-signed
+#      driver's key ACL and SPKI pin, refresher-only refresh, require_ceremony_intent: the driver's
+#      DKGs and the refresher's refreshes carry ceremony intents): every journal entry is a driver-signed
 #      intent, and `audit-cross-check` finds the driver's hash-chained audit log and the three
 #      cosigner journals consistent (every ok sign journaled on at least two nodes).
 #
@@ -112,7 +113,7 @@ mkconfig() { # node-config-name  cert-name  out
     | .tls.key = "\($work)/certs/\($cert).key"
     | .hosted_keys.anti_entropy_interval_secs = 10
     | .refresh_allowlist = ["refresher"]
-    | .signing_policy = { require_intent: true, require_epoch_match: true, signer_acl_required: true,
+    | .signing_policy = { require_intent: true, require_ceremony_intent: true, require_epoch_match: true, signer_acl_required: true,
         signer_may_refresh: false, signer_acl: { driver: [$prefix] }, signer_pins: { driver: [$pin] } }
     | del(.metrics_listen)' "$REPO/deploy/frost/config-tls/$1.json" >"$3"
 }

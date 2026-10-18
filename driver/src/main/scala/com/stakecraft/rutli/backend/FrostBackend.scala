@@ -622,7 +622,32 @@ class FrostBackend(
       // connection level (no ceremony started). Never retry on DEADLINE_EXCEEDED — a slow but
       // in-flight DKG must not be run a second time against another leader — nor on a leader-side
       // INTERNAL, which may have failed part-way through the ceremony.
-      clusterCall("dkg", connectionRefused)(_.dkg(DkgRequest.newBuilder().setKeyId(keyId).build()))
+      // The request carries a ceremony intent (purpose "dkg") signed with the mTLS identity, which
+      // every cosigner verifies before it opens the ceremony. It is built once, so a failover to
+      // another leader (connection refused only) presents the same intent — and the same ceremony id.
+      val dkgReq = DkgRequest.newBuilder().setKeyId(keyId)
+      if (signIntents) intentSigner.foreach { signer =>
+        learnClusterId() match {
+          case Some(cluster) =>
+            val requestId = FrostIntentSigner.newRequestId()
+            dkgReq.setIntent(
+              signer.signCeremony(
+                cluster, FrostIntentSigner.PurposeDkg, keyId, requestId, System.currentTimeMillis(), intentLifetime.toMillis
+              )
+            )
+            logger.info(
+              s"FROST: DKG for $keyId carries ceremony intent " +
+                s"(ceremony ${FrostIntentSigner.ceremonyId(FrostIntentSigner.PurposeDkg, requestId)})"
+            )
+          case None =>
+            logger.warn(
+              s"FROST: DKG for $keyId goes WITHOUT a ceremony intent: no cosigner reports a cluster id " +
+                "(frost.cluster-id unset); cosigners with signing_policy.require_ceremony_intent will refuse it."
+            )
+        }
+      }
+      val built = dkgReq.build()
+      clusterCall("dkg", connectionRefused)(_.dkg(built))
         .flatMap { reply =>
           // The leader's reply is one cosigner's word: the new key is believed only once every
           // endpoint that answers agrees on it, and it must be the key the leader reported.
