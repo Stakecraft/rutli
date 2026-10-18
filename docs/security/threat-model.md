@@ -94,10 +94,16 @@ availability attack, never a key compromise**. It is detected (`rutli_ceremony_e
 `RutliCeremonySplit`) and recoverable: the aborted node's staged share is quarantined, and
 `ceremony recover-commit` commits it once a peer proves the sharing committed and live
 (`docs/ceremonies.md`). It can make each peer write at most a bounded number of no-vote records by
-asking about made-up ceremony ids (F2), stall a key's signing for up to the 15-minute orphan timeout
-at a time by fencing it for a refresh it leads (any peer may lead one; renewable — a residual,
-visible as fenced-key refusals), and open at most 1024 waiting sign sessions per key (round 1 is
-refused beyond).
+asking about made-up ceremony ids (F2), and open at most 1024 waiting sign sessions per key (round 1
+is refused beyond). It **cannot pause signing** by fencing a key for a ceremony (since 0.4.0-rc.4: a
+DKG/refresh guard no longer blocks sign round 1, see `docs/ceremonies.md`, "Signing during a
+ceremony"). Up to rc.3 it could, and with no time limit: a fence that was never followed by part 1
+stopped that key's signing on the fenced nodes until they restarted. That was earlier documented as
+"≤ 15 min", which was wrong. Residual until ceremony intents ship: any peer may still lead a
+DKG/refresh that no client asked for (that is, start one at will). With n = 3 it can use such a
+ceremony to split the key (above), and it can hold off other ceremonies for the key, for 60 s with a
+bare fence or 15 min with a session at a time. Like any participant, it can veto every ceremony by
+refusing to take part.
 
 ### Holder of the driver certificate and key (bypassing the driver)
 

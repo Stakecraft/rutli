@@ -33,7 +33,7 @@ Status: **pre-production, not yet audited**. Use this as the engagement brief an
 
 1. **No single host holds the namespace private key** — DKG; shares sealed at rest; mTLS mesh.
 2. **Nonce reuse must be impossible** across crash/restart (burn-before-share + fsync markers).
-3. **Ceremonies must not split shares** — per-key guard, ownership on part2/part3, cluster-wide fence, reverse fence vs in-flight signs.
+3. **Ceremonies must not split shares** — per-key guard, ownership on part2/part3, cluster-wide fence, two-phase staging (signing is not fenced since 0.4.0-rc.4: part 3 only stages, commit evicts the signing state).
 4. **Signer API is not “any cluster cert”** — `signer_allowlist` required when TLS is on.
 5. **Compliance controls** — fail-closed hash-chained audit; M-of-N Ed25519 approval; signing journal (detection, not semantic double-sign prevention).
 6. **Honest limits** — namespace key non-rotatable; journal cannot see height/round; software sealing ≠ HSM/enclave.
