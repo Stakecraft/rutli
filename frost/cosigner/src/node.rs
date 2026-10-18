@@ -570,6 +570,30 @@ impl Node {
         }
     }
 
+    /// After the book dropped every in-memory session (poison recovery, [`Node::book`]): turn
+    /// every DKG/refresh guard marked as having a session back into a fence, so it is judged by
+    /// [`CEREMONY_FENCE_TIMEOUT`] (measured, as always, from its first acquisition) rather than the
+    /// 15-minute orphan timeout. Caller holds the book lock (order: book, then guards).
+    ///
+    /// Unmarked rather than released, for the same reason a failed part 1 keeps its leader's fence
+    /// ([`Node::start_session`]): the guard is that ceremony's reservation of the key, and while
+    /// its leader is alive the leader ends it — its part 2/part 3 here find no session (and
+    /// `assert_owns` still guards staging), it aborts, and its abort releases every fence. Until
+    /// then the guard keeps serializing ceremonies on this node like the leader's fences on the
+    /// others. A dead leader blocks the key for at most the fence timeout from when the guard was
+    /// taken, which is usually already past. Without this a session-less guard kept the 15-minute
+    /// orphan timeout.
+    ///
+    /// Hosted-key (genkey/delkey) guards are left as they are: they never have a session, and
+    /// keep the orphan timeout by design.
+    fn unmark_ceremony_guards(&self) {
+        for g in self.guards().values_mut() {
+            if g.session && matches!(g.kind, "dkg" | "refresh") {
+                g.session = false;
+            }
+        }
+    }
+
     /// Whether `guard` is orphaned, i.e. the next ceremony for its key may preempt it: a DKG/refresh
     /// fence with no session after [`CEREMONY_FENCE_TIMEOUT`], any other guard after the orphan
     /// timeout. Both measured from the owner's first acquisition.
@@ -682,7 +706,8 @@ impl Node {
     /// restart would: votes reloaded from `keys/.ceremonies/`, in-memory sessions dropped (this node
     /// then votes no on them, as after a restart). If the votes cannot be reloaded the operation
     /// fails (closed) and the lock stays poisoned, so the next caller tries again; signing does not
-    /// use the book and is unaffected.
+    /// use the book and is unaffected. The DKG/refresh guards of the dropped sessions go back to
+    /// fence-only ([`Node::unmark_ceremony_guards`]).
     fn book(&self) -> Result<std::sync::MutexGuard<'_, CeremonyBook>> {
         match self.book.lock() {
             Ok(book) => Ok(book),
@@ -694,6 +719,9 @@ impl Node {
                 let mut book = poisoned.into_inner();
                 book.records = records.into_iter().map(|r| (r.ceremony_id.clone(), r)).collect();
                 book.sessions.clear();
+                // Still under the book lock (book -> guards), so no part 1 can mark a guard for a
+                // new session between the clear and the unmark.
+                self.unmark_ceremony_guards();
                 crate::sync::note("ceremony_book", "reloaded");
                 self.book.clear_poison();
                 Ok(book)
@@ -3100,6 +3128,39 @@ mod guard_tests {
         n.ceremony_part1("dkg-b", "k", CeremonyKind::Dkg, &[1, 2, 3]).unwrap();
         assert_eq!(guard(&n, "k"), Some(("dkg-b".to_string(), true)));
         assert!(n.book().unwrap().sessions.contains_key("dkg-b"));
+    }
+
+    /// Poison recovery drops every in-memory ceremony session; the DKG/refresh guards those
+    /// sessions had marked go back to fence-only, so a dead leader's ceremony blocks the key for the
+    /// fence timeout, not 15 minutes. Hosted-key guards are not touched.
+    #[test]
+    fn book_poison_recovery_turns_the_dropped_sessions_guards_back_into_fences() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fence_timeout = Duration::from_millis(300);
+        let n = node(&tmp, fence_timeout);
+        n.ceremony_fence("dkg-a", "k", "dkg").unwrap();
+        n.ceremony_part1("dkg-a", "k", CeremonyKind::Dkg, &[1, 2, 3]).unwrap();
+        assert_eq!(guard(&n, "k"), Some(("dkg-a".to_string(), true)));
+        // A hosted-key guard, marked by hand to show recovery leaves its kind alone (hosted guards
+        // never carry a session in practice).
+        n.guards().insert(
+            "h".to_string(),
+            CeremonyGuard { owner: "genkey-a".into(), kind: "genkey", started: Instant::now(), session: true },
+        );
+
+        crate::sync::poison(&n.book);
+        assert!(n.book().unwrap().sessions.is_empty(), "recovered: sessions dropped");
+
+        assert_eq!(guard(&n, "k"), Some(("dkg-a".to_string(), false)), "back to a fence");
+        assert_eq!(guard(&n, "h"), Some(("genkey-a".to_string(), true)), "hosted guard untouched");
+        // The dropped ceremony cannot go on here.
+        assert!(n.ceremony_part3("dkg-a", &[0u8; 32]).is_err());
+        // Still a fence within its timeout; preemptible after it, not after 15 minutes.
+        let refused = n.ceremony_fence("dkg-b", "k", "dkg");
+        assert!(matches!(refused, Err(DaemonError::CeremonyInProgress { .. })), "{refused:?}");
+        std::thread::sleep(fence_timeout + Duration::from_millis(50));
+        n.ceremony_fence("dkg-b", "k", "dkg").unwrap();
+        assert_eq!(guard(&n, "k"), Some(("dkg-b".to_string(), false)));
     }
 }
 
