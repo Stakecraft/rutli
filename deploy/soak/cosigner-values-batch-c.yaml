@@ -14,3 +14,7 @@ signingPolicy:
   signer_pins:
     driver:
       - 1c20597ee5024fde51187233c56e8946d1e5fa8878b8c87941a598a508bd76fe
+  require_intent: true
+  signer_acl_required: true
+  signer_may_refresh: false
+  require_epoch_match: true
