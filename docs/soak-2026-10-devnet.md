@@ -219,6 +219,13 @@ verdict is **GO pending** (destruction and teardown below are still open).
 - From now on the soak's driver key signs only with a journaled intent, only under `frost-`/`rutli-`, within the rate
   limits, and nobody can refresh until the CA rotation. Rollback: `helm -n rutli rollback rutli 10` + restarts 1 → 2 → 0.
   Next: phase 5 (`audit-cross-check`).
+- Phase 5, first `audit-cross-check` (22:45Z, journals copied first, then the driver audit log): driver audit 29 514
+  entries, 29 488 signs, 5 859 with an intent and a message digest; journals node 1 5 938, node 2 5 941, node 3 3
+  entries. The first copy showed one `signed ok but is in 1 of the supplied journals` for the newest audit entry (a
+  sign in flight during the copy); a fresh copy: `--allow-no-intent` exit 0. Strict run: exit 1 with only the
+  rollout-window lines — node 1 and node 2 81 no-intent signatures each (2026-10-18 09:12:50Z .. 09:49:55Z), node 3 two
+  (09:11:12Z .. 09:11:20Z), all before T2 (09:49:59Z): accepted. These lines repeat until journal retention (90 days)
+  drops them. Schedule: weekly manual run, results in this log.
 
 ## Drill calendar
 
