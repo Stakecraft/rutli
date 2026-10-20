@@ -202,6 +202,24 @@ verdict is **GO pending** (destruction and teardown below are still open).
   `.rc2` jar. Next: phase 4 (`require_intent`, `signer_acl_required`, `signer_may_refresh: false`) on a later day after
   a clean soak-check, then phase 5 (`audit-cross-check`).
 
+**Planned event: rc.3 phase 4 — enforcement on every node, 2026-10-20 20:48 → 22:40 UTC.** Runbook
+[runbook-rc3-soak-rollout.md](runbook-rc3-soak-rollout.md) §4, after clean soak-checks on 2026-10-19 and 2026-10-20.
+- Pre-checks (24 h): `intent_absent`, `signer_acl_absent`, `rate_limited` 0 on every node, no policy refusals, no
+  staged ceremony, clocks within 3 s; since T2 the journals hold only `"purpose":"sign"` (node 1: 5 588, node 2: 5 589;
+  node 3 has 2 `no-intent` entries from the phase 1 roll, before T2 — it is outside the leader's first pair).
+- `require_intent`, `signer_acl_required`, `require_epoch_match` on and `signer_may_refresh` off → rev 11 (ConfigMap
+  only; the render from main carries no field rc.3 does not know). Canary: node 2 (20:49Z, watched 15 min: refusals 0,
+  errors 0, retries 0, 32 signs through the leader, node 2 journaling `sign`/`driver`) → node 3 → node 1 (≈22:36Z).
+  All three log `require_intent=true signer_acl_required=true signer_may_refresh=false` and none of the "is off" notices.
+- Positive: participant signs after the restarts `outcome=ok` with intents; nodes 1 and 2 journal `sign`/`driver`;
+  `epoch_check_skipped` 0, sign errors 0; `verify-key` ok for both FROST keys from the pinned workstation certificate.
+- Negative (22:38Z): an intent-less `Sign` for `frost-rc3-negative-test` sent to each node as leader with the driver
+  certificate is refused by all three with `PermissionDenied … carries no signing intent and this node requires one`
+  (`RutliSignPolicyRefusals{reason="missing"}` for 15 min, expected).
+- From now on the soak's driver key signs only with a journaled intent, only under `frost-`/`rutli-`, within the rate
+  limits, and nobody can refresh until the CA rotation. Rollback: `helm -n rutli rollback rutli 10` + restarts 1 → 2 → 0.
+  Next: phase 5 (`audit-cross-check`).
+
 ## Drill calendar
 
 | Week | Drill | Status |
