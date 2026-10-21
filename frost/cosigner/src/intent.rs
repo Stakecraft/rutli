@@ -473,14 +473,14 @@ impl IntentVerifier {
         self.check_acl_with(cn, key_id, refused)
     }
 
-    fn check_acl_with(&self, cn: &str, key_id: &str, refused: fn(&'static str, String) -> DaemonError) -> Result<()> {
+    fn check_acl_with(&self, cn: &str, key_id: &str, refuse: fn(&'static str, String) -> DaemonError) -> Result<()> {
         match self.acl.get(cn) {
             Some(prefixes) if prefixes.iter().any(|p| key_id.starts_with(p.as_str())) => Ok(()),
-            Some(_) => Err(refused(
+            Some(_) => Err(refuse(
                 "acl",
                 format!("client {cn:?} may not use key {key_id} (signing_policy.signer_acl)"),
             )),
-            None if self.acl_required => Err(refused(
+            None if self.acl_required => Err(refuse(
                 "acl",
                 format!(
                     "client {cn:?} has no signing_policy.signer_acl entry and signer_acl_required is set"
@@ -498,16 +498,16 @@ impl IntentVerifier {
         self.check_pin_with(cn, spki_sha256, refused)
     }
 
-    /// [`IntentVerifier::check_pin`], refused (and counted) as `refused` says: a delete or a
+    /// [`IntentVerifier::check_pin`], refused (and counted) as `refuse` says: a delete or a
     /// ceremony intent's pin refusal is that kind's refusal, not a signing-policy one.
     fn check_pin_with(
         &self,
         cn: &str,
         spki_sha256: &[u8; 32],
-        refused: fn(&'static str, String) -> DaemonError,
+        refuse: fn(&'static str, String) -> DaemonError,
     ) -> Result<()> {
         match self.pins.get(cn) {
-            Some(pins) if !pins.contains(spki_sha256) => Err(refused(
+            Some(pins) if !pins.contains(spki_sha256) => Err(refuse(
                 "pin",
                 format!(
                     "the certificate key of {cn:?} (spki sha256 {}) is not pinned in \
@@ -824,10 +824,10 @@ impl IntentVerifier {
         issued_at_ms: u64,
         not_after_ms: u64,
         now_ms: u64,
-        refused: fn(&'static str, String) -> DaemonError,
+        refuse: fn(&'static str, String) -> DaemonError,
     ) -> Result<()> {
         if not_after_ms < issued_at_ms || not_after_ms - issued_at_ms > self.max_lifetime_ms {
-            return Err(refused(
+            return Err(refuse(
                 "expiry",
                 format!(
                     "intent validity {} ms exceeds signing_policy.intent_max_lifetime_secs ({} s) or is negative",
@@ -837,7 +837,7 @@ impl IntentVerifier {
             ));
         }
         if now_ms.saturating_add(self.skew_ms) < issued_at_ms {
-            return Err(refused(
+            return Err(refuse(
                 "expiry",
                 format!(
                     "intent issued {} ms in the future (clock skew beyond {} s — check NTP on the driver and this node)",
@@ -847,7 +847,7 @@ impl IntentVerifier {
             ));
         }
         if now_ms > not_after_ms.saturating_add(self.skew_ms) {
-            return Err(refused(
+            return Err(refuse(
                 "expiry",
                 format!("intent expired {} ms ago", now_ms - not_after_ms),
             ));
@@ -862,7 +862,7 @@ impl IntentVerifier {
         intent: &pb::SignIntent,
         request_id: &str,
         threshold: u32,
-        refused: fn(&'static str, String) -> DaemonError,
+        refuse: fn(&'static str, String) -> DaemonError,
     ) -> Result<Vec<String>> {
         let mut valid: Vec<String> = intent
             .approvals
@@ -877,7 +877,7 @@ impl IntentVerifier {
         valid.sort();
         valid.dedup();
         if intent.approval_nonce.is_empty() || (valid.len() as u32) < threshold {
-            return Err(refused(
+            return Err(refuse(
                 "approval",
                 format!(
                     "approval required: key {} needs {threshold} approval(s) by distinct configured \
@@ -892,6 +892,10 @@ impl IntentVerifier {
 }
 
 /// A policy refusal, counted by reason.
+///
+/// Convention the `metrics` tests rely on: a check shared by the sign, ceremony and delete paths
+/// takes the refusal function as a parameter named `refuse`, and every reason it passes is a string
+/// literal; `metrics::tests` reads those literals and requires them in each primed reason list.
 pub fn refused(reason: &'static str, msg: String) -> DaemonError {
     metrics::counter!(crate::metrics::SIGN_POLICY_REFUSALS, "reason" => reason).increment(1);
     DaemonError::PolicyRefused(format!("signing intent refused: {msg}"))

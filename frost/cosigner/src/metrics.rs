@@ -411,6 +411,29 @@ mod tests {
         assert!(SIGN_DURATION_BUCKETS.contains(&1.0));
     }
 
+    use std::collections::BTreeMap;
+
+    /// Label sets one counter must expose after `prime()`.
+    type LabelSets = Vec<Vec<(String, String)>>;
+    /// Called with each call site's reason literal and a description of the site.
+    type SiteCheck<'a> = Box<dyn FnMut(&str, &str) + 'a>;
+
+    /// The series `name` in a rendered exposition: its labels and its value text.
+    fn series(out: &str, name: &str) -> Vec<(BTreeMap<String, String>, String)> {
+        out.lines()
+            .filter_map(|line| {
+                let rest = line.strip_prefix(name)?;
+                let (labels, value) = rest.strip_prefix('{')?.split_once("} ")?;
+                let labels = labels
+                    .split(',')
+                    .filter_map(|kv| kv.split_once('='))
+                    .map(|(k, v)| (k.to_owned(), v.trim_matches('"').to_owned()))
+                    .collect();
+                Some((labels, value.to_owned()))
+            })
+            .collect()
+    }
+
     /// After `prime()` every labelled alerting counter already exposes each of its series at 0, so
     /// the first refusal takes a series from 0 to 1 and `increase()` sees it (2026-10-20 soak: the
     /// first `rutli_sign_policy_refusals_total{reason}` created the series at 1 and
@@ -425,103 +448,223 @@ mod tests {
         });
         let out = handle.render();
 
-        let mut expected: Vec<String> = Vec::new();
-        for (name, label, values) in [
-            (SIGN_POLICY_REFUSALS, "reason", SIGN_POLICY_REASONS),
-            (CEREMONY_INTENT_REFUSALS, "reason", CEREMONY_INTENT_REASONS),
-            (DELETE_INTENT_REFUSALS, "reason", DELETE_INTENT_REASONS),
-            (HOSTED_TOMBSTONES_WRITTEN, "how", TOMBSTONE_HOWS),
-            (LOCK_POISON_RECOVERIES, "lock", LOCK_NAMES),
-        ] {
-            assert!(!values.is_empty(), "{name}");
-            for v in values {
-                expected.push(format!(r#"{name}{{{label}="{v}"}} 0"#));
-            }
-        }
+        let one = |label: &str, values: &[&str]| -> LabelSets {
+            values.iter().map(|v| vec![(label.to_owned(), (*v).to_owned())]).collect()
+        };
+        let mut expected: Vec<(&str, LabelSets)> = vec![
+            (SIGN_POLICY_REFUSALS, one("reason", SIGN_POLICY_REASONS)),
+            (CEREMONY_INTENT_REFUSALS, one("reason", CEREMONY_INTENT_REASONS)),
+            (DELETE_INTENT_REFUSALS, one("reason", DELETE_INTENT_REASONS)),
+            (HOSTED_TOMBSTONES_WRITTEN, one("how", TOMBSTONE_HOWS)),
+            (LOCK_POISON_RECOVERIES, one("lock", LOCK_NAMES)),
+        ];
+        let mut ops = Vec::new();
         for op in HOSTED_KEY_OPS_NAMES {
             for result in ["ok", "error"] {
-                expected.push(format!(r#"{HOSTED_KEY_OPS}{{op="{op}",result="{result}"}} 0"#));
+                ops.push(vec![("op".to_owned(), (*op).to_owned()), ("result".to_owned(), result.to_owned())]);
             }
         }
-        for line in &expected {
-            assert!(out.lines().any(|l| l == line), "missing {line:?}:\n{out}");
+        expected.push((HOSTED_KEY_OPS, ops));
+
+        for (name, wanted) in expected {
+            assert!(!wanted.is_empty(), "{name}");
+            let rendered = series(&out, name);
+            for labels in wanted {
+                let found = rendered.iter().find(|(l, _)| labels.iter().all(|(k, v)| l.get(k) == Some(v)));
+                match found {
+                    Some((_, value)) => assert_eq!(value, "0", "{name}{labels:?} is not primed at 0:\n{out}"),
+                    None => panic!("{name}{labels:?} is not primed:\n{out}"),
+                }
+            }
         }
+    }
+
+    /// Every non-test `.rs` file of this crate, as `(name, text)`; `metrics.rs` is left out (its
+    /// own lists and tests quote the literals being looked for).
+    fn crate_sources() -> Vec<(String, String)> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<(String, String)>) {
+            for entry in std::fs::read_dir(dir).expect("read src dir") {
+                let path = entry.expect("dir entry").path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|e| e == "rs") && !path.ends_with("metrics.rs") {
+                    let text = std::fs::read_to_string(&path).expect("read source");
+                    out.push((path.display().to_string(), text));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut out);
+        assert!(out.len() > 5, "found only {} sources: the scan is stale", out.len());
+        out
+    }
+
+    /// The arguments (top-level comma split, trimmed) of every call `callee(...)` in `src`, outside
+    /// `//` comments. Parentheses, brackets and braces nest; string literals are skipped whole. A
+    /// definition (`fn callee(`) and a longer identifier (`xcallee(`, `callee_x(`) are not calls.
+    fn calls(src: &str, callee: &str) -> Vec<Vec<String>> {
+        let code: String = src
+            .lines()
+            .map(|l| if l.trim_start().starts_with("//") { "" } else { l })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let needle = format!("{callee}(");
+        let mut found = Vec::new();
+        for (at, _) in code.match_indices(&needle) {
+            let before = &code[..at];
+            if before.chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_') || before.ends_with("fn ") {
+                continue;
+            }
+            let (mut depth, mut args, mut cur) = (1usize, Vec::new(), String::new());
+            let mut chars = code[at + needle.len()..].chars();
+            while let Some(c) = chars.next() {
+                match c {
+                    '"' => {
+                        cur.push(c);
+                        while let Some(d) = chars.next() {
+                            cur.push(d);
+                            if d == '\\' {
+                                cur.extend(chars.next());
+                            } else if d == '"' {
+                                break;
+                            }
+                        }
+                    }
+                    '(' | '[' | '{' => {
+                        depth += 1;
+                        cur.push(c);
+                    }
+                    ')' | ']' | '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                        cur.push(c);
+                    }
+                    ',' if depth == 1 => args.push(std::mem::take(&mut cur).trim().to_owned()),
+                    _ => cur.push(c),
+                }
+            }
+            if !cur.trim().is_empty() {
+                args.push(cur.trim().to_owned());
+            }
+            found.push(args);
+        }
+        found
+    }
+
+    /// `arg` as a plain string literal's contents, or a failure naming the call.
+    fn literal<'a>(arg: Option<&'a String>, what: &str) -> &'a str {
+        arg.and_then(|a| a.strip_prefix('"')?.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("{what}: the argument is not a plain string literal ({arg:?}), so it cannot be checked against the primed lists"))
     }
 
     /// The reason lists are written out by hand; this reads the call sites so a new
     /// `refused("new-reason", ..)` fails here instead of silently going unprimed (and its first
-    /// occurrence going unalerted). It checks each variant's own literals against its list; the
-    /// shared signer checks pass their reasons through a function argument, so those are covered
-    /// by the lists' hand-kept union.
+    /// occurrence going unalerted).
+    ///
+    /// - `refused_ceremony(..)` / `refused_delete(..)` / `refused(..)` are the three counters; their
+    ///   own call sites' literals must be in their own list.
+    /// - The checks shared by the three paths take the refusal function as a parameter named
+    ///   `refuse` (`verify_signer`, `check_acl_with`, `check_pin_with`, `check_times_with`,
+    ///   `count_approvals`); every literal they pass can land on any of the three counters, so it
+    ///   must be in all three lists — except `approval`, which only the sign and delete paths reach
+    ///   (a ceremony intent carries no approvals; `verify_ceremony` never calls `count_approvals`).
+    /// - A reason that is not a literal cannot be checked, so it fails the test too.
     #[test]
     fn reasons_cover_the_call_sites() {
-        let sources = [
-            include_str!("intent.rs"),
-            include_str!("sign_policy.rs"),
-            include_str!("service.rs"),
-            include_str!("node.rs"),
-            include_str!("orchestrator.rs"),
-        ];
-        // The string literal that is the first argument of every `<callee>("..."` in `src`.
-        fn first_literals<'a>(src: &'a str, callee: &str) -> Vec<&'a str> {
-            let needle = format!("{callee}(");
-            let mut found = Vec::new();
-            for (at, _) in src.match_indices(&needle) {
-                let ident_before =
-                    src[..at].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_');
-                if ident_before {
+        let sources = crate_sources();
+        let each = |callee: &str, mut f: SiteCheck<'_>| {
+            let mut seen = 0;
+            for (file, src) in &sources {
+                // keystore.rs's tests have their own `refused(result, msg)` helper, unrelated.
+                if file.ends_with("keystore.rs") {
                     continue;
                 }
-                let rest = src[at + needle.len()..].trim_start();
-                if let Some(lit) = rest.strip_prefix('"') {
-                    if let Some(end) = lit.find('"') {
-                        found.push(&lit[..end]);
-                    }
+                // export.rs has an unrelated `refuse` closure; the shared checks are all in intent.rs.
+                if callee == "refuse" && !file.ends_with("intent.rs") {
+                    continue;
+                }
+                for args in calls(src, callee) {
+                    let what = format!("{file}: {callee}(..)");
+                    f(literal(args.first(), &what), &what);
+                    seen += 1;
                 }
             }
-            found
-        }
+            assert!(seen > 0, "no {callee}(..) call found: the scan is stale");
+        };
         for (callee, list) in [
             ("refused", SIGN_POLICY_REASONS),
             ("refused_ceremony", CEREMONY_INTENT_REASONS),
             ("refused_delete", DELETE_INTENT_REASONS),
-            ("refuse", SIGN_POLICY_REASONS),
-            ("refuse", CEREMONY_INTENT_REASONS),
-            ("refuse", DELETE_INTENT_REASONS),
         ] {
-            let mut seen = 0;
-            for src in sources {
-                for lit in first_literals(src, callee) {
-                    seen += 1;
-                    assert!(list.contains(&lit), "{callee}({lit:?}, ..) is not in the primed reasons {list:?}");
-                }
-            }
-            assert!(seen > 0, "no {callee}(\"..\") call site found: the scan is stale");
+            each(callee, Box::new(|lit, what| assert!(list.contains(&lit), "{what}: {lit:?} is not in {list:?}")));
         }
-        for (callee, list) in [("recover", LOCK_NAMES), ("recover_reset", LOCK_NAMES), ("note", LOCK_NAMES)] {
-            // `recover(&lock, "name")` takes the literal second.
-            for src in sources.iter().chain([&include_str!("ratelimit.rs"), &include_str!("journal.rs")]) {
-                let needle = format!("{callee}(");
-                for (at, _) in src.match_indices(&needle) {
-                    if src[..at].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+        each(
+            "refuse",
+            Box::new(|lit, what| {
+                for (list, name) in [
+                    (SIGN_POLICY_REASONS, "SIGN_POLICY_REASONS"),
+                    (CEREMONY_INTENT_REASONS, "CEREMONY_INTENT_REASONS"),
+                    (DELETE_INTENT_REASONS, "DELETE_INTENT_REASONS"),
+                ] {
+                    if lit == "approval" && name == "CEREMONY_INTENT_REASONS" {
                         continue;
                     }
-                    let call = &src[at + needle.len()..];
-                    let call = &call[..call.find(')').unwrap_or(call.len())];
-                    let lit = if callee == "note" { call.split('"').nth(1) } else { call.split(", \"").nth(1) };
-                    if let Some(lit) = lit.and_then(|l| l.split('"').next()) {
-                        if lit == "test_hook" || lit == "test" {
-                            continue;
-                        }
-                        assert!(list.contains(&lit), "{callee}(.., {lit:?}) is not in LOCK_NAMES");
+                    assert!(list.contains(&lit), "{what}: shared reason {lit:?} is not in {name}");
+                }
+            }),
+        );
+        each("record_hosted_op", Box::new(|lit, what| assert!(HOSTED_KEY_OPS_NAMES.contains(&lit), "{what}: {lit:?}")));
+    }
+
+    /// The lock names behind `rutli_lock_poison_recoveries_total{lock}`: `sync::recover(&l, "x")`,
+    /// `sync::recover_reset(&l, "x", ..)`, `sync::note("x", ..)` and the sign-session map's direct
+    /// counter increment. Arguments are parsed with nesting, so `recover(lock.write().unwrap(),
+    /// "x")` and rustfmt's multi-line form are both seen.
+    #[test]
+    fn lock_names_cover_the_call_sites() {
+        let sources = crate_sources();
+        // sync.rs's own tests use "test"; node.rs/hooks use "test_hook" for test-only locks.
+        let ignored = ["test", "test_hook"];
+        for (callee, at) in [("recover", 1), ("recover_reset", 1), ("note", 0)] {
+            let mut seen = 0;
+            for (file, src) in &sources {
+                // sync.rs forwards its callers' names (`note(name, ..)`); its tests use "test".
+                if file.ends_with("sync.rs") {
+                    continue;
+                }
+                for args in calls(src, callee) {
+                    // `note(..)` is also a method elsewhere; only sync's two-string form counts.
+                    if callee == "note" && (args.len() != 2 || !args.iter().all(|a| a.starts_with('"'))) {
+                        continue;
                     }
+                    let what = format!("{file}: {callee}(..)");
+                    let lit = literal(args.get(at), &what);
+                    if ignored.contains(&lit) {
+                        continue;
+                    }
+                    assert!(LOCK_NAMES.contains(&lit), "{what}: lock {lit:?} is not in LOCK_NAMES");
+                    seen += 1;
+                }
+            }
+            assert!(seen > 0, "no {callee}(..) lock call found: the scan is stale");
+        }
+        // The direct counter increment (frost/core cannot export metrics, so node.rs publishes it).
+        let mut direct = 0;
+        for (file, src) in &sources {
+            if file.ends_with("sync.rs") {
+                continue; // forwards its caller's name
+            }
+            for args in calls(src, "metrics::counter!") {
+                if args.first().is_some_and(|a| a.ends_with("LOCK_POISON_RECOVERIES")) {
+                    let value = args.get(1).and_then(|a| a.split_once("=>")).map(|(_, v)| v.trim().to_owned());
+                    let lit = literal(value.as_ref(), file);
+                    assert!(LOCK_NAMES.contains(&lit), "{file}: lock {lit:?} is not in LOCK_NAMES");
+                    direct += 1;
                 }
             }
         }
-        for src in sources {
-            for lit in first_literals(src, "record_hosted_op") {
-                assert!(HOSTED_KEY_OPS_NAMES.contains(&lit), "record_hosted_op({lit:?}, ..) is not primed");
-            }
-        }
+        assert!(direct > 0, "no direct LOCK_POISON_RECOVERIES increment found: the scan is stale");
     }
 }
