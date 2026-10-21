@@ -137,6 +137,84 @@ pub const KEY_REPLICAS: &str = "rutli_key_replicas";
 /// `Signer.Health` call; not the same as [`UNREADABLE_KEY_FILES`] (one file failing to unseal).
 pub const KEYSTORE_UNREADABLE: &str = "rutli_keystore_unreadable";
 
+/// Every `reason` label value `rutli_sign_policy_refusals_total` can carry (the string literals the
+/// `refused(..)` call sites in `intent.rs`, `sign_policy.rs`, `service.rs` and `node.rs` pass).
+/// Primed to 0 at start so the first refusal moves the series from 0 to 1 and `increase()` sees it
+/// (`RutliSignPolicyRefusals`). The `reasons_cover_the_call_sites` test fails when a call site uses
+/// a literal missing here.
+pub const SIGN_POLICY_REASONS: &[&str] = &[
+    "acl",
+    "approval",
+    "certificate",
+    "cluster",
+    "expiry",
+    "key",
+    "malformed",
+    "missing",
+    "pin",
+    "purpose",
+    "role",
+    "sign-test",
+    "signature",
+    "signer",
+];
+/// Every `reason` of `rutli_ceremony_intent_refusals_total` (`refused_ceremony(..)` and the shared
+/// signer checks it drives). Primed for `RutliCeremonyIntentRefused`.
+pub const CEREMONY_INTENT_REASONS: &[&str] = &[
+    "acl",
+    "ceremony-id",
+    "certificate",
+    "cluster",
+    "expiry",
+    "key",
+    "malformed",
+    "missing",
+    "pin",
+    "purpose",
+    "signature",
+    "signer",
+];
+/// Every `reason` of `rutli_delete_intent_refusals_total` (`refused_delete(..)` and the shared
+/// signer checks it drives). Primed for `RutliDeleteIntentRefused`.
+pub const DELETE_INTENT_REASONS: &[&str] = &[
+    "acl",
+    "approval",
+    "certificate",
+    "cluster",
+    "disabled",
+    "expiry",
+    "key",
+    "malformed",
+    "missing",
+    "pin",
+    "policy-changed",
+    "purpose",
+    "role",
+    "rollback",
+    "signature",
+    "signer",
+    "stale",
+];
+/// The `how` values `rutli_hosted_tombstones_written_total` is incremented with in `node.rs`
+/// (`RutliHostedKeyDeleted`). The help text also names `deleted`; no call site emits it.
+pub const TOMBSTONE_HOWS: &[&str] = &["converted", "recorded"];
+/// The `lock` names passed to `sync::recover` / `recover_reset` / `note` and the sign-session map
+/// recovery (`RutliLockPoisonRecovered`). `test_hook` (test-only hooks) is left out.
+pub const LOCK_NAMES: &[&str] = &[
+    "ceremony_book",
+    "ceremony_guards",
+    "hosted_created_in",
+    "key_cache",
+    "rate_limiter",
+    "sign_journal",
+    "sign_sessions",
+    "stale_marks",
+];
+/// The `op` values of `rutli_hosted_key_ops_total` (`record_hosted_op` call sites in `service.rs`);
+/// `result` is "ok" | "error" (`RutliHostedKeyErrors`).
+pub const HOSTED_KEY_OPS_NAMES: &[&str] =
+    &["generate", "delete", "decrypt", "ecdh_derive", "symmetric_encrypt", "symmetric_decrypt"];
+
 /// Upper bounds (seconds) of the `rutli_sign_duration_seconds` histogram buckets.
 ///
 /// Without explicit buckets `metrics-exporter-prometheus` renders a `histogram!` as a Prometheus
@@ -173,7 +251,11 @@ pub fn install(listen: &str) -> Result<()> {
 }
 
 /// Initialize every fixed label combination to zero so an idle daemon's scrape already exposes
-/// all series — `increase()`/`rate()` alert rules misbehave on series that don't exist yet.
+/// all series — `increase()`/`rate()` alert rules misbehave on series that don't exist yet: a
+/// series created by its first event starts at 1, `increase()` reads 0 for it, and the alert never
+/// fires for that first event (the 2026-10-20 soak: the rc.3 negative test did not fire
+/// `RutliSignPolicyRefusals`). Labels that are not a closed set (`rutli_stale_share{key}`)
+/// cannot be primed.
 fn prime() {
     for result in ["ok", "error"] {
         metrics::counter!(SIGN_REQUESTS, "result" => result).absolute(0);
@@ -207,6 +289,26 @@ fn prime() {
     metrics::counter!(SIGNER_ACL_ABSENT).absolute(0);
     metrics::counter!(SIGN_JOURNAL_ENTRIES).absolute(0);
     metrics::counter!(SIGN_JOURNAL_ERRORS).absolute(0);
+    for reason in SIGN_POLICY_REASONS {
+        metrics::counter!(SIGN_POLICY_REFUSALS, "reason" => *reason).absolute(0);
+    }
+    for reason in CEREMONY_INTENT_REASONS {
+        metrics::counter!(CEREMONY_INTENT_REFUSALS, "reason" => *reason).absolute(0);
+    }
+    for reason in DELETE_INTENT_REASONS {
+        metrics::counter!(DELETE_INTENT_REFUSALS, "reason" => *reason).absolute(0);
+    }
+    for how in TOMBSTONE_HOWS {
+        metrics::counter!(HOSTED_TOMBSTONES_WRITTEN, "how" => *how).absolute(0);
+    }
+    for lock in LOCK_NAMES {
+        metrics::counter!(LOCK_POISON_RECOVERIES, "lock" => *lock).absolute(0);
+    }
+    for op in HOSTED_KEY_OPS_NAMES {
+        for result in ["ok", "error"] {
+            metrics::counter!(HOSTED_KEY_OPS, "op" => *op, "result" => result).absolute(0);
+        }
+    }
     // No hosted keys yet means no shortfall — not a shortfall of zero, which would page instantly.
     metrics::gauge!(KEY_REPLICAS).set(f64::NAN);
     metrics::counter!(SIGN_ABORTS).absolute(0);
@@ -307,5 +409,119 @@ mod tests {
         assert!(SIGN_DURATION_BUCKETS.iter().any(|&b| b > 5.0));
         // The soak gate's 1 s threshold should be a bucket bound, so "p99 < 1" is exact.
         assert!(SIGN_DURATION_BUCKETS.contains(&1.0));
+    }
+
+    /// After `prime()` every labelled alerting counter already exposes each of its series at 0, so
+    /// the first refusal takes a series from 0 to 1 and `increase()` sees it (2026-10-20 soak: the
+    /// first `rutli_sign_policy_refusals_total{reason}` created the series at 1 and
+    /// `RutliSignPolicyRefusals` never fired for it).
+    #[test]
+    fn prime_exposes_every_labelled_alert_series_at_zero() {
+        let recorder = builder().expect("valid buckets").build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            describe();
+            prime();
+        });
+        let out = handle.render();
+
+        let mut expected: Vec<String> = Vec::new();
+        for (name, label, values) in [
+            (SIGN_POLICY_REFUSALS, "reason", SIGN_POLICY_REASONS),
+            (CEREMONY_INTENT_REFUSALS, "reason", CEREMONY_INTENT_REASONS),
+            (DELETE_INTENT_REFUSALS, "reason", DELETE_INTENT_REASONS),
+            (HOSTED_TOMBSTONES_WRITTEN, "how", TOMBSTONE_HOWS),
+            (LOCK_POISON_RECOVERIES, "lock", LOCK_NAMES),
+        ] {
+            assert!(!values.is_empty(), "{name}");
+            for v in values {
+                expected.push(format!(r#"{name}{{{label}="{v}"}} 0"#));
+            }
+        }
+        for op in HOSTED_KEY_OPS_NAMES {
+            for result in ["ok", "error"] {
+                expected.push(format!(r#"{HOSTED_KEY_OPS}{{op="{op}",result="{result}"}} 0"#));
+            }
+        }
+        for line in &expected {
+            assert!(out.lines().any(|l| l == line), "missing {line:?}:\n{out}");
+        }
+    }
+
+    /// The reason lists are written out by hand; this reads the call sites so a new
+    /// `refused("new-reason", ..)` fails here instead of silently going unprimed (and its first
+    /// occurrence going unalerted). It checks each variant's own literals against its list; the
+    /// shared signer checks pass their reasons through a function argument, so those are covered
+    /// by the lists' hand-kept union.
+    #[test]
+    fn reasons_cover_the_call_sites() {
+        let sources = [
+            include_str!("intent.rs"),
+            include_str!("sign_policy.rs"),
+            include_str!("service.rs"),
+            include_str!("node.rs"),
+            include_str!("orchestrator.rs"),
+        ];
+        // The string literal that is the first argument of every `<callee>("..."` in `src`.
+        fn first_literals<'a>(src: &'a str, callee: &str) -> Vec<&'a str> {
+            let needle = format!("{callee}(");
+            let mut found = Vec::new();
+            for (at, _) in src.match_indices(&needle) {
+                let ident_before =
+                    src[..at].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_');
+                if ident_before {
+                    continue;
+                }
+                let rest = src[at + needle.len()..].trim_start();
+                if let Some(lit) = rest.strip_prefix('"') {
+                    if let Some(end) = lit.find('"') {
+                        found.push(&lit[..end]);
+                    }
+                }
+            }
+            found
+        }
+        for (callee, list) in [
+            ("refused", SIGN_POLICY_REASONS),
+            ("refused_ceremony", CEREMONY_INTENT_REASONS),
+            ("refused_delete", DELETE_INTENT_REASONS),
+            ("refuse", SIGN_POLICY_REASONS),
+            ("refuse", CEREMONY_INTENT_REASONS),
+            ("refuse", DELETE_INTENT_REASONS),
+        ] {
+            let mut seen = 0;
+            for src in sources {
+                for lit in first_literals(src, callee) {
+                    seen += 1;
+                    assert!(list.contains(&lit), "{callee}({lit:?}, ..) is not in the primed reasons {list:?}");
+                }
+            }
+            assert!(seen > 0, "no {callee}(\"..\") call site found: the scan is stale");
+        }
+        for (callee, list) in [("recover", LOCK_NAMES), ("recover_reset", LOCK_NAMES), ("note", LOCK_NAMES)] {
+            // `recover(&lock, "name")` takes the literal second.
+            for src in sources.iter().chain([&include_str!("ratelimit.rs"), &include_str!("journal.rs")]) {
+                let needle = format!("{callee}(");
+                for (at, _) in src.match_indices(&needle) {
+                    if src[..at].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                        continue;
+                    }
+                    let call = &src[at + needle.len()..];
+                    let call = &call[..call.find(')').unwrap_or(call.len())];
+                    let lit = if callee == "note" { call.split('"').nth(1) } else { call.split(", \"").nth(1) };
+                    if let Some(lit) = lit.and_then(|l| l.split('"').next()) {
+                        if lit == "test_hook" || lit == "test" {
+                            continue;
+                        }
+                        assert!(list.contains(&lit), "{callee}(.., {lit:?}) is not in LOCK_NAMES");
+                    }
+                }
+            }
+        }
+        for src in sources {
+            for lit in first_literals(src, "record_hosted_op") {
+                assert!(HOSTED_KEY_OPS_NAMES.contains(&lit), "record_hosted_op({lit:?}, ..) is not primed");
+            }
+        }
     }
 }

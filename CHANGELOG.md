@@ -5,6 +5,18 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **The first refusal now fires its alert: the labelled alert counters are primed at start.** Found
+  on the 2026-10-20 soak, where the rc.3 negative test did not fire `RutliSignPolicyRefusals`. The
+  daemon created `rutli_sign_policy_refusals_total{reason}` (and the other labelled counters behind
+  alerts) on the first event, at 1; Prometheus `increase()` reads 0 for a series that appears already
+  at 1, so the first refusal per node and reason raised nothing. `prime()` now starts every reason of
+  `rutli_sign_policy_refusals_total`, `rutli_ceremony_intent_refusals_total` and
+  `rutli_delete_intent_refusals_total`, every `how` of `rutli_hosted_tombstones_written_total`, every
+  `lock` of `rutli_lock_poison_recoveries_total` and every op/result of `rutli_hosted_key_ops_total`
+  at 0. A test reads the call sites, so a new refusal reason that is not primed fails the build.
+
 ## [0.4.0-rc.4] — 2026-10-22
 
 _Release candidate, pre-audit: for soak and review, not for production key custody. Wire change (optional proto fields only): upgrade every cosigner, then the driver and the refresh CronJob image, then `signing_policy.require_ceremony_intent` (see "Rollout (ceremony intents)" below)._
