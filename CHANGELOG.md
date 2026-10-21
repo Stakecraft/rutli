@@ -5,6 +5,13 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.4.0-rc.4] — 2026-10-22
+
+_Release candidate, pre-audit: for soak and review, not for production key custody. Wire change (optional proto fields only): upgrade every cosigner, then the driver and the refresh CronJob image, then `signing_policy.require_ceremony_intent` (see "Rollout (ceremony intents)" below)._
+
+Builds on 0.4.0-rc.3. Ceremony-fence and guard hardening, client-signed ceremony intents for DKG and
+refresh, plain cosigner logs outside a terminal, and CI timing fixes.
+
 ### Security
 
 - **A ceremony fence can no longer stall signing** (ceremony-fence residual, L1 of the remediation).
@@ -1432,6 +1439,7 @@ not audited. Do not place production authority keys behind it.
 - HSM backend validated only against SoftHSM.
 - No third-party security audit.
 
+[0.4.0-rc.4]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.4
 [0.4.0-rc.3]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.3
 [0.4.0-rc.2]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.2
 [0.4.0-rc.1]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.1
