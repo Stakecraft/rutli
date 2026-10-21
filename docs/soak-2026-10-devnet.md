@@ -215,7 +215,10 @@ verdict is **GO pending** (destruction and teardown below are still open).
   `epoch_check_skipped` 0, sign errors 0; `verify-key` ok for both FROST keys from the pinned workstation certificate.
 - Negative (22:38Z): an intent-less `Sign` for `frost-rc3-negative-test` sent to each node as leader with the driver
   certificate is refused by all three with `PermissionDenied … carries no signing intent and this node requires one`
-  (`RutliSignPolicyRefusals{reason="missing"}` for 15 min, expected).
+  (`rutli_sign_policy_refusals_total{reason="missing"}` = 1 on each node). **Correction (2026-10-22):** the alert
+  `RutliSignPolicyRefusals` did NOT fire — Prometheus has no `ALERTS` series for it in 22:30–23:30Z. The counter is not
+  primed at start, so the first refusal per node and reason creates the series at 1 and `increase()` reads 0: a
+  monitoring gap, filed for a code fix (prime the refusal counters).
 - From now on the soak's driver key signs only with a journaled intent, only under `frost-`/`rutli-`, within the rate
   limits, and nobody can refresh until the CA rotation. Rollback: `helm -n rutli rollback rutli 10` + restarts 1 → 2 → 0.
   Next: phase 5 (`audit-cross-check`).
