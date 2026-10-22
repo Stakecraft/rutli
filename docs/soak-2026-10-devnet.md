@@ -230,6 +230,38 @@ verdict is **GO pending** (destruction and teardown below are still open).
   (09:11:12Z .. 09:11:20Z), all before T2 (09:49:59Z): accepted. These lines repeat until journal retention (90 days)
   drops them. Schedule: weekly manual run, results in this log.
 
+**Planned event: soak to 0.4.0-rc.4 (ceremony intents), 2026-10-22 12:48 → 22:10 UTC.** Runbook
+[runbook-rc4-soak-rollout.md](runbook-rc4-soak-rollout.md), legacy topology.
+- Pre-flight: cosigners rev 11 (rc.3, batch C enforced), participant rev 8, no CronJob, soak-check PASS; the chart pins
+  `0.4.0-rc.4@sha256:03485f47…55dd63`; `StateCheck` with the rc.4 jar OK (33 182 / 33 156); `verify-key` ok; sealed-key
+  tars taken (6 files per node).
+- **Tooling lesson:** `kubectl exec`/`kubectl cp` streams from this cluster now drop after ≈ 2–10 MB (`unexpected EOF`),
+  silently truncating copies. State files were fetched in 1 MiB `tail -c | head -c` chunks and the 35 MB driver jar was
+  uploaded in sha-checked 2 MiB chunks (`~/rc4-rollout/stage-jar.sh`). The runbook's sha256 checks caught nothing bad,
+  but plain `tar | tar` copies would have.
+- Phase 1 (16:10Z): `helm upgrade` → rev 12, image rolled 2 → 1 → 0. Every node: rc.4 digest, plain logs (0 escape
+  bytes), `require_intent=true require_ceremony_intent=false …`, cluster id `453bb4ae…`, the expected
+  `require_ceremony_intent is off` warning; `ceremony_intent_absent` 0, nothing staged or stale, `verify-key` ok (one
+  epoch, one `pkp_digest`). 15 min: sign errors 0, refusals 0, rate-limited 0, epoch skips 0. Monitoring re-applied:
+  `RutliCeremonyIntentRefused` and `RutliCeremonyIntentAbsent` added.
+- Phase 2 (T4 = 21:24:17Z): rc.3 jar kept as `rutli-driver.jar.rc3`, rc.4 jar `ea20dcba…f8c3` renamed into place,
+  `kubectl rollout restart` (Recreate; participant up in ≈ 20 s; Helm stays rev 8). `Loaded driver rutli (API v1) build
+  0.4.0-rc.4`, intents signed by `CN=driver`; signs `outcome=ok` with intents, no `intent=none`, no `sig-verify=failed`;
+  15 min: refusals 0, errors 0; `StateCheck` OK (34 029 / 34 002). The first staging helper pod (`sleep 3600`) had
+  exited before the swap; it was recreated and the staged jar re-verified (`sha256sum -c`) before the rename.
+- Phase 3 (21:44Z → 22:01Z): `require_ceremony_intent: true` → rev 13 (ConfigMap only); canary node 2 (5 min: errors 0)
+  → node 3 → node 1, all `require_ceremony_intent=true` with no "is off" warning. Positive: signs ok with intents,
+  `verify-key` ok. Negative (22:02Z): an intent-less `Signer/Dkg` for `frost-import-rc4-negative-test` sent to each node
+  as leader is refused `PermissionDenied … carries no ceremony intent and this node requires one`;
+  `rutli_ceremony_intent_refusals_total{reason="missing"}` = 1 per node, `ceremonies_staged` 0 — nothing created. (The
+  refusal counter is unprimed in rc.4, so `RutliCeremonyIntentRefused` may not have fired; primed from #56 on.)
+- Phase 4 (22:08Z): `audit-cross-check` strict — driver audit 34 075 entries, 34 049 signs (10 420 with intent and
+  digest); only the 2026-10-18 rollout-window no-intent lines (81/81/2, all before T2) plus one in-flight sign (the
+  newest audit entry, seen in 1 journal at copy time, in 2 journals a minute later): accepted.
+- Now: DKG and refresh need a client-signed ceremony intent on every node; refresh stays impossible until the CA
+  rotation. Rollback: `helm -n rutli rollback rutli 12` + restarts 1 → 2 → 0 (flag off), then 11 (image) / the
+  `.rc3` jar.
+
 ## Drill calendar
 
 | Week | Drill | Status |

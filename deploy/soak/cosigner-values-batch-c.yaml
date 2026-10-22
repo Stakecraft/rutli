@@ -18,3 +18,4 @@ signingPolicy:
   signer_acl_required: true
   signer_may_refresh: false
   require_epoch_match: true
+  require_ceremony_intent: true
