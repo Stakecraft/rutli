@@ -16,6 +16,15 @@ All notable changes to Rütli are documented here. Format loosely follows
   `rutli_delete_intent_refusals_total`, every `how` of `rutli_hosted_tombstones_written_total`, every
   `lock` of `rutli_lock_poison_recoveries_total` and every op/result of `rutli_hosted_key_ops_total`
   at 0. A test reads the call sites, so a new refusal reason that is not primed fails the build.
+- **`rutli_hosted_tombstones_written_total` no longer documents a `how="deleted"` it never
+  emitted.** The metric's doc comment listed `deleted|converted|recorded`; the daemon has only ever
+  emitted `converted` (a live copy replaced by a tombstone — by a delete this node executed, DeleteKey's
+  fan-out or a peer's PurgeKey, or by a peer's tombstone in anti-entropy) and `recorded` (a tombstone
+  for a key the node did not hold), as `docs/observability.md` and the `RutliHostedKeyDeleted`
+  annotation already said. The alert sums every `how`, so a delete fires it at delete time on every
+  node it reaches, once per node: a retried delete counts nothing. A test now pins the emitted values,
+  the primed list and the doc comment to each other, and one counts a delete, its retries, a
+  propagated tombstone and a recorded one on the nodes that write them.
 
 ## [0.4.0-rc.4] — 2026-10-22
 

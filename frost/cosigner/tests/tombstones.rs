@@ -229,6 +229,57 @@ async fn a_signed_delete_tombstones_the_key_on_every_node_and_retains_its_materi
     assert_eq!(again, (false, 3));
 }
 
+/// What `RutliHostedKeyDeleted` sees (`rutli_hosted_tombstones_written_total{how}`, any `how`): a
+/// delete this node executes — DeleteKey's fan-out and a peer's PurgeKey both land in
+/// `hosted_apply_tombstone(.., Enforce, ..)` — counts one `converted` at delete time; a retry, or a
+/// new intent for the tombstoned id, counts nothing; a peer's tombstone applied by anti-entropy
+/// counts `converted` on a node that still held the key and `recorded` where it was absent. Driven
+/// on the node directly: the per-thread recorder does not follow `Node::blocking`'s worker threads.
+#[tokio::test]
+async fn a_delete_counts_one_tombstone_per_node_and_a_retry_none() {
+    const WRITTEN: &str = "rutli_hosted_tombstones_written_total";
+    let c = cluster();
+    c.generate("rutli-sym-10").await;
+    let count = |node: usize, f: &dyn Fn(&Node)| {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || f(&c.nodes[node]));
+        let out = handle.render();
+        let value = |how: &str| {
+            let prefix = format!("{WRITTEN}{{how=\"{how}\"}} ");
+            out.lines().find_map(|l| l.strip_prefix(&prefix)).map_or(0, |v| v.parse::<u64>().unwrap())
+        };
+        (value("converted"), value("recorded"))
+    };
+
+    // The executing node: one `converted` for the delete, nothing for the retries.
+    let first = delete_intent(&c.ids, "operator", "rutli-sym-10");
+    let executed = count(0, &|n| {
+        assert_eq!(n.hosted_apply_tombstone("rutli-sym-10", &first, intent::Expiry::Enforce, None).unwrap(), TombstoneOutcome::Converted);
+        assert_eq!(n.hosted_apply_tombstone("rutli-sym-10", &first, intent::Expiry::Enforce, None).unwrap(), TombstoneOutcome::Already);
+        let retry = delete_intent(&c.ids, "operator", "rutli-sym-10");
+        assert_eq!(n.hosted_apply_tombstone("rutli-sym-10", &retry, intent::Expiry::Enforce, None).unwrap(), TombstoneOutcome::Already);
+    });
+    assert_eq!(executed, (1, 0));
+
+    // A peer that missed the delete still holds the key: anti-entropy converts it, once.
+    let t = c.nodes[0].hosted_tombstones().unwrap().pop().unwrap();
+    let propagated = intent::Expiry::Propagated { deleted_at_ms: t.deleted_at_ms };
+    let peer = count(1, &|n| {
+        assert_eq!(n.hosted_apply_tombstone("rutli-sym-10", &first, propagated, None).unwrap(), TombstoneOutcome::Converted);
+        assert_eq!(n.hosted_apply_tombstone("rutli-sym-10", &first, propagated, None).unwrap(), TombstoneOutcome::Already);
+    });
+    assert_eq!(peer, (1, 0));
+
+    // A node that never held the key records the tombstone, at delete time as by anti-entropy.
+    let absent = delete_intent(&c.ids, "operator", "rutli-sym-11");
+    let recorded = count(2, &|n| {
+        assert_eq!(n.hosted_apply_tombstone("rutli-sym-11", &absent, intent::Expiry::Enforce, None).unwrap(), TombstoneOutcome::Recorded);
+        assert_eq!(n.hosted_apply_tombstone("rutli-sym-11", &absent, intent::Expiry::Enforce, None).unwrap(), TombstoneOutcome::Already);
+    });
+    assert_eq!(recorded, (0, 1));
+}
+
 #[tokio::test]
 async fn unsigned_forged_or_unauthorized_deletes_are_refused_at_every_node() {
     let c = cluster();

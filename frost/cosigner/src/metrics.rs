@@ -83,8 +83,13 @@ pub const CEREMONY_INTENT_ABSENT: &str = "rutli_ceremony_intent_absent_total";
 /// on a peer's PurgeKey, and on a tombstone a peer propagated in anti-entropy. A forged or
 /// unauthorized tombstone shows up here.
 pub const DELETE_INTENT_REFUSALS: &str = "rutli_delete_intent_refusals_total";
-/// Counter, label `how` (deleted|converted|recorded): tombstones this node wrote — a delete it
-/// took part in, a live copy a peer's tombstone converted, a tombstone recorded for a key it lacked.
+/// Counter, label `how` (converted|recorded): tombstones this node wrote, once per node and delete
+/// (a repeated or retried delete of a tombstoned id writes nothing). `converted`: a live copy
+/// replaced by a tombstone — by a delete this node took part in (DeleteKey's fan-out, a peer's
+/// PurgeKey with the intent) or by a peer's tombstone in anti-entropy. `recorded`: a tombstone
+/// recorded for a key this node did not hold. Dropping the retained material after the grace
+/// period writes no tombstone and is not counted. The node that served the DeleteKey also counts
+/// it in `rutli_hosted_key_ops_total{op="delete"}`.
 pub const HOSTED_TOMBSTONES_WRITTEN: &str = "rutli_hosted_tombstones_written_total";
 /// Gauge: tombstones on this node (deleted hosted keys), and how many still retain material for
 /// undelete (`retained="true"`).
@@ -196,7 +201,7 @@ pub const DELETE_INTENT_REASONS: &[&str] = &[
     "stale",
 ];
 /// The `how` values `rutli_hosted_tombstones_written_total` is incremented with in `node.rs`
-/// (`RutliHostedKeyDeleted`). The help text also names `deleted`; no call site emits it.
+/// (`RutliHostedKeyDeleted`); a test checks the call sites and the doc comment against it.
 pub const TOMBSTONE_HOWS: &[&str] = &["converted", "recorded"];
 /// The `lock` names passed to `sync::recover` / `recover_reset` / `note` and the sign-session map
 /// recovery (`RutliLockPoisonRecovered`). `test_hook` (test-only hooks) is left out.
@@ -666,5 +671,30 @@ mod tests {
             }
         }
         assert!(direct > 0, "no direct LOCK_POISON_RECOVERIES increment found: the scan is stale");
+    }
+
+    /// `TOMBSTONE_HOWS` (what `prime()` starts at 0) is exactly the set of `how` values the
+    /// tombstone counter is incremented with, and the counter's doc comment names exactly those:
+    /// it once documented a `how="deleted"` that no call site emitted.
+    #[test]
+    fn tombstone_hows_match_the_call_sites_and_the_docs() {
+        let mut emitted = std::collections::BTreeSet::new();
+        for (file, src) in &crate_sources() {
+            for args in calls(src, "metrics::counter!") {
+                if args.first().is_some_and(|a| a.ends_with("HOSTED_TOMBSTONES_WRITTEN")) {
+                    let value = args.get(1).and_then(|a| a.split_once("=>")).map(|(_, v)| v.trim().to_owned());
+                    emitted.insert(literal(value.as_ref(), file).to_owned());
+                }
+            }
+        }
+        let listed: std::collections::BTreeSet<String> = TOMBSTONE_HOWS.iter().map(|h| (*h).to_owned()).collect();
+        assert_eq!(emitted, listed, "rutli_hosted_tombstones_written_total: call sites vs TOMBSTONE_HOWS");
+
+        let this = include_str!("metrics.rs");
+        let decl = this.find("pub const HOSTED_TOMBSTONES_WRITTEN").expect("the const is declared here");
+        let doc: Vec<&str> = this[..decl].lines().rev().take_while(|l| l.starts_with("///")).collect();
+        let first = doc.last().expect("the const has a doc comment");
+        let wanted = format!("label `how` ({})", TOMBSTONE_HOWS.join("|"));
+        assert!(first.contains(&wanted), "the HOSTED_TOMBSTONES_WRITTEN doc names other values than {wanted:?}: {first}");
     }
 }
