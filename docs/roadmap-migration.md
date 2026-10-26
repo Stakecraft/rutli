@@ -190,7 +190,7 @@ Soak (Track A) continues in the background and may preempt a day here and there.
 - Upstream `KmsDriverTest` encrypts with `JcePureCrypto` and calls `decryptAsymmetric` for every
   advertised algorithm, so advertising ECIES gives a JVM→driver differential test for free.
 - Validator on DevNet keeps 8 plaintext `pg_dumpall` copies on PVC plus AES-256-CBC copies in S3
-  `canton-k8s-validators-backup`. After a migration, every one of them still holds the whole
+  `<backup-bucket>`. After a migration, every one of them still holds the whole
   namespace key: purge, and say so in the runbook.
 
 **Reports behind the estimates:** deep-reasoner (read Canton source; A 7–11 d, B 7–10 d, spike
