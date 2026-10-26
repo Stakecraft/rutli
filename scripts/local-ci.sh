@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
 # Run the CI jobs of .github/workflows/ci.yml on a workstation (macOS or Linux), in the same order,
 # for when GitHub Actions is unavailable or before pushing. Stops at the first failing job.
 #

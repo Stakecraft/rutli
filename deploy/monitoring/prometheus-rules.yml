@@ -1,3 +1,5 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
 # Prometheus alerting rules for the Rütli FROST cosigner cluster.
 #
 # Rütli is a threshold-signing daemon: N cosigner instances (e.g. 3) jointly

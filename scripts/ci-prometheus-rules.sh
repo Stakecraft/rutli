@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
 # CI gate for the alert rules: `promtool check rules` on deploy/monitoring/prometheus-rules.yml (the
 # source of truth the compose/soak stacks load) and on the rule groups of the rendered
 # PrometheusRule (deploy/monitoring/k8s/prometheusrule.yaml), which must also be the current render

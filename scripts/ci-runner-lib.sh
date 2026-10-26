@@ -1,3 +1,5 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
 # Shared helpers for ci-runner-up.sh / ci-runner-down.sh. Source it; do not execute it.
 # See deploy/ci-runner/README.md for the trust model: the runner must only ever talk to the
 # docker daemon of the dedicated, host-mount-free Colima VM — never to Docker Desktop's.

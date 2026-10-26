@@ -1,3 +1,5 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
 # CI render (scripts/check-deploy-policy.sh): topology=perNode, hosted keys on with placeholder
 # pins, the backup sidecar on with per-node backup PVCs, an operator role.
 topology: perNode

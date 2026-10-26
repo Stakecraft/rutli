@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
 # End-to-end: ECIES hosted keys (roadmap Track C) on a real Canton 3.6.1 participant.
 #
 #   CANTON_HOME=~/.cache/canton-3.6.1/canton-open-source-3.6.1 scripts/e2e-ecies-hosted.sh

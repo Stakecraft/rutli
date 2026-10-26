@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
 # Regenerate the FROST gRPC Java stubs from the shared proto, checked into driver/src/main/java.
 #
 # We generate out-of-band with native protoc + protoc-gen-grpc-java (NOT the sbt-protoc/scalapb

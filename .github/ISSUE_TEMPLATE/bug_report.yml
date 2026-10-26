@@ -1,0 +1,57 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+name: Bug report
+description: Something does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security problems do not go here.** Use private vulnerability reporting (SECURITY.md).
+        Never paste key material, seal secrets, private keys, tokens or full configs with secrets.
+  - type: input
+    id: version
+    attributes:
+      label: Rütli version
+      description: Release tag or commit of the driver and of the cosigners (they can differ).
+      placeholder: driver 0.4.0-rc.4, cosigners 0.4.0-rc.4
+    validations:
+      required: true
+  - type: input
+    id: canton
+    attributes:
+      label: Canton / Splice version
+      placeholder: Canton 3.6.1, Splice 0.9.0
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Driver (Canton KMS driver jar)
+        - Cosigner (FROST cluster)
+        - Dealer / split ceremony
+        - Hosted keys
+        - Helm chart / Kubernetes manifests
+        - Documentation / runbook
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Topology (t-of-n, backend, delegate), the commands you ran, the relevant config with secrets removed.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Driver and cosigner logs around the failure. Redact anything secret.
+      render: text

@@ -1,3 +1,5 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
 # Started by scripts/ci-runner-up.sh. One runner, one job at a time.
 #
 # !! Run this ONLY against the isolated Colima VM's daemon (docker --context colima-rutli-ci ...),

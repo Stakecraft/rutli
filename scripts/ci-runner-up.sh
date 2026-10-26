@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
 # Start the self-hosted CI runner (deploy/ci-runner) inside an ISOLATED Colima VM.
 #
 # Why a dedicated VM: CI jobs control the docker daemon they are given, which is root on that

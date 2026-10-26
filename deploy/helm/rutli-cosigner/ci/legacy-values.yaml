@@ -1,3 +1,5 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
 # CI render: the deprecated legacy topology. scripts/check-deploy-policy.sh must REJECT it (shared
 # seal env var, every node's TLS Secret in one pod spec) — CI asserts that it does.
 topology: legacy

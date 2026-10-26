@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
 # Stop the isolated self-hosted CI runner started by scripts/ci-runner-up.sh.
 #
 #   scripts/ci-runner-down.sh              stop + remove the runner container (VM keeps running)
