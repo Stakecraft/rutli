@@ -1,15 +1,16 @@
 # Request for Quote: security audit of Rütli
 
-> **Template note (delete before sending).** This is one generic RFQ, sent unchanged to Least
-> Authority, Trail of Bits, NCC Group and Kudelski Security. Fill the `<PLACEHOLDERS>` and resolve
-> every `TODO(owner)` (questions only the maintainers can answer) before it goes out. Drafted
-> 2026-10-08; updated 2026-10-16 for the internal security review and `v0.4.0-rc.2` (tag commit
-> `80213a7`). Line counts below were measured on 2026-10-14 at `v0.4.0-rc.1` (commit `903d318`,
-> without B6) and must be re-measured at code freeze.
+> **Note.** Addressed to Cure53, the auditor we have selected. Drafted 2026-10-08 for a shortlist of
+> four firms; updated 2026-10-16 for the internal security review and on 2026-10-27 for
+> `v0.4.0-rc.4`, the choice of auditor and the funding-dependent start. Line counts below were
+> measured on 2026-10-14 at `v0.4.0-rc.1` (commit `903d318`, without B6) and will be re-measured at
+> code freeze.
 > Companion brief for the auditors: [audit-prep.md](audit-prep.md).
 
-**From:** Stakecraft, maintainers of Rütli. **Contact:** `<NAME>, <EMAIL>`
-**Reply requested by:** `<REPLY_BY_DATE>`. **Desired start:** 2026-11-17 (fixed date).
+**To:** Cure53. **From:** Stakecraft, maintainers of Rütli. **Contact:** Vasily Istomin (commercial)
+and Alex Novacovschi, CTO (technical), both at business@stakecraft.com.
+**Reply requested by:** 2026-11-07. **Start:** after our funding is confirmed, expected December
+2026 to January 2027; please give your earliest slots from mid-December and the notice you need.
 
 ## 1. Project summary
 
@@ -33,11 +34,11 @@ Before engaging you we ran an internal security audit: two independent reviews, 
 `v0.4.0-rc.1` (`903d318`), on 2026-10-16, followed by a review of the batch C design and code. It does
 not replace your review; it is why the surface you will see differs from rc.1, and where we most want
 a second pair of eyes. Finding ids carry the prefix `DS-`. The canonical list, with severity, impact
-and the fix for each, will live at [docs/security/internal-review-2026-10.md](security/internal-review-2026-10.md)
-(it lands with batch C; until then we can send it, see the pre-read question below).
+and the fix for each, is public at [docs/security/internal-review-2026-10.md](security/internal-review-2026-10.md).
 
 **What was found, and where it is fixed** (`rc.2` = `v0.4.0-rc.2`, tagged 2026-10-16; `C` = batch C,
-before the `v0.4.0` freeze):
+shipped in `v0.4.0-rc.3`, 2026-10-18; `v0.4.0-rc.4`, 2026-10-21, adds ceremony intents and the
+fence-timeout fix):
 
 | Id | Issue | Fixed in |
 |---|---|---|
@@ -96,20 +97,19 @@ keys are test material) and refresh is not run.
    the cosigner-side signing policy (intent format, signature binding, where approvals, journal and
    rate limit are enforced, and what a compromised driver or a single compromised cosigner can still
    do; DS-C2). Please quote these as separate line items if you can.
-3. **Pre-read:** tell us whether you want the internal findings list ahead of the engagement. We will
-   provide it under NDA, or in the evidence pack at engagement start, as you prefer.
+3. **Pre-read:** the internal findings list is public in the repository; read it ahead of the
+   engagement if that helps your estimate.
 
 ## 2. Scope (in)
 
 Repository state to review: tag `v0.4.0`, target ~2026-11-14, which is also our code freeze. The date
-now depends on batch C of the internal-review remediation (section 1.1, row j): if batch C is late,
-the freeze moves, and we will tell you before the engagement starts. Nothing else lands in the audited
-surface after the freeze except audit fixes. The release candidate `v0.4.0-rc.2` (tagged 2026-10-16)
-is the current pre-read: it contains the split ceremony (B2), the Canton key parser (B1), the ECIES
-hosted keys (Track C), the optional carry of protocol keys (B6, row h) and remediation batches A and B.
-The earlier `v0.4.0-rc.1` (2026-10-09) is superseded. Between rc.2 and `v0.4.0` we expect batch C
-(row j; a wire change, so rc.2 is **not** the wire format you will audit), the in-place migration
-procedure (row i), review fixes and documentation.
+depends on the in-place migration rehearsal (row i); if it slips we will tell you before the
+engagement starts. Nothing else lands in the audited surface after the freeze except audit fixes.
+The release candidate `v0.4.0-rc.4` (tagged 2026-10-21, commit `be49c46`) is the current pre-read: it
+contains the split ceremony (B2), the Canton key parser (B1), the ECIES hosted keys (Track C), the
+optional carry of protocol keys (B6, row h) and remediation batches A, B and C (row j, including its
+wire change), plus ceremony intents. Earlier release candidates are superseded. Between rc.4 and
+`v0.4.0` we expect the in-place migration procedure (row i), review fixes and documentation.
 
 | # | Component | Includes | Where |
 |---|---|---|---|
@@ -240,9 +240,9 @@ no forward secrecy; seal-secret protection is software, not HSM or enclave; one 
 
 | Item | Request |
 |---|---|
-| Start | **2026-11-17, fixed.** We will accept a later date only if stated up front; the project's 1.0 date moves with it. |
+| Start | **After our funding is confirmed**, expected December 2026 to January 2027. Give us your earliest slots from mid-December and the notice you need; the project's 1.0 date follows the audit. |
 | Duration | 2-3 weeks; tell us what you can cover in each. |
-| Code freeze | `v0.4.0`, target ~2026-11-14, which includes the split ceremony, the ECIES hosted keys, milestone B6 and remediation batch C (section 1.1). The date depends on batch C and may slip a few days; we will tell you early if it does, and give you the commit hash on the day. Only audit fixes land afterwards. |
+| Code freeze | `v0.4.0`, target ~2026-11-14, which includes the split ceremony, the ECIES hosted keys, milestone B6 and remediation batches A to C (section 1.1). We will give you the commit hash on the day; only audit fixes land afterwards. |
 | Our availability | One maintainer engineer, available during the engagement for questions. No feature work lands in the audited surface after the freeze. Walkthrough on request. |
 | Deliverables | Written report with findings and severity ratings; per-finding recommendations; executive summary suitable for publication. |
 | Verification of internal fixes | Verifying the internal-review fixes (rc.2 and batch C, section 1.1) is part of the engagement; please show it and the batch C re-review as separate line items. |
@@ -251,19 +251,19 @@ no forward secrecy; seal-secret protection is software, not HSM or enclave; one 
 
 ## 6. What we ask in your reply
 
-1. Earliest start date you can commit to, and whether 2026-11-17 is feasible.
+1. Your earliest start dates from mid-December 2026, and the notice you need once we confirm.
 2. Proposed duration and staffing (number of reviewers, seniority, person-weeks).
 3. Price, and whether fixed-fee or time-and-materials; payment terms and what changes the price.
 4. Your track record with threshold-signature, MPC or FROST audits (named reports, if public).
 5. Retest terms: scope, timing, cost.
 6. Publication terms: whether you publish, our ability to publish, embargo and redaction handling.
 7. The weight of the ECIES hosted keys (section 2.1), of milestone B6 and of the batch C re-review (section 1.1: DKG/refresh confidentiality, cosigner-side signing policy) as separate line items in your quote, if you can show them.
-8. Whether you want our internal security findings list as a pre-read, and on what terms (NDA, or the evidence pack at engagement start).
+8. Anything in the public internal findings list you want discussed before quoting.
 9. Any information you need from us before quoting (access, build instructions, a call).
 
 ## 7. Materials we provide
 
-- **Repository:** `https://github.com/Stakecraft/rutli` (public). Tag `v0.4.0-rc.2` (2026-10-16, commit `80213a7`) is the current pre-read; `v0.4.0-rc.1` (2026-10-09, commit `903d318`) is superseded. Tag `v0.4.0` will be cut at code freeze, after batch C.
+- **Repository:** `https://github.com/Stakecraft/rutli` (public). Tag `v0.4.0-rc.4` (2026-10-21, commit `be49c46`) is the current pre-read; earlier release candidates are superseded. Tag `v0.4.0` will be cut at code freeze.
 - **Design and operator docs** (relative to the repository root):
   - [README.md](../README.md), [SECURITY.md](../SECURITY.md), [CHANGELOG.md](../CHANGELOG.md)
   - [docs/audit-prep.md](audit-prep.md): engagement brief and evidence index
@@ -281,9 +281,9 @@ no forward secrecy; seal-secret protection is software, not HSM or enclave; one 
 - **Tests and CI:** `cd frost && cargo test && cargo clippy --all-targets -- -D warnings`;
   `sbt driver/test`; TLS compose smoke (`scripts/ci-frost-tls-smoke.sh`); the driver passes the
   upstream Canton KMS driver conformance suite.
-- **Internal security review:** the findings list `docs/security/internal-review-2026-10.md` (lands with batch C; two independent reviews on 2026-10-16 plus the batch C review) and the batch C design notes, under NDA or in the evidence pack, as you prefer (section 1.1).
+- **Internal security review:** the public findings list `docs/security/internal-review-2026-10.md` (two independent reviews on 2026-10-16 plus the batch C review) and [docs/security/threat-model.md](security/threat-model.md); the batch C design notes on request (section 1.1).
 - **Environment:** an evidence pack from our DevNet soak (3 cosigners backing a Splice DevNet
-  validator, on rc.2 since 2026-10-16): the soak log, the B0/B4 runbooks and their evidence (driver audit logs, hashes,
+  validator, on rc.4 since 2026-10-22): the soak log, the B0/B4 runbooks and their evidence (driver audit logs, hashes,
   timings), and dashboard exports; a live demo over video call on request. We do not grant access
   to the cluster itself (it is shared with other DevNet validators). The DevNet B4 cutover rehearsal
   (an existing JCE validator moved into the cluster with its namespace and party IDs unchanged) ran
@@ -299,7 +299,7 @@ no forward secrecy; seal-secret protection is software, not HSM or enclave; one 
 
 ## 8. Contact
 
-`<NAME>, <EMAIL>`
+Vasily Istomin (commercial) and Alex Novacovschi, CTO (technical): business@stakecraft.com
 
 Please send questions and the quote to the address above. Vulnerabilities found during the audit that
 you consider urgent can also go through the private channel in [SECURITY.md](../SECURITY.md).
