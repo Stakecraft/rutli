@@ -12,6 +12,20 @@ are attached to the GitHub release by the maintainer.
    regenerate and commit both `THIRD-PARTY-LICENSES.txt` files first.
 3. `CHANGELOG.md`: move `[Unreleased]` under the new version.
 
+## After the image is built: pin it by digest
+
+The tag commit still points the deploy files at the previous image. Once `publish-image.yml` has
+pushed the new one, read the multi-arch index digest
+(`docker buildx imagetools inspect ghcr.io/stakecraft/rutli-cosigner:<version>`) and pin
+`<version>@sha256:<index digest>` in one PR, in every place a default image lives:
+
+- `deploy/helm/rutli-cosigner/values.yaml` (`image.tag`) and its `README.md`;
+- `deploy/k8s/kustomization.yaml` (`newTag` + `digest`), `deploy/k8s/cosigner.yaml` (re-render with
+  `scripts/render-k8s.sh`), `deploy/k8s/cronjob-refresh.yaml`, `deploy/k8s/job-verify-key.example.yaml`;
+- `deploy/frost/docker-compose.yml`, `deploy/frost/docker-compose.tls.yml` and `deploy/frost/README.md`.
+
+`git grep` the previous version afterwards: no default should still name it.
+
 ## Release assets
 
 | Asset | Contents | License files |
