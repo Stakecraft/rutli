@@ -209,3 +209,8 @@ must pass; CI runs both on every PR.
 ## License
 
 [Apache-2.0](LICENSE). Not affiliated with or endorsed by Digital Asset.
+
+Third-party components bundled into the release artifacts are listed, with their licenses, in
+[driver/THIRD-PARTY-LICENSES.txt](driver/THIRD-PARTY-LICENSES.txt) (inside `rutli-driver.jar` under
+`META-INF/rutli/`) and [frost/THIRD-PARTY-LICENSES.txt](frost/THIRD-PARTY-LICENSES.txt) (in the
+cosigner image under `/usr/share/doc/rutli-cosigner/`, and next to the `rutli-dealer` release binary).

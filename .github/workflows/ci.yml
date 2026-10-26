@@ -56,6 +56,9 @@ jobs:
       - name: Assemble driver jar
         run: sbt -batch driver/assembly
 
+      - name: Third-party notices up to date (driver)
+        run: scripts/third-party-licenses.sh --check jvm
+
       - uses: actions/upload-artifact@v4
         # Convenience only — the tests above are the gate. An upload failure (e.g. the org's
         # artifact storage quota) must not turn a green test run red.
@@ -83,6 +86,22 @@ jobs:
       - name: Clippy
         working-directory: frost
         run: cargo clippy --all-targets -- -D warnings
+
+  licenses:
+    name: Dependency licenses (cargo-deny, notices)
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # Pinned: frost/THIRD-PARTY-LICENSES.txt is compared byte for byte with cargo-about's output.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny@0.20.2,cargo-about@0.9.3
+      - name: cargo deny (licenses, bans, sources)
+        working-directory: frost
+        run: cargo deny check licenses bans sources
+      - name: Third-party notices up to date (cosigner, dealer)
+        run: scripts/third-party-licenses.sh --check rust
 
   deploy-policy:
     name: Deploy manifests policy (Helm + kustomize)

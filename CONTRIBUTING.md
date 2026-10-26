@@ -88,6 +88,10 @@ CONFORMANCE=1 CANTON_AUTOMATIC_PROTOCOL_VERSION=1 sbt -batch driver/test
   attacker could do before and cannot do after.
 - **Compatibility stated.** Say whether the change needs every cosigner upgraded first, changes a
   wire format, a key-file format or a configuration default, and how to roll back.
+- **Third-party notices regenerated** when a dependency is added, removed or upgraded:
+  `scripts/third-party-licenses.sh` (needs `cargo-about`; CI checks it, and `cargo deny` rejects
+  copyleft licenses in the Rust workspace). Only permissive licenses are accepted for bundled code;
+  see `frost/deny.toml` and `scripts/third-party-licenses-jvm.py`.
 - **An SPDX header** on new source files, the same as the existing ones:
   ```
   // Copyright 2026 StakeCraft
