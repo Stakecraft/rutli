@@ -1,35 +1,150 @@
 # Security policy
 
-This project manages **authority key material for Canton Network / Splice nodes** — the highest-value
+Rütli manages **authority key material for Canton Network / Splice nodes**, the highest-value
 secret a node holds. Treat every change as security-critical.
 
 ## Status
 
-Pre-release, **unaudited**. The Phase 0 `SoftwareBackend` performs key operations in-process with
-software crypto and is for integration testing only. **Never place production namespace/identity,
-signing, or encryption keys behind the `SoftwareBackend`.** Production requires an HSM/enclave
-(Phase 1) or the FROST MPC cluster (Phase 2).
+- **Pre-1.0 and not yet externally audited.** The latest release is `0.4.0-rc.4`. An independent
+  third-party audit is being arranged for the `0.4.0` code freeze; its report will be published in
+  this repository.
+- **Internal security review, October 2026.** Two independent reviews of `0.4.0-rc.1`. Every
+  critical and high finding is fixed in `0.4.0-rc.2` and `0.4.0-rc.3`. The findings and their status
+  are in [docs/security/internal-review-2026-10.md](docs/security/internal-review-2026-10.md).
+- **Do not put production authority keys behind Rütli before the external audit is complete.**
+  The DevNet soak validator runs on it as test material.
+
+## Supported versions
+
+Until 1.0, only the latest release or release candidate receives security fixes. There are no
+backports; upgrade to the latest release.
+
+| Version | Supported |
+|---|---|
+| `0.4.0-rc.4` (latest) | Yes |
+| Anything older | No |
 
 ## Reporting a vulnerability
 
-Do **not** open a public issue for security reports. Use GitHub private vulnerability reporting:
+Do **not** open a public issue, pull request or discussion for a security problem. Use GitHub
+private vulnerability reporting:
 **[Security → Report a vulnerability](https://github.com/Stakecraft/rutli/security/advisories/new)**.
-Include a description, reproduction, and impact. We aim to acknowledge within 72 hours.
+
+Please include the affected version or commit, the component, a description, steps to reproduce
+and the impact you see.
+
+What to expect:
+
+- acknowledgement within 72 hours;
+- a first assessment (severity, affected versions) within 7 days;
+- a fix, a GitHub Security Advisory and, where it applies, a CVE. We coordinate the disclosure date
+  with you, by default no later than 90 days after the report;
+- credit in the advisory and the changelog, unless you prefer otherwise.
+
+There is no bug bounty at this time.
+
+## Scope
+
+**In scope:**
+
+- the Canton KMS driver (`driver/`): key routing, intent signing, approval gate, signing journal,
+  audit log;
+- the cosigner and dealer (`frost/`): DKG, signing, refresh, repair, nonce handling, hosted keys,
+  sealing, the split ceremony, and the mesh and client gRPC APIs;
+- the deployment artefacts (`deploy/helm`, `deploy/k8s`, `deploy/frost`) and the scripts that
+  generate certificates or seal material;
+- the runbooks, where following them as written leads to key exposure or loss.
+
+**Out of scope:**
+
+- the `software` backend: in-process keys for integration tests only, insecure by design;
+- the soak and CI infrastructure described in the docs (report problems there privately all the
+  same);
+- issues that need the attacker to already hold `t` shares, or to administer every cosigner's
+  trust domain (see the threat model);
+- Canton, Splice and third-party dependencies themselves. Report those upstream; tell us if Rütli
+  is affected.
+
+## Backends
+
+| Backend | Use | Notes |
+|---|---|---|
+| `frost` | The production path | Namespace and signing keys as FROST-ed25519 shares across a `t`-of-`n` cosigner cluster. Encryption and symmetric keys either cluster-hosted (`frost.delegate = "none"`) or in an HSM (`"hsm"`) |
+| `hsm` | Non-Ed25519 keys on a PKCS#11 token | Verified against SoftHSM only. Not in the planned audit scope |
+| `software` | Integration tests only | **Never** place namespace, signing or encryption keys behind it |
+
+## What the security properties assume
+
+The guarantees in [docs/security/threat-model.md](docs/security/threat-model.md) hold only for a
+cluster where:
+
+- every cosigner and the driver run the same release, upgraded **before** any DKG or refresh;
+- the enforcement switches are on, identically, on every node: `signing_policy.require_intent`,
+  `require_ceremony_intent`, `signer_acl_required`, `require_epoch_match`, with
+  `signer_may_refresh: false`. They default to off in this release so that a rolling upgrade keeps
+  working ([docs/approval-quorum.md](docs/approval-quorum.md), "Switching enforcement on");
+- key files are written in format v2 (`keyfile.write_version: 2`, `cluster_uuid` set), and
+  `accept_v1: false` once every file is v2;
+- the Helm `perNode` topology is used: per-node seal and TLS secrets, no `pods/exec` RBAC (CI
+  enforces this with `scripts/check-deploy-policy.sh`);
+- **no TLS-terminating service mesh** sits between cosigners. A terminating proxy sees every new
+  share;
+- for keys that matter, the cosigners sit in **separate trust domains** (clusters, cloud accounts
+  or operators). One Kubernetes cluster under one administration is one trust domain, and its
+  administrator holds every share.
+
+**Keys from earlier releases.** Every key generated by DKG, and every refresh, on `0.4.0-rc.2` or
+earlier sent round-2 packages through the coordinating node, which could reconstruct the key.
+Generate or split any key that matters on `0.4.0-rc.3` or later, on a uniformly upgraded cluster.
 
 ## Design invariants (must not be violated)
 
-- Private keys never leave the KMS boundary; the Canton process only ever sees public keys and
-  signatures (external key storage mode).
-- No key type is served by a weaker backend than its policy requires (routing is enforced, not
-  advisory).
-- FROST signing: fresh per-session nonce commitments, never reused; good CSPRNG; strict per-session
-  nonce state; canonical encoding of the group public key and `R` enforced at the boundary.
-- Threshold **decryption** is not attempted with bespoke crypto — encryption keys stay in an HSM.
-- Audit log entries are append-only and tamper-evident (hash-chained), fsynced write-ahead, and a
-  successful op that cannot be logged fails closed. (`audit-log-path`.)
+- Canton never sees a private key. The driver returns only public keys, signatures and plaintexts
+  of decryptions it was asked for (Canton's external key storage mode).
+- No node, operator or dealer ever holds a whole FROST key, except the offline dealer during a
+  split ceremony of an existing key. FROST shares cannot be exported.
+- DKG and refresh round-2 packages travel node to node; the coordinating node only relays
+  round-1 data.
+- FROST nonces: fresh per session, from a CSPRNG, burned durably before a signature share is
+  released, never reused across restarts. Canonical encodings of the group key and `R` are checked
+  at the boundary.
+- A cosigner releases a signature share only for the digest named in a client-signed intent it has
+  verified (with `require_intent` on), within its own rate limits and ACLs.
+- The driver accepts a group key only when at least two cosigners agree on it and none disagrees,
+  pins it, and verifies every signature (strict RFC 8032) against the pinned key before returning
+  it to Canton.
+- Keys at rest are sealed with AES-256-GCM under a per-node key. Key files in format v2 bind their
+  header (cluster, node, key id, kind, epoch) as associated data, so a file cannot be moved to
+  another node, key or epoch.
+- Threshold **decryption** is not attempted. Hosted encryption keys are whole keys, sealed and
+  replicated on each cosigner. They leave the cluster only through the offline
+  `rutli-cosigner export-key`, run by an operator with the node stopped; the export is
+  passphrase-protected (Argon2id) by default.
+- Audit log entries are append-only, hash-chained and fsynced before the operation returns. An
+  operation that cannot be logged fails closed (`audit-log-path`).
+
+Known residual risks are listed plainly at the end of the
+[threat model](docs/security/threat-model.md#residual-risks-stated-plainly).
 
 ## Scope reminder
 
-The Canton **namespace root key cannot be rotated**. There is no recovery from its loss beyond
-restore-from-backup, and no recovery from its compromise beyond node/SV offboarding. Backup, share
-refresh, and key-ceremony procedures are in scope precisely because the blast radius is total.
+The Canton **namespace root key cannot be rotated**. There is no recovery from its loss beyond a
+restore from backup, and no recovery from its compromise beyond offboarding the node or SV. Backup,
+share refresh, key ceremonies and migration are in scope precisely because the blast radius is
+total.
+
+## License and warranty
+
+Rütli is open source under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE) for
+attributions.
+
+- **No warranty.** The software is provided "AS IS", without warranties or conditions of any kind
+  (Apache-2.0, section 7). You are responsible for deciding whether it is fit to protect your keys.
+- **No liability.** No contributor is liable for damages arising from its use, including the loss
+  or compromise of keys or funds (Apache-2.0, section 8).
+- **Best-effort process.** The reporting process above is our commitment to handle reports
+  responsibly. It is not a service-level agreement.
+- **Contributions,** including security fixes, are accepted under the same license (Apache-2.0,
+  section 5).
+- **Not affiliated with Digital Asset.** Canton and the Canton KMS Driver API are projects of
+  Digital Asset and are used under their own licenses.
