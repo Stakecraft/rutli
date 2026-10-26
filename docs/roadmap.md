@@ -17,7 +17,7 @@ A validator reaches Rütli one of two ways. Which one depends on whether it exis
 | Namespace key | Born by DKG in the cluster | **Carried** in (non-rotatable), split offline |
 | Signing / encryption keys | Born in the cluster | Client's choice: rotate (default) or carry |
 | Has any key ever existed whole? | No | The namespace key: yes, on the old host and its backups |
-| Status | Working | 2b proven; 2a hypothesis |
+| Status | Working | 2b proven; 2a switch rehearsed (B8), cleanup pending |
 
 ### Flow 1: new validator on Rütli
 
@@ -54,9 +54,11 @@ Common to both variants:
 
 #### 2a: In place (same database, same participant UID)
 
-**Status: hypothesis, targeted for v0.4.0.** Needs a release candidate with B6 and the C2 fixes (rc.2) on the
-cosigners first: rc.1 cosigners refuse the B6 bundle format. Milestone B8 rehearses it on DevNet (planned for the week of
-2026-10-19). Not yet run. Decided 2026-10-15: 2a ships in v0.4.0, before the audit, so the auditors review it.
+**Status: switch rehearsed, targeted for v0.4.0.** Milestone B8 (DevNet, 2026-10-23..26, cosigners on `v0.4.0-rc.4`)
+**passed phases 0–4 and the 5.1 verification on 2026-10-26**: same UID, all three keys carried with their fingerprints,
+wallet down ≈ 20 min, operator and end-user balances unchanged, no re-onboard. Rotation, observation, SQL cleanup and
+destruction are pending. Runbook: [runbook-migration-inplace.md](runbook-migration-inplace.md). Decided 2026-10-15: 2a
+ships in v0.4.0, before the audit, so the auditors review it.
 
 *Mechanics.* Independently checked against the Canton 3.6.1 source by two reviewers (Opus and Codex), who agree:
 
@@ -131,10 +133,10 @@ Today 2b mints fresh signing and encryption keys. With B6 the same client choice
 | dApp data (non-DSO contracts) | Unchanged | Lost |
 | Wallet end-users | Unchanged | Must re-onboard in the UI |
 | Point of no return | None; two rollback boundaries (first rotation, SQL cleanup) | Removal of the old trust certificate |
-| Downtime | One restart cycle plus verification (**unproven**) | Wallet about 1 h |
+| Downtime | Wallet about 20 min (B8) | Wallet about 1 h |
 | DA documentation status | Not a DA-documented procedure | The documented shape (new participant) |
-| Maturity | Hypothesis; B8 pending | Proven twice (B0, B4) |
-| Choose when | Nodes with external parties, dApps or many users, **once B8 is green** | Simple validators, or clients who want the DA-documented shape |
+| Maturity | Switch rehearsed once (B8, phases 0–4 + 5.1); rotation and cleanup pending | Proven twice (B0, B4) |
+| Choose when | Nodes with external parties, dApps or many users | Simple validators, or clients who want the DA-documented shape |
 
 ### Keys across flows
 
@@ -165,7 +167,7 @@ namespace and signing keys are threshold keys; the encryption key is not.
 | B5 | Docs fix (stale "unsupported" claims, exposure caveat) | Done |
 | B6 | Optional carry of signing and ECIES keys | In review: PR #23 (Opus and Codex reviews addressed) |
 | B7 | 2b rehearsal with wallet end-users: verify re-onboarding keeps their parties and balances | New, proposed |
-| B8 | In-place rehearsal (2a), carry-first sequence, on a fresh scratch JCE validator on DevNet | Planned, week of 2026-10-19; gates v0.4.0 |
+| B8 | In-place rehearsal (2a), carry-first sequence, on a fresh scratch JCE validator on DevNet | Phases 0–4 + 5.1 **passed 2026-10-26**; rotation, observation, SQL cleanup, destruction pending. Runbook [runbook-migration-inplace.md](runbook-migration-inplace.md) |
 | C1 to C3 | ECIES hosted keys | Done; shipped in v0.4.0-rc.1. Codex review found two availability fixes, in PR #24 |
 | CA rotation | Pin plus runbook | In review: PR #19 |
 
