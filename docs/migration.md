@@ -6,6 +6,9 @@ Step 8 as unproven. The corrections are folded in below and listed in "Lessons f
 **Applies to:** Splice 0.9.x validators on Canton 3.6.x whose keys are held by Canton itself (JCE, keys in Postgres),
 moving into a Rütli cluster ≥ 0.4.0.
 **Audience:** the operator of the existing validator, and the operator of the Rütli cluster, if that is someone else.
+**This page is Flow 2b** (new participant UID, fresh database). To keep the same participant, database and UID and carry
+every key in place (Flow 2a, rehearsed as B8 on 2026-10-26), use [runbook-migration-inplace.md](runbook-migration-inplace.md);
+the choice between the two is in [roadmap.md](roadmap.md), "2a versus 2b".
 
 ---
 
@@ -322,7 +325,9 @@ The reverse mistake is worse, and nothing warns about it: never let a broad `aut
 
 ### Register them on the new participant
 
-Instead of Step 5.2, register each carried key by id with the usage it had, **minus namespace**. Canton adds proof-of-ownership
+Instead of Step 5.2, register each carried key by id with the usage it had, **minus namespace**. (This is for the new
+participant of 2b. In place, the existing public-key row must match exactly, so Splice's `signing` key is registered
+**with** its stored usage `All`: [runbook-migration-inplace.md](runbook-migration-inplace.md) 4.8.) Canton adds proof-of-ownership
 to every non-namespace key itself (`Signing.scala:943-947, 1336`), which the key needs to sign the OTK that lists it
 (`TopologyManager.scala:1315-1318`). Each must return the old fingerprint; otherwise STOP and roll back.
 
