@@ -1,6 +1,6 @@
 # Rütli roadmap
 
-**Status:** 2026-10-15. **Scope:** where Rütli stands, the two ways a Canton/Splice validator ends up on it, and the
+**Status:** 2026-10-15; audit timing updated 2026-10-27. **Scope:** where Rütli stands, the two ways a Canton/Splice validator ends up on it, and the
 path to 1.0. Facts are stated as established only where a rehearsal or a source check backs them; everything else
 is marked **unproven**. The detailed Track B record (migration spike, milestones, findings) is
 [roadmap-migration.md](roadmap-migration.md).
@@ -184,16 +184,17 @@ Track A (soak and hardening) continues on `stakecraft-devnet-rutli-01`; exit cri
 | ≈ 2026-11-14 | **v0.4.0 = audit code freeze:** Flow 1, Flow 2a (after B8), Flow 2b, B2, B6, ECIES, C2 fixes, CA rotation |
 | Later | Pre-rotate alternative for 2a (research), if B8 shows it is worth it |
 | Day v0.4.0 is tagged | Splice TestNet validator run starts; at least 4 weeks clean before 1.0 |
-| ≈ 2026-12-19 | **1.0**, only if an auditor starts ≈ 2026-11-17 |
+| Audit + ≈ 4 weeks | **1.0**: after the audit's fixes and retest, and at least 4 clean weeks on TestNet |
 
-- **The audit is the critical path.** The RFQ is ready (PR #22): scope includes ECIES and B6, `HsmBackend` is excluded,
-  and an evidence pack replaces live access. It goes to Least Authority, Trail of Bits, NCC Group and Kudelski. Every
-  week without a booking moves 1.0 by a week. See [audit-rfq.md](audit-rfq.md) and [audit-prep.md](audit-prep.md).
+- **The audit is the critical path.** Auditor: **Cure53** (chosen 2026-10-27). The RFQ
+  ([audit-rfq.md](audit-rfq.md), brief [audit-prep.md](audit-prep.md)) covers ECIES and B6, excludes `HsmBackend`, and
+  replaces live access with an evidence pack. The audit starts once its funding is confirmed, expected December 2026
+  to January 2027, so 1.0 follows in the first quarter of 2027 rather than in December.
 - **External deadline:** Splice's `splice-postgres` chart is unsupported after 2026-11-12 (PostgreSQL 14 end of life).
   This affects the soak validator's deployment and must be handled before then.
 
 ## Open decisions
 
-- Auditor choice and earliest start date; this sets the 1.0 date.
+- The audit's start date, which waits for funding; it sets the 1.0 date.
 - If B8 is not green by early November: ship v0.4.0 with 2a marked experimental, or slip the freeze.
 - Whether the pre-rotate alternative is worth pursuing after B8, or the carry-first path is enough.
