@@ -201,7 +201,7 @@ Then the soak-log entries "Planned event: cosigners to perNode TLS / to 0.4.0-rc
   It runs `verify-key`/`refresh` from the laptop (D9).
 - Canton console: the participant image, as in B0 1.3 (`linux/amd64` only, use `--platform linux/amd64` on arm64).
   Record `IMAGE_PARTICIPANT` from `kubectl -n $NS get deploy participant -o jsonpath='{.spec.template.spec.containers[0].image}'` after Phase 1.
-- `aws` CLI with read and `DeleteObjectVersion` on `canton-k8s-validators-backup` (5.4 L4). **The user provides it.**
+- `aws` CLI with read and `DeleteObjectVersion` on `<backup-bucket>` (5.4 L4). **The user provides it.**
 
 ### 0.7 Driver jar and dealer binary
 
@@ -253,7 +253,7 @@ B4 Hetzner volumes are bound to the chosen node's location.
 
 `$D/env-stakecraft-devnet-rutli-b4.sh` (sources the operator's NAAS `env.sh` for credentials, then overrides):
 ```sh
-source /Users/novy/novy/crypto/stakecraft/Canton/NAAS/k8s/deploy/env.sh
+source "$NAAS_DIR/k8s/deploy/env.sh"              # $NAAS_DIR: the operator's NAAS checkout
 export NAMESPACE="stakecraft-devnet-rutli-b4"
 export TENANT_ID="stakecraft-devnet-rutli-b4"
 export TARGET_NODE="<0.9>" TARGET_NODE_IP="<0.9 egress IP>"
@@ -262,7 +262,7 @@ export KMS_PROVIDER="none"                         # JCE: keys in Postgres
 export MIGRATION_ID="1"                            # DevNet migration id on 2026-10-07; confirm no DevNet migration since
 export VALIDATOR_PARTY_HINT="stakecraft-rutli-b4-1"
 export VALIDATOR_NODE_NAME="stakecraft-rutli-b4-1" # = hint (D1)
-export VALIDATOR_CONTACT="naas@stakecraft.com"
+export VALIDATOR_CONTACT="<validator-contact-email>"
 export SPONSOR_SV_URL="https://sv.sv-1.dev.global.canton.network.sync.global"
 export SCAN_URL="https://scan.sv-1.dev.global.canton.network.sync.global"
 export TOPUP_ENABLED="false"                       # true after the first tap (1.4)
@@ -273,13 +273,13 @@ export BACKUP_LOCAL_COPIES="8"                     # as on rutli-01: realistic L
 ### 1.2 Deploy
 
 ```sh
-cd /Users/novy/novy/crypto/stakecraft/Canton/NAAS/k8s/deploy
+cd "$NAAS_DIR/k8s/deploy"
 ./deploy.sh --env $D/env-stakecraft-devnet-rutli-b4.sh --skip-kms --setup-auth0 --dry-run    # review every printed command
 ./deploy.sh --env $D/env-stakecraft-devnet-rutli-b4.sh --skip-kms --setup-auth0              # [MUTATES]
 ```
 What it runs (from `deploy.sh`): `kubectl create namespace`; the NAAS chart `canton-validator` (secrets, DevNet
 onboarding Job → sponsor `POST /api/sv/v0/devnet/onboard/validator/prepare` (`sv-internal.yaml:530`), backup CronJob
-`0 */4 * * *` to PVC + S3 `canton-k8s-validators-backup/<ns>/`, ServiceMonitors); tenant Cilium policies
+`0 */4 * * *` to PVC + S3 `<backup-bucket>/<ns>/`, ServiceMonitors); tenant Cilium policies
 (`network-policies.yaml`); then Splice OCI charts `oci://ghcr.io/digital-asset/decentralized-canton-sync/helm/splice-{postgres,participant,validator}`
 `--version 0.9.0` with the generated values (`participant_1`, `cantonnet_validator`, `nodeIdentifier = validatorPartyHint`,
 4 Gi/8 Gi participant memory). `--setup-dns --setup-tls` add the wallet UI. They are optional: B4 drives the wallet over the API.
@@ -313,8 +313,8 @@ The rehearsal wants realistic backups: ≥ 6 local `pg_dumpall` copies and their
 (split-ceremony.md §3.2) into `$D/evidence/inventory-pre.md`:
 - **L3:** a `postgres:15-alpine` pod mounting PVC `canton-validator-canton-validator-naas-backup` **read-only**, outside `:00–:25`
   (B0 §2 step 2 shape): `ls -l --time-style=full-iso /backups/`.
-- **L4:** `aws s3api get-bucket-versioning --bucket canton-k8s-validators-backup`, `aws s3api get-object-lock-configuration --bucket …`,
-  `aws s3api get-bucket-lifecycle-configuration --bucket …`, `aws s3api list-object-versions --bucket canton-k8s-validators-backup --prefix stakecraft-devnet-rutli-b4/`.
+- **L4:** `aws s3api get-bucket-versioning --bucket <backup-bucket>`, `aws s3api get-object-lock-configuration --bucket …`,
+  `aws s3api get-bucket-lifecycle-configuration --bucket …`, `aws s3api list-object-versions --bucket <backup-bucket> --prefix stakecraft-devnet-rutli-b4/`.
   **Object lock on = STOP**: the copies cannot be deleted before retention ends. Decide whether B4 accepts that (record the date).
 - **L5:** `kubectl get volumesnapshot -A` (CRD absent = none). Hetzner Cloud has no volume snapshots, but check server backups
   for the node (Hetzner console).
@@ -576,7 +576,7 @@ Every row: the "before" listing, the action, the "after" listing, saved under `$
 | L1 | `participant_1.participant.common_crypto_private_keys` (3 plaintext rows) | `kubectl -n $NS exec postgres-0 -c postgres -- psql -U cnadmin -d postgres -c 'DROP DATABASE participant_1'` (the old participant can never run again after the PNR). Also `DROP DATABASE cantonnet_validator` (old validator store, no keys, hygiene) | before: row count `3\|3` (1.3); after: `select datname from pg_database` without `participant_1` |
 | L2 | WAL in `pg-data-postgres-0` | `SHOW archive_mode` (expect `off`), no replicas. `CHECKPOINT; SELECT pg_switch_wal();` ×3 so the segments recycle. The volume blocks remain until 5.6 deletes the volume | outputs |
 | L3 | backup PVC: every `pg_dumpall-*.sql.gz` (+ `.sha256`) with a timestamp ≤ the DROP (Phase 1 copies, 4.2's copy, every 4-hourly copy until the DROP) | one-off `postgres:15-alpine` pod mounting the PVC **read-write** outside `:00–:25`; `rm` the listed files. Then let the next scheduled run complete and check it with B0 §2 step 2's content check | before/after `ls`; new dump: no `participant_1`, `private_keys` rows 0 |
-| L4 | S3 `canton-k8s-validators-backup/stakecraft-devnet-rutli-b4/` (`pg_dumpall-*.sql.gz.enc`, `manifest-*.json`; AES-256-CBC under a passphrase, so still the key) | for every **version and delete marker** with `LastModified` ≤ the DROP: `aws s3api delete-object --bucket … --key <k> --version-id <v>` | `list-object-versions` before/after; versioning + lock state (1.5) |
+| L4 | S3 `<backup-bucket>/stakecraft-devnet-rutli-b4/` (`pg_dumpall-*.sql.gz.enc`, `manifest-*.json`; AES-256-CBC under a passphrase, so still the key) | for every **version and delete marker** with `LastModified` ≤ the DROP: `aws s3api delete-object --bucket … --key <k> --version-id <v>` | `list-object-versions` before/after; versioning + lock state (1.5) |
 | L5 | snapshots | none expected (1.5) | listings |
 | L6 | identities dumps | **none were made** (D8): no call to `/admin/participant/identities`. `dump-keyfree.json` has no keys (delete it as hygiene). `/domain-upgrade-dump` empty | `jq` check output (4.11); `ls` |
 | L7 | export file: laptop `$D/b4/namespace.export` + the transfer copy | `rm`; note "APFS/SSD, not provable erasure" | `ls` |
@@ -689,7 +689,7 @@ Others: the July CA key may be lost (operator role unrehearsed, 0.4); `deploy/k8
 3. **Dealer host**: live USB on spare hardware, or the no-network VM (0.8). Who witnesses Gate 0.
 4. **Release**: approve `v0.4.0-rc.1`, merge R1/R2/R4, run R3, tag R5 (auto mode cannot push or merge).
 5. **Auth0**: `--setup-auth0` (and optionally DNS/TLS for the wallet UI) for the scratch validator (1.2).
-6. **AWS**: credentials able to list and delete object versions under `canton-k8s-validators-backup/stakecraft-devnet-rutli-b4/`. Confirm object lock is off.
+6. **AWS**: credentials able to list and delete object versions under `<backup-bucket>/stakecraft-devnet-rutli-b4/`. Confirm object lock is off.
 7. **Observation window** before teardown: 24 h minimum, or ≥ 72 h as a live ECIES soak (5.1, 5.6).
 
 ---

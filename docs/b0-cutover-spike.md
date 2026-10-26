@@ -279,7 +279,7 @@ Scan before (allowlist), so any manual Scan call in §5 must run in-cluster.
    ```
    Expect `SHA-256` (record `BACKUP_SHA`), `Local backup: … (<size>)` (within ±10 % of the previous run),
    `S3 verification: OK`, `Backup Complete`. STOP on `ERROR`. Off-cluster copy:
-   `aws s3 ls s3://canton-k8s-validators-backup/stakecraft-devnet-rutli-01/pg_dumpall-<TS>.sql.gz.enc`.
+   `aws s3 ls s3://<backup-bucket>/stakecraft-devnet-rutli-01/pg_dumpall-<TS>.sql.gz.enc`.
 2. **[MUTATES: pod]** Content check. Mount the **backup** PVC read-only (never a cosigner volume) in a
    `postgres:15-alpine` Job. Run:
    ```sh

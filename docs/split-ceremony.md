@@ -98,7 +98,7 @@ missing from it survives the ceremony.
 | L1 | Live DB rows | `common_crypto_private_keys` in the participant database (`wrapper_key_id` NULL = plaintext) | |
 | L2 | WAL, WAL archive, streaming/logical replicas, PITR base backups | Postgres `pg_wal`, archive bucket, replicas | |
 | L3 | Logical dumps on cluster storage | the validator's backup PVC: **8 rotating `pg_dumpall` copies** (DevNet) | |
-| L4 | Object storage | S3 `canton-k8s-validators-backup` (AES-256-CBC copies): **every object version and delete marker**; check whether object lock / retention is on (it blocks deletion) | |
+| L4 | Object storage | S3 `<backup-bucket>` (AES-256-CBC copies): **every object version and delete marker**; check whether object lock / retention is on (it blocks deletion) | |
 | L5 | Provider snapshots | CSI / cloud volume snapshots of the Postgres and backup volumes | |
 | L6 | Identities dumps | Splice participant identities dumps (they contain the private keys) | |
 | L7 | Export files | `ExportKeyPair` / `keys.secret.download` outputs, wherever they were written or copied | |
