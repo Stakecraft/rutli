@@ -15,6 +15,8 @@ RUN cargo build --release -p rutli-cosigner --bin rutli-cosigner
 FROM debian:stable-slim
 RUN useradd -r -u 10001 rutli && mkdir /data && chown rutli /data
 COPY --from=build /src/target/release/rutli-cosigner /usr/local/bin/rutli-cosigner
+# Licenses of the Rust crates compiled into the binary (scripts/third-party-licenses.sh).
+COPY THIRD-PARTY-LICENSES.txt /usr/share/doc/rutli-cosigner/THIRD-PARTY-LICENSES.txt
 USER rutli
 VOLUME ["/data"]
 ENTRYPOINT ["rutli-cosigner"]
