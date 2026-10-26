@@ -97,7 +97,7 @@ Rütli. **Unverified** and more complex.
 
 *Rollback.* Two boundaries instead of one point of no return. Until the first rotation onto a Rütli-born key (RB1),
 switch the provider back to `jce` and restart: the JCE rows are untouched and the network still knows only the old
-keys. Between RB1 and the SQL cleanup (RB2), rolling back means rotating the OTK back to the carried keys first. After
+keys. Between RB1 and the SQL cleanup (RB2), fix forward: a JCE rollback would first need the OTK rotated back to the carried keys while still on KMS (possible, not rehearsed). After
 RB2, only a restore from backup. No step removes the participant from the network, unlike 2b's trust-certificate
 removal.
 

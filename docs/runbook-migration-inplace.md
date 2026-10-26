@@ -608,7 +608,8 @@ Console: reconnected by itself, three keys with `kms=None`, `p.health.ping(p)`. 
 job, lift the silence. The 4.8 metadata rows stay and are ignored by JCE; a retry re-registers idempotently. **Stray rows
 after a fingerprint mismatch** in 4.8: with the participant stopped, `delete from participant.common_kms_metadata_store where
 fingerprint = '<stray>'` and the same `key_id` in `common_crypto_public_keys`. If Splice minted a key into the OTK, RB1 is
-crossed: do not roll back to JCE.
+crossed: fix forward. (A JCE rollback would first need the OTK rotated back to the carried keys while still on
+KMS; possible, not rehearsed.)
 
 ---
 
