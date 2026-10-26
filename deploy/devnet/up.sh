@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
 # Phase 0 devnet launcher. Boots a Canton participant that delegates crypto to the rutli driver,
 # then runs the smoke-test bootstrap script.
 #

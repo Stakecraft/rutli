@@ -1,3 +1,5 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
 # Batch C settings for the LIVE DevNet soak (release rutli, namespace rutli), added phase by phase
 # by docs/runbook-rc3-soak-rollout.md. Pass it LAST:
 #   -f <exported values> -f deploy/soak/cosigner-values.yaml -f deploy/soak/cosigner-values-batch-c.yaml

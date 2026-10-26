@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
 # Build and push the multi-arch cosigner image from a workstation, the way
 # .github/workflows/publish-image.yml does (context frost/, frost/Dockerfile, linux/amd64 +
 # linux/arm64, tag = the semver of the git tag without the leading v). For when GitHub Actions is

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
 # Starts as root only to hand the mounted docker socket and the job work dir to the unprivileged
 # `runner` user, then registers once (the registration survives container restarts in the
 # container's own layer) and serves jobs as `runner` — like GitHub's hosted runners, so tests that

@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
 # Resolve the Canton KMS Driver API artifacts locally.
 #
 # The community artifacts `kms-driver-api` and `kms-driver-testing` are NOT on Maven Central. The

@@ -1,3 +1,5 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
 # CI render: the DevNet soak after docs/runbook-per-node-seal.md — reuses the legacy StatefulSet's
 # claims, script-type backup with per-node credentials and an egress rule.
 topology: perNode

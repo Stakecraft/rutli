@@ -1,0 +1,23 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+name: Feature request
+description: A capability Rütli does not have yet.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do as an operator or integrator, and what stops you today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Optional. For changes on the key path (FROST, nonces, sealing, intents, ceremonies), describe the security reasoning.
+  - type: textarea
+    id: context
+    attributes:
+      label: Environment and constraints
+      description: Network (DevNet/TestNet/MainNet), deployment (Kubernetes, Compose, bare metal), HSM or trust-domain requirements.

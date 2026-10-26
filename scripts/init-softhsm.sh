@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
 # Create a local SoftHSM token for exercising the HSM backend, and print the env exports the
 # integration test needs. Dev convenience only — SoftHSM is not a production HSM.
 #

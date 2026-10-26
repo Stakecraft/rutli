@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
 # CI smoke: bring up the mTLS + sealed-share cosigner cluster, run Health / DKG / Sign through
 # the allowlisted driver cert, and assert a plaintext client is refused at the handshake.
 #

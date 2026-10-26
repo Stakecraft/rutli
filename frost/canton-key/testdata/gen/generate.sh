@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
 # Regenerates frost/canton-key/testdata/vectors from a throwaway in-memory Canton participant.
 #
 #   CANTON_HOME=~/.cache/canton-3.6.1/canton-open-source-3.6.1 ./generate.sh
