@@ -7,10 +7,15 @@ signingPolicy:
     - {key_id_prefix: "frost-namespace", per_min: 10, per_day: 200}
     # measured 2026-10-18: busiest minute 42, busiest full day 2801 -> max(600, 420), max(100000, 28010)
     - {key_id_prefix: "frost-signing", per_min: 600, per_day: 100000}
+    # B8 in-place drill (2026-10-23). The signing key's id also starts with "b8-frost-import-": its rule goes first.
+    - {key_id_prefix: "b8-frost-import-sig-", per_min: 600, per_day: 100000} # B8 Splice signing key (All usage)
+    - {key_id_prefix: "b8-frost-import-", per_min: 10, per_day: 200} # B8 namespace key
+    - {key_id_prefix: "b8-", per_min: 600, per_day: 100000} # B8 DKG keys (optional rotation)
   signer_acl:
     driver:
       - frost-
       - rutli-
+      - b8-
   signer_pins:
     driver:
       - 1c20597ee5024fde51187233c56e8946d1e5fa8878b8c87941a598a508bd76fe
