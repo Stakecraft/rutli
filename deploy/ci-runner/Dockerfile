@@ -29,5 +29,9 @@ ENV LANG=C.UTF-8 LC_ALL=C.UTF-8
 # debug links stay small. Runner-only: GitHub-hosted runs are unaffected.
 ENV CARGO_BUILD_JOBS=4 CARGO_PROFILE_DEV_DEBUG=line-tables-only CARGO_PROFILE_TEST_DEBUG=line-tables-only
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod 0755 /entrypoint.sh
+# Refuses jobs that are not from this repository's own branches (fork PRs above all); see the
+# script and README.md, "Public repository".
+COPY job-started-guard.sh /usr/local/lib/rutli-ci/job-started-guard.sh
+RUN chmod 0755 /entrypoint.sh /usr/local/lib/rutli-ci/job-started-guard.sh
+ENV ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/lib/rutli-ci/job-started-guard.sh
 ENTRYPOINT ["/entrypoint.sh"]

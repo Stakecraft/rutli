@@ -32,14 +32,34 @@ What the VM still exposes:
   secrets that a job is given are visible to that job as on any runner.
 - **Whatever you put in the VM.** Do not copy credentials into it or add mounts.
 
-Consequences: use the runner **only for this private repo and trusted branches**. Never attach it
-to a public repository, and never to one that runs fork pull requests, because that would run
-arbitrary code with the access above.
+Consequences: use the runner only for this repository's own branches. While the repository is
+private that means trusted branches only; once it is public, the guard in "Public repository"
+below must be installed first, and fork pull requests never reach the runner.
 
 `scripts/ci-runner-up.sh` enforces the isolation rather than assuming it. It refuses to continue
 if the VM mounts anything other than the empty directory read-only, if the `colima-rutli-ci`
 docker context does not point at the profile's own socket, or if a probe container can see files
 under `$HOME`. It never falls back to the default Docker context.
+
+## Public repository
+
+Once the repository is public, anyone can open a pull request from a fork, and a fork PR runs the
+workflow file **from the PR**. It can therefore rewrite `runs-on` and target this runner's labels.
+Three layers keep fork code off the self-hosted runners:
+
+1. **Routing (`ci.yml`).** Jobs of a pull request whose head is not a branch of this repository run
+   on `ubuntu-latest`, whatever `vars.CI_RUNNER` says. Honest contributors get CI; it is not a
+   security boundary, since a fork PR can edit it.
+2. **Runner guard (the boundary).** [`job-started-guard.sh`](job-started-guard.sh) runs on the
+   runner before every job (`ACTIONS_RUNNER_HOOK_JOB_STARTED`) and fails any job that is not a
+   `push`, `schedule`, `workflow_dispatch` or `pull_request` from a branch of `Stakecraft/rutli`.
+   It fails closed. The Docker image here sets it; the KVM runners install it with
+   `30-runner-in-vm.sh`. A PR cannot change it.
+3. **Approval (repository setting).** Settings → Actions → General → "Fork pull request workflows
+   from outside collaborators": **Require approval for all external contributors**. Before
+   approving, read the PR's changes to `.github/` and `scripts/`.
+
+The runner itself must still be treated as running untrusted code from anyone with write access.
 
 ## Start
 
