@@ -13,12 +13,19 @@ env:
   CANTON_TAG: v3.6.1
   SBT_OPTS: "-Xmx4g -Xss8m"
 
-# Every job runs on `vars.CI_RUNNER` when that repository variable is set (e.g. `rutli-ci`, the
-# self-hosted runner in deploy/ci-runner), otherwise on GitHub's `ubuntu-latest`.
+# Least privilege for every job's GITHUB_TOKEN; nothing in CI writes to the repository.
+permissions:
+  contents: read
+
+# Every job runs on `vars.CI_RUNNER` when that repository variable is set (e.g. `rutli-ci-kvm`, the
+# self-hosted runner in deploy/ci-runner), otherwise on GitHub's `ubuntu-latest`. Pull requests
+# from forks always go to `ubuntu-latest`: the self-hosted runner only takes this repository's own
+# branches. A fork PR can rewrite this expression, so the runner enforces the same rule itself
+# (deploy/ci-runner/job-started-guard.sh) and fork PR workflows need a maintainer's approval.
 jobs:
   test:
     name: Unit tests + assembly
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -58,7 +65,7 @@ jobs:
 
   frost:
     name: FROST core (Rust)
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -77,7 +84,7 @@ jobs:
 
   deploy-policy:
     name: Deploy manifests policy (Helm + kustomize)
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
@@ -89,7 +96,7 @@ jobs:
 
   prometheus-rules:
     name: Alert rules (promtool)
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -105,7 +112,7 @@ jobs:
 
   frost-tls-smoke:
     name: FROST TLS cluster smoke
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
       - name: mTLS + sealed-share compose smoke (Health / DKG / Sign)
@@ -113,7 +120,7 @@ jobs:
 
   conformance:
     name: Canton conformance suite
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
     # Heavy (publishes a large slice of Canton locally) — run on schedule/manual, not per-PR.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
