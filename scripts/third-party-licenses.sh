@@ -42,8 +42,16 @@ if [[ "$what" == rust || "$what" == all ]]; then
 fi
 
 if [[ "$what" == jvm || "$what" == all ]]; then
-  (cd "$ROOT" && sbt -batch -error "export driver/Runtime/dependencyClasspath") | tail -n 1 >"$TMP/cp.txt"
-  grep -q '\.jar' "$TMP/cp.txt" || { echo "ERROR: could not read the driver classpath from sbt" >&2; exit 1; }
+  # The classpath is the one output line with jars on it. No colour codes (CI forces them on), and
+  # nothing else on stdout may be mistaken for it.
+  (cd "$ROOT" && sbt -batch -Dsbt.log.noformat=true -Dsbt.color=false \
+    "export driver/Runtime/dependencyClasspath") >"$TMP/sbt.out" 2>&1 || true
+  sed $'s/\x1b\\[[0-9;]*m//g' "$TMP/sbt.out" | grep '\.jar' | grep -v '^\[' | tail -n 1 >"$TMP/cp.txt" || true
+  if ! grep -q '\.jar' "$TMP/cp.txt"; then
+    tail -30 "$TMP/sbt.out" >&2
+    echo "ERROR: could not read the driver classpath from sbt (output above)" >&2
+    exit 1
+  fi
   python3 -I "$ROOT/scripts/third-party-licenses-jvm.py" "$TMP/cp.txt" "$TMP/jvm.txt"
   finish "$TMP/jvm.txt" "$ROOT/driver/THIRD-PARTY-LICENSES.txt"
 fi
