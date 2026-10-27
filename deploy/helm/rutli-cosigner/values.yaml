@@ -57,8 +57,8 @@ seal:
 
 image:
   repository: ghcr.io/stakecraft/rutli-cosigner
-  # Multi-arch index digest for v0.4.0-rc.4 (amd64 + arm64). Retag/retarget carefully.
-  tag: "0.4.0-rc.4@sha256:03485f479d3d662a8256dc46917a85a09aeed473bda85d34954b9f30c955dd63"
+  # Multi-arch index digest for v0.4.0-rc.5 (amd64 + arm64). Retag/retarget carefully.
+  tag: "0.4.0-rc.5@sha256:94b52f8254a19d26cae315f46f9fcb5da7140585af9f05b80a40e31ab535ed4e"
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []

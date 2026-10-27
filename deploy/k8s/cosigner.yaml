@@ -591,7 +591,7 @@ spec:
               app.kubernetes.io/instance: rutli
       containers:
         - name: cosigner
-          image: ghcr.io/stakecraft/rutli-cosigner:0.4.0-rc.4@sha256:03485f479d3d662a8256dc46917a85a09aeed473bda85d34954b9f30c955dd63
+          image: ghcr.io/stakecraft/rutli-cosigner:0.4.0-rc.5@sha256:94b52f8254a19d26cae315f46f9fcb5da7140585af9f05b80a40e31ab535ed4e
           imagePullPolicy: IfNotPresent
           args: ["--config", "/config/cosigner-1.json"]
           env:
@@ -638,7 +638,7 @@ spec:
         # Copies this node's SEALED key files to this node's destination. Data volume read-only; no
         # seal bundle, no TLS key, no API token: it never holds anything that opens a share.
         - name: backup
-          image: ghcr.io/stakecraft/rutli-cosigner:0.4.0-rc.4@sha256:03485f479d3d662a8256dc46917a85a09aeed473bda85d34954b9f30c955dd63
+          image: ghcr.io/stakecraft/rutli-cosigner:0.4.0-rc.5@sha256:94b52f8254a19d26cae315f46f9fcb5da7140585af9f05b80a40e31ab535ed4e
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "/destination/backup-loop.sh"]
           env:
@@ -773,7 +773,7 @@ spec:
               app.kubernetes.io/instance: rutli
       containers:
         - name: cosigner
-          image: ghcr.io/stakecraft/rutli-cosigner:0.4.0-rc.4@sha256:03485f479d3d662a8256dc46917a85a09aeed473bda85d34954b9f30c955dd63
+          image: ghcr.io/stakecraft/rutli-cosigner:0.4.0-rc.5@sha256:94b52f8254a19d26cae315f46f9fcb5da7140585af9f05b80a40e31ab535ed4e
           imagePullPolicy: IfNotPresent
           args: ["--config", "/config/cosigner-2.json"]
           env:
@@ -820,7 +820,7 @@ spec:
         # Copies this node's SEALED key files to this node's destination. Data volume read-only; no
         # seal bundle, no TLS key, no API token: it never holds anything that opens a share.
         - name: backup
-          image: ghcr.io/stakecraft/rutli-cosigner:0.4.0-rc.4@sha256:03485f479d3d662a8256dc46917a85a09aeed473bda85d34954b9f30c955dd63
+          image: ghcr.io/stakecraft/rutli-cosigner:0.4.0-rc.5@sha256:94b52f8254a19d26cae315f46f9fcb5da7140585af9f05b80a40e31ab535ed4e
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "/destination/backup-loop.sh"]
           env:
@@ -955,7 +955,7 @@ spec:
               app.kubernetes.io/instance: rutli
       containers:
         - name: cosigner
-          image: ghcr.io/stakecraft/rutli-cosigner:0.4.0-rc.4@sha256:03485f479d3d662a8256dc46917a85a09aeed473bda85d34954b9f30c955dd63
+          image: ghcr.io/stakecraft/rutli-cosigner:0.4.0-rc.5@sha256:94b52f8254a19d26cae315f46f9fcb5da7140585af9f05b80a40e31ab535ed4e
           imagePullPolicy: IfNotPresent
           args: ["--config", "/config/cosigner-3.json"]
           env:
@@ -1002,7 +1002,7 @@ spec:
         # Copies this node's SEALED key files to this node's destination. Data volume read-only; no
         # seal bundle, no TLS key, no API token: it never holds anything that opens a share.
         - name: backup
-          image: ghcr.io/stakecraft/rutli-cosigner:0.4.0-rc.4@sha256:03485f479d3d662a8256dc46917a85a09aeed473bda85d34954b9f30c955dd63
+          image: ghcr.io/stakecraft/rutli-cosigner:0.4.0-rc.5@sha256:94b52f8254a19d26cae315f46f9fcb5da7140585af9f05b80a40e31ab535ed4e
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "/destination/backup-loop.sh"]
           env:
