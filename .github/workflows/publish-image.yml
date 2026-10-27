@@ -5,12 +5,9 @@ name: Publish cosigner image
 on:
   push:
     tags: ["v*"]
+  # Manual re-run of a release tag only: pick a `v*` tag as the ref. The job refuses any other ref,
+  # so a manual run can never push an arbitrary image tag from a branch.
   workflow_dispatch:
-    inputs:
-      tag:
-        description: "Image tag (default: git tag or latest)"
-        required: false
-        default: ""
 
 env:
   REGISTRY: ghcr.io
@@ -23,6 +20,12 @@ jobs:
       contents: read
       packages: write
     steps:
+      - name: Require a release tag ref
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          echo "::error::This workflow publishes only from a v* tag ref (got ${GITHUB_REF}). Run it on a release tag."
+          exit 1
+
       - uses: actions/checkout@v4
 
       # GitHub-hosted only: the self-hosted runner VM emulates amd64 with Rosetta, and installing
@@ -50,7 +53,6 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
-            type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
 
       - name: Build and push
         uses: docker/build-push-action@v6

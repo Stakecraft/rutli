@@ -1,8 +1,9 @@
 # Copyright 2026 StakeCraft
 # SPDX-License-Identifier: Apache-2.0
 #
-# cargo-deny policy for the Rust workspace. CI runs `cargo deny check licenses bans sources`
-# (advisories are not gated yet). about.toml must accept the same licenses.
+# cargo-deny policy for the Rust workspace. CI runs `cargo deny check advisories licenses bans sources`;
+# a RustSec vulnerability, unsound or unmaintained advisory in the lockfile fails the build.
+# about.toml must accept the same licenses.
 
 [graph]
 # Every target a release is built for: the cosigner image (Linux, amd64 and arm64) and the dealer
@@ -12,6 +13,19 @@ targets = [
   "aarch64-unknown-linux-gnu",
   "aarch64-apple-darwin",
   "x86_64-apple-darwin",
+]
+
+[advisories]
+# Vulnerabilities, unsound and unmaintained advisories all fail the build (cargo-deny 0.20: the
+# `unmaintained` scope covers the whole dependency graph, `unsound` likewise). Yanked crates only warn.
+unmaintained = "all"
+unsound = "all"
+yanked = "warn"
+ignore = [
+  # Unmaintained, no patched release exists. Used only to read PEM files: directly by the cosigner
+  # (loading its own TLS material at start-up) and by tonic's TLS config. No known vulnerability; the
+  # fix is a migration to rustls-pki-types' PemObject, tracked with the tonic upgrade.
+  { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile unmaintained; PEM parsing only, migrate to rustls-pki-types with the tonic upgrade" },
 ]
 
 [licenses]

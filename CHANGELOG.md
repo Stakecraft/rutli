@@ -15,6 +15,11 @@ All notable changes to Rütli are documented here. Format loosely follows
   constraints. The one advisory that applies as written is the TLS 1.3 handshake accepting messages
   across an encryption-level boundary (GHSA-2mjx-qc3c-rqvc) on the mutually authenticated
   cosigner-to-cosigner and client-to-cosigner links. The driver (Java) is not affected.
+- **CI supply chain.** The `dpm` download in the conformance job is pinned to an exact release
+  and verified against a sha256 before it is extracted, and is installed into the user's
+  `~/.local/bin` without `sudo`. The cosigner image workflow no longer accepts a free-form tag from
+  a manual run: it publishes only from a `v*` tag ref. `cargo deny` now also gates RustSec
+  advisories in CI (`advisories`), not just licenses, bans and sources.
 
 ## [0.4.0-rc.5] — 2026-10-27
 
