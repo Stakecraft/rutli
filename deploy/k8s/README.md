@@ -250,7 +250,7 @@ and mounts the same volume read-only. A CSI volume snapshot is fine (storage lay
 
 ## Notes / hardening
 
-- The image is pinned by tag and digest in `kustomization.yaml` (currently `0.4.0-rc.4`). To use your own build, pin it by digest:
+- The image is pinned by tag and digest in `kustomization.yaml` (currently `0.4.0-rc.5`). To use your own build, pin it by digest:
   `kustomize edit set image ghcr.io/stakecraft/rutli-cosigner@sha256:…`
 - Required pod anti-affinity + zone topology spread are in every node's StatefulSet (on the shared
   labels, so they apply across nodes).
