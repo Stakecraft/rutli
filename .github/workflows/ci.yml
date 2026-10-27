@@ -97,9 +97,9 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny@0.20.2,cargo-about@0.9.3
-      - name: cargo deny (licenses, bans, sources)
+      - name: cargo deny (advisories, licenses, bans, sources)
         working-directory: frost
-        run: cargo deny check licenses bans sources
+        run: cargo deny check advisories licenses bans sources
       - name: Third-party notices up to date (cosigner, dealer)
         run: scripts/third-party-licenses.sh --check rust
 
@@ -162,13 +162,26 @@ jobs:
           path: ~/.ivy2/local/com.daml
           key: canton-full-${{ runner.os }}-${{ runner.arch }}-${{ env.CANTON_TAG }}-v1
 
+      # dpm is pinned by version and sha256 and installed without sudo. To bump: set DPM_VERSION to the
+      # new release tag, then DPM_SHA256 to the linux-amd64 line of that release's
+      # dpm-<version>-checksums.txt and confirm it against `shasum -a 256` of the downloaded tarball.
+      # (The value below was cross-checked against the release's checksums file.)
       - name: Install dpm
         if: steps.canton-cache.outputs.cache-hit != 'true'
+        env:
+          DPM_VERSION: "1.0.22"
+          DPM_SHA256: ebfdb2072e62e4b094f4cc1f9b221a5a6fd536644d88799da8e13bf936e088ff
         run: |
-          VER=$(curl -s https://api.github.com/repos/digital-asset/dpm/releases/latest | jq -r .tag_name)
-          curl -sL "https://github.com/digital-asset/dpm/releases/download/${VER}/dpm-${VER}-linux-amd64.tar.gz" | tar xz
-          sudo install -m 0755 dpm /usr/local/bin/dpm
-          dpm --version
+          set -euo pipefail
+          tarball="dpm-${DPM_VERSION}-linux-amd64.tar.gz"
+          tmp="$(mktemp -d)"
+          curl -fsSL -o "${tmp}/${tarball}" "https://github.com/digital-asset/dpm/releases/download/${DPM_VERSION}/${tarball}"
+          echo "${DPM_SHA256}  ${tmp}/${tarball}" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf "${tmp}/${tarball}" -C "${tmp}" dpm
+          install -m 0755 "${tmp}/dpm" "$HOME/.local/bin/dpm"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/dpm" --version
 
       - name: Publish Canton module closure locally
         if: steps.canton-cache.outputs.cache-hit != 'true'
