@@ -5,6 +5,17 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Security
+
+- **rustls 0.23.37 → 0.23.46 and rustls-webpki 0.103.10 → 0.103.16** in the cosigner and dealer,
+  closing GHSA-2mjx-qc3c-rqvc, GHSA-c8m5-c952-6cm4, GHSA-h2v8-394m-p7vv, GHSA-w44r-93j7-qv28 (rustls)
+  and GHSA-82j2-j2ch-gfr8, GHSA-xgp8-3hg3-c2mh, GHSA-965h-392x-2mh5 (webpki). Exposure in Rütli is
+  low: the cosigners configure no CRLs (the high-severity webpki panic is on CRL parsing), have no
+  certificate compression, never `Debug`-format a TLS session, and their private CA carries no name
+  constraints. The one advisory that applies as written is the TLS 1.3 handshake accepting messages
+  across an encryption-level boundary (GHSA-2mjx-qc3c-rqvc) on the mutually authenticated
+  cosigner-to-cosigner and client-to-cosigner links. The driver (Java) is not affected.
+
 ## [0.4.0-rc.5] — 2026-10-27
 
 _Release candidate, pre-audit: for soak and review, not for production key custody. No wire or config change: the cosigner image and the driver jar can be upgraded in either order, one node at a time._

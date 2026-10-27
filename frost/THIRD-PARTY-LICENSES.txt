@@ -3899,7 +3899,7 @@ Used by:
   - ring 0.17.14
   - rusticata-macros 4.1.0
   - rustls-pemfile 2.2.0
-  - rustls 0.23.37
+  - rustls 0.23.46
   - scopeguard 1.2.0
   - signal-hook-registry 1.4.8
   - smallvec 1.15.2
@@ -6568,7 +6568,7 @@ CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ================================================================================
 ISC License (ISC)
 Used by:
-  - rustls-webpki 0.103.10
+  - rustls-webpki 0.103.16
 --------------------------------------------------------------------------------
 Except as otherwise noted, this project is licensed under the following
 (ISC-style) terms:
