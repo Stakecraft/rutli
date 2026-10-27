@@ -8,9 +8,14 @@ are attached to the GitHub release by the maintainer.
 
 1. Versions bumped consistently: `build.sbt` (`ThisBuild / version`), `frost/Cargo.toml`
    (`workspace.package.version`), the Helm chart.
-2. `scripts/third-party-licenses.sh --check` passes (CI runs it). After any dependency change,
+2. `scripts/third-party-licenses.sh --check` passes (CI runs it). After any dependency change, and
+   after every version bump (the Rust notices list the workspace's own crates with their version),
    regenerate and commit both `THIRD-PARTY-LICENSES.txt` files first.
 3. `CHANGELOG.md`: move `[Unreleased]` under the new version.
+4. "Latest release" references name the new version: `SECURITY.md` (status and supported-versions
+   table) and the version placeholder in `.github/ISSUE_TEMPLATE/bug_report.yml`.
+5. Tag only after the release PR is merged, and tag the merge commit by its SHA
+   (`git tag -a v<version> -m v<version> <sha>`), never a branch head that still carries the old versions.
 
 ## After the image is built: pin it by digest
 

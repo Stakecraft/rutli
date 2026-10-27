@@ -5,6 +5,14 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.4.0-rc.5] — 2026-10-27
+
+_Release candidate, pre-audit: for soak and review, not for production key custody. No wire or config change: the cosigner image and the driver jar can be upgraded in either order, one node at a time._
+
+Builds on 0.4.0-rc.4. Alert counters primed so the first refusal fires its alert, third-party license
+notices in every artifact, the in-place migration runbook (`docs/runbook-migration-inplace.md`), and the
+repository's public release (Apache-2.0, DCO, fork pull requests kept off the self-hosted runners).
+
 ### Added
 
 - **Third-party license notices in every release artifact.** `rutli-driver.jar` used to discard
@@ -1478,6 +1486,7 @@ not audited. Do not place production authority keys behind it.
 - HSM backend validated only against SoftHSM.
 - No third-party security audit.
 
+[0.4.0-rc.5]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.5
 [0.4.0-rc.4]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.4
 [0.4.0-rc.3]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.3
 [0.4.0-rc.2]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.2
