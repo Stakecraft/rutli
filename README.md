@@ -66,8 +66,8 @@ Behind the driver, a swappable backend routes each key to the right protection:
 | Canton key | Backend | Isolation |
 |---|---|---|
 | **Namespace / identity** (Ed25519) | **FROST MPC cluster** | `t`-of-`n`, one share per host/account/region |
-| Protocol / sequencer (ECDSA) | HSM (or threshold ECDSA) | PKCS#11 hardware |
-| Encryption (RSA-OAEP) · symmetric (AES) | **cluster-hosted** (or HSM) | sealed whole key per node — *not* threshold |
+| Protocol signing / sequencer auth (Ed25519) | **FROST MPC cluster** (or HSM) | `t`-of-`n`, like the namespace key |
+| Encryption (ECIES P-256; RSA-OAEP also supported) · symmetric (AES) | **cluster-hosted** (or HSM) | sealed whole key per node — *not* threshold |
 
 **What "cluster-hosted" means, precisely.** Canton's encryption and symmetric keys can now live in
 the cluster too, so a participant needs **no HSM and no local key state**. But these are *replicated
@@ -78,8 +78,7 @@ The security tier matches the recoverability tier: the one key Canton *cannot* r
 key) stays in real 2-of-3 MPC; the keys that get only replication are exactly the ones Canton *can*
 rotate under it. And the cost, stated plainly: an attacker who extracts one encryption key gains
 **retrospective** read access to any recorded traffic encrypted to it — rotation fixes the future,
-not the past. Threshold RSA is permanently out of scope; the reasoning, and the ECIES roadmap that
-*is* thresholdable, are in [docs/hosted-keys.md](docs/hosted-keys.md).
+not the past. Threshold RSA is permanently out of scope; the reasoning, and the roadmap to threshold ECIES, are in [docs/hosted-keys.md](docs/hosted-keys.md).
 
 ## Features
 
