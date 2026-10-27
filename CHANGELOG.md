@@ -20,6 +20,9 @@ All notable changes to Rütli are documented here. Format loosely follows
   `~/.local/bin` without `sudo`. The cosigner image workflow no longer accepts a free-form tag from
   a manual run: it publishes only from a `v*` tag ref. `cargo deny` now also gates RustSec
   advisories in CI (`advisories`), not just licenses, bans and sources.
+- **h2 0.4.15 → 0.4.20** (RUSTSEC-2026-0258, unbounded queueing of empty DATA frames, low severity)
+  and **tokio 1.52.3 → 1.54.1** (RUSTSEC-2026-0386, unsound `AsyncFd` constructors; Rütli does not use
+  `AsyncFd`), found by the new `cargo deny` advisories gate. Lockfile-only change.
 
 ## [0.4.0-rc.5] — 2026-10-27
 
