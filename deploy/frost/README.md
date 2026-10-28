@@ -72,6 +72,12 @@ Example TLS configs are in `config-tls/` (mount `certs/` at `/certs`). The drive
 `frost.tls { ca-cert, cert, key, domain }` in its Canton config, pointing at the CA + `driver.{crt,key}`.
 With TLS on, a plaintext client is refused at the handshake.
 
+The example configs opt out of ceremony intents (`"signing_policy": { "require_ceremony_intent": false }`)
+so that a hand-run `grpcurl … Signer/Dkg` (and the CI smoke test) can start a DKG: grpcurl cannot sign
+the client ceremony intent every cosigner requires by default from 0.4.0-rc.6. Remove the opt-out for
+anything driven by the Rütli driver (0.4.0-rc.4 or later signs its DKGs) — see
+[approval-quorum.md](../../docs/approval-quorum.md).
+
 ### On Linux: cert ownership
 
 The cosigner containers run as **uid 10001**, and a bind-mounted directory keeps its host

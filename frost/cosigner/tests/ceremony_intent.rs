@@ -320,7 +320,7 @@ fn rig_with_fence_timeout(policy: impl Fn(u16) -> SigningPolicyConfig, fence_tim
 }
 
 fn enforcing() -> SigningPolicyConfig {
-    SigningPolicyConfig { require_ceremony_intent: true, signer_may_refresh: false, ..Default::default() }
+    SigningPolicyConfig { require_ceremony_intent: Some(true), signer_may_refresh: false, ..Default::default() }
 }
 
 impl Rig {
@@ -570,7 +570,7 @@ async fn only_the_refresher_role_refreshes_unless_signer_may_refresh() {
         group
     );
     // With signer_may_refresh, the driver may.
-    let lenient_role = rig(|_| SigningPolicyConfig { require_ceremony_intent: true, ..Default::default() });
+    let lenient_role = rig(|_| SigningPolicyConfig { require_ceremony_intent: Some(true), ..Default::default() });
     let group = run_dkg_with_intent(&lenient_role.peers, KEY, Some(lenient_role.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)))
         .await
         .unwrap();
@@ -634,11 +634,12 @@ async fn a_pinned_out_key_is_refused_at_every_node() {
     }
 }
 
-/// Verify-if-present (`require_ceremony_intent` off, this release's default): a ceremony without an
-/// intent is accepted and counted; a present one is verified in full and refused if invalid.
+/// Verify-if-present (`require_ceremony_intent: false`, the explicit opt-out; the default before
+/// 0.4.0-rc.6): a ceremony without an intent is accepted and counted; a present one is verified in
+/// full and refused if invalid.
 #[tokio::test]
 async fn without_enforcement_an_absent_intent_is_counted_and_a_present_one_verified() {
-    let r = rig(|_| SigningPolicyConfig::default());
+    let r = rig(|_| SigningPolicyConfig { require_ceremony_intent: Some(false), ..Default::default() });
     let group = run_dkg(&r.peers, KEY).await.unwrap();
     assert_eq!(run_refresh(&r.peers, KEY).await.unwrap(), group);
     // A present but invalid intent is refused by every node.
@@ -740,7 +741,7 @@ async fn under_ceremony_intents_part1_needs_the_leaders_fence() {
     // The intent was not spent: its leader runs it.
     assert_eq!(run_refresh_with_intent(&r.led_by(0), KEY, Some(x)).await.unwrap(), group);
     // Without enforcement a part 1 may still open its own guard (bound to its caller), as before.
-    let lenient = rig(|_| SigningPolicyConfig { require_ceremony_intent: false, ..Default::default() });
+    let lenient = rig(|_| SigningPolicyConfig { require_ceremony_intent: Some(false), ..Default::default() });
     lenient.nodes[1].ceremony_part1("dkg-unfenced", KEY, CeremonyKind::Dkg, &[1, 2, 3], None).unwrap();
 }
 

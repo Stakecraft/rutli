@@ -727,7 +727,10 @@ async fn main() -> Result<()> {
     // approvals, the per-key sign rate limit, and the durable sign journal every released share is
     // written to first.
     let sign_guard = {
-        let policy = &cfg.signing_policy;
+        // `require_ceremony_intent` settled for this node: unset = on with TLS, off without.
+        let mut policy = cfg.signing_policy.clone();
+        policy.require_ceremony_intent = Some(policy.ceremony_intent_required(cfg.tls.is_some()));
+        let policy = &policy;
         let ca_pem = match &cfg.tls {
             Some(t) => std::fs::read(&t.ca_cert)?,
             None => Vec::new(),
@@ -784,7 +787,7 @@ async fn main() -> Result<()> {
         )?;
         tracing::info!(
             require_intent = policy.require_intent,
-            require_ceremony_intent = policy.require_ceremony_intent,
+            require_ceremony_intent = policy.ceremony_intent_required(cfg.tls.is_some()),
             signer_acl_required = policy.signer_acl_required,
             signer_may_refresh = policy.signer_may_refresh,
             acl_entries = policy.signer_acl.len(),
@@ -803,12 +806,13 @@ async fn main() -> Result<()> {
                  every cosigner and the driver run this release (docs/approval-quorum.md)"
             );
         }
-        if !policy.require_ceremony_intent {
+        if !policy.ceremony_intent_required(cfg.tls.is_some()) {
             tracing::warn!(
                 "signing_policy.require_ceremony_intent is off: a DKG or refresh without a client-signed \
                  ceremony intent is accepted (counted in rutli_ceremony_intent_absent_total), so a \
-                 compromised cosigner can start one on this node — turn it on, on every node, once the \
-                 driver and the refresh job run this release (docs/approval-quorum.md)"
+                 compromised cosigner can start one on this node — remove the opt-out, on every node, once \
+                 the driver (0.4.0-rc.4 or later) and the refresh job sign ceremony intents \
+                 (docs/approval-quorum.md)"
             );
         }
         if policy.signer_may_refresh {

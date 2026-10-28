@@ -124,14 +124,16 @@ refreshAllowlist: []
 
 # Cosigner-side signing policy (audit C2), written into every node's config as `signing_policy`
 # verbatim — snake_case keys exactly as docs/approval-quorum.md documents them. Empty = defaults:
-# signing intents verified when present but not required, no ACLs or pins, 300/min and 20000/day
-# per key, journal kept 90 days / 64 MiB per key. Switch enforcement on (require_intent,
-# require_ceremony_intent, signer_acl_required, signer_may_refresh: false) only after every cosigner
-# AND the driver (and, for require_ceremony_intent, the refresh CronJob's image) run this release.
+# DKG/refresh ceremony intents REQUIRED (since 0.4.0-rc.6), signing intents verified when present but
+# not required, no ACLs or pins, 300/min and 20000/day per key, journal kept 90 days / 64 MiB per key.
+# Ceremony intents need the driver on 0.4.0-rc.4 or later and the refresh CronJob's image on the
+# cosigners' release; until then opt out with `require_ceremony_intent: false` (the cosigners warn
+# at startup) and remove it once both sign them. Switch the other enforcement on (require_intent,
+# signer_acl_required, signer_may_refresh: false) only after every cosigner AND the driver run this
+# release.
 # Example:
 #   signingPolicy:
 #     require_intent: true
-#     require_ceremony_intent: true
 #     signer_acl_required: true
 #     signer_may_refresh: false
 #     signer_acl: { driver: ["participant1-"] }

@@ -18,8 +18,8 @@
 #
 # From 0.4.0-rc.4 `rutli-cosigner refresh` signs a ceremony intent with that same certificate, which
 # every cosigner verifies before it fences (docs/ceremonies.md, "Ceremony intents"); with
-# `signing_policy.require_ceremony_intent` on, an older image's intent-less refresh is refused. Pin
-# the image to the cosigners' release. Set `cluster_id` in client-refresher.json to skip the
+# `signing_policy.require_ceremony_intent` on (the default from 0.4.0-rc.6), an older image's
+# intent-less refresh is refused. Pin the image to the cosigners' release. Set `cluster_id` in client-refresher.json to skip the
 # cluster-id probe (otherwise a majority of the roster's Capabilities decides it).
 #
 # No refresher certificate yet (a cluster whose CA key is lost, until docs/ca-rotation.md issues

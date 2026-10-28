@@ -35,6 +35,9 @@
   "signer_allowlist": [
     "driver"
   ],
+  "signing_policy": {
+    "require_ceremony_intent": false
+  },
   "metrics_listen": "0.0.0.0:9200",
   "peer_allowlist": [
     "cosigner1",

@@ -230,7 +230,7 @@ groups:
           severity: info
         annotations:
           summary: "Rütli cosigner {{ $labels.instance }} ran a DKG/refresh without a client ceremony intent"
-          description: "{{ $labels.instance }} took part in a DKG or refresh that carried no client-signed ceremony intent, accepted because signing_policy.require_ceremony_intent is off. That is the transition state of this release: a compromised cosigner can still start (and split) ceremonies on this node. Once the driver and the refresh job run this release, set require_ceremony_intent on every node (docs/approval-quorum.md, Switching enforcement on). On a cluster that enforces, this never fires."
+          description: "{{ $labels.instance }} took part in a DKG or refresh that carried no client-signed ceremony intent, accepted because signing_policy.require_ceremony_intent is set to false on this node (the opt-out; on by default since 0.4.0-rc.6). A compromised cosigner can still start (and split) ceremonies on it. Once the driver (0.4.0-rc.4 or later) and the refresh job sign ceremony intents, remove the opt-out on every node (docs/approval-quorum.md, Switching enforcement on). On a cluster that enforces, this never fires."
 
       - alert: RutliSignRateLimited
         expr: increase(rutli_sign_rate_limited_total[10m]) > 0

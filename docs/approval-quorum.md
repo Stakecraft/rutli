@@ -119,6 +119,7 @@ All per node, in `signing_policy`. The defaults are in brackets.
 | Setting | Meaning |
 |---|---|
 | `require_intent` [false] | A round without a valid intent is refused. Off: verified if present, accepted and counted if absent |
+| `require_ceremony_intent` [unset = on with TLS, since 0.4.0-rc.6] | A DKG/refresh fence or part 1 without a valid client-signed ceremony intent is refused (`docs/ceremonies.md`, "Ceremony intents"). `false` is the explicit opt-out while the driver is older than 0.4.0-rc.4 or the refresh job's image predates the cosigners' release: verified if present, accepted and counted if absent (`rutli_ceremony_intent_absent_total`), with a startup warning. A plaintext node verifies no intents: unset means off there, and `true` is a config error |
 | `signer_acl` [none] | Client CN → key-id prefixes it may use (`""` = every key). Checked on every key-scoped Signer RPC and on the intent signer at every node. Give each tenant's driver its own CN and prefix |
 | `signer_acl_required` [false] | A signer CN without an ACL entry is refused |
 | `signer_pins` [none] | Client CN → SHA-256 of the SubjectPublicKeyInfo of each key allowed under that CN: `openssl x509 -in driver.crt -noout -pubkey \| openssl pkey -pubin -outform DER \| sha256sum`. A CA-valid certificate with an unpinned key is refused on the Signer API and as an intent signer. This is **revocation without the CA**: issue a new driver certificate and replace the pin |
@@ -136,8 +137,10 @@ New metrics: `rutli_sign_intent_absent_total`, `rutli_sign_policy_refusals_total
 
 ## Switching enforcement on
 
-The defaults keep a rolling upgrade, and a driver older than intents, working. Switch on in this
-order:
+The defaults keep a rolling upgrade, and a driver older than intents, working — except ceremony
+intents, required by default since 0.4.0-rc.6: a cosigner of that release refuses a DKG from a driver
+older than 0.4.0-rc.4, and an intent-less refresh, unless it runs with `require_ceremony_intent:
+false` (step 4). Switch on in this order:
 
 1. **Every cosigner on this release** (0.4.0-rc.2 or later), defaults unchanged. Signing keeps
    working in both directions. Each node verifies intents when they are present and journals every
@@ -160,9 +163,11 @@ order:
    `signer_may_refresh: false` (and `require_epoch_match: true` from batch C phase 2). From the moment
    the **last** node enforces, a compromised cosigner or a driver-key thief without approvals can no
    longer sign a gated key, and nothing signs without a journaled intent.
-   **Ceremony intents** (0.4.0-rc.4): `require_ceremony_intent: true`, once the driver release that
-   signs DKG intents runs and the refresh CronJob's image is this release (its
-   `rutli-cosigner refresh` signs refresh intents). First check that
+   **Ceremony intents** (0.4.0-rc.4; on by default since 0.4.0-rc.6): `require_ceremony_intent`
+   unset (or `true`), once the driver release that signs DKG intents (0.4.0-rc.4 or later) runs and
+   the refresh CronJob's image is this release (its `rutli-cosigner refresh` signs refresh intents).
+   Until then, cosigners of 0.4.0-rc.6 or later need the explicit opt-out
+   `require_ceremony_intent: false`; remove it here. First check that
    `rutli_ceremony_intent_absent_total` no longer grows after a DKG or refresh. Each node that
    enforces then refuses, on its own, any DKG/refresh fence or part 1 without a valid ceremony
    intent naming exactly that ceremony. So a compromised cosigner can no longer start ceremonies on
@@ -174,9 +179,9 @@ order:
 5. Schedule `rutli-cosigner audit-cross-check` (weekly, and after any incident). From now on, do not
    pass `--allow-no-intent`: an intent-less journal entry is an unexplained signature.
 
-Rollback: turning a flag off is immediate (restart). A driver downgrade needs `require_intent` (and
-`require_ceremony_intent`) off first, or every sign (and DKG) is refused. Same for a refresh CronJob
-image older than this release.
+Rollback: turning a flag off is immediate (restart). A driver downgrade needs `require_intent` off
+(and `require_ceremony_intent: false`) first, or every sign (and DKG) is refused. Same for a refresh
+CronJob image older than this release.
 
 ## Approving hosted-key deletes
 

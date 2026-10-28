@@ -202,7 +202,7 @@ async fn cluster_with(policy: impl Fn(&Ids, u16) -> SigningPolicyConfig, refresh
     let nodes: Vec<Arc<Node>> = (1..=N).map(|i| open_node(&root, &ids, i, &policy(&ids, i))).collect();
     rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
     let local: Peers = nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
-    if policy(&ids, 1).require_ceremony_intent {
+    if policy(&ids, 1).ceremony_intent_required(true) {
         run_dkg_with_intent(&local, KEY, Some(ceremony_by(&ids, "driver", rutli_cosigner::node::CeremonyKind::Dkg, KEY, 0xd0)))
             .await
             .unwrap();
@@ -523,10 +523,15 @@ async fn only_the_driver_signs_with_its_own_intent_and_every_participant_journal
 }
 
 /// The refresher refreshes and reads key status, never signs; once `signer_may_refresh` is off the
-/// driver no longer refreshes.
+/// driver no longer refreshes. (Roles only: intent-less refreshes, so ceremony intents opted out.)
 #[tokio::test]
 async fn the_refresher_refreshes_but_never_signs_and_the_driver_stops_refreshing() {
-    let policy = SigningPolicyConfig { require_intent: true, signer_may_refresh: false, ..Default::default() };
+    let policy = SigningPolicyConfig {
+        require_intent: true,
+        require_ceremony_intent: Some(false),
+        signer_may_refresh: false,
+        ..Default::default()
+    };
     let c = cluster(|_| policy.clone(), Some(vec!["refresher".into()])).await;
     let msg = digest(b"refresher tries");
     let by_driver = intent_by(&c.ids, "driver", KEY, &msg, 30);
@@ -729,7 +734,12 @@ async fn local(root: &Path, policy: &SigningPolicyConfig) -> (Ids, Vec<Arc<Node>
     let nodes: Vec<Arc<Node>> = (1..=N).map(|i| open_node(root, &ids, i, policy)).collect();
     rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
     let peers: Peers = nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
-    run_dkg(&peers, KEY).await.unwrap();
+    if policy.ceremony_intent_required(true) {
+        let dkg = ceremony_by(&ids, "driver", rutli_cosigner::node::CeremonyKind::Dkg, KEY, 0xd0);
+        run_dkg_with_intent(&peers, KEY, Some(dkg)).await.unwrap();
+    } else {
+        run_dkg(&peers, KEY).await.unwrap();
+    }
     (ids, nodes)
 }
 
@@ -877,7 +887,7 @@ async fn a_sign_test_round_for_another_message_is_refused_at_the_peer() {
 #[tokio::test]
 async fn signer_dkg_and_refresh_need_the_callers_own_ceremony_intent() {
     use rutli_cosigner::node::CeremonyKind::{Dkg, Refresh};
-    let policy = SigningPolicyConfig { require_ceremony_intent: true, signer_may_refresh: false, ..Default::default() };
+    let policy = SigningPolicyConfig { require_ceremony_intent: Some(true), signer_may_refresh: false, ..Default::default() };
     let c = cluster(|_| policy.clone(), Some(vec!["refresher".into()])).await;
     let group = c.group_key().to_vec();
     let refresh = |intent| pb::RefreshRequest { key_id: KEY.into(), intent };
@@ -919,7 +929,7 @@ async fn signer_dkg_and_refresh_need_the_callers_own_ceremony_intent() {
 /// protocol error.
 #[tokio::test]
 async fn a_cosigner_cannot_fence_an_honest_peer_without_a_client_intent() {
-    let policy = SigningPolicyConfig { require_ceremony_intent: true, ..Default::default() };
+    let policy = SigningPolicyConfig { require_ceremony_intent: Some(true), ..Default::default() };
     let c = cluster(|_| policy.clone(), Some(vec!["refresher".into()])).await;
     let mut attacker = c.peer_as("cosigner3", 0).await;
     let e = c.nodes[0].key_epoch(KEY).unwrap();
@@ -973,7 +983,7 @@ async fn a_cosigner_cannot_fence_an_honest_peer_without_a_client_intent() {
 #[tokio::test]
 async fn only_the_fencing_cosigner_runs_parts_over_grpc() {
     use rutli_cosigner::node::CeremonyKind::Refresh;
-    let policy = SigningPolicyConfig { require_ceremony_intent: true, ..Default::default() };
+    let policy = SigningPolicyConfig { require_ceremony_intent: Some(true), ..Default::default() };
     let c = cluster(|_| policy.clone(), Some(vec!["refresher".into()])).await;
     let e = c.nodes[1].key_epoch(KEY).unwrap();
     let x = ceremony_by(&c.ids, "refresher", Refresh, KEY, 7);
