@@ -745,10 +745,17 @@ impl Node {
         // A delete fence likewise, except where a hosted record already sits under the id: a key
         // squatted on a FROST id before 0.4.0-rc.6 must stay deletable (then
         // `hosted-clear-tombstone` frees the id for its DKG).
+        // "Nothing hosted here" is said only when that is known: a file that cannot be read (a
+        // corrupt or unsealable legacy record, a hung volume) is an error, so the delete of a
+        // squat it may be counts it as a refusal, never as done.
         if kind == "delkey" && refuse_unless_hosted_id(key_id).is_err() {
+            self.refuse_if_keystore_down()?;
             match self.keystore.load_record(key_id) {
                 Ok(crate::keystore::Record::Hosted(_)) | Ok(crate::keystore::Record::Tombstone(_)) => {}
-                _ => return Err(DaemonError::NotHostedKeyId(key_id.to_string())),
+                Ok(crate::keystore::Record::Frost(_)) | Err(DaemonError::UnknownKey(_)) => {
+                    return Err(DaemonError::NotHostedKeyId(key_id.to_string()))
+                }
+                Err(e) => return Err(e),
             }
         }
         // A hosted-key fence never covers a FROST share: it would serialize that key's DKG/refresh

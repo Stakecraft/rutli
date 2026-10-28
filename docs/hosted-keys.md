@@ -146,8 +146,10 @@ under an id whose first `frost-`/`rutli-` tag is `rutli-`, so no peer can park a
 FROST key's id. A hosted record already under another id (squatted before 0.4.0-rc.6, or made by
 hand) keeps serving on the nodes that hold it but is no longer replicated or repaired, nor restored
 from a backup onto a node without it; it can still be deleted where it is — `DeleteKey` succeeds once
-every node has answered, with a tombstone where the record was and "nothing here" elsewhere — and
-`hosted-clear-tombstone` on those nodes then frees the id.
+every node has answered, with a tombstone where the record was and "nothing here" elsewhere, so
+success means the nodes report nothing hosted left under the id (a node that cannot read its file,
+or cannot be reached, fails it; nothing anywhere is NOT_FOUND) — and `hosted-clear-tombstone` on
+those nodes then frees the id.
 
 **Several participants on one cluster:** FROST ids derive from Canton's key name, so a second
 participant on the same cluster asks for the same `frost-namespace` and its DKG is refused with

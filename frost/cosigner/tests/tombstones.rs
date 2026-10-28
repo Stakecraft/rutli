@@ -998,3 +998,102 @@ async fn deleting_a_squat_on_one_node_succeeds_and_frees_the_id_for_its_dkg() {
     rutli_cosigner::orchestrator::run_dkg_with_intent(&c.peers, id, Some(sign(&c.ids, "driver", dkg))).await.unwrap();
     assert!(c.nodes.iter().all(|n| n.key_epoch(id).unwrap().present));
 }
+
+/// A delete of a non-hosted id where nothing hosted is anywhere (a typo, or a live FROST key) is
+/// NOT_FOUND, never a "success" with zero tombstones.
+#[tokio::test]
+async fn deleting_a_non_hosted_id_that_holds_nothing_is_not_found() {
+    let c = cluster_with(operator_deletes(), SigningPolicyConfig::default(), Duration::from_millis(1));
+    let id = "frost-namespace-typo";
+    let intent = delete_intent(&c.ids, "operator", id);
+    let err = delete_hosted_key(&c.peers, id, &intent, 2).await.unwrap_err();
+    assert!(matches!(err, DaemonError::UnknownKey(ref m) if m.contains("nothing hosted")), "{err:?}");
+}
+
+/// A squat a node cannot read is not "nothing here": its fence error is a refusal, the delete fails,
+/// and the file stays for the operator.
+#[tokio::test]
+async fn an_unreadable_squat_fails_the_delete() {
+    let c = cluster_with(operator_deletes(), SigningPolicyConfig::default(), Duration::from_millis(1));
+    let id = "frost-participant1-signing";
+    let path = keys_dir(&c.root, 2).join(format!("{id}.json"));
+    std::fs::write(&path, b"{ not a key file").unwrap();
+    let intent = delete_intent(&c.ids, "operator", id);
+    let err = delete_hosted_key(&c.peers, id, &intent, 2).await.unwrap_err();
+    assert!(!matches!(err, DaemonError::NotHostedKeyId(_) | DaemonError::UnknownKey(_)), "{err:?}");
+    assert!(path.exists(), "the squat file is still there");
+}
+
+/// The cleanup of a non-hosted id needs every node's answer: with one unreachable, it fails even
+/// though the squat was tombstoned where it was.
+#[tokio::test]
+async fn deleting_a_squat_with_a_node_unreachable_does_not_succeed() {
+    let c = cluster_with(operator_deletes(), SigningPolicyConfig::default(), Duration::from_millis(1));
+    let id = "frost-participant1-signing";
+    let sealer = Sealer::from_master_secret(MASTER, 1).with_binding(KeyFileBinding {
+        node: 1,
+        cluster_uuid: Some(UUID.into()),
+        write_version: 2,
+        accept_v1: true,
+    });
+    KeyStore::open_with_sealer(keys_dir(&c.root, 1), Some(Arc::new(sealer)))
+        .unwrap()
+        .create_hosted(id, &rutli_cosigner::hosted::HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap())
+        .unwrap();
+    let mut peers = c.peers.clone();
+    peers[2] = Arc::new(Unreachable(c.nodes[2].identifier));
+    let intent = delete_intent(&c.ids, "operator", id);
+    let err = delete_hosted_key(&peers, id, &intent, 2).await.unwrap_err();
+    assert!(matches!(err, DaemonError::ThresholdNotMet { needed: 3, got: 2 }), "{err:?}");
+}
+
+/// A cosigner that cannot be reached: every call is a transport error.
+struct Unreachable(Identifier);
+
+#[async_trait]
+impl PeerApi for Unreachable {
+    fn identifier(&self) -> Identifier {
+        self.0
+    }
+    async fn sign_round1(&self, _: &str, _: &str, _: &Round1Ctx) -> Result<SigningCommitments> {
+        Err(down())
+    }
+    async fn sign_round2(
+        &self,
+        _: &str,
+        _: &str,
+        _: &[u8],
+        _: &std::collections::BTreeMap<Identifier, SigningCommitments>,
+        _: Option<&[u8; 32]>,
+    ) -> Result<SignatureShare> {
+        Err(down())
+    }
+    async fn abort_sign(&self, _: &str, _: &str) -> Result<()> {
+        Err(down())
+    }
+    async fn ceremony_fence(&self, _: &str, _: &str, _: &'static str) -> Result<()> {
+        Err(down())
+    }
+    async fn ceremony_release(&self, _: &str, _: &str) -> Result<()> {
+        Err(down())
+    }
+    async fn node_info(&self) -> Result<(u16, [u8; 32])> {
+        Err(down())
+    }
+    async fn replicate_key(&self, _: &str, _: &str, _: &str, _: &[u8], _: &rutli_cosigner::wrap::Wrapped) -> Result<Vec<u8>> {
+        Err(down())
+    }
+    async fn fetch_key(&self, _: &str) -> Result<(String, Vec<u8>, rutli_cosigner::wrap::Wrapped)> {
+        Err(down())
+    }
+    async fn list_keys(&self) -> Result<Vec<(String, String, Vec<u8>)>> {
+        Err(down())
+    }
+    async fn purge_key(&self, _: &str, _: &str) -> Result<bool> {
+        Err(down())
+    }
+}
+
+fn down() -> DaemonError {
+    DaemonError::Status(tonic::Status::unavailable("transport error: node down"))
+}

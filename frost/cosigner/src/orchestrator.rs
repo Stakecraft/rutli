@@ -1062,9 +1062,16 @@ pub async fn delete_hosted_key(
     release_fences(&fenced, &ceremony_id, key_id).await;
     // The cleanup of a squatted non-hosted id: no tombstone may be recorded where nothing hosted
     // is, so the write quorum cannot apply. It succeeds when every node answered — a tombstone
-    // where a record was, "nothing here" elsewhere — with no refusal.
+    // where a record was, "nothing here" elsewhere — with no refusal, and at least one node held
+    // a record: on success the nodes report nothing hosted left under the id. Nothing anywhere (a
+    // typo, a live FROST key) is NOT_FOUND, not a delete.
     if crate::node::refuse_unless_hosted_id(key_id).is_err() {
         if refusal.is_none() && tombstones + nothing_here == peers.len() {
+            if tombstones == 0 {
+                return Err(DaemonError::UnknownKey(format!(
+                    "{key_id} (nothing hosted under this non-hosted id on any cosigner)"
+                )));
+            }
             return Ok((deleted_anywhere, tombstones));
         }
         return Err(refusal.unwrap_or(DaemonError::ThresholdNotMet { needed: peers.len(), got: tombstones + nothing_here }));
