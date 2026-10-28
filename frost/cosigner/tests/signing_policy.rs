@@ -967,3 +967,58 @@ async fn a_cosigner_cannot_fence_an_honest_peer_without_a_client_intent() {
     let ok = ceremony_by(&c.ids, "refresher", rutli_cosigner::node::CeremonyKind::Refresh, KEY, 6);
     c.signer("refresher", 0).await.refresh(pb::RefreshRequest { key_id: KEY.into(), intent: Some(ok) }).await.unwrap();
 }
+
+/// Over the mesh the leader is the fencing caller's certificate CN: a fenced peer that presents the
+/// client's intent it was shown cannot run part 1 (or 2, 3) on a node another cosigner fenced.
+#[tokio::test]
+async fn only_the_fencing_cosigner_runs_parts_over_grpc() {
+    use rutli_cosigner::node::CeremonyKind::Refresh;
+    let policy = SigningPolicyConfig { require_ceremony_intent: true, ..Default::default() };
+    let c = cluster(|_| policy.clone(), Some(vec!["refresher".into()])).await;
+    let e = c.nodes[1].key_epoch(KEY).unwrap();
+    let x = ceremony_by(&c.ids, "refresher", Refresh, KEY, 7);
+    let xid = intent::ceremony_id_for(Refresh, &[7; 16]);
+    let protocol = rutli_cosigner::ceremony::CEREMONY_PROTOCOL;
+    c.peer_as("cosigner1", 1)
+        .await
+        .ceremony_fence(pb::CeremonyFenceRequest {
+            ceremony_id: xid.clone(),
+            key_id: KEY.into(),
+            kind: "refresh".into(),
+            expected_epoch: e.epoch,
+            expected_pkp_digest: e.pkp_digest.clone(),
+            protocol,
+            intent: Some(x.clone()),
+        })
+        .await
+        .unwrap();
+    let part1 = || pb::CeremonyPart1Request {
+        ceremony_id: xid.clone(),
+        key_id: KEY.into(),
+        kind: "refresh".into(),
+        roster: vec![1, 2, 3],
+        protocol,
+        intent: Some(x.clone()),
+    };
+    let stolen = c.peer_as("cosigner3", 1).await.ceremony_part1(part1()).await.unwrap_err();
+    assert_eq!(stolen.code(), tonic::Code::FailedPrecondition, "{stolen:?}");
+    assert!(stolen.message().contains("led by peer \"cosigner1\""), "{stolen:?}");
+    let part3 = c
+        .peer_as("cosigner3", 1)
+        .await
+        .ceremony_part3(pb::CeremonyPart3Request { ceremony_id: xid.clone(), round1_digest: vec![0; 32] })
+        .await
+        .unwrap_err();
+    assert_eq!(part3.code(), tonic::Code::NotFound, "no session yet: {part3:?}");
+    // The fencing cosigner's part 1 runs.
+    c.peer_as("cosigner1", 1).await.ceremony_part1(part1()).await.unwrap();
+    let part3 = c
+        .peer_as("cosigner3", 1)
+        .await
+        .ceremony_part3(pb::CeremonyPart3Request { ceremony_id: xid.clone(), round1_digest: vec![0; 32] })
+        .await
+        .unwrap_err();
+    assert!(part3.message().contains("led by peer \"cosigner1\""), "{part3:?}");
+    // The refusal left the session alone: the leader can still abort it as its own.
+    assert!(c.nodes[1].ceremony_record(&xid).is_none(), "nothing recorded by the refused part 3");
+}

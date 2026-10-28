@@ -707,6 +707,12 @@ async fn abort_sign(chosen: &[&Arc<dyn PeerApi>], key_id: &str, session_id: &str
 /// every reachable node (an unknown id's no-vote, under the per-asker cap), so the intent is spent.
 /// A client retries with a fresh intent (the driver and `rutli-cosigner refresh` mint one per
 /// attempt).
+///
+/// The leader fences its own node first: that binds the ceremony to this leader on its own node
+/// before any peer has seen the client's intent. A peer that races the remaining fences with the
+/// intent it was shown can then bind at most the other nodes to itself, which stops the ceremony,
+/// but never run it: every ceremony needs the leader's node, which takes parts 1–3 only from the
+/// leader (and lets no one else release its fence).
 async fn fence_all(
     peers: &Peers,
     ceremony_id: &str,
@@ -716,7 +722,8 @@ async fn fence_all(
     intent: Option<&pb::SignedIntent>,
 ) -> Result<()> {
     let mut fenced: Vec<&Arc<dyn PeerApi>> = Vec::new();
-    for p in peers {
+    let own_node_first = peers.iter().filter(|p| p.is_local()).chain(peers.iter().filter(|p| !p.is_local()));
+    for p in own_node_first {
         match p.ceremony_begin(ceremony_id, key_id, kind, expect, intent).await {
             Ok(()) => fenced.push(p),
             Err(e) => {

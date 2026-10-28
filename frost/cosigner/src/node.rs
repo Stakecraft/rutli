@@ -97,8 +97,15 @@ struct CeremonyBook {
 /// to a leader that died between part 1 and part 3).
 ///
 /// The guard serializes ceremonies; it does **not** fence signing (see [`Node::sign_round1`]).
+///
+/// It also binds the ceremony to its leader: the caller that took it. Parts 1–3 of the ceremony are
+/// accepted only from that caller, so a fenced peer cannot take over another leader's ceremony.
 struct CeremonyGuard {
     owner: String,
+    /// Who leads `owner` on this node: the certificate CN of the peer whose fence (or part 1) took
+    /// the guard, or `None` for this node's own in-process leader — and on a plaintext dev mesh,
+    /// where no caller is identified.
+    leader: Option<String>,
     kind: &'static str,
     /// When the owner first took the guard. Never moved by the same owner taking it again (its own
     /// part 1, or a repeated fence), so no ceremony id can keep a guard alive by re-fencing.
@@ -510,9 +517,27 @@ impl Node {
     /// fence repeated under one ceremony id never extends it (before 0.4.0-rc.4 it reset the timer,
     /// and a fence re-sent under the same id held the key forever).
     ///
+    /// `leader` is the caller (see [`CeremonyGuard::leader`]): recorded when the guard is created,
+    /// and when `owner` already holds it, it must be the same caller — a second leader for one
+    /// ceremony is refused. `may_create: false` (part 1 on a node that requires ceremony intents)
+    /// refuses instead of creating the guard: the ceremony must have been fenced here first.
+    ///
     /// Returns whether this call created the guard (`false`: `owner` already held it), so a caller
     /// that fails afterwards can put things back exactly as they were.
-    fn acquire_ceremony(&self, key_id: &str, owner: &str, kind: &'static str) -> Result<bool> {
+    fn acquire_ceremony(
+        &self,
+        key_id: &str,
+        owner: &str,
+        kind: &'static str,
+        leader: Option<&str>,
+        may_create: bool,
+    ) -> Result<bool> {
+        let unfenced = || {
+            DaemonError::CeremonyRefused(format!(
+                "ceremony {owner} has no fence for {key_id} on this node — under ceremony intents a \
+                 ceremony starts with its leader's fence, which binds it to that leader"
+            ))
+        };
         let preempted: Option<String> = {
             let mut guards = self.guards();
             let preempted = match guards.get_mut(key_id) {
@@ -522,6 +547,9 @@ impl Node {
                             "ceremony {owner} holds {key_id} as a {} ceremony, not a {kind} one",
                             cur.kind
                         )));
+                    }
+                    if cur.leader.as_deref() != leader {
+                        return Err(not_the_leader(owner, cur.leader.as_deref(), leader));
                     }
                     return Ok(false);
                 }
@@ -533,13 +561,23 @@ impl Node {
                             other: cur.owner.clone(),
                         });
                     }
+                    if !may_create {
+                        return Err(unfenced());
+                    }
                     Some(cur.owner.clone()) // orphan — preempt it
                 }
+                None if !may_create => return Err(unfenced()),
                 None => None,
             };
             guards.insert(
                 key_id.to_string(),
-                CeremonyGuard { owner: owner.to_string(), kind, started: Instant::now(), session: false },
+                CeremonyGuard {
+                    owner: owner.to_string(),
+                    leader: leader.map(str::to_string),
+                    kind,
+                    started: Instant::now(),
+                    session: false,
+                },
             );
             preempted
         }; // ceremonies lock released before touching the session maps (avoid nested locks)
@@ -614,6 +652,19 @@ impl Node {
         }
     }
 
+    /// Refuse a ceremony part from anyone but the leader bound to `owner`'s guard on `key_id`
+    /// ([`CeremonyGuard::leader`]). Checked before the part touches the session, so a peer that is
+    /// not the leader can neither drive the ceremony nor fail it. No guard (released, preempted):
+    /// left to the part's own checks, which refuse it.
+    fn assert_leader(&self, key_id: &str, owner: &str, leader: Option<&str>) -> Result<()> {
+        match self.guards().get(key_id) {
+            Some(g) if g.owner == owner && g.leader.as_deref() != leader => {
+                Err(not_the_leader(owner, g.leader.as_deref(), leader))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Assert ceremony `owner` still holds the guard for `key_id`. A ceremony that was preempted
     /// (its guard taken by a newer one after it was orphaned) must NOT persist — this is the
     /// load-bearing safety check against a stale leader clobbering/splitting shares on refresh.
@@ -636,12 +687,24 @@ impl Node {
     /// of ceremony protocol 1, where part 3 overwrote the live share. Under protocol 2 part 3 only
     /// stages; see [`Node::sign_round1`] for why signing and ceremonies may overlap.
     pub fn ceremony_fence(&self, ceremony_id: &str, key_id: &str, kind: &'static str) -> Result<()> {
-        self.fence_created(ceremony_id, key_id, kind).map(|_| ())
+        self.ceremony_fence_from(ceremony_id, key_id, kind, None)
     }
 
-    /// [`Node::ceremony_fence`], returning whether this call created the guard (`false`: this
+    /// [`Node::ceremony_fence`] asked by the peer whose certificate CN is `leader` (`None`: this
+    /// node's own leader), which the guard then binds the ceremony to.
+    pub fn ceremony_fence_from(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        kind: &'static str,
+        leader: Option<&str>,
+    ) -> Result<()> {
+        self.fence_created(ceremony_id, key_id, kind, leader).map(|_| ())
+    }
+
+    /// [`Node::ceremony_fence_from`], returning whether this call created the guard (`false`: this
     /// ceremony id already held it).
-    fn fence_created(&self, ceremony_id: &str, key_id: &str, kind: &'static str) -> Result<bool> {
+    fn fence_created(&self, ceremony_id: &str, key_id: &str, kind: &'static str, leader: Option<&str>) -> Result<bool> {
         // A DKG/refresh participant persists a share at the very end. On a read-only remount
         // `exists()`/`load()` still work, so without this the ceremony would fail only at this
         // node's final save — after the nodes before it had already persisted theirs: a half-applied
@@ -671,11 +734,22 @@ impl Node {
                 )));
             }
         }
-        self.acquire_ceremony(key_id, ceremony_id, kind)
+        self.acquire_ceremony(key_id, ceremony_id, kind, leader, true)
     }
 
     /// Roll back a fence taken by [`ceremony_fence`] (partial cluster fence / aborted ceremony).
     pub fn ceremony_release(&self, ceremony_id: &str, key_id: &str) {
+        self.ceremony_release_from(ceremony_id, key_id, None)
+    }
+
+    /// [`Node::ceremony_release`] asked by the peer whose certificate CN is `leader` (`None`: this
+    /// node's own leader). Only the ceremony's leader releases its guard; anyone else's release is
+    /// a no-op. Otherwise a fenced peer could drop the leader's fence here and fence this node
+    /// itself under the same ceremony id, which would bind the ceremony to it.
+    pub fn ceremony_release_from(&self, ceremony_id: &str, key_id: &str, leader: Option<&str>) {
+        if self.assert_leader(key_id, ceremony_id, leader).is_err() {
+            return;
+        }
         self.release_ceremony(key_id, ceremony_id);
         // Past its fence a generation can no longer be rolled back.
         let mut created = crate::sync::recover(&self.hosted_created_in, "hosted_created_in");
@@ -701,7 +775,8 @@ impl Node {
     /// is orphaned and preempted — the same as a leader that crashed mid-ceremony. Signing never
     /// consults the guards.
     ///
-    /// Lock order: may be taken while holding the book ([`Node::mark_session`]); the book is never
+    /// Lock order: may be taken while holding the book ([`Node::mark_session`], and the leader
+    /// check of parts 2 and 3, [`Node::assert_leader`]); the book is never
     /// taken while holding this.
     fn guards(&self) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, CeremonyGuard>> {
         crate::sync::recover(&self.ceremonies, "ceremony_guards")
@@ -1316,6 +1391,8 @@ impl Node {
     /// First of all, before any of that and before the guard: the client's ceremony intent
     /// ([`Node::authorize_ceremony`]) — so a peer that leads a ceremony no authorized client asked
     /// for takes no guard and opens no session here.
+    ///
+    /// The guard binds the ceremony to this caller, its leader: [`Node::ceremony_begin_from`].
     pub fn ceremony_begin(
         &self,
         ceremony_id: &str,
@@ -1323,6 +1400,20 @@ impl Node {
         kind: CeremonyKind,
         expect: Option<(u64, [u8; 32])>,
         intent: Option<&crate::pb::SignedIntent>,
+    ) -> Result<()> {
+        self.ceremony_begin_from(ceremony_id, key_id, kind, expect, intent, None)
+    }
+
+    /// [`Node::ceremony_begin`] asked by the peer whose certificate CN is `leader` (`None`: this
+    /// node's own leader). Only that caller may then run parts 1–3 of the ceremony here.
+    pub fn ceremony_begin_from(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        kind: CeremonyKind,
+        expect: Option<(u64, [u8; 32])>,
+        intent: Option<&crate::pb::SignedIntent>,
+        leader: Option<&str>,
     ) -> Result<()> {
         // Pure checks first: a malformed or oversized id never reaches a refusal message or a log.
         crate::keystore::validate_ceremony_id(ceremony_id)?;
@@ -1369,7 +1460,7 @@ impl Node {
         // here is a second leader for the same ceremony — under ceremony intents, two leaders
         // presenting one client intent. Refused, never joined: two leaders must never drive one
         // ceremony id. (A re-fence never extended a guard either; now it is refused outright.)
-        if !self.fence_created(ceremony_id, key_id, kind.as_str())? {
+        if !self.fence_created(ceremony_id, key_id, kind.as_str(), leader)? {
             return Err(DaemonError::CeremonyRefused(format!(
                 "ceremony {ceremony_id} already holds the guard for {key_id} on this node — a second \
                  fence under one ceremony id (a second leader for one client intent) is refused"
@@ -1394,6 +1485,12 @@ impl Node {
             Some(g) => g.authorize_ceremony(kind, key_id, ceremony_id, intent),
             None => Ok(None),
         }
+    }
+
+    /// Whether this node refuses a DKG/refresh without a client-signed ceremony intent
+    /// (`signing_policy.require_ceremony_intent`).
+    fn ceremony_intent_required(&self) -> bool {
+        self.sign_guard.as_ref().is_some_and(|g| g.require_ceremony_intent())
     }
 
     fn refuse_if_staged(&self, key_id: &str) -> Result<()> {
@@ -1426,6 +1523,11 @@ impl Node {
     ///    the guard was never marked. Dropping it here would unfence this one node while the leader
     ///    still counts it as fenced, and its retained cost is bounded by that short timeout.
     ///    A repeated part 1 also lands here: the live session keeps its guard (already marked).
+    ///
+    /// Only the ceremony's leader may run part 1 ([`CeremonyGuard::leader`]): a guard its fence
+    /// took for another caller is refused, untouched. On a node that requires ceremony intents,
+    /// part 1 never creates the guard — the leader's fence must have taken it — so no part 1 can
+    /// bind a ceremony to a leader that did not fence it.
     fn start_session(
         &self,
         ceremony_id: &str,
@@ -1433,10 +1535,19 @@ impl Node {
         kind: CeremonyKind,
         roster: Vec<u16>,
         old: Option<KeyVersion>,
+        leader: Option<&str>,
     ) -> Result<round1::Package> {
         crate::keystore::validate_ceremony_id(ceremony_id)?;
         self.refuse_if_staged(key_id)?;
-        let created = self.acquire_ceremony(key_id, ceremony_id, kind.as_str())?;
+        // A used id first, as at the fence: that is the refusal that says why (its guard is gone
+        // too). Checked again with the book locked when the session opens.
+        if self.book()?.records.contains_key(ceremony_id) {
+            return Err(DaemonError::CeremonyRefused(format!(
+                "ceremony id {ceremony_id} was already used on this node"
+            )));
+        }
+        let may_create = !self.ceremony_intent_required();
+        let created = self.acquire_ceremony(key_id, ceremony_id, kind.as_str(), leader, may_create)?;
         let result = self.open_session(ceremony_id, key_id, kind, roster, old);
         if result.is_err() && created {
             self.release_ceremony(key_id, ceremony_id);
@@ -1553,6 +1664,20 @@ impl Node {
         roster: &[u16],
         intent: Option<&crate::pb::SignedIntent>,
     ) -> Result<round1::Package> {
+        self.ceremony_part1_from(ceremony_id, key_id, kind, roster, intent, None)
+    }
+
+    /// [`Node::ceremony_part1`] asked by the peer whose certificate CN is `leader` (`None`: this
+    /// node's own leader), which must be the leader that fenced the ceremony here.
+    pub fn ceremony_part1_from(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        kind: CeremonyKind,
+        roster: &[u16],
+        intent: Option<&crate::pb::SignedIntent>,
+        leader: Option<&str>,
+    ) -> Result<round1::Package> {
         crate::keystore::validate_ceremony_id(ceremony_id)?;
         crate::keystore::validate_key_id(key_id)?;
         self.authorize_ceremony(kind, key_id, ceremony_id, intent)?;
@@ -1580,7 +1705,7 @@ impl Node {
             }
         };
         self.check_roster(roster)?;
-        self.start_session(ceremony_id, key_id, kind, roster.to_vec(), old)
+        self.start_session(ceremony_id, key_id, kind, roster.to_vec(), old, leader)
     }
 
     /// Part 2: check the leader's round-1 map — exactly the roster, and this node's own package
@@ -1589,14 +1714,19 @@ impl Node {
     ///
     /// The packages go to [`crate::ceremony::part2_and_deliver`], which sends each straight to its
     /// recipient over the mesh. Crate-private on purpose: no peer API ever returns them.
+    ///
+    /// `leader`: the caller, which must be the ceremony's leader ([`CeremonyGuard::leader`]).
     pub(crate) fn ceremony_part2_compute(
         &self,
         ceremony_id: &str,
         round1_map: &BTreeMap<Identifier, round1::Package>,
+        leader: Option<&str>,
     ) -> Result<([u8; 32], BTreeMap<u16, round2::Package>)> {
         let (key_id, kind, roster, old, own) = {
             let book = self.book()?;
             let s = book.sessions.get(ceremony_id).ok_or_else(|| DaemonError::UnknownDkg(ceremony_id.into()))?;
+            // The leader first (lock order: the book, then the guards).
+            self.assert_leader(&s.key_id, ceremony_id, leader)?;
             if s.part2.is_some() {
                 return Err(DaemonError::CeremonyRefused(format!("ceremony {ceremony_id}: part 2 already ran")));
             }
@@ -1712,9 +1842,24 @@ impl Node {
     /// same round-1 map as this node's (equal digests) and the leader's digest equal too; then
     /// stage the new share and vote yes ([`Node::finish_session`]). Any mismatch votes no.
     pub fn ceremony_part3(&self, ceremony_id: &str, leader_digest: &[u8; 32]) -> Result<StagedOutcome> {
+        self.ceremony_part3_from(ceremony_id, leader_digest, None)
+    }
+
+    /// [`Node::ceremony_part3`] asked by the peer whose certificate CN is `leader` (`None`: this
+    /// node's own leader), which must be the ceremony's leader: anyone else is refused before the
+    /// session is touched, so it can neither stage nor fail it.
+    pub fn ceremony_part3_from(
+        &self,
+        ceremony_id: &str,
+        leader_digest: &[u8; 32],
+        leader: Option<&str>,
+    ) -> Result<StagedOutcome> {
         let (key_id, kind, roster, old, digest, round1_map, inbox) = {
             let book = self.book()?;
             let s = book.sessions.get(ceremony_id).ok_or_else(|| DaemonError::UnknownDkg(ceremony_id.into()))?;
+            // The leader first: a peer that is not it learns nothing about the session's progress.
+            // (Lock order: the book, then the guards.)
+            self.assert_leader(&s.key_id, ceremony_id, leader)?;
             let p2 = s
                 .part2
                 .as_ref()
@@ -2529,6 +2674,18 @@ pub(crate) fn tombstoned(key_id: &str) -> DaemonError {
     ))
 }
 
+/// The refusal of a ceremony part (or a second fence) from a caller that is not the ceremony's
+/// leader on this node.
+fn not_the_leader(owner: &str, leader: Option<&str>, caller: Option<&str>) -> DaemonError {
+    let who = |c: Option<&str>| c.map_or_else(|| "this node itself".to_string(), |cn| format!("peer {cn:?}"));
+    DaemonError::CeremonyRefused(format!(
+        "ceremony {owner} is led by {} on this node, not by {} — only the leader that fenced a \
+         ceremony may run it",
+        who(leader),
+        who(caller)
+    ))
+}
+
 pub(crate) fn refuse_reserved_for_hosted(key_id: &str) -> Result<()> {
     if crate::share_delivery::is_reserved_for_import(key_id) {
         return Err(DaemonError::ReservedKeyId(key_id.to_string()));
@@ -3244,7 +3401,13 @@ mod guard_tests {
         // never carry a session in practice).
         n.guards().insert(
             "h".to_string(),
-            CeremonyGuard { owner: "genkey-a".into(), kind: "genkey", started: Instant::now(), session: true },
+            CeremonyGuard {
+                owner: "genkey-a".into(),
+                leader: None,
+                kind: "genkey",
+                started: Instant::now(),
+                session: true,
+            },
         );
 
         crate::sync::poison(&n.book);

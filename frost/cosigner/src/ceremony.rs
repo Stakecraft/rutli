@@ -85,14 +85,17 @@ pub struct Part2Outcome {
 /// Part 2 on `node`: compute its round-2 packages ([`Node::ceremony_part2_compute`]) and deliver
 /// each directly to its recipient over the node's mesh. Any failed delivery aborts the session
 /// here (the leader then aborts it everywhere). The packages never leave this function except to
-/// their recipients.
+/// their recipients. `leader`: the caller's certificate CN (`None`: this node's own leader), which
+/// must be the ceremony's leader.
 pub async fn part2_and_deliver(
     node: &Arc<Node>,
     ceremony_id: &str,
     round1_map: BTreeMap<Identifier, round1::Package>,
+    leader: Option<String>,
 ) -> Result<Part2Outcome> {
     let id = ceremony_id.to_owned();
-    let (digest, packages) = node.blocking(move |n| n.ceremony_part2_compute(&id, &round1_map)).await?;
+    let (digest, packages) =
+        node.blocking(move |n| n.ceremony_part2_compute(&id, &round1_map, leader.as_deref())).await?;
     let me = node.index()?;
     let mut delivered = Vec::new();
     for (to, package) in packages {

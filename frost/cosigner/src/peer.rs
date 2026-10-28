@@ -28,6 +28,11 @@ use crate::Result;
 #[async_trait]
 pub trait PeerApi: Send + Sync {
     fn identifier(&self) -> Identifier;
+    /// Whether this handle is the calling node itself, in process (a [`LocalPeer`] that acts for
+    /// no other node). A leader fences its own node first ([`crate::orchestrator`]).
+    fn is_local(&self) -> bool {
+        false
+    }
     /// Sign round 1. `ctx` is what the leader declares for the session (its sharing of the key);
     /// a refusal because of it is [`crate::DaemonError::EpochMismatch`] or
     /// [`crate::DaemonError::StaleShare`] over every transport.
@@ -205,7 +210,8 @@ impl LocalPeer {
     }
 
     /// Who asks, as the serving node would see the caller's certificate CN (`cosigner<N>`), for a
-    /// handle acting on behalf of another node; `None` for an in-process leader handle.
+    /// handle acting on behalf of another node; `None` for an in-process leader handle. It is also
+    /// who leads a ceremony this handle fences or runs, exactly as over gRPC.
     fn asker(&self) -> Option<String> {
         self.caller.as_ref().and_then(|c| c.index().ok()).map(|i| format!("cosigner{i}"))
     }
@@ -231,6 +237,9 @@ impl PeerApi for LocalPeer {
     fn identifier(&self) -> Identifier {
         self.node.identifier
     }
+    fn is_local(&self) -> bool {
+        self.caller.is_none()
+    }
     async fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &Round1Ctx) -> Result<SigningCommitments> {
         let (key_id, session_id, ctx) = (key_id.to_owned(), session_id.to_owned(), ctx.clone());
         self.node.blocking(move |n| n.sign_round1(&key_id, &session_id, &ctx)).await
@@ -254,10 +263,10 @@ impl PeerApi for LocalPeer {
         Ok(())
     }
     async fn ceremony_fence(&self, ceremony_id: &str, key_id: &str, kind: &'static str) -> Result<()> {
-        self.node.ceremony_fence(ceremony_id, key_id, kind)
+        self.node.ceremony_fence_from(ceremony_id, key_id, kind, self.asker().as_deref())
     }
     async fn ceremony_release(&self, ceremony_id: &str, key_id: &str) -> Result<()> {
-        self.node.ceremony_release(ceremony_id, key_id);
+        self.node.ceremony_release_from(ceremony_id, key_id, self.asker().as_deref());
         Ok(())
     }
     async fn node_info(&self) -> Result<(u16, [u8; 32])> {
@@ -353,7 +362,12 @@ impl PeerApi for LocalPeer {
         intent: Option<&pb::SignedIntent>,
     ) -> Result<()> {
         let (ceremony_id, key_id, intent) = (ceremony_id.to_owned(), key_id.to_owned(), intent.cloned());
-        self.node.blocking(move |n| n.ceremony_begin(&ceremony_id, &key_id, kind, expect, intent.as_ref())).await
+        let leader = self.asker();
+        self.node
+            .blocking(move |n| {
+                n.ceremony_begin_from(&ceremony_id, &key_id, kind, expect, intent.as_ref(), leader.as_deref())
+            })
+            .await
     }
 
     async fn ceremony_commit(&self, ceremony_id: &str) -> Result<StatusInfo> {
@@ -386,7 +400,12 @@ impl PeerApi for LocalPeer {
     ) -> Result<round1::Package> {
         let (ceremony_id, key_id, roster, intent) =
             (ceremony_id.to_owned(), key_id.to_owned(), roster.to_vec(), intent.cloned());
-        self.node.blocking(move |n| n.ceremony_part1(&ceremony_id, &key_id, kind, &roster, intent.as_ref())).await
+        let leader = self.asker();
+        self.node
+            .blocking(move |n| {
+                n.ceremony_part1_from(&ceremony_id, &key_id, kind, &roster, intent.as_ref(), leader.as_deref())
+            })
+            .await
     }
 
     async fn ceremony_part2(
@@ -394,7 +413,7 @@ impl PeerApi for LocalPeer {
         ceremony_id: &str,
         round1_map: &BTreeMap<Identifier, round1::Package>,
     ) -> Result<crate::ceremony::Part2Outcome> {
-        crate::ceremony::part2_and_deliver(&self.node, ceremony_id, round1_map.clone()).await
+        crate::ceremony::part2_and_deliver(&self.node, ceremony_id, round1_map.clone(), self.asker()).await
     }
 
     async fn ceremony_deliver(
@@ -418,8 +437,8 @@ impl PeerApi for LocalPeer {
     }
 
     async fn ceremony_part3(&self, ceremony_id: &str, round1_digest: &[u8; 32]) -> Result<StagedOutcome> {
-        let (ceremony_id, digest) = (ceremony_id.to_owned(), *round1_digest);
-        self.node.blocking(move |n| n.ceremony_part3(&ceremony_id, &digest)).await
+        let (ceremony_id, digest, leader) = (ceremony_id.to_owned(), *round1_digest, self.asker());
+        self.node.blocking(move |n| n.ceremony_part3_from(&ceremony_id, &digest, leader.as_deref())).await
     }
 }
 
