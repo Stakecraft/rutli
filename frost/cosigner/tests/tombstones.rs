@@ -970,3 +970,31 @@ async fn a_squatted_frost_id_stays_deletable_but_no_tombstone_lands_on_one() {
     }
     assert!(c.nodes.iter().all(|n| !n.has_key(id)), "the id is free for its DKG");
 }
+
+/// The realistic legacy case: one node holds a hosted key squatted on a FROST id. The delete
+/// tombstones it there and finds nothing hosted on the others; that is success, not a missed write
+/// quorum. `hosted-clear-tombstone` then frees the id, and the key's DKG runs.
+#[tokio::test]
+async fn deleting_a_squat_on_one_node_succeeds_and_frees_the_id_for_its_dkg() {
+    let c = cluster_with(operator_deletes(), SigningPolicyConfig::default(), Duration::from_millis(1));
+    let id = "frost-participant1-signing";
+    let store = |i: u16| {
+        let sealer = Sealer::from_master_secret(MASTER, i).with_binding(KeyFileBinding {
+            node: i,
+            cluster_uuid: Some(UUID.into()),
+            write_version: 2,
+            accept_v1: true,
+        });
+        KeyStore::open_with_sealer(keys_dir(&c.root, i), Some(Arc::new(sealer))).unwrap()
+    };
+    store(2).create_hosted(id, &rutli_cosigner::hosted::HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap()).unwrap();
+    let intent = delete_intent(&c.ids, "operator", id);
+    assert_eq!(delete_hosted_key(&c.peers, id, &intent, 2).await.unwrap(), (true, 1));
+    assert_eq!(c.states(id), vec![(false, false), (false, true), (false, false)]);
+    std::thread::sleep(Duration::from_millis(5));
+    c.nodes[1].hosted_purge_expired(intent::now_ms()).unwrap();
+    store(2).clear_tombstone(id).unwrap();
+    let dkg = intent::ceremony_intent(CLUSTER, rutli_cosigner::node::CeremonyKind::Dkg, id, [0x51; 16], intent::now_ms(), 120_000);
+    rutli_cosigner::orchestrator::run_dkg_with_intent(&c.peers, id, Some(sign(&c.ids, "driver", dkg))).await.unwrap();
+    assert!(c.nodes.iter().all(|n| n.key_epoch(id).unwrap().present));
+}

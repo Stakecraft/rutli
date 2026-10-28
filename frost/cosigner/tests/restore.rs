@@ -286,3 +286,23 @@ fn the_restore_command_takes_the_instance_lock() {
     let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(text.contains("already in use by another rutli-cosigner process"), "{text}");
 }
+
+/// F1, restore: a backup taken before 0.4.0-rc.6 may hold a hosted key squatted on a FROST id.
+/// Restoring onto a node that lacks it leaves it out (the rest restores), so the id stays free for
+/// its DKG.
+#[tokio::test]
+async fn a_squatted_hosted_record_is_not_restored_onto_a_frost_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    cluster(root).await;
+    let ks = store(root, 1);
+    let src = KeyStore::open_with_sealer(root.join("old-backup"), Some(sealer(1, UUID))).unwrap();
+    src.save_hosted("frost-participant1-signing", &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap()).unwrap();
+    src.save_hosted("rutli-enc-kept", &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap()).unwrap();
+    let p = plan(&ks, &root.join("old-backup"), false, None).unwrap();
+    assert_eq!(p.install.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>(), vec!["rutli-enc-kept"]);
+    assert!(p.skipped.iter().any(|(k, why)| k == "frost-participant1-signing" && why.contains("hosted-key id")), "{:?}", p.skipped);
+    apply(&ks, &p, false).unwrap();
+    assert!(!keys(root, 1).join("frost-participant1-signing.json").exists());
+    assert_eq!(ks.list_hosted().unwrap(), vec!["rutli-enc-kept".to_string()]);
+}

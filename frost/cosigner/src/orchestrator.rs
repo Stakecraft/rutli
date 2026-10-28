@@ -1022,6 +1022,9 @@ pub async fn delete_hosted_key(
 ) -> Result<(bool, usize)> {
     let ceremony_id = new_id("delkey");
     let mut fenced: Vec<&Arc<dyn PeerApi>> = Vec::new();
+    // Nodes that hold nothing hosted under a non-hosted id (they refuse its fence and its
+    // tombstone with NotHostedKeyId): the cleanup of a key squatted on a FROST id.
+    let mut nothing_here = 0usize;
     for p in peers {
         match p.ceremony_fence(&ceremony_id, key_id, "delkey").await {
             Ok(()) => fenced.push(p),
@@ -1032,6 +1035,7 @@ pub async fn delete_hosted_key(
             // FROST id before 0.4.0-rc.6): nothing to delete there, and no tombstone may be recorded.
             Err(e) if is_not_hosted_id(&e) => {
                 tracing::info!(peer = ?p.identifier(), key_id, "no hosted record under a non-hosted id on this cosigner; skipping it");
+                nothing_here += 1;
             }
             Err(e) => {
                 release_fences(&fenced, &ceremony_id, key_id).await;
@@ -1046,6 +1050,7 @@ pub async fn delete_hosted_key(
                 deleted_anywhere |= converted;
                 tombstones += 1;
             }
+            Err(e) if is_not_hosted_id(&e) => nothing_here += 1, // its record went meanwhile
             Err(e) => {
                 tracing::warn!(peer = ?p.identifier(), key_id, error = %e, "hosted key delete refused or failed on peer");
                 if refusal.is_none() && !is_unreachable(&e) {
@@ -1055,6 +1060,15 @@ pub async fn delete_hosted_key(
         }
     }
     release_fences(&fenced, &ceremony_id, key_id).await;
+    // The cleanup of a squatted non-hosted id: no tombstone may be recorded where nothing hosted
+    // is, so the write quorum cannot apply. It succeeds when every node answered — a tombstone
+    // where a record was, "nothing here" elsewhere — with no refusal.
+    if crate::node::refuse_unless_hosted_id(key_id).is_err() {
+        if refusal.is_none() && tombstones + nothing_here == peers.len() {
+            return Ok((deleted_anywhere, tombstones));
+        }
+        return Err(refusal.unwrap_or(DaemonError::ThresholdNotMet { needed: peers.len(), got: tombstones + nothing_here }));
+    }
     if tombstones < write_quorum {
         // A node's refusal (an invalid intent, a role it does not grant) is the answer, not "too
         // few nodes"; tombstones already written stay and propagate.
