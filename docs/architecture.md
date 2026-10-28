@@ -238,7 +238,12 @@ two keys, two DKGs, no collision. Rules:
 - **Approval rules match the full id.** With a prefix, a rule's `key-id-prefix` must include it
   (`"soak1-frost-"`, not `"frost-"`); see [approval-quorum.md](approval-quorum.md).
 - The alphabet is the cosigner keystore's, `[A-Za-z0-9_-]`; anything else fails at driver startup.
-- The cosigners are untouched: ids are opaque strings to them. A prefix is a namespace, not an
+- **No routing tag inside the prefix** (since 0.4.0-rc.6): a prefix containing `frost-` or `rutli-`
+  fails at driver startup. The cosigners do not know the prefix; they read an id's routing tag as the
+  first `frost-` or `rutli-` in it and create hosted keys only under `rutli-` ids, so that no peer can
+  park a hosted key on a FROST id before its DKG ([threat-model.md](security/threat-model.md)). A
+  prefix without a tag keeps the first tag in every id equal to the one the driver routes on.
+- Otherwise the cosigners treat ids as opaque strings. A prefix is a namespace, not an
   authorization boundary — any driver with a valid client certificate can address any id on the
   cluster, so participants sharing a cluster share a trust domain.
 

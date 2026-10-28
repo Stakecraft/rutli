@@ -65,29 +65,40 @@ guard or opens a session:
 
 That last rule makes an intent single-use. Ceremony ids are used once per node (durable ceremony
 records, checked at the fence and at part 1). A ceremony that fails spends its id on every node it
-reached, even when it fails at the fence: the leader's rollback then aborts the id everywhere,
-which records a durable no-vote. A node also refuses a second fence under an id whose guard it
-already holds, so two leaders can never drive one ceremony id. Replaying an intent therefore finds
-its id spent. The exception is a ceremony whose leader died before it could spend the id: a node
-can then run that same requested ceremony once, within the intent's validity. So clients mint a
-fresh intent per attempt: the driver does so for every failover leader, and `rutli-cosigner
-refresh` for every run. An intent cannot be reused for another key, kind or cluster, and a leader
-cannot mint or alter one. The leader also checks the intent on `Signer.Dkg`/`Refresh` and
-requires the intent's signer (CN and certificate key) to be the caller on that connection. This
-gives the client a clear refusal, and an intent cannot be replayed through another client's
-connection.
+reached, even when it fails at the fence: the leader's rollback then aborts the id everywhere, which
+records a durable no-vote. A node also refuses a second fence under an id whose guard it already
+holds, so two leaders can never drive one ceremony id. And since 0.4.0-rc.6 the guard binds the
+ceremony to its leader, the caller whose fence took it (its certificate CN, or the node itself):
+parts 1–3 and the release of the fence are accepted only from that leader, and on a node that
+enforces intents part 1 never takes the guard without a fence. The leader fences its own node first,
+before any peer has seen the intent, so a peer that was shown the intent at its fence cannot run the
+ceremony: at most it binds another node to itself, which stops it. Replaying an intent finds its id
+spent. The exception is a ceremony whose leader died (its node restarted, dropping the in-memory
+guards) before it could spend the id: a node can then run that same requested ceremony once,
+starting it while the intent is still valid. The intent is checked at the fence and at part 1; parts
+2–3 and the commit may finish after it expires ([threat-model.md](security/threat-model.md) says why
+that is safe). So clients mint a fresh intent per attempt: the driver does so for every failover
+leader, and `rutli-cosigner refresh` for every run. An intent cannot be reused for another key, kind
+or cluster, and a leader cannot mint or alter one. The leader also checks the intent on
+`Signer.Dkg`/`Refresh` and requires the intent's signer (CN and certificate key) to be the caller on
+that connection. This gives the client a clear refusal, and an intent cannot be replayed through
+another client's connection.
 
-**Enforcement:** `signing_policy.require_ceremony_intent` (needs TLS). It is off in this release:
-a node accepts a ceremony without an intent and counts it in `rutli_ceremony_intent_absent_total`
-(alert `RutliCeremonyIntentAbsent`, info), but an intent that is present is always verified in full.
-With the flag on, a ceremony without a valid intent is refused. From then on, a compromised cosigner
-can no longer start a DKG or refresh on that node. So it can no longer split the key or churn
-epochs at will. The ceremony records it can still make a node write are the no-votes for
-unknown ids it asks about (`CeremonyStatus`/`Abort`/`Commit`), bounded by the per-asker and total
-caps (audit F2). Refusals are counted in `rutli_ceremony_intent_refusals_total{reason}`
-(alert `RutliCeremonyIntentRefused`). A refusal on the mesh path is logged with the asking peer's CN:
-a cosigner on this release that leads ceremonies nobody signed for is a compromise signal. The switch
-order is in [approval-quorum.md](approval-quorum.md#switching-enforcement-on).
+**Enforcement:** `signing_policy.require_ceremony_intent`. It is **on by default since 0.4.0-rc.6**
+on every node with TLS (a plaintext dev node verifies no intents and leaves it off; setting it there
+is a config error). `require_ceremony_intent: false` is the explicit opt-out, for an upgrade while
+the driver is older than 0.4.0-rc.4 or the refresh job's image predates the cosigners' release: the
+node then warns at startup, accepts a ceremony without an intent and counts it in
+`rutli_ceremony_intent_absent_total` (alert `RutliCeremonyIntentAbsent`, info), but an intent that
+is present is always verified in full. With the flag on, a ceremony without a valid intent is
+refused. From then on, a compromised cosigner can no longer start a DKG or refresh on that node. So
+it can no longer split the key or churn epochs at will. The ceremony records it can still make a
+node write are the no-votes for unknown ids it asks about (`CeremonyStatus`/`Abort`/`Commit`),
+bounded by the per-asker and total caps (audit F2). Refusals are counted in
+`rutli_ceremony_intent_refusals_total{reason}` (alert `RutliCeremonyIntentRefused`). A refusal on
+the mesh path is logged with the asking peer's CN: a cosigner on this release that leads ceremonies
+nobody signed for is a compromise signal. The switch order is in
+[approval-quorum.md](approval-quorum.md#switching-enforcement-on).
 
 What an intent does **not** bind, and why:
 
@@ -379,9 +390,11 @@ before running a DKG or refresh; pause any refresh CronJob and onboarding DKGs d
 
 Ceremony intents need no protocol bump. They are new optional fields that an older node ignores. An
 older leader drops them: a node of this release then sees a ceremony without an intent, which it
-accepts and counts while `require_ceremony_intent` is off and refuses once it is on. So turn the
-flag on only after every cosigner, the driver and the refresh job run this release. To roll back,
-turn the flag off first.
+accepts and counts while `require_ceremony_intent` is off and refuses once it is on — the default
+from 0.4.0-rc.6. So before cosigners of 0.4.0-rc.6 or later run with the default, the driver must
+be 0.4.0-rc.4 or later (it signs DKG intents) and the refresh job's image the cosigners' release
+(it signs refresh intents); until then set `require_ceremony_intent: false` on every node, and
+remove it once both sign them. To roll the driver or the refresh job back, set it to `false` first.
 
 Every key generated or refreshed on a release before ceremony protocol 2 must be treated as
 exposed to that ceremony's leader (audit C1). A post-upgrade refresh re-isolates the shares of a
