@@ -69,20 +69,25 @@ reached, even when it fails at the fence: the leader's rollback then aborts the 
 records a durable no-vote. A node also refuses a second fence under an id whose guard it already
 holds, so two leaders can never drive one ceremony id. And since 0.4.0-rc.6 the guard binds the
 ceremony to its leader, the caller whose fence took it (its certificate CN, or the node itself):
-parts 1–3 and the release of the fence are accepted only from that leader, and on a node that
-enforces intents part 1 never takes the guard without a fence. The leader fences its own node first,
-before any peer has seen the intent, so a peer that was shown the intent at its fence cannot run the
-ceremony: at most it binds another node to itself, which stops it. Replaying an intent finds its id
-spent. The exception is a ceremony whose leader died (its node restarted, dropping the in-memory
-guards) before it could spend the id: a node can then run that same requested ceremony once,
-starting it while the intent is still valid. The intent is checked at the fence and at part 1; parts
-2–3 and the commit may finish after it expires ([threat-model.md](security/threat-model.md) says why
-that is safe). So clients mint a fresh intent per attempt: the driver does so for every failover
-leader, and `rutli-cosigner refresh` for every run. An intent cannot be reused for another key, kind
-or cluster, and a leader cannot mint or alter one. The leader also checks the intent on
-`Signer.Dkg`/`Refresh` and requires the intent's signer (CN and certificate key) to be the caller on
-that connection. This gives the client a clear refusal, and an intent cannot be replayed through
-another client's connection.
+parts 1–3, an abort of the live ceremony and the release of the fence are accepted only from that
+leader, and on a node that enforces intents part 1 never takes the guard without a fence. The leader
+fences its own node first, before any peer has seen the intent, so a peer that was shown the intent
+at its fence cannot run the ceremony: at most it binds another node to itself, which stops it. And a
+node fences an intent's ceremony at most once: the fence writes a durable fence mark for the id
+(`keys/.ceremonies/.fenced/<id>`, kept 24 h, longer than any intent is valid), which refuses every
+later fence under the id and any part 1 that would take a new guard for it — after the leader's
+release, a preemption or a restart alike. The leader cannot resume a ceremony across a restart
+either; the client retries with a fresh intent. Replaying an intent finds its id spent. The
+exception is a ceremony whose leader died (its node restarted, dropping the in-memory guards) before
+it could spend the id: a node can then run that same requested ceremony once, starting it while the
+intent is still valid. The intent is checked at the fence and at part 1; parts 2–3 and the commit
+may finish after it expires ([threat-model.md](security/threat-model.md) says why that is safe). So
+clients mint a fresh intent per attempt: the driver does so for every failover leader, and
+`rutli-cosigner refresh` for every run. An intent cannot be reused for another key, kind or cluster,
+and a leader cannot mint or alter one. The leader also checks the intent on `Signer.Dkg`/`Refresh`
+and requires the intent's signer (CN and certificate key) to be the caller on that connection. This
+gives the client a clear refusal, and an intent cannot be replayed through another client's
+connection.
 
 **Enforcement:** `signing_policy.require_ceremony_intent`. It is **on by default since 0.4.0-rc.6**
 on every node with TLS (a plaintext dev node verifies no intents and leaves it off; setting it there

@@ -141,8 +141,11 @@ anything else → the delegate. With `delegate = "none"` there is no third path 
 holds no key material at all, and any key id matching neither prefix fails loudly and names the key
 instead of silently doing local crypto. The cosigners hold the two namespaces apart too (since
 0.4.0-rc.6): a node creates a hosted key — generated, replicated from a peer, pulled by
-anti-entropy or read-repair, or imported — only under an id whose first `frost-`/`rutli-` tag is
-`rutli-`, so no peer can park a hosted key on a FROST key's id.
+anti-entropy or read-repair, or imported — and records a tombstone or takes a hosted-key fence only
+under an id whose first `frost-`/`rutli-` tag is `rutli-`, so no peer can park a hosted key on a
+FROST key's id. A hosted record already under another id (squatted before 0.4.0-rc.6, or made by
+hand) keeps serving on the nodes that hold it but is no longer replicated or repaired; it can still
+be deleted where it is, and `hosted-clear-tombstone` on those nodes then frees the id.
 
 **Several participants on one cluster:** FROST ids derive from Canton's key name, so a second
 participant on the same cluster asks for the same `frost-namespace` and its DKG is refused with
