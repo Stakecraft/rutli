@@ -4,8 +4,8 @@ apiVersion: v2
 name: rutli-cosigner
 description: Rütli FROST cosigner cluster (t-of-n threshold signing for Canton namespace keys)
 type: application
-version: 0.4.0-rc.5
-appVersion: "0.4.0-rc.5"
+version: 0.4.0-rc.6
+appVersion: "0.4.0-rc.6"
 home: https://github.com/Stakecraft/rutli
 sources:
   - https://github.com/Stakecraft/rutli

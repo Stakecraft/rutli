@@ -5,6 +5,15 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.4.0-rc.6] — 2026-10-28
+
+_Release candidate, pre-audit: for soak and review, not for production key custody. **Breaking default:** `require_ceremony_intent` is on for every cosigner with TLS; read "Changed (breaking default)" below before upgrading. No wire change._
+
+Builds on 0.4.0-rc.5. Fixes from a multi-model review of rc.3 → rc.5 and four rounds of adversarial
+review of the fixes: a ceremony is led only by the node that fenced it, and a durable fence mark spends
+its id on every node that saw the intent; hosted keys can no longer squat on a FROST key's id; TLS and
+HTTP/2 crate advisories closed; CI supply chain pinned.
+
 ### Security
 
 - **rustls 0.23.37 → 0.23.46 and rustls-webpki 0.103.10 → 0.103.16** in the cosigner and dealer,
@@ -1572,6 +1581,7 @@ not audited. Do not place production authority keys behind it.
 - HSM backend validated only against SoftHSM.
 - No third-party security audit.
 
+[0.4.0-rc.6]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.6
 [0.4.0-rc.5]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.5
 [0.4.0-rc.4]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.4
 [0.4.0-rc.3]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.3
