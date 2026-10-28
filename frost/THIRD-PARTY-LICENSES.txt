@@ -5586,9 +5586,9 @@ limitations under the License.
 ================================================================================
 Apache License 2.0 (Apache-2.0)
 Used by:
-  - rutli-canton-key 0.4.0-rc.5
-  - rutli-frost-core 0.4.0-rc.5
-  - rutli-cosigner 0.4.0-rc.5
+  - rutli-canton-key 0.4.0-rc.6
+  - rutli-frost-core 0.4.0-rc.6
+  - rutli-cosigner 0.4.0-rc.6
   - anyhow 1.0.103
   - asn1-rs-impl 0.2.0
   - async-trait 0.1.89

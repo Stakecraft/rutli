@@ -1858,7 +1858,7 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "rutli-canton-key"
-version = "0.4.0-rc.5"
+version = "0.4.0-rc.6"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -1875,7 +1875,7 @@ dependencies = [
 
 [[package]]
 name = "rutli-cosigner"
-version = "0.4.0-rc.5"
+version = "0.4.0-rc.6"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -1917,7 +1917,7 @@ dependencies = [
 
 [[package]]
 name = "rutli-frost-core"
-version = "0.4.0-rc.5"
+version = "0.4.0-rc.6"
 dependencies = [
  "ed25519-dalek",
  "frost-core",

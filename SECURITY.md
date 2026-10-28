@@ -5,7 +5,7 @@ secret a node holds. Treat every change as security-critical.
 
 ## Status
 
-- **Pre-1.0 and not yet externally audited.** The latest release is `0.4.0-rc.5`. An independent
+- **Pre-1.0 and not yet externally audited.** The latest release is `0.4.0-rc.6`. An independent
   third-party audit is being arranged for the `0.4.0` code freeze; its report will be published in
   this repository.
 - **Internal security review, October 2026.** Two independent reviews of `0.4.0-rc.1`. Every
@@ -21,7 +21,7 @@ backports; upgrade to the latest release.
 
 | Version | Supported |
 |---|---|
-| `0.4.0-rc.5` (latest) | Yes |
+| `0.4.0-rc.6` (latest) | Yes |
 | Anything older | No |
 
 ## Reporting a vulnerability

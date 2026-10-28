@@ -14,7 +14,7 @@ body:
     attributes:
       label: Rütli version
       description: Release tag or commit of the driver and of the cosigners (they can differ).
-      placeholder: driver 0.4.0-rc.5, cosigners 0.4.0-rc.5
+      placeholder: driver 0.4.0-rc.6, cosigners 0.4.0-rc.6
     validations:
       required: true
   - type: input
