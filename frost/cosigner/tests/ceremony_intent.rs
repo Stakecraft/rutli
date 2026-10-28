@@ -700,6 +700,10 @@ async fn only_the_leader_that_fenced_a_ceremony_runs_it() {
         // Nor can it abort the leader's live session there.
         not_the_leader(p.ceremony_abort(&xid).await);
     }
+    // Node 3's release of the leader's fence is a no-op: the leader's part 2 still finds its guard.
+    for p in &node3[..2] {
+        p.ceremony_release(&xid, KEY).await.unwrap();
+    }
     let mut digest = [0u8; 32];
     for p in &leader {
         digest = p.ceremony_part2(&xid, &map).await.unwrap().round1_digest;
@@ -1210,4 +1214,104 @@ async fn a_fence_mark_survives_a_restart() {
     r.led_by(0)[0].ceremony_release(&xid, KEY).await.unwrap();
     let y = r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 31);
     assert_eq!(run_refresh_with_intent(&r.led_by(0), KEY, Some(y)).await.unwrap(), group);
+}
+
+/// Review (rc.6, round 3): a leader node that opted out of ceremony intents next to enforcing ones.
+/// After the leader's rollback released its own guard, node 3 fenced the leader's node under the
+/// client's ceremony id WITHOUT an intent (the fence mark was consulted only for intent-carrying
+/// fences) and drove the client's DKG to commit as its leader. Now a marked id refuses every fence
+/// and every guard-creating part 1, with or without an intent.
+#[tokio::test]
+async fn an_opted_out_leader_node_still_refuses_a_marked_id_without_an_intent() {
+    let lenient = SigningPolicyConfig { require_ceremony_intent: Some(false), ..Default::default() };
+    let r = rig(move |i| if i == 1 { lenient.clone() } else { enforcing() });
+    let key = "frost-participant1-victim";
+    let (x, xid) = (r.ids.ceremony("driver", CeremonyKind::Dkg, key, 41), id(CeremonyKind::Dkg, 41));
+    let (leader, p3) = (r.led_by(0), r.led_by(2));
+    leader[0].ceremony_begin(&xid, key, CeremonyKind::Dkg, None, Some(&x)).await.unwrap();
+    // Node 3, shown the intent at its fence, races node 2 with it; the leader's fence there fails
+    // and its rollback releases its own fence.
+    p3[2].ceremony_begin(&xid, key, CeremonyKind::Dkg, None, Some(&x)).await.unwrap();
+    p3[1].ceremony_begin(&xid, key, CeremonyKind::Dkg, None, Some(&x)).await.unwrap();
+    assert!(leader[1].ceremony_begin(&xid, key, CeremonyKind::Dkg, None, Some(&x)).await.is_err());
+    leader[0].ceremony_release(&xid, key).await.unwrap();
+    // Node 3 tries the leader's (opted-out) node under the same id, without and with the intent.
+    for intent in [None, Some(&x)] {
+        match p3[0].ceremony_begin(&xid, key, CeremonyKind::Dkg, None, intent).await {
+            Err(DaemonError::CeremonyRefused(m)) => assert!(m.contains("already fenced"), "{m}"),
+            other => panic!("a fence under a marked id must be refused, got {other:?}"),
+        }
+        match p3[0].ceremony_part1(&xid, key, CeremonyKind::Dkg, &[1, 2, 3], intent).await {
+            Err(DaemonError::CeremonyRefused(m)) => assert!(m.contains("already fenced"), "{m}"),
+            other => panic!("a part 1 under a marked id must be refused, got {other:?}"),
+        }
+    }
+    assert!(r.nodes.iter().all(|n| !n.has_key(key)), "no node holds a share of the client's key");
+}
+
+/// Review (rc.6, round 3): the leader-bound abort looked at whichever guard carried the ceremony id.
+/// Node 3 planted hosted-key fences under the client's ceremony id on other keys, bound to itself,
+/// and its abort then killed the leader's session. Now one ceremony id guards one key, and an abort
+/// is refused while any live guard under the id is bound to another leader.
+#[tokio::test]
+async fn a_same_id_guard_on_another_key_cannot_stand_in_for_the_leaders() {
+    let r = rig(|_| enforcing());
+    let group =
+        run_dkg_with_intent(&r.led_by(0), KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    let (x, xid) = (r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 42), id(CeremonyKind::Refresh, 42));
+    let (leader, p3) = (r.led_by(0), r.led_by(2));
+    for p in &leader {
+        p.ceremony_begin(&xid, KEY, CeremonyKind::Refresh, r.expect(KEY), Some(&x)).await.unwrap();
+    }
+    let mut map = BTreeMap::new();
+    for p in &leader {
+        map.insert(p.identifier(), p.ceremony_part1(&xid, KEY, CeremonyKind::Refresh, &[1, 2, 3], Some(&x)).await.unwrap());
+    }
+    for i in 0..8 {
+        match p3[1].ceremony_fence(&xid, &format!("rutli-enc-planted-{i}"), "genkey").await {
+            Err(DaemonError::CeremonyRefused(m)) => assert!(m.contains("one ceremony id guards one key"), "{m}"),
+            other => panic!("a second key under the ceremony id must be refused, got {other:?}"),
+        }
+    }
+    not_the_leader(p3[1].ceremony_abort(&xid).await);
+    let mut digest = [0u8; 32];
+    for p in &leader {
+        digest = p.ceremony_part2(&xid, &map).await.unwrap().round1_digest;
+    }
+    for p in &leader {
+        p.ceremony_part3(&xid, &digest).await.unwrap();
+    }
+    for p in &leader {
+        p.ceremony_commit(&xid).await.unwrap();
+    }
+    for n in &r.nodes {
+        assert_eq!(StatusInfo::from_record(&n.ceremony_record(&xid).unwrap()).phase, Phase::Committed);
+        assert_eq!(n.group_key(KEY).unwrap(), group);
+    }
+}
+
+/// Where intents are not required, a part 1 with an intent may take the guard itself — and then
+/// marks the id like a fence does: after the guard is gone (here: a restart), the same id is
+/// refused at part 1 and at the fence, with or without the intent.
+#[tokio::test]
+async fn an_opted_out_part1_that_takes_the_guard_marks_the_id() {
+    let lenient = || SigningPolicyConfig { require_ceremony_intent: Some(false), ..Default::default() };
+    let r = rig(move |_| lenient());
+    let key = "frost-participant1-lenient";
+    let (x, xid) = (r.ids.ceremony("driver", CeremonyKind::Dkg, key, 43), id(CeremonyKind::Dkg, 43));
+    r.nodes[1].ceremony_part1(&xid, key, CeremonyKind::Dkg, &[1, 2, 3], Some(&x)).unwrap();
+    let restarted = Arc::new(
+        Node::new(Identifier::try_from(2u16).unwrap(), 3, 2, KeyStore::open(r._tmp.path().join("n2")).unwrap())
+            .with_sign_guard(guard_for(&r.ids, r._tmp.path(), 2, &lenient())),
+    );
+    for intent in [Some(&x), None] {
+        match restarted.ceremony_part1(&xid, key, CeremonyKind::Dkg, &[1, 2, 3], intent) {
+            Err(DaemonError::CeremonyRefused(m)) => assert!(m.contains("already fenced"), "{m}"),
+            other => panic!("part 1 under a marked id must be refused, got {other:?}"),
+        }
+        match restarted.ceremony_begin(&xid, key, CeremonyKind::Dkg, None, intent) {
+            Err(DaemonError::CeremonyRefused(m)) => assert!(m.contains("already fenced"), "{m}"),
+            other => panic!("a fence under a marked id must be refused, got {other:?}"),
+        }
+    }
 }

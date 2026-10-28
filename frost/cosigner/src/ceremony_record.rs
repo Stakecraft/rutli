@@ -386,6 +386,13 @@ impl CeremonyRecords {
         Ok(true)
     }
 
+    /// Whether `ceremony_id` carries a fence mark (read-only; [`CeremonyRecords::mark_fenced`] is
+    /// the test-and-set).
+    pub fn is_fenced(&self, ceremony_id: &str) -> Result<bool> {
+        validate_ceremony_id(ceremony_id)?;
+        Ok(self.fenced_dir().join(ceremony_id).try_exists()?)
+    }
+
     /// Delete fence marks older than `older_than` (by file time). Returns how many.
     pub fn prune_fenced(&self, older_than: std::time::Duration) -> Result<usize> {
         let dir = self.fenced_dir();

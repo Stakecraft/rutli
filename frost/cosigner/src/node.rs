@@ -577,6 +577,15 @@ impl Node {
                 None if !may_create => return Err(unfenced()),
                 None => None,
             };
+            // A ceremony id guards one key: a guard under it on another key (a hosted-key fence a
+            // peer took under a client ceremony's id, say) would make "the guard of this ceremony"
+            // ambiguous to the checks that bind it to its leader.
+            if guards.iter().any(|(k, g)| g.owner == owner && k != key_id) {
+                return Err(DaemonError::CeremonyRefused(format!(
+                    "ceremony {owner} already holds the guard of another key on this node — one \
+                     ceremony id guards one key"
+                )));
+            }
             guards.insert(
                 key_id.to_string(),
                 CeremonyGuard {
@@ -1477,8 +1486,12 @@ impl Node {
         // A client intent's ceremony is fenced at most once on this node, and that is durable: the
         // guard that binds it to its leader lives in memory and goes with a release, a preemption
         // or a restart, and the id must not be free for anyone to fence again then.
-        if verified.is_some() {
-            self.mark_fenced(ceremony_id, key_id, leader)?;
+        // A fence without an intent (allowed only where intents are not required) never writes a
+        // mark, but it is refused under a marked id all the same: otherwise a node that opted out
+        // would let any peer re-fence a client's ceremony once its leader's guard went.
+        match verified {
+            Some(_) => self.mark_fenced(ceremony_id, key_id, leader)?,
+            None => self.refuse_if_fenced(ceremony_id)?,
         }
         // One fence per ceremony per node: a second fence under an id that already holds the guard
         // here is a second leader for the same ceremony — under ceremony intents, two leaders
@@ -1530,6 +1543,17 @@ impl Node {
                 "ceremony {ceremony_id} was already fenced on this node — a second fence under one \
                  client intent (a second leader, or the same id after its guard went or this node \
                  restarted) is refused; the client retries with a fresh intent"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Refuse `ceremony_id` if it carries a fence mark: an intent's ceremony fenced here before.
+    fn refuse_if_fenced(&self, ceremony_id: &str) -> Result<()> {
+        if self.record_store.is_fenced(ceremony_id)? {
+            return Err(DaemonError::CeremonyRefused(format!(
+                "ceremony {ceremony_id} was already fenced on this node under a client intent — it is \
+                 never fenced or started again here, with or without an intent"
             )));
         }
         Ok(())
@@ -1599,8 +1623,10 @@ impl Node {
         // once per intent.
         let held = self.guards().get(key_id).is_some_and(|g| g.owner == ceremony_id);
         let may_create = !held && !self.ceremony_intent_required();
-        if may_create && intent {
-            self.mark_fenced(ceremony_id, key_id, leader)?;
+        match (may_create, intent) {
+            (true, true) => self.mark_fenced(ceremony_id, key_id, leader)?,
+            (true, false) => self.refuse_if_fenced(ceremony_id)?,
+            (false, _) => {}
         }
         let created = self.acquire_ceremony(key_id, ceremony_id, kind.as_str(), leader, may_create)?;
         let result = self.open_session(ceremony_id, key_id, kind, roster, old);
@@ -2296,10 +2322,14 @@ impl Node {
     /// leaves the abort to anyone, as before (an orphan's leader is gone).
     pub fn ceremony_abort_from(&self, ceremony_id: &str, asker: Option<&str>) -> Result<StatusInfo> {
         crate::keystore::validate_ceremony_id(ceremony_id)?;
-        if let Some(g) = self.guards().values().find(|g| g.owner == ceremony_id) {
-            if !self.guard_orphaned(g) && g.leader.as_deref() != asker {
-                return Err(not_the_leader(ceremony_id, g.leader.as_deref(), asker));
-            }
+        // Every live guard under the id (one key per id — see `acquire_ceremony` — but checked
+        // over all of them, so no other guard can stand in for the leader's).
+        if let Some(g) = self
+            .guards()
+            .values()
+            .find(|g| g.owner == ceremony_id && !self.guard_orphaned(g) && g.leader.as_deref() != asker)
+        {
+            return Err(not_the_leader(ceremony_id, g.leader.as_deref(), asker));
         }
         self.abort_unchecked(ceremony_id, asker)
     }
@@ -3130,8 +3160,17 @@ impl Node {
     /// missed its write quorum. Anything else is refused: no peer and no leader can physically
     /// remove a key otherwise (audit M2).
     pub fn hosted_rollback_purge(&self, ceremony_id: &str, key_id: &str) -> Result<bool> {
+        self.hosted_rollback_purge_from(ceremony_id, key_id, None)
+    }
+
+    /// [`Node::hosted_rollback_purge`] asked by the peer whose certificate CN is `leader` (`None`:
+    /// this node's own leader): only the generation's leader, the caller whose fence took the
+    /// guard, may roll it back — not any peer that learned the generation's ceremony id.
+    pub fn hosted_rollback_purge_from(&self, ceremony_id: &str, key_id: &str, leader: Option<&str>) -> Result<bool> {
         self.hosted_ctx()?;
-        let fenced = self.guards().get(key_id).is_some_and(|g| g.owner == ceremony_id && g.kind == "genkey");
+        let fenced = self.guards().get(key_id).is_some_and(|g| {
+            g.owner == ceremony_id && g.kind == "genkey" && g.leader.as_deref() == leader
+        });
         let created_here = crate::sync::recover(&self.hosted_created_in, "hosted_created_in")
             .get(key_id)
             .is_some_and(|c| c == ceremony_id);

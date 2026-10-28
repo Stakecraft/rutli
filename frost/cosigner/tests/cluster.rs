@@ -1091,6 +1091,25 @@ async fn a_push_after_part3_staged_cannot_block_the_commit() {
     sign(&nodes[0], &peers, id, &msg).await.unwrap();
 }
 
+/// A generation's rollback purge is the generation leader's alone: a peer that learned the
+/// generation's ceremony id cannot purge the copy a node just stored for it.
+#[tokio::test]
+async fn only_the_generation_leader_purges_its_rollback() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, _peers) = hosted_cluster(&tmp);
+    let (cid, id) = ("genkey-rollback", "rutli-enc-purge");
+    let key = rutli_cosigner::hosted::HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
+    // Node 1 leads the generation on node 2: fence, then the replica.
+    let leader = LocalPeer::new(nodes[1].clone()).on_behalf_of(nodes[0].clone());
+    leader.ceremony_fence(cid, id, "genkey").await.unwrap();
+    leader.replicate_key(cid, id, "aes-256-gcm", &[], &wrapped_by(&nodes[0], &nodes[1], id, &key)).await.unwrap();
+    let node3 = LocalPeer::new(nodes[1].clone()).on_behalf_of(nodes[2].clone());
+    assert!(node3.purge_key(cid, id).await.is_err(), "another peer's purge is refused");
+    assert!(nodes[1].hosted_exists(id));
+    assert!(leader.purge_key(cid, id).await.unwrap(), "the leader rolls its generation back");
+    assert!(!nodes[1].hosted_exists(id));
+}
+
 #[tokio::test]
 async fn hosted_keys_survive_a_restart() {
     let tmp = tempfile::tempdir().unwrap();

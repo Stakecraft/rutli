@@ -1179,7 +1179,7 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::PurgeKeyRequest>,
     ) -> Result<Response<pb::PurgeKeyReply>, Status> {
-        self.authorize(&req)?;
+        let asker = self.authorize(&req)?;
         self.node.refuse_if_keystore_down().map_err(Status::from)?;
         let r = req.into_inner();
         let deleted = self
@@ -1189,7 +1189,7 @@ impl Peer for PeerSvc {
                 Some(intent) => n
                     .hosted_apply_tombstone(&r.key_id, intent, crate::intent::Expiry::Enforce, None)
                     .map(|o| o == crate::node::TombstoneOutcome::Converted),
-                None => n.hosted_rollback_purge(&r.ceremony_id, &r.key_id),
+                None => n.hosted_rollback_purge_from(&r.ceremony_id, &r.key_id, asker.as_deref()),
             })
             .await
             .map_err(Status::from)?;

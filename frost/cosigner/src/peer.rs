@@ -335,7 +335,8 @@ impl PeerApi for LocalPeer {
 
     async fn purge_key(&self, ceremony_id: &str, key_id: &str) -> Result<bool> {
         let (ceremony_id, key_id) = (ceremony_id.to_owned(), key_id.to_owned());
-        self.node.blocking(move |n| n.hosted_rollback_purge(&ceremony_id, &key_id)).await
+        let leader = self.asker();
+        self.node.blocking(move |n| n.hosted_rollback_purge_from(&ceremony_id, &key_id, leader.as_deref())).await
     }
 
     async fn delete_key(&self, _ceremony_id: &str, key_id: &str, intent: &pb::SignedIntent) -> Result<bool> {
