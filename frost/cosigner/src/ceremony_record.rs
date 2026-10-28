@@ -207,6 +207,10 @@ pub fn transition_allowed(from: Option<RecordState>, to: RecordState) -> bool {
     )
 }
 
+/// Subdirectory of the record directory holding the fence marks ([`CeremonyRecords::mark_fenced`]).
+/// Its dot keeps it out of [`CeremonyRecords::load_all`].
+pub const FENCED_DIR: &str = ".fenced";
+
 /// The record directory. Callers serialize writes (the node holds one lock over its records);
 /// this type only does the durable IO and the transition check.
 pub struct CeremonyRecords {
@@ -351,6 +355,56 @@ impl CeremonyRecords {
     /// mistake an unreadable vote for no vote — audit F4).
     pub fn file_exists(&self, ceremony_id: &str) -> Result<bool> {
         Ok(self.path(ceremony_id)?.try_exists()?)
+    }
+
+    fn fenced_dir(&self) -> PathBuf {
+        self.dir.join(FENCED_DIR)
+    }
+
+    /// Durably mark `ceremony_id` as fenced on this node, test-and-set: `false` when it already
+    /// was. Existence is the mark (a create-new file, fsynced with its directory); the content —
+    /// key id, leader, time — is for operators. Survives a restart, unlike the in-memory guard.
+    pub fn mark_fenced(&self, ceremony_id: &str, key_id: &str, leader: Option<&str>) -> Result<bool> {
+        validate_ceremony_id(ceremony_id)?;
+        let dir = self.fenced_dir();
+        crate::keystore::ensure_private_dir(&self.dir)?;
+        crate::keystore::ensure_private_dir(&dir)?;
+        let mut f = match private_file(&dir.join(ceremony_id), true) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+            Err(e) => return Err(e.into()),
+        };
+        let mark = serde_json::json!({
+            "ceremony_id": ceremony_id,
+            "key_id": key_id,
+            "leader": leader.unwrap_or("self"),
+            "fenced_ms": now_ms(),
+        });
+        f.write_all(&serde_json::to_vec(&mark)?)?;
+        f.sync_all()?;
+        std::fs::File::open(&dir)?.sync_all()?;
+        Ok(true)
+    }
+
+    /// Delete fence marks older than `older_than` (by file time). Returns how many.
+    pub fn prune_fenced(&self, older_than: std::time::Duration) -> Result<usize> {
+        let dir = self.fenced_dir();
+        if !dir.try_exists()? {
+            return Ok(0);
+        }
+        let mut n = 0;
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            let old = entry.metadata()?.modified()?.elapsed().is_ok_and(|age| age >= older_than);
+            if old {
+                std::fs::remove_file(entry.path())?;
+                n += 1;
+            }
+        }
+        if n > 0 {
+            std::fs::File::open(&dir)?.sync_all()?;
+        }
+        Ok(n)
     }
 
     /// Delete a record (garbage collection of a settled, old ceremony only).
@@ -538,6 +592,23 @@ pub fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fence mark is test-and-set, durable across a reopen, invisible to `load_all`, and pruned
+    /// by age only.
+    #[test]
+    fn fence_marks_are_set_once_survive_a_reopen_and_are_pruned_by_age() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = CeremonyRecords::open(tmp.path().join("ceremonies"));
+        assert!(store.mark_fenced("refresh-aa", "frost-ns", Some("cosigner1")).unwrap());
+        assert!(!store.mark_fenced("refresh-aa", "frost-ns", None).unwrap());
+        let reopened = CeremonyRecords::open(tmp.path().join("ceremonies"));
+        assert!(!reopened.mark_fenced("refresh-aa", "frost-ns", Some("cosigner3")).unwrap());
+        assert!(reopened.load_all().unwrap().is_empty(), "a mark is not a vote");
+        assert_eq!(reopened.prune_fenced(std::time::Duration::from_secs(3600)).unwrap(), 0);
+        assert_eq!(reopened.prune_fenced(std::time::Duration::ZERO).unwrap(), 1);
+        assert!(reopened.mark_fenced("refresh-aa", "frost-ns", None).unwrap());
+        assert!(reopened.mark_fenced("../x", "frost-ns", None).is_err(), "ids are validated");
+    }
 
     fn staged(id: &str, roster: &[u16], pkp: &str) -> CeremonyRecord {
         CeremonyRecord {

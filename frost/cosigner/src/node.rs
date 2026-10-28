@@ -126,6 +126,11 @@ const CEREMONY_ORPHAN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// generation or delete.
 pub const CEREMONY_FENCE_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// How long a fence mark ([`Node::mark_fenced`]) is kept: longer than any ceremony intent can be
+/// valid (`intent_max_lifetime_secs` ≤ 1 h, plus `clock_skew_secs` ≤ 1 h). Past it the intent
+/// that the mark spends is refused on its own validity anyway.
+pub const FENCE_MARK_RETENTION: Duration = Duration::from_secs(24 * 3600);
+
 /// How often a running node prunes expired nonce markers (and once at startup).
 pub const NONCE_PRUNE_INTERVAL: Duration = Duration::from_secs(10 * 60);
 /// Most markers one prune pass removes, so a pass over a huge backlog stays short; a pass that hits
@@ -332,6 +337,9 @@ impl Node {
             #[cfg(test)]
             hooks: TestHooks::default(),
         };
+        if let Err(e) = node.record_store.prune_fenced(FENCE_MARK_RETENTION) {
+            tracing::warn!(error = %e, "could not prune old ceremony fence marks");
+        }
         if !records_loaded {
             // Without the votes the repair cannot tell an orphaned staged share from one this node
             // voted yes on (audit F4): leave everything as it is until a start that reads them.
@@ -1418,7 +1426,8 @@ impl Node {
         // Pure checks first: a malformed or oversized id never reaches a refusal message or a log.
         crate::keystore::validate_ceremony_id(ceremony_id)?;
         crate::keystore::validate_key_id(key_id)?;
-        if let Some(v) = self.authorize_ceremony(kind, key_id, ceremony_id, intent)? {
+        let verified = self.authorize_ceremony(kind, key_id, ceremony_id, intent)?;
+        if let Some(v) = &verified {
             tracing::info!(
                 ceremony_id,
                 key_id,
@@ -1455,6 +1464,12 @@ impl Node {
                     }
                 }
             }
+        }
+        // A client intent's ceremony is fenced at most once on this node, and that is durable: the
+        // guard that binds it to its leader lives in memory and goes with a release, a preemption
+        // or a restart, and the id must not be free for anyone to fence again then.
+        if verified.is_some() {
+            self.mark_fenced(ceremony_id, key_id, leader)?;
         }
         // One fence per ceremony per node: a second fence under an id that already holds the guard
         // here is a second leader for the same ceremony — under ceremony intents, two leaders
@@ -1493,6 +1508,24 @@ impl Node {
         self.sign_guard.as_ref().is_some_and(|g| g.require_ceremony_intent())
     }
 
+    /// Durably mark `ceremony_id` fenced on this node, or refuse: a fence mark exists, so it was
+    /// fenced here before — by another leader, or by one whose guard has since gone (released,
+    /// preempted, or lost in a restart). Marks are kept for [`FENCE_MARK_RETENTION`].
+    fn mark_fenced(&self, ceremony_id: &str, key_id: &str, leader: Option<&str>) -> Result<()> {
+        self.refuse_if_keystore_down()?;
+        if let Err(e) = self.record_store.prune_fenced(FENCE_MARK_RETENTION) {
+            tracing::warn!(error = %e, "could not prune old ceremony fence marks");
+        }
+        if !self.record_store.mark_fenced(ceremony_id, key_id, leader)? {
+            return Err(DaemonError::CeremonyRefused(format!(
+                "ceremony {ceremony_id} was already fenced on this node — a second fence under one \
+                 client intent (a second leader, or the same id after its guard went or this node \
+                 restarted) is refused; the client retries with a fresh intent"
+            )));
+        }
+        Ok(())
+    }
+
     fn refuse_if_staged(&self, key_id: &str) -> Result<()> {
         let book = self.book()?;
         if let Some(r) =
@@ -1528,6 +1561,11 @@ impl Node {
     /// took for another caller is refused, untouched. On a node that requires ceremony intents,
     /// part 1 never creates the guard — the leader's fence must have taken it — so no part 1 can
     /// bind a ceremony to a leader that did not fence it.
+    ///
+    /// `intent`: a verified client intent authorized it. A part 1 that would create the guard for
+    /// such a ceremony (allowed only where intents are not required) first marks the id fenced
+    /// ([`Node::mark_fenced`]), so it cannot reopen one whose fence has gone.
+    #[allow(clippy::too_many_arguments)]
     fn start_session(
         &self,
         ceremony_id: &str,
@@ -1536,6 +1574,7 @@ impl Node {
         roster: Vec<u16>,
         old: Option<KeyVersion>,
         leader: Option<&str>,
+        intent: bool,
     ) -> Result<round1::Package> {
         crate::keystore::validate_ceremony_id(ceremony_id)?;
         self.refuse_if_staged(key_id)?;
@@ -1546,7 +1585,14 @@ impl Node {
                 "ceremony id {ceremony_id} was already used on this node"
             )));
         }
-        let may_create = !self.ceremony_intent_required();
+        // Held by this ceremony (its fence): part 1 joins it, never recreates it if it goes
+        // meanwhile. Not held: under ceremony intents part 1 never creates it; otherwise it may,
+        // once per intent.
+        let held = self.guards().get(key_id).is_some_and(|g| g.owner == ceremony_id);
+        let may_create = !held && !self.ceremony_intent_required();
+        if may_create && intent {
+            self.mark_fenced(ceremony_id, key_id, leader)?;
+        }
         let created = self.acquire_ceremony(key_id, ceremony_id, kind.as_str(), leader, may_create)?;
         let result = self.open_session(ceremony_id, key_id, kind, roster, old);
         if result.is_err() && created {
@@ -1680,7 +1726,7 @@ impl Node {
     ) -> Result<round1::Package> {
         crate::keystore::validate_ceremony_id(ceremony_id)?;
         crate::keystore::validate_key_id(key_id)?;
-        self.authorize_ceremony(kind, key_id, ceremony_id, intent)?;
+        let verified = self.authorize_ceremony(kind, key_id, ceremony_id, intent)?.is_some();
         let old = match kind {
             CeremonyKind::Dkg => {
                 // `…frost-import-…` ids belong to the split ceremony. Refusing them here, on every
@@ -1705,7 +1751,7 @@ impl Node {
             }
         };
         self.check_roster(roster)?;
-        self.start_session(ceremony_id, key_id, kind, roster.to_vec(), old, leader)
+        self.start_session(ceremony_id, key_id, kind, roster.to_vec(), old, leader, verified)
     }
 
     /// Part 2: check the leader's round-1 map — exactly the roster, and this node's own package
@@ -2235,9 +2281,28 @@ impl Node {
         self.ceremony_abort_from(ceremony_id, None)
     }
 
-    /// [`Node::ceremony_abort`] from the peer whose certificate CN is `asker`.
+    /// [`Node::ceremony_abort`] from the peer whose certificate CN is `asker`. While a live guard
+    /// binds the ceremony to its leader ([`CeremonyGuard::leader`]), only that leader may abort it:
+    /// otherwise any fenced peer could fail the leader's ceremony here. An orphaned guard, or none,
+    /// leaves the abort to anyone, as before (an orphan's leader is gone).
     pub fn ceremony_abort_from(&self, ceremony_id: &str, asker: Option<&str>) -> Result<StatusInfo> {
         crate::keystore::validate_ceremony_id(ceremony_id)?;
+        if let Some(g) = self.guards().values().find(|g| g.owner == ceremony_id) {
+            if !self.guard_orphaned(g) && g.leader.as_deref() != asker {
+                return Err(not_the_leader(ceremony_id, g.leader.as_deref(), asker));
+            }
+        }
+        self.abort_unchecked(ceremony_id, asker)
+    }
+
+    /// This node gives up its own session of `ceremony_id` (a round-2 delivery of its own failed),
+    /// whoever leads it.
+    pub(crate) fn abort_own_session(&self, ceremony_id: &str) -> Result<StatusInfo> {
+        crate::keystore::validate_ceremony_id(ceremony_id)?;
+        self.abort_unchecked(ceremony_id, None)
+    }
+
+    fn abort_unchecked(&self, ceremony_id: &str, asker: Option<&str>) -> Result<StatusInfo> {
         let mut release = None;
         let info = {
             let mut book = self.book()?;

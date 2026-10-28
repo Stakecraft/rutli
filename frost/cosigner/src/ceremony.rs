@@ -108,7 +108,7 @@ pub async fn part2_and_deliver(
             // this node's log; the leader gets only its category (audit F11).
             tracing::warn!(ceremony_id, to, error = %e, "round-2 delivery failed; aborting this node's session");
             let id = ceremony_id.to_owned();
-            let _ = node.blocking(move |n| n.ceremony_abort(&id)).await;
+            let _ = node.blocking(move |n| n.abort_own_session(&id)).await;
             return Err(DaemonError::CeremonyRefused(format!(
                 "delivering the round-2 package to node {to} failed ({}) — see that node's and this node's logs",
                 delivery_failure_code(&e)
