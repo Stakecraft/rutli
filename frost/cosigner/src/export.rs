@@ -380,7 +380,8 @@ pub enum Installed {
 }
 
 /// Write an imported hosted key into this node's key store: create-once, never an overwrite. The
-/// id must not be reserved for the split ceremony; an existing key under it must be this very key
+/// id must not be reserved for the split ceremony and must be a hosted-key id
+/// ([`crate::node::refuse_unless_hosted_id`]); an existing key under it must be this very key
 /// (same spec and material), else [`DaemonError::KeyExists`] — hosted keys are create-once
 /// immutable, and Canton rotates by minting a new id.
 ///
@@ -407,6 +408,7 @@ pub fn install_imported(
     if crate::share_delivery::is_reserved_for_import(key_id) {
         return Err(DaemonError::ReservedKeyId(key_id.to_string()));
     }
+    crate::node::refuse_unless_hosted_id(key_id)?;
     let compare = || -> Result<Installed> {
         // load_hosted refuses a FROST share under the id: never "identical" to a hosted key.
         let existing = keystore.load_hosted(key_id)?;

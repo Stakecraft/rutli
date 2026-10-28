@@ -297,6 +297,11 @@ fn guard_for(ids: &Ids, root: &std::path::Path, i: u16, policy: &SigningPolicyCo
 
 /// Three in-process nodes (2-of-3), node `i` on `policy(i)`, wired as a mesh.
 fn rig(policy: impl Fn(u16) -> SigningPolicyConfig) -> Rig {
+    rig_with_fence_timeout(policy, rutli_cosigner::node::CEREMONY_FENCE_TIMEOUT)
+}
+
+/// [`rig`] with a fence-only guard orphaned after `fence_timeout`.
+fn rig_with_fence_timeout(policy: impl Fn(u16) -> SigningPolicyConfig, fence_timeout: std::time::Duration) -> Rig {
     let tmp = tempfile::tempdir().unwrap();
     let ids = Ids::new();
     let nodes: Vec<Arc<Node>> = (1..=3u16)
@@ -304,7 +309,8 @@ fn rig(policy: impl Fn(u16) -> SigningPolicyConfig) -> Rig {
             let ks = KeyStore::open(tmp.path().join(format!("n{i}"))).unwrap();
             Arc::new(
                 Node::new(Identifier::try_from(i).unwrap(), 3, 2, ks)
-                    .with_sign_guard(guard_for(&ids, tmp.path(), i, &policy(i))),
+                    .with_sign_guard(guard_for(&ids, tmp.path(), i, &policy(i)))
+                    .with_ceremony_fence_timeout(fence_timeout),
             )
         })
         .collect();
@@ -314,10 +320,24 @@ fn rig(policy: impl Fn(u16) -> SigningPolicyConfig) -> Rig {
 }
 
 fn enforcing() -> SigningPolicyConfig {
-    SigningPolicyConfig { require_ceremony_intent: true, signer_may_refresh: false, ..Default::default() }
+    SigningPolicyConfig { require_ceremony_intent: Some(true), signer_may_refresh: false, ..Default::default() }
 }
 
 impl Rig {
+    /// The handles node `leader` (0-based) leads ceremonies through, as the daemon has them: itself
+    /// in process, every other node as a mesh peer that sees it as `cosigner<leader+1>`.
+    fn led_by(&self, leader: usize) -> Peers {
+        self.nodes
+            .iter()
+            .enumerate()
+            .map(|(j, n)| {
+                let p = LocalPeer::new(n.clone());
+                let p = if j == leader { p } else { p.on_behalf_of(self.nodes[leader].clone()) };
+                Arc::new(p) as Arc<dyn PeerApi>
+            })
+            .collect()
+    }
+
     /// The sharing every node holds of `key` (what a refresh fence expects).
     fn expect(&self, key: &str) -> Option<(u64, [u8; 32])> {
         let e = self.nodes[0].key_epoch(key).unwrap();
@@ -550,7 +570,7 @@ async fn only_the_refresher_role_refreshes_unless_signer_may_refresh() {
         group
     );
     // With signer_may_refresh, the driver may.
-    let lenient_role = rig(|_| SigningPolicyConfig { require_ceremony_intent: true, ..Default::default() });
+    let lenient_role = rig(|_| SigningPolicyConfig { require_ceremony_intent: Some(true), ..Default::default() });
     let group = run_dkg_with_intent(&lenient_role.peers, KEY, Some(lenient_role.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1)))
         .await
         .unwrap();
@@ -614,11 +634,12 @@ async fn a_pinned_out_key_is_refused_at_every_node() {
     }
 }
 
-/// Verify-if-present (`require_ceremony_intent` off, this release's default): a ceremony without an
-/// intent is accepted and counted; a present one is verified in full and refused if invalid.
+/// Verify-if-present (`require_ceremony_intent: false`, the explicit opt-out; the default before
+/// 0.4.0-rc.6): a ceremony without an intent is accepted and counted; a present one is verified in
+/// full and refused if invalid.
 #[tokio::test]
 async fn without_enforcement_an_absent_intent_is_counted_and_a_present_one_verified() {
-    let r = rig(|_| SigningPolicyConfig::default());
+    let r = rig(|_| SigningPolicyConfig { require_ceremony_intent: Some(false), ..Default::default() });
     let group = run_dkg(&r.peers, KEY).await.unwrap();
     assert_eq!(run_refresh(&r.peers, KEY).await.unwrap(), group);
     // A present but invalid intent is refused by every node.
@@ -643,4 +664,654 @@ async fn without_enforcement_an_absent_intent_is_counted_and_a_present_one_verif
     let out = handle.render();
     assert!(out.contains("rutli_ceremony_intent_absent_total 1"), "{out}");
     assert!(out.contains(r#"rutli_ceremony_intent_refusals_total{reason="signer"} 1"#), "{out}");
+}
+
+#[track_caller]
+fn not_the_leader(r: rutli_cosigner::Result<impl std::fmt::Debug>) {
+    match r {
+        Err(DaemonError::CeremonyRefused(m)) => assert!(m.contains("only the leader that fenced"), "{m:?}"),
+        other => panic!("expected a refusal of a caller that is not the ceremony's leader, got {other:?}"),
+    }
+}
+
+/// A fenced peer sees the client's intent at its fence, and could present it to the other nodes.
+/// Every node binds the ceremony to the leader whose fence took its guard, so parts 1–3 from any
+/// other peer are refused — before they touch the session — and the leader's ceremony completes.
+#[tokio::test]
+async fn only_the_leader_that_fenced_a_ceremony_runs_it() {
+    let r = rig(|_| enforcing());
+    let group =
+        run_dkg_with_intent(&r.led_by(0), KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    let (x, xid) = (r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 6), id(CeremonyKind::Refresh, 6));
+    let (leader, node3) = (r.led_by(0), r.led_by(2));
+    for p in &leader {
+        p.ceremony_begin(&xid, KEY, CeremonyKind::Refresh, r.expect(KEY), Some(&x)).await.unwrap();
+    }
+    // Node 3 runs part 1 on node 1 (the leader itself) and node 2 with the intent it was shown.
+    for p in &node3[..2] {
+        not_the_leader(p.ceremony_part1(&xid, KEY, CeremonyKind::Refresh, &[1, 2, 3], Some(&x)).await);
+    }
+    let mut map = BTreeMap::new();
+    for p in &leader {
+        map.insert(p.identifier(), p.ceremony_part1(&xid, KEY, CeremonyKind::Refresh, &[1, 2, 3], Some(&x)).await.unwrap());
+    }
+    for p in &node3[..2] {
+        not_the_leader(p.ceremony_part2(&xid, &map).await);
+        // Nor can it abort the leader's live session there.
+        not_the_leader(p.ceremony_abort(&xid).await);
+    }
+    // Node 3's release of the leader's fence is a no-op: the leader's part 2 still finds its guard.
+    for p in &node3[..2] {
+        p.ceremony_release(&xid, KEY).await.unwrap();
+    }
+    let mut digest = [0u8; 32];
+    for p in &leader {
+        digest = p.ceremony_part2(&xid, &map).await.unwrap().round1_digest;
+    }
+    for p in &node3[..2] {
+        not_the_leader(p.ceremony_part3(&xid, &digest).await);
+    }
+    for p in &leader {
+        p.ceremony_part3(&xid, &digest).await.unwrap();
+    }
+    for p in &leader {
+        p.ceremony_commit(&xid).await.unwrap();
+    }
+    for n in &r.nodes {
+        let rec = n.ceremony_record(&xid).unwrap();
+        assert_eq!(StatusInfo::from_record(&rec).phase, Phase::Committed);
+        assert_eq!(n.group_key(KEY).unwrap(), group);
+    }
+    // And the orchestrator's own run, led by node 2, as the daemon wires it.
+    let y = r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 7);
+    assert_eq!(run_refresh_with_intent(&r.led_by(1), KEY, Some(y)).await.unwrap(), group);
+}
+
+/// Under ceremony intents part 1 never creates the guard: a ceremony starts with its leader's fence,
+/// so a peer cannot skip the fence to bind a node to itself. Nothing is left behind by the refusal.
+#[tokio::test]
+async fn under_ceremony_intents_part1_needs_the_leaders_fence() {
+    let r = rig(|_| enforcing());
+    let group =
+        run_dkg_with_intent(&r.led_by(0), KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    let (x, xid) = (r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 8), id(CeremonyKind::Refresh, 8));
+    for p in &r.led_by(2) {
+        match p.ceremony_part1(&xid, KEY, CeremonyKind::Refresh, &[1, 2, 3], Some(&x)).await {
+            Err(DaemonError::CeremonyRefused(m)) => assert!(m.contains("has no fence"), "{m:?}"),
+            other => panic!("expected a refusal of an unfenced part 1, got {other:?}"),
+        }
+    }
+    for n in 0..3 {
+        r.assert_unguarded(n, CeremonyKind::Refresh, KEY, 9).await;
+    }
+    // The intent was not spent: its leader runs it.
+    assert_eq!(run_refresh_with_intent(&r.led_by(0), KEY, Some(x)).await.unwrap(), group);
+    // Without enforcement a part 1 may still open its own guard (bound to its caller), as before.
+    let lenient = rig(|_| SigningPolicyConfig { require_ceremony_intent: Some(false), ..Default::default() });
+    lenient.nodes[1].ceremony_part1("dkg-unfenced", KEY, CeremonyKind::Dkg, &[1, 2, 3], None).unwrap();
+}
+
+/// Failover: the driver's first leader fences and dies; the next leader, with a fresh intent, runs
+/// the ceremony once the dead leader's fences time out — the binding is per ceremony id.
+#[tokio::test]
+async fn a_failover_leader_runs_the_ceremony_after_the_first_leader_died() {
+    let fence_timeout = std::time::Duration::from_secs(2);
+    let r = rig_with_fence_timeout(|_| enforcing(), fence_timeout);
+    let group =
+        run_dkg_with_intent(&r.led_by(0), KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    let (x, xid) = (r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 10), id(CeremonyKind::Refresh, 10));
+    for p in &r.led_by(0) {
+        p.ceremony_begin(&xid, KEY, CeremonyKind::Refresh, r.expect(KEY), Some(&x)).await.unwrap();
+    }
+    // Leader 1 is gone. Its fences hold the key until they time out...
+    let y = r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 11);
+    assert!(run_refresh_with_intent(&r.led_by(1), KEY, Some(y)).await.is_err());
+    tokio::time::sleep(fence_timeout + std::time::Duration::from_millis(250)).await;
+    // ...then leader 2 runs a fresh ceremony to the end.
+    let z = r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 12);
+    assert_eq!(run_refresh_with_intent(&r.led_by(1), KEY, Some(z)).await.unwrap(), group);
+    for n in &r.nodes {
+        assert_eq!(n.key_epoch(KEY).unwrap().epoch, 2);
+    }
+}
+
+/// The leader's handle to a compromised node 1: when the leader's fence shows it the client's
+/// intent, node 1 first races the leader with it — on the leader's own node and on node 2, as
+/// `cosigner1` — and only then answers the fence. What each attempt returned is kept.
+struct Racer {
+    inner: Arc<dyn PeerApi>,
+    /// Node 1's handles to every node (`cosigner1` to the others).
+    attacker: Peers,
+    log: std::sync::Mutex<Vec<(usize, &'static str, bool)>>,
+}
+
+#[async_trait::async_trait]
+impl PeerApi for Racer {
+    fn identifier(&self) -> Identifier {
+        self.inner.identifier()
+    }
+    async fn sign_round1(
+        &self,
+        k: &str,
+        s: &str,
+        ctx: &rutli_cosigner::node::Round1Ctx,
+    ) -> rutli_cosigner::Result<frost_ed25519::round1::SigningCommitments> {
+        self.inner.sign_round1(k, s, ctx).await
+    }
+    async fn sign_round2(
+        &self,
+        k: &str,
+        s: &str,
+        m: &[u8],
+        c: &BTreeMap<Identifier, frost_ed25519::round1::SigningCommitments>,
+        d: Option<&[u8; 32]>,
+    ) -> rutli_cosigner::Result<frost_ed25519::round2::SignatureShare> {
+        self.inner.sign_round2(k, s, m, c, d).await
+    }
+    async fn abort_sign(&self, k: &str, s: &str) -> rutli_cosigner::Result<()> {
+        self.inner.abort_sign(k, s).await
+    }
+    async fn ceremony_fence(&self, c: &str, k: &str, kind: &'static str) -> rutli_cosigner::Result<()> {
+        self.inner.ceremony_fence(c, k, kind).await
+    }
+    async fn ceremony_release(&self, c: &str, k: &str) -> rutli_cosigner::Result<()> {
+        self.inner.ceremony_release(c, k).await
+    }
+    async fn node_info(&self) -> rutli_cosigner::Result<(u16, [u8; 32])> {
+        self.inner.node_info().await
+    }
+    async fn replicate_key(
+        &self,
+        a: &str,
+        b: &str,
+        s: &str,
+        d: &[u8],
+        w: &rutli_cosigner::wrap::Wrapped,
+    ) -> rutli_cosigner::Result<Vec<u8>> {
+        self.inner.replicate_key(a, b, s, d, w).await
+    }
+    async fn fetch_key(&self, k: &str) -> rutli_cosigner::Result<(String, Vec<u8>, rutli_cosigner::wrap::Wrapped)> {
+        self.inner.fetch_key(k).await
+    }
+    async fn list_keys(&self) -> rutli_cosigner::Result<Vec<(String, String, Vec<u8>)>> {
+        self.inner.list_keys().await
+    }
+    async fn purge_key(&self, c: &str, k: &str) -> rutli_cosigner::Result<bool> {
+        self.inner.purge_key(c, k).await
+    }
+    async fn key_epoch(&self, k: &str) -> rutli_cosigner::Result<pb::KeyEpochReply> {
+        self.inner.key_epoch(k).await
+    }
+    async fn ceremony_begin(
+        &self,
+        cid: &str,
+        key: &str,
+        kind: CeremonyKind,
+        expect: Option<(u64, [u8; 32])>,
+        intent: Option<&pb::SignedIntent>,
+    ) -> rutli_cosigner::Result<()> {
+        // Node 3 leads; node 1 now holds the intent and attacks nodes 3 and 2, in that order.
+        for n in [2usize, 1] {
+            let p = &self.attacker[n];
+            p.ceremony_release(cid, key).await.unwrap(); // a no-op where another leader holds it
+            let fenced = p.ceremony_begin(cid, key, kind, expect, intent).await.is_ok();
+            let part1 = p.ceremony_part1(cid, key, kind, &[1, 2, 3], intent).await.is_ok();
+            let mut log = self.log.lock().unwrap();
+            log.push((n, "fence", fenced));
+            log.push((n, "part1", part1));
+        }
+        self.inner.ceremony_begin(cid, key, kind, expect, intent).await
+    }
+    async fn ceremony_commit(&self, c: &str) -> rutli_cosigner::Result<StatusInfo> {
+        self.inner.ceremony_commit(c).await
+    }
+    async fn ceremony_status(&self, c: &str) -> rutli_cosigner::Result<StatusInfo> {
+        self.inner.ceremony_status(c).await
+    }
+    async fn ceremony_abort(&self, c: &str) -> rutli_cosigner::Result<StatusInfo> {
+        self.inner.ceremony_abort(c).await
+    }
+    async fn ceremony_protocol(&self) -> rutli_cosigner::Result<u32> {
+        self.inner.ceremony_protocol().await
+    }
+    async fn ceremony_part1(
+        &self,
+        c: &str,
+        k: &str,
+        kind: CeremonyKind,
+        roster: &[u16],
+        i: Option<&pb::SignedIntent>,
+    ) -> rutli_cosigner::Result<frost_ed25519::keys::dkg::round1::Package> {
+        self.inner.ceremony_part1(c, k, kind, roster, i).await
+    }
+    async fn ceremony_part2(
+        &self,
+        c: &str,
+        m: &BTreeMap<Identifier, frost_ed25519::keys::dkg::round1::Package>,
+    ) -> rutli_cosigner::Result<rutli_cosigner::ceremony::Part2Outcome> {
+        self.inner.ceremony_part2(c, m).await
+    }
+    async fn ceremony_part3(&self, c: &str, d: &[u8; 32]) -> rutli_cosigner::Result<rutli_cosigner::node::StagedOutcome> {
+        self.inner.ceremony_part3(c, d).await
+    }
+}
+
+/// The race behind the leader binding: a fenced peer that answers its fence late and uses the
+/// intent first. The leader fences its own node before any peer sees the intent, so the peer can
+/// neither release, fence nor start that node; binding node 2 to itself only stops the ceremony.
+/// Nothing is staged or committed under the attacker, and the next refresh runs.
+#[tokio::test]
+async fn a_peer_racing_the_leaders_fences_stops_the_ceremony_but_never_runs_it() {
+    let r = rig(|_| enforcing());
+    let group =
+        run_dkg_with_intent(&r.led_by(0), KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    let before = r.expect(KEY);
+    // Node 3 leads, through the daemon's handles; its handle to node 1 is the racer.
+    let mut leader = r.led_by(2);
+    let racer = Arc::new(Racer { inner: leader[0].clone(), attacker: r.led_by(0), log: Default::default() });
+    leader[0] = racer.clone();
+    let (x, xid) = (r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 13), id(CeremonyKind::Refresh, 13));
+    assert!(run_refresh_with_intent(&leader, KEY, Some(x)).await.is_err());
+    assert_eq!(
+        *racer.log.lock().unwrap(),
+        vec![(2, "fence", false), (2, "part1", false), (1, "fence", true), (1, "part1", true)],
+        "the leader's own node refused everything; node 2 was bound to node 1"
+    );
+    for n in &r.nodes {
+        if let Some(rec) = n.ceremony_record(&xid) {
+            assert_eq!(StatusInfo::from_record(&rec).phase, Phase::Aborted);
+        }
+        assert_eq!(n.group_key(KEY).unwrap(), group);
+    }
+    assert_eq!(r.expect(KEY), before, "no node moved to a new sharing");
+    // Node 1's session on node 2 is node 1's: the leader's abort cannot touch it (only node 1, or
+    // the orphan timeout, ends it). Once node 1 gives it up, a fresh refresh runs.
+    not_the_leader(r.led_by(2)[1].ceremony_abort(&xid).await);
+    r.led_by(0)[1].ceremony_abort(&xid).await.unwrap();
+    let y = r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 14);
+    assert_eq!(run_refresh_with_intent(&r.led_by(2), KEY, Some(y)).await.unwrap(), group);
+}
+
+/// Where a compromised node 1 makes the leader wait (for up to the peer RPC timeout) while it tries
+/// to run the leader's ceremony itself, after the leader's fence on node 2 failed.
+#[derive(Clone, Copy, PartialEq)]
+enum Stall {
+    /// In the leader's rollback release of node 1's fence (node 3's own fence is already gone).
+    Release,
+    /// In the leader's abort of the id on node 1 (node 1 asked before node 3, in roster order).
+    Abort,
+    /// Nowhere: the test body tries once the leader has given up.
+    Never,
+}
+
+/// What the racer was shown at its fence: the ceremony id, the expected sharing, the intent.
+type Seen = (String, Option<(u64, [u8; 32])>, pb::SignedIntent);
+
+/// The leader's handle to a compromised node 1. Shown the client's intent at its fence, node 1
+/// binds node 2 to itself first, so the leader's fence there fails and the leader rolls back; then,
+/// at `stall`, it tries to fence node 3 (the leader's own) and itself with the intent and run the
+/// ceremony as its leader.
+struct RollbackRacer {
+    inner: Arc<dyn PeerApi>,
+    attacker: Peers,
+    stall: Stall,
+    seen: std::sync::Mutex<Option<Seen>>,
+    /// (node, fence accepted) for each fence it tried, and whether it ran the ceremony.
+    log: std::sync::Mutex<Vec<(usize, bool)>>,
+    ran: std::sync::atomic::AtomicBool,
+}
+
+impl RollbackRacer {
+    async fn take_over(&self) {
+        let Some((cid, expect, intent)) = self.seen.lock().unwrap().clone() else { return };
+        let (a, kind) = (&self.attacker, CeremonyKind::Refresh);
+        for n in [2usize, 0] {
+            let ok = a[n].ceremony_begin(&cid, KEY, kind, expect, Some(&intent)).await.is_ok();
+            self.log.lock().unwrap().push((n, ok));
+        }
+        let mut map = BTreeMap::new();
+        for p in a.iter() {
+            match p.ceremony_part1(&cid, KEY, kind, &[1, 2, 3], Some(&intent)).await {
+                Ok(pkg) => map.insert(p.identifier(), pkg),
+                Err(_) => return,
+            };
+        }
+        let mut digest = [0u8; 32];
+        for p in a.iter() {
+            match p.ceremony_part2(&cid, &map).await {
+                Ok(out) => digest = out.round1_digest,
+                Err(_) => return,
+            }
+        }
+        for p in a.iter() {
+            if p.ceremony_part3(&cid, &digest).await.is_err() {
+                return;
+            }
+        }
+        for p in a.iter() {
+            let _ = p.ceremony_commit(&cid).await;
+        }
+        self.ran.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[async_trait::async_trait]
+impl PeerApi for RollbackRacer {
+    fn identifier(&self) -> Identifier {
+        self.inner.identifier()
+    }
+    async fn sign_round1(
+        &self,
+        k: &str,
+        s: &str,
+        ctx: &rutli_cosigner::node::Round1Ctx,
+    ) -> rutli_cosigner::Result<frost_ed25519::round1::SigningCommitments> {
+        self.inner.sign_round1(k, s, ctx).await
+    }
+    async fn sign_round2(
+        &self,
+        k: &str,
+        s: &str,
+        m: &[u8],
+        c: &BTreeMap<Identifier, frost_ed25519::round1::SigningCommitments>,
+        d: Option<&[u8; 32]>,
+    ) -> rutli_cosigner::Result<frost_ed25519::round2::SignatureShare> {
+        self.inner.sign_round2(k, s, m, c, d).await
+    }
+    async fn abort_sign(&self, k: &str, s: &str) -> rutli_cosigner::Result<()> {
+        self.inner.abort_sign(k, s).await
+    }
+    async fn ceremony_fence(&self, c: &str, k: &str, kind: &'static str) -> rutli_cosigner::Result<()> {
+        self.inner.ceremony_fence(c, k, kind).await
+    }
+    async fn ceremony_release(&self, c: &str, k: &str) -> rutli_cosigner::Result<()> {
+        self.inner.ceremony_release(c, k).await?;
+        if self.stall == Stall::Release {
+            self.take_over().await;
+        }
+        Ok(())
+    }
+    async fn node_info(&self) -> rutli_cosigner::Result<(u16, [u8; 32])> {
+        self.inner.node_info().await
+    }
+    async fn replicate_key(
+        &self,
+        a: &str,
+        b: &str,
+        s: &str,
+        d: &[u8],
+        w: &rutli_cosigner::wrap::Wrapped,
+    ) -> rutli_cosigner::Result<Vec<u8>> {
+        self.inner.replicate_key(a, b, s, d, w).await
+    }
+    async fn fetch_key(&self, k: &str) -> rutli_cosigner::Result<(String, Vec<u8>, rutli_cosigner::wrap::Wrapped)> {
+        self.inner.fetch_key(k).await
+    }
+    async fn list_keys(&self) -> rutli_cosigner::Result<Vec<(String, String, Vec<u8>)>> {
+        self.inner.list_keys().await
+    }
+    async fn purge_key(&self, c: &str, k: &str) -> rutli_cosigner::Result<bool> {
+        self.inner.purge_key(c, k).await
+    }
+    async fn key_epoch(&self, k: &str) -> rutli_cosigner::Result<pb::KeyEpochReply> {
+        self.inner.key_epoch(k).await
+    }
+    async fn ceremony_begin(
+        &self,
+        cid: &str,
+        key: &str,
+        kind: CeremonyKind,
+        expect: Option<(u64, [u8; 32])>,
+        intent: Option<&pb::SignedIntent>,
+    ) -> rutli_cosigner::Result<()> {
+        // Node 2 bound to node 1, so the leader's fence there fails and it rolls back.
+        self.attacker[1].ceremony_begin(cid, key, kind, expect, intent).await.unwrap();
+        *self.seen.lock().unwrap() = Some((cid.to_string(), expect, intent.cloned().unwrap()));
+        self.inner.ceremony_begin(cid, key, kind, expect, intent).await
+    }
+    async fn ceremony_commit(&self, c: &str) -> rutli_cosigner::Result<StatusInfo> {
+        self.inner.ceremony_commit(c).await
+    }
+    async fn ceremony_status(&self, c: &str) -> rutli_cosigner::Result<StatusInfo> {
+        self.inner.ceremony_status(c).await
+    }
+    async fn ceremony_abort(&self, c: &str) -> rutli_cosigner::Result<StatusInfo> {
+        if self.stall == Stall::Abort {
+            self.take_over().await;
+        }
+        self.inner.ceremony_abort(c).await
+    }
+    async fn ceremony_protocol(&self) -> rutli_cosigner::Result<u32> {
+        self.inner.ceremony_protocol().await
+    }
+    async fn ceremony_part1(
+        &self,
+        c: &str,
+        k: &str,
+        kind: CeremonyKind,
+        roster: &[u16],
+        i: Option<&pb::SignedIntent>,
+    ) -> rutli_cosigner::Result<frost_ed25519::keys::dkg::round1::Package> {
+        self.inner.ceremony_part1(c, k, kind, roster, i).await
+    }
+    async fn ceremony_part2(
+        &self,
+        c: &str,
+        m: &BTreeMap<Identifier, frost_ed25519::keys::dkg::round1::Package>,
+    ) -> rutli_cosigner::Result<rutli_cosigner::ceremony::Part2Outcome> {
+        self.inner.ceremony_part2(c, m).await
+    }
+    async fn ceremony_part3(&self, c: &str, d: &[u8; 32]) -> rutli_cosigner::Result<rutli_cosigner::node::StagedOutcome> {
+        self.inner.ceremony_part3(c, d).await
+    }
+}
+
+/// Node 3 leads a refresh whose fence on node 2 fails because node 1 bound node 2 to itself, and
+/// node 1 then tries to lead the very ceremony while the leader rolls back. Returns the racer.
+async fn rollback_race(r: &Rig, stall: Stall, rid: u8) -> Arc<RollbackRacer> {
+    let mut leader = r.led_by(2);
+    let racer = Arc::new(RollbackRacer {
+        inner: leader[0].clone(),
+        attacker: r.led_by(0),
+        stall,
+        seen: Default::default(),
+        log: Default::default(),
+        ran: Default::default(),
+    });
+    leader[0] = racer.clone();
+    let x = r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, rid);
+    assert!(run_refresh_with_intent(&leader, KEY, Some(x)).await.is_err());
+    if stall == Stall::Never {
+        racer.take_over().await;
+    }
+    racer
+}
+
+/// What none of the rollback races may achieve: the leader's own node (3) refuses node 1's fence
+/// under the leader's ceremony id — its fence mark outlives the guard the rollback released — so
+/// node 1 never runs the ceremony and no node moves to a new sharing.
+fn assert_not_taken_over(r: &Rig, racer: &RollbackRacer, xid: &str, group: [u8; 32], before: Option<(u64, [u8; 32])>) {
+    let log = racer.log.lock().unwrap().clone();
+    assert_eq!(log.first(), Some(&(2, false)), "node 3 must refuse node 1's fence under the leader's id: {log:?}");
+    assert!(!racer.ran.load(std::sync::atomic::Ordering::SeqCst), "node 1 ran the leader's ceremony");
+    let _ = xid;
+    for n in &r.nodes {
+        assert_eq!(n.group_key(KEY).unwrap(), group);
+    }
+    assert_eq!(r.expect(KEY), before, "a node moved to a sharing led by node 1");
+}
+
+/// Review (rc.6): the leader's rollback released its own fence before the id was spent on its node,
+/// and node 1 held the leader in its own release meanwhile — then fenced the leader's node under the
+/// same id, bound it to itself and led the ceremony. Now an intent's fence is marked durably, and
+/// the mark outlives the guard.
+#[tokio::test]
+async fn a_peer_cannot_take_over_during_the_leaders_fence_rollback() {
+    let r = rig(|_| enforcing());
+    let group =
+        run_dkg_with_intent(&r.led_by(0), KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    let before = r.expect(KEY);
+    let racer = rollback_race(&r, Stall::Release, 20).await;
+    assert_not_taken_over(&r, &racer, &id(CeremonyKind::Refresh, 20), group, before);
+}
+
+/// The same race held in the leader's abort, which reaches node 1 before node 3 (roster order).
+#[tokio::test]
+async fn a_peer_cannot_take_over_while_holding_the_leaders_abort() {
+    let r = rig(|_| enforcing());
+    let group =
+        run_dkg_with_intent(&r.led_by(0), KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    let before = r.expect(KEY);
+    let racer = rollback_race(&r, Stall::Abort, 21).await;
+    assert_not_taken_over(&r, &racer, &id(CeremonyKind::Refresh, 21), group, before);
+}
+
+/// No timing at all: the leader's abort on its own node is a capped no-vote for an id with no
+/// session, and a peer can fill that cap. The fence mark does not depend on it, so even with the
+/// cap full node 1 cannot fence the leader's node under the id once the leader gave up.
+#[tokio::test]
+async fn a_full_no_vote_cap_does_not_leave_the_leaders_id_unspent() {
+    let r = rig(|_| enforcing());
+    let group =
+        run_dkg_with_intent(&r.led_by(0), KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    let before = r.expect(KEY);
+    // Fill node 3's caps on no-votes for unknown ids asked in process (the bucket its own leader's
+    // aborts use) and in total.
+    for i in 0..rutli_cosigner::node::MAX_UNKNOWN_NO_VOTES_PER_ASKER {
+        r.nodes[2].ceremony_abort(&format!("refresh-filler-{i}")).unwrap();
+    }
+    assert!(r.nodes[2].ceremony_abort("refresh-filler-x").is_err(), "the cap is full");
+    let racer = rollback_race(&r, Stall::Never, 22).await;
+    assert_not_taken_over(&r, &racer, &id(CeremonyKind::Refresh, 22), group, before);
+}
+
+/// A fence mark survives a restart (the guard does not): after node 2 restarts, nobody — another
+/// cosigner, nor the leader that fenced it — can fence it or start part 1 under that intent's id
+/// again. The leader cannot resume either: the restarted node lost the ceremony's state, so the
+/// client retries with a fresh intent, which runs.
+#[tokio::test]
+async fn a_fence_mark_survives_a_restart() {
+    let r = rig(|_| enforcing());
+    let group =
+        run_dkg_with_intent(&r.led_by(0), KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    let (x, xid) = (r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 30), id(CeremonyKind::Refresh, 30));
+    r.led_by(0)[1].ceremony_begin(&xid, KEY, CeremonyKind::Refresh, r.expect(KEY), Some(&x)).await.unwrap();
+    // Node 2 restarts: a new process over the same key store, no guards.
+    let restarted = Arc::new(
+        Node::new(Identifier::try_from(2u16).unwrap(), 3, 2, KeyStore::open(r._tmp.path().join("n2")).unwrap())
+            .with_sign_guard(guard_for(&r.ids, r._tmp.path(), 2, &enforcing())),
+    );
+    for (who, as_who) in [("node 3", 2usize), ("the leader, node 1", 0)] {
+        let p = LocalPeer::new(restarted.clone()).on_behalf_of(r.nodes[as_who].clone());
+        match p.ceremony_begin(&xid, KEY, CeremonyKind::Refresh, r.expect(KEY), Some(&x)).await {
+            Err(DaemonError::CeremonyRefused(m)) => assert!(m.contains("already fenced"), "{who}: {m}"),
+            other => panic!("{who}: a fence under a marked id must be refused, got {other:?}"),
+        }
+        assert!(p.ceremony_part1(&xid, KEY, CeremonyKind::Refresh, &[1, 2, 3], Some(&x)).await.is_err(), "{who}");
+    }
+    // The leader gives up (its rollback releases its fences); a fresh intent runs.
+    r.led_by(0)[1].ceremony_release(&xid, KEY).await.unwrap();
+    r.led_by(0)[0].ceremony_release(&xid, KEY).await.unwrap();
+    let y = r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 31);
+    assert_eq!(run_refresh_with_intent(&r.led_by(0), KEY, Some(y)).await.unwrap(), group);
+}
+
+/// Review (rc.6, round 3): a leader node that opted out of ceremony intents next to enforcing ones.
+/// After the leader's rollback released its own guard, node 3 fenced the leader's node under the
+/// client's ceremony id WITHOUT an intent (the fence mark was consulted only for intent-carrying
+/// fences) and drove the client's DKG to commit as its leader. Now a marked id refuses every fence
+/// and every guard-creating part 1, with or without an intent.
+#[tokio::test]
+async fn an_opted_out_leader_node_still_refuses_a_marked_id_without_an_intent() {
+    let lenient = SigningPolicyConfig { require_ceremony_intent: Some(false), ..Default::default() };
+    let r = rig(move |i| if i == 1 { lenient.clone() } else { enforcing() });
+    let key = "frost-participant1-victim";
+    let (x, xid) = (r.ids.ceremony("driver", CeremonyKind::Dkg, key, 41), id(CeremonyKind::Dkg, 41));
+    let (leader, p3) = (r.led_by(0), r.led_by(2));
+    leader[0].ceremony_begin(&xid, key, CeremonyKind::Dkg, None, Some(&x)).await.unwrap();
+    // Node 3, shown the intent at its fence, races node 2 with it; the leader's fence there fails
+    // and its rollback releases its own fence.
+    p3[2].ceremony_begin(&xid, key, CeremonyKind::Dkg, None, Some(&x)).await.unwrap();
+    p3[1].ceremony_begin(&xid, key, CeremonyKind::Dkg, None, Some(&x)).await.unwrap();
+    assert!(leader[1].ceremony_begin(&xid, key, CeremonyKind::Dkg, None, Some(&x)).await.is_err());
+    leader[0].ceremony_release(&xid, key).await.unwrap();
+    // Node 3 tries the leader's (opted-out) node under the same id, without and with the intent.
+    for intent in [None, Some(&x)] {
+        match p3[0].ceremony_begin(&xid, key, CeremonyKind::Dkg, None, intent).await {
+            Err(DaemonError::CeremonyRefused(m)) => assert!(m.contains("already fenced"), "{m}"),
+            other => panic!("a fence under a marked id must be refused, got {other:?}"),
+        }
+        match p3[0].ceremony_part1(&xid, key, CeremonyKind::Dkg, &[1, 2, 3], intent).await {
+            Err(DaemonError::CeremonyRefused(m)) => assert!(m.contains("already fenced"), "{m}"),
+            other => panic!("a part 1 under a marked id must be refused, got {other:?}"),
+        }
+    }
+    assert!(r.nodes.iter().all(|n| !n.has_key(key)), "no node holds a share of the client's key");
+}
+
+/// Review (rc.6, round 3): the leader-bound abort looked at whichever guard carried the ceremony id.
+/// Node 3 planted hosted-key fences under the client's ceremony id on other keys, bound to itself,
+/// and its abort then killed the leader's session. Now one ceremony id guards one key, and an abort
+/// is refused while any live guard under the id is bound to another leader.
+#[tokio::test]
+async fn a_same_id_guard_on_another_key_cannot_stand_in_for_the_leaders() {
+    let r = rig(|_| enforcing());
+    let group =
+        run_dkg_with_intent(&r.led_by(0), KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    let (x, xid) = (r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 42), id(CeremonyKind::Refresh, 42));
+    let (leader, p3) = (r.led_by(0), r.led_by(2));
+    for p in &leader {
+        p.ceremony_begin(&xid, KEY, CeremonyKind::Refresh, r.expect(KEY), Some(&x)).await.unwrap();
+    }
+    let mut map = BTreeMap::new();
+    for p in &leader {
+        map.insert(p.identifier(), p.ceremony_part1(&xid, KEY, CeremonyKind::Refresh, &[1, 2, 3], Some(&x)).await.unwrap());
+    }
+    for i in 0..8 {
+        match p3[1].ceremony_fence(&xid, &format!("rutli-enc-planted-{i}"), "genkey").await {
+            Err(DaemonError::CeremonyRefused(m)) => assert!(m.contains("one ceremony id guards one key"), "{m}"),
+            other => panic!("a second key under the ceremony id must be refused, got {other:?}"),
+        }
+    }
+    not_the_leader(p3[1].ceremony_abort(&xid).await);
+    let mut digest = [0u8; 32];
+    for p in &leader {
+        digest = p.ceremony_part2(&xid, &map).await.unwrap().round1_digest;
+    }
+    for p in &leader {
+        p.ceremony_part3(&xid, &digest).await.unwrap();
+    }
+    for p in &leader {
+        p.ceremony_commit(&xid).await.unwrap();
+    }
+    for n in &r.nodes {
+        assert_eq!(StatusInfo::from_record(&n.ceremony_record(&xid).unwrap()).phase, Phase::Committed);
+        assert_eq!(n.group_key(KEY).unwrap(), group);
+    }
+}
+
+/// Where intents are not required, a part 1 with an intent may take the guard itself — and then
+/// marks the id like a fence does: after the guard is gone (here: a restart), the same id is
+/// refused at part 1 and at the fence, with or without the intent.
+#[tokio::test]
+async fn an_opted_out_part1_that_takes_the_guard_marks_the_id() {
+    let lenient = || SigningPolicyConfig { require_ceremony_intent: Some(false), ..Default::default() };
+    let r = rig(move |_| lenient());
+    let key = "frost-participant1-lenient";
+    let (x, xid) = (r.ids.ceremony("driver", CeremonyKind::Dkg, key, 43), id(CeremonyKind::Dkg, 43));
+    r.nodes[1].ceremony_part1(&xid, key, CeremonyKind::Dkg, &[1, 2, 3], Some(&x)).unwrap();
+    let restarted = Arc::new(
+        Node::new(Identifier::try_from(2u16).unwrap(), 3, 2, KeyStore::open(r._tmp.path().join("n2")).unwrap())
+            .with_sign_guard(guard_for(&r.ids, r._tmp.path(), 2, &lenient())),
+    );
+    for intent in [Some(&x), None] {
+        match restarted.ceremony_part1(&xid, key, CeremonyKind::Dkg, &[1, 2, 3], intent) {
+            Err(DaemonError::CeremonyRefused(m)) => assert!(m.contains("already fenced"), "{m}"),
+            other => panic!("part 1 under a marked id must be refused, got {other:?}"),
+        }
+        match restarted.ceremony_begin(&xid, key, CeremonyKind::Dkg, None, intent) {
+            Err(DaemonError::CeremonyRefused(m)) => assert!(m.contains("already fenced"), "{m}"),
+            other => panic!("a fence under a marked id must be refused, got {other:?}"),
+        }
+    }
 }

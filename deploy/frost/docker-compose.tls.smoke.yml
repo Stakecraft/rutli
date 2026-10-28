@@ -1,11 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
-# Overlay for CI smoke: no host port binds (RPCs go over the compose network).
+# Overlay for CI smoke: no host port binds (RPCs go over the compose network), and the configs
+# from ./config-tls-smoke — the examples with ceremony intents opted out, written by
+# scripts/ci-frost-tls-smoke.sh, because the smoke drives DKG through grpcurl, which cannot sign
+# one. The examples themselves keep the default (required).
 # Used as: docker compose -f docker-compose.tls.yml -f docker-compose.tls.smoke.yml ...
 
 services:
   cosigner1:
     ports: !override []
+    volumes:
+      - ./config-tls-smoke:/config:ro
   cosigner2:
     ports: !override []
+    volumes:
+      - ./config-tls-smoke:/config:ro
   cosigner3:
     ports: !override []
+    volumes:
+      - ./config-tls-smoke:/config:ro

@@ -707,6 +707,12 @@ async fn abort_sign(chosen: &[&Arc<dyn PeerApi>], key_id: &str, session_id: &str
 /// every reachable node (an unknown id's no-vote, under the per-asker cap), so the intent is spent.
 /// A client retries with a fresh intent (the driver and `rutli-cosigner refresh` mint one per
 /// attempt).
+///
+/// The leader fences its own node first: that binds the ceremony to this leader on its own node
+/// before any peer has seen the client's intent. A peer that races the remaining fences with the
+/// intent it was shown can then bind at most the other nodes to itself, which stops the ceremony,
+/// but never run it: every ceremony needs the leader's node, which takes parts 1–3 only from the
+/// leader (and lets no one else release its fence).
 async fn fence_all(
     peers: &Peers,
     ceremony_id: &str,
@@ -716,7 +722,8 @@ async fn fence_all(
     intent: Option<&pb::SignedIntent>,
 ) -> Result<()> {
     let mut fenced: Vec<&Arc<dyn PeerApi>> = Vec::new();
-    for p in peers {
+    let own_node_first = peers.iter().filter(|p| p.is_local()).chain(peers.iter().filter(|p| !p.is_local()));
+    for p in own_node_first {
         match p.ceremony_begin(ceremony_id, key_id, kind, expect, intent).await {
             Ok(()) => fenced.push(p),
             Err(e) => {
@@ -799,10 +806,12 @@ pub async fn generate_hosted_key(
     spec: crate::hosted::HostedSpec,
     write_quorum: usize,
 ) -> Result<(crate::hosted::HostedKey, bool, usize)> {
-    // A hosted key squatting on an import id would make the split ceremony's install fail.
+    // A hosted key squatting on an import id would make the split ceremony's install fail, and one
+    // under a FROST id that key's DKG. Every node refuses both too; this answers before the mesh.
     if crate::share_delivery::is_reserved_for_import(key_id) {
         return Err(DaemonError::ReservedKeyId(key_id.to_string()));
     }
+    crate::node::refuse_unless_hosted_id(key_id)?;
     if spec.needs_every_node() {
         ensure_every_peer_supports(node, peers, spec).await?;
     }
@@ -1013,11 +1022,20 @@ pub async fn delete_hosted_key(
 ) -> Result<(bool, usize)> {
     let ceremony_id = new_id("delkey");
     let mut fenced: Vec<&Arc<dyn PeerApi>> = Vec::new();
+    // Nodes that hold nothing hosted under a non-hosted id (they refuse its fence and its
+    // tombstone with NotHostedKeyId): the cleanup of a key squatted on a FROST id.
+    let mut nothing_here = 0usize;
     for p in peers {
         match p.ceremony_fence(&ceremony_id, key_id, "delkey").await {
             Ok(()) => fenced.push(p),
             Err(e) if is_unreachable(&e) => {
                 tracing::warn!(peer = ?p.identifier(), key_id, error = %e, "cosigner unreachable while fencing a hosted-key delete; anti-entropy will bring it the tombstone");
+            }
+            // A node that holds nothing under a non-hosted id (the cleanup of a key squatted on a
+            // FROST id before 0.4.0-rc.6): nothing to delete there, and no tombstone may be recorded.
+            Err(e) if is_not_hosted_id(&e) => {
+                tracing::info!(peer = ?p.identifier(), key_id, "no hosted record under a non-hosted id on this cosigner; skipping it");
+                nothing_here += 1;
             }
             Err(e) => {
                 release_fences(&fenced, &ceremony_id, key_id).await;
@@ -1032,6 +1050,7 @@ pub async fn delete_hosted_key(
                 deleted_anywhere |= converted;
                 tombstones += 1;
             }
+            Err(e) if is_not_hosted_id(&e) => nothing_here += 1, // its record went meanwhile
             Err(e) => {
                 tracing::warn!(peer = ?p.identifier(), key_id, error = %e, "hosted key delete refused or failed on peer");
                 if refusal.is_none() && !is_unreachable(&e) {
@@ -1041,6 +1060,22 @@ pub async fn delete_hosted_key(
         }
     }
     release_fences(&fenced, &ceremony_id, key_id).await;
+    // The cleanup of a squatted non-hosted id: no tombstone may be recorded where nothing hosted
+    // is, so the write quorum cannot apply. It succeeds when every node answered — a tombstone
+    // where a record was, "nothing here" elsewhere — with no refusal, and at least one node held
+    // a record: on success the nodes report nothing hosted left under the id. Nothing anywhere (a
+    // typo, a live FROST key) is NOT_FOUND, not a delete.
+    if crate::node::refuse_unless_hosted_id(key_id).is_err() {
+        if refusal.is_none() && tombstones + nothing_here == peers.len() {
+            if tombstones == 0 {
+                return Err(DaemonError::UnknownKey(format!(
+                    "{key_id} (nothing hosted under this non-hosted id on any cosigner)"
+                )));
+            }
+            return Ok((deleted_anywhere, tombstones));
+        }
+        return Err(refusal.unwrap_or(DaemonError::ThresholdNotMet { needed: peers.len(), got: tombstones + nothing_here }));
+    }
     if tombstones < write_quorum {
         // A node's refusal (an invalid intent, a role it does not grant) is the answer, not "too
         // few nodes"; tombstones already written stay and propagate.
@@ -1050,6 +1085,15 @@ pub async fn delete_hosted_key(
         tracing::warn!(key_id, tombstones, expected = peers.len(), "hosted key delete reached only some nodes — anti-entropy propagates the tombstone");
     }
     Ok((deleted_anywhere, tombstones))
+}
+
+/// [`DaemonError::NotHostedKeyId`], in process or as a peer's INVALID_ARGUMENT naming it.
+fn is_not_hosted_id(e: &DaemonError) -> bool {
+    match e {
+        DaemonError::NotHostedKeyId(_) => true,
+        DaemonError::Status(s) => s.code() == tonic::Code::InvalidArgument && s.message().contains("is not a hosted-key id"),
+        _ => false,
+    }
 }
 
 /// How many cosigners currently hold `key_id` (for reporting and the replica alert).

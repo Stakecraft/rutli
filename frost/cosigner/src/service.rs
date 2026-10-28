@@ -944,10 +944,13 @@ impl Peer for PeerSvc {
                     32 => Some((r.expected_epoch, r.expected_pkp_digest.as_slice().try_into().expect("32"))),
                     _ => return Err(Status::invalid_argument("expected_pkp_digest must be 32 bytes")),
                 };
-                let (ceremony_id, key_id) = (r.ceremony_id.clone(), r.key_id.clone());
+                let (ceremony_id, key_id, leader) = (r.ceremony_id.clone(), r.key_id.clone(), asker.clone());
+                // The guard binds the ceremony to this caller: only it may run parts 1–3 here.
                 let result = self
                     .node
-                    .blocking(move |n| n.ceremony_begin(&r.ceremony_id, &r.key_id, kind, expect, r.intent.as_ref()))
+                    .blocking(move |n| {
+                        n.ceremony_begin_from(&r.ceremony_id, &r.key_id, kind, expect, r.intent.as_ref(), leader.as_deref())
+                    })
                     .await;
                 warn_if_intent_refused(&result, asker.as_deref(), "fence", &ceremony_id, &key_id);
                 result.map_err(Status::from)?;
@@ -959,7 +962,9 @@ impl Peer for PeerSvc {
                     "a ceremony intent is only valid on a dkg or refresh fence, not {kind}"
                 )))
             }
-            _ => self.node.ceremony_fence(&r.ceremony_id, &r.key_id, kind).map_err(Status::from)?,
+            _ => {
+                self.node.ceremony_fence_from(&r.ceremony_id, &r.key_id, kind, asker.as_deref()).map_err(Status::from)?
+            }
         }
         Ok(Response::new(pb::CeremonyFenceReply {}))
     }
@@ -968,9 +973,9 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::CeremonyReleaseRequest>,
     ) -> Result<Response<pb::CeremonyReleaseReply>, Status> {
-        self.authorize(&req)?;
+        let asker = self.authorize(&req)?;
         let r = req.into_inner();
-        self.node.ceremony_release(&r.ceremony_id, &r.key_id);
+        self.node.ceremony_release_from(&r.ceremony_id, &r.key_id, asker.as_deref());
         Ok(Response::new(pb::CeremonyReleaseReply {}))
     }
 
@@ -1024,9 +1029,13 @@ impl Peer for PeerSvc {
             .iter()
             .map(|&i| u16::try_from(i).map_err(|_| Status::invalid_argument("roster identifier out of range")))
             .collect::<Result<_, _>>()?;
-        let (ceremony_id, key_id) = (r.ceremony_id.clone(), r.key_id.clone());
-        let result =
-            self.node.blocking(move |n| n.ceremony_part1(&r.ceremony_id, &r.key_id, kind, &roster, r.intent.as_ref())).await;
+        let (ceremony_id, key_id, leader) = (r.ceremony_id.clone(), r.key_id.clone(), asker.clone());
+        let result = self
+            .node
+            .blocking(move |n| {
+                n.ceremony_part1_from(&r.ceremony_id, &r.key_id, kind, &roster, r.intent.as_ref(), leader.as_deref())
+            })
+            .await;
         warn_if_intent_refused(&result, asker.as_deref(), "part 1", &ceremony_id, &key_id);
         let package = result.map_err(Status::from)?;
         Ok(Response::new(pb::CeremonyPart1Reply { round1_package: json(&package)? }))
@@ -1036,14 +1045,14 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::CeremonyPart2Request>,
     ) -> Result<Response<pb::CeremonyPart2Reply>, Status> {
-        self.authorize(&req)?;
+        let asker = self.authorize(&req)?;
         let r = req.into_inner();
         let round1_map = de(&r.round1_map)?;
         // Detached: the deliveries to every recipient finish (or the session aborts) even if the
         // leader stops waiting.
         let node = self.node.clone();
         let out = crate::ceremony::detach(async move {
-            crate::ceremony::part2_and_deliver(&node, &r.ceremony_id, round1_map).await
+            crate::ceremony::part2_and_deliver(&node, &r.ceremony_id, round1_map, asker).await
         })
         .await
         .map_err(Status::from)?;
@@ -1077,7 +1086,7 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::CeremonyPart3Request>,
     ) -> Result<Response<pb::CeremonyPart3Reply>, Status> {
-        self.authorize(&req)?;
+        let asker = self.authorize(&req)?;
         let r = req.into_inner();
         let digest: [u8; 32] = r
             .round1_digest
@@ -1086,7 +1095,7 @@ impl Peer for PeerSvc {
             .map_err(|_| Status::invalid_argument("round1_digest must be 32 bytes"))?;
         let out = self
             .node
-            .blocking(move |n| n.ceremony_part3(&r.ceremony_id, &digest))
+            .blocking(move |n| n.ceremony_part3_from(&r.ceremony_id, &digest, asker.as_deref()))
             .await
             .map_err(Status::from)?;
         Ok(Response::new(pb::CeremonyPart3Reply {
@@ -1170,7 +1179,7 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::PurgeKeyRequest>,
     ) -> Result<Response<pb::PurgeKeyReply>, Status> {
-        self.authorize(&req)?;
+        let asker = self.authorize(&req)?;
         self.node.refuse_if_keystore_down().map_err(Status::from)?;
         let r = req.into_inner();
         let deleted = self
@@ -1180,7 +1189,7 @@ impl Peer for PeerSvc {
                 Some(intent) => n
                     .hosted_apply_tombstone(&r.key_id, intent, crate::intent::Expiry::Enforce, None)
                     .map(|o| o == crate::node::TombstoneOutcome::Converted),
-                None => n.hosted_rollback_purge(&r.ceremony_id, &r.key_id),
+                None => n.hosted_rollback_purge_from(&r.ceremony_id, &r.key_id, asker.as_deref()),
             })
             .await
             .map_err(Status::from)?;

@@ -1216,7 +1216,8 @@ async fn hosted_key_fences_never_cover_a_frost_key_and_pending_sign_sessions_are
     let group = run_dkg(&rig.peers, KEY).await.unwrap();
     for kind in ["genkey", "delkey"] {
         let err = rig.nodes[0].ceremony_fence(&format!("{kind}-evil"), KEY, kind).unwrap_err();
-        assert!(matches!(err, DaemonError::CeremonyRefused(_)), "{kind}: {err:?}");
+        // Refused on the id alone (F1: no hosted key, and no delete fence, on a FROST id).
+        assert!(matches!(err, DaemonError::NotHostedKeyId(_)), "{kind}: {err:?}");
     }
     rig.every_pair_signs(&group).await;
 

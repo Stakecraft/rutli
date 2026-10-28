@@ -81,7 +81,8 @@ cluster where:
 - every cosigner and the driver run the same release, upgraded **before** any DKG or refresh;
 - the enforcement switches are on, identically, on every node: `signing_policy.require_intent`,
   `require_ceremony_intent`, `signer_acl_required`, `require_epoch_match`, with
-  `signer_may_refresh: false`. They default to off in this release so that a rolling upgrade keeps
+  `signer_may_refresh: false`. `require_ceremony_intent` is on by default since 0.4.0-rc.6 (opt out
+  with `false` only during an upgrade); the others default to off so that a rolling upgrade keeps
   working ([docs/approval-quorum.md](docs/approval-quorum.md), "Switching enforcement on");
 - key files are written in format v2 (`keyfile.write_version: 2`, `cluster_uuid` set), and
   `accept_v1: false` once every file is v2;

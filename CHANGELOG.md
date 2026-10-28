@@ -23,6 +23,73 @@ All notable changes to Rütli are documented here. Format loosely follows
 - **h2 0.4.15 → 0.4.20** (RUSTSEC-2026-0258, unbounded queueing of empty DATA frames, low severity)
   and **tokio 1.52.3 → 1.54.1** (RUSTSEC-2026-0386, unsound `AsyncFd` constructors; Rütli does not use
   `AsyncFd`), found by the new `cargo deny` advisories gate. Lockfile-only change.
+- **A hosted key can no longer squat on a FROST key's id** (pre-existing since 0.3.0). A peer's
+  `ReplicateKey` is authorized by the mesh allowlist alone and anti-entropy pulls what a peer lists,
+  so one compromised cosigner could create a hosted key under a deterministic FROST id
+  (`frost-namespace`, `<prefix>frost-<name>`) before its DKG: every node then refused that DKG, and
+  a push after part 3 staged left that node STAGED while the others committed. FROST and hosted keys
+  now have disjoint ids. An id's routing tag is the first of `frost-`/`rutli-` in it, and a node
+  creates a hosted key — `GenerateKey`, `ReplicateKey`, the anti-entropy and read-repair pull, the
+  genkey fence, `import-key` — or records a tombstone for a key it does not hold, or takes a delete
+  fence where it holds nothing, only under one whose tag is `rutli-` (else `INVALID_ARGUMENT`). A
+  hosted record already under another id stays deletable where it is (`DeleteKey` succeeds once
+  every node answered, with a tombstone where the record was and "nothing here" elsewhere, whatever
+  the write quorum), then `hosted-clear-tombstone` frees the id; `restore` never puts such a record
+  back onto a node that has none. The driver refuses a `frost.key-prefix` containing either tag.
+  Existing hosted ids (`<prefix>rutli-<kind>-…`) and deployed prefixes are unaffected; DKG ids are
+  not restricted.
+- **A fenced peer can no longer take over another leader's DKG or refresh** (since 0.4.0-rc.4). It
+  sees the client's ceremony intent at its fence, and part 1 checked the intent but not the caller,
+  so it could delay its fence reply, run parts 1–3 on the honest nodes under the leader's ceremony
+  id and choose its round-1 commitments after seeing theirs (a bias of the DKG output, not a key
+  compromise). Every node now binds the ceremony to the leader whose fence took its guard (the
+  caller's certificate CN, or itself) and accepts parts 1–3, a second fence, an abort of the live
+  ceremony and the release of the fence only from that leader; on a node requiring ceremony intents,
+  part 1 never takes the guard without a fence; the leader fences its own node first, before any
+  peer sees the intent; and a node fences a client intent's ceremony at most once: the fence writes
+  a durable fence mark (`keys/.ceremonies/.fenced/<id>`, kept 24 h), which refuses every later fence
+  under the id and any part 1 that would take a new guard for it. The in-memory guard can go — the
+  leader's rollback releasing it while a stalling peer holds the leader, a preemption, a restart of
+  every fenced node — without freeing the id, and the mark does not depend on the capped no-votes a
+  peer can exhaust. A marked id is refused with or without an intent, so a node that opted out of
+  ceremony intents cannot be re-fenced intent-less under a client's id; and one ceremony id guards
+  one key, so a guard a peer plants under the same id on another key cannot stand in for the
+  leader's. A generation's rollback purge (`PurgeKey` without an intent) is likewise accepted only
+  from that generation's leader. A racing peer can still stop a ceremony, as it always could by
+  refusing; a ceremony it bound to itself on an honest node stays there until it gives it up or the
+  orphan timeout passes. Driver failover is unaffected (a fresh intent, so a fresh ceremony id, per
+  attempt).
+
+### Changed (breaking default)
+
+- **`signing_policy.require_ceremony_intent` is on by default** for every cosigner with TLS: a DKG
+  or refresh without a valid client-signed ceremony intent is refused. A plaintext dev node, which
+  verifies no intents, leaves it off (an explicit `true` there is still a config error).
+  `require_ceremony_intent: false` is the explicit opt-out, with the existing startup warning and
+  `rutli_ceremony_intent_absent_total`. The TLS compose example (`deploy/frost/config-tls`) keeps
+  the default, so a hand-run `grpcurl … Signer/Dkg` against it is refused; the CI smoke test runs on
+  copies that opt out (`scripts/ci-frost-tls-smoke.sh`).
+
+  **Upgrade note:** before cosigners of this release run with the default, the driver must be
+  0.4.0-rc.4 or later (it signs DKG intents; `frost.sign-intents` on and a cluster id it can learn)
+  and the refresh CronJob's image must be the cosigners' release (`rutli-cosigner refresh` signs
+  refresh intents). Otherwise set `require_ceremony_intent: false` in `signing_policy`
+  (`signingPolicy` in the Helm chart) on every node first, and remove it once both sign intents.
+  Clusters that already set `require_ceremony_intent: true` (the rc.4 rollout's phase 3) see no
+  change. Docs: `docs/approval-quorum.md` ("Switching enforcement on"), `docs/ceremonies.md`.
+- **Hosted keys only under `rutli-` ids** (the F1 fix above). No Rütli release minted a hosted key
+  under any other id, but a hand-made one (or one squatted on a FROST id) is, after the upgrade, no
+  longer replicated, repaired by anti-entropy or read-repair, or tombstoned where absent; it keeps
+  serving on the nodes that hold it. **Upgrade note:** before upgrading, check the hosted inventory
+  (`verify-hosted`, `rutli_hosted_keys`) for ids without `rutli-` after the participant's
+  `frost.key-prefix`; rotate such a key in Canton to a driver-minted id, or delete it.
+
+### Documented
+
+- `docs/security/threat-model.md`: a ceremony intent's validity bounds the **start** of a ceremony
+  (fence and part 1), not its finish; why that is safe (a DKG is create-once, a refresh a
+  compare-and-swap from the announced sharing that never changes the group key). The earlier
+  "it can never take that ceremony over" was wrong before this release (above).
 
 ## [0.4.0-rc.5] — 2026-10-27
 

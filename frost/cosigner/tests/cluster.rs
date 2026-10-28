@@ -961,6 +961,155 @@ async fn hosted_keys_never_land_on_import_ids_or_over_a_share() {
     assert!(frost_ks.load("rutli-sym-taken").is_ok(), "the share is still there");
 }
 
+/// A hosted key wrapped by `from` for node `to` under `key_id`: what a compromised cosigner can
+/// push to (or serve to) an honest one.
+fn wrapped_by(from: &Node, to: &Node, key_id: &str, key: &rutli_cosigner::hosted::HostedKey) -> rutli_cosigner::wrap::Wrapped {
+    let to_id = rutli_cosigner::hosted::identifier_index(to.identifier).unwrap();
+    from.hosted_wrap_for(key_id, key, to_id, &to.dist_public_key().unwrap()).unwrap()
+}
+
+/// F1: FROST and hosted keys have disjoint ids. A compromised cosigner's `ReplicateKey` under a
+/// FROST id (no client authorizes a push; the mesh allowlist does) is refused, so the key's DKG —
+/// which refuses over any existing record — still runs.
+#[tokio::test]
+async fn a_peer_cannot_push_a_hosted_key_under_a_frost_id() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = hosted_cluster(&tmp);
+    let key = rutli_cosigner::hosted::HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
+    for id in ["frost-namespace", "b8-frost-namespace", "p1-frost-rutli-x", "untagged-key"] {
+        for victim in &nodes[..2] {
+            // Node 3 calls the victim's Peer API, as over the mesh.
+            let as_node3 = LocalPeer::new(victim.clone()).on_behalf_of(nodes[2].clone());
+            let err = as_node3
+                .replicate_key("genkey-evil", id, "aes-256-gcm", &[], &wrapped_by(&nodes[2], victim, id, &key))
+                .await
+                .unwrap_err();
+            assert!(matches!(err, DaemonError::NotHostedKeyId(_)), "{id}: got {err:?}");
+            assert!(!victim.has_key(id), "{id}");
+            // The genkey fence refuses the id too, and generation (by a leader or the CLI).
+            assert!(matches!(victim.ceremony_fence("genkey-evil", id, "genkey"), Err(DaemonError::NotHostedKeyId(_))));
+            assert!(matches!(victim.hosted_generate(id, HostedSpec::Aes256Gcm), Err(DaemonError::NotHostedKeyId(_))));
+        }
+    }
+    assert!(matches!(
+        generate_hosted_key(&nodes[0], &peers, "frost-namespace", HostedSpec::Aes256Gcm, DEFAULT_WRITE_QUORUM).await,
+        Err(DaemonError::NotHostedKeyId(_))
+    ));
+    // The DKG of the id is unaffected.
+    run_dkg(&peers, "frost-namespace").await.unwrap();
+    // Hosted ids keep working whatever the prefix and the Canton name after the tag contain.
+    for id in ["rutli-enc-frost-x", "b8-rutli-sym-1"] {
+        let as_node3 = LocalPeer::new(nodes[0].clone()).on_behalf_of(nodes[2].clone());
+        as_node3.replicate_key("genkey-ok", id, "aes-256-gcm", &[], &wrapped_by(&nodes[2], &nodes[0], id, &key)).await.unwrap();
+        assert!(nodes[0].hosted_exists(id), "{id}");
+    }
+}
+
+/// F1, the pull path: a compromised cosigner lists a hosted key under a FROST id in its inventory
+/// and serves it on `FetchKey`. Anti-entropy (and read-repair) on the honest nodes does not store
+/// it, so once that cosigner stops vetoing, the key's DKG runs.
+#[tokio::test]
+async fn anti_entropy_does_not_pull_a_hosted_key_under_a_frost_id() {
+    use rutli_cosigner::seal::Sealer;
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = hosted_cluster(&tmp);
+    let id = "frost-namespace";
+    // Planted on node 3 behind its node's back (its own key store, its own sealer).
+    let planted = KeyStore::open_with_sealer(
+        tmp.path().join("node-3"),
+        Some(Arc::new(Sealer::from_master_secret(HOSTED_MASTER, 3))),
+    )
+    .unwrap();
+    let key = rutli_cosigner::hosted::HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
+    planted.create_hosted(id, &key).unwrap();
+    assert!(nodes[2].hosted_manifest().unwrap().iter().any(|m| m.key_id == id), "listed by node 3");
+
+    for (i, me) in nodes[..2].iter().enumerate() {
+        let as_me: Peers = nodes
+            .iter()
+            .map(|n| Arc::new(LocalPeer::new(n.clone()).on_behalf_of(me.clone())) as Arc<dyn PeerApi>)
+            .collect();
+        // Node 3 really serves it, wrapped to the asking node...
+        let (_, _, wrapped) = as_me[2].fetch_key(id).await.unwrap();
+        assert!(me.hosted_unwrap(id, HostedSpec::Aes256Gcm, &wrapped).is_ok());
+        // ...and still nothing lands here.
+        let (pulled, _) = anti_entropy_sweep(me, &as_me).await.unwrap();
+        assert_eq!(pulled, 0, "node {}", i + 1);
+        assert!(repair_hosted_key(me, &as_me, id).await.is_err(), "node {}", i + 1);
+        assert!(!me.has_key(id), "node {}", i + 1);
+        assert!(!me.key_epoch(id).unwrap().present, "node {}", i + 1);
+    }
+    // While node 3 holds it, node 3 vetoes the DKG (as any one cosigner can)...
+    assert!(run_dkg(&peers, id).await.is_err());
+    // ...and once it is gone the DKG runs: the honest nodes hold nothing under the id.
+    std::fs::remove_file(tmp.path().join("node-3").join(format!("{id}.json"))).unwrap();
+    run_dkg(&peers, id).await.unwrap();
+}
+
+/// F1, after part 3: a push under the id of a DKG every node has STAGED is refused, so the commit
+/// promotes the staged share on every node instead of leaving this one STAGED ("a different key
+/// appeared") while the others commit.
+#[tokio::test]
+async fn a_push_after_part3_staged_cannot_block_the_commit() {
+    use rutli_cosigner::ceremony_record::RecordState;
+    use rutli_cosigner::node::CeremonyKind;
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = hosted_cluster(&tmp);
+    let (id, ceremony) = ("frost-namespace", "dkg-staged-push");
+    for p in &peers {
+        p.ceremony_begin(ceremony, id, CeremonyKind::Dkg, None, None).await.unwrap();
+    }
+    let mut map = BTreeMap::new();
+    for p in &peers {
+        map.insert(p.identifier(), p.ceremony_part1(ceremony, id, CeremonyKind::Dkg, &[1, 2, 3], None).await.unwrap());
+    }
+    let mut digest = [0u8; 32];
+    for p in &peers {
+        digest = p.ceremony_part2(ceremony, &map).await.unwrap().round1_digest;
+    }
+    for p in &peers {
+        p.ceremony_part3(ceremony, &digest).await.unwrap();
+    }
+    assert_eq!(nodes[0].ceremony_record(ceremony).unwrap().state, RecordState::Staged);
+
+    let key = rutli_cosigner::hosted::HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
+    let as_node3 = LocalPeer::new(nodes[0].clone()).on_behalf_of(nodes[2].clone());
+    let err = as_node3
+        .replicate_key("genkey-evil", id, "aes-256-gcm", &[], &wrapped_by(&nodes[2], &nodes[0], id, &key))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DaemonError::NotHostedKeyId(_)), "got {err:?}");
+
+    for p in &peers {
+        p.ceremony_commit(ceremony).await.unwrap();
+    }
+    for n in &nodes {
+        assert_eq!(n.ceremony_record(ceremony).unwrap().state, RecordState::Committed);
+    }
+    // The committed key signs.
+    let msg = canton_digest(b"after the push");
+    sign(&nodes[0], &peers, id, &msg).await.unwrap();
+}
+
+/// A generation's rollback purge is the generation leader's alone: a peer that learned the
+/// generation's ceremony id cannot purge the copy a node just stored for it.
+#[tokio::test]
+async fn only_the_generation_leader_purges_its_rollback() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, _peers) = hosted_cluster(&tmp);
+    let (cid, id) = ("genkey-rollback", "rutli-enc-purge");
+    let key = rutli_cosigner::hosted::HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
+    // Node 1 leads the generation on node 2: fence, then the replica.
+    let leader = LocalPeer::new(nodes[1].clone()).on_behalf_of(nodes[0].clone());
+    leader.ceremony_fence(cid, id, "genkey").await.unwrap();
+    leader.replicate_key(cid, id, "aes-256-gcm", &[], &wrapped_by(&nodes[0], &nodes[1], id, &key)).await.unwrap();
+    let node3 = LocalPeer::new(nodes[1].clone()).on_behalf_of(nodes[2].clone());
+    assert!(node3.purge_key(cid, id).await.is_err(), "another peer's purge is refused");
+    assert!(nodes[1].hosted_exists(id));
+    assert!(leader.purge_key(cid, id).await.unwrap(), "the leader rolls its generation back");
+    assert!(!nodes[1].hosted_exists(id));
+}
+
 #[tokio::test]
 async fn hosted_keys_survive_a_restart() {
     let tmp = tempfile::tempdir().unwrap();

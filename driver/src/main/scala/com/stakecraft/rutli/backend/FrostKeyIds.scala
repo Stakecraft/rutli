@@ -24,6 +24,12 @@ package com.stakecraft.rutli.backend
   *
   * The cosigner treats ids as opaque strings but its keystore accepts only `[A-Za-z0-9_-]`, so the
   * prefix is restricted to that alphabet — a bad prefix fails here, at startup, not at the first DKG.
+  *
+  * The prefix may not contain either routing tag. The cosigner does not know the prefix, so it reads
+  * an id's routing tag as the first `frost-` or `rutli-` in it and creates hosted keys only under
+  * `rutli-` ids — the namespaces stay disjoint, and no peer can park a hosted key on a FROST id
+  * before its DKG. A prefix with a tag in it (`frost-p1-`) would make this driver's hosted ids
+  * (`frost-p1-rutli-…`) read as FROST ids there, and its FROST ids under `rutli-p1-` as hosted ones.
   */
 final case class FrostKeyIds(prefix: String) {
 
@@ -32,6 +38,11 @@ final case class FrostKeyIds(prefix: String) {
   require(
     prefix.matches(PrefixAlphabet),
     s"frost.key-prefix must match [A-Za-z0-9_-]* (cosigner keystore alphabet), got ${prefix.replace("\"", "\\\"")}",
+  )
+  require(
+    !prefix.contains(FrostTag) && !prefix.contains(HostedTag),
+    s"frost.key-prefix must not contain the routing tags '$FrostTag' or '$HostedTag' (the cosigners read the " +
+      s"first tag in an id as its routing tag), got ${prefix.replace("\"", "\\\"")}",
   )
 
   private val frostPrefix: String = prefix + FrostTag

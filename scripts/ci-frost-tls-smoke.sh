@@ -18,6 +18,7 @@ COMPOSE=(docker compose -p rutli-tls-smoke
   -f deploy/frost/docker-compose.tls.yml
   -f deploy/frost/docker-compose.tls.smoke.yml)
 CERTS=deploy/frost/certs
+SMOKE_CONFIG=deploy/frost/config-tls-smoke
 export RUTLI_SEAL_SECRET="${RUTLI_SEAL_SECRET:-$(openssl rand -hex 32)}"
 # The compose file defaults to the published GHCR image with pull_policy=always — right for
 # operators, wrong for CI: a smoke test must exercise the working tree, or a broken (or fixed)
@@ -42,9 +43,29 @@ cleanup() {
   # The certs dir is 0700 and was chowned to the container uid: remove it, or a persistent
   # (self-hosted) runner's next checkout fails with EACCES while cleaning the workspace.
   sudo rm -rf "$CERTS" 2>/dev/null || rm -rf "$CERTS" 2>/dev/null || true
+  rm -rf "$SMOKE_CONFIG" 2>/dev/null || true
   return $rc
 }
 trap cleanup EXIT
+
+# The example configs keep the default: DKG and refresh need a client-signed ceremony intent. The
+# smoke drives DKG through grpcurl, which cannot sign one, so it runs on copies that opt out
+# (docker-compose.tls.smoke.yml mounts them).
+echo "==> Writing the smoke configs (ceremony intents opted out)"
+rm -rf "$SMOKE_CONFIG"
+mkdir -p "$SMOKE_CONFIG"
+python3 - "$SMOKE_CONFIG" deploy/frost/config-tls/cosigner*.json <<'PY'
+import json, os, sys
+out = sys.argv[1]
+for src in sys.argv[2:]:
+    with open(src) as f:
+        cfg = json.load(f)
+    cfg.setdefault("signing_policy", {})["require_ceremony_intent"] = False
+    with open(os.path.join(out, os.path.basename(src)), "w") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+PY
+chmod -R a+rX "$SMOKE_CONFIG"
 
 echo "==> Generating mTLS certs"
 rm -rf "$CERTS"

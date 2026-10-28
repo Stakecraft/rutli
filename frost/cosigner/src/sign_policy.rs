@@ -68,7 +68,9 @@ impl SignGuard {
         sign_test_per_min: u32,
     ) -> Self {
         let require_intent = verifier.policy().require_intent;
-        let require_ceremony_intent = verifier.policy().require_ceremony_intent;
+        // Unset = on, the default of a node that verifies intents; the daemon settles it for a
+        // plaintext node ([`crate::config::SigningPolicyConfig::ceremony_intent_required`]).
+        let require_ceremony_intent = verifier.policy().require_ceremony_intent.unwrap_or(true);
         Self {
             verifier,
             journal,

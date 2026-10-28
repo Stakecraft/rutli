@@ -232,6 +232,16 @@ fn decide(
             }
             overwrite(&format!("the backup holds a newer epoch ({} > live {})", b.epoch, l.epoch))
         }
+        // A hosted key or tombstone is created only under a hosted-key id (F1): a backup taken
+        // before 0.4.0-rc.6 may hold one squatted on a FROST id, and restoring it would occupy the
+        // id again and block that key's DKG. Left out (not a refusal: the rest restores).
+        (Record::Hosted(_), None) | (Record::Tombstone(_), None) if crate::node::refuse_unless_hosted_id(key_id).is_err() => {
+            Ok(Decision::Skip(
+                "a hosted record under an id that is not a hosted-key id (no `rutli-` routing tag) — never \
+                 restored where none is live (it would squat on a FROST key's id)"
+                    .into(),
+            ))
+        }
         (Record::Hosted(_), None) | (Record::Tombstone(_), None) => Ok(Decision::Install { broke_glass: false }),
         (Record::Hosted(b), Some(Record::Hosted(l))) => {
             if b.spec == l.spec && b.private_der == l.private_der {

@@ -15,7 +15,8 @@ The statements below hold for a cluster where:
   `CHANGELOG.md`), on a cluster uniformly upgraded **before** any DKG or refresh
   (`ceremony_protocol` 2 on every node);
 - the enforcement switches are on, identically, on every node: `signing_policy.require_intent`,
-  `require_ceremony_intent`, `signer_acl_required`, `signer_may_refresh: false`, `require_epoch_match`
+  `require_ceremony_intent` (on by default since 0.4.0-rc.6, unless opted out with `false`),
+  `signer_acl_required`, `signer_may_refresh: false`, `require_epoch_match`
   (`docs/approval-quorum.md`, "Switching enforcement on");
 - key files are written in format v2 (`keyfile.write_version: 2`, `cluster_uuid` set) and the
   legacy shared seal master has been retired: per-node seal bundles, DEKs rotated
@@ -68,7 +69,7 @@ substitute for that.
   re-checks it before it releases its share (C2);
 - delete a hosted key, or purge one through a "rollback" — deletes need a delete-role intent every
   node verifies; a rollback purge removes only a key the peer created in the same still-fenced
-  generation (M2).
+  generation, and (since 0.4.0-rc.6) only at the request of that generation's leader (M2).
 
 **Can:** abort ceremonies and signatures it leads (the driver fails over), burn round-1 nonces,
 and refuse to forward. Availability, not integrity.
@@ -79,6 +80,18 @@ and refuse to forward. Availability, not integrity.
 names and exact client CNs, M3), make an honest peer release a share without a valid intent, forge
 a tombstone, roll a peer back to an old epoch, or get a peer to accept a key file it planted (v2
 headers bind cluster, node, key id and kind; plaintext is refused, M4).
+
+It also **cannot park a hosted key on a FROST key's id** (since 0.4.0-rc.6). FROST ids are
+deterministic (`<prefix>frost-<name>`), and a peer's `ReplicateKey` needs no client authorization,
+so up to rc.5 it could push a hosted key under, say, `frost-namespace` before its DKG (or list one
+and let anti-entropy pull it): every node then refused that DKG, and a push after part 3 staged
+left that node STAGED while the others committed. The two kinds of key now have disjoint ids: a
+node creates a hosted key — generated, pushed, pulled or imported — or records a tombstone, or
+takes a hosted-key fence, only under an id whose first routing tag is `rutli-`, and the driver
+refuses a `frost.key-prefix` that contains either tag. A hosted record already sitting under
+another id (squatted before rc.6) can still be deleted where it is, on one node or several;
+`hosted-clear-tombstone` then frees the id. A restore never puts such a record back where none is
+live.
 
 **Can:** read every hosted key (inherent to replicated whole keys — `docs/hosted-keys-design.md`),
 refuse or corrupt its own contributions (routed around by t-subset retry, flagged by
@@ -115,19 +128,52 @@ the per-asker and total caps (F2). What remains:
 
 - it can split (above) a DKG or refresh that a client **did** ask for and that it takes part in;
 - it can stop a requested ceremony: by refusing (n-of-n), or by presenting its intent as a second
-  leader, which fails and spends the id. It can never take that ceremony over;
-- if the leader of a requested ceremony dies before it can spend the id, it can lead that same
-  ceremony once, within the intent's validity (at most `intent_max_lifetime_secs` + skew). That is
-  a ceremony the client asked for, and the split residual above applies to it;
+  leader, which fails and spends the id;
+- it cannot take a requested ceremony over (since 0.4.0-rc.6). Every node binds the ceremony to the
+  leader whose fence took its guard (the caller's certificate CN, or the node itself) and accepts
+  parts 1–3, a second fence, an abort of the live ceremony and the release of that fence only from
+  that leader; under `require_ceremony_intent`, part 1 never takes the guard without a fence. The
+  leader fences its own node first, before any peer has seen the intent, so a peer that races the
+  remaining fences can bind only the other nodes to itself: that stops the ceremony, but every
+  ceremony needs the leader's node. And a node fences a client intent's ceremony at most once: the
+  fence writes a durable fence mark for the id (kept 24 h, longer than any intent is valid), and a
+  mark refuses every later fence under the id, and any part 1 that would take a new guard for it,
+  with or without an intent — so a node that opted out of ceremony intents cannot be re-fenced
+  intent-less under a client's id either. A ceremony id guards one key, so no guard a peer takes
+  under the same id on another key can stand in for the leader's. The guard that binds the leader is
+  in memory; the mark is what keeps the id closed when the guard goes — released by the leader's
+  rollback while it waits on a stalling peer, preempted, or lost in a restart — and it does not
+  depend on the capped no-votes a peer can exhaust. Up to rc.5 it could take one over: a fenced peer
+  sees the intent, so it could delay its fence reply, run parts 1–3 on both honest nodes under the
+  leader's ceremony id, and choose its own round-1 commitments after seeing theirs (a bias of the
+  DKG output, never knowledge of the key; round-1 equivocation was still caught);
+- nor can it lead a requested ceremony whose leader died or whose nodes restarted: every node the
+  leader fenced keeps the id's fence mark, the leader fences its own node first, and every ceremony
+  needs all nodes. (Up to the rc.6 review, a leader that died before spending the id, with the
+  fenced nodes restarted, left the id free: within the intent's validity it could then fence the
+  honest nodes itself, choose its round-1 commitments after theirs and bias the key the driver
+  adopts.) Only if both honest nodes lost their marks with their volumes, while the intent is still
+  valid, would this reopen;
 - like any participant, it can veto every ceremony, onboarding DKGs included, by refusing to take
   part (n-of-n);
 - hosted-key genkey/delkey fences are not intent-gated: it can block a hosted id's generation or
-  deletion, as it can by refusing.
+  deletion, as it can by refusing;
+- a ceremony it binds to itself on an honest node by racing the leader's fence (above) stays on that
+  node until it gives it up or the orphan timeout (15 min) passes: the leader's abort cannot end
+  another leader's ceremony. That blocks only the key's ceremonies, which it can veto anyway.
 
-Without `require_ceremony_intent` (this release's default), a ceremony without an intent is still
-accepted and counted (`RutliCeremonyIntentAbsent`), and the residual is as on rc.3. Any peer can
-then lead a DKG or refresh at will, split it, and hold off other ceremonies for 60 s with a bare
-fence or 15 min with a session at a time.
+The intent's validity bounds the **start** of a ceremony, not its finish: it is checked at the
+fence and at part 1, where a node decides to take part, and not again at parts 2–3 or the commit,
+which may complete after `not_after`. That is deliberate. Finishing late cannot produce anything the
+client did not ask for: a DKG is create-once (a node refuses one over any existing record, and
+commits only what it staged for that ceremony id), a refresh is a compare-and-swap from the sharing
+the leader announced at the fence (a node aborts if its share changed meanwhile), and a refresh never
+changes the group key. A session that stalls is bounded by the orphan timeout, not by the intent.
+
+With `require_ceremony_intent: false` (the opt-out; before 0.4.0-rc.6, the default), a ceremony
+without an intent is still accepted and counted (`RutliCeremonyIntentAbsent`), and the residual is as
+on rc.3. Any peer can then lead a DKG or refresh at will, split it, and hold off other ceremonies for
+60 s with a bare fence or 15 min with a session at a time.
 
 ### Holder of the driver certificate and key (bypassing the driver)
 

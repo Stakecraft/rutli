@@ -165,10 +165,12 @@ impl KeyFileConfig {
 /// cluster is only as strict as its most lenient node that a quorum can reach, so set the same
 /// policy everywhere.
 ///
-/// **Enforcement switches** (`require_intent`, `require_ceremony_intent`, `signer_acl_required`,
-/// and `signer_may_refresh` turned off) default to the lenient side in this release, so a rolling upgrade and a driver that
+/// **Enforcement switches** (`require_intent`, `signer_acl_required`, and `signer_may_refresh`
+/// turned off) default to the lenient side in this release, so a rolling upgrade and a driver that
 /// predates intents keep working. Turn them on, on every node, once every cosigner and the driver
 /// run this release (docs/approval-quorum.md, "Switching enforcement on").
+/// `require_ceremony_intent` is the exception: on by default since 0.4.0-rc.6 (with TLS), with an
+/// explicit opt-out for an upgrade from a driver older than 0.4.0-rc.4.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SigningPolicyConfig {
     /// Refuse sign round 1 from a leader that does not say which sharing (epoch, PKP digest) of the
@@ -185,13 +187,17 @@ pub struct SigningPolicyConfig {
     #[serde(default)]
     pub require_intent: bool,
     /// Refuse to take part in a DKG or refresh (its fence and part 1) without a valid client-signed
-    /// ceremony intent naming exactly that ceremony. Off: an intent that is present is verified in
-    /// full (and refused if invalid); a ceremony without one is accepted and counted in
-    /// `rutli_ceremony_intent_absent_total`. On: absence is refusal — a compromised cosigner can no
-    /// longer start a DKG or refresh on this node that no authorized client asked for. Requires
-    /// TLS. Turn it on once the driver and the refresh job run a release that signs them.
-    #[serde(default)]
-    pub require_ceremony_intent: bool,
+    /// ceremony intent naming exactly that ceremony. On: absence is refusal — a compromised cosigner
+    /// cannot start a DKG or refresh on this node that no authorized client asked for. Off: an
+    /// intent that is present is verified in full (and refused if invalid); a ceremony without one
+    /// is accepted and counted in `rutli_ceremony_intent_absent_total`.
+    ///
+    /// **Unset = on** since 0.4.0-rc.6 ([`SigningPolicyConfig::ceremony_intent_required`]), except
+    /// on a plaintext node, which verifies no intents (`true` there is a config error). `false` is
+    /// the explicit opt-out, for a rolling upgrade while the driver is older than 0.4.0-rc.4 or the
+    /// refresh job does not sign its refreshes yet; the node then warns at startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_ceremony_intent: Option<bool>,
     /// Refuse every key operation by a Signer client CN that has no `signer_acl` entry. Off: a CN
     /// without an entry may use every key (counted in `rutli_signer_acl_absent_total`).
     #[serde(default)]
@@ -254,7 +260,7 @@ impl Default for SigningPolicyConfig {
         Self {
             require_epoch_match: false,
             require_intent: false,
-            require_ceremony_intent: false,
+            require_ceremony_intent: None,
             signer_acl_required: false,
             signer_may_refresh: true,
             signer_acl: BTreeMap::new(),
@@ -372,6 +378,13 @@ impl SigningPolicyConfig {
         })
     }
 
+    /// `require_ceremony_intent` as it applies on a node with (`tls`) or without TLS: as set, else
+    /// on with TLS and off without — a plaintext node verifies no intents, so it could run no
+    /// ceremony at all.
+    pub fn ceremony_intent_required(&self, tls: bool) -> bool {
+        self.require_ceremony_intent.unwrap_or(tls)
+    }
+
     fn validate(&self, signers: &[String], tls: bool) -> crate::Result<()> {
         use crate::DaemonError::Config;
         if self.require_intent && !tls {
@@ -379,7 +392,7 @@ impl SigningPolicyConfig {
                 "signing_policy.require_intent needs tls: intents are verified against the cluster CA".into(),
             ));
         }
-        if self.require_ceremony_intent && !tls {
+        if self.require_ceremony_intent == Some(true) && !tls {
             return Err(Config(
                 "signing_policy.require_ceremony_intent needs tls: intents are verified against the cluster CA"
                     .into(),
@@ -1073,13 +1086,25 @@ mod tests {
     #[test]
     fn the_signing_policy_is_validated() {
         use super::{ApprovalRuleConfig, ApproverConfig};
-        // Defaults: lenient switches, the documented limits.
+        // Defaults: lenient switches but ceremony intents, the documented limits.
         let d = SigningPolicyConfig::default();
-        assert!(!d.require_intent && !d.require_ceremony_intent && !d.signer_acl_required && d.signer_may_refresh);
+        assert!(!d.require_intent && !d.signer_acl_required && d.signer_may_refresh);
         assert_eq!((d.sign_rate_limit_per_min, d.sign_rate_limit_per_day), (300, 20_000));
         let parsed: SigningPolicyConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(parsed.max_shares_per_request, d.max_shares_per_request);
         assert!(parsed.signer_may_refresh, "absent = on, like Default");
+        // require_ceremony_intent: unset = on with TLS (0.4.0-rc.6), off on a plaintext node; an
+        // explicit value wins.
+        for p in [&d, &parsed] {
+            assert_eq!(p.require_ceremony_intent, None);
+            assert!(p.ceremony_intent_required(true) && !p.ceremony_intent_required(false));
+        }
+        let opt_out: SigningPolicyConfig = serde_json::from_str(r#"{"require_ceremony_intent": false}"#).unwrap();
+        assert!(!opt_out.ceremony_intent_required(true));
+        let on: SigningPolicyConfig = serde_json::from_str(r#"{"require_ceremony_intent": true}"#).unwrap();
+        assert!(on.ceremony_intent_required(true));
+        base(None, None).validate().unwrap();
+        mesh_ok().validate().unwrap();
 
         // require_intent needs TLS.
         let mut plain = base(None, None);
@@ -1087,10 +1112,10 @@ mod tests {
         assert!(plain.validate().unwrap_err().to_string().contains("require_intent"));
         // So does require_ceremony_intent.
         let mut plain = base(None, None);
-        plain.signing_policy.require_ceremony_intent = true;
+        plain.signing_policy.require_ceremony_intent = Some(true);
         assert!(plain.validate().unwrap_err().to_string().contains("require_ceremony_intent"));
         let mut c = mesh_ok();
-        c.signing_policy.require_ceremony_intent = true;
+        c.signing_policy.require_ceremony_intent = Some(true);
         c.validate().unwrap();
 
         let mut c = mesh_ok();

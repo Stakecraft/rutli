@@ -68,6 +68,8 @@ backup before it writes anything, and one refusal writes nothing:
   does not help), another sharing at the same epoch, different material under a hosted key id, or a
   hosted key over its tombstone. Another group key under the same id, or another kind of record, is
   always refused;
+- a hosted key or tombstone under an id without the `rutli-` routing tag (squatted on a FROST id
+  before 0.4.0-rc.6) is left out where none is live: restoring it would block that key's DKG;
 - an identical file (same sharing / same hosted key) is left alone; `--force` only lets a backup
   that is **ahead** replace the live file (a newer epoch after a snapshot rollback, a tombstone over
   a live key).
