@@ -32,10 +32,12 @@ All notable changes to Rütli are documented here. Format loosely follows
   creates a hosted key — `GenerateKey`, `ReplicateKey`, the anti-entropy and read-repair pull, the
   genkey fence, `import-key` — or records a tombstone for a key it does not hold, or takes a delete
   fence where it holds nothing, only under one whose tag is `rutli-` (else `INVALID_ARGUMENT`). A
-  hosted record already under another id stays deletable where it is (`DeleteKey` skips the nodes
-  without one), then `hosted-clear-tombstone` frees the id. The driver refuses a `frost.key-prefix`
-  containing either tag. Existing hosted ids (`<prefix>rutli-<kind>-…`) and deployed prefixes are
-  unaffected; DKG ids are not restricted.
+  hosted record already under another id stays deletable where it is (`DeleteKey` succeeds once
+  every node answered, with a tombstone where the record was and "nothing here" elsewhere, whatever
+  the write quorum), then `hosted-clear-tombstone` frees the id; `restore` never puts such a record
+  back onto a node that has none. The driver refuses a `frost.key-prefix` containing either tag.
+  Existing hosted ids (`<prefix>rutli-<kind>-…`) and deployed prefixes are unaffected; DKG ids are
+  not restricted.
 - **A fenced peer can no longer take over another leader's DKG or refresh** (since 0.4.0-rc.4). It
   sees the client's ceremony intent at its fence, and part 1 checked the intent but not the caller,
   so it could delay its fence reply, run parts 1–3 on the honest nodes under the leader's ceremony
@@ -49,9 +51,13 @@ All notable changes to Rütli are documented here. Format loosely follows
   under the id and any part 1 that would take a new guard for it. The in-memory guard can go — the
   leader's rollback releasing it while a stalling peer holds the leader, a preemption, a restart of
   every fenced node — without freeing the id, and the mark does not depend on the capped no-votes a
-  peer can exhaust. A racing peer can still stop a ceremony, as it always could by refusing; a
-  ceremony it bound to itself on an honest node stays there until it gives it up or the orphan
-  timeout passes. Driver failover is unaffected (a fresh intent, so a fresh ceremony id, per
+  peer can exhaust. A marked id is refused with or without an intent, so a node that opted out of
+  ceremony intents cannot be re-fenced intent-less under a client's id; and one ceremony id guards
+  one key, so a guard a peer plants under the same id on another key cannot stand in for the
+  leader's. A generation's rollback purge (`PurgeKey` without an intent) is likewise accepted only
+  from that generation's leader. A racing peer can still stop a ceremony, as it always could by
+  refusing; a ceremony it bound to itself on an honest node stays there until it gives it up or the
+  orphan timeout passes. Driver failover is unaffected (a fresh intent, so a fresh ceremony id, per
   attempt).
 
 ### Changed (breaking default)

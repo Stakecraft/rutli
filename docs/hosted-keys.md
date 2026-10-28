@@ -144,8 +144,10 @@ instead of silently doing local crypto. The cosigners hold the two namespaces ap
 anti-entropy or read-repair, or imported — and records a tombstone or takes a hosted-key fence only
 under an id whose first `frost-`/`rutli-` tag is `rutli-`, so no peer can park a hosted key on a
 FROST key's id. A hosted record already under another id (squatted before 0.4.0-rc.6, or made by
-hand) keeps serving on the nodes that hold it but is no longer replicated or repaired; it can still
-be deleted where it is, and `hosted-clear-tombstone` on those nodes then frees the id.
+hand) keeps serving on the nodes that hold it but is no longer replicated or repaired, nor restored
+from a backup onto a node without it; it can still be deleted where it is — `DeleteKey` succeeds once
+every node has answered, with a tombstone where the record was and "nothing here" elsewhere — and
+`hosted-clear-tombstone` on those nodes then frees the id.
 
 **Several participants on one cluster:** FROST ids derive from Canton's key name, so a second
 participant on the same cluster asks for the same `frost-namespace` and its DKG is refused with
@@ -261,9 +263,11 @@ failover can never produce two different keys under one name. Requesting an exis
 **Below `write_quorum` the write rolls back.** The leader purges the partial copies and returns an
 error, leaving the id free for a clean retry. Each node removes only a key it created in that very
 generation while the generation still holds its fence — a `PurgeKey` without a delete intent is
-nothing else, so a leader cannot use "rollback" to destroy an existing key — a single node holding the only copy is precisely the
-failure this feature exists to prevent. Above quorum but below n, the key is created, a warning is
-logged, and anti-entropy repairs the missing replica.
+nothing else, and only the generation's leader (the caller whose fence took the guard) may send it,
+so a leader cannot use "rollback" to destroy an existing key, nor another peer a fresh copy — a
+single node holding the only copy is precisely the failure this feature exists to prevent. Above
+quorum but below n, the key is created, a warning is logged, and anti-entropy repairs the missing
+replica.
 
 ### Use
 
