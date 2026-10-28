@@ -733,6 +733,15 @@ impl Node {
         if kind == "genkey" {
             refuse_unless_hosted_id(key_id)?;
         }
+        // A delete fence likewise, except where a hosted record already sits under the id: a key
+        // squatted on a FROST id before 0.4.0-rc.6 must stay deletable (then
+        // `hosted-clear-tombstone` frees the id for its DKG).
+        if kind == "delkey" && refuse_unless_hosted_id(key_id).is_err() {
+            match self.keystore.load_record(key_id) {
+                Ok(crate::keystore::Record::Hosted(_)) | Ok(crate::keystore::Record::Tombstone(_)) => {}
+                _ => return Err(DaemonError::NotHostedKeyId(key_id.to_string())),
+            }
+        }
         // A hosted-key fence never covers a FROST share: it would serialize that key's DKG/refresh
         // behind a hosted-key operation that can never apply to it.
         if matches!(kind, "genkey" | "delkey") {
@@ -3096,6 +3105,10 @@ impl Node {
                     return Ok(TombstoneOutcome::Converted);
                 }
                 HostedState::Absent => {
+                    // Recording a tombstone creates a record under the id: only a hosted-key id,
+                    // or a tombstone could squat on a FROST key's DKG like a key could (F1). A
+                    // squatted copy that exists is converted above, so it stays deletable.
+                    refuse_unless_hosted_id(key_id)?;
                     match self.keystore.create_tombstone(key_id, &tombstone(known.cloned().unwrap_or_default(), None)) {
                         Ok(()) => {
                             metrics::counter!(crate::metrics::HOSTED_TOMBSTONES_WRITTEN, "how" => "recorded").increment(1);

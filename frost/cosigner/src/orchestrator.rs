@@ -1028,6 +1028,11 @@ pub async fn delete_hosted_key(
             Err(e) if is_unreachable(&e) => {
                 tracing::warn!(peer = ?p.identifier(), key_id, error = %e, "cosigner unreachable while fencing a hosted-key delete; anti-entropy will bring it the tombstone");
             }
+            // A node that holds nothing under a non-hosted id (the cleanup of a key squatted on a
+            // FROST id before 0.4.0-rc.6): nothing to delete there, and no tombstone may be recorded.
+            Err(e) if is_not_hosted_id(&e) => {
+                tracing::info!(peer = ?p.identifier(), key_id, "no hosted record under a non-hosted id on this cosigner; skipping it");
+            }
             Err(e) => {
                 release_fences(&fenced, &ceremony_id, key_id).await;
                 return Err(e);
@@ -1059,6 +1064,15 @@ pub async fn delete_hosted_key(
         tracing::warn!(key_id, tombstones, expected = peers.len(), "hosted key delete reached only some nodes — anti-entropy propagates the tombstone");
     }
     Ok((deleted_anywhere, tombstones))
+}
+
+/// [`DaemonError::NotHostedKeyId`], in process or as a peer's INVALID_ARGUMENT naming it.
+fn is_not_hosted_id(e: &DaemonError) -> bool {
+    match e {
+        DaemonError::NotHostedKeyId(_) => true,
+        DaemonError::Status(s) => s.code() == tonic::Code::InvalidArgument && s.message().contains("is not a hosted-key id"),
+        _ => false,
+    }
 }
 
 /// How many cosigners currently hold `key_id` (for reporting and the replica alert).

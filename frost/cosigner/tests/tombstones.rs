@@ -920,3 +920,53 @@ async fn delete_hosted_key_collects_approvals_through_the_inbox() {
         s.abort();
     }
 }
+
+/// F1, deletes: no tombstone and no delete fence lands on a FROST id where nothing hosted is, but
+/// a hosted key squatted on one before 0.4.0-rc.6 stays deletable where it sits — and
+/// `hosted-clear-tombstone` then frees the id for its DKG.
+#[tokio::test]
+async fn a_squatted_frost_id_stays_deletable_but_no_tombstone_lands_on_one() {
+    let c = cluster_with(operator_deletes(), SigningPolicyConfig::default(), Duration::from_millis(1));
+    let id = "frost-namespace";
+    // Planted on nodes 1 and 2 behind their nodes' backs, as a pre-rc.6 push could have.
+    let key = rutli_cosigner::hosted::HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
+    let store = |i: u16| {
+        let sealer = Sealer::from_master_secret(MASTER, i).with_binding(KeyFileBinding {
+            node: i,
+            cluster_uuid: Some(UUID.into()),
+            write_version: 2,
+            accept_v1: true,
+        });
+        KeyStore::open_with_sealer(keys_dir(&c.root, i), Some(Arc::new(sealer))).unwrap()
+    };
+    for i in [1, 2] {
+        store(i).create_hosted(id, &key).unwrap();
+    }
+    let intent = delete_intent(&c.ids, "operator", id);
+    // Node 3 holds nothing there: no delete fence, no tombstone.
+    assert!(matches!(c.nodes[2].ceremony_fence("delkey-x", id, "delkey"), Err(DaemonError::NotHostedKeyId(_))));
+    assert!(matches!(
+        c.nodes[2].hosted_apply_tombstone(id, &intent, intent::Expiry::Enforce, None),
+        Err(DaemonError::NotHostedKeyId(_))
+    ));
+    // The delete converts the two squatted copies and skips node 3.
+    assert_eq!(delete_hosted_key(&c.peers, id, &intent, 2).await.unwrap(), (true, 2));
+    assert_eq!(c.states(id), vec![(false, true), (false, true), (false, false)]);
+    // Anti-entropy does not carry the tombstone to node 3 either.
+    let as_node3: Peers = c
+        .nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone()).on_behalf_of(c.nodes[2].clone())) as Arc<dyn PeerApi>)
+        .collect();
+    let _ = anti_entropy_sweep(&c.nodes[2], &as_node3).await;
+    assert!(!c.nodes[2].has_key(id));
+    // Past the grace period, the operator's break-glass frees the id on the nodes that held it.
+    std::thread::sleep(Duration::from_millis(5));
+    for n in &c.nodes[..2] {
+        n.hosted_purge_expired(intent::now_ms()).unwrap();
+    }
+    for i in [1, 2] {
+        store(i).clear_tombstone(id).unwrap();
+    }
+    assert!(c.nodes.iter().all(|n| !n.has_key(id)), "the id is free for its DKG");
+}
