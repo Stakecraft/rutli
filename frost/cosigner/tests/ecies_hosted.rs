@@ -620,6 +620,11 @@ async fn import_key_into_a_running_node_races_safely_with_anti_entropy() {
         install_imported(&store, "frost-import-sig-x", &key),
         Err(rutli_cosigner::DaemonError::ReservedKeyId(_))
     ));
+    // An import under a FROST id is refused like any other hosted write under one (F1).
+    assert!(matches!(
+        install_imported(&store, "b8-frost-namespace", &key),
+        Err(rutli_cosigner::DaemonError::NotHostedKeyId(_))
+    ));
 
     // The running node serves the key it did not write itself, and anti-entropy pushes it on.
     let canton_pub = rutli_canton_key::parse_public_key(&read("encryption.pub.bin")).unwrap();

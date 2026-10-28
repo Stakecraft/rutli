@@ -656,6 +656,12 @@ impl Node {
         if kind == "dkg" && crate::share_delivery::is_reserved_for_import(key_id) {
             return Err(DaemonError::ReservedKeyId(key_id.to_string()));
         }
+        // A generation fence only ever covers a hosted-key id: no hosted key can be created under
+        // a FROST id ([`refuse_unless_hosted_id`]), so a genkey fence on one would only hold off
+        // that key's DKG.
+        if kind == "genkey" {
+            refuse_unless_hosted_id(key_id)?;
+        }
         // A hosted-key fence never covers a FROST share: it would serialize that key's DKG/refresh
         // behind a hosted-key operation that can never apply to it.
         if matches!(kind, "genkey" | "delkey") {
@@ -2530,6 +2536,37 @@ pub(crate) fn refuse_reserved_for_hosted(key_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// The driver's routing tag in `key_id` (`FrostKeyIds`): whichever of `frost-` and `rutli-` occurs
+/// first, or `None`. The driver mints `<frost.key-prefix><tag><name>` and refuses a prefix that
+/// contains either tag, so in every id it mints the first tag is the one it routes on — whatever the
+/// prefix, and whatever the Canton key name after the tag contains.
+pub(crate) fn routing_tag(key_id: &str) -> Option<&'static str> {
+    use crate::export::{FROST_ROUTING_TAG, HOSTED_ROUTING_TAG};
+    match (key_id.find(FROST_ROUTING_TAG), key_id.find(HOSTED_ROUTING_TAG)) {
+        (Some(f), Some(h)) => Some(if f < h { FROST_ROUTING_TAG } else { HOSTED_ROUTING_TAG }),
+        (Some(_), None) => Some(FROST_ROUTING_TAG),
+        (None, Some(_)) => Some(HOSTED_ROUTING_TAG),
+        (None, None) => None,
+    }
+}
+
+/// A hosted key is created only under a hosted-key id: one whose [`routing_tag`] is `rutli-`.
+///
+/// FROST and hosted keys live in disjoint id namespaces. A FROST id (`<prefix>frost-<name>`) is
+/// deterministic, so a hosted key created under one before its DKG — pushed by a compromised peer
+/// (ReplicateKey, which no client authorizes), pulled from its inventory by anti-entropy, or
+/// generated — would make that DKG fail on every node, and a push after part 3 staged it here
+/// would leave this node STAGED while the others commit. Checked by every hosted-key write that
+/// can create a key: [`Node::hosted_generate`], [`Node::hosted_store_for`] (the peer push and the
+/// anti-entropy/read-repair pull), the genkey fence and the import. An id with no tag is refused
+/// too: the driver never routes one to hosted keys.
+pub(crate) fn refuse_unless_hosted_id(key_id: &str) -> Result<()> {
+    if routing_tag(key_id) != Some(crate::export::HOSTED_ROUTING_TAG) {
+        return Err(DaemonError::NotHostedKeyId(key_id.to_string()));
+    }
+    Ok(())
+}
+
 fn without_self(
     map: &BTreeMap<Identifier, round1::Package>,
     me: Identifier,
@@ -2667,6 +2704,7 @@ impl Node {
     ) -> Result<(crate::hosted::HostedKey, bool)> {
         self.hosted_ctx()?;
         refuse_reserved_for_hosted(key_id)?;
+        refuse_unless_hosted_id(key_id)?;
         if self.keystore.exists(key_id) {
             if let HostedState::Tombstone(_) = self.hosted_state(key_id)? {
                 return Err(tombstoned(key_id));
@@ -2699,6 +2737,10 @@ impl Node {
         // A peer may never push a hosted key under an id reserved for the split ceremony: it would
         // squat on an import, or (with a rename-based write) replace an installed share.
         refuse_reserved_for_hosted(key_id)?;
+        // Nor under a FROST id (or any id the driver does not route to hosted keys): it would
+        // squat on that key's DKG. Peer pushes are authorized by the mesh allowlist alone, so this
+        // is what keeps one compromised cosigner out of the FROST namespace.
+        refuse_unless_hosted_id(key_id)?;
         // Create-once-immutable: a key id maps to one key forever. Canton rotates by minting a new
         // id plus a topology transaction, so a differing replica is a genuine conflict — never a
         // merge. Overwriting here could silently destroy the material peers already committed to.
@@ -3395,5 +3437,40 @@ mod sign_across_commit_tests {
 
         let sig = sign(&nodes[0], &peers, KEY, &msg).await.unwrap();
         assert!(crate::verify_key::signature_verifies(&group, &msg, &sig));
+    }
+}
+
+#[cfg(test)]
+mod hosted_id_tests {
+    use super::*;
+
+    /// The driver's id grammar (`FrostKeyIds`): `<prefix><tag><name>`, the prefix free of both
+    /// tags, so the first tag is the routing tag — whatever the name after it contains.
+    #[test]
+    fn the_first_routing_tag_decides_and_only_rutli_ids_may_be_hosted() {
+        for id in [
+            "rutli-enc-0b9e3c4a-5d2f-4e1a-9c7b-1f2e3d4c5b6a",
+            "rutli-sym-participant1-3f2c",
+            "b4-rutli-enc-ecies-1",
+            "soak1-rutli-enc-frost-named-key-1",
+            "rutli-enc-imported-1",
+        ] {
+            assert_eq!(routing_tag(id), Some("rutli-"), "{id}");
+            refuse_unless_hosted_id(id).unwrap();
+        }
+        for id in [
+            "frost-namespace",
+            "b8-frost-namespace",
+            "soak1-frost-signing",
+            "frost-participant1-rutli-x",
+            "frost-import-1220cb0e",
+        ] {
+            assert_eq!(routing_tag(id), Some("frost-"), "{id}");
+            assert!(matches!(refuse_unless_hosted_id(id), Err(DaemonError::NotHostedKeyId(_))), "{id}");
+        }
+        for id in ["namespace-participant1", "k", "ci-smoke-namespace", "rutli", "frost"] {
+            assert_eq!(routing_tag(id), None, "{id}");
+            assert!(matches!(refuse_unless_hosted_id(id), Err(DaemonError::NotHostedKeyId(_))), "{id}");
+        }
     }
 }

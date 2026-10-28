@@ -137,6 +137,15 @@ pub enum DaemonError {
          install it with the split ceremony (docs/split-ceremony.md)"
     )]
     ReservedKeyId(String),
+
+    /// A hosted key may only be created under an id the driver routes to hosted keys: its first
+    /// routing tag must be `rutli-` ([`crate::node::refuse_unless_hosted_id`]). A `<prefix>frost-…`
+    /// id belongs to a FROST key, and a hosted key under it would make that key's DKG fail.
+    #[error(
+        "key id {0} is not a hosted-key id: a hosted key is created only under <frost.key-prefix>rutli-<name> \
+         (the first of \"frost-\" / \"rutli-\" in the id must be \"rutli-\"); FROST ids are never hosted"
+    )]
+    NotHostedKeyId(String),
 }
 
 /// A sharing of a FROST key as nodes compare it: (epoch, PKP digest). Same as
@@ -247,7 +256,9 @@ impl From<DaemonError> for tonic::Status {
             // aborted: a concurrent ceremony is holding the key; the caller may retry later.
             DaemonError::CeremonyInProgress { .. } => tonic::Status::aborted(e.to_string()),
             DaemonError::CeremonySuperseded { .. } => tonic::Status::aborted(e.to_string()),
-            DaemonError::InvalidMessageLength { .. } | DaemonError::InvalidPoint(_) => {
+            DaemonError::InvalidMessageLength { .. }
+            | DaemonError::InvalidPoint(_)
+            | DaemonError::NotHostedKeyId(_) => {
                 tonic::Status::invalid_argument(e.to_string())
             }
             _ => tonic::Status::internal(e.to_string()),

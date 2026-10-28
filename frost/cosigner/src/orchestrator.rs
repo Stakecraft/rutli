@@ -799,10 +799,12 @@ pub async fn generate_hosted_key(
     spec: crate::hosted::HostedSpec,
     write_quorum: usize,
 ) -> Result<(crate::hosted::HostedKey, bool, usize)> {
-    // A hosted key squatting on an import id would make the split ceremony's install fail.
+    // A hosted key squatting on an import id would make the split ceremony's install fail, and one
+    // under a FROST id that key's DKG. Every node refuses both too; this answers before the mesh.
     if crate::share_delivery::is_reserved_for_import(key_id) {
         return Err(DaemonError::ReservedKeyId(key_id.to_string()));
     }
+    crate::node::refuse_unless_hosted_id(key_id)?;
     if spec.needs_every_node() {
         ensure_every_peer_supports(node, peers, spec).await?;
     }

@@ -108,5 +108,37 @@ class FrostKeyIdsSpec extends AnyWordSpec with Matchers {
       intercept[IllegalArgumentException](FrostKeyIds("soak1."))
       intercept[IllegalArgumentException](FrostKeyIds("soak1:"))
     }
+
+    "reject a prefix containing a routing tag, which would put its ids in the other namespace" in {
+      // The cosigners read the first frost-/rutli- in an id as its routing tag and create hosted keys
+      // only under rutli- ids: with prefix "frost-p1-" every hosted id would read as a FROST id.
+      for (bad <- Seq("frost-", "frost-p1-", "p1-frost-", "rutli-", "x-rutli-y", "afrost-")) {
+        val err = intercept[IllegalArgumentException](FrostKeyIds(bad))
+        err.getMessage should include("frost.key-prefix")
+        err.getMessage should include("routing tags")
+      }
+      // Deployed prefixes, and prefixes that only resemble a tag, stay valid.
+      for (ok <- Seq("", "soak1-", "b4-", "b8-", "acme1-", "frost", "rutli", "frostp1-", "rutli_1-"))
+        noException should be thrownBy FrostKeyIds(ok)
+    }
+
+    "keep the first routing tag in every minted id equal to the one it routes on" in {
+      // The cosigner-side rule (a hosted key only under an id whose first tag is rutli-) must accept
+      // every hosted id and refuse every FROST id this driver mints, whatever the Canton key name.
+      def firstTag(id: String): Option[String] =
+        Seq(FrostKeyIds.FrostTag, FrostKeyIds.HostedTag)
+          .map(t => t -> id.indexOf(t))
+          .filter(_._2 >= 0)
+          .sortBy(_._2)
+          .headOption
+          .map(_._1)
+      for (prefix <- Seq("", "soak1-", "frost", "rutli", "p1")) {
+        val ids = FrostKeyIds(prefix)
+        for (name <- Seq(Some("namespace"), Some("frost-x"), Some("rutli-y"), Some("rutli-frost-z"), None)) {
+          firstTag(ids.frost(name)) shouldBe Some(FrostKeyIds.FrostTag)
+          firstTag(ids.hosted("enc", name, "u")) shouldBe Some(FrostKeyIds.HostedTag)
+        }
+      }
+    }
   }
 }
