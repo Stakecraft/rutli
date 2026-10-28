@@ -72,11 +72,12 @@ Example TLS configs are in `config-tls/` (mount `certs/` at `/certs`). The drive
 `frost.tls { ca-cert, cert, key, domain }` in its Canton config, pointing at the CA + `driver.{crt,key}`.
 With TLS on, a plaintext client is refused at the handshake.
 
-The example configs opt out of ceremony intents (`"signing_policy": { "require_ceremony_intent": false }`)
-so that a hand-run `grpcurl … Signer/Dkg` (and the CI smoke test) can start a DKG: grpcurl cannot sign
-the client ceremony intent every cosigner requires by default from 0.4.0-rc.6. Remove the opt-out for
-anything driven by the Rütli driver (0.4.0-rc.4 or later signs its DKGs) — see
-[approval-quorum.md](../../docs/approval-quorum.md).
+The example configs keep the default from 0.4.0-rc.6: a DKG or refresh needs a client-signed
+ceremony intent, which the Rütli driver (0.4.0-rc.4 or later) and `rutli-cosigner refresh` sign. A
+hand-run `grpcurl … Signer/Dkg` cannot sign one and is refused ("carries no ceremony intent"). To try
+DKG with grpcurl on a throwaway cluster, add `"signing_policy": { "require_ceremony_intent": false }`
+to each config (never on a cluster that holds real keys), as the CI smoke test does on its own copies
+(`scripts/ci-frost-tls-smoke.sh`) — see [approval-quorum.md](../../docs/approval-quorum.md).
 
 ### On Linux: cert ownership
 

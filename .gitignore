@@ -41,3 +41,6 @@ log/
 
 # scripts/ci-prometheus-rules.sh scratch (removed on exit)
 .promtool.*/
+
+# CI smoke: config copies written by scripts/ci-frost-tls-smoke.sh
+deploy/frost/config-tls-smoke/
