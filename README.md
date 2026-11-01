@@ -124,8 +124,9 @@ With `backend = "frost"` (the production path):
 | Symmetric | AES-256-GCM | Hosted, as above |
 | Other signing specs (ECDSA P-256, P-384, secp256k1) | | Not served by the cluster; only through `frost.delegate = "hsm"` (PKCS#11, single token, not threshold) |
 
-- Hosted keys are not threshold-shared: one compromised cosigner can read them.
-  Threshold ECIES is planned for 1.0 ([docs/roadmap.md](docs/roadmap.md)).
+- Hosted keys are not threshold-shared: one compromised cosigner can read them. Threshold ECIES is
+  planned for 2.0; existing nodes will move to it by an ordinary encryption-key rotation
+  ([docs/roadmap.md](docs/roadmap.md)).
 - `backend = "hsm"` (PKCS#11) signs with EC P-256, P-384 and secp256k1 (and Ed25519 if the token
   supports it) and decrypts RSA-2048 OAEP. It is verified against SoftHSM only and is outside the
   planned audit.
