@@ -212,14 +212,14 @@ v0.4.0.
 | **2.0** | Confidential computing | Cosigners in AWS Nitro Enclaves, AMD SEV-SNP or Intel TDX, so even root on the host or a memory snapshot does not reveal a share (today a documented residual, audit L7) |
 
 **Consequence for the audit.** Threshold ECIES moved to 2.0 (decided 2026-11-02) so that the Cure53
-engagement on v0.4.0 stays as scoped. Emergency recovery and the signed audit export are still new
-security-critical code after the freeze: 1.0 cannot be called audited without a review of them, either
-as an extension of the Cure53 engagement or a short second review before 1.0. **Decision open.**
+engagement on v0.4.0 stays as scoped. The other 1.0 features are new security-critical code after the
+freeze: emergency recovery, the signed audit export, and the encryption-key rotation with its mixed-mode
+driver. **Decided 2026-11-02: Cure53 reviews them too**, as a second phase of the same engagement once
+they are code-complete and before 1.0 is tagged. The RFQ asks for that phase as a separate line item
+([audit-rfq.md](audit-rfq.md), section 2.2).
 
 ## Open decisions
 
 - The audit's start date, which waits for funding; it sets the 1.0 date.
-- How the 1.0 features (emergency recovery, signed audit export) get audited: within the Cure53 engagement
-  or in a second review.
 - If B8 is not green by early November: ship v0.4.0 with 2a marked experimental, or slip the freeze.
 - Whether the pre-rotate alternative is worth pursuing after B8, or the carry-first path is enough.

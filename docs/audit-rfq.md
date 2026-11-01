@@ -184,6 +184,21 @@ Where we would like attention, in order:
    serve it; EC operations fail over past an old node. Please check that a rolling upgrade cannot end
    with a key that only some nodes can serve, or an ECIES decrypt silently routed to the wrong place.
 
+### 2.2 Phase 2, before 1.0 (separate line item)
+
+After the v0.4.0 engagement, three features are planned for Rütli 1.0. They are new code on the key
+path, so we want them reviewed by the same team before 1.0 is tagged, as a second, smaller phase once
+they are code-complete (expected in the first half of 2027):
+
+| Feature | What it does | Where we want attention |
+|---|---|---|
+| **Emergency recovery** | Shares encrypted to offline keys held by several recovery officers, for the case where every cosigner is lost at once | It is a path to the whole key: the threshold of officers, the ceremony, storage and destruction of recovery material, and what an officer or a stolen recovery kit can do |
+| **Signed audit log export** | The hash-chained audit log is periodically signed and shipped to append-only storage off the host | That a host administrator cannot rewrite or truncate history unnoticed; key handling for the signing key; gaps and replays |
+| **Encryption-key rotation, mixed mode** | A runbook and driver support for rotating the participant's encryption key, serving an old hosted ECIES key and a new one side by side, with versioned key ids | That a decrypt can never be routed to the wrong key or kind of key, that an old key is retired only when no traffic needs it, and the preparation for threshold ECIES in 2.0 |
+
+Please quote phase 2 separately, with your best estimate of effort; we will confirm its scope and date
+when the code is frozen.
+
 ## 3. Out of scope
 
 - **Upstream `frost-ed25519` crate internals.** The Zcash Foundation FROST implementation has been
@@ -246,6 +261,7 @@ no forward secrecy; seal-secret protection is software, not HSM or enclave; one 
 | Our availability | One maintainer engineer, available during the engagement for questions. No feature work lands in the audited surface after the freeze. Walkthrough on request. |
 | Deliverables | Written report with findings and severity ratings; per-finding recommendations; executive summary suitable for publication. |
 | Verification of internal fixes | Verifying the internal-review fixes (rc.2 and batch C, section 1.1) is part of the engagement; please show it and the batch C re-review as separate line items. |
+| Phase 2 | A second, smaller review before 1.0 of the features in section 2.2, by the same team, scheduled when they are code-complete. Quote it separately. |
 | Retest | Verification of our fixes against your findings is included in the quote. State how it is scheduled and whether there is a time or finding cap. |
 | Publication | The project is open source, and we expect the final report to be public (after fixes). Please state your publication policy and any embargo or redaction terms. |
 
@@ -260,6 +276,7 @@ no forward secrecy; seal-secret protection is software, not HSM or enclave; one 
 7. The weight of the ECIES hosted keys (section 2.1), of milestone B6 and of the batch C re-review (section 1.1: DKG/refresh confidentiality, cosigner-side signing policy) as separate line items in your quote, if you can show them.
 8. Anything in the public internal findings list you want discussed before quoting.
 9. Any information you need from us before quoting (access, build instructions, a call).
+10. An estimate for phase 2 (section 2.2) as its own line item, and how much notice you need to schedule it.
 
 ## 7. Materials we provide
 
