@@ -140,7 +140,7 @@ With `backend = "frost"` (the production path):
 | Canton | 3.4 and earlier | **Not supported:** driver-based KMS arrived in Canton 3.5 |
 | Splice | 0.9.0 | **Tested:** DevNet validator on Rütli since 2026-10-07 |
 | JVM (driver) | Java 17 | Bytecode pinned to 17, as Canton requires |
-| Driver ↔ cosigners | driver ≥ `0.4.0-rc.4` with cosigners ≥ `0.4.0-rc.6` | From rc.6, cosigners on TLS require ceremony intents by default, which older drivers do not send. Upgrade the cosigners first, then the driver, as each release's notes describe |
+| Driver ↔ cosigners | driver ≥ `0.4.0-rc.4` with cosigners ≥ `0.4.0-rc.6` | From rc.6, cosigners on TLS refuse a DKG or refresh without a client-signed ceremony intent, and drivers older than rc.4 do not sign one. Upgrade the driver to ≥ `0.4.0-rc.4` (and the refresh CronJob's image to the cosigners' release) **before** the cosigners, or set `require_ceremony_intent: false` on every node first; see the rc.6 upgrade note in [CHANGELOG.md](CHANGELOG.md) |
 
 ## Install & run
 
