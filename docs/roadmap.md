@@ -1,6 +1,6 @@
 # Rütli roadmap
 
-**Status:** 2026-10-15; audit timing updated 2026-10-27. **Scope:** where Rütli stands, the two ways a Canton/Splice validator ends up on it, and the
+**Status:** 2026-10-15; audit timing updated 2026-10-27; post-0.4.0 plan added 2026-11-01. **Scope:** where Rütli stands, the two ways a Canton/Splice validator ends up on it, and the
 path to 1.0. Facts are stated as established only where a rehearsal or a source check backs them; everything else
 is marked **unproven**. The detailed Track B record (migration spike, milestones, findings) is
 [roadmap-migration.md](roadmap-migration.md).
@@ -184,7 +184,7 @@ Track A (soak and hardening) continues on `stakecraft-devnet-rutli-01`; exit cri
 | ≈ 2026-11-14 | **v0.4.0 = audit code freeze:** Flow 1, Flow 2a (after B8), Flow 2b, B2, B6, ECIES, C2 fixes, CA rotation |
 | Later | Pre-rotate alternative for 2a (research), if B8 shows it is worth it |
 | Day v0.4.0 is tagged | Splice TestNet validator run starts; at least 4 weeks clean before 1.0 |
-| Audit + ≈ 4 weeks | **1.0**: after the audit's fixes and retest, and at least 4 clean weeks on TestNet |
+| After the audit | **1.0**: the audit's fixes and retest, at least 4 clean weeks on TestNet, and the 1.0 features below |
 
 - **The audit is the critical path.** Auditor: **Cure53** (chosen 2026-10-27). The RFQ
   ([audit-rfq.md](audit-rfq.md), brief [audit-prep.md](audit-prep.md)) covers ECIES and B6, excludes `HsmBackend`, and
@@ -193,8 +193,33 @@ Track A (soak and hardening) continues on `stakecraft-devnet-rutli-01`; exit cri
 - **External deadline:** Splice's `splice-postgres` chart is unsupported after 2026-11-12 (PostgreSQL 14 end of life).
   This affects the soak validator's deployment and must be handled before then.
 
+## After v0.4.0: v0.5.0, 1.0 and 2.0
+
+Planned 2026-11-01, partly informed by a review of the commercial alternatives (Blockdaemon Builder
+Vault's Canton KMS driver, cloud KMS). ECIES hosted keys, once planned as v0.5.0 (Track C), shipped in
+v0.4.0.
+
+| Release | Item | What and why |
+|---|---|---|
+| **Now** (docs) | Supported keys and algorithms, Canton compatibility matrix | In the README: which key is threshold, which is hosted, which Canton and Splice versions are tested. Done with this change |
+| **v0.5.0** | Unified admin CLI | One tool for generate, import, public key and Canton fingerprint (`1220…`), and a documented rotation recipe (`rotate_kms_node_key`, `owner_to_key_mappings.rotate_key`). Today these are spread across `rutli-cosigner` and `rutli-dealer` |
+| **v0.5.0** | Canton LocalNet quickstart | Rütli next to Splice's LocalNet, all in local containers, so an operator can try it in minutes without touching a real node |
+| **1.0** | Driver published to a Maven repository | Operators consume the driver as a normal dependency instead of a jar from a GitHub release |
+| **1.0** | Signed audit log, exported off the host | The hash chain is periodically signed and shipped to append-only storage (for example S3 Object Lock or syslog), so a host administrator can no longer rewrite it unnoticed |
+| **1.0** | Threshold ECIES | The encryption key held as shares too: each cosigner computes its part of the ECDH and the driver combines them. Needs a P-256 DKG and proofs that each partial result is correct. Closes the residual "one compromised cosigner reads the hosted keys" for ECIES; RSA stays hosted |
+| **1.0** | Emergency recovery | A designed answer to "every cosigner is lost at once": shares encrypted to offline keys held by several recovery officers. It is a path to the whole key, so the design (who, how many, which ceremony) comes before the code |
+| **2.0** | Confidential computing | Cosigners in AWS Nitro Enclaves, AMD SEV-SNP or Intel TDX, so even root on the host or a memory snapshot does not reveal a share (today a documented residual, audit L7) |
+
+**Consequence for the audit.** Threshold ECIES, emergency recovery and the signed audit export are
+new security-critical code that lands after the v0.4.0 freeze, so they are not in the RFQ's scope.
+1.0 cannot be called audited without them being reviewed. Either Cure53's engagement is extended to
+cover them, which costs more and moves 1.0, or a second, smaller review follows before 1.0. **Decision
+open.**
+
 ## Open decisions
 
 - The audit's start date, which waits for funding; it sets the 1.0 date.
+- How the 1.0 features (threshold ECIES, emergency recovery, signed audit export) get audited: within the
+  Cure53 engagement or in a second review.
 - If B8 is not green by early November: ship v0.4.0 with 2a marked experimental, or slip the freeze.
 - Whether the pre-rotate alternative is worth pursuing after B8, or the carry-first path is enough.

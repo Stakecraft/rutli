@@ -29,9 +29,10 @@ If it leaks, an attacker controls the node. If it's lost, every party and Canton
 under that node is gone — permanently. And it **cannot be rotated**: there is no "issue a new one".
 
 Today the ways to protect it are all compromises: Canton's built-in KMS is **cloud-only** (AWS/GCP,
-Enterprise Edition); the sovereign alternatives are **proprietary** (MPCH Stronghold) or **SaaS
-custodians** (Fireblocks, Dfns). None is open-source, self-hosted, *and* real threshold-MPC — one a
-bank could run and certify entirely inside its own SOC 2 / ISO 27001 / DORA boundary.
+Enterprise Edition); the self-hosted alternatives are **proprietary** (Blockdaemon Builder Vault, MPCH
+Stronghold), and custody platforms (Fireblocks, Dfns) protect party and asset keys rather than the
+node's own. None is open-source, self-hosted, *and* real threshold-MPC — one a bank could run and
+certify entirely inside its own SOC 2 / ISO 27001 / DORA boundary.
 
 Rütli is that missing option — **the "Web3Signer/Teku of Canton."**
 
@@ -110,6 +111,36 @@ not the past. Threshold RSA is permanently out of scope; the reasoning, and the 
 - **Signing journal** — persistent per-key record for replay detection, plus an optional rate limit.
 - **Disaster recovery** — encrypted backup/restore + a share-repair primitive, with a full runbook.
 - **Deploy** — Docker Compose and Kubernetes, dev and mTLS-hardened.
+
+## Supported keys and algorithms
+
+With `backend = "frost"` (the production path):
+
+| Canton key | Key spec / algorithm | How Rütli holds it |
+|---|---|---|
+| Namespace, protocol signing, sequencer authentication | Ed25519 (`EcCurve25519`) | **Threshold:** FROST-ed25519 shares, t-of-n (2-of-3 by default); never assembled |
+| Encryption | ECIES P-256 (`EciesHkdfHmacSha256Aes128Cbc`) | **Hosted:** whole key, sealed and replicated on every cosigner (`hosted-keys = true`) |
+| Encryption (legacy) | RSA-2048, RSA-OAEP-SHA256 | Hosted, as above |
+| Symmetric | AES-256-GCM | Hosted, as above |
+| Other signing specs (ECDSA P-256, P-384, secp256k1) | | Not served by the cluster; only through `frost.delegate = "hsm"` (PKCS#11, single token, not threshold) |
+
+- Hosted keys are not threshold-shared: one compromised cosigner can read them.
+  Threshold ECIES is planned for 1.0 ([docs/roadmap.md](docs/roadmap.md)).
+- `backend = "hsm"` (PKCS#11) signs with EC P-256, P-384 and secp256k1 (and Ed25519 if the token
+  supports it) and decrypts RSA-2048 OAEP. It is verified against SoftHSM only and is outside the
+  planned audit.
+- `backend = "software"` keeps keys in the driver's memory. It is for tests only.
+
+### Compatibility
+
+| Component | Version | Status |
+|---|---|---|
+| Canton | 3.6.1 | **Tested:** upstream `KmsDriverTest` conformance in CI, DevNet soak, migration rehearsals |
+| Canton | 3.5.x | **Supported:** the KMS driver SPI is byte-identical to 3.6.1; earlier Rütli releases ran end to end on 3.5.6, but 0.4 is not re-tested there |
+| Canton | 3.4 and earlier | **Not supported:** driver-based KMS arrived in Canton 3.5 |
+| Splice | 0.9.0 | **Tested:** DevNet validator on Rütli since 2026-10-07 |
+| JVM (driver) | Java 17 | Bytecode pinned to 17, as Canton requires |
+| Driver ↔ cosigners | driver ≥ `0.4.0-rc.4` with cosigners ≥ `0.4.0-rc.6` | From rc.6, cosigners on TLS require ceremony intents by default, which older drivers do not send. Upgrade the cosigners first, then the driver, as each release's notes describe |
 
 ## Install & run
 
