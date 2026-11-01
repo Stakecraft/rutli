@@ -206,20 +206,20 @@ v0.4.0.
 | **v0.5.0** | Canton LocalNet quickstart | Rütli next to Splice's LocalNet, all in local containers, so an operator can try it in minutes without touching a real node |
 | **1.0** | Driver published to a Maven repository | Operators consume the driver as a normal dependency instead of a jar from a GitHub release |
 | **1.0** | Signed audit log, exported off the host | The hash chain is periodically signed and shipped to append-only storage (for example S3 Object Lock or syslog), so a host administrator can no longer rewrite it unnoticed |
-| **1.0** | Threshold ECIES | The encryption key held as shares too: each cosigner computes its part of the ECDH and the driver combines them. Needs a P-256 DKG and proofs that each partial result is correct. Closes the residual "one compromised cosigner reads the hosted keys" for ECIES; RSA stays hosted |
+| **1.0** | Encryption-key rotation, ready for threshold ECIES | A runbook for rotating the participant's encryption key (planned or after an incident), and a driver that can serve an old hosted ECIES key and a new one side by side during the rotation, with versioned key ids so the two kinds cannot be confused. This is what makes the 2.0 migration below a routine rotation |
 | **1.0** | Emergency recovery | A designed answer to "every cosigner is lost at once": shares encrypted to offline keys held by several recovery officers. It is a path to the whole key, so the design (who, how many, which ceremony) comes before the code |
+| **2.0** | Threshold ECIES | The encryption key held as shares too: each cosigner computes its part of the ECDH and the driver combines them. Needs a P-256 DKG and proofs that each partial result is correct. Closes the residual "one compromised cosigner reads the hosted keys" for ECIES. **Migration:** existing nodes rotate their encryption key to a new threshold key born by DKG, with the 1.0 runbook, without downtime and without changing the node's identity. Traffic encrypted to the old key keeps the protection it had. RSA keys rotate to threshold ECIES the same way. An optional split of the existing ECIES key into shares (same public key) is possible but weaker, because the key once existed whole |
 | **2.0** | Confidential computing | Cosigners in AWS Nitro Enclaves, AMD SEV-SNP or Intel TDX, so even root on the host or a memory snapshot does not reveal a share (today a documented residual, audit L7) |
 
-**Consequence for the audit.** Threshold ECIES, emergency recovery and the signed audit export are
-new security-critical code that lands after the v0.4.0 freeze, so they are not in the RFQ's scope.
-1.0 cannot be called audited without them being reviewed. Either Cure53's engagement is extended to
-cover them, which costs more and moves 1.0, or a second, smaller review follows before 1.0. **Decision
-open.**
+**Consequence for the audit.** Threshold ECIES moved to 2.0 (decided 2026-11-02) so that the Cure53
+engagement on v0.4.0 stays as scoped. Emergency recovery and the signed audit export are still new
+security-critical code after the freeze: 1.0 cannot be called audited without a review of them, either
+as an extension of the Cure53 engagement or a short second review before 1.0. **Decision open.**
 
 ## Open decisions
 
 - The audit's start date, which waits for funding; it sets the 1.0 date.
-- How the 1.0 features (threshold ECIES, emergency recovery, signed audit export) get audited: within the
-  Cure53 engagement or in a second review.
+- How the 1.0 features (emergency recovery, signed audit export) get audited: within the Cure53 engagement
+  or in a second review.
 - If B8 is not green by early November: ship v0.4.0 with 2a marked experimental, or slip the freeze.
 - Whether the pre-rotate alternative is worth pursuing after B8, or the carry-first path is enough.
