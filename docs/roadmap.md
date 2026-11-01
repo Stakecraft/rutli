@@ -1,6 +1,6 @@
 # Rütli roadmap
 
-**Status:** 2026-10-15; audit timing updated 2026-10-27; post-0.4.0 plan added 2026-11-01. **Scope:** where Rütli stands, the two ways a Canton/Splice validator ends up on it, and the
+**Status:** 2026-10-15; audit timing updated 2026-10-27; post-0.4.0 plan added 2026-11-01; milestone and release status updated 2026-11-02. **Scope:** where Rütli stands, the two ways a Canton/Splice validator ends up on it, and the
 path to 1.0. Facts are stated as established only where a rehearsal or a source check backs them; everything else
 is marked **unproven**. The detailed Track B record (migration spike, milestones, findings) is
 [roadmap-migration.md](roadmap-migration.md).
@@ -57,7 +57,7 @@ Common to both variants:
 **Status: switch rehearsed, targeted for v0.4.0.** Milestone B8 (DevNet, 2026-10-23..26, cosigners on `v0.4.0-rc.4`)
 **passed phases 0–4 and the 5.1 verification on 2026-10-26**: same UID, all three keys carried with their fingerprints,
 wallet down ≈ 20 min, operator and end-user balances unchanged, no re-onboard. Rotation, observation, SQL cleanup and
-destruction are pending. Runbook: [runbook-migration-inplace.md](runbook-migration-inplace.md). Decided 2026-10-15: 2a
+destruction are pending; the DevNet cosigners have run `v0.4.0-rc.6` since 2026-10-28. Runbook: [runbook-migration-inplace.md](runbook-migration-inplace.md). Decided 2026-10-15: 2a
 ships in v0.4.0, before the audit, so the auditors review it.
 
 *Mechanics.* Independently checked against the Canton 3.6.1 source by two reviewers (Opus and Codex), who agree:
@@ -165,10 +165,10 @@ namespace and signing keys are threshold keys; the encryption key is not.
 | B3 | RSA import | Dropped (not needed) |
 | B4 | Cutover rehearsal on a scratch JCE validator | Cutover and verification done 2026-10-14; GO and destruction from 2026-10-15 17:11Z |
 | B5 | Docs fix (stale "unsupported" claims, exposure caveat) | Done |
-| B6 | Optional carry of signing and ECIES keys | In review: PR #23 (Opus and Codex reviews addressed) |
+| B6 | Optional carry of signing and ECIES keys | Done: PR #23, merged 2026-10-15 (Opus and Codex reviews addressed) |
 | B7 | 2b rehearsal with wallet end-users: verify re-onboarding keeps their parties and balances | New, proposed |
-| B8 | In-place rehearsal (2a), carry-first sequence, on a fresh scratch JCE validator on DevNet | Phases 0–4 + 5.1 **passed 2026-10-26**; rotation, observation, SQL cleanup, destruction pending. Runbook [runbook-migration-inplace.md](runbook-migration-inplace.md) |
-| C1 to C3 | ECIES hosted keys | Done; shipped in v0.4.0-rc.1. Codex review found two availability fixes, in PR #24 |
+| B8 | In-place rehearsal (2a), carry-first sequence, on a fresh scratch JCE validator on DevNet | Phases 0–4 + 5.1 **passed 2026-10-26**; rotation, observation, SQL cleanup, destruction pending; cosigners on `v0.4.0-rc.6` since 2026-10-28. Runbook [runbook-migration-inplace.md](runbook-migration-inplace.md) |
+| C1 to C3 | ECIES hosted keys | Done; shipped in v0.4.0-rc.1. The two availability fixes from Codex's review are merged |
 | CA rotation | Pin plus runbook | In review: PR #19 |
 
 Track A (soak and hardening) continues on `stakecraft-devnet-rutli-01`; exit criteria are in
@@ -181,6 +181,7 @@ Track A (soak and hardening) continues on `stakecraft-devnet-rutli-01`; exit cri
 | When | What |
 |---|---|
 | 2026-10-09 | v0.4.0-rc.1 tagged |
+| 2026-10-28 | v0.4.0-rc.6: ceremony leader binding and durable fence marks, disjoint FROST and hosted key ids, TLS crate advisories closed; ceremony intents required by default with TLS |
 | ≈ 2026-11-14 | **v0.4.0 = audit code freeze:** Flow 1, Flow 2a (after B8), Flow 2b, B2, B6, ECIES, C2 fixes, CA rotation |
 | Later | Pre-rotate alternative for 2a (research), if B8 shows it is worth it |
 | Day v0.4.0 is tagged | Splice TestNet validator run starts; at least 4 weeks clean before 1.0 |
