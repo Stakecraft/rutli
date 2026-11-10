@@ -28,8 +28,8 @@ A Canton node's **namespace key** defines its on-chain identity and authorizes e
 If it leaks, an attacker controls the node. If it's lost, every party and Canton Coin balance hosted
 under that node is gone — permanently. And it **cannot be rotated**: there is no "issue a new one".
 
-Today the ways to protect it are all compromises: Canton's built-in KMS is **cloud-only** (AWS/GCP,
-Enterprise Edition); the self-hosted alternatives are **proprietary** (Blockdaemon Builder Vault, MPCH
+Today the ways to protect it are all compromises: Canton's built-in KMS is **cloud-only** (AWS or GCP);
+the self-hosted alternatives are **proprietary** (Blockdaemon Builder Vault, MPCH
 Stronghold), and custody platforms (Fireblocks, Dfns) protect party and asset keys rather than the
 node's own. None is open-source, self-hosted, *and* real threshold-MPC — one a bank could run and
 certify entirely inside its own SOC 2 / ISO 27001 / DORA boundary.
