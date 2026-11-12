@@ -365,7 +365,7 @@ footer .status-line { font-family: var(--mono); font-size: 12.5px; flex-basis: 1
       <li class="panel"><h3>Export</h3><p>Each key is exported from the running node with <code>keys.secret.download_to</code>, protected by a password.</p></li>
       <li class="panel"><h3>Split offline</h3><p>The namespace and signing keys are split into FROST shares on an offline machine, checked against their Canton fingerprints, then refreshed so the dealt shares are useless (required in production, skipped in the DevNet drill). The encryption key is imported whole.</p></li>
       <li class="panel"><h3>Switch</h3><p>The same participant restarts on the Rütli driver, registers each key by id and comes back with identical fingerprints. On DevNet the wallet was down about 20 minutes, and nobody had to re-onboard.</p></li>
-      <li class="panel"><h3>Clean up</h3><span class="tag">Not rehearsed yet</span><p>Rotate onto keys born in the cluster, delete the old database rows and destroy every old copy. A key that once existed whole stays as exposed as its old copies.</p></li>
+      <li class="panel"><h3>Clean up</h3><p>Both keys were rotated onto keys born in the cluster. After 11 clean days the old database rows were deleted and every old copy destroyed, and the node restarted with no private key in its database. A key that once existed whole stays as exposed as any copy you missed.</p></li>
     </ol>
   </section>
 
