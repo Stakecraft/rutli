@@ -4,8 +4,7 @@
 > four firms; updated 2026-10-16 for the internal security review and on 2026-10-27 for
 > `v0.4.0-rc.4`, the choice of auditor and the funding-dependent start; and on 2026-11-13 for
 > `v0.4.0-rc.6` as the pre-read and the completed in-place rehearsal. Line counts below were
-> measured on 2026-10-14 at `v0.4.0-rc.1` (commit `903d318`, without B6) and will be re-measured at
-> code freeze.
+> re-measured on 2026-11-13 for the `v0.4.0` code freeze.
 > Companion brief for the auditors: [audit-prep.md](audit-prep.md).
 
 **To:** Cure53. **From:** Stakecraft, maintainers of Rütli. **Contact:** Vasily Istomin (commercial)
@@ -129,29 +128,38 @@ build-time lockfile update and documentation.
 
 ### Approximate size
 
-**These numbers are for `v0.4.0-rc.1`; they predate B6, remediation batches A and B (rc.2) and batch C, which add code (batch C touches the core ceremony and signing paths). We will re-measure at the freeze and send the new table with the commit hash.** Measured on 2026-10-14 at `v0.4.0-rc.1` (`903d318`) with `wc -l` (physical lines, including comments and
+**These numbers are for the `v0.4.0` code freeze.** Measured on 2026-11-13 at the `v0.4.0` release commit (the code
+of `v0.4.0-rc.6` plus a lockfile update) with `wc -l` (physical lines, including comments and
 blanks; `tokei` was not used). Rust non-test lines were counted by cutting each file at its first
 `#[cfg(test)]`. Tests, generated code and build output are excluded from the "reviewable" column and
-listed separately. B2 and Track C code is already included in the crate rows. B6, rc.2 and batch C are not counted.
+listed separately. The first version of this table, measured on 2026-10-14 at `v0.4.0-rc.1`, is the
+baseline for the growth figures below.
 
 | Component | Reviewable lines | Excluded (not counted) |
 |---|---|---|
-| `frost/core` (Rust, crypto core, includes `dealer.rs`) | ~960 | ~430 integration tests, ~280 inline unit tests |
-| `frost/cosigner` (Rust daemon and `rutli-dealer`, `src/`) | ~9,520 | ~2,330 inline unit tests, ~3,750 integration tests |
-| `frost/canton-key` (B1, Canton key parser) | ~1,490 | ~110 inline unit tests, ~600 vector tests, test vectors |
-| `frost/cosigner/proto/cosigner.proto` | ~330 | |
-| `driver/src/main/scala` (JVM driver, hand-written, 18 files) | ~3,310 | ~3,190 tests; 121 checked-in grpc-java generated files under `driver/src/main/java` |
-| `deploy/helm`, `deploy/k8s` (YAML) | ~1,570 | |
-| Runbooks and design docs | ~3,090 (`key-ceremony`, `disaster-recovery`, `approval-quorum`, `hosted-keys*`, `phase-2-frost`, `architecture`, `split-ceremony`, `migration`) | |
+| `frost/core` (Rust, crypto core, includes `dealer.rs`) | ~1,270 | ~530 integration tests, ~380 inline unit tests |
+| `frost/cosigner` (Rust daemon and `rutli-dealer`, `src/`) | ~19,370 | ~8,990 inline unit tests, ~11,940 integration tests |
+| `frost/canton-key` (B1, Canton key parser) | ~1,520 | ~110 inline unit tests, ~600 vector tests, test vectors |
+| `frost/cosigner/proto/cosigner.proto` | ~590 | |
+| `driver/src/main/scala` (JVM driver, hand-written, 23 files) | ~4,630 | ~5,070 tests; 160 checked-in grpc-java generated files under `driver/src/main/java` |
+| `deploy/helm`, `deploy/k8s` (YAML) | ~2,690 | |
+| Runbooks and design docs | ~3,810 (`key-ceremony`, `disaster-recovery`, `approval-quorum`, `hosted-keys*`, `phase-2-frost`, `architecture`, `split-ceremony`, `migration`) | |
 
-Of the cosigner and core rows, the split ceremony (B2) accounts for ~2,850 lines (`dealer.rs`,
+Growth since `v0.4.0-rc.1`, in reviewable lines: `frost/cosigner` +9,850, the driver +1,320 (18 to 23
+files), `frost/core` +310, `cosigner.proto` +260, `frost/canton-key` +30. It comes from B6, the
+remediation batches A, B and C, ceremony intents and the rc.6 review fixes; batch C and the ceremony
+work are in the core ceremony and signing paths. Four documents written since are not in the last
+row: `runbook-migration-inplace` (~680 lines), `ca-rotation` (~640), `ceremonies` (~410) and
+`security/threat-model` (~310).
+
+Measured at `v0.4.0-rc.1` and not re-measured: of the cosigner and core rows, the split ceremony (B2) accounts for ~2,850 lines (`dealer.rs`,
 `share_delivery.rs`, `share_import.rs`, `verify_key.rs`, `request_auth.rs`, `rutli-dealer`), plus
 changes in `wrap`, `keystore`, `node`, `service` and `main`. Track C (ECIES) added about 1,350 lines
 across 11 files, inline tests included, in the 24 commits since its first commit (`e09d07f`),
 mostly `FrostBackend.scala`, `CantonEcies.scala`, `hosted.rs` and `export.rs`.
 
-Rough total: ~15,600 lines of Rust, protobuf and Scala (B1, B2 and Track C included), plus ~1,570
-lines of deployment YAML. Recount at the freeze tag.
+Rough total: ~27,380 lines of Rust, protobuf and Scala (~15,600 at `v0.4.0-rc.1`), plus ~2,690 lines
+of deployment YAML.
 
 ### 2.1 ECIES hosted keys (Track C): detail and where we want attention
 

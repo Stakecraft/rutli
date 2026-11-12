@@ -313,6 +313,25 @@ otherwise unaffected.
 - Object storage (L4): no object, version or delete marker under the validator's prefix (checked 2026-11-12).
 - Open: the workstation statements (shell history, password-manager entry) and the teardown of the scratch validator (offboarding, its prefix out of `signer_acl`, its volumes).
 
+**Planned event: both participants' drivers to 0.4.0-rc.6, 2026-11-12 23:34 → 2026-11-13 00:40 UTC.**
+The driver had stayed on rc.4 since 2026-10-22 while the cosigners moved to rc.6; the rc.5 and rc.6 driver changes
+(license notices in the jar, the `frost.key-prefix` check) had only run in CI. Same procedure as the rc.4 swap: the jar
+from the release (sha256 `98da3063…21b8`, checked against the release's `SHA256SUMS`) staged next to the running one in
+verified 2 MiB chunks, the running jar kept as `.rc4`, an atomic rename, `rollout restart`.
+- Before each swap: `StateCheck` with the running jar in the pod and with the rc.6 jar on a copy of the audit log, both
+  OK (B8: 47 345 entries; soak: 90 934). The soak's driver config sets no key prefix.
+- B8 first (swap 23:36:44Z, first signature 23:37:25Z): `Loaded driver rutli (API v1) build 0.4.0-rc.6`, same UID,
+  reconnected by itself, the console check of the migration runbook green, the ping decrypted. One hour later: 97
+  signatures and 1 decrypt since the swap, all `outcome=ok`, none without an intent, no failover; 27 commitments
+  correct, no mismatch; validator untouched.
+- Soak (swap 00:37:53Z, reconnected and signing by 00:39:00Z): the same driver line, `pinned group key for
+  frost-signing`, same UID, no `ERROR` line. A ping from the B8 participant was decrypted with the soak's hosted ECIES
+  key. In the first two minutes: 18 signatures and 1 decrypt, all `outcome=ok` with intents, `sig-verify=failed` 0;
+  `StateCheck` with the rc.6 jar OK (90 955 entries); validator untouched, 0 `ERROR` lines; refusal counters 0 on
+  every cosigner. A database backup job was running during the restart; it does not use the participant.
+- Rollback: the `.rc4` copy on each bundle volume, then `rollout restart`. Helm revisions unchanged (soak participant
+  rev 8).
+
 ## Drill calendar
 
 | Week | Drill | Status |
