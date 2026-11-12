@@ -1,10 +1,13 @@
 # Runbook: in-place migration of an existing validator into Rütli (Flow 2a)
 
-**Status:** rehearsed on DevNet 2026-10-23..26 (roadmap milestone B8: a Splice 0.9.0 / Canton 3.6.1 JCE validator, Rütli
-`0.4.0-rc.4` with ceremony intents enforced). Phases 0–4 and the 5.1 verification passed. **Rotation (5.2), the 24 h
-observation (5.3), the SQL cleanup (5.4) and destruction (5.5) have not been rehearsed yet: treat them as unproven.**
+**Status:** rehearsed end to end on DevNet (roadmap milestone B8: a Splice 0.9.0 / Canton 3.6.1 JCE validator).
+Phases 0–4 and the 5.1 verification passed on 2026-10-23..26 with Rütli `0.4.0-rc.4`, ceremony intents enforced. The
+rotation of both keys (5.2) passed on 2026-11-01 with the cosigners on `0.4.0-rc.6` and the driver on `0.4.0-rc.4`; the
+observation (5.3, 11 days), the SQL cleanup (5.4) and the destruction of the dump and the exports (5.5) passed on
+2026-11-12. **Not rehearsed:** the post-import refresh (D4), a cosigner key backup after the rotation, deleting
+object-storage copies (L4: B8 had none under its prefix), a backup job that resumes after the cleanup, and the teardown (5.6).
 Every Scala block here compiles against the Canton 3.6.1 release jar (checked 2026-10-26, with a negative control); those
-of Phases 0–4 and 5.1 are generalised from the blocks that ran in B8.
+of Phases 0–4, 5.1 and 5.2 are generalised from the blocks that ran in B8.
 **Applies to:** Splice 0.9.x validators on Canton 3.6.x whose keys Canton holds itself (JCE, rows in Postgres), moving
 into a Rütli cluster ≥ 0.4.0-rc.4. **Audience:** the validator operator and the cluster operator.
 
@@ -510,12 +513,15 @@ val from = CantonTimestamp.assertFromInstant(java.time.Instant.parse(rd("T_RECON
 val rc = p.commitments.lookup_received_acs_commitments(Seq(SynchronizerTimeRange(SYNC_ID, Some(TimeRange(from, CantonTimestamp.now())))), Seq.empty, Seq.empty, false).values.flatten.toSeq
 println(s"commitments periods=${rc.size} mismatches=${rc.count(_.state.toString.contains("Mismatch"))}")
 ```
-  Expect `periods > 0` and `mismatches=0`. `periods=0` is **not** a pass (B8's run 40 min after the reconnect returned 0):
-  run it again later.
+  Expect `periods > 0` and `mismatches=0`. `periods=0` is **not** a pass: run it again later. In B8 this lookup returned
+  0 on every run, also six days after the reconnect and without a time range, and so did the lookup of sent commitments.
+  The participant log is the fallback: count `Commitment correct for sender` lines per counter-participant and
+  `ACS_COMMITMENT_MISMATCH` lines over at least two reconciliation intervals (B8: correct from 15 senders, 0 mismatches).
+  The kubelet rotates this log quickly, so read it soon after an interval ends.
 
 **5.2 Rotation per client choice (D3)** [MUTATES: topology; **crosses RB1**]. Gate: 5.1 green and the client's written yes.
-Compiled against 3.6.1, **not yet rehearsed**. The 3.6.1 jar's `rotate_key(member, current, new)` works through the
-Authorized store: first assert Authorized OTK = synchronizer OTK. Never `keys.secret.delete` (under KMS it deletes the key
+Rehearsed in B8 on 2026-11-01, 5.2a then 5.2b, with the cosigners on `0.4.0-rc.6`. The 3.6.1 jar's
+`rotate_key(member, current, new)` works through the Authorized store: first assert Authorized OTK = synchronizer OTK. Never `keys.secret.delete` (under KMS it deletes the key
 in the cluster); the old keys stay registered to decrypt in-flight views.
 ```scala
 // 5.2a encryption onto a fresh cluster-hosted ECIES key (default)
@@ -532,7 +538,17 @@ println(s"rotated encryption to ${encNew.fingerprint}")
 ```
 Then the 4.10 ping (decrypts under the new id), a cosigner key backup (new keys exist), and record `T_RB1`.
 
-**5.3 Observation:** ≥ 24 h; repeat 5.1 at the end; two green health checks.
+Observed in the rehearsal: each rotation (key generation, `rotate_key`, the wait for the synchronizer) took 11–12 s
+and raised the OTK serial by 2 (1 → 3 → 5). The new ECIES key
+was on all three cosigners within a minute and the ping decrypted under it. For 5.2b the driver's DKG carried a ceremony
+intent; every cosigner logged `dkg fence: ceremony intent verified`, wrote its fence mark and committed within a second.
+The new signing key has no namespace usage. After `p.synchronizers.disconnect(ALIAS); p.synchronizers.reconnect(ALIAS)`
+(2.5 s) every signature came from the new key. The driver audit shows exactly two `generate*` lines. *B8 took no
+cosigner key backup afterwards: its cluster had no backup sidecar. In production, do not skip it.*
+
+**5.3 Observation:** ≥ 24 h; repeat 5.1 at the end; two green health checks. (B8 ran 11 days: 0 non-ok lines and 0
+`ecies-failure=` in 47 136 driver audit entries, refusal counters at 0 on every cosigner, the 5.1 console block and the
+ping green at the end. The audit cross-check and the wallet checks were not repeated at the end.)
 
 **5.4 SQL cleanup of the JCE rows (RB2)** [MUTATES: irreversible]. Gate (console): every OTK key and `NS_FP` is KMS-backed
 and every `keys.secret.list()` entry has a `kmsKeyId`. Then stop the validator and the participant (0 pods) and:
@@ -562,6 +578,14 @@ P -d $PDB -c "select count(*) from participant.common_crypto_private_keys" -c "s
 Expect `CLEANUP-COMMITTED`, `0`, `3` (4–5 after rotations). STOP on `ROLLED-BACK-…`. Start the participant (auto-connect
 on), rerun the 4.11 console check, the validator with the 4.12 guard, then resume the backup job and prove the next dump
 has 0 private-key rows. `CHECKPOINT`/`pg_switch_wal` need a superuser.
+
+Observed in the rehearsal: `CLEANUP-COMMITTED`, then `0` and `5`. The participant came back on the same revision,
+reconnected by itself with no `ERROR` line, and passed the console check and the ping; the validator logged `Node has
+identity … matching`, `has signed keys` and `already onboarded`, and the driver audit gained no `generate*` line. The
+validator was down 8.5 min, about 4 of them because the first console check ran before the admin API answered through a
+fresh port-forward: retry the console instead of treating one `UNAVAILABLE` as a failed node. If `psql` prints no marker
+at all (a cut `exec` stream), read the row count before retrying: `0` means the transaction committed. B8 had no backup
+job left to resume, so "the next dump is clean" was not exercised.
 
 **5.5 Destruction inventory (2a)** [MUTATES], with before/after evidence per row ([split-ceremony.md](split-ceremony.md)
 §8 record). Gate: 5.1–5.4 green and the client's yes.
@@ -613,7 +637,7 @@ KMS; possible, not rehearsed.)
 
 ---
 
-## Appendix: lessons from the B8 rehearsal (2026-10-23..26)
+## Appendix: lessons from the B8 rehearsal (2026-10-23 to 2026-11-12)
 
 1. **Copies truncate.** `kubectl exec`/`cp` streams dropped silently after a few MB on this cluster, and once
    `kubectl exec -i … < file` produced an empty file. Every copy is sha256-checked and retried (`push`/`pull`); the 36 MB
@@ -637,3 +661,17 @@ KMS; possible, not rehearsed.)
 14. **The cold restart is part of the switch** (4.11): it is the only proof an unattended restart reconnects.
 15. **Pick `P_REV0` carefully:** an older revision pointed at a deleted database; roll back only to the revision whose values
     the overlays were rendered against.
+16. **The commitment lookup can stay empty.** `lookup_received_acs_commitments` returned 0 periods throughout while the
+    log showed correct commitments from 15 counter-participants: verify from the log (5.1).
+17. **Five keys after both rotations, three in use.** The carried signing and encryption keys leave the OTK but stay
+    registered and stay in the cluster: `common_kms_metadata_store` holds 5 rows, and that is the expected end state.
+18. **A newer cluster than driver works.** The rotation ran with cosigners on rc.6 (ceremony intents required by default,
+    leader-bound ceremonies) and the driver on rc.4.
+19. **Keep the 4.2 safety dump until the node has passed after the cleanup.** It is the only way back to the three rows
+    between 5.4 and 5.5. Compare its sha256 with the recorded one before deleting it.
+20. **A founding backup can be more than this validator's.** A `tar` of a cosigner's key directory holds every key of the
+    cluster. B8 kept its three tars as a recorded exception: they were the only off-cluster copy of another validator's
+    key files.
+21. **Volumes outlive their rows.** A backup volume and a pre-migration database volume were deleted during the drill
+    without wiping, and the live volume keeps old heap and WAL blocks until it is destroyed: on a provider that does not
+    wipe, record those as residual exposure, and prefer encrypted volumes.
