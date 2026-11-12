@@ -1,6 +1,6 @@
 # Rütli roadmap
 
-**Status:** 2026-10-15; audit timing updated 2026-10-27; post-0.4.0 plan added 2026-11-01; milestone and release status updated 2026-11-02. **Scope:** where Rütli stands, the two ways a Canton/Splice validator ends up on it, and the
+**Status:** 2026-10-15; audit timing updated 2026-10-27; post-0.4.0 plan added 2026-11-01; milestone and release status updated 2026-11-02; B8 completed 2026-11-12. **Scope:** where Rütli stands, the two ways a Canton/Splice validator ends up on it, and the
 path to 1.0. Facts are stated as established only where a rehearsal or a source check backs them; everything else
 is marked **unproven**. The detailed Track B record (migration spike, milestones, findings) is
 [roadmap-migration.md](roadmap-migration.md).
@@ -17,7 +17,7 @@ A validator reaches Rütli one of two ways. Which one depends on whether it exis
 | Namespace key | Born by DKG in the cluster | **Carried** in (non-rotatable), split offline |
 | Signing / encryption keys | Born in the cluster | Client's choice: rotate (default) or carry |
 | Has any key ever existed whole? | No | The namespace key: yes, on the old host and its backups |
-| Status | Working | 2b proven; 2a switch rehearsed (B8), cleanup pending |
+| Status | Working | 2b proven; 2a rehearsed end to end (B8) |
 
 ### Flow 1: new validator on Rütli
 
@@ -54,10 +54,13 @@ Common to both variants:
 
 #### 2a: In place (same database, same participant UID)
 
-**Status: switch rehearsed, targeted for v0.4.0.** Milestone B8 (DevNet, 2026-10-23..26, cosigners on `v0.4.0-rc.4`)
-**passed phases 0–4 and the 5.1 verification on 2026-10-26**: same UID, all three keys carried with their fingerprints,
-wallet down ≈ 20 min, operator and end-user balances unchanged, no re-onboard. Rotation, observation, SQL cleanup and
-destruction are pending; the DevNet cosigners have run `v0.4.0-rc.6` since 2026-10-28. Runbook: [runbook-migration-inplace.md](runbook-migration-inplace.md). Decided 2026-10-15: 2a
+**Status: rehearsed end to end, targeted for v0.4.0.** Milestone B8 (DevNet) **passed phases 0–4 and the 5.1
+verification on 2026-10-26** with the cosigners on `v0.4.0-rc.4`: same UID, all three keys carried with their fingerprints,
+wallet down ≈ 20 min, operator and end-user balances unchanged, no re-onboard. With the cosigners on `v0.4.0-rc.6`, **both
+keys were rotated on 2026-11-01** (a cluster-hosted ECIES key and a FROST signing key from a DKG) **and the JCE rows were
+deleted on 2026-11-12** after 11 clean days; the node restarted and reconnected on its own with no JCE private key left in
+its database, and the safety dump and the key exports were destroyed. Still open: the teardown of the scratch
+validator. Runbook: [runbook-migration-inplace.md](runbook-migration-inplace.md). Decided 2026-10-15: 2a
 ships in v0.4.0, before the audit, so the auditors review it.
 
 *Mechanics.* Independently checked against the Canton 3.6.1 source by two reviewers (Opus and Codex), who agree:
@@ -135,7 +138,7 @@ Today 2b mints fresh signing and encryption keys. With B6 the same client choice
 | Point of no return | None; two rollback boundaries (first rotation, SQL cleanup) | Removal of the old trust certificate |
 | Downtime | Wallet about 20 min (B8) | Wallet about 1 h |
 | DA documentation status | Not a DA-documented procedure | The documented shape (new participant) |
-| Maturity | Switch rehearsed once (B8, phases 0–4 + 5.1); rotation and cleanup pending | Proven twice (B0, B4) |
+| Maturity | Rehearsed once end to end (B8), including rotation and SQL cleanup | Proven twice (B0, B4) |
 | Choose when | Nodes with external parties, dApps or many users | Simple validators, or clients who want the DA-documented shape |
 
 ### Keys across flows
@@ -167,7 +170,7 @@ namespace and signing keys are threshold keys; the encryption key is not.
 | B5 | Docs fix (stale "unsupported" claims, exposure caveat) | Done |
 | B6 | Optional carry of signing and ECIES keys | Done: PR #23, merged 2026-10-15 (Opus and Codex reviews addressed) |
 | B7 | 2b rehearsal with wallet end-users: verify re-onboarding keeps their parties and balances | New, proposed |
-| B8 | In-place rehearsal (2a), carry-first sequence, on a fresh scratch JCE validator on DevNet | Phases 0–4 + 5.1 **passed 2026-10-26**; rotation, observation, SQL cleanup, destruction pending; cosigners on `v0.4.0-rc.6` since 2026-10-28. Runbook [runbook-migration-inplace.md](runbook-migration-inplace.md) |
+| B8 | In-place rehearsal (2a), carry-first sequence, on a fresh scratch JCE validator on DevNet | Phases 0–4 + 5.1 **passed 2026-10-26**; rotation **passed 2026-11-01** (cosigners on `v0.4.0-rc.6`); observation, SQL cleanup and destruction **passed 2026-11-12**. Open: teardown. Runbook [runbook-migration-inplace.md](runbook-migration-inplace.md) |
 | C1 to C3 | ECIES hosted keys | Done; shipped in v0.4.0-rc.1. The two availability fixes from Codex's review are merged |
 | CA rotation | Pin plus runbook | In review: PR #19 |
 
@@ -222,5 +225,4 @@ they are code-complete and before 1.0 is tagged. The RFQ asks for that phase as 
 ## Open decisions
 
 - The audit's start date, which waits for funding; it sets the 1.0 date.
-- If B8 is not green by early November: ship v0.4.0 with 2a marked experimental, or slip the freeze.
 - Whether the pre-rotate alternative is worth pursuing after B8, or the carry-first path is enough.

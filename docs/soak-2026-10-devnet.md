@@ -262,6 +262,57 @@ verdict is **GO pending** (destruction and teardown below are still open).
   rotation. Rollback: `helm -n rutli rollback rutli 12` + restarts 1 → 2 → 0 (flag off), then 11 (image) / the
   `.rc3` jar.
 
+**Planned event: soak to 0.4.0-rc.6 (leader-bound ceremonies, disjoint key ids), 2026-10-28 14:49 → 14:53 UTC.**
+- Pre-check: the rc.6 chart rendered with the exported values differs from the live manifest only in the image and the
+  version labels. Every hosted key id on the three nodes already carries `rutli-`, so the new id rule touches nothing.
+  `require_ceremony_intent: true` was already set (rc.4 phase 3). No refresh CronJob; the participants' drivers stay rc.4.
+- `helm upgrade` → rev 15, image `0.4.0-rc.6@sha256:8304e662…f45ae3`, rolled 2 → 1 → 0. Every node: ready, 0 restarts,
+  `require_intent=true require_ceremony_intent=true signer_acl_required=true`, cluster id `453bb4ae…`. Warnings are the
+  known ones: legacy shared seal master, and the two B8 keys from the split ceremony never refreshed.
+- While node 1 restarted, the B8 participant logged two `UNAVAILABLE` failovers to the next cosigner; both signatures
+  completed (`outcome=ok`). Rollback: `helm -n rutli rollback rutli 14` (rc.4).
+
+**Unplanned event: the cluster's nodes restarted one after another, 2026-11-01 02:17 → 03:13 UTC.**
+- Every pod of the soak moved: the cosigners at 02:17, 02:39 and 03:13Z (never two at once), the soak participant and
+  validator at 03:13Z, the B8 validator at 02:39Z. All came back unattended, both participants on `provider = kms`
+  reconnected by themselves, and no pod has restarted since (checked 2026-11-12).
+- Not measured: whether any signature failed during the restarts. The cause was not investigated. The 08:00Z database
+  backup job of that day failed once; every later run succeeded.
+
+**Planned event: B8, in-place migration rehearsal of a scratch JCE validator (Flow 2a), 2026-10-23 → 2026-11-12.**
+Runbook [runbook-migration-inplace.md](runbook-migration-inplace.md). The soak participant was the ping target and was
+otherwise unaffected.
+- Phases 0–4 and 5.1 (2026-10-23..26, cosigners rc.4): policy for the `b8-` prefix (rev 14), two split ceremonies and one
+  ECIES import, then the switch. Same UID, three keys carried with their fingerprints, B8 wallet down 15:19:16 →
+  15:39:24Z on 2026-10-26, operator and end-user balances unchanged, no re-onboarding.
+- 5.2 rotation (2026-11-01, cosigners rc.6, driver rc.4). Encryption 23:02:10 → 23:02:22Z onto a new cluster-hosted
+  ECIES key, present on all three nodes; the ping decrypted under it. Signing 23:04:02 → 23:04:13Z onto
+  `b8-frost-signing-r1` from a DKG: `dkg fence: ceremony intent verified` and `ceremony committed … epoch=1` on every
+  node within a second, one fence mark per node, no namespace usage on the new key; reconnect 2.5 s; every later
+  signature under the new key. OTK serial 1 → 3 → 5. `T_RB1` = 23:05:14Z. No cosigner key backup followed (this cluster
+  has no backup sidecar and the exec CronJob is gone since the audit): the keys rely on 2-of-3 replication.
+- 5.3 observation, 11 days. On 2026-11-12: driver audit 47 136 entries, 0 non-ok, 0 `ecies-failure=`, 2 `generate*`
+  (the rotation); refusal, rate-limit and ceremony-intent counters 0 on every node (27 series each); participant logs
+  show `Commitment correct` and no mismatch (the console lookup of commitments returns 0 periods, see the runbook);
+  console: 5 keys, all KMS-backed, OTK = the two new keys, one trust certificate, ACS 7 → 7 with two contracts rolled
+  over; ping decrypts under the new key. The audit cross-check and the wallet checks (login, balances, transfers) were
+  not repeated.
+- 5.4 SQL cleanup (2026-11-12, `T_CLEAN` = 21:48:23Z): validator and participant to 0, no session left, the three rows
+  deleted in one transaction (`CLEANUP-COMMITTED`), `VACUUM FULL`, three WAL switches; 0 private-key rows, 5 KMS rows.
+  The participant came back on the same revision, reconnected by itself with no `ERROR` line and passed the console
+  check and the ping; the validator logged `has signed keys` and `already onboarded`, with no new `generate*` line.
+  Validator down 21:48:23 → 21:56:58Z, about 4 min of it a tooling retry (the console ran before the admin API answered
+  through a fresh port-forward).
+- 5.5 destruction (22:00Z): the 4.2 safety dump (sha256 equal to the recorded one) deleted from the database volume; the
+  three password-protected exports (sha256 equal to the export-time record) removed with `rm -P`; no share bundle left,
+  ceremony records moved to the evidence, cosigner `/tmp` empty, migration dump volume empty, no driver private key in
+  the drill workspace. WAL archiving has no target; old WAL and heap blocks stay on the live volume until teardown. The
+  backup volume and the pre-migration database volume had been deleted earlier in the drill, unwiped.
+- Kept on purpose: the three cosigner key tars of 2026-10-26 (never-refreshed B8 shares). They are also the only
+  off-cluster copy of the soak's key files.
+- Object storage (L4): no object, version or delete marker under the validator's prefix (checked 2026-11-12).
+- Open: the workstation statements (shell history, password-manager entry) and the teardown of the scratch validator (offboarding, its prefix out of `signer_acl`, its volumes).
+
 ## Drill calendar
 
 | Week | Drill | Status |
