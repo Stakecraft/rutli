@@ -20,6 +20,9 @@ key; a `t`-of-`n` quorum signs on its behalf.
 **New here? → [QUICKSTART.md](QUICKSTART.md)** gets you from `cargo test` to a live Canton node with
 its namespace key in a threshold cluster in three copy-paste steps.
 
+**See it work → [Rütli Cluster Explorer](https://stakecraft.github.io/rutli/explorer/)**: an interactive page
+where you take cosigners offline, breach them or lose their disks, then sign and see what still works.
+
 ---
 
 ## Why it matters

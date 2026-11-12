@@ -1,0 +1,676 @@
+<!doctype html>
+<!-- Copyright 2026 StakeCraft
+     SPDX-License-Identifier: Apache-2.0 -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Interactive explainer: how a Rütli threshold cosigner cluster signs for a Canton node, and what happens when cosigners go offline, get breached or lose their disks.">
+<style>:root{color-scheme:light;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}img{max-width:100%}[hidden]{display:none!important}</style>
+<title>Rütli Cluster Explorer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one column explainer. The live cluster diagram with its status rail is the hero; below it, the signing sequence, an incident comparison table and the migration steps. */
+:root {
+  --paper: #F2F5F7;
+  --surface: #FFFFFF;
+  --ink: #13202B;
+  --muted: #55687A;
+  --line: #D2DBE2;
+  --accent: #0E5E85;
+  --accent-soft: #DCEAF2;
+  --ok: #23744A;
+  --ok-soft: #E0F0E6;
+  --warn: #93600F;
+  --warn-soft: #F6EBD7;
+  --crit: #B2322A;
+  --crit-soft: #F7E0DD;
+  --off: #8B9AA7;
+  --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --paper: #0D141A; --surface: #142029; --ink: #E3EBF0; --muted: #98A9B7; --line: #263540;
+    --accent: #5FB4DB; --accent-soft: #15344A; --ok: #63C18B; --ok-soft: #163326;
+    --warn: #E4AF58; --warn-soft: #3A2B13; --crit: #EF7468; --crit-soft: #3E1C19; --off: #6A7A87;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0D141A; --surface: #142029; --ink: #E3EBF0; --muted: #98A9B7; --line: #263540;
+  --accent: #5FB4DB; --accent-soft: #15344A; --ok: #63C18B; --ok-soft: #163326;
+  --warn: #E4AF58; --warn-soft: #3A2B13; --crit: #EF7468; --crit-soft: #3E1C19; --off: #6A7A87;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--body);
+  font-size: 16px;
+  line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 0 56px;
+}
+.wrap { max-width: 1100px; margin: 0 auto; display: grid; gap: 56px; }
+h1, h2, h3 { font-family: var(--display); text-wrap: balance; margin: 0; }
+h2 { font-size: clamp(24px, 3vw, 32px); font-weight: 750; font-stretch: 110%; letter-spacing: -0.01em; }
+h3 { font-size: 17px; font-weight: 700; font-stretch: 105%; }
+p { margin: 0; }
+a { color: var(--accent); }
+code { font-family: var(--mono); font-size: 0.88em; background: var(--accent-soft); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+.eyebrow { font-family: var(--mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.section-head { display: grid; gap: 8px; max-width: 68ch; }
+.section-head p { color: var(--muted); }
+
+/* Header */
+header { padding-block: 44px 0; display: grid; gap: 16px; }
+header h1 { font-size: clamp(38px, 6vw, 66px); font-weight: 800; font-stretch: 118%; line-height: 1; letter-spacing: -0.02em; }
+header h1 span { color: var(--accent); }
+.lede { font-size: 18px; max-width: 64ch; }
+.origin { font-size: 14px; color: var(--muted); max-width: 64ch; }
+
+/* Explorer */
+.explorer { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; align-items: start; }
+@media (max-width: 920px) { .explorer { grid-template-columns: minmax(0, 1fr); } }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; }
+.stage { display: grid; gap: 0; min-width: 0; }
+.controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; padding: 14px 16px; border-bottom: 1px solid var(--line); }
+.ctl-group { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.ctl-label { font-family: var(--mono); font-size: 11px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); margin-right: 4px; }
+button { font: inherit; cursor: pointer; }
+.seg, .chip {
+  border: 1px solid var(--line); background: var(--paper); color: var(--ink);
+  font-size: 13.5px; padding: 5px 11px; border-radius: 6px;
+}
+.seg[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--surface); }
+.chip:hover, .seg:hover { border-color: var(--accent); }
+.chip[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); }
+button:focus-visible, [tabindex]:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button:disabled { cursor: not-allowed; opacity: 0.55; }
+.toggle { display: inline-flex; gap: 8px; align-items: center; font-size: 13.5px; }
+.toggle input { accent-color: var(--accent); width: 16px; height: 16px; }
+.sign-btn {
+  margin-left: auto; background: var(--ink); color: var(--paper); border: 0;
+  font-family: var(--display); font-weight: 700; font-stretch: 110%; font-size: 15px;
+  padding: 9px 18px; border-radius: 7px;
+}
+.sign-btn:hover { background: var(--accent); }
+.diagram { overflow-x: auto; padding: 8px 8px 0; }
+.diagram svg { display: block; width: 100%; min-width: 600px; height: auto; }
+.hint { padding: 10px 16px 14px; font-size: 13.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 8px 18px; }
+.legend-item { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 12px; height: 12px; border-radius: 3px; border: 1.5px solid; display: inline-block; }
+.sw.online { border-color: var(--accent); background: var(--surface); }
+.sw.offline { border-color: var(--off); border-style: dashed; background: var(--paper); }
+.sw.lost { border-color: var(--muted); background: repeating-linear-gradient(45deg, var(--paper) 0 3px, var(--line) 3px 5px); }
+.sw.compromised { border-color: var(--crit); background: var(--crit-soft); }
+
+/* SVG */
+.s-box { fill: var(--surface); stroke: var(--line); stroke-width: 1.5; }
+.s-cluster { fill: none; stroke: var(--line); stroke-width: 1.5; stroke-dasharray: 5 5; }
+.s-drv { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+.s-db { fill: var(--ok-soft); stroke: var(--ok); stroke-width: 1.2; }
+.s-t { fill: var(--ink); font-family: var(--body); font-size: 15px; font-weight: 600; }
+.s-m { fill: var(--muted); font-family: var(--body); font-size: 12.5px; }
+.s-mono { font-family: var(--mono); font-size: 13px; fill: var(--ink); }
+.s-ok { fill: var(--ok); font-family: var(--body); font-size: 12.5px; font-weight: 600; }
+.s-label { fill: var(--muted); font-family: var(--mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; }
+.s-link { fill: none; stroke: var(--line); stroke-width: 1.5; }
+.s-link.dead { stroke-dasharray: 3 5; opacity: 0.6; }
+.node { cursor: pointer; }
+.node rect.body { fill: var(--surface); stroke: var(--accent); stroke-width: 1.8; transition: fill .2s, stroke .2s; }
+.node.offline rect.body { fill: var(--paper); stroke: var(--off); stroke-dasharray: 6 5; }
+.node.lost rect.body { fill: url(#hatch); stroke: var(--muted); stroke-dasharray: 2 4; }
+.node.compromised rect.body { fill: var(--crit-soft); stroke: var(--crit); }
+.node.flash rect.body { stroke-width: 3.5; }
+.node:focus { outline: none; }
+.node:focus-visible rect.body { stroke-width: 3.5; }
+.chip-share { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1; }
+.node.offline .chip-share { fill: var(--paper); stroke: var(--off); }
+.node.lost .chip-share { fill: var(--paper); stroke: var(--muted); stroke-dasharray: 2 3; }
+.node.compromised .chip-share { fill: var(--crit-soft); stroke: var(--crit); }
+.chip-text { font-family: var(--mono); font-size: 12px; fill: var(--accent); }
+.node.offline .chip-text, .node.lost .chip-text { fill: var(--muted); }
+.node.compromised .chip-text { fill: var(--crit); }
+.leader-tag { font-family: var(--mono); font-size: 10.5px; letter-spacing: 0.06em; fill: var(--accent); }
+.hatch-a { fill: var(--paper); }
+.hatch-b { stroke: var(--line); stroke-width: 2; }
+.fx-path { fill: none; stroke: none; }
+.dot { stroke: var(--surface); stroke-width: 2; }
+.dot.req { fill: var(--accent); }
+.dot.r1 { fill: var(--warn); }
+.dot.r2 { fill: var(--ok); }
+.dot.sig { fill: var(--ink); }
+.flash-box { stroke-width: 3.5 !important; }
+
+/* Status rail */
+.status { padding: 6px 0; display: grid; }
+.status-row { padding: 14px 18px; display: grid; gap: 6px; border-bottom: 1px solid var(--line); }
+.status-row:last-child { border-bottom: 0; }
+.status-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.status-name { font-family: var(--display); font-weight: 700; font-stretch: 105%; font-size: 15px; }
+.pill { font-family: var(--mono); font-size: 11.5px; font-weight: 500; letter-spacing: 0.04em; text-transform: uppercase; padding: 3px 9px; border-radius: 999px; white-space: nowrap; }
+.pill.ok { color: var(--ok); background: var(--ok-soft); }
+.pill.warn { color: var(--warn); background: var(--warn-soft); }
+.pill.crit { color: var(--crit); background: var(--crit-soft); }
+.status-text { font-size: 14px; color: var(--muted); }
+
+/* Sequence */
+.sequence { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; align-items: start; }
+@media (max-width: 860px) { .sequence { grid-template-columns: minmax(0, 1fr); } }
+.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; counter-reset: st; }
+.steps li { counter-increment: st; display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 10px; padding: 10px 12px; border-radius: 8px; transition: background .2s; }
+.steps li::before {
+  content: counter(st); font-family: var(--mono); font-size: 13px; width: 26px; height: 26px; border-radius: 50%;
+  display: grid; place-items: center; border: 1.5px solid var(--line); color: var(--muted);
+}
+.steps li.active { background: var(--accent-soft); }
+.steps li.active::before { border-color: var(--accent); color: var(--accent); }
+.steps li.done::before { background: var(--ok); border-color: var(--ok); color: var(--surface); content: "✓"; }
+.steps li.failed { background: var(--crit-soft); }
+.steps li.failed::before { background: var(--crit); border-color: var(--crit); color: var(--surface); content: "!"; }
+.steps strong { display: block; font-weight: 600; }
+.steps span { font-size: 14px; color: var(--muted); }
+.result { padding: 18px; display: grid; gap: 10px; }
+.result p { font-size: 15px; }
+.result .eyebrow { margin-bottom: 2px; }
+.facts { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; font-size: 14px; color: var(--muted); }
+.facts b { color: var(--ink); font-weight: 600; }
+
+/* Comparison */
+.table-scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; min-width: 780px; font-size: 14px; }
+th, td { text-align: left; vertical-align: top; padding: 12px 14px; border-bottom: 1px solid var(--line); }
+thead th { font-family: var(--display); font-weight: 700; font-stretch: 105%; font-size: 14px; border-bottom: 2px solid var(--ink); }
+thead th.us { color: var(--accent); }
+tbody th { font-weight: 600; width: 22%; }
+td.us { background: var(--accent-soft); }
+.mark { display: grid; grid-template-columns: 10px minmax(0, 1fr); gap: 8px; align-items: baseline; }
+.mark::before { content: ""; width: 9px; height: 9px; border-radius: 50%; transform: translateY(1px); }
+.mark.ok::before { background: var(--ok); }
+.mark.warn::before { background: var(--warn); }
+.mark.crit::before { background: var(--crit); }
+.mark.na::before { background: var(--line); }
+.table-note { font-size: 13px; color: var(--muted); margin-top: 10px; }
+
+/* Migration */
+.migrate { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; counter-reset: mg; }
+.migrate li { counter-increment: mg; padding: 18px; display: grid; gap: 8px; align-content: start; }
+.migrate li::before { content: "Step " counter(mg); font-family: var(--mono); font-size: 11.5px; letter-spacing: 0.07em; text-transform: uppercase; color: var(--accent); }
+.migrate p { font-size: 14px; color: var(--muted); }
+.tag { justify-self: start; font-family: var(--mono); font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--warn); background: var(--warn-soft); padding: 2px 8px; border-radius: 999px; }
+
+/* Footer */
+.simplify { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px 28px; margin: 0; padding: 0; list-style: none; font-size: 14px; color: var(--muted); }
+.simplify b { color: var(--ink); font-weight: 600; }
+footer { border-top: 1px solid var(--line); padding-top: 18px; display: flex; flex-wrap: wrap; gap: 10px 22px; font-size: 14px; color: var(--muted); }
+footer .status-line { font-family: var(--mono); font-size: 12.5px; flex-basis: 100%; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { transition: none !important; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="eyebrow">Canton node keys · threshold custody · open source</div>
+    <h1>Rütli <span>Cluster Explorer</span></h1>
+    <p class="lede">Rütli keeps a Canton node's namespace and signing keys as shares spread across a cluster of cosigners. Any 2 of 3 can sign together, and no single machine ever holds the whole key. Take cosigners down, breach them or destroy their disks below, then press <b>Sign</b> to see what still works.</p>
+    <p class="origin">Named after the Rütli meadow, where three cantons swore to act only together.</p>
+  </header>
+
+  <section class="explorer" aria-label="Interactive cluster">
+    <div class="panel stage">
+      <div class="controls">
+        <div class="ctl-group" role="group" aria-label="Threshold">
+          <span class="ctl-label">Threshold</span>
+          <button class="seg" id="th-23" type="button" aria-pressed="true">2-of-3</button>
+          <button class="seg" id="th-35" type="button" aria-pressed="false">3-of-5</button>
+        </div>
+        <label class="toggle" for="backups"><input type="checkbox" id="backups" checked> Sealed backups exist</label>
+        <button class="sign-btn" id="sign" type="button">Sign</button>
+      </div>
+      <div class="controls" style="border-bottom:0; padding-bottom:4px">
+        <div class="ctl-group" role="group" aria-label="Scenarios" id="presets">
+          <span class="ctl-label">Try</span>
+          <button class="chip" type="button" data-preset="healthy" aria-pressed="true">All healthy</button>
+          <button class="chip" type="button" data-preset="one-off" aria-pressed="false">One offline</button>
+          <button class="chip" type="button" data-preset="below" aria-pressed="false">Too many offline</button>
+          <button class="chip" type="button" data-preset="one-breach" aria-pressed="false">One host breached</button>
+          <button class="chip" type="button" data-preset="t-breach" aria-pressed="false">Threshold breached</button>
+          <button class="chip" type="button" data-preset="one-lost" aria-pressed="false">One disk lost</button>
+          <button class="chip" type="button" data-preset="many-lost" aria-pressed="false">Too many disks lost</button>
+        </div>
+      </div>
+      <div class="diagram">
+        <svg id="svg" viewBox="0 0 960 460" role="img" aria-label="A Canton participant with the Rütli driver, connected over mTLS to a cluster of cosigners that each hold one key share"></svg>
+      </div>
+      <div class="hint">
+        <span>Click a cosigner to change its state.</span>
+        <span class="legend-item"><i class="sw online"></i>Online</span>
+        <span class="legend-item"><i class="sw offline"></i>Offline (comes back)</span>
+        <span class="legend-item"><i class="sw lost"></i>Disk lost (share gone)</span>
+        <span class="legend-item"><i class="sw compromised"></i>Breached (attacker has host and seal secret)</span>
+      </div>
+    </div>
+
+    <aside class="panel status" aria-live="polite" aria-label="Cluster status">
+      <div class="status-row"><div class="status-top"><span class="status-name">Signing</span><span class="pill" id="p-sign"></span></div><p class="status-text" id="t-sign"></p></div>
+      <div class="status-row"><div class="status-top"><span class="status-name">Namespace key: secrecy</span><span class="pill" id="p-sec"></span></div><p class="status-text" id="t-sec"></p></div>
+      <div class="status-row"><div class="status-top"><span class="status-name">Namespace key: survival</span><span class="pill" id="p-surv"></span></div><p class="status-text" id="t-surv"></p></div>
+      <div class="status-row"><div class="status-top"><span class="status-name">Encryption key</span><span class="pill" id="p-enc"></span></div><p class="status-text" id="t-enc"></p></div>
+    </aside>
+  </section>
+
+  <section class="sequence" aria-label="How one signature is made">
+    <div class="section-head" style="grid-column: 1 / -1">
+      <div class="eyebrow">One signature, step by step</div>
+      <h2>What happens when the node signs</h2>
+      <p>Press <b>Sign</b> above. The steps light up as the request moves through the cluster in its current state.</p>
+    </div>
+    <ol class="steps panel" id="steps" style="padding:8px">
+      <li><div><strong>Canton asks the driver to sign</strong><span>The participant hands <code>rutli-driver.jar</code> a 34-byte digest through Canton's KMS Driver SPI. The node itself is unmodified.</span></div></li>
+      <li><div><strong>The driver sends a signed request to one cosigner</strong><span>That cosigner leads this signing session. If it can't be reached, the driver fails over to the next one in the roster.</span></div></li>
+      <li><div><strong>Every cosigner checks the request</strong><span>Each one verifies the driver's signed intent and applies its own policy and rate limits, so one bad cosigner can't use the others as a signing oracle.</span></div></li>
+      <li><div><strong>Round 1: nonce commitments</strong><span>The leader collects commitments from enough cosigners to reach the threshold. Each nonce is marked used on disk before any share goes out, so a crash can't reuse it.</span></div></li>
+      <li><div><strong>Round 2: signature shares</strong><span>Each of those cosigners returns a signature share. No share reveals the key.</span></div></li>
+      <li><div><strong>The leader combines the shares</strong><span>The result is one ordinary Ed25519 signature (RFC 8032). The whole key never existed anywhere.</span></div></li>
+      <li><div><strong>Canton gets its signature</strong><span>Canton can't tell it from a single-key signature. The driver's hash-chained audit log records it, and so does the journal of each cosigner that took part.</span></div></li>
+    </ol>
+    <div class="panel result">
+      <div class="eyebrow">Result</div>
+      <p id="sign-result">Not signed yet. Press <b>Sign</b> to run one request through the cluster.</p>
+      <ul class="facts">
+        <li><b>About 100 ms</b> per 2-of-3 signature across three regions on DevNet.</li>
+        <li><b>Namespace operations are rare:</b> the namespace key signs topology changes, while protocol signing uses the signing key, held the same way.</li>
+        <li><b>Approval quorums</b> can also require M-of-N people to approve a signature on a protected key. This page leaves them out.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section aria-label="Comparison">
+    <div class="section-head">
+      <div class="eyebrow">Where the keys live</div>
+      <h2>What one incident exposes</h2>
+      <p>The same incidents, for four ways of holding a Canton node's keys.</p>
+    </div>
+    <div class="table-scroll" style="margin-top:18px">
+      <table>
+        <thead>
+          <tr>
+            <th scope="col">Incident</th>
+            <th scope="col">Keys in the node's database (default)</th>
+            <th scope="col">Cloud KMS</th>
+            <th scope="col">One self-hosted KMS or HSM</th>
+            <th scope="col" class="us">Rütli, 2-of-3 with separate operators</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row">A database backup leaks</th>
+            <td><div class="mark crit">Every node key, namespace included, in plaintext</div></td>
+            <td><div class="mark ok">No private keys in it</div></td>
+            <td><div class="mark ok">No private keys in it</div></td>
+            <td class="us"><div class="mark ok">No private keys in it</div></td>
+          </tr>
+          <tr>
+            <th scope="row">The machine or account holding the keys is breached</th>
+            <td><div class="mark crit">Keys copied</div></td>
+            <td><div class="mark crit">Attacker can sign with every key while access lasts</div></td>
+            <td><div class="mark crit">Attacker can sign with every key while access lasts</div></td>
+            <td class="us"><div class="mark warn">One share: can't sign. The encryption key is exposed, since it's held whole until 2.0</div></td>
+          </tr>
+          <tr>
+            <th scope="row">One administrator goes rogue</th>
+            <td><div class="mark crit">Can copy every key</div></td>
+            <td><div class="mark crit">Can sign, given key permissions</div></td>
+            <td><div class="mark crit">Can sign, given key permissions</div></td>
+            <td class="us"><div class="mark ok">Needs 2 cosigners run by different people, plus any approval quorum</div></td>
+          </tr>
+          <tr>
+            <th scope="row">The key store is destroyed</th>
+            <td><div class="mark warn">Restore from a database backup, which holds the keys in plaintext</div></td>
+            <td><div class="mark ok">Covered by the provider's durability</div></td>
+            <td><div class="mark warn">Restore from that KMS or HSM's own backup</div></td>
+            <td class="us"><div class="mark ok">Repair from the surviving cosigners, or restore sealed backups</div></td>
+          </tr>
+          <tr>
+            <th scope="row">An existing node moves in, same namespace</th>
+            <td><div class="mark na">Already there</div></td>
+            <td><div class="mark na">No: a new validator</div></td>
+            <td><div class="mark na">No: a new participant</div></td>
+            <td class="us"><div class="mark ok">Yes, rehearsed on DevNet</div></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="table-note">The Rütli column assumes cosigners in separate trust domains. Three cosigners in one cluster run by one team behave much like a single KMS against a rogue administrator.</p>
+  </section>
+
+  <section aria-label="Migration">
+    <div class="section-head">
+      <div class="eyebrow">Moving an existing validator in</div>
+      <h2>Same node, same namespace, same party IDs</h2>
+      <p>Canton has no supported switch from database keys to a KMS. This is the in-place path we rehearsed on a Splice 0.9.0 / Canton 3.6.1 validator on DevNet.</p>
+    </div>
+    <ol class="migrate" style="margin-top:18px">
+      <li class="panel"><h3>Export</h3><p>Each key is exported from the running node with <code>keys.secret.download_to</code>, protected by a password.</p></li>
+      <li class="panel"><h3>Split offline</h3><p>The namespace and signing keys are split into FROST shares on an offline machine, checked against their Canton fingerprints, then refreshed so the dealt shares are useless (required in production, skipped in the DevNet drill). The encryption key is imported whole.</p></li>
+      <li class="panel"><h3>Switch</h3><p>The same participant restarts on the Rütli driver, registers each key by id and comes back with identical fingerprints. On DevNet the wallet was down about 20 minutes, and nobody had to re-onboard.</p></li>
+      <li class="panel"><h3>Clean up</h3><span class="tag">Not rehearsed yet</span><p>Rotate onto keys born in the cluster, delete the old database rows and destroy every old copy. A key that once existed whole stays as exposed as its old copies.</p></li>
+    </ol>
+  </section>
+
+  <section aria-label="What this page simplifies">
+    <div class="section-head" style="margin-bottom:16px">
+      <div class="eyebrow">Read with care</div>
+      <h2>What this page leaves out</h2>
+    </div>
+    <ul class="simplify">
+      <li><b>Breached</b> here means the attacker controls the host and its seal secret. A stolen disk alone gives only a sealed share.</li>
+      <li><b>The encryption key isn't threshold-shared yet.</b> It is sealed and replicated on every cosigner. Threshold encryption is planned for 2.0.</li>
+      <li><b>A breached cosigner can refuse to sign.</b> The driver fails over around it, as it does for an offline one.</li>
+      <li><b>Evidence so far is DevNet.</b> Rütli is at v0.4.0-rc.6 and not yet externally audited; the independent audit is the next step.</li>
+    </ul>
+  </section>
+
+  <footer>
+    <a href="https://github.com/Stakecraft/rutli">Repository (Apache-2.0)</a>
+    <a href="https://github.com/Stakecraft/rutli/blob/main/docs/disaster-recovery.md">Disaster recovery and loss matrix</a>
+    <a href="https://github.com/Stakecraft/rutli/blob/main/docs/runbook-migration-inplace.md">In-place migration runbook</a>
+    <span class="status-line">Built by Stakecraft · v0.4.0-rc.6 · Splice DevNet validator on Rütli since 2026-10-07</span>
+  </footer>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var NS = "http://www.w3.org/2000/svg";
+  var svg = document.getElementById("svg");
+  var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var ORDER = ["online", "offline", "lost", "compromised"];
+  var LABEL = { online: "Online", offline: "Offline", lost: "Disk lost", compromised: "Breached" };
+  var S = { n: 3, t: 2, nodes: [], backups: true, running: false, leader: -1 };
+  var fx = null;
+
+  function reset(n, t) { S.n = n; S.t = t; S.nodes = []; for (var i = 0; i < n; i++) S.nodes.push("online"); S.leader = -1; }
+  reset(3, 2);
+
+  function geom() {
+    var n = S.n, top = 50, bottom = 432, h = n === 3 ? 86 : 60;
+    var gap = (bottom - top - n * h) / (n - 1), out = [];
+    for (var i = 0; i < n; i++) { var y = top + i * (h + gap); out.push({ x: 600, y: y, w: 250, h: h, cy: y + h / 2 }); }
+    return out;
+  }
+  var DRV = { x: 244, y: 253 };
+  function linkPath(i) { var g = geom()[i]; return "M" + DRV.x + "," + DRV.y + " C410," + DRV.y + " 440," + g.cy + " 600," + g.cy; }
+  function arcPath(a, b) {
+    var g = geom(), ya = g[a].cy, yb = g[b].cy, dx = 34 + Math.abs(ya - yb) * 0.2;
+    return "M850," + ya + " C" + (850 + dx) + "," + ya + " " + (850 + dx) + "," + yb + " 850," + yb;
+  }
+  function esc(s) { return String(s); }
+
+  function render() {
+    var g = geom(), h = "";
+    h += '<defs><pattern id="hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect class="hatch-a" width="8" height="8"></rect><line class="hatch-b" x1="0" y1="0" x2="0" y2="8"></line></pattern></defs>';
+    // links
+    for (var i = 0; i < S.n; i++) {
+      var dead = S.nodes[i] === "offline" || S.nodes[i] === "lost";
+      h += '<path class="s-link' + (dead ? " dead" : "") + '" d="' + linkPath(i) + '"></path>';
+    }
+    h += '<text class="s-label" x="330" y="236">mTLS · signed intent</text>';
+    // participant
+    h += '<rect class="s-box" id="box-part" x="24" y="140" width="240" height="172" rx="9"></rect>';
+    h += '<text class="s-t" x="44" y="170">Canton participant</text>';
+    h += '<text class="s-m" x="44" y="190">Unmodified node</text>';
+    h += '<rect class="s-drv" id="box-drv" x="44" y="214" width="200" height="72" rx="7"></rect>';
+    h += '<text class="s-mono" x="60" y="244">rutli-driver.jar</text>';
+    h += '<text class="s-m" x="60" y="266">KMS Driver SPI</text>';
+    h += '<rect class="s-db" x="24" y="330" width="240" height="56" rx="9"></rect>';
+    h += '<text class="s-t" x="44" y="353" style="font-size:14px">Participant database</text>';
+    h += '<text class="s-ok" x="44" y="373">No private keys</text>';
+    // cluster
+    h += '<rect class="s-cluster" x="578" y="14" width="366" height="436" rx="12"></rect>';
+    h += '<text class="s-label" x="596" y="37">Cosigner cluster · ' + S.t + "-of-" + S.n + "</text>";
+    for (var k = 0; k < S.n; k++) {
+      var b = g[k], st = S.nodes[k], small = S.n === 5;
+      var chip = st === "lost" ? "no share" : st === "compromised" ? "share stolen" : "share " + (k + 1);
+      var cw = st === "compromised" ? 104 : 82;
+      h += '<g class="node ' + st + '" data-i="' + k + '" tabindex="0" role="button" aria-label="Cosigner ' + (k + 1) + ", " + LABEL[st] + ', activate to change state">';
+      h += '<rect class="body" x="' + b.x + '" y="' + b.y + '" width="' + b.w + '" height="' + b.h + '" rx="8"></rect>';
+      h += '<text class="s-t" x="' + (b.x + 16) + '" y="' + (b.y + (small ? 25 : 34)) + '">Cosigner ' + (k + 1) + "</text>";
+      h += '<text class="s-m" x="' + (b.x + 16) + '" y="' + (b.y + (small ? 45 : 56)) + '">' + esc(LABEL[st]) + (k === S.leader ? "" : "") + "</text>";
+      if (k === S.leader) h += '<text class="leader-tag" x="' + (b.x + 16) + '" y="' + (b.y + (small ? 45 : 74)) + '" dx="' + (small ? 70 : 0) + '">LEADER</text>';
+      h += '<rect class="chip-share" x="' + (b.x + b.w - cw - 14) + '" y="' + (b.cy - 13) + '" width="' + cw + '" height="26" rx="13"></rect>';
+      h += '<text class="chip-text" x="' + (b.x + b.w - cw / 2 - 14) + '" y="' + (b.cy + 4.5) + '" text-anchor="middle">' + chip + "</text>";
+      h += "</g>";
+    }
+    h += '<g id="fx"></g>';
+    svg.innerHTML = h;
+    fx = document.getElementById("fx");
+    var nodes = svg.querySelectorAll(".node");
+    for (var j = 0; j < nodes.length; j++) {
+      nodes[j].addEventListener("click", onNode);
+      nodes[j].addEventListener("keydown", function (e) { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onNode.call(this, e); } });
+    }
+    status();
+  }
+
+  function onNode() {
+    if (S.running) return;
+    var i = +this.getAttribute("data-i");
+    S.nodes[i] = ORDER[(ORDER.indexOf(S.nodes[i]) + 1) % ORDER.length];
+    S.leader = -1;
+    markPreset(null);
+    clearSteps();
+    render();
+    var el = svg.querySelector('.node[data-i="' + i + '"]');
+    if (el) el.focus();
+  }
+
+  function count(s) { var c = 0; for (var i = 0; i < S.n; i++) if (S.nodes[i] === s) c++; return c; }
+  function setRow(id, cls, label, text) {
+    var p = document.getElementById("p-" + id);
+    p.className = "pill " + cls; p.textContent = label;
+    document.getElementById("t-" + id).textContent = text;
+  }
+  function plural(k, one, many) { return k + " " + (k === 1 ? one : many); }
+
+  function status() {
+    var n = S.n, t = S.t, on = count("online"), off = count("offline"), lost = count("lost"), comp = count("compromised");
+    var avail = on + comp, survive = n - lost;
+    // signing
+    if (avail >= t) {
+      var miss = off + lost;
+      setRow("sign", "ok", "Available", plural(avail, "cosigner", "cosigners") + " can answer and " + t + " are needed." + (miss ? " The driver fails over around the missing ones." : ""));
+    } else {
+      setRow("sign", "crit", "Stopped", "Only " + avail + " can answer and " + t + " are needed. Signing waits until enough come back. Waiting loses nothing.");
+    }
+    // secrecy
+    if (comp >= t) {
+      setRow("sec", "crit", "Exposed", "An attacker controls " + comp + " shares, enough to sign as this node. The namespace key can't be rotated, so the node's identity has to be abandoned.");
+    } else if (comp > 0) {
+      setRow("sec", "warn", "Safe, act now", "An attacker holds " + plural(comp, "share", "shares") + ", fewer than " + t + ", which reveals nothing about the key. Run a share refresh: it replaces every share without changing the key, so the stolen one becomes useless.");
+    } else {
+      setRow("sec", "ok", "Safe", "No one holds " + t + " shares. The whole key never exists on any machine.");
+    }
+    // survival
+    if (lost === 0) {
+      setRow("surv", "ok", "Intact", "Every share is in place." + (off ? " Offline cosigners rejoin with their shares when they come back." : ""));
+    } else if (survive >= t) {
+      setRow("surv", "warn", "Recoverable", plural(lost, "share is", "shares are") + " gone. Restore from backup, or repair from " + t + " surviving cosigners. The key and the namespace don't change.");
+    } else if (S.backups) {
+      setRow("surv", "warn", "Backups only", "Only " + plural(survive, "share survives", "shares survive") + ", fewer than " + t + ". The key comes back only by restoring at least " + t + " shares from sealed cold backups.");
+    } else {
+      setRow("surv", "crit", "Lost", "Only " + plural(survive, "share survives", "shares survive") + " and there are no backups. The namespace key is gone for good, and so is every party and Canton Coin balance under it.");
+    }
+    // encryption key
+    if (comp > 0) {
+      setRow("enc", "warn", "Exposed", "The encryption key is replicated whole, sealed, on every cosigner, so one breached host exposes it. Rotate it in Canton; that protects future traffic only. Threshold encryption is planned for 2.0.");
+    } else if (lost === n) {
+      if (S.backups) setRow("enc", "warn", "Backups only", "Every copy is gone from the cluster. Restore one node's backup and the cluster replicates it again.");
+      else setRow("enc", "crit", "Lost", "Every copy is gone and there is no backup.");
+    } else {
+      setRow("enc", "ok", "Safe", "Any one cosigner can serve decryption." + (lost ? " A rebuilt cosigner pulls it back from a peer automatically." : ""));
+    }
+  }
+
+  // presets
+  function applyPreset(name) {
+    var n = S.n, t = S.t;
+    for (var i = 0; i < n; i++) S.nodes[i] = "online";
+    var k;
+    if (name === "one-off") S.nodes[0] = "offline";
+    if (name === "below") for (k = 0; k < n - t + 1; k++) S.nodes[k] = "offline";
+    if (name === "one-breach") S.nodes[n - 1] = "compromised";
+    if (name === "t-breach") for (k = 0; k < t; k++) S.nodes[n - 1 - k] = "compromised";
+    if (name === "one-lost") S.nodes[0] = "lost";
+    if (name === "many-lost") for (k = 0; k < n - t + 1; k++) S.nodes[k] = "lost";
+    S.leader = -1;
+    markPreset(name);
+    clearSteps();
+    render();
+  }
+  function markPreset(name) {
+    var bs = document.querySelectorAll("#presets .chip");
+    for (var i = 0; i < bs.length; i++) bs[i].setAttribute("aria-pressed", String(bs[i].getAttribute("data-preset") === name));
+  }
+  document.getElementById("presets").addEventListener("click", function (e) {
+    var b = e.target.closest("[data-preset]");
+    if (b && !S.running) applyPreset(b.getAttribute("data-preset"));
+  });
+  function setThreshold(n, t) {
+    if (S.running) return;
+    document.getElementById("th-23").setAttribute("aria-pressed", String(n === 3));
+    document.getElementById("th-35").setAttribute("aria-pressed", String(n === 5));
+    reset(n, t);
+    markPreset("healthy");
+    clearSteps();
+    render();
+  }
+  document.getElementById("th-23").addEventListener("click", function () { setThreshold(3, 2); });
+  document.getElementById("th-35").addEventListener("click", function () { setThreshold(5, 3); });
+  document.getElementById("backups").addEventListener("change", function () { S.backups = this.checked; status(); });
+
+  // sequence
+  var stepEls = document.querySelectorAll("#steps li");
+  var resultEl = document.getElementById("sign-result");
+  function clearSteps() {
+    for (var i = 0; i < stepEls.length; i++) stepEls[i].className = "";
+    resultEl.innerHTML = "Not signed yet. Press <b>Sign</b> to run one request through the cluster.";
+  }
+  function step(i, cls) { stepEls[i].className = cls; }
+  function wait(ms) { return new Promise(function (r) { setTimeout(r, reduce ? 0 : ms); }); }
+  function moveDot(d, cls, dur, reverse) {
+    return new Promise(function (res) {
+      if (reduce) { res(); return; }
+      var p = document.createElementNS(NS, "path");
+      p.setAttribute("d", d); p.setAttribute("class", "fx-path"); fx.appendChild(p);
+      var L = p.getTotalLength();
+      var c = document.createElementNS(NS, "circle");
+      c.setAttribute("r", "6.5"); c.setAttribute("class", "dot " + cls); fx.appendChild(c);
+      var t0 = performance.now();
+      function f(now) {
+        var k = Math.min(1, (now - t0) / dur);
+        var e = k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+        var pt = p.getPointAtLength((reverse ? 1 - e : e) * L);
+        c.setAttribute("cx", pt.x); c.setAttribute("cy", pt.y);
+        if (k < 1) requestAnimationFrame(f); else { p.remove(); c.remove(); res(); }
+      }
+      requestAnimationFrame(f);
+    });
+  }
+  function flash(sel, ms) {
+    var els = svg.querySelectorAll(sel);
+    for (var i = 0; i < els.length; i++) els[i].classList.add(els[i].tagName === "g" ? "flash" : "flash-box");
+    return wait(ms).then(function () { for (var i = 0; i < els.length; i++) els[i].classList.remove("flash", "flash-box"); });
+  }
+  function lock(on) {
+    S.running = on;
+    var bs = document.querySelectorAll(".controls button, #backups");
+    for (var i = 0; i < bs.length; i++) bs[i].disabled = on;
+  }
+
+  async function sign() {
+    if (S.running) return;
+    lock(true);
+    clearSteps();
+    S.leader = -1; render();
+    var avail = [], skipped = [];
+    for (var i = 0; i < S.n; i++) {
+      if (S.nodes[i] === "online" || S.nodes[i] === "compromised") avail.push(i);
+      else if (avail.length === 0) skipped.push(i);
+    }
+    try {
+      step(0, "active"); resultEl.textContent = "Signing…";
+      await flash("#box-drv", 550); step(0, "done");
+
+      step(1, "active");
+      if (avail.length === 0) {
+        for (var s0 = 0; s0 < skipped.length; s0++) await moveDot(linkPath(skipped[s0]), "req", 500);
+        step(1, "failed");
+        resultEl.textContent = "The driver can't reach any cosigner. Signing waits until one comes back. Nothing is lost by waiting.";
+        return;
+      }
+      for (var s = 0; s < skipped.length; s++) await moveDot(linkPath(skipped[s]), "req", 450);
+      var L = avail[0];
+      await moveDot(linkPath(L), "req", 750);
+      S.leader = L; render();
+      step(1, "done");
+
+      step(2, "active");
+      var sel = avail.map(function (x) { return '.node[data-i="' + x + '"]'; }).join(",");
+      await flash(sel, 600); step(2, "done");
+
+      step(3, "active");
+      var chosen = avail.slice(0, S.t), others = chosen.filter(function (x) { return x !== L; });
+      var reach = avail.filter(function (x) { return x !== L; });
+      if (avail.length < S.t) {
+        await Promise.all(reach.map(function (x) { return moveDot(arcPath(L, x), "r1", 700); }));
+        await Promise.all(reach.map(function (x) { return moveDot(arcPath(L, x), "r1", 700, true); }));
+        step(3, "failed");
+        resultEl.textContent = "Only " + avail.length + " of the " + S.t + " cosigners needed answered. The session is abandoned and its nonces are burnt. Signing waits until enough cosigners are back; nothing is lost by waiting.";
+        return;
+      }
+      await Promise.all(others.map(function (x) { return moveDot(arcPath(L, x), "r1", 700); }));
+      await Promise.all(others.map(function (x) { return moveDot(arcPath(L, x), "r1", 700, true); }));
+      step(3, "done");
+
+      step(4, "active");
+      await Promise.all(others.map(function (x) { return moveDot(arcPath(L, x), "r2", 700); }));
+      await Promise.all(others.map(function (x) { return moveDot(arcPath(L, x), "r2", 700, true); }));
+      step(4, "done");
+
+      step(5, "active");
+      await flash('.node[data-i="' + L + '"]', 650); step(5, "done");
+
+      step(6, "active");
+      await moveDot(linkPath(L), "sig", 800, true);
+      await flash("#box-part", 500); step(6, "done");
+
+      var compIn = chosen.filter(function (x) { return S.nodes[x] === "compromised"; }).length;
+      var names = chosen.map(function (x) { return x + 1; }).join(" and ");
+      var msg = "Signed by cosigners " + names + ". Canton received one standard Ed25519 signature.";
+      if (skipped.length) msg += " The driver failed over past " + (skipped.length === 1 ? "cosigner " : "cosigners ") + skipped.map(function (x) { return x + 1; }).join(" and ") + ".";
+      if (count("compromised") >= S.t) msg += " But the attacker holds enough shares to make the same signature without you.";
+      else if (compIn) msg += " A breached cosigner took part. With fewer than " + S.t + " breached, that gives the attacker nothing.";
+      resultEl.textContent = msg;
+    } finally {
+      lock(false);
+    }
+  }
+  document.getElementById("sign").addEventListener("click", sign);
+
+  render();
+})();
+</script>
+</body>
+</html>
