@@ -69,7 +69,7 @@ There is no bug bounty at this time.
 
 | Backend | Use | Notes |
 |---|---|---|
-| `frost` | The production path | Namespace and signing keys as FROST-ed25519 shares across a `t`-of-`n` cosigner cluster. Encryption and symmetric keys either cluster-hosted (`frost.delegate = "none"`) or in an HSM (`"hsm"`) |
+| `frost` | The production path | Namespace, protocol signing and sequencer authentication keys as FROST-ed25519 shares across a `t`-of-`n` cosigner cluster. Encryption and symmetric keys either cluster-hosted (`frost.delegate = "none"`) or in an HSM (`"hsm"`) |
 | `hsm` | Non-Ed25519 keys on a PKCS#11 token | Verified against SoftHSM only. Not in the planned audit scope |
 | `software` | Integration tests only | **Never** place namespace, signing or encryption keys behind it |
 
@@ -81,9 +81,9 @@ cluster where:
 - every cosigner and the driver run the same release, upgraded **before** any DKG or refresh;
 - the enforcement switches are on, identically, on every node: `signing_policy.require_intent`,
   `require_ceremony_intent`, `signer_acl_required`, `require_epoch_match`, with
-  `signer_may_refresh: false`. `require_ceremony_intent` is on by default since 0.4.0-rc.6 (opt out
-  with `false` only during an upgrade); the others default to off so that a rolling upgrade keeps
-  working ([docs/approval-quorum.md](docs/approval-quorum.md), "Switching enforcement on");
+  `signer_may_refresh: false`. `require_ceremony_intent` is on by default on a TLS cosigner since
+  0.4.0-rc.6 (opt out with `false` only during an upgrade); the others default to off so that a
+  rolling upgrade keeps working ([docs/approval-quorum.md](docs/approval-quorum.md), "Switching enforcement on");
 - key files are written in format v2 (`keyfile.write_version: 2`, `cluster_uuid` set), and
   `accept_v1: false` once every file is v2;
 - the Helm `perNode` topology is used: per-node seal and TLS secrets, no `pods/exec` RBAC (CI

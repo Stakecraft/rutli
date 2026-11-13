@@ -245,7 +245,10 @@ Read these before relying on this release. Each item names the file that states 
   `docs/migration.md`, §8; `docs/runbook-migration-inplace.md`, §0)
 - **A shared cluster separates key ids, not authority.** `frost.key-prefix` does not stop a holder of
   the cluster's driver certificate from addressing another prefix; use a driver CN per participant
-  with `signer_acl`. (`docs/migration.md`, §7; `docs/approval-quorum.md`)
+  with `signer_acl`. Two participants with the same prefix (or none) end up on the same Ed25519
+  keys without an error: a DKG for an id the cluster already holds returns the existing key.
+  (`docs/migration.md`, §7; `docs/approval-quorum.md`; `docs/architecture.md`, "One cluster,
+  several participants")
 - **Imported and DKG keys cannot be deleted from the cluster;** a failed attempt leaves its ids
   behind. Deleting a hosted key is not erasure: a tombstone keeps the material for the grace period,
   and old backups keep what they captured. (`docs/migration.md`, §7;
