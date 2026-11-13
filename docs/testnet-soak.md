@@ -7,7 +7,9 @@ below is scripted in [`deploy/soak/`](../deploy/soak/).
 
 > **Why DevNet, not TestNet:** DevNet onboarding is self-serve (mint a secret from any SV, plus an
 > egress-IP allowlist); TestNet needs Tokenomics-Committee approval and a sponsor-issued secret.
-> Start on DevNet; a TestNet re-run can follow with the identical setup once approved.
+> Start on DevNet; a TestNet re-run can follow with the identical setup once approved. Since
+> 2026-10-28 the DevNet soak runs 0.4.0-rc.6 ([soak log](soak-2026-10-devnet.md)); the TestNet run
+> starts with the v0.4.0 tag.
 
 ## Topology
 
@@ -63,11 +65,14 @@ cosigner per host/account/region (see `deploy/k8s/README.md`).
 
    **A second participant on the same cluster** needs its own `frost.key-prefix` in the overlay
    (e.g. `"soak2-"`), set *before* its first bootstrap. Without it, its DKG asks the cluster for the
-   first participant's `frost-namespace` and is refused with `ALREADY_EXISTS` — the create-once guard
-   doing its job, not a cluster fault (2026-10-07 bring-up). See
+   first participant's `frost-namespace`. Before 0.4.0-rc.3 that was refused with `ALREADY_EXISTS`
+   (2026-10-07 bring-up); since then a DKG for a committed key returns it, so the second
+   participant would be handed the first one's keys unless a `signer_acl` refuses its driver. See
    `docs/architecture.md` → *One cluster, several participants*.
-5. **Acceptance:** participant boots, driver health OK in its log, namespace key born via cluster
-   DKG (`rutli_ceremony_requests_total{kind="dkg",result="ok"} == 1`), validator visible on Scan,
+5. **Acceptance:** participant boots, driver health OK in its log, its Ed25519 keys born via cluster DKG: a Splice
+   validator has two, `frost-namespace` and `frost-signing`
+   (`rutli_ceremony_requests_total{kind="dkg",result="ok"}` summed over the cosigners `== 2`),
+   validator visible on Scan,
    `soak-check.sh` fully green within 24 h.
 
 ## Day 1–14+ — the soak proper
@@ -85,7 +90,7 @@ cosigner per host/account/region (see `deploy/k8s/README.md`).
 | Week | Drill | Pass signal |
 |---|---|---|
 | 1 | Kill one cosigner 30 min, restart | signing uninterrupted (2-of-3); `RutliCosignerDown` fires + resolves; skips counter only if the dead node was tried |
-| 1 | Proactive refresh mid-traffic: `rutli-cosigner refresh --key-id <key>` | group key unchanged; `kind="refresh",result="ok"`; signing continues after |
+| 1 | Proactive refresh mid-traffic: `rutli-cosigner --config <refresher client config> refresh --key-id <key>` | group key unchanged; `kind="refresh",result="ok"`; signing continues after |
 | 2 | Full cosigner-cluster restart (one node at a time) | no sign errors; shares reload from sealed disk |
 | 2 | Restore drill: wipe one cosigner's data dir, restore from backup | node rejoins, cluster signs; group key unchanged |
 | 3+ | Participant restart + host reboot | validator recovers; journal + audit chain intact across restart |

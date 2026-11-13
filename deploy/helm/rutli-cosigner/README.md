@@ -2,7 +2,8 @@
 
 Deploys a `t`-of-`n` FROST cosigner cluster with mTLS, sealed shares, PDB, and NetworkPolicy.
 Default image: `ghcr.io/stakecraft/rutli-cosigner:0.4.0-rc.6` pinned by multi-arch digest
-(`sha256:8304e662d495eb1a8330cb5b04ba86b725ff1bf414fa217283add66b2df45ae3`). Also tagged `latest` on GHCR.
+(`sha256:8304e662d495eb1a8330cb5b04ba86b725ff1bf414fa217283add66b2df45ae3`). `latest` on GHCR moves
+only on a final (non-rc) release tag.
 
 Two layouts (`topology`):
 
@@ -21,7 +22,8 @@ Two layouts (`topology`):
 
 ## Prerequisites
 
-- Kubernetes 1.25+ with a NetworkPolicy-capable CNI (for production)
+- Kubernetes 1.29+ and a CSI driver with `ReadWriteOncePod` (the default access mode; see "Volume
+  access mode"), with a NetworkPolicy-capable CNI (for production)
 - Helm 3.8+
 - Secrets created **before** install (TLS + seal bundles) — the chart does not generate key material
 - `rutli-cosigner` on an operator workstation, for `seal new-node` / `seal split-legacy`
@@ -95,7 +97,7 @@ Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org A
 | `operatorAllowlist` | `[]` | Operator role for `verify-key` and `verify-hosted` (KeyStatus + HostedKeyStatus + CeremonySignTest only), e.g. `[operator]` |
 | `refreshAllowlist` | `[]` | Refresher role for the refresh job (Refresh + KeyStatus only, never Sign), e.g. `[refresher]`; may be `[operator]` until a refresher cert exists |
 | `signingPolicy` | `{}` | Cosigner signing policy (audit C2), rendered verbatim as `signing_policy`: `require_intent`, `require_ceremony_intent`, `signer_acl_required`, `signer_may_refresh`, `signer_acl`, `signer_pins`, rate limits, journal retention, approval `rules`/`approvers` — see `docs/approval-quorum.md`. Empty = defaults: ceremony intents required (since 0.4.0-rc.6; opt out with `require_ceremony_intent: false` while the driver is older than 0.4.0-rc.4 or the refresh job's image predates the cosigners' release), signing intents verify-if-present |
-| `hostedKeys.enabled` | `false` | Cluster-hosted RSA/AES keys — replicated whole keys, not threshold shares |
+| `hostedKeys.enabled` | `false` | Cluster-hosted RSA/ECIES/AES keys — replicated whole keys, not threshold shares |
 | `hostedKeys.deleteAllowlist` | `[]` | Delete role (audit M2): client CNs whose signed delete intents tombstone hosted keys. Empty = no deletes; never a cosigner CN. `deleteAcl`, `deleteApprovalThreshold` (≥ 1 in production), `deleteGraceSecs` (604800) — `docs/hosted-keys.md`, Delete |
 | `keyfile` | `{}` | Key-file format (audit M4), rendered verbatim as `keyfile`: `cluster_uuid`, `write_version` (1 or 2), `accept_v1` — `docs/disaster-recovery.md` §3h |
 | `maintenanceNodes` | `[]` | perNode only: node ids whose cosigner container runs no daemon (`sleep infinity`, never Ready), for `restore`, `keyfile`, `hosted-undelete` and the ceremony tools, which take the instance lock |
@@ -174,8 +176,8 @@ pin must be ≥ 0.3.1.
 
 `backup.enabled=true` (topology perNode) adds a `backup` sidecar to each cosigner pod. Once a day
 (`backup.dailyAtUtc`, default 03:17 UTC; plus once at pod start) it tars that node's **sealed**
-`keys/*.json` — never dotfiles, nonce markers or temps — and its sign journals (`journal/`), and
-hands the tar to that node's destination:
+`keys/*.json` — never dotfiles, nonce markers or temps — its cleared-delete-intent markers
+(`keys/.cleared/`) and its sign journals (`journal/`), and hands the tar to that node's destination:
 
 - `backup.destination.type: pvc` (default): a per-node backup PVC `<fullname>-backup-n<id>` (or
   `nodes[].backupClaim`), mounted in that node's sidecar only; the newest `backup.destination.keep`

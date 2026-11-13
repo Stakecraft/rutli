@@ -26,7 +26,8 @@ pushed the new one, read the multi-arch index digest
 
 - `deploy/helm/rutli-cosigner/values.yaml` (`image.tag`) and its `README.md`;
 - `deploy/k8s/kustomization.yaml` (`newTag` + `digest`), `deploy/k8s/cosigner.yaml` (re-render with
-  `scripts/render-k8s.sh`), `deploy/k8s/cronjob-refresh.yaml`, `deploy/k8s/job-verify-key.example.yaml`;
+  `scripts/render-k8s.sh`), `deploy/k8s/cronjob-refresh.yaml`, `deploy/k8s/job-verify-key.example.yaml`
+  and the "currently" version in `deploy/k8s/README.md`;
 - `deploy/frost/docker-compose.yml`, `deploy/frost/docker-compose.tls.yml` and `deploy/frost/README.md`.
 
 `git grep` the previous version afterwards: no default should still name it.

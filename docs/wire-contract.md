@@ -2,7 +2,8 @@
 
 Captured from a live devnet run (Canton v3.5.6, participant auto-init, Ed25519 pinned) with
 `audit-logging = true`. This is the contract every backend (HSM, FROST, DKLS) must satisfy.
-Raw capture: `AUDIT` lines in the Canton log.
+Raw capture: `AUDIT` lines in the Canton log. Since 0.4.0-rc.3 the `sign` line also carries
+`msg=<sha256 of the signed bytes>`, and `deploy/devnet/up.sh` needs Canton 3.6.x.
 
 ## Call sequence at node bootstrap
 
@@ -67,6 +68,6 @@ Implications for the Phase 2 FROST backend:
 
 ```sh
 sbt driver/assembly
-CANTON_HOME=/path/to/canton-3.5.6 deploy/devnet/up.sh
+CANTON_HOME=/path/to/canton-open-source-3.6.1 deploy/devnet/up.sh
 grep AUDIT log/canton.log
 ```

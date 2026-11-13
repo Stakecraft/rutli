@@ -27,7 +27,7 @@ correctly and the key that resulted is the one the node now carries.
   two). `t` = the number that must collude to sign; `n − t` = the number you can lose and still sign.
 - **Cosigner placement** — the `n` distinct trust domains. Independence is the whole point; two
   shares in one cloud account is `t` effectively reduced.
-- **Seal-secret custody** — where each cosigner's `RUTLI_SEAL_SECRET` lives (secret manager /
+- **Seal-secret custody** — where each cosigner's seal bundle lives (secret manager /
   systemd credential / enclave). Separate trust domain from the share backups.
 - **Approver set** — the `M`-of-`N` approver keys for the signing policy.
 
@@ -35,14 +35,18 @@ correctly and the key that resulted is the one the node now carries.
 
 - [ ] `n` cosigner hosts provisioned, each in its own trust domain, clocks synced.
 - [ ] Cluster mTLS PKI generated and distributed: `scripts/gen-frost-certs.sh <n>` → one CA, one
-      cert per cosigner, one driver client cert. CA private key handled per your PKI policy.
-- [ ] One shared cluster seal master secret minted (`openssl rand -hex 32`) and placed in each
-      host's secret manager, exposed to the daemon as `RUTLI_SEAL_SECRET`. Each node derives its own
-      per-node encryption key from it via HKDF (salted by node id) — so it's one secret, distinct
-      keys. **Never on disk, never in the config.**
+      cert per cosigner, and client certs for the driver, the operator and the refresher. CA
+      private key handled per your PKI policy.
+- [ ] One seal bundle per cosigner minted offline (`rutli-cosigner seal new-node --node <i> --out
+      node-<i>.json`) and placed in that host's secret manager, mounted to the daemon as a file.
+      Each bundle holds only that node's keys. **Never in the config, never in an env var.** Pin
+      the `dist_public_key` it prints on every node's peer entry for `<i>`; with hosted keys on,
+      set one `hosted_keys.commitment_key` (`openssl rand -hex 32`, public) on every node. (The
+      shared master in `RUTLI_SEAL_SECRET`, `share_seal.secret_env`, is deprecated.)
 - [ ] Each cosigner JSON config authored with `"tls": { … }` and
-      `"share_seal": { "secret_env": "RUTLI_SEAL_SECRET" }` set (see `deploy/frost/config-tls/`).
-      Plaintext / no-TLS is disqualifying for a real ceremony.
+      `"share_seal": { "secret_file": "<path to node-<i>.json>" }` set (`deploy/frost/config-tls/`
+      shows the rest of the config; it still uses the legacy `secret_env`). Plaintext / no-TLS is
+      disqualifying for a real ceremony.
 - [ ] Approver keys minted: each approver runs
       `java -cp rutli-driver.jar com.stakecraft.rutli.policy.ApproveCli keygen <name>` and hands the
       printed public-key line to the lead.
@@ -58,12 +62,12 @@ correctly and the key that resulted is the one the node now carries.
 ## Ceremony
 
 **1. Stand up the cosigner cluster (sealed, mTLS).**
-On each of the `n` hosts, with the seal secret present in the environment:
+On each of the `n` hosts, with the node's seal bundle mounted at its `share_seal.secret_file`:
 ```sh
-RUTLI_SEAL_SECRET="$(fetch-from-secret-manager)" \
-  rutli-cosigner --config /etc/rutli/cosigner-<i>.json serve
+rutli-cosigner --config /etc/rutli/cosigner-<i>.json serve
 ```
-Confirm each log line shows `mutual TLS enabled` and `share sealing enabled (AES-256-GCM at rest)`.
+Confirm each log line shows `mutual TLS enabled` and `share sealing enabled (bundle node=<i>) —
+AES-256-GCM at rest`.
 If any node logs `running WITHOUT TLS` or `share sealing DISABLED`, **halt** — do not proceed.
 
 **2. Generate the key via node bootstrap (the DKG moment).**
@@ -90,7 +94,7 @@ On each cosigner, confirm exactly one sealed share file exists for the key and t
 envelope, not plaintext:
 ```sh
 ls  <data_dir>/keys/frost-<participant>-namespace.json
-head -c 64 <data_dir>/keys/frost-<participant>-namespace.json   # must be a {"v":1,"sealed":true,…} envelope
+head -c 64 <data_dir>/keys/frost-<participant>-namespace.json   # a sealed envelope: "v": 1 with "sealed": true, or "v": 2 with a "hdr"
 ```
 Witnesses confirm `n` distinct hosts each hold one sealed share and that no host holds a plaintext
 share or more than one.
@@ -110,7 +114,10 @@ Record where each backup and each seal secret live.
 - Confirm the signing journal (`signing-journal`) and hash-chained audit log (`audit-log-path`) are
   active.
 - Set the proactive-refresh schedule (cron/systemd timer running `rutli-cosigner refresh --key-id
-  frost-<participant>-namespace`), so any share exposed later has a bounded lifetime.
+  frost-<participant>-namespace`), so any share exposed later has a bounded lifetime. Its client
+  config uses the refresher certificate, whose CN is on every node's `refresh_allowlist` (the driver
+  certificate can refresh only while `signing_policy.signer_may_refresh` is on): the command signs a
+  ceremony intent with it ([ceremonies.md](ceremonies.md#ceremony-intents)).
 
 **7. Sign the record.**
 The lead completes the ceremony record (template below); every witness and operator independently

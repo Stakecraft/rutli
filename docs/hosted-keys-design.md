@@ -126,6 +126,11 @@ remains, worth knowing before running this in production:
 1. No cosigner-side rate limit on decrypt (**Rate limiting and auditing for decrypt**).
 2. No pinned peer distribution keys, so no startup self-check on the seal secret (**Replication**).
 
+> **As of 0.4.0-rc.6 both have shipped:** the per-key decrypt rate limit in 0.3.0
+> (`hosted_keys.decrypt_rate_limit_per_min`), and pinned distribution keys with a startup self-check
+> in 0.4.0-rc.2, for clusters on per-node seal bundles (`peers[].dist_public_key`; on the legacy
+> master the pins are optional). See the notes in those sections.
+
 ## The problem
 
 Rütli's FROST cluster holds only the Ed25519 namespace/identity key. Every other key Canton needs —
@@ -330,6 +335,14 @@ DEK. Moving to per-node seal secrets upgrades this design's property with no cod
 > derived `dist_pubkey` matches what the cluster expects, so a wrong-secret or wrong-mount is still
 > only discovered when an operation fails — and that discovery-too-late is the incident class this
 > feature exists to close. Smallest useful next step, ahead of per-node seal secrets.
+>
+> **Update, 0.4.0-rc.2: pinning and the self-check shipped with per-node seal bundles** (audit C3).
+> On `share_seal.secret_file` each node holds only its own distribution seed; every peer's
+> `dist_public_key` is pinned in `peers[]`, along with one cluster-wide
+> `hosted_keys.commitment_key`. A node whose own `peers[]` entry carries a pin checks it against its
+> seed at startup (the own pin is optional; set it), and the push
+> path wraps only to the pinned key, refusing a peer whose `NodeInfo` reports another
+> (`orchestrator::replicate_to`). The legacy shared master (`secret_env`) still derives as above.
 
 **Write quorum: 2-of-3 by default, with anti-entropy mandatory.** The two passes split here (3/3 vs
 2/3). Resolution: 3/3 would mean you cannot rotate an encryption key while any node is down, which
@@ -407,6 +420,13 @@ key under a new master, rendering old sealed blobs — including in backups — 
 > **Not shipped:** the `rewrap` ceremony that would make destruction real. Until it exists, "delete"
 > means "unreferenced", and the disaster-recovery answer to a suspected master-secret compromise is
 > still a full re-key, not a rewrap.
+>
+> **Update, 0.4.0-rc.3:** a delete is now a client-authorized tombstone (audit M2), and per-node DEK
+> rotation (`seal rotate-dek`, restart, `seal drop-previous`) re-seals every key file under a fresh
+> DEK, after which files and backups sealed under the dropped DEK no longer open with that node's
+> current bundle. They are destroyed only once every copy of the old DEK is gone: older versions of
+> the bundle Secret and, on a cluster migrated from `secret_env`, the escrowed legacy master
+> ([`hosted-keys.md`](hosted-keys.md) §3, [`disaster-recovery.md`](disaster-recovery.md) §3h).
 
 ### API and driver routing
 
@@ -450,6 +470,12 @@ reproduce the incident class. Failover across endpoints stays restricted to `UNA
 > And `Capabilities` failing (older cluster, or the cluster unreachable at startup) falls back to
 > the configured expectation rather than to "no hosted specs": silently advertising fewer specs to
 > Canton would present as a config bug and could steer keys to the delegate unnoticed.
+>
+> **Update, as of 0.4.0-rc.6:** the driver asks every cosigner for `Capabilities` and advertises
+> what every answering node serves; a node older than `Capabilities` counts as RSA + AES, and
+> `ec-p256-ecies` needs a majority of the roster to answer. Re-issuable operations (reads,
+> decryption, symmetric crypto) also fail over on `INTERNAL` / `UNKNOWN` (0.3.1), and an EC key's
+> "not found" moves to the next cosigner ([`hosted-keys.md`](hosted-keys.md) §2).
 
 Relevant SPI facts (verified in Canton source): there is **no `encryptAsymmetric`** — Canton encrypts
 in software with the public key, so only `decryptAsymmetric` is required. Asymmetric ciphertext in is
@@ -475,6 +501,11 @@ with `audit-log-path` set, every decrypt takes a synchronous hash-chain fsync to
 > by anyone holding that certificate. `rutli_hosted_key_ops_total{op,result}` gives the alerting
 > signal, but nothing throttles. Highest-value security follow-up in this section.
 >
+> **Update, 0.3.0: the cosigner-side limiter shipped.** `hosted_keys.decrypt_rate_limit_per_min`
+> (default 6000) is a per-key bucket on each node, shared by `Decrypt`, `EcdhDerive` and
+> `SymmetricDecrypt`, counted in `rutli_decrypt_rate_limited_total`. It is per node, not per cluster
+> ([`hosted-keys.md`](hosted-keys.md) §2).
+>
 > The `audited` fsync hazard is still unmeasured: no decrypt-path numbers in
 > [`performance.md`](performance.md) yet.
 
@@ -482,7 +513,7 @@ with `audit-log-path` set, every decrypt takes a synchronous hash-chain fsync to
 
 | Phase | Content | New crypto risk |
 |---|---|---|
-| **P0** | Peer-API allowlist ✅, type-aware reseal ✅, peer-channel deadlines (still open) | none |
+| **P0** | Peer-API allowlist ✅, type-aware reseal ✅, peer-channel deadlines ✅ (0.3.1) | none |
 | **v1** ✅ | Hosted RSA-2048 + AES-256-GCM, replicated + sealed; `delegate = "none"` possible. RSA decrypt via `aws-lc-rs`/OpenSSL, **not** the `rsa` crate | none — standard primitives |
 | **v1.5** ✅ | `EcdhDerive` + hosted EC-P256 keys (still whole-key); driver-side DEM via BouncyCastle `IESEngine`. Advertise `EcP256`/ECIES to steer Canton off RSA | low — no new crypto in Rust |
 | **v2** | **Threshold ECIES**: `frost-p256` DKG + Lagrange partial-point ECDH + DLEQ proofs. **Wire contract unchanged from v1.5** — server-side only | moderate, well-understood, no nonce state |

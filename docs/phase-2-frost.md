@@ -10,8 +10,8 @@
 >   **survives a downed cosigner**, shares persist across reload. Runnable via `deploy/frost`
 >   (Docker compose, 2-of-3).
 >
-> - `driver` `FrostBackend` (Scala): composite backend routing the Ed25519 namespace key to the
->   cluster over gRPC (checked-in grpc-java stubs from the shared proto) and delegating every other
+> - `driver` `FrostBackend` (Scala): composite backend routing the Ed25519 keys (namespace,
+>   protocol signing, sequencer auth) to the cluster over gRPC (checked-in grpc-java stubs from the shared proto) and delegating every other
 >   key to the HSM/software backend — and, with `frost.hosted-keys = true`, routing
 >   `rutli-`-prefixed ids to the cluster too so the delegate can be dropped entirely
 >   (`delegate = "none"`; *Cluster-hosted keys*, below). **Live e2e verified** (`FrostBackendIT`,
@@ -134,7 +134,8 @@ RutliDriver (JVM)  ──FrostBackend──►  gRPC/mTLS  ──►  Cosigner c
 - `n` cosigners, threshold `t` (e.g. 2-of-3). Each holds one FROST share, each on a separate
   host / cloud account / region — all operated by the single node operator (self-custody).
 - Each share ideally sealed in an enclave/HSM ("MPC-of-HSM"): breach needs `t` enclaves.
-- A node's keystore may also hold **cluster-hosted keys** (RSA encryption, AES symmetric), which are
+- A node's keystore may also hold **cluster-hosted keys** (ECIES P-256 and RSA encryption, AES
+  symmetric), which are
   whole keys replicated to *every* node rather than split across them. The two kinds of material
   share a directory and a sealing key but nothing else — see *Cluster-hosted keys* below, and in
   particular the rule that replication never touches a FROST share.
@@ -175,6 +176,11 @@ may omit both.
 - **`peer_allowlist`** — who may call the mesh Peer RPCs. The **cosigner CNs only**; the driver must
   *not* be listed.
 
+Two optional roles cannot sign arbitrary messages: `operator_allowlist` (`KeyStatus`, `HostedKeyStatus` and
+`CeremonySignTest`, for `verify-key` / `verify-hosted`) and `refresh_allowlist` (`Refresh` and
+`KeyStatus`, for the refresh job). The signer role keeps `Refresh` only while
+`signing_policy.signer_may_refresh` is on ([approval-quorum.md](approval-quorum.md)).
+
 Why the second one is load-bearing: the Peer API is the raw FROST protocol, below every policy check.
 A caller that reaches `SignRound1`/`SignRound2` on `threshold` cosigners can assemble a signature
 over **any** message, bypassing the leader, the 34-byte Canton-digest guard, the ceremony fence and
@@ -188,9 +194,11 @@ allowlist. The TLS example configs, the k8s ConfigMap and the Helm chart set bot
 
 DKG and refresh rewrite a key's shares, so they must never overlap or clobber a live key:
 
-- **DKG never overwrites a provisioned key.** `dkg_part1` refuses if the key already exists
-  (`KeyExists`) — an accidental re-DKG (a failover retry, an ops mistake) would otherwise generate a
-  brand-new key and **destroy the non-rotatable namespace key**.
+- **DKG never overwrites a provisioned key.** The fence and part 1 refuse a DKG if the key already
+  exists (`KeyExists`) — an accidental re-DKG (a failover retry, an ops mistake) would otherwise generate a
+  brand-new key and **destroy the non-rotatable namespace key**. Since 0.4.0-rc.3 the leader answers
+  a DKG for a key every node already holds from a DKG with that key
+  ([ceremonies.md](ceremonies.md#idempotent-dkg)).
 - **One ceremony per key at a time.** Each node holds a per-key ceremony guard: a second DKG or
   refresh for the same key (a different ceremony id) is refused (`CeremonyInProgress`) until the
   first releases at part 3, or its guard is orphaned (a leader that died mid-ceremony: 60 s for a
@@ -246,8 +254,9 @@ regardless, and a session id seen again after its marker is gone only ever gets 
 first prune leaves `.signed` in the key's marker directory so `discard-partial-key` still knows the
 key signed there. The marker count is now bounded by the sign rate over 15 minutes; the operator
 role's `CeremonySignTest` stays rate-limited per key (`ceremony_sign_test_rate_limit_per_min`,
-default 10/min per leading node; metric `rutli_ceremony_sign_test_rate_limited_total`), and a
-cosigner-side limit on `Sign` arrives with signing intents (audit C2). Markers never protected
+default 10/min per leading node; metric `rutli_ceremony_sign_test_rate_limited_total`), and every
+cosigner rate-limits signing per key (`signing_policy.sign_rate_limit_per_min` / `_per_day`,
+audit C2; [approval-quorum.md](approval-quorum.md)). Markers never protected
 against a memory snapshot of a running cosigner being cloned (audit L7): each clone holds its own
 copy of the in-flight nonces, and with a snapshotted volume its own markers — never snapshot or
 live-migrate a running cosigner.
@@ -255,7 +264,8 @@ live-migrate a running cosigner.
 ## Cluster-hosted keys (non-FROST material in the same cluster)
 
 The cluster also holds the key material FROST cannot produce: **RSA-2048-OAEP-SHA256** encryption
-keypairs and **AES-256-GCM** symmetric keys. Before this, those keys were delegated to an HSM
+keypairs and **AES-256-GCM** symmetric keys, and since 0.4.0-rc.1 **EC P-256 (ECIES)** encryption
+keys (*Where this goes next*, below). Before this, those keys were delegated to an HSM
 (PKCS#11) or to the software backend, which kept them in JVM heap on the participant host — the
 arrangement behind the 2026-08-12 DevNet incident, where a Splice 0.6.11→0.7.0 upgrade restarted the
 participant, the heap-only RSA encryption key was gone, peers kept encrypting to the still-published
@@ -335,8 +345,11 @@ would have been silently skipped by backup — the exact failure class the incid
 
 One honest limit: **delete does not claim secure erasure.** On copy-on-write filesystems,
 wear-levelled SSDs and snapshotted volumes, removing a file does not destroy the bytes. Deleting
-removes the only *referenced* copy; real destruction means rotating the seal master secret so every
-old sealed blob — including the ones sitting in backups — becomes undecryptable.
+replaces the key with a tombstone that keeps the material sealed for
+`hosted_keys.delete_grace_secs` (default 7 days, for `hosted-undelete`), then drops it; real
+destruction means rotating the seal key (`seal rotate-dek`, `keyfile migrate`, `seal
+drop-previous`) and destroying the old one, so every old sealed blob — including the ones sitting in
+backups — becomes undecryptable.
 
 ### Replication wrapping, and why mTLS alone was judged insufficient
 
@@ -367,10 +380,12 @@ The AAD binding is what makes an envelope non-transplantable: it cannot be repla
 node, presented under a different key id, or relabelled as a different spec. Each of those is a
 decryption failure, reported opaquely — wrong recipient, tampered AAD and corrupt ciphertext are all
 just "this envelope is not for you or not intact". The `cluster_id` is derived from the CA
-certificate (`sha256(ca_pem)[..8]`), so envelopes cannot cross trust domains and no new config field
-was needed.
+certificate (`sha256(ca_pem)[..8]`), so envelopes cannot cross trust domains. Since the CA rotation
+work it can be pinned in config (`cluster_id`), so that changing the CA file does not change it
+([ca-rotation.md](ca-rotation.md)).
 
-The recipient's static X25519 key is **derived, never generated or stored**:
+The recipient's static X25519 key comes from its seal secret. Under the original (now deprecated)
+shared master it is **derived, never generated or stored**:
 
 ```text
 dist_sk_j = HKDF-SHA256(ikm  = cluster master secret,
@@ -378,16 +393,15 @@ dist_sk_j = HKDF-SHA256(ikm  = cluster master secret,
                         info = "x25519-v1")
 ```
 
-That is the same master secret as share sealing (`share_seal`). Deriving avoids a first-boot
-ordering problem — there is no keypair to distribute before the cluster can talk — and it makes a
-startup self-check *possible*: with each peer's `dist_pubkey` pinned in config, a node could confirm
-its derived public key is the one its peers expect and catch a wrong secret or a wrong mount
-*before* any key is generated, which is precisely the class of failure the incident belonged to.
-**That pinning and the check are not shipped** — `peers[]` still carries only `identifier` and
-`endpoint`, so a wrong secret is still discovered when an operation fails. It is the smallest useful
-next step here. Under today's shared master secret any node can derive any peer's distribution key,
-which is no worse than the status quo for share sealing; moving to per-node seal secrets makes the
-binding real with no code change.
+That is the same master secret as share sealing (`share_seal.secret_env`). Deriving avoids a
+first-boot ordering problem — there is no keypair to distribute before the cluster can talk — but
+any node can derive any peer's distribution key. Since 0.4.0-rc.2 each node can instead read its
+own seal bundle (`share_seal.secret_file`), whose `dist_seed` is that node's X25519 key and nothing
+of any other node's (`seal split-legacy` writes the same seeds the master derived). Every other
+peer's public key is pinned in config (`peers[].dist_public_key`, required with a bundle when
+hosted keys are on). A node whose own entry carries a pin that does not match its seal keys refuses
+to start (the own pin is optional; set it), so a wrong secret or a wrong mount is caught *before*
+any key is generated, which is precisely the class of failure the incident belonged to.
 
 Two details that carry more weight than they look:
 
@@ -435,15 +449,16 @@ behind it instead of racing. The leader then wraps and pushes the key to every p
 
 `share_seal` is a hard prerequisite: config validation refuses `hosted_keys.enabled` without it,
 because a whole private key must never sit unsealed on disk — an unsealed replica would be strictly
-worse than the HSM delegate it replaces — and the seal master secret is also what the distribution
-keys derive from. The Peer RPCs that carry key material additionally require `peer_allowlist`: with
+worse than the HSM delegate it replaces — and the seal secret is also where the distribution keys
+come from. The Peer RPCs that carry key material additionally require `peer_allowlist`: with
 no allowlist there is no authenticated CN to identify the recipient, and the daemon refuses rather
 than guessing.
 
 ### API surface and metrics
 
 - **Signer** (client-facing, `signer_allowlist`): `Capabilities`, `GenerateKey`, `PublicKey`,
-  `KeyInfo`, `DeleteKey`, `Decrypt`, `SymmetricEncrypt`, `SymmetricDecrypt`. `Capabilities` lets the
+  `KeyInfo`, `DeleteKey`, `Decrypt`, `EcdhDerive`, `SymmetricEncrypt`, `SymmetricDecrypt`, and
+  `HostedKeyStatus` (also open to `operator_allowlist`). `Capabilities` lets the
   driver learn the cluster's supported specs at startup instead of hardcoding them.
 - **Peer** (mesh only, `peer_allowlist`): `ReplicateKey`, `FetchKey`, `ListKeys`, `PurgeKey`,
   `NodeInfo`. The reasoning in *Who can call which API* applies unchanged and with more force here:
@@ -472,9 +487,10 @@ triggers on `NOT_FOUND` either: reads, decrypt and symmetric crypto fail over on
 
 ### Where this goes next
 
-**v1.5** adds `EcdhDerive` and hosted **EC-P256** keys — still whole keys — with the driver
+**v1.5** (shipped in 0.4.0-rc.1) adds `EcdhDerive` and hosted **EC-P256** keys — still whole keys — with the driver
 completing ECIES (KDF2 → AES-128-CBC → HMAC) via BouncyCastle's own `IESEngine`, so the byte-exact
-reference implementation stays in the JVM next to Canton's encryptor. **v2** makes that path
+reference implementation stays in the JVM next to Canton's encryptor. **v2** (planned for release
+2.0, [roadmap.md](roadmap.md)) makes that path
 genuinely *threshold* via `frost-p256`: with Shamir shares `dᵢ` of `d`, each node returns `λᵢ·dᵢ·R`
 and the leader sums the points — one stateless round, **no nonce state**, and therefore none of the
 footgun documented above. The wire contract is identical for v1.5 and v2, so promoting a key class

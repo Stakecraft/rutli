@@ -30,7 +30,7 @@ data:
   {{- $peerAllow = list }}
   {{- range $k := until $n }}{{ $peerAllow = append $peerAllow (printf "cosigner%d" (add $k 1)) }}{{ end }}
 {{- end }}
-{{/* Cluster-hosted keys (replicated whole RSA/AES keys, not threshold shares — docs/hosted-keys.md).
+{{/* Cluster-hosted keys (replicated whole RSA/ECIES/AES keys, not threshold shares — docs/hosted-keys.md).
      The cosigner refuses to start on an unreachable write quorum; fail at template time instead so
      the operator sees it here rather than as a CrashLoopBackOff. Sealing is always configured
      below, which is the other precondition. */}}

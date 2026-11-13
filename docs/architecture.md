@@ -42,15 +42,18 @@ Canton node (crypto.provider = kms)
    ▼  KMS Driver SPI (in-JVM)
 KMS Driver shim (Scala/JVM)  ── policy · M-of-N quorum · tamper-evident audit log
    │  routes by KEY TYPE — in the driver, by key-id prefix
-   ├── namespace/identity (Ed25519)  `frost-…` → cosigner cluster: THRESHOLD t-of-n  [Phase 2]
-   ├── encryption (RSA-2048-OAEP)    `rutli-…` → cosigner cluster: REPLICATED keys   [hosted v1]
+   ├── namespace, protocol signing,
+   │   sequencer auth (Ed25519)      `frost-…` → cosigner cluster: THRESHOLD t-of-n  [Phase 2]
+   ├── encryption (ECIES P-256,
+   │   RSA-2048-OAEP)                `rutli-…` → cosigner cluster: REPLICATED keys   [hosted v1/v1.5]
    ├── symmetric wrap (AES-256-GCM)  `rutli-…` → cosigner cluster: REPLICATED keys   [hosted v1]
    ├── protocol/sequencer (ECDSA P-256/384)    → threshold ECDSA (DKLS23) or HSM     [Phase 4]
    └── anything else                           → delegate: HSM (PKCS#11) | software  [Phase 1]
 ```
 
-Two different protections now share one cluster, and the difference is not cosmetic. The namespace
-key is a real `t`-of-`n` FROST share set — no node ever holds it. The hosted keys (`rutli-…`) are
+Two different protections now share one cluster, and the difference is not cosmetic. The Ed25519
+keys (namespace, protocol signing, sequencer auth) are real `t`-of-`n` FROST share sets — no node
+ever holds one. The hosted keys (`rutli-…`) are
 **whole keys replicated to every cosigner**, sealed at rest per node, and any single node can serve
 a decrypt: that is replication, not MPC. What it buys is covered below. The HSM delegate remains
 available for both classes but is experimental (verified on SoftHSM only, outside the audit scope); with hosted keys enabled, `delegate = "none"` also becomes
@@ -131,10 +134,10 @@ compromised or crashed client can stall signing but never touches key material o
 
 | Canton key | Algo (format) | Backend | Why |
 |---|---|---|---|
-| Namespace / identity root | Ed25519 (`concat`, raw 64-byte R‖S) | **FROST-ed25519** (ZF `frost-ed25519`) | RFC 9591; emits standard RFC 8032 sig Canton verifies natively. Audited by NCC Group (public report, Oct 2023, v0.6.0; we pin 2.2.0). The one key where "no node holds the whole secret" clearly earns MPC. |
-| Protocol / sequencer auth | ECDSA P-256/P-384 (`der`) | **DKLS23** (Silence Labs) or HSM | OT-based, avoids the Paillier/TSSHOCK class that broke GG18/GG20/CGGMP. ToB-audited. **Pin DKLS23, not DKLS24** (2026 OT-count caveat). Confirm P-384 instantiation. |
+| Namespace / identity root; protocol signing and sequencer auth when Ed25519 (Canton's default) | Ed25519 (`concat`, raw 64-byte R‖S) | **FROST-ed25519** (ZF `frost-ed25519`) | RFC 9591; emits standard RFC 8032 sig Canton verifies natively. Audited by NCC Group (public report, Oct 2023, v0.6.0; we pin 2.2.0). The one key where "no node holds the whole secret" clearly earns MPC. |
+| Protocol / sequencer auth (roadmap, ECDSA keys) | ECDSA P-256/P-384 (`der`) | **DKLS23** (Silence Labs) or HSM | OT-based, avoids the Paillier/TSSHOCK class that broke GG18/GG20/CGGMP. ToB-audited. **Pin DKLS23, not DKLS24** (2026 OT-count caveat). Confirm P-384 instantiation. |
 | Asymmetric encryption | RSA-2048-OAEP-SHA256 (Canton's KMS-mode default) | **Cluster-hosted (replicated, sealed)** or HSM delegate | **Not threshold — and for RSA that is permanent, not a roadmap item.** No Rust implementation of threshold RSA decryption exists (crates.io sweep found none; Shoup's construction lives in Go/C++/Java), and RUSTSEC-2023-0071 (Marvin timing side-channel, still unpatched in 2026) rules out the pure-Rust `rsa` crate for a network-facing decryptor — so the cluster holds a whole key and decrypts with `aws-lc-rs`. It performs the *full* OAEP decrypt: returning raw `c^d mod N` would hand the driver a Manger/Bleichenbacher oracle. |
-| Asymmetric encryption (roadmap) | ECIES-P256 (`EciesHkdfHmacSha256Aes128Cbc`) | Cluster-hosted whole key (v1.5) → **threshold `frost-p256`** (v2) | ECDH *is* thresholdable where RSA is not: each node returns `λᵢ·dᵢ·R` and the leader adds the points — one round, stateless, no nonce hazard. Both versions share one wire contract (`EcdhDerive`), so promoting to real threshold is a server-side change. Gated on the synchronizer's `requiredEncryptionSpecs` admitting `EcP256`. |
+| Asymmetric encryption | ECIES-P256 (`EciesHkdfHmacSha256Aes128Cbc`) | Cluster-hosted whole key (v1.5, shipped) → **threshold `frost-p256`** (v2, planned for release 2.0; not implemented) | ECDH *is* thresholdable where RSA is not: each node returns `λᵢ·dᵢ·R` and the leader adds the points — one round, stateless, no nonce hazard. Both versions share one wire contract (`EcdhDerive`), so promoting to real threshold is a server-side change. Gated on the synchronizer's `requiredEncryptionSpecs` admitting `EcP256`. |
 | Symmetric wrapping | AES-256-GCM | **Cluster-hosted (replicated, sealed)** or HSM delegate | The algorithm is opaque to Canton — the driver picks it. Nothing here to threshold; the only question is where the key lives. |
 
 Note: AWS KMS + YubiHSM now support Ed25519 natively, so MPC here is a **trust-distribution**
@@ -161,11 +164,13 @@ rationale in [hosted-keys-design.md](hosted-keys-design.md)):
 - **Wrapped on the wire, not merely inside mTLS.** A service-mesh sidecar terminating TLS would
   otherwise see plaintext private keys. Each replica is sealed to one recipient node: ephemeral
   X25519 → HKDF-SHA256 → AES-256-GCM, AAD-bound to cluster id, key id, spec and recipient. The
-  recipient's static key is *derived* from the cluster master secret (the same secret used for share
-  sealing), never generated or stored, which avoids a first-boot ordering problem. The startup
-  self-check that derivation makes possible — pinning each peer's `dist_pubkey` in config so a
-  wrong secret or wrong mount is caught *before* any key exists — is **not shipped**; today a wrong
-  secret surfaces when an operation fails.
+  recipient's static key comes from its seal secret: the distribution seed in its per-node seal
+  bundle (`share_seal.secret_file`), or, on the deprecated shared master (`secret_env`), a
+  derivation from that master. With hosted keys on, a node on a seal bundle needs every other
+  peer's public key pinned in config (`peers[].dist_public_key`). If its own entry also carries a
+  pin, it refuses to start when that pin does not match its seal keys, so a wrong bundle or wrong
+  mount is caught *before* any key exists. Without the own pin the mismatch shows only when peers
+  refuse to replicate to it.
 - **Anti-entropy and read-repair.** A sweep every 300 s pulls keys this node lacks and pushes keys a
   peer lacks; a request landing on a lagging replica pulls on demand. Hosted keys are
   create-once-immutable (Canton rotates by minting a new id plus a topology transaction), so a
@@ -179,7 +184,7 @@ rationale in [hosted-keys-design.md](hosted-keys-design.md)):
   silently break the threshold scheme.
 
 New Signer RPCs: `Capabilities`, `GenerateKey`, `PublicKey`, `KeyInfo`, `DeleteKey`, `Decrypt`,
-`SymmetricEncrypt`, `SymmetricDecrypt`. New Peer RPCs (mesh only, gated by `peer_allowlist`):
+`EcdhDerive`, `SymmetricEncrypt`, `SymmetricDecrypt`, `HostedKeyStatus`. New Peer RPCs (mesh only, gated by `peer_allowlist`):
 `ReplicateKey`, `FetchKey`, `ListKeys`, `PurgeKey`, `NodeInfo`. New metrics: `rutli_hosted_keys`,
 `rutli_hosted_key_ops_total{op,result}`, `rutli_anti_entropy_repairs_total`,
 `rutli_key_replicas` (fewest cosigners holding any one key — the alert that makes a write quorum
@@ -208,11 +213,17 @@ The driver derives FROST key ids **deterministically from Canton's key name** (`
 `frost-namespace`, `signing` → `frost-signing`), and hosted ids as `rutli-<kind>-<name>-<uuid>`. The
 determinism is deliberate — a retry or a failover must ask for the *same* namespace key, never mint
 a second one — but it means two participants pointed at the same cosigner cluster both ask for
-`frost-namespace`. The cluster's create-once guard then refuses the second participant's DKG with
-`ALREADY_EXISTS`. **That refusal is correct and stays:** the guard is what protects a live namespace
-key from being overwritten, and it must never be relaxed to make sharing a cluster convenient. (The
-2026-10-07 DevNet soak bring-up hit exactly this with a second validator; the only way out at the
-time was retiring the old shares by hand on every cosigner.)
+`frost-namespace`. Before 0.4.0-rc.3 the cluster's create-once guard refused the second
+participant's DKG with `ALREADY_EXISTS`. (The 2026-10-07 DevNet soak bring-up hit exactly this with
+a second validator; the only way out at the time was retiring the old shares by hand on every
+cosigner.) Since 0.4.0-rc.3 a DKG for an id that every node already holds from a DKG returns the
+existing key, so that Canton's retry succeeds ([ceremonies.md](ceremonies.md#idempotent-dkg)). The
+cluster cannot tell a retry from a second participant: without a prefix the second participant is
+handed the first one's Ed25519 keys, and the two share one identity root. Nothing is overwritten,
+and nothing warns. Set the prefix before the first bootstrap, and give each participant its own
+driver certificate with a `signing_policy.signer_acl` entry: the ACL is checked on `Signer.Dkg`
+too, so a driver that asks for another participant's id is refused
+([approval-quorum.md](approval-quorum.md)).
 
 The fix is on the driver side. `frost.key-prefix` (default `""`) is prepended to **every** id the
 driver mints or looks up — FROST and hosted alike — and every path that builds or recognises an id
@@ -285,9 +296,9 @@ two keys, two DKGs, no collision. Rules:
   cosigner cluster: hosted RSA-2048-OAEP-SHA256 + AES-256-GCM, replicated and sealed, with write
   quorum, anti-entropy, read-repair and offline `export-key`/`import-key`, plus the matching
   driver-side `rutli-` routing and `delegate = "none"` — both halves shipped and verified end to end
-  on a real Canton participant. **v1.5**: `EcdhDerive` + hosted EC-P256 keys (still whole
+  on a real Canton participant. ✅ **v1.5**: `EcdhDerive` + hosted EC-P256 keys (still whole
   keys) with driver-side ECIES via BouncyCastle's `IESEngine`, advertising `EcP256` to steer
-  deployments off RSA. **v2**:
+  deployments off RSA. **v2** (planned for release 2.0, [roadmap.md](roadmap.md)):
   threshold ECIES via `frost-p256` — one stateless round, no nonce hazard — on the **same wire
   contract as v1.5**, so promoting is a server-side change plus a config flag. **Never**: threshold
   RSA.

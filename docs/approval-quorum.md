@@ -131,9 +131,11 @@ All per node, in `signing_policy`. The defaults are in brackets.
 
 New metrics: `rutli_sign_intent_absent_total`, `rutli_sign_policy_refusals_total{reason}`,
 `rutli_sign_rate_limited_total`, `rutli_signer_acl_absent_total`, `rutli_sign_journal_entries_total`,
-`rutli_sign_journal_errors_total` (`docs/observability.md`), with alerts in
+`rutli_sign_journal_errors_total`, and for ceremony intents `rutli_ceremony_intent_absent_total`
+and `rutli_ceremony_intent_refusals_total{reason}` (`docs/observability.md`), with alerts in
 `deploy/monitoring/prometheus-rules.yml` (`RutliSignJournalErrors`, `RutliSignPolicyRefusals`,
-`RutliSignIntentAbsent`, `RutliSignRateLimited`, `RutliSignerAclAbsent`).
+`RutliSignIntentAbsent`, `RutliSignRateLimited`, `RutliSignerAclAbsent`,
+`RutliCeremonyIntentAbsent`, `RutliCeremonyIntentRefused`).
 
 ## Switching enforcement on
 
@@ -173,9 +175,9 @@ false` (step 4). Switch on in this order:
    intent naming exactly that ceremony. So a compromised cosigner can no longer start ceremonies on
    it (`docs/ceremonies.md`, "Ceremony intents"). The flag works per node: an older leader drops
    the intent and is refused by an enforcing node, so enforce only after the whole cluster runs this
-   release. Where only the driver certificate can refresh (no refresher certificate yet, as on the
-   DevNet soak, whose CA key is lost), a refresh needs `signer_may_refresh: true` and the CLI pointed
-   at the driver certificate; that is today's constraint, unchanged by intents.
+   release. Without a refresher certificate, use the operator certificate with
+   `refresh_allowlist: [operator]` (step 3); a refresh signed with the driver certificate needs
+   `signer_may_refresh: true`. That is unchanged by intents.
 5. Schedule `rutli-cosigner audit-cross-check` (weekly, and after any incident). From now on, do not
    pass `--allow-no-intent`: an intent-less journal entry is an unexplained signature.
 

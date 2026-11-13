@@ -13,9 +13,11 @@ package com.stakecraft.rutli.backend
   * The routing tag decides which RPCs an id is served by. The `prefix` (`frost.key-prefix` in the
   * driver config, default empty) exists so **several participants can share one cosigner cluster**:
   * FROST ids are derived deterministically from Canton's key name, so without a prefix a second
-  * participant asks the cluster for the very same `frost-namespace` id and the cluster's create-once
-  * guard refuses the DKG with `ALREADY_EXISTS` — correct, because that guard is what protects a
-  * live namespace key. A per-participant prefix keeps the ids disjoint instead.
+  * participant asks the cluster for the very same `frost-namespace` id. The cluster never overwrites
+  * a live key, but since 0.4.0-rc.3 a DKG for an id every node already holds from a DKG returns that
+  * key (so Canton's retry succeeds), and the cluster cannot tell a retry from a second participant:
+  * without a prefix the second participant is handed the first one's key, unless a `signer_acl`
+  * refuses its driver certificate. A per-participant prefix keeps the ids disjoint instead.
   *
   * With the default empty prefix the ids are byte-for-byte what earlier releases minted, so existing
   * deployments are untouched. Routing is strict: a prefixed driver recognises only ids carrying its

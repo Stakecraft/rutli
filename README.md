@@ -93,7 +93,7 @@ not the past. Threshold RSA is permanently out of scope; the reasoning, and the 
 - **Backends** — `software` (testing), `hsm` (PKCS#11, experimental: verified on SoftHSM only) and `frost` (the MPC
   cluster), which routes non-FROST keys to a delegate: `hsm`, `software`, or `none` — no delegate at
   all, which requires cluster-hosted keys (below).
-- **Cluster-hosted keys** — ECIES P-256 (Canton's default encryption key), RSA-2048-OAEP and
+- **Cluster-hosted keys** — ECIES P-256 (Canton's JCE default encryption key), RSA-2048-OAEP and
   AES-256-GCM keys held by the cosigners themselves: configurable write quorum (2-of-3 by default), wrapped per recipient node so
   key material never crosses the mesh in the clear (not even inside mTLS), healed by anti-entropy
   and read-repair, and covered by the existing `backup`/`restore`. Replicated, not threshold — see

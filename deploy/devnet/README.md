@@ -133,14 +133,14 @@ CANTON_CONF=canton-hosted.conf deploy/devnet/up.sh
 ### What "pass" looks like
 
 At startup the driver reports what the cluster actually serves — it asks via the `Capabilities` RPC
-rather than hardcoding a spec list, so adding a key type later needs no driver release:
+rather than hardcoding a spec list:
 
 ```
-Loaded driver rutli (API v1) build 0.3.1
-FROST: mutual TLS channel to localhost:9101
-FROST: mutual TLS channel to localhost:9102
-FROST: mutual TLS channel to localhost:9103
-FROST: cluster hosts non-FROST keys (rsa-2048-oaep-sha256, aes-256-gcm)
+Loaded driver rutli (API v1) build <version>
+FROST: mutual TLS channel to localhost:9101 (server name cosigner1)
+FROST: mutual TLS channel to localhost:9102 (server name cosigner2)
+FROST: mutual TLS channel to localhost:9103 (server name cosigner3)
+FROST: every cosigner hosts non-FROST keys (aes-256-gcm, ec-p256-ecies, rsa-2048-oaep-sha256)
 ```
 
 Then four keys, all minted in the cluster, none of them on the participant host:
@@ -159,7 +159,7 @@ by the FROST quorum:
 ```
 FROST: generating cluster-hosted rsa-2048-oaep-sha256 key rutli-enc-participant1-encryption-6525cd62-…
 FROST: hosted key rutli-enc-participant1-encryption-6525cd62-… ready (created=true, replicas=3)
-AUDIT sign keyId=frost-participant1-namespace algo=Ed25519 inBytes=34 sigBytes=64 outcome=ok
+AUDIT sign keyId=frost-participant1-namespace algo=Ed25519 inBytes=34 msg=<sha256> … sigBytes=64 outcome=ok
 ```
 
 `replicas=3` is the driver's word for it; confirm it on disk. Each cosigner stores one sealed file
@@ -180,7 +180,7 @@ the same four keys, now as Canton sees them (three `EC-Curve25519`, one `Rsa2048
 participant id whose namespace is the fingerprint of the FROST group key.
 
 If no `rutli-` key appears, the cosigners do not actually have hosted keys on. The driver says so —
-`driver has hosted-keys enabled but the cluster reports them disabled` — and routes the encryption
+`FROST: cosigner … reports hosted keys disabled` — and routes the encryption
 key to the delegate, which under `delegate = "none"` refuses it, so the participant fails to
 initialize instead of quietly keying itself on the host. That is the intended outcome.
 
@@ -223,12 +223,14 @@ then repeats it with an encryption key imported from a Canton node. Run Canton o
   there so you can optionally extend the test to connect the participant to a synchronizer and
   exercise cross-node topology signing (see the commented block in `bootstrap.canton`). The two
   cluster configs omit them — they test the driver's key paths, not synchronizer traffic.
-- Node/port config schema tracks Canton 3.5.x. If the release rejects a key, compare against the
+- Node/port config schema tracks Canton 3.6.x. If the release rejects a key, compare against the
   `reference.conf` bundled in `$CANTON_HOME`.
 - All three configs use `storage.type = memory`, so every run starts from a clean participant — but
   the cluster does not, and **DKG deliberately refuses to clobber a provisioned key**. A second run
-  against the same cluster asks for `frost-participant1-namespace` again and gets `KeyExists`, and
-  the participant fails to initialize. That guard is why the namespace key survives an ops mistake;
-  wipe the cosigner volumes between runs (`docker compose -f … down -v`). Hosted keys behave
-  differently: the driver mints a fresh UUID-suffixed `rutli-enc-…` id per run, so a re-run leaves
-  the previous encryption key behind in the cluster rather than colliding with it.
+  against the same cluster asks for `frost-participant1-namespace` again and gets back the key
+  already committed there (a retried DKG returns a committed key, audit M5), so the run reuses the
+  old Ed25519 keys instead of starting clean. That guard is why the namespace key survives an ops
+  mistake; for fresh keys, wipe the cosigner volumes between runs (`docker compose -f … down -v`).
+  Hosted keys behave differently: the driver mints a fresh UUID-suffixed `rutli-enc-…` id per run,
+  so a re-run leaves the previous encryption key behind in the cluster rather than colliding with
+  it.

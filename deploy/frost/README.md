@@ -36,17 +36,20 @@ a shared `rutli-cosigner` SAN, so an older config with `tls.domain = "rutli-cosi
 connects; new certificates do not, and a shared name lets any cosigner answer for any endpoint.
 
 Three cosigners come up on `localhost:9101..9103`. On first start they have no key — trigger DKG
-once against any node's `Signer.Dkg` (e.g. with `grpcurl`, or via the `FrostBackend`):
+once against any node's `Signer.Dkg` (e.g. with `grpcurl`, or via the `FrostBackend`). The cosigner
+has no gRPC reflection, so grpcurl reads the proto from the repo:
 
 ```sh
-grpcurl -plaintext -d '{"key_id":"namespace-participant1"}' localhost:9101 rutli.cosigner.v1.Signer/Dkg
+grpcurl -plaintext -import-path frost/cosigner/proto -proto cosigner.proto \
+  -d '{"key_id":"namespace-participant1"}' localhost:9101 rutli.cosigner.v1.Signer/Dkg
 # -> { "groupVerifyingKey": "<base64 32-byte Ed25519 group key>" }
 ```
 
 Then sign Canton's 34-byte pre-hashed payload:
 
 ```sh
-grpcurl -plaintext -d '{"key_id":"namespace-participant1","message":"<base64 34 bytes>"}' \
+grpcurl -plaintext -import-path frost/cosigner/proto -proto cosigner.proto \
+  -d '{"key_id":"namespace-participant1","message":"<base64 34 bytes>"}' \
   localhost:9101 rutli.cosigner.v1.Signer/Sign
 # -> { "signature": "<base64 64-byte Ed25519 signature>" }
 ```
@@ -69,7 +72,8 @@ scripts/gen-frost-certs.sh 3 deploy/frost/certs   # cluster CA + 3 cosigner cert
 ```
 
 Example TLS configs are in `config-tls/` (mount `certs/` at `/certs`). The driver enables TLS via
-`frost.tls { ca-cert, cert, key, domain }` in its Canton config, pointing at the CA + `driver.{crt,key}`.
+`frost.tls { ca-cert, cert, key }` in its Canton config, pointing at the CA + `driver.{crt,key}`, and
+a `tls-name` per endpoint (above).
 With TLS on, a plaintext client is refused at the handshake.
 
 The example configs keep the default from 0.4.0-rc.6: a DKG or refresh needs a client-signed
@@ -96,9 +100,9 @@ for you — certs come from a Secret with `defaultMode: 0440` and the pod's `fsG
 
 ## Cluster-hosted keys
 
-The `config-tls/` configs also enable **cluster-hosted keys**: the RSA-2048-OAEP encryption keypair
-and the AES-256-GCM symmetric key Canton needs are held by the cosigners themselves, instead of by
-an HSM or the driver's software backend.
+The `config-tls/` configs also enable **cluster-hosted keys**: the encryption keypair (RSA-2048-OAEP,
+or EC P-256 for ECIES) and the AES-256-GCM symmetric key Canton needs are held by the cosigners
+themselves, instead of by an HSM or the driver's software backend.
 
 ```json
 "hosted_keys": { "enabled": true, "write_quorum": 2, "anti_entropy_interval_secs": 300 }

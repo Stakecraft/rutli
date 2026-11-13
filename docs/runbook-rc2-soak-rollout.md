@@ -1,5 +1,8 @@
 # Runbook: upgrade the DevNet soak to 0.4.0-rc.2 (in place, legacy topology)
 
+**Status:** done 2026-10-16. Kept as the record of that rollout; for a current install see
+[deploy/k8s/README.md](../deploy/k8s/README.md).
+
 The plain upgrade of the soak to the audit-remediation release (batches A and B), **without** the
 per-node seal migration: the cosigner cluster (Helm release `rutli`, namespace `rutli`) stays on the
 legacy StatefulSet and the shared seal master, and the soak participant's driver jar moves to rc.2.

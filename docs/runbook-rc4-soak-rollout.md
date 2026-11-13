@@ -1,5 +1,7 @@
 # Runbook: ceremony intents on the DevNet soak (0.4.0-rc.3 → 0.4.0-rc.4, legacy topology)
 
+**Status:** done 2026-10-22. Kept as the record of that rollout.
+
 Moves the soak to 0.4.0-rc.4 (ceremony-fence hardening, client-signed ceremony intents for DKG and
 refresh, plain cosigner logs) in the order `CHANGELOG.md` gives ("Rollout (ceremony intents)"):
 every cosigner, then the driver, then `signing_policy.require_ceremony_intent` on every node. It

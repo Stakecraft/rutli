@@ -36,7 +36,7 @@ under a group key; "hosted key" means a replicated whole key (RSA-2048, EC P-256
 |---|---|---|
 | Namespace / protocol FROST keys | One share per node, sealed in `keys/<id>.json` | Existential for the namespace key (non-rotatable). `t` shares = the key |
 | Hosted keys | Whole key on every node, sealed | Retrospective decryption of traffic encrypted to it; rotatable in Canton |
-| Seal bundle (per node) | Per-node Secret, file-mounted into the cosigner container only | That node's DEK: opens that node's sealed files (one share, every hosted key) |
+| Seal bundle (per node) | Per-node Secret, file-mounted into the cosigner container only | That node's current DEK, any previous DEKs kept during a rotation, and its distribution seed: opens that node's sealed files, current and in retained backups (its one share of each FROST key, every hosted key), and any envelope wrapped to that node |
 | Node TLS key | Per-node Secret | Impersonation of that node on the mesh |
 | Driver TLS key | The participant | Signer-role requests (bounded below) |
 | Sign journals | `data_dir/journal` per node | The independent record of every share released |
@@ -219,8 +219,8 @@ make a deleted id reusable (break-glass on every node only).
 The backup runs as a sidecar in the cosigner's own pod with the data volume mounted read-only, no
 seal bundle and no TLS key (enforced by `check-deploy-policy.sh`). A destination holds one node's
 sealed key files and its sign journals — below threshold, unreadable without that node's DEK.
-Destination **plus** that node's DEK = that node's share for every retained backup epoch (still one
-share). Retention of old epochs in backups is an operator decision (P2b); a restore never rolls a
+Destination **plus** that node's DEK = that node's shares for every retained backup epoch (still one
+share per key). Retention of old epochs in backups is an operator decision (P2b); a restore never rolls a
 live share back (below).
 
 ### Kubernetes cluster-admin / a reader of every Secret in the namespace (P10)
