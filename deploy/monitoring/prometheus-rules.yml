@@ -14,6 +14,7 @@
 #     summary instead — no _bucket series, so RutliSignLatencyHigh sees no data
 #     from them)
 #   rutli_ceremony_requests_total{kind="dkg"|"refresh", result=...}   counter
+#   rutli_ceremony_resolutions_total{result=...}                     counter
 #   rutli_sign_round1_skips_total                                    counter
 #   rutli_sign_aborts_total                                          counter
 #   rutli_sign_retries_total                                         counter
@@ -24,7 +25,10 @@
 #   rutli_ceremonies_staged                                          gauge
 #   rutli_ceremonies_split                                           gauge
 #   rutli_ceremony_equivocations_total                               counter
+#   rutli_ceremony_unknown_refused_total                             counter
+#   rutli_ceremony_unknown_no_votes                                  gauge
 #   rutli_nonce_markers                                              gauge
+#   rutli_nonce_markers_pruned_total                                 counter
 #   rutli_lock_poison_recoveries_total{lock=...}                     counter
 #   rutli_pending_sign_sessions                                      gauge
 #   rutli_keystore_unreadable                                        gauge (0|1)
@@ -38,7 +42,12 @@
 #   rutli_sign_policy_refusals_total{reason=...}                     counter
 #   rutli_sign_rate_limited_total                                    counter
 #   rutli_signer_acl_absent_total                                    counter
+#   rutli_sign_journal_entries_total                                 counter
 #   rutli_sign_journal_errors_total                                  counter
+#   rutli_ceremony_intent_refusals_total{reason=...}                 counter
+#   rutli_ceremony_intent_absent_total                               counter
+#   rutli_decrypt_rate_limited_total                                 counter
+#   rutli_ceremony_sign_test_rate_limited_total                      counter
 #   rutli_delete_intent_refusals_total{reason=...}                   counter
 #   rutli_hosted_tombstones_written_total{how=...}                   counter
 #   rutli_hosted_tombstones{retained="true"|"false"}                 gauge
@@ -49,7 +58,9 @@
 # increases. rutli_keyfiles is set once at start-up (audit M4: key-file format and which DEK seals
 # each file).
 #
-# The last six cover cluster-hosted keys (RSA/EC/AES key material replicated
+# The hosted-key metrics (rutli_hosted_*, rutli_anti_entropy_*, rutli_key_replicas,
+# rutli_unreadable_key_files_total, rutli_decrypt_rate_limited_total) cover
+# cluster-hosted keys (RSA/EC/AES key material replicated
 # whole to every node, unlike the FROST share, which is never copied between
 # nodes). `op` is one of generate | decrypt | ecdh_derive | symmetric_encrypt |
 # symmetric_decrypt | delete. Unlike every other metric above, the hosted-key

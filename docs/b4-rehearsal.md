@@ -3,7 +3,7 @@
 **Status:** plan, ready for review, 2026-10-09; run on 2026-10-14, GO 2026-10-15, destruction 2026-10-15, teardown
 2026-10-16 ([soak log](soak-2026-10-devnet.md)). **Roadmap item:** B4 in [roadmap-migration.md](roadmap-migration.md).
 **Output:** a proven run of [migration.md](migration.md), the pilot runbook, and its corrections.
-**Who runs it:** the operator (Alex) runs every command marked **[MUTATES]**. Claude prepares and reads only
+**Who runs it:** the operator (Alex) runs every command marked **[MUTATES]**. Everything else is read-only preparation
 (`kubectl get/describe/logs`, `helm get/list/status/template`). "Seen 2026-10-09" values come from a read-only
 inspection on that date. Record them again on the day.
 
@@ -90,17 +90,17 @@ RNS=rutli; NS=stakecraft-devnet-rutli-b4
 
 | What | Command | Seen 2026-10-09 |
 |---|---|---|
-| context | `kubectl config current-context` | `hcloud-cluster` |
+| context | `kubectl config current-context` | `<kube-context>` |
 | cosigner release | `helm -n rutli history rutli` | rev 4, `rutli-cosigner-0.3.2`, image `0.3.2@sha256:af38fd04…6d7d3f` |
-| cosigner values | `helm -n rutli get values rutli -o yaml` | `hostedKeys.enabled: true`, `persistence.storageClassName: hcloud-volumes` (nothing else) |
-| pods | `kubectl -n rutli get pods -o wide` | `rutli-cosigner-0` hel, `-1` nbg, `-2` fsn, 3/3 Ready |
+| cosigner values | `helm -n rutli get values rutli -o yaml` | `hostedKeys.enabled: true`, `persistence.storageClassName: <storage-class>` (nothing else) |
+| pods | `kubectl -n rutli get pods -o wide` | `rutli-cosigner-0` node B, `-1` node C, `-2` node A, 3/3 Ready |
 | TLS Secret | `kubectl -n rutli get secret rutli-cosigner-tls -o json \| jq -r '.data\|keys[]'` | `ca.crt cosigner{1,2,3}.{crt,key} driver.{crt,key}` (shared layout) |
 | cluster CA | `kubectl -n rutli get secret rutli-cosigner-tls -o jsonpath='{.data.ca\.crt}' \| base64 -d \| shasum -a 256` | `453bb4aea2088bb5b0b98c4c62a66621519dfc9bd0ae24a61eee2f2d3c12c663`, P-256, CA:TRUE, valid to 2028-10-19 |
 | cosigner certs | `… cosigner1.crt … \| openssl x509 -noout -ext basicConstraints,keyUsage,extendedKeyUsage,subjectAltName` | no basicConstraints/KU/EKU. SAN `rutli-cosigner, cosigner1, cosigner-0, localhost, 127.0.0.1`. **Accepted by the dealer**: leaf not a CA, KU/EKU are checked only when present (`request_auth.rs:309-330`); P-256 supported (`request_auth.rs:108-127`) |
 | cosigner backups | `kubectl -n rutli get cronjob` | `rutli-cosigner-backup` `17 3 * * *` (from `deploy/soak/k8s/cosigner-backup-exec-cronjob.yaml`, not the chart). It writes `/data/backup-<weekday>` inside each pod and ships nowhere |
 | namespace labels | `kubectl get ns rutli stakecraft-devnet-rutli-01 --show-labels` | `rutli` has **no** `rutli.io/client-ns`; rutli-01 has it |
 | soak participant | `helm -n stakecraft-devnet-rutli-01 list` | participant rev 5 (`participant_b0`), validator rev 3, driver 0.3.1, no key-prefix |
-| node capacity | `kubectl describe node <n> \| sed -n '/Allocated resources/,/Events/p'` | memory requests: **fsn 95 %** (soak + naas-01 + validator-1), hel 34 %, nbg 66 % |
+| node capacity | `kubectl describe node <n> \| sed -n '/Allocated resources/,/Events/p'` | memory requests: **node A 95 %** (soak and two other validators), node B 34 %, node C 66 % |
 | local certs | `shasum -a 256 deploy/frost/certs/ca.crt` (MPC checkout) | `27c9e079…`: **not** the cluster CA. The CA key that signed the soak certs (July) is elsewhere (0.6) |
 
 ### 0.2 Driver 0.3.1 against 0.4.0-rc cosigners: compatible (evidence)
@@ -117,7 +117,7 @@ RNS=rutli; NS=stakecraft-devnet-rutli-b4
 - **Rollback caveat:** once the B4 participant holds an EC key (4.8), rolling the cosigners back below the rc
   takes the B4 participant down (a 0.3.x cosigner cannot serve EC keys). The soak participant is unaffected.
 
-### 0.3 Release candidate `v0.4.0-rc.1` (operator merges, tags and publishes; Claude prepares the PRs)
+### 0.3 Release candidate `v0.4.0-rc.1` (operator merges, tags and publishes)
 
 | # | Step | Expect | STOP if |
 |---|---|---|---|
@@ -233,18 +233,18 @@ split-ceremony.md §3.3 asks for an air-gapped live-boot machine, no swap, no co
 
 ### 0.9 Placement and DevNet egress (blocking, decide before Phase 1)
 
-fsn holds the soak and two other DevNet validators at **95 % of memory requested**. A Splice validator requests about 9.5 GiB
-(participant 4 Gi, validator-app 4 Gi, postgres 1 Gi, UIs 0.5 Gi), so B4 does **not** fit on fsn. hel has room (34 %), but
+Node A holds the soak and two other DevNet validators at **95 % of memory requested**. A Splice validator requests about 9.5 GiB
+(participant 4 Gi, validator-app 4 Gi, postgres 1 Gi, UIs 0.5 Gi), so B4 does **not** fit on node A. Node B has room (34 %), but
 it hosts `rutli-cosigner-0` and monitoring. DevNet allowlists validator egress IPs (the laptop got 403 from Scan in
 B0), so whichever node B4 runs on, its egress IP must be allowlisted. Check it:
 ```sh
 kubectl run b4-egress-check -n default --rm -i --restart=Never --image=curlimages/curl:8.10.1 \
-  --overrides='{"spec":{"nodeSelector":{"kubernetes.io/hostname":"agent-cx33-hel-pim"}}}' -- \
+  --overrides='{"spec":{"nodeSelector":{"kubernetes.io/hostname":"<node-B>"}}}' -- \
   -s -o /dev/null -w '%{http_code}\n' https://scan.sv-1.dev.global.canton.network.sync.global/api/scan/version
 ```
-`200` → `TARGET_NODE=agent-cx33-hel-pim`. `403` → **the user decides**: allowlist hel's egress IP with the SV operators (takes days),
-or free about 10 GiB of requests on fsn (e.g. lower `stakecraft-devnet-stakecraft-naas-01`; never `validator-stakecraft-validator-1`).
-B4 Hetzner volumes are bound to the chosen node's location.
+`200` → `TARGET_NODE=<node-B>`. `403` → **the user decides**: allowlist node B's egress IP with the SV operators (takes days),
+or free about 10 GiB of requests on node A (e.g. lower another validator on the cluster; never the operator's long-running validator).
+B4 volumes from the provider are bound to the chosen node's location.
 
 ---
 
@@ -317,8 +317,8 @@ The rehearsal wants realistic backups: ≥ 6 local `pg_dumpall` copies and their
 - **L4:** `aws s3api get-bucket-versioning --bucket <backup-bucket>`, `aws s3api get-object-lock-configuration --bucket …`,
   `aws s3api get-bucket-lifecycle-configuration --bucket …`, `aws s3api list-object-versions --bucket <backup-bucket> --prefix stakecraft-devnet-rutli-b4/`.
   **Object lock on = STOP**: the copies cannot be deleted before retention ends. Decide whether B4 accepts that (record the date).
-- **L5:** `kubectl get volumesnapshot -A` (CRD absent = none). Hetzner Cloud has no volume snapshots, but check server backups
-  for the node (Hetzner console).
+- **L5:** `kubectl get volumesnapshot -A` (CRD absent = none). The hosting provider has no volume snapshots, but check server backups
+  for the node (the provider's console).
 - **L6:** `participantIdentitiesDumpPeriodicBackup` unset in `helm -n $NS get values validator`; `kubectl -n $NS exec deploy/validator-app -- ls -la /domain-upgrade-dump` (empty).
 
 ---
@@ -446,7 +446,7 @@ for c in rutli-kms-bundle rutli-driver-state; do kubectl -n $NS apply -f - <<EOF
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata: { name: $c, labels: { app.kubernetes.io/part-of: rutli } }
-spec: { accessModes: [ReadWriteOnce], storageClassName: hcloud-volumes, resources: { requests: { storage: 1Gi } } }
+spec: { accessModes: [ReadWriteOnce], storageClassName: <storage-class>, resources: { requests: { storage: 1Gi } } }
 EOF
 done
 kubectl -n $NS run rutli-kms-populate --restart=Never --image=docker.io/library/busybox:1.36 \
@@ -586,7 +586,7 @@ Every row: the "before" listing, the action, the "after" listing, saved under `$
 | — | ceremony artefacts | `out/` bundles (dead after install), `r<i>.json` (public), pod `/tmp` (removed in S4) | `ls` in pods: no `/tmp/share.json` |
 | — | pre-refresh cosigner backups | none expected (CronJob suspended S0–S7). Check `kubectl -n rutli exec rutli-cosigner-<o> -c cosigner -- ls -la --time-style=full-iso /data/` (no `backup-*` modified between S4 and S6) | listing |
 
-State the residue plainly in the record. Hetzner volume deletion, S3 deletion and SSD `rm` are not provable erasure, and the key existed
+State the residue plainly in the record. Volume deletion at the provider, S3 deletion and SSD `rm` are not provable erasure, and the key existed
 whole on the participant host for the life of the scratch validator.
 
 ### 5.5 Cluster residue (by design, record it)
@@ -602,7 +602,7 @@ soak log day 0) is optional and needs a cosigner restart.
    participant: `p.topology.synchronizer_trust_certificates.propose(ParticipantId(NEW_UID), SYNC_ID, store = Some(TopologyStoreId.Synchronizer(SYNC_ID)), change = TopologyChangeOp.Remove)`
    (`TopologyAdministrationGroup.scala:2576-2600`). It is signed by the FROST namespace key, one last exercise of the imported key.
 3. **[MUTATES]** `./destroy.sh --env $D/env-stakecraft-devnet-rutli-b4.sh` (plus `--teardown-all` for the Auth0/DNS/TLS from 1.2). PVs are
-   `Delete` (seen on rutli-01), so the Hetzner volumes go. Check that `kubectl get pv | grep rutli-b4` is empty.
+   `Delete` (seen on rutli-01), so the provider's volumes go. Check that `kubectl get pv | grep rutli-b4` is empty.
 4. **[MUTATES]** Purge the remaining S3 prefix `stakecraft-devnet-rutli-b4/` (all versions).
 5. **[MUTATES]** Separately, after v0.4.0 final: delete `rutli-cosigner-tls` in `rutli` (the rev 4 rollback path; it also holds a copy of the driver key).
 
@@ -650,7 +650,7 @@ Runbook: [b4-rehearsal.md](b4-rehearsal.md); pilot runbook: [migration.md](migra
 
 ---
 
-## 8. Time estimate (one operator, Claude preparing)
+## 8. Time estimate (one operator)
 
 | Phase | Effort | Wall clock |
 |---|---|---|
@@ -666,7 +666,7 @@ Runbook: [b4-rehearsal.md](b4-rehearsal.md); pilot runbook: [migration.md](migra
 
 ## 9. Risks (ranked)
 
-1. **Placement and DevNet egress.** fsn is full (95 % of memory requested), and hel's egress IP may not be allowlisted. If it is not, Phase 1 cannot
+1. **Placement and DevNet egress.** Node A is full (95 % of memory requested), and node B's egress IP may not be allowlisted. If it is not, Phase 1 cannot
    onboard, and allowlisting is an external lead time. Check 0.9 first.
 2. **Rollout on the live soak cluster.** Two restarts of all three cosigners under the soak participant. The new chart's `tls-select`/projected
    Secrets have not run live yet. Mitigations: split into A/B, server-side diff, PDB, rollback revisions kept, the shared Secret kept. B4 activity also lands
@@ -677,7 +677,7 @@ Runbook: [b4-rehearsal.md](b4-rehearsal.md); pilot runbook: [migration.md](migra
    says 0.9.0 never reads the keys of a pre-initialised node. The OTK carries proof-of-ownership signatures, so Splice's rotation
    should not fire. Both have explicit STOP lines before the PNR.
 5. **Destruction completeness.** S3 versioning or object lock, the 4-hourly CronJob writing new plaintext copies until the DROP, laptop
-   snapshots, Hetzner volume residue. Mitigations: lock check in 1.5, DROP right after GO, the `tmutil` exclusion before export, and the stated
+   snapshots, provider volume residue. Mitigations: lock check in 1.5, DROP right after GO, the `tmutil` exclusion before export, and the stated
    residual exposure.
 
 Others: the July CA key may be lost (operator role unrehearsed, 0.4); `deploy/k8s/job-verify-key.example.yaml` does not fit Helm installs
@@ -686,7 +686,7 @@ Others: the July CA key may be lost (operator role unrehearsed, 0.4); `deploy/k8
 ## 10. What the user must decide or provide
 
 1. **The July cluster CA private key** (cert sha256 `453bb4ae…c663`) for the operator certificate, or accept the driver-cert fallback (0.4).
-2. **Placement**: run the egress check on hel; if it returns 403, allowlist hel or free fsn requests (0.9).
+2. **Placement**: run the egress check on node B; if it returns 403, allowlist node B or free node A requests (0.9).
 3. **Dealer host**: live USB on spare hardware, or the no-network VM (0.8). Who witnesses Gate 0.
 4. **Release**: approve `v0.4.0-rc.1`, merge R1/R2/R4, run R3, tag R5 (auto mode cannot push or merge).
 5. **Auth0**: `--setup-auth0` (and optionally DNS/TLS for the wallet UI) for the scratch validator (1.2).

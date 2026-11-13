@@ -51,18 +51,23 @@ services:
               }
               frost = {
                 # Full cosigner roster on the shared docker network — driver fails over across it.
-                endpoints = ["cosigner1:9101", "cosigner2:9102", "cosigner3:9103"]
+                # Each endpoint names the certificate it must present: certificates issued since
+                # 0.4.0-rc.2 carry no name shared by all cosigners.
+                endpoints = [
+                  { url = "cosigner1:9101", tls-name = "cosigner1" },
+                  { url = "cosigner2:9102", tls-name = "cosigner2" },
+                  { url = "cosigner3:9103", tls-name = "cosigner3" }
+                ]
                 delegate  = "software" # soak scope; "hsm" + hsm{...} for production delegates
                 # Several participants on this one cluster? Give each its own prefix BEFORE first
                 # bootstrap (never change it after): without one the second participant's DKG
-                # collides on frost-namespace and is refused. docs/architecture.md, "One cluster,
-                # several participants".
+                # asks for the first one's frost-namespace and, since 0.4.0-rc.3, is handed that
+                # key. docs/architecture.md, "One cluster, several participants".
                 # key-prefix = "soak1-"
                 tls = {
                   ca-cert = "/rutli-certs/ca.crt"
                   cert    = "/rutli-certs/driver.crt"
                   key     = "/rutli-certs/driver.key"
-                  domain  = "rutli-cosigner"
                 }
               }
             }
