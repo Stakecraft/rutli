@@ -240,7 +240,9 @@ With it, participant one births `soak1-frost-namespace` and participant two `soa
 two keys, two DKGs, no collision. Rules:
 
 - **Set a distinct prefix per participant** on a shared cluster. Without one, the second
-  participant's DKG is refused by design — do not work around that by deleting shares.
+  participant's DKG returns the first one's keys and reports no error (since 0.4.0-rc.3; earlier
+  releases refused it). The cluster refuses it only if that participant's driver CN has a
+  `signer_acl` entry that does not cover the id.
 - **Choose it before the participant's first bootstrap and never change it.** Canton stores the ids
   it was handed, and routing is strict on the full prefix: a driver started with `soak1-` does not
   recognise a bare `frost-namespace` (or `soak2-…`) as its own key and sends it to the delegate.
@@ -255,8 +257,11 @@ two keys, two DKGs, no collision. Rules:
   park a hosted key on a FROST id before its DKG ([threat-model.md](security/threat-model.md)). A
   prefix without a tag keeps the first tag in every id equal to the one the driver routes on.
 - Otherwise the cosigners treat ids as opaque strings. A prefix is a namespace, not an
-  authorization boundary — any driver with a valid client certificate can address any id on the
-  cluster, so participants sharing a cluster share a trust domain.
+  authorization boundary: a driver whose CN has no `signing_policy.signer_acl` entry can address
+  any id on the cluster, so participants sharing a cluster without ACL entries share a trust
+  domain. An entry limits that CN to the key-id prefixes it lists, on every key-scoped Signer RPC
+  including `Signer.Dkg`; `signer_acl_required` refuses a CN that has no entry
+  ([approval-quorum.md](approval-quorum.md)).
 
 ## Hard constraints (design around these)
 
