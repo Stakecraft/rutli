@@ -93,8 +93,8 @@ not the past. Threshold RSA is permanently out of scope; the reasoning, and the 
 - **Backends** — `software` (testing), `hsm` (PKCS#11, experimental: verified on SoftHSM only) and `frost` (the MPC
   cluster), which routes non-FROST keys to a delegate: `hsm`, `software`, or `none` — no delegate at
   all, which requires cluster-hosted keys (below).
-- **Cluster-hosted keys** — RSA-2048-OAEP encryption and AES-256-GCM symmetric keys held by the
-  cosigners themselves: configurable write quorum (2-of-3 by default), wrapped per recipient node so
+- **Cluster-hosted keys** — ECIES P-256 (Canton's default encryption key), RSA-2048-OAEP and
+  AES-256-GCM keys held by the cosigners themselves: configurable write quorum (2-of-3 by default), wrapped per recipient node so
   key material never crosses the mesh in the clear (not even inside mTLS), healed by anti-entropy
   and read-repair, and covered by the existing `backup`/`restore`. Replicated, not threshold — see
   above — but it takes both the HSM and the last private key off the Canton host.
@@ -187,7 +187,7 @@ Before protecting a real key, run the witnessed **[key ceremony](docs/key-ceremo
 | [QUICKSTART.md](QUICKSTART.md) | Get running in minutes |
 | [docs/architecture.md](docs/architecture.md) | How it's built, and why |
 | [docs/phase-2-frost.md](docs/phase-2-frost.md) | The FROST cluster in depth |
-| [docs/hosted-keys.md](docs/hosted-keys.md) | Cluster-hosted RSA/AES keys: what they are, what they are not |
+| [docs/hosted-keys.md](docs/hosted-keys.md) | Cluster-hosted keys (ECIES, RSA, AES): what they are, what they are not |
 | [docs/hosted-keys-design.md](docs/hosted-keys-design.md) | Why they are replicated and not threshold — the design record, with what did and did not ship |
 | [docs/key-ceremony.md](docs/key-ceremony.md) | Witnessed namespace-key generation |
 | [docs/key-rotation.md](docs/key-rotation.md) | Which keys rotate, how, and why the root can't |
@@ -221,12 +221,14 @@ no PKCS#11 module and no key material on the participant host. It has been exerc
 3.5.6 participant with no local key state
 ([`deploy/devnet/canton-hosted.conf`](deploy/devnet/canton-hosted.conf)): three Ed25519 keys born by
 cluster DKG and threshold-signed, plus an RSA-2048 encryption key generated in the cluster and
-replicated to all three cosigners. It is still the newest surface in the codebase, so run it on
-DevNet before it holds anything you care about, and read
-[docs/hosted-keys.md](docs/hosted-keys.md) first — replicated keys are a different security property
-from the threshold namespace key, not the same one applied wider. What remains for a 1.0 is
-external: a **security audit** and a **Splice testnet validator run**. See
-[CHANGELOG.md](CHANGELOG.md).
+replicated to all three cosigners. A Splice DevNet validator has run on Rütli since 2026-10-07, now
+on Splice 0.9.0 and Canton 3.6.1 ([docs/soak-2026-10-devnet.md](docs/soak-2026-10-devnet.md)), and
+both migration paths for an existing validator were rehearsed there
+([docs/roadmap.md](docs/roadmap.md)). Run it on DevNet before it holds anything you care about, and
+read [docs/hosted-keys.md](docs/hosted-keys.md) first — replicated keys are a different security property
+from the threshold namespace key, not the same one applied wider. What remains for 1.0: the
+external **security audit**, a **Splice TestNet validator run** of at least four weeks, and the 1.0
+features listed in [docs/roadmap.md](docs/roadmap.md). See [CHANGELOG.md](CHANGELOG.md).
 
 ## Security
 

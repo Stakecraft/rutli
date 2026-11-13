@@ -158,7 +158,7 @@ namespace and signing keys are threshold keys; the encryption key is not.
 
 ---
 
-## Milestones (status as of 2026-10-15)
+## Milestones (status as of 2026-11-13)
 
 | # | Milestone | Status |
 |---|---|---|
@@ -172,7 +172,7 @@ namespace and signing keys are threshold keys; the encryption key is not.
 | B7 | 2b rehearsal with wallet end-users: verify re-onboarding keeps their parties and balances | New, proposed |
 | B8 | In-place rehearsal (2a), carry-first sequence, on a fresh scratch JCE validator on DevNet | Phases 0–4 + 5.1 **passed 2026-10-26**; rotation **passed 2026-11-01** (cosigners on `v0.4.0-rc.6`); observation, SQL cleanup and destruction **passed 2026-11-12**. Open: teardown. Runbook [runbook-migration-inplace.md](runbook-migration-inplace.md) |
 | C1 to C3 | ECIES hosted keys | Done; shipped in v0.4.0-rc.1. The two availability fixes from Codex's review are merged |
-| CA rotation | Pin plus runbook | In review: PR #19 |
+| CA rotation | Pin plus runbook | Done; shipped in v0.4.0-rc.2 |
 
 Track A (soak and hardening) continues on `stakecraft-devnet-rutli-01`; exit criteria are in
 [testnet-soak.md](testnet-soak.md).
@@ -195,7 +195,8 @@ Track A (soak and hardening) continues on `stakecraft-devnet-rutli-01`; exit cri
   replaces live access with an evidence pack. The audit starts once its funding is confirmed, expected December 2026
   to January 2027, so 1.0 follows in the first quarter of 2027 rather than in December.
 - **External deadline:** Splice's `splice-postgres` chart is unsupported after 2026-11-12 (PostgreSQL 14 end of life).
-  This affects the soak validator's deployment and must be handled before then.
+  As of 2026-11-13 the soak validator still runs on that chart; its move to another PostgreSQL deployment is planned
+  for after the freeze.
 
 ## After v0.4.0: v0.5.0, 1.0 and 2.0
 
@@ -205,7 +206,7 @@ v0.4.0.
 
 | Release | Item | What and why |
 |---|---|---|
-| **Now** (docs) | Supported keys and algorithms, Canton compatibility matrix | In the README: which key is threshold, which is hosted, which Canton and Splice versions are tested. Done with this change |
+| **Now** (docs) | Supported keys and algorithms, Canton compatibility matrix | In the README: which key is threshold, which is hosted, which Canton and Splice versions are tested. Done (#77) |
 | **v0.5.0** | Unified admin CLI | One tool for generate, import, public key and Canton fingerprint (`1220…`), and a documented rotation recipe (`rotate_kms_node_key`, `owner_to_key_mappings.rotate_key`). Today these are spread across `rutli-cosigner` and `rutli-dealer` |
 | **v0.5.0** | Canton LocalNet quickstart | Rütli next to Splice's LocalNet, all in local containers, so an operator can try it in minutes without touching a real node |
 | **1.0** | Driver published to a Maven repository | Operators consume the driver as a normal dependency instead of a jar from a GitHub release |

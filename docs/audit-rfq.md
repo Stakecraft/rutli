@@ -2,7 +2,8 @@
 
 > **Note.** Addressed to Cure53, the auditor we have selected. Drafted 2026-10-08 for a shortlist of
 > four firms; updated 2026-10-16 for the internal security review and on 2026-10-27 for
-> `v0.4.0-rc.4`, the choice of auditor and the funding-dependent start. Line counts below were
+> `v0.4.0-rc.4`, the choice of auditor and the funding-dependent start; and on 2026-11-13 for
+> `v0.4.0-rc.6` as the pre-read and the completed in-place rehearsal. Line counts below were
 > measured on 2026-10-14 at `v0.4.0-rc.1` (commit `903d318`, without B6) and will be re-measured at
 > code freeze.
 > Companion brief for the auditors: [audit-prep.md](audit-prep.md).
@@ -37,8 +38,9 @@ a second pair of eyes. Finding ids carry the prefix `DS-`. The canonical list, w
 and the fix for each, is public at [docs/security/internal-review-2026-10.md](security/internal-review-2026-10.md).
 
 **What was found, and where it is fixed** (`rc.2` = `v0.4.0-rc.2`, tagged 2026-10-16; `C` = batch C,
-shipped in `v0.4.0-rc.3`, 2026-10-18; `v0.4.0-rc.4`, 2026-10-21, adds ceremony intents and the
-fence-timeout fix):
+shipped in `v0.4.0-rc.3`, 2026-10-18; `v0.4.0-rc.4`, 2026-10-22, adds ceremony intents and the
+fence-timeout fix; `v0.4.0-rc.6`, 2026-10-28, adds the fixes from a further review, see
+[CHANGELOG.md](../CHANGELOG.md), `[0.4.0-rc.6]`):
 
 | Id | Issue | Fixed in |
 |---|---|---|
@@ -71,16 +73,17 @@ the driver, fail-closed journal and audit log, config validation); the DevNet so
 2026-10-16 and the exec backup was removed there. Details: [CHANGELOG.md](../CHANGELOG.md),
 `[0.4.0-rc.2]`.
 
-**Batch C, in progress; lands before the `v0.4.0` code freeze.** It is a wire change: confidential
+**Batch C shipped in `v0.4.0-rc.3`.** It is a wire change: confidential
 peer-to-peer delivery of DKG and refresh round-2 packages over mutual TLS (DS-C1); cosigner-enforced,
 driver-signed signing intents with per-node approvals, journal and rate limit (DS-C2); two-phase
 ceremonies with epochs (DS-H1, DS-M1); share format v2 with AAD (DS-M4); hosted-key tombstones
-(DS-M2). Until it ships, keys born or refreshed on the cluster are treated as leader-exposed (soak
-keys are test material) and refresh is not run.
+(DS-M2). Keys born or refreshed on a cluster before it are treated as leader-exposed (the soak's keys
+are test material).
 
 **Residuals we state up front:**
 
-- a refresh-fence stall can block signing until it clears (availability);
+- a cosigner can stop a ceremony it takes part in, by refusing or by holding it on an honest node
+  until the orphan timeout (availability; since rc.4 a ceremony no longer pauses signing);
 - a Byzantine two-phase split at n=3 can cost availability (DS-CR);
 - one Kubernetes cluster is one trust domain (mainnet topology decided later);
 - no HPKE layer on top of mTLS, with the deployment requirement that **no TLS-terminating service mesh
@@ -102,14 +105,14 @@ keys are test material) and refresh is not run.
 
 ## 2. Scope (in)
 
-Repository state to review: tag `v0.4.0`, target ~2026-11-14, which is also our code freeze. The date
-depends on the in-place migration rehearsal (row i); if it slips we will tell you before the
-engagement starts. Nothing else lands in the audited surface after the freeze except audit fixes.
-The release candidate `v0.4.0-rc.4` (tagged 2026-10-21, commit `be49c46`) is the current pre-read: it
+Repository state to review: tag `v0.4.0`, target ~2026-11-14, which is also our code freeze. The
+in-place migration rehearsal it depended on (row i) completed on 2026-11-12. Nothing else lands in the audited surface after the freeze except audit fixes.
+The release candidate `v0.4.0-rc.6` (tagged 2026-10-28, commit `e69ed3f`) is the current pre-read: it
 contains the split ceremony (B2), the Canton key parser (B1), the ECIES hosted keys (Track C), the
 optional carry of protocol keys (B6, row h) and remediation batches A, B and C (row j, including its
-wire change), plus ceremony intents. Earlier release candidates are superseded. Between rc.4 and
-`v0.4.0` we expect the in-place migration procedure (row i), review fixes and documentation.
+wire change), plus ceremony intents (rc.4), the in-place migration procedure (row i, rc.5) and the
+rc.6 review fixes. Earlier release candidates are superseded. Between rc.6 and `v0.4.0` there is one
+build-time lockfile update and documentation.
 
 | # | Component | Includes | Where |
 |---|---|---|---|
@@ -121,8 +124,8 @@ wire change), plus ceremony intents. Earlier release candidates are superseded. 
 | f | **Operational runbooks** (procedural review) | Key ceremony, split ceremony (incl. destruction of the whole key), DR/backup/restore, approval quorum, and the pilot migration runbook (`docs/migration.md`), whose steps were exercised in the DevNet B4 cutover rehearsal on 2026-10-14 | `docs/key-ceremony.md`, `docs/split-ceremony.md`, `docs/disaster-recovery.md`, `docs/approval-quorum.md`, `docs/migration.md` |
 | g | **ECIES hosted keys (Track C)** | Merged and part of `v0.4.0` (in `v0.4.0-rc.1`); no longer a separate release or optional addendum. Hosted EC-P256 keys with an `EcdhDerive` RPC on the cosigner (`aws-lc-rs`) and a driver-side ECIES decrypt path (BouncyCastle `IESEngine`, shared secret supplied by the cluster); `import-key` of a Canton EC P-256 encryption key via the B1 parser. Details and our focus questions in section 2.1 | `frost/cosigner/src/{hosted,export,service,node}.rs`, `cosigner.proto`; `driver/.../backend/{CantonEcies,FrostBackend}.scala` |
 | h | **Optional carry of protocol signing and ECIES encryption keys (milestone B6)** | Implemented and in `v0.4.0-rc.2`. A discouraged path: the recommended migration carries only the namespace key and gives the new node fresh keys. It touches the offline dealer's usage guard (`rutli-dealer --expect-usage`, envelope v3), adds a `rutli-cosigner verify-hosted` RPC/CLI, and docs. Size to be given with the freeze commit | `frost/core/src/dealer.rs`, `frost/cosigner/src/bin/rutli-dealer.rs`, `frost/cosigner` (`verify-hosted`), `docs/` |
-| i | **In-place migration of an existing node (Flow 2a)** | Procedure, targeted for `v0.4.0` after a DevNet rehearsal (milestone B8). The existing participant keeps its database and UID: all its active keys are carried into the cluster with their fingerprints (namespace via the split ceremony, protocol signing and ECIES via B6), the node is restarted with `crypto.provider = kms`, the keys are registered by KMS id before it reconnects, then rotated per the operator's choice and the old plaintext rows removed. Mostly runbook and Canton console steps, little new code; not a procedure Digital Asset documents. We want the sequence, the rollback story and the residue reviewed. The B8 rehearsal on DevNet precedes the freeze. |
-| j | **Internal-review remediation, batch C (in progress)** | Lands before the `v0.4.0` code freeze; a wire change. Confidential peer-to-peer delivery of DKG/refresh round-2 packages over mTLS (DS-C1); cosigner-enforced signed signing intents with per-node approvals, journal and rate limit (DS-C2); two-phase ceremonies with epochs (DS-H1); share format v2 with AAD; hosted-key tombstones. Our priority area for re-review (section 1.1). Size to be given with the freeze commit | `frost/core` (DKG, refresh), `frost/cosigner` (`orchestrator`, `node`, `service`, `keystore`, `peer`), `cosigner.proto`, `driver/src/main` (intent signing, approval gate) |
+| i | **In-place migration of an existing node (Flow 2a)** | Procedure, in `v0.4.0`; rehearsed end to end on DevNet (milestone B8, 2026-10-23 to 2026-11-12). The existing participant keeps its database and UID: all its active keys are carried into the cluster with their fingerprints (namespace via the split ceremony, protocol signing and ECIES via B6), the node is restarted with `crypto.provider = kms`, the keys are registered by KMS id before it reconnects, then rotated per the operator's choice and the old plaintext rows removed. Mostly runbook and Canton console steps, little new code; not a procedure Digital Asset documents. We want the sequence, the rollback story and the residue reviewed. What the rehearsal did not cover is listed in the runbook's status. |
+| j | **Internal-review remediation, batch C** | Shipped in `v0.4.0-rc.3`; a wire change. Confidential peer-to-peer delivery of DKG/refresh round-2 packages over mTLS (DS-C1); cosigner-enforced signed signing intents with per-node approvals, journal and rate limit (DS-C2); two-phase ceremonies with epochs (DS-H1); share format v2 with AAD; hosted-key tombstones. Our priority area for re-review (section 1.1). Size to be given with the freeze commit | `frost/core` (DKG, refresh), `frost/cosigner` (`orchestrator`, `node`, `service`, `keystore`, `peer`), `cosigner.proto`, `driver/src/main` (intent signing, approval gate) |
 
 ### Approximate size
 
@@ -280,7 +283,7 @@ no forward secrecy; seal-secret protection is software, not HSM or enclave; one 
 
 ## 7. Materials we provide
 
-- **Repository:** `https://github.com/Stakecraft/rutli` (public). Tag `v0.4.0-rc.4` (2026-10-21, commit `be49c46`) is the current pre-read; earlier release candidates are superseded. Tag `v0.4.0` will be cut at code freeze.
+- **Repository:** `https://github.com/Stakecraft/rutli` (public). Tag `v0.4.0-rc.6` (2026-10-28, commit `e69ed3f`) is the current pre-read; earlier release candidates are superseded. Tag `v0.4.0` will be cut at code freeze.
 - **Design and operator docs** (relative to the repository root):
   - [README.md](../README.md), [SECURITY.md](../SECURITY.md), [CHANGELOG.md](../CHANGELOG.md)
   - [docs/audit-prep.md](audit-prep.md): engagement brief and evidence index
@@ -300,7 +303,7 @@ no forward secrecy; seal-secret protection is software, not HSM or enclave; one 
   upstream Canton KMS driver conformance suite.
 - **Internal security review:** the public findings list `docs/security/internal-review-2026-10.md` (two independent reviews on 2026-10-16 plus the batch C review) and [docs/security/threat-model.md](security/threat-model.md); the batch C design notes on request (section 1.1).
 - **Environment:** an evidence pack from our DevNet soak (3 cosigners backing a Splice DevNet
-  validator, on rc.4 since 2026-10-22): the soak log, the B0/B4 runbooks and their evidence (driver audit logs, hashes,
+  validator, cosigners on rc.6 since 2026-10-28): the soak log, the B0, B4 and B8 runbooks and their evidence (driver audit logs, hashes,
   timings), and dashboard exports; a live demo over video call on request. We do not grant access
   to the cluster itself (it is shared with other DevNet validators). The DevNet B4 cutover rehearsal
   (an existing JCE validator moved into the cluster with its namespace and party IDs unchanged) ran

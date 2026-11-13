@@ -11,8 +11,8 @@ The findings these controls answer, with their canonical `DS-` IDs and status, a
 
 The statements below hold for a cluster where:
 
-- every cosigner and the driver run the release that completes batch C (Unreleased in
-  `CHANGELOG.md`), on a cluster uniformly upgraded **before** any DKG or refresh
+- every cosigner and the driver run `0.4.0` (batch C shipped in `0.4.0-rc.3`; later statements name
+  the release candidate they hold from), on a cluster uniformly upgraded **before** any DKG or refresh
   (`ceremony_protocol` 2 on every node);
 - the enforcement switches are on, identically, on every node: `signing_policy.require_intent`,
   `require_ceremony_intent` (on by default since 0.4.0-rc.6, unless opted out with `false`),

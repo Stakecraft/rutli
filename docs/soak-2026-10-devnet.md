@@ -9,7 +9,7 @@ Running record for the soak described in [testnet-soak.md](testnet-soak.md). Dat
 | Network | Canton Network **DevNet**, migration id 1, Splice 0.9.0, Canton 3.6.1 |
 | Validator | `stakecraft-rutli-soak-1::12203286ffe2…` (fresh identity; sponsor: Global Synchronizer Foundation, `sv.sv-1.dev.global.canton.network.sync.global`, self-served DevNet secret) |
 | Participant | Splice `splice-participant` 0.9.0 chart, `rutli-driver.jar` **0.3.0** on `EXTRA_CLASSPATH`, `backend = "frost"`, `hosted-keys = true`, `delegate = "none"` — **no local key material at all** |
-| Cosigners | 3 × `rutli-cosigner:0.3.0` (Helm chart 0.3.0), 2-of-3, mTLS, sealed shares, `peer_allowlist`, `hosted_keys` on, one per Hetzner location (hel / nbg / fsn) |
+| Cosigners | 3 × `rutli-cosigner:0.3.0` (Helm chart 0.3.0), 2-of-3, mTLS, sealed shares, `peer_allowlist`, `hosted_keys` on, one per data-centre location (three locations) |
 | Keys | `frost-namespace`, `frost-signing` (FROST DKG); `rutli-enc-encryption-d625b676…` (RSA-2048, cluster-hosted, replicated 3/3) |
 | Monitoring | cluster kube-prometheus-stack via `deploy/monitoring` (3/3 targets, 14 rules), daily `rutli-soak-check` CronJob in `monitoring`, Grafana dashboard "Rütli FROST Cosigner" (the operator's internal Grafana, dashboard JSON in `deploy/monitoring/grafana-dashboard.json`; fallback `kubectl -n monitoring port-forward svc/prometheus-grafana 3000:80`). Its *Sign Latency* panel stays empty while the cosigners run ≤ 0.3.1, which export a summary instead of a histogram ([#6](https://github.com/Stakecraft/rutli/pull/6)) |
 | Prometheus retention | **10 d** (stack default) — shorter than the 45 d the soak doc asks for; daily verdicts are kept in the CronJob history instead |
@@ -144,7 +144,7 @@ verdict is **GO pending** (destruction and teardown below are still open).
   rows) and `cantonnet_validator`; WAL checkpoint + switch; 4 `pg_dumpall` files + 1 checksum removed from the backup
   PVC, the next dump verified free of `participant_1` (0 rows in `common_crypto_private_keys`); S3: no objects (the
   uploads never succeeded); the password-protected export file was the only copy (sha256 scan) and was removed.
-  Residue: not provable erasure on SSD/Hetzner volumes; dealer ran on the operator laptop (`--allow-swap`, encrypted swap).
+  Residue: not provable erasure on the provider's SSD volumes; dealer ran on the operator laptop (`--allow-swap`, encrypted swap).
 - **Teardown 2026-10-16:** the `-mig` member offboarded at 10:08Z (trust certificate removed, signed by the carried
   namespace key through FROST — its 10th and last signature); `destroy.sh --teardown-all` at 13:16Z removed the
   namespace, its volumes, the three Auth0 apps and the wallet user. The `b4-` keys stay on the cosigners (no delete path).
@@ -320,7 +320,7 @@ otherwise unaffected.
 | 1 | Kill one cosigner 30 min, restart | pending |
 | 1 | Proactive refresh mid-traffic | pending |
 | 2 | Full cluster restart, one node at a time | pending |
-| 2 | Restore drill: wipe one cosigner's keys, restore from backup | pending (needs exec-based backups first) |
+| 2 | Restore drill: wipe one cosigner's keys, restore from backup | pending (needs the per-node backup sidecar, which the soak does not run; the exec backup was removed in rc.2) |
 | 3+ | Participant restart + host reboot | pending |
 
 ## Exit criteria tracking
