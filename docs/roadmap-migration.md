@@ -2,7 +2,7 @@
 
 > This is the detailed Track B record; the current roadmap is [roadmap.md](roadmap.md).
 
-**Status:** draft, 2026-10-08; milestone statuses updated 2026-11-13. **Owner:** Alex, with Claude as orchestrator; one engineer, sequential. **Goal:** show that a Splice validator that exists
+**Status:** draft, 2026-10-08; milestone statuses updated 2026-11-13. **Owner:** Alex; one engineer, sequential. **Goal:** show that a Splice validator that exists
 today, with its keys in Postgres, can move its identity into a Rütli cluster without changing its
 namespace or any party ID.
 
@@ -223,4 +223,4 @@ after B4. Offer: we migrate a scratch validator of theirs alongside ours, same r
 
 - Auditor choice and earliest start date. Sets the 1.0 date.
 - B0 runs on the soak validator in the new-UID shape ("B0-B", decided 2026-10-08; the same-UID replay variant was dropped). B4 needs a scratch JCE validator on
-  DevNet; `validator-stakecraft-validator-1` stays untouched.
+  DevNet; the operator's long-running validator stays untouched.

@@ -22,7 +22,7 @@ everything else is read-only. Release values not known at writing time are place
 | Cosigner config | ConfigMap `rutli-cosigner-config`, keys `cosigner-1.json` … `cosigner-3.json`, mounted at `/config`. `signer_allowlist: ["driver"]`, `peer_allowlist: ["cosigner1","cosigner2","cosigner3"]`, **no `operator_allowlist`**. Sealing: `share_seal.secret_env = RUTLI_SEAL_SECRET` (the legacy shared master, Secret `rutli-seal`) |
 | TLS | Secrets `rutli-cosigner-tls-1..3` (CN `cosigner<i>`), CA Secret `rutli-cosigner-ca` (sha256 `453bb4ae…c663`), cluster id `453bb4aea2088bb5`. **The CA private key is lost**: no new certificate of any kind (driver, operator, refresher) can be issued until [ca-rotation.md](ca-rotation.md) runs |
 | Keys on the cosigners | soak: `frost-namespace`, `frost-signing` (DKG on 0.3.0, 2026-10-07), one hosted ECIES/RSA key `rutli-enc-…`; B4 leftovers (B4 is offboarded): `b4-frost-import-17bc38d7`, `b4-frost-signing`, `b4-rutli-enc-encryption-be578c92-…`. List the exact ids with `ls /data/keys` (phase 0) |
-| Participant | Namespace `stakecraft-devnet-rutli-01`, `deploy/participant` (`strategy: Recreate`, node `agent-cx33-fsn-vkh`, label `app=participant`), Splice `splice-participant` chart 0.9.0, Helm rev 5. Validator UID `stakecraft-rutli-soak-1-b0`, party `stakecraft-rutli-soak-1::12203286…22ea` |
+| Participant | Namespace `stakecraft-devnet-rutli-01`, `deploy/participant` (`strategy: Recreate`, node `<node>`, label `app=participant`), Splice `splice-participant` chart 0.9.0, Helm rev 5. Validator UID `stakecraft-rutli-soak-1-b0`, party `stakecraft-rutli-soak-1::12203286…22ea` |
 | Driver | 0.4.0-rc.2. Jar on PVC `rutli-kms-bundle` (subPath → `/app/rutli-driver.jar`; `rutli-driver.jar.rc2` and `rutli-driver.jar.0.3.1-backup` beside it), certs subPath `certs` → `/rutli-certs`. State PVC `rutli-driver-state` → `/rutli-state/audit.jsonl`, `/rutli-state/journal`. HOCON in env `ADDITIONAL_CONFIG_RUTLI_KMS` (participant Helm value `additionalEnvVars`): `backend = "frost"`, bare-string endpoints `rutli-cosigner-<o>.rutli-cosigner.rutli.svc.cluster.local:9101`, `domain = "rutli-cosigner"`, `hosted-keys = true`, `delegate = "none"`, **no `key-prefix`**, no `approval` block (check in phase 0) |
 | Backups | **None automatic.** The exec CronJob was deleted (audit C3); the per-node backup sidecar arrives with [runbook-per-node-seal.md](runbook-per-node-seal.md). This runbook takes manual sealed-file copies before phases 1, 6 and 7 |
 | Load | `frost-signing` ≈ 4.8–5.5 k signs / 24 h, bursty; ECIES decrypts a few per day; namespace signs rare |
@@ -521,7 +521,7 @@ CLUSTER_ID=453bb4aea2088bb5
 ### 2.2 Stage the rc.3 jar next to the running one
 
 ```bash
-NODE=$(kubectl -n $PNS get pod -l app=participant -o jsonpath='{.items[0].spec.nodeName}'); echo $NODE   # agent-cx33-fsn-vkh
+NODE=$(kubectl -n $PNS get pod -l app=participant -o jsonpath='{.items[0].spec.nodeName}'); echo $NODE   # <node>
 kubectl -n $PNS run rutli-kms-rc3 --restart=Never --image=docker.io/library/busybox:1.36 \
   --overrides='{"spec":{"nodeSelector":{"kubernetes.io/hostname":"'$NODE'"},"containers":[{"name":"p","image":"docker.io/library/busybox:1.36","command":["sleep","3600"],"volumeMounts":[{"name":"b","mountPath":"/bundle"}]}],"volumes":[{"name":"b","persistentVolumeClaim":{"claimName":"rutli-kms-bundle"}}]}}'   # [MUTATES] helper pod
 kubectl -n $PNS wait --for=condition=Ready pod/rutli-kms-rc3 --timeout=180s

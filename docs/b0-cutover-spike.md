@@ -101,7 +101,7 @@ Work directory outside the repo: `mkdir -p ~/b0-drill/b0 && chmod 700 ~/b0-drill
 
 | Var | Command | Expected (seen 2026-10-08) |
 |---|---|---|
-| — | `kubectl config current-context` | `hcloud-cluster` |
+| — | `kubectl config current-context` | `<kube-context>` |
 | `PODS_PRE` | `kubectl -n $NS get deploy,sts,pvc,cronjob` | `participant`, `validator-app` 1/1, `strategy: Recreate`; PVCs `rutli-kms-bundle`, `rutli-driver-state`, `pg-data-postgres-0`, backup PVC |
 | `PARTICIPANT_REV_PRE`, `VALIDATOR_REV_PRE` | `helm -n $NS list` | participant **3** (splice-participant-0.9.0), validator **1** (splice-validator-0.9.0) |
 | values | `helm -n $NS get values participant -o yaml > ~/b0-drill/participant-values.pre-b0.yaml`, and the same for `validator` | participant `persistence.databaseName: participant`; validator `persistence.databaseName: cantonnet_validator`, `nodeIdentifier` = `validatorPartyHint` = `stakecraft-rutli-soak-1`, `topup.enabled: true` |

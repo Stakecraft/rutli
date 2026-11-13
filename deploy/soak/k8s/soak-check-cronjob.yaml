@@ -4,7 +4,7 @@
 # Daily soak gate on Kubernetes: runs deploy/soak/soak-check.sh (from the ConfigMap the
 # kustomization generates) against the cluster's kube-prometheus-stack. Metrics checks only — the
 # optional audit-chain check needs the driver's audit.jsonl, which lives on the participant's RWO
-# volume and cannot be mounted a second time (hcloud CSI: "Resource busy"); verify it by hand
+# volume and cannot be mounted a second time (the CSI driver: "Resource busy"); verify it by hand
 # instead, e.g. weekly:
 #   kubectl cp <ns>/<participant-pod>:/rutli-state/audit.jsonl ./audit.jsonl && \
 #     RUTLI_AUDIT_LOG=./audit.jsonl PROM=… deploy/soak/soak-check.sh
