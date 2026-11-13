@@ -111,7 +111,7 @@ contract.
 #### 2b: New database, new participant UID (same namespace)
 
 **Status: proven.** B0 (2026-10-09, the soak validator) and B4 (2026-10-14, a scratch JCE validator; the point of no
-return was crossed at 17:05:01Z, gates G1 to G7 green; destruction and teardown follow the GO). Runbook:
+return was crossed at 17:05:01Z, gates G1 to G7 green; GO and destruction 2026-10-15, teardown 2026-10-16). Runbook:
 [migration.md](migration.md); rehearsal plan: [b4-rehearsal.md](b4-rehearsal.md).
 
 The party move uses Splice's migrator (`migrateValidatorParty`, identities dump, `newParticipantIdentifier`). Removing
@@ -166,7 +166,7 @@ namespace and signing keys are threshold keys; the encryption key is not.
 | B1 | Canton key parser | Done |
 | B2 | Split ceremony ([split-ceremony.md](split-ceremony.md)) | Done; Codex adversarial review: nothing above low |
 | B3 | RSA import | Dropped (not needed) |
-| B4 | Cutover rehearsal on a scratch JCE validator | Cutover and verification done 2026-10-14; GO and destruction from 2026-10-15 17:11Z |
+| B4 | Cutover rehearsal on a scratch JCE validator | Done: cutover and verification 2026-10-14, GO and destruction 2026-10-15, teardown 2026-10-16 |
 | B5 | Docs fix (stale "unsupported" claims, exposure caveat) | Done |
 | B6 | Optional carry of signing and ECIES keys | Done: PR #23, merged 2026-10-15 (Opus and Codex reviews addressed) |
 | B7 | 2b rehearsal with wallet end-users: verify re-onboarding keeps their parties and balances | New, proposed |
@@ -208,6 +208,7 @@ v0.4.0.
 |---|---|---|
 | **Now** (docs) | Supported keys and algorithms, Canton compatibility matrix | In the README: which key is threshold, which is hosted, which Canton and Splice versions are tested. Done (#77) |
 | **v0.5.0** | Unified admin CLI | One tool for generate, import, public key and Canton fingerprint (`1220…`), and a documented rotation recipe (`rotate_kms_node_key`, `owner_to_key_mappings.rotate_key`). Today these are spread across `rutli-cosigner` and `rutli-dealer` |
+| **v0.5.0** | Shared-cluster guard | A DKG that returns an existing key says so, and the driver refuses a key it did not create unless the operator allows it. Today two participants with the same `frost.key-prefix` end up on the same Ed25519 keys without an error; only a `signer_acl` per driver certificate prevents it ([architecture.md](architecture.md), "One cluster, several participants") |
 | **v0.5.0** | Canton LocalNet quickstart | Rütli next to Splice's LocalNet, all in local containers, so an operator can try it in minutes without touching a real node |
 | **1.0** | Driver published to a Maven repository | Operators consume the driver as a normal dependency instead of a jar from a GitHub release |
 | **1.0** | Signed audit log, exported off the host | The hash chain is periodically signed and shipped to append-only storage (for example S3 Object Lock or syslog), so a host administrator can no longer rewrite it unnoticed |
