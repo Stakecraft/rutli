@@ -255,7 +255,7 @@ verified.
 ### Step 6 — refresh, then verify again
 
 ```sh
-rutli-cosigner --config <driver config> refresh --key-id "$KEY_ID"    # the refresh CronJob's cert
+rutli-cosigner --config <refresher config> refresh --key-id "$KEY_ID"  # a certificate on refresh_allowlist
 rutli-cosigner --config <operator config> verify-key --key-id "$KEY_ID" --expect-fingerprint "$FP" --sign-test
 ```
 
@@ -340,7 +340,7 @@ confirm `verify-key` reports the key absent on that node. Then start again from 
 | `verify-key`: different packages | nodes installed bundles from different dealer runs | `abort-import --yes-delete-installed-share` everywhere, restart those cosigners (§5), redo |
 | `verify-key`: a sign-test quorum fails | a node's secret share does not match the package (corrupted, mis-installed), or a node is down | do not proceed; `verify-key` names the quorum; investigate that node |
 | `refresh` fails | a node is down, or has no share | fix and re-run, then `verify-key`: a refresh refused at the fence or in part 1 changes nothing |
-| `refresh` half-applied on an imported key (`verify-key`: different packages, refresh counts disagree) | some nodes persisted the refreshed sharing, others did not | the key id is a **dead end**: there is no safe way to merge the two sharings. Re-run the whole ceremony under a **new `KEY_ID`** (new `CEREMONY`, Steps 1–7) from the old node's key, then cut over to the new id; abort the old id's leftovers per node. (Before the cutover the old node still holds the key.) |
+| after a `refresh`, `verify-key` shows different packages or refresh counts that disagree | the refresh is still staged on some node (a peer was unreachable at the commit), or a Byzantine cosigner split it (alert `RutliCeremonySplit`) | a staged refresh resolves by itself: every node's resolver retries every 30 s and signing continues meanwhile (`rutli_ceremonies_staged`); re-run `verify-key`. For a split, follow [ceremonies.md](ceremonies.md#a-split-ceremony-byzantine-cosigner). Since 0.4.0-rc.3 a refresh is two-phase, so an interruption no longer leaves the key id a dead end |
 | startup WARN `never been refreshed` | Step 6 not done | do Step 6 |
 
 ## 7. Verification anyone can repeat

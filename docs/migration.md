@@ -1,8 +1,8 @@
 # Migrating an existing Canton validator into Rütli
 
 **Status:** draft, corrected after the DevNet rehearsal of 2026-10-14 ([b4-rehearsal.md](b4-rehearsal.md), roadmap B4; results in the
-[soak log](soak-2026-10-devnet.md)). The cutover and verification ran green; destruction (Step 8) has not run yet, so treat
-Step 8 as unproven. The corrections are folded in below and listed in "Lessons from the B4 rehearsal".
+[soak log](soak-2026-10-devnet.md)). The cutover and verification ran green, and destruction (Step 8) and the teardown ran on
+2026-10-15 and 2026-10-16. The corrections are folded in below and listed in "Lessons from the B4 rehearsal".
 **Applies to:** Splice 0.9.x validators on Canton 3.6.x whose keys are held by Canton itself (JCE, keys in Postgres),
 moving into a Rütli cluster ≥ 0.4.0.
 **Audience:** the operator of the existing validator, and the operator of the Rütli cluster, if that is someone else.
