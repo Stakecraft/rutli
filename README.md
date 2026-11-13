@@ -32,10 +32,11 @@ If it leaks, an attacker controls the node. If it's lost, every party and Canton
 under that node is gone — permanently. And it **cannot be rotated**: there is no "issue a new one".
 
 Today the ways to protect it are all compromises: Canton's built-in KMS is **cloud-only** (AWS or GCP);
-the self-hosted alternatives are **proprietary** (Blockdaemon Builder Vault, MPCH
-Stronghold), and custody platforms (Fireblocks, Dfns) protect party and asset keys rather than the
-node's own. None is open-source, self-hosted, *and* real threshold-MPC — one a bank could run and
-certify entirely inside its own SOC 2 / ISO 27001 / DORA boundary.
+the self-hosted alternatives are either **proprietary** (Blockdaemon Builder Vault, MPCH
+Stronghold) or keep the whole key in a single KMS or HSM (Saxon's open-source drivers, proposed in
+[Dev Fund #950](https://github.com/canton-foundation/canton-dev-fund/pull/950)); and custody platforms
+(Fireblocks, Dfns) protect party and asset keys rather than the node's own. None is open-source,
+self-hosted, *and* real threshold-MPC — one a bank could run and certify entirely inside its own SOC 2 / ISO 27001 / DORA boundary.
 
 Rütli is that missing option — **the "Web3Signer/Teku of Canton."**
 
