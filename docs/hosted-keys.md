@@ -677,7 +677,7 @@ delegate.
 |---|---|---|
 | **v1** (shipped) | hosted RSA-2048 + AES-256-GCM; `delegate = "none"` becomes possible | no — replicated |
 | **v1.5** (shipped) | `EcdhDerive` + hosted EC-P256 keys; the driver completes ECIES with BouncyCastle | no — replicated |
-| **v2** | threshold ECIES via `frost-p256` — one stateless round, no nonce hazard | **yes** |
+| **v2** (planned for release 2.0, [roadmap.md](roadmap.md)) | threshold ECIES via `frost-p256` — one stateless round, no nonce hazard | **yes** |
 | **never** | threshold RSA | — |
 
 The load-bearing property of that table is that **v1.5 and v2 share a wire contract**: the cluster

@@ -489,7 +489,8 @@ triggers on `NOT_FOUND` either: reads, decrypt and symmetric crypto fail over on
 
 **v1.5** (shipped in 0.4.0-rc.1) adds `EcdhDerive` and hosted **EC-P256** keys — still whole keys — with the driver
 completing ECIES (KDF2 → AES-128-CBC → HMAC) via BouncyCastle's own `IESEngine`, so the byte-exact
-reference implementation stays in the JVM next to Canton's encryptor. **v2** makes that path
+reference implementation stays in the JVM next to Canton's encryptor. **v2** (planned for release
+2.0, [roadmap.md](roadmap.md)) makes that path
 genuinely *threshold* via `frost-p256`: with Shamir shares `dᵢ` of `d`, each node returns `λᵢ·dᵢ·R`
 and the leader sums the points — one stateless round, **no nonce state**, and therefore none of the
 footgun documented above. The wire contract is identical for v1.5 and v2, so promoting a key class
