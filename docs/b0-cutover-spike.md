@@ -1,6 +1,6 @@
 # B0: cutover spike on the soak validator (runbook, B0-B)
 
-**Status:** ready for review, 2026-10-08. **Roadmap item:** B0 in [roadmap-migration.md](roadmap-migration.md).
+**Status:** ready for review, 2026-10-08; run on 2026-10-09, **GO** ([soak log](soak-2026-10-devnet.md); verdict in [roadmap.md](roadmap.md)). **Roadmap item:** B0 in [roadmap-migration.md](roadmap-migration.md).
 **Target:** `stakecraft-devnet-rutli-01` (Splice 0.9.0 / Canton 3.6.1, driver 0.3.1, cosigners 0.3.1).
 **Shape (decided 2026-10-08):** a **new participant UID under the same FROST namespace**. The validator
 party and its contracts move to the new participant; the old participant is offboarded.

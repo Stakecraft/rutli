@@ -21,8 +21,8 @@ How to scrape: see [`observability.md`](observability.md).
 ## DevNet reference (multi-region k8s)
 
 **Captured:** 2026-07-20 · image `ghcr.io/stakecraft/rutli-cosigner:0.2.1` · threshold **2-of-3**  
-**Topology:** three cosigners on Hetzner agents in **HEL / NBG / FSN** (separate AZs), mTLS + sealed
-shares; Splice DevNet participant in HEL driving the cluster (`stakecraft-devnet-rutli-01`).
+**Topology:** three cosigners in three separate data centers (separate AZs), mTLS + sealed
+shares; a Splice DevNet participant in the same region as one of them driving the cluster.
 
 | Metric | Value |
 |---|---|
@@ -41,15 +41,15 @@ estimates, which is why the mean from `sum/count` is the headline number here. L
 export a true histogram (buckets in [`observability.md`](observability.md#sign-latency-histogram)),
 so re-captures should report p50/p95/p99 from `histogram_quantile()` over the run window.
 
-**How to read this:** ~100 ms mean for a **cross-region** 2-of-3 FROST sign (HEL leader ↔ NBG/FSN
-peers) is the realistic multi-DC figure. Same-rack / single-AZ lab clusters will be faster; do not
-cite DevNet numbers as co-located latency.
+**How to read this:** ~100 ms mean for a **cross-region** 2-of-3 FROST sign (leader ↔ peers in
+two other data centers) is the realistic multi-DC figure. Same-rack / single-AZ lab clusters will
+be faster; do not cite DevNet numbers as co-located latency.
 
 ### Reproduce
 
 ```sh
 # Per-cosigner (leader holds the counters)
-kubectl -n rutli port-forward pod/rutli-cosigner-0 9200:9200
+kubectl -n rutli port-forward pod/rutli-cosigner-n1-0 9200:9200   # pod names of deploy/k8s
 curl -s localhost:9200/metrics | grep -E '^rutli_sign_|^rutli_ceremony_'
 
 # Mean latency (seconds → ms)
@@ -91,5 +91,5 @@ Suggested soak gates (already in spirit of [`testnet-soak.md`](testnet-soak.md))
 ## What we deliberately do *not* claim
 
 - Throughput of the Canton participant or Splice validator-app (those dominate wall-clock for many flows).  
-- Encryption-key latency (software/HSM delegate — not FROST).  
+- Encryption-key latency (delegate or cluster-hosted keys — not FROST).  
 - MainNet or audited production SLOs — DevNet evidence only until soak + audit close.

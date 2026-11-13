@@ -9,8 +9,8 @@ Rütli holds that key as a `t`-of-`n` FROST sharing: no machine ever holds the w
 survives the loss of up to `n − t` cosigners with no action at all. This runbook covers the cases
 beyond that.
 
-The cluster can also hold **non-FROST key material** — the RSA-2048 encryption keypair and AES-256-GCM
-symmetric keys ("cluster-hosted keys"). Those are **replicated whole keys, not threshold shares**:
+The cluster can also hold **non-FROST key material** — the RSA-2048 or EC P-256 (ECIES) encryption
+keypair and AES-256-GCM symmetric keys ("cluster-hosted keys"). Those are **replicated whole keys, not threshold shares**:
 generated on one cosigner, replicated to all, sealed at rest per node, and any node can serve a
 decrypt on its own. That difference runs through this runbook in both directions — hosted keys are
 much easier to recover than a share (§3c), and a single compromised cosigner yields one of them
@@ -28,7 +28,7 @@ key, Canton can rotate them.
 | Suspected key compromise (≥ `t` shares may be exposed) | Mitigate, not undo | The key cannot be rotated. **Proactively refresh** (invalidates pre-refresh shares) and escalate to a governance decision on the node's future. See `docs/phase-2-frost.md`. |
 | A cosigner rebuilt, its **cluster-hosted** keys gone with it | Yes, automatically | It pulls them back from a peer — read-repair on demand, anti-entropy within one sweep (§3c). No backup needed while ≥ 1 cosigner still holds the key. |
 | Every copy of a **cluster-hosted** key lost (whole cluster, no backup) | Only from backups | Restore **one** node's own backup onto that node (§3); the cluster re-replicates from it. With no backup the key is gone — rotate in Canton and accept §3b's bounded data gap. |
-| Seal **master secret** lost (backups intact but unopenable) | Only from an export | A sealed backup is useless without the master secret. An `export-key` artifact taken beforehand is the only recovery — see §3d. Without either, the key is gone: rotate in Canton and accept §3b's bounded gap. |
+| Every **seal bundle** (or the legacy master secret) lost (backups intact but unopenable) | Only from an export | A sealed backup is useless without its node's seal bundle. An `export-key` artifact taken beforehand is the only recovery — see §3d. Without either, the key is gone: rotate in Canton and accept §3b's bounded gap. |
 | A **cluster-hosted** encryption key exposed | Mitigate, not undo | Rotate the key in Canton topology (the namespace key signs it; node identity is untouched). Rotation protects future traffic only — recorded traffic encrypted to the old key stays readable to whoever holds it. |
 | A cosigner restored from an **old backup** / volume snapshot | Yes, detected | `restore` refuses to roll a share back to an older epoch, even with `--force` (§1). A snapshot rollback or a break-glass restore is caught at the node's next start: its share is marked stale and refused for signing until current (`RutliStaleShare`). |
 | A hosted key **deleted** by mistake | Yes, within the grace period | `hosted-undelete` on every node (§3g) — the tombstone retains the material for `hosted_keys.delete_grace_secs` (7 days). |
@@ -94,10 +94,11 @@ the backup path) — keep the two recovery inputs in separate trust domains.
 mounted by that cosigner's pod and by nothing else, ever — not a backup Job, not a debug pod, not a
 sidecar. On 2026-10-07 the DevNet soak lost all signing for five minutes (54 failed signs) because a
 backup CronJob bound `cosigner-0`'s ReadWriteOnce claim into a second pod: the extra mount left
-`data_dir/keys` unreadable to the running cosigner, whose health check does not touch the key store,
-so it stayed in rotation and answered every Sign with `INTERNAL` — and the driver deliberately does
-not fail over on `INTERNAL`, so a sick leader at position 0 blocked the participant until the pod was
-restarted (`soak-2026-10-devnet.md`, incident #1).
+`data_dir/keys` unreadable to the running cosigner, whose health check did not then touch the key
+store, so it stayed in rotation and answered every Sign with `INTERNAL` — and the driver then did not
+fail over on `INTERNAL`, so a sick leader at position 0 blocked the participant until the pod was
+restarted (`soak-2026-10-devnet.md`, incident #1). Both were fixed in 0.3.1 (readiness `health`
+checks the key store; a sign fails over on a leader-side `INTERNAL`).
 
 Since 0.4.0-rc.2 the backup runs **in the cosigner's own pod**: with `topology: perNode` and
 `backup.enabled=true` (the Helm chart; `deploy/k8s` renders the same), each pod has a `backup`
@@ -133,7 +134,8 @@ whatever its access mode or `fsGroup`.
 Cluster-hosted keys live in the same `data_dir/keys/` directory (one sealed file per key id), so
 these two commands already cover them — there is no second backup procedure and no sibling directory
 to forget. Two properties follow from the sealing: a node's backup restores onto **that node**
-(the sealing DEK is derived from the master secret, salted by node id), and hosted keys minted after
+(the sealing DEK is that node's own, from its seal bundle; on the legacy shared master it is derived
+from the master, salted by node id), and hosted keys minted after
 the backup was taken are re-acquired from the peers on their own, so a stale backup is not a stale
 key set. See §3c for what that self-healing does and does not cover.
 
@@ -189,19 +191,23 @@ key was never persisted — no backup contains it.
 **Prevention:** never run a real node with a heap-only software delegate. Three durable options,
 best first for a deployment without an HSM.
 
-**(a) Host the encryption key in the cluster.** The cosigners hold the RSA-2048 encryption keypair
-and the AES-256-GCM symmetric key themselves, so no key material sits on the participant host at all:
+**(a) Host the encryption key in the cluster.** The cosigners hold the encryption keypair (RSA-2048
+or EC P-256 ECIES) and the AES-256-GCM symmetric key themselves, so no key material sits on the
+participant host at all:
 
 ```json
 {
   "share_seal": { "secret_file": "/run/rutli/seal/node.json" },
-  "hosted_keys": { "enabled": true, "write_quorum": 2, "anti_entropy_interval_secs": 300 }
+  "hosted_keys": { "enabled": true, "write_quorum": 2, "anti_entropy_interval_secs": 300,
+                   "commitment_key": "<64 hex>" }
 }
 ```
 
-on every cosigner (config validation refuses `hosted_keys` without `share_seal` — a whole private key
-must never sit unsealed on disk), and on the driver side `frost.hosted-keys = true`, which routes key
-ids prefixed `rutli-` to the cluster alongside `frost-`. With that, `delegate = "none"` becomes
+on every cosigner, with each `peers[]` entry carrying that node's `dist_public_key` (config
+validation refuses `hosted_keys` without `share_seal` — a whole private key must never sit unsealed
+on disk — and, on a seal bundle, without the commitment key and every peer's pin), and on the driver
+side `frost.hosted-keys = true`, which routes key ids tagged `rutli-` to the cluster alongside
+`frost-`. With that, `delegate = "none"` becomes
 possible: no HSM, no local key state, nothing on the participant to lose across a restart.
 
 What this is and is not: these are **replicated whole keys, not threshold shares** — three sealed
@@ -264,11 +270,12 @@ replicas instead of minting a second key under the same name.
 **Preconditions.** A rebuilt node that misses one of these repairs nothing — it logs the failure
 rather than silently continuing with a wrong or empty key set:
 
-- the **same node identifier** and the **same master seal secret**: the X25519 key peers wrap
-  material to is derived from that secret (HKDF, salted by node id), and every envelope is addressed
-  to one recipient — a wrong secret means peers wrap to a key this node cannot open;
-- the **same cluster CA**: envelopes are AAD-bound to a cluster id derived from the CA certificate,
-  so material cannot cross trust domains;
+- the **same node identifier** and the **same seal bundle** (legacy: the same master seal secret):
+  the X25519 key peers wrap material to comes from the bundle's distribution seed (legacy: HKDF of
+  the master, salted by node id) and is pinned by every peer, and every envelope is addressed to one
+  recipient — a wrong bundle means peers wrap to a key this node cannot open;
+- the **same cluster id**: envelopes are AAD-bound to it (the pinned `cluster_id`, else derived
+  from the CA file), so material cannot cross trust domains;
 - the rebuilt node's certificate CN present in every peer's `peer_allowlist` — replication runs over
   the mesh Peer API, which is allowlisted;
 - **at least one live cosigner that still holds the key.**
@@ -301,7 +308,7 @@ gone: rotate the node's DEK (`seal rotate-dek`, §3h) and drop the previous one 
 
 ## §3d Recovering with an exported key (seal secret lost, or moving clusters)
 
-`backup` cannot help in two cases: the seal master secret is gone (every sealed file is ciphertext
+`backup` cannot help in two cases: the seal bundles (or legacy master) are gone (every sealed file is ciphertext
 you can no longer open), or you need the key in a *different* cluster. An export artifact covers
 both, because it is protected by its own passphrase rather than by the cluster's seal secret.
 
@@ -331,8 +338,10 @@ once installed and refreshed, an ordinary FROST key: §1–§3 apply unchanged, 
 its share (provenance included, inside the sealed file), and `verify-key` is the post-recovery check.
 Three things differ:
 
-- **Founding backups come after the first refresh, never before.** Suspend the backup CronJob for
-  the ceremony window: a backup taken between `import-share` and the refresh holds the *dealt*
+- **Founding backups come after the first refresh, never before.** Keep backups out of the ceremony window. On Kubernetes
+  the per-pod `backup` sidecar runs daily at `backup.dailyAtUtc` and at every pod start and cannot
+  be paused: schedule around the daily run and restart no cosigner between `import-share` and the
+  refresh. A backup taken between `import-share` and the refresh holds the *dealt*
   shares, and `t` of those plus the seal secret are the key as the dealer produced it. Any such
   backup goes on the ceremony's destruction list. The daemon logs a startup WARN for every imported
   key that has never been refreshed.
@@ -471,7 +480,7 @@ the master.
   (`cluster_id`) so the CA file can change without touching it.
 - A **proactive-refresh schedule** so a share exposed at any point has a bounded useful lifetime.
 - A decision, recorded, on whether to take an **`export-key` artifact** for each hosted key. It is
-  the only recovery from a lost seal master secret, and it cannot be produced retroactively — but it
+  the only recovery from lost seal bundles (or legacy master), and it cannot be produced retroactively — but it
   is also a portable copy of a private key, so storing one is a deliberate tradeoff, not a default.
 - A **key-ceremony record**: who ran DKG, the `t`/`n` chosen, cosigner host/account/region for each
   share, and where each backup + seal secret lives. Keep it with your BCP documentation. For an
@@ -479,7 +488,8 @@ the master.
   ([split-ceremony.md](split-ceremony.md) §8), and founding backups taken **after** its first
   refresh (§3e).
 - **If hosted keys are enabled:** the same backup discipline covers them for free, but the input that
-  actually decides recoverability is the **master seal secret** — without it a rebuilt node can
+  actually decides recoverability is the node's **seal bundle** (legacy: the master seal secret) —
+  without it a rebuilt node can
   neither open its own backup nor accept a replica from a peer. Rehearse a rebuild with an empty
   `keys/` directory and confirm the node re-acquires its hosted keys (the cluster tests
   `a_node_that_missed_a_write_is_repaired_and_then_serves_decrypts` and

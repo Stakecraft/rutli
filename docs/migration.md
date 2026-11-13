@@ -7,7 +7,7 @@
 moving into a Rütli cluster ≥ 0.4.0.
 **Audience:** the operator of the existing validator, and the operator of the Rütli cluster, if that is someone else.
 **This page is Flow 2b** (new participant UID, fresh database). To keep the same participant, database and UID and carry
-every key in place (Flow 2a, rehearsed as B8 on 2026-10-26), use [runbook-migration-inplace.md](runbook-migration-inplace.md);
+every key in place (Flow 2a, rehearsed as B8 from 2026-10-23 to 2026-11-12), use [runbook-migration-inplace.md](runbook-migration-inplace.md);
 the choice between the two is in [roadmap.md](roadmap.md), "2a versus 2b".
 
 ---
@@ -66,7 +66,9 @@ also hold `t` seal secrets. Details: [split-ceremony.md](split-ceremony.md) §1.
 ## 3. Before you start
 
 - [ ] **Rütli cluster ≥ 0.4.0** on every cosigner, `share_seal` and mTLS on. Per-node TLS (`tls.layout: perNode` or the
-      `tls-select` init container). `operatorAllowlist` lists an operator certificate issued by the cluster CA. For ECIES, every
+      `tls-select` init container). `operatorAllowlist` lists an operator certificate issued by the cluster CA, and
+      `refreshAllowlist` a refresher certificate for the refresh in Step 3 (since 0.4.0-rc.6 every node requires the
+      ceremony intent it signs). For ECIES, every
       cosigner is upgraded **and up** when the encryption key is created ([hosted-keys.md](hosted-keys.md) §2).
 - [ ] **Driver ≥ 0.4.0** jar for the new participant, its sha256 recorded. The cluster's driver client certificate.
 - [ ] **Network reachability:** the new participant's pods reach the cosigners on 9101. In the cosigner chart's NetworkPolicy,
@@ -202,8 +204,9 @@ participant again.
 - **Party unhosted for seconds to minutes** between unhosting on the old participant and hosting on the new one. Transactions that
   need it fail meanwhile.
 - **Purchased traffic** of the old member is lost.
-- **Shared cluster:** `frost.key-prefix` separates key ids, not authority. Any holder of the cluster's driver certificate can address any
-  key id. Use your own cluster, or your own driver CN with approval rules ([architecture.md](architecture.md)).
+- **Shared cluster:** `frost.key-prefix` separates key ids, not authority. Any holder of a driver certificate without a
+  `signer_acl` entry can address any key id. Use your own cluster, or your own driver CN with a `signer_acl` entry for your
+  prefix ([approval-quorum.md](approval-quorum.md)) and approval rules ([architecture.md](architecture.md)).
 - **ECIES** needs every cosigner upgraded and up when the key is created. RSA does not, and remains available.
 - **Cluster residue:** imported and DKG keys cannot be deleted from the cluster (by design). A failed attempt leaves its ids behind.
 
@@ -381,7 +384,8 @@ a. **Console visibility.** `admin.api.client.data.SequencerConnections.toInterna
    p.keys.secret.generate_signing_key("signing", SigningKeyUsage.ProtocolWithProofOfOwnership ++ SigningKeyUsage.SequencerAuthenticationOnly, Some(SigningKeySpec.EcCurve25519))
    ```
 
-   The same usage set goes into `register_kms_signing_key`. Export the identity snapshot with `protocolVersion = Some("35")`.
+   The same usage set goes into `register_kms_signing_key`. Export the identity snapshot with the synchronizer's protocol
+   version (`Some("35")` in B4; read it from the connected synchronizer, DevNet has since moved to 36).
 b. **`connect_by_config(…, validation = SequencerConnectionValidation.Active)`** takes the admin-data type
    (`com.digitalasset.canton.admin.api.client.data`), not the one in `sequencing`.
 c. **Helm 4 uses server-side apply.** An earlier `kubectl patch` of the Deployment (we patched probes) makes `helm upgrade` fail with

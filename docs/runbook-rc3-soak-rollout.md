@@ -1,5 +1,7 @@
 # Runbook: batch C on the DevNet soak (0.4.0-rc.2 → 0.4.0-rc.3, legacy topology)
 
+**Status:** phases 1–5 done 2026-10-18 to 2026-10-20. Kept as the record of that rollout.
+
 Rolls audit-remediation **batch C** (ceremony protocol 2, epochs, cosigner-enforced signing
 intents, rate limits, sign journals, key-file v2, DEK rotation, hosted-key tombstones) out to the
 DevNet soak, in the order `CHANGELOG.md` gives ("Rollout order across batch C", steps 0–9) and

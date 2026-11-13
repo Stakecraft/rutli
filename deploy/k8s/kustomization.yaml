@@ -13,7 +13,7 @@ resources:
   - cosigner.yaml
   - client-config.yaml
   # Opt-in: cronjob-refresh.yaml needs KEY_ID and the refresher's cert (rutli-refresher-tls), and
-  # every cosigner on 0.4.0-rc.2+; see its header. There is no backup CronJob: each pod's backup
+  # every cosigner on 0.4.0-rc.3+; see its header. There is no backup CronJob: each pod's backup
   # sidecar does it.
   # - cronjob-refresh.yaml
 images:

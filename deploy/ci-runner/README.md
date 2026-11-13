@@ -32,9 +32,9 @@ What the VM still exposes:
   secrets that a job is given are visible to that job as on any runner.
 - **Whatever you put in the VM.** Do not copy credentials into it or add mounts.
 
-Consequences: use the runner only for this repository's own branches. While the repository is
-private that means trusted branches only; once it is public, the guard in "Public repository"
-below must be installed first, and fork pull requests never reach the runner.
+Consequences: use the runner only for this repository's own branches. The repository is public,
+so the guard in "Public repository" below must be installed first, and fork pull requests never
+reach the runner.
 
 `scripts/ci-runner-up.sh` enforces the isolation rather than assuming it. It refuses to continue
 if the VM mounts anything other than the empty directory read-only, if the `colima-rutli-ci`
@@ -43,7 +43,7 @@ under `$HOME`. It never falls back to the default Docker context.
 
 ## Public repository
 
-Once the repository is public, anyone can open a pull request from a fork, and a fork PR runs the
+The repository is public, so anyone can open a pull request from a fork, and a fork PR runs the
 workflow file **from the PR**. It can therefore rewrite `runs-on` and target this runner's labels.
 Three layers keep fork code off the self-hosted runners:
 
@@ -123,7 +123,8 @@ Follow the runner: `docker --context colima-rutli-ci compose -f deploy/ci-runner
 
 ## Route CI to it, and back
 
-Each job in `ci.yml` runs on `${{ vars.CI_RUNNER || 'ubuntu-latest' }}`.
+Each job in `ci.yml` runs on `vars.CI_RUNNER`, or on `ubuntu-latest` when it is unset and for every
+pull request from a fork (see "Public repository").
 
 ```bash
 gh variable set CI_RUNNER --body rutli-ci --repo Stakecraft/rutli      # use the self-hosted runner

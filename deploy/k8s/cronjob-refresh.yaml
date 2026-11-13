@@ -1,7 +1,7 @@
 # Copyright 2026 StakeCraft
 # SPDX-License-Identifier: Apache-2.0
 #
-# Enable only on a cluster where EVERY cosigner runs 0.4.0-rc.2 or later (ceremony protocol 2: the
+# Enable only on a cluster where EVERY cosigner runs 0.4.0-rc.3 or later (ceremony protocol 2: the
 # leader never sees a round-2 package, audit C1; two-phase commit, audit H1). Never on a mixed
 # cluster. See docs/ceremonies.md.
 #

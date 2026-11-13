@@ -18,6 +18,9 @@ the cluster while preparing it. Commands marked `# [MUTATES]` change the cluster
 > **Do NOT run `refresh` (or enable any refresh CronJob) until the ceremony fixes ship** (audit C1:
 > the leader sees every round-2 package of a DKG/refresh; H1: a refresh interrupted between nodes
 > can leave the nodes on mixed share epochs). This migration does not touch either.
+>
+> As of 0.4.0-rc.6: the fixes shipped in 0.4.0-rc.3 (ceremony protocol 2) and the soak runs rc.6.
+> Still run no refresh during this migration.
 
 ## Prerequisites
 
@@ -30,8 +33,8 @@ the cluster while preparing it. Commands marked `# [MUTATES]` change the cluster
   rutli-cosigner` in `frost/`), `kubectl` access to the soak cluster, `helm` 3, `openssl`, `jq`.
 - The operator client config used for `verify-key` in B4 (`client-operator.json`, operator cert),
   or the driver cert.
-- A maintenance window: step 5 has a **full signing gap** of roughly 30–90 s while the hcloud
-  volumes re-attach. Topology signs are rare; Canton retries. Avoid the backup minute (03:17 UTC).
+- A maintenance window: step 5 has a **full signing gap** of roughly 30–90 s while the volumes
+  re-attach. Topology signs are rare; Canton retries. Avoid the backup minute (03:17 UTC).
 
 Work in a private, short-lived directory (tmpfs if you have one) and keep it off shared storage:
 
@@ -49,7 +52,7 @@ helm -n rutli history rutli | tail -3                       # note the current R
 helm -n rutli get values rutli -o yaml > $D/rutli-values.exported.yaml
 cat $D/rutli-values.exported.yaml                           # expect hostedKeys.enabled: true, storageClassName, operatorAllowlist
 
-# The cosigners run rc.2 on the legacy topology.
+# The cosigners run rc.2 or later on the legacy topology.
 kubectl -n rutli get pods -o wide                           # rutli-cosigner-0/1/2, 3/3 Ready, three hosts
 kubectl -n rutli logs rutli-cosigner-0 -c cosigner | grep -E 'verified under its own server name|legacy SHARED master'
 
@@ -69,7 +72,7 @@ certificate re-issue under the CA-rotation runbook first.)
 
 ```sh
 # The data claims the new StatefulSets will reuse, and their volumes.
-kubectl -n rutli get pvc                                    # data-rutli-cosigner-0/1/2, Bound, RWO, hcloud-volumes
+kubectl -n rutli get pvc                                    # data-rutli-cosigner-0/1/2, Bound, RWO
 kubectl get pv $(kubectl -n rutli get pvc -o jsonpath='{.items[*].spec.volumeName}') \
   -o custom-columns=NAME:.metadata.name,CLAIM:.spec.claimRef.name,RECLAIM:.spec.persistentVolumeReclaimPolicy
 
@@ -291,5 +294,7 @@ Only after step 6 passed (ideally after a day of clean soak-check):
 - Backups now land on each node's own backup PVC (newest 14). To ship them off-cluster, switch
   `backup.destination.type` to `script` with per-node credentials (`nodes[].backupSecret`) and an
   egress rule (chart README, "Backups").
-- Still **no refresh** until the C1/H1 fixes ship. Treat every key DKG'd or refreshed on ≤ rc.2 as
-  exposed to the then-leader's memory (P9); DevNet soak keys stay test material.
+- Refresh needs every cosigner on 0.4.0-rc.3 or later (the C1/H1 fixes), and since 0.4.0-rc.6 a
+  client-signed ceremony intent (`deploy/k8s/cronjob-refresh.yaml`). Treat every key DKG'd or
+  refreshed on ≤ rc.2 as exposed to the then-leader's memory (P9); DevNet soak keys stay test
+  material.

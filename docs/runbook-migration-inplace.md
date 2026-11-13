@@ -74,7 +74,7 @@ _rf() { [ -s $D/con/$1 ] && cat $D/con/$1; }
 export PDB=$(_rf PDB.txt) P_REV0=$(_rf P_REV0.txt) IMAGE_PARTICIPANT=$(_rf IMAGE.txt) NS_FP=$(_rf NS_FP.txt) SIG_FP=$(_rf SIG_FP.txt) ENC_FP=$(_rf ENC_FP.txt)
 [ -n "$NS_FP" ] && export NS_ID=${PREFIX}frost-import-${NS_FP:4:8} SIG_ID=${PREFIX}frost-import-sig-${SIG_FP:4:8} ENC_ID=${PREFIX}rutli-enc-imported-${ENC_FP:4:8}
 P()  { kubectl -n $NS exec $PG_POD -c postgres -- psql -U $PG_USER -At "$@"; }        # read-only unless the SQL says otherwise
-kx() { local i=$1; shift; kubectl -n $RNS exec rutli-cosigner-$((i-1)) -c cosigner "$@"; }   # node i; perNode topology: rutli-node-<i>-0
+kx() { local i=$1; shift; kubectl -n $RNS exec rutli-cosigner-$((i-1)) -c cosigner "$@"; }   # node i; perNode topology: rutli-cosigner-n<i>-0
 cs() { local i=$1; shift; kx $i -- rutli-cosigner --config /config/cosigner-$i.json "$@"; }
 rc() { RUST_LOG=warn $RC --config $D/cer/client.json "$@"; }
 pf_start() { pf_stop; for o in 0 1 2; do ( while true; do kubectl -n $RNS port-forward pod/rutli-cosigner-$o 1910$((o+1)):9101 >/dev/null 2>&1; sleep 1; done ) & done; sleep 4; }
@@ -372,7 +372,9 @@ yq '.additionalEnvVars += [{"name":"ADDITIONAL_CONFIG_NO_AUTOCONNECT","value":"c
 diff <(helm -n $NS get manifest participant) <(helm template participant $CHART_PARTICIPANT --version $CHART_VER -n $NS -f $D/participant-values.pre.yaml -f $D/participant-switch.yaml) | grep -E '^[<>]' | cut -c1-150
 ```
 Expect only the label, three env vars, three mounts, two volumes. **STOP on any database or host change.** `sign-intents`
-defaults to on; leave it out.
+defaults to on; leave it out. The endpoints and `domain` above are the legacy topology's (B8). On a `perNode` cluster list
+`{ url = "rutli-node-<i>.$RNS.svc:9101", tls-name = "cosigner<i>" }` per node instead: certificates issued since
+0.4.0-rc.2 carry no shared `rutli-cosigner` name.
 
 **4.1 Pre-switch check** (read-only): `con pre ids precheck` with the 0.2 key/OTK assertions repeated (keys unchanged, OTK
 serial recorded, connected); `helper; kubectl -n $NS exec rutli-kms-populate -c p -- sh -c 'cd /bundle && sha256sum -c
@@ -576,8 +578,8 @@ P -d $PDB -c "VACUUM (FULL) participant.common_crypto_private_keys"; for i in 1 
 P -d $PDB -c "select count(*) from participant.common_crypto_private_keys" -c "select count(*) from participant.common_kms_metadata_store"
 ```
 Expect `CLEANUP-COMMITTED`, `0`, `3` (4–5 after rotations). STOP on `ROLLED-BACK-…`. Start the participant (auto-connect
-on), rerun the 4.11 console check, the validator with the 4.12 guard, then resume the backup job and prove the next dump
-has 0 private-key rows. `CHECKPOINT`/`pg_switch_wal` need a superuser.
+on), rerun the 4.11 console check once its admin API answers, and only then start the validator with the 4.12 guard; then
+resume the backup job and prove the next dump has 0 private-key rows. `CHECKPOINT`/`pg_switch_wal` need a superuser.
 
 Observed in the rehearsal: `CLEANUP-COMMITTED`, then `0` and `5`. The participant came back on the same revision,
 reconnected by itself with no `ERROR` line, and passed the console check and the ping; the validator logged `Node has

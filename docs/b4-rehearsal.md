@@ -1,6 +1,7 @@
 # B4: cutover rehearsal, a JCE validator moved into Rütli (DevNet plan)
 
-**Status:** plan, ready for review, 2026-10-09. **Roadmap item:** B4 in [roadmap-migration.md](roadmap-migration.md).
+**Status:** plan, ready for review, 2026-10-09; run on 2026-10-14, GO 2026-10-15, destruction 2026-10-15, teardown
+2026-10-16 ([soak log](soak-2026-10-devnet.md)). **Roadmap item:** B4 in [roadmap-migration.md](roadmap-migration.md).
 **Output:** a proven run of [migration.md](migration.md), the pilot runbook, and its corrections.
 **Who runs it:** the operator (Alex) runs every command marked **[MUTATES]**. Claude prepares and reads only
 (`kubectl get/describe/logs`, `helm get/list/status/template`). "Seen 2026-10-09" values come from a read-only

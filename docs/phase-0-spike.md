@@ -6,6 +6,9 @@
 > key types born in the driver and identity topology signed through it — verified on both the
 > KMS-default path (EC-P256/ECDSA) and the production-target path (**Ed25519 namespace key**, the
 > exact algorithm+format the Phase 2 FROST backend produces).
+>
+> As of 0.4.0-rc.6 the build and the devnet target Canton 3.6.1: run the commands below with
+> `v3.6.1` and a 3.6.x `CANTON_HOME` ([QUICKSTART.md](../QUICKSTART.md)).
 
 **Goal:** kill all Canton-integration risk before writing any product or MPC code. Prove that a
 custom `KmsDriver` we control can be loaded by a real Canton node and used to generate and sign

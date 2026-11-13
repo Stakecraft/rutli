@@ -39,10 +39,20 @@ myNode.topology.owner_to_key_mappings.remove_key(oldKey.fingerprint, oldKey.purp
 ```
 
 **With Rütli there is nothing extra to do.** `rotate_node_key(s)` calls the driver's
-`generateSigningKeyPair` / `generateEncryptionKeyPair` to mint the new key in the backend (HSM or
-software), then Canton signs the topology change with the namespace key (which, for a `frost` node,
-is the threshold signature). The new key lives behind the same driver; the old one is deactivated.
-Rotate on your normal schedule, or immediately if a non-root key is suspected exposed.
+`generateSigningKeyPair` / `generateEncryptionKeyPair` to mint the new key in the backend, then
+Canton signs the topology change with the namespace key (which, for a `frost` node, is the
+threshold signature). On a `frost` node a new Ed25519 signing key is a FROST DKG (the driver signs
+its ceremony intent when intents are on), and a new encryption key is a cluster-hosted key (`hosted-keys = true`) or
+goes to the delegate. The new key lives behind the same driver; the old one is deactivated but
+stays registered. Do not `keys.secret.delete` it: under KMS that deletes the key in the backend,
+and it may still be needed to decrypt views in flight. Rotate on your normal schedule, or
+immediately if a non-root key is suspected exposed.
+
+The in-place migration rehearsal (B8, 2026-11-01) rotated the encryption key onto a new hosted
+ECIES key and the signing key onto a new FROST key with `generate_encryption_key` /
+`generate_signing_key` and `owner_to_key_mappings.rotate_key`, with the cosigners on
+0.4.0-rc.6. `rotate_node_keys()` itself was not rehearsed. The commands are in
+[runbook-migration-inplace.md](runbook-migration-inplace.md) 5.2.
 
 ## Why the namespace root key cannot be rotated
 
@@ -73,9 +83,17 @@ When the root key is held online in the FROST cluster, you can't change the key,
 re-randomize the **shares** under it — same public key, same identity, fresh secret material:
 
 ```sh
-rutli-cosigner --config /etc/rutli/cosigner-1.json \
+rutli-cosigner --config /etc/rutli/client-refresher.json \
   refresh --key-id frost-<participant>-namespace
 ```
+
+The config is a client config with the refresher certificate, whose CN is on every cosigner's
+`refresh_allowlist` (the driver certificate can refresh only while
+`signing_policy.signer_may_refresh` is on). The command signs a ceremony intent with that
+certificate when it can learn the cluster id (`cluster_id` in its config, or a majority of the
+roster). Without an intent a TLS cosigner refuses the refresh by default
+([ceremonies.md](ceremonies.md#ceremony-intents), `deploy/k8s/cronjob-refresh.yaml`). A
+cosigner's own certificate is refused.
 
 Run it on a schedule. Any share an attacker may have captured is now useless — they must re-breach
 ≥ `t` cosigners within a single refresh window. This is the closest thing to "rotating" the root, and

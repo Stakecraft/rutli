@@ -115,22 +115,23 @@ are the key).
 - [ ] Cluster healthy: all `n` cosigners ready, version ≥ 0.4.0, mTLS and `share_seal` on (no
       `share sealing DISABLED` / `running WITHOUT TLS` in any log).
 - [ ] `KEY_ID` absent on every node, and no DKG for it was ever attempted.
-- [ ] **Cosigner backups suspended** for the ceremony window, so no backup captures dealt shares:
-      `kubectl -n rutli patch cronjob rutli-cosigner-backup -p '{"spec":{"suspend":true}}'`
-      (raw manifests: `cosigner-backup`). Same for any refresh CronJob on this key id.
+- [ ] **No cosigner backup in the ceremony window**, so no backup captures dealt shares. The
+      `backup` sidecar runs daily at `backup.dailyAtUtc` and at pod start (`backup.runOnStart`):
+      keep Steps 4–6 clear of the daily run and restart no cosigner in between; a backup that runs
+      anyway goes on the destruction list. Suspend any refresh CronJob on this key id.
 - [ ] Dealer host: an air-gapped machine booted from a live medium, **no swap** (`swapon --show`
       empty), no core handler (`sysctl kernel.core_pattern` not starting with `|`,
       `fs.suid_dumpable` ≠ 2), running as root (so `rutli-dealer` can `mlockall`). The
       `rutli-dealer` binary built from the release tag; its `sha256sum` recorded.
 - [ ] The cluster CA certificate on the dealer host: **the exact file** the cosigners use as
       `tls.ca_cert` (the cluster id is a hash of its bytes); its SHA-256 compared by a witness with
-      the one in the cluster (`kubectl -n rutli exec cosigner-0 -c cosigner -- sha256sum /certs/ca.crt`).
+      the one in the cluster (`kubectl -n rutli exec rutli-cosigner-n1-0 -c cosigner -- sha256sum /certs/ca.crt`).
 - [ ] An **operator certificate** for `verify-key` (CN `operator`, issued by the cluster CA —
       `scripts/gen-frost-certs.sh` makes one) and every cosigner config listing it in
-      `operator_allowlist` (Helm: `operatorAllowlist`). The operator role may call `KeyStatus` and
-      `CeremonySignTest` only — never `Sign` — so no one in the ceremony needs the driver
-      certificate. Each cosigner's mTLS certificate has CN `cosigner<identifier>`. On Kubernetes,
-      create the operator Secret only for the ceremony and run `verify-key` as the one-off
+      `operator_allowlist` (Helm: `operatorAllowlist`). The operator role may call `KeyStatus`,
+      `HostedKeyStatus` and `CeremonySignTest` only — never `Sign` — so no one in the ceremony
+      needs the driver certificate. Each cosigner's mTLS certificate has CN
+      `cosigner<identifier>`. On Kubernetes, create the operator Secret only for the ceremony and run `verify-key` as the one-off
       `deploy/k8s/job-verify-key.example.yaml`; delete both afterwards.
 - [ ] Per-node TLS deployment (chart/manifests ≥ 0.4.0, `tls.layout: perNode` or at least the
       `tls-select` init container): each cosigner container holds only its own mTLS key, so one
@@ -144,9 +145,10 @@ are the key).
 
 ## 4. The ceremony
 
-`C<i>` below is node *i*'s config. On Kubernetes, node *i* is pod `cosigner-<i-1>` with
+`C<i>` below is node *i*'s config. On Kubernetes, node *i* is pod `rutli-cosigner-n<i>-0` (the
+`perNode` topology; `rutli-cosigner-<i-1>` on the legacy StatefulSet) with
 `/config/cosigner-<i>.json`; every cosigner command runs **inside the live pod** with
-`kubectl -n rutli exec cosigner-<i-1> -c cosigner -- …` (the pod already has `RUTLI_SEAL_SECRET`).
+`kubectl -n rutli exec rutli-cosigner-n<i>-0 -c cosigner -- …` (the pod already has its seal secret).
 Nothing needs the daemon stopped: the install is a no-clobber create and the daemon caches nothing
 for an id it does not have.
 
@@ -154,7 +156,7 @@ for an id it does not have.
 
 ```sh
 rutli-cosigner --config C<i> share-recipient --key-id "$KEY_ID" --ceremony-id "$CEREMONY" --out /tmp/r<i>.json
-kubectl -n rutli exec cosigner-<i-1> -c cosigner -- cat /tmp/r<i>.json > r<i>.json
+kubectl -n rutli exec rutli-cosigner-n<i>-0 -c cosigner -- cat /tmp/r<i>.json > r<i>.json
 ```
 
 `r<i>.json` is public. It names the node, cluster, key id, ceremony, `t`, `n`, roster and the
@@ -207,7 +209,7 @@ Witnesses record the printed **group key** and **pkp digest**. Then power the de
 ### Step 3 — dry run (each cosigner operator)
 
 ```sh
-kubectl -n rutli exec -i cosigner-<i-1> -c cosigner -- sh -c 'umask 077; cat > /tmp/share.json' < share-$KEY_ID-node<i>.json
+kubectl -n rutli exec -i rutli-cosigner-n<i>-0 -c cosigner -- sh -c 'umask 077; cat > /tmp/share.json' < share-$KEY_ID-node<i>.json
 rutli-cosigner --config C<i> import-share --in /tmp/share.json --expect-fingerprint "$FP" --dry-run
 ```
 
@@ -219,7 +221,7 @@ from the old node.
 
 ```sh
 rutli-cosigner --config C<i> import-share --in /tmp/share.json --expect-fingerprint "$FP"
-kubectl -n rutli exec cosigner-<i-1> -c cosigner -- rm -f /tmp/share.json /tmp/r<i>.json
+kubectl -n rutli exec rutli-cosigner-n<i>-0 -c cosigner -- rm -f /tmp/share.json /tmp/r<i>.json
 ```
 
 Prints `"outcome": "installed"`, this node's verifying share and the pkp digest; the recipient secret
@@ -259,6 +261,12 @@ rutli-cosigner --config <refresher config> refresh --key-id "$KEY_ID"  # a certi
 rutli-cosigner --config <operator config> verify-key --key-id "$KEY_ID" --expect-fingerprint "$FP" --sign-test
 ```
 
+`refresh` signs a ceremony intent with that certificate; since 0.4.0-rc.6 every TLS node requires
+one by default (`signing_policy.require_ceremony_intent`). It takes the cluster id from the config's
+`cluster_id`, else from a majority of the roster's `Capabilities`; without one it sends no intent
+and the cosigners refuse the refresh. The operator role cannot refresh unless its CN is also on
+`refresh_allowlist`.
+
 **Gate C:** the group key is unchanged, `verify-key` is `OK` with **refresh count 1** and a **new
 pkp digest**. From here on the dealt shares — every bundle, every copy the dealer ever held — no
 longer combine with the live ones. Be precise about what this buys: refresh re-randomises the
@@ -269,8 +277,7 @@ dealt share useless, not to undo the key's history.
 
 Take the founding backups now, after the refresh (they hold refreshed shares only):
 [key-ceremony.md](key-ceremony.md) step 5 / [disaster-recovery.md](disaster-recovery.md) §1. Then
-resume the backup CronJob (`"suspend": false`) and re-enable any refresh schedule, now including
-`KEY_ID`.
+re-enable any refresh schedule, now including `KEY_ID`.
 
 ### Step 8 — Canton cutover
 
@@ -319,7 +326,7 @@ deliberately no generic key-destroy command.
 **After deleting an installed share, restart that cosigner before anything is imported under the
 id again — this is mandatory.** A running daemon that has signed (Gate B) with the share keeps it
 cached; a new share installed under the same id would sit next to a stale cached one until the
-next restart. On Kubernetes: `kubectl -n rutli delete pod cosigner-<i-1>`, wait for Ready, and
+next restart. On Kubernetes: `kubectl -n rutli delete pod rutli-cosigner-n<i>-0`, wait for Ready, and
 confirm `verify-key` reports the key absent on that node. Then start again from Step 1 with a new
 `CEREMONY` id.
 
@@ -382,7 +389,7 @@ Gate A dry run (digest per node):  1 ________  2 ________  3 ________   [ ] all 
 Install (Step 4):                  1 [ ]  2 [ ]  3 [ ]   bundles + /tmp copies removed: [ ]
 Gate B verify-key (operator cert): [ ] OK  refresh count 0  quorums {1,2} [ ] {1,3} [ ] {2,3} [ ]
 Gate C after refresh:              [ ] OK  refresh count 1  new digest ______________________
-Founding backups (after refresh):  locations ___________________________   backups resumed: [ ]
+Founding backups (after refresh):  locations ___________________________   refresh schedule on: [ ]
 Cutover (B0/B4 shape):             RegisterKmsSigningKey(KEY_ID) returned FP: [ ]   go: [ ]
 
 Sign-off (each independently compared FP, group key and digests):

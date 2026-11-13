@@ -25,24 +25,32 @@ annotations, NetworkPolicy ingress for pods labelled `rutli.io/scraper: "true"`)
 | `rutli_ceremony_requests_total` | counter | `kind`=dkg\|refresh, `result` | Key-ceremony outcomes (rare; any `error` needs investigation before retrying) |
 | `rutli_ceremonies_staged` | gauge | — | Two-phase DKG/refresh ceremonies staged on this node and not yet resolved (the resolver is waiting on a peer). Non-zero for up to a minute during a ceremony; must be 0 before the next ceremony or rollout step |
 | `rutli_ceremonies_split` | gauge | — | Ceremonies this node aborted while a peer reports them COMMITTED with this node's outcome, staged share still quarantined (audit F3). Must be 0; > 0 means a cosigner equivocated — `docs/ceremonies.md`, "A split ceremony" |
+| `rutli_ceremony_resolutions_total` | counter | `result`=committed\|aborted\|recovered | Two-phase ceremonies this node resolved |
 | `rutli_ceremony_equivocations_total` | counter | — | Ceremonies a peer reported COMMITTED while another reported ABORTED (impossible with crash faults) |
 | `rutli_ceremony_unknown_refused_total` | counter | — | No-votes for unknown ceremony ids or orphaned sessions this node refused to record because a cap was reached (audit F2) — a peer asking about many made-up ceremonies |
 | `rutli_ceremony_unknown_no_votes` | gauge | — | No-votes held for ceremony ids peers asked about that this node never knew (capped, garbage-collected after 30 days) |
 | `rutli_epoch_mismatch_total` | counter | — | Sign round-1 refusals because the leader signs with another sharing (epoch, PKP digest) of the key than this node committed (audit H1/M1): two nodes hold different epochs of one key |
+| `rutli_epoch_check_skipped_total` | counter | — | Sign round-1 requests from a leader that sent no sharing (a release before epochs), so the epoch check was skipped. Expected only during a rolling upgrade |
 | `rutli_stale_share` | gauge | `key` | `1` while this node's share of `key` is older than a committed sharing a peer holds (typically a restore from an old backup); the node refuses to sign or lead for that key. Else `0` |
 | `rutli_nonce_markers` | gauge | — | Burned-session nonce markers on this node after the last prune pass (audit L4); each costs an inode on the key volume, bounded by the sign rate over the retention window |
+| `rutli_nonce_markers_pruned_total` | counter | — | Burned-session nonce markers removed past their retention |
 | `rutli_sign_round1_skips_total` | counter | — | Peers skipped in sign round 1 — the quorum-margin canary: skips mean you are signing with less headroom than you deployed |
 | `rutli_sign_aborts_total` | counter | — | Given-up signatures (leader aborted the in-flight session on the quorum) |
+| `rutli_sign_retries_total` | counter | — | Sign attempts beyond the first within one `Signer.Sign`: a t-subset failed and the leader retried with another |
+| `rutli_invalid_signature_shares_total` | counter | — | Signature shares that failed verification at aggregation (attributed to a cosigner and routed around). Any increase means a cosigner returned a bad share (`RutliInvalidSignatureShare`) |
 | `rutli_pending_sign_sessions` | gauge | — | In-flight round-1 sessions held on this node; hovers near 0 in a healthy cluster |
 | `rutli_keystore_unreadable` | gauge | — | `1` while this node's key store (`data_dir/keys`) fails its readiness probe — cannot be listed or written, or not one key file in it opens, or the probe has hung for 6s (a stalled mount) — else `0`. Re-probed every 15s by a watchdog thread and on `Signer.Health` (cached 5s, one probe at a time); primed to `0` |
 | `rutli_hosted_keys` | gauge | — | Cluster-hosted keys held by this node |
 | `rutli_decrypt_rate_limited_total` | counter | — | Hosted-key decryptions refused by the per-key rate limit (enforced by each node on its own, so read it per instance). Never moves in normal operation: either a node outgrew its ceiling, or someone with the driver certificate is bulk-decrypting |
+| `rutli_ceremony_sign_test_rate_limited_total` | counter | — | Split-ceremony `CeremonySignTest` calls refused by the per-key rate limit. A `verify-key --sign-test` run never trips it |
 | `rutli_unreadable_key_files_total` | counter | — | Key files present on disk that could not be unsealed (wrong seal secret, partial restore, corruption) and were therefore skipped from the hosted-key inventory, or could not even be opened (ownership/permissions) by the key-store probe while the rest of the store could |
 | `rutli_hosted_key_ops_total` | counter | `op`=generate\|decrypt\|ecdh_derive\|symmetric_encrypt\|symmetric_decrypt\|delete, `result`=ok\|error | Signer-side hosted-key operation outcomes |
 | `rutli_anti_entropy_repairs_total` | counter | — | Hosted keys a sweep pulled to this node or pushed to a peer that lacked them |
 | `rutli_key_replicas` | gauge | — | Fewest cosigners holding any one hosted key, as of the last anti-entropy sweep (`NaN` until a sweep sees a hosted key, so comparisons never fire on an idle cluster). Below the cluster size means a write has not healed yet |
 | `rutli_anti_entropy_conflicts_total` | counter | — | Hosted keys found with *different* material on this node and a peer under the same key id — an invariant violation, never auto-reconciled |
 | `rutli_sign_intent_absent_total` | counter | — | Signatures this node took part in without a client-signed intent (accepted only while `signing_policy.require_intent` is off). Must stop growing once the driver signs intents; never moves on an enforcing cluster |
+| `rutli_ceremony_intent_absent_total` | counter | — | DKG/refresh fences and part 1s this node accepted without a client-signed ceremony intent (accepted only while `signing_policy.require_ceremony_intent` is off) |
+| `rutli_ceremony_intent_refusals_total` | counter | `reason`=missing\|malformed\|certificate\|signer\|pin\|signature\|cluster\|purpose\|key\|expiry\|acl\|ceremony-id | DKG/refresh ceremony intents this node refused: at the fence or part 1 of a ceremony a peer leads, or as leader on `Signer.Dkg`/`Signer.Refresh`. A refusal on the peer path means a leader asked for a ceremony no authorized client requested |
 | `rutli_sign_policy_refusals_total` | counter | `reason`=missing\|malformed\|certificate\|signer\|pin\|signature\|cluster\|purpose\|key\|expiry\|acl\|approval\|role\|… | Signatures this node refused by its signing policy (audit C2). `missing`/`approval`/`expiry` are rollout and NTP issues; `signer`/`certificate`/`signature`/`pin`/`cluster`/`key` mean something presented an intent this node does not accept |
 | `rutli_sign_rate_limited_total` | counter | — | Signatures refused by the per-key sign rate limit (per node; charged once per signed intent — its request id and digest — or per session without one) |
 | `rutli_signer_acl_absent_total` | counter | — | Key operations by a Signer client CN with no `signer_acl` entry, allowed while `signer_acl_required` is off |
@@ -52,6 +60,7 @@ annotations, NetworkPolicy ingress for pods labelled `rutli.io/scraper: "true"`)
 | `rutli_hosted_tombstones_written_total` | counter | `how`=converted\|recorded | Tombstones this node wrote: a live copy deleted (directly or from a peer's tombstone), or a tombstone recorded for a key it did not hold |
 | `rutli_hosted_tombstones` | gauge | `retained`=true\|false | Deleted hosted keys on this node, split by whether the tombstone still retains the material (grace period) — refreshed by the anti-entropy sweep |
 | `rutli_keyfiles` | gauge | `format`=v1\|v2\|plaintext, `dek`=current\|previous\|unknown\|none | This node's key files at start-up (audit M4): a v2 migration watches `format="v1"` reach 0, a DEK rotation watches `dek="previous"` reach 0 before the previous DEK leaves the seal bundle; `dek="unknown"` files do not open on this node |
+| `rutli_lock_poison_recoveries_total` | counter | `lock` | Locks recovered after a panicking request poisoned them (audit L3). The node kept serving; the panic is a bug (`RutliLockPoisonRecovered`) |
 
 Leader-side metrics (`sign_*`, `ceremony_*`) appear on whichever node served the driver's request —
 with driver failover that can be any of them, so always aggregate across instances (`sum(...)`).
@@ -78,14 +87,15 @@ exhaustive. Three collection details matter when writing rules:
 `rutli_hosted_keys`, `rutli_unreadable_key_files_total` and both `anti_entropy_*` counters are
 primed to zero at startup, so they exist even where hosted keys are disabled; `rutli_key_replicas`
 is primed to `NaN` for the same reason (zero would page an idle cluster instantly).
-`rutli_hosted_key_ops_total` has no fixed label set and its series appear on first use: alert on its
-rate, never on its absence.
+`rutli_hosted_key_ops_total` is primed for every `op` and `result`.
 
-The signing-policy, delete and tombstone series are not primed: they first appear when they first
-count, so their rules (`deploy/monitoring/prometheus-rules.yml`: `RutliSignPolicyRefusals`,
-`RutliSignIntentAbsent`, `RutliSignRateLimited`, `RutliSignerAclAbsent`, `RutliSignJournalErrors`,
-`RutliDeleteIntentRefused`, `RutliHostedKeyDeleted`, `RutliCeremonyIntentRefused`,
-`RutliCeremonyIntentAbsent`) alert on increases. `rutli_keyfiles` is set
+The signing-policy, ceremony-intent, delete, tombstone and lock-poison series are primed to zero
+for every label value they can carry, so the first event moves a series from 0 to 1 and the rules
+that alert on increases see it (`deploy/monitoring/prometheus-rules.yml`:
+`RutliSignPolicyRefusals`, `RutliSignIntentAbsent`, `RutliSignRateLimited`, `RutliSignerAclAbsent`,
+`RutliSignJournalErrors`, `RutliDeleteIntentRefused`, `RutliHostedKeyDeleted`,
+`RutliCeremonyIntentRefused`, `RutliCeremonyIntentAbsent`, `RutliLockPoisonRecovered`).
+`rutli_stale_share` carries a key id and cannot be primed. `rutli_keyfiles` is set
 once per start (`RutliKeyFilesUnopenable`, `RutliKeyFileMigrationPending`).
 
 Published latency snapshots and how to reproduce them: [`performance.md`](performance.md).

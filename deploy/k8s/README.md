@@ -11,7 +11,7 @@ cosigner.yaml          GENERATED from the Helm chart (scripts/render-k8s.sh + va
                        per node a StatefulSet rutli-cosigner-n<id>, a Service rutli-node-<id>, a data
                        PVC and a backup PVC; the config, headless Service, NetworkPolicy, PDB
 values.yaml            the chart values cosigner.yaml is rendered with
-client-config.yaml     client configs for the operator CLI Jobs (driver / operator role)
+client-config.yaml     client configs for the operator CLI Jobs (refresher / operator / driver role)
 cronjob-refresh.yaml   opt-in: weekly proactive share refresh (refresher cert only — never the driver's)
 job-verify-key.example.yaml  split ceremony: one-off verify-key with a temporary operator cert
 secrets.example.yaml   shape of the Secrets you create out-of-band (never commit real ones)
@@ -22,7 +22,8 @@ Do not edit `cosigner.yaml` by hand: change `values.yaml` (or the chart) and run
 `scripts/render-k8s.sh`; CI fails when the file is stale, and runs
 `scripts/check-deploy-policy.sh` on the kustomize build.
 
-Prereqs: a NetworkPolicy-enforcing CNI (Calico/Cilium), a default StorageClass, and a registry you
+Prereqs: a NetworkPolicy-enforcing CNI (Calico/Cilium), a default StorageClass whose CSI driver
+supports `ReadWriteOncePod` (Kubernetes 1.29+; `cosigner.yaml` requests it), and a registry you
 can push to.
 
 ## 1. Build & push the cosigner image
@@ -107,7 +108,8 @@ distributed — do this as the witnessed **key ceremony** (`docs/key-ceremony.md
 
 ## 5. Cluster-hosted keys (optional)
 
-**Cluster-hosted keys** put the RSA-2048-OAEP encryption keypair and the AES-256-GCM symmetric key
+**Cluster-hosted keys** put the encryption keypair (RSA-2048-OAEP or EC P-256 ECIES) and the
+AES-256-GCM symmetric key
 Canton needs in the cluster rather than on an HSM or in the driver's software backend. They are off
 in `values.yaml`, because they need two per-cluster public values a checked-in manifest cannot know:
 one `hostedKeys.commitmentKey` for the cluster (`openssl rand -hex 32`) and each node's
@@ -217,19 +219,21 @@ and mounts the same volume read-only. A CSI volume snapshot is fine (storage lay
 
 ## Day-2 operations
 
-- **Backup**: each pod's `backup` sidecar copies that node's sealed `keys/*.json` daily (03:17 UTC,
+- **Backup**: each pod's `backup` sidecar copies that node's sealed `keys/*.json` and sign journals
+  daily (03:17 UTC,
   and once at pod start) to that node's backup PVC `rutli-cosigner-backup-n<id>`, keeping the newest
   14. It mounts the data volume read-only and never sees the seal bundle or the TLS key. Check it:
   `kubectl -n rutli logs rutli-cosigner-n1-0 -c backup | grep BACKUP_`. For an off-cluster
   destination, render with `backup.destination.type: script` and per-node credentials (chart
   README, "Backups"). There is no backup CronJob and no `pods/exec` RBAC: the exec-based backup of
   earlier releases could read every node's seal secret (audit C3).
-- **Proactive refresh**: only with every cosigner on 0.4.0-rc.2 or later (ceremony protocol 2,
+- **Proactive refresh**: only with every cosigner on 0.4.0-rc.3 or later (ceremony protocol 2,
   audit C1/H1). `rutli-cosigner --config /config/client-refresher.json refresh --key-id frost-<participant>-namespace`
   with the refresher's identity (`refresh_allowlist`; the driver role keeps Refresh only while
   `signing_policy.signer_may_refresh` is on) — same key, rotated shares. Example CronJob:
-  `cronjob-refresh.yaml` (set `KEY_ID`; mounts only `rutli-refresher-tls`). Refresh fences signing
-  cluster-wide; avoid topology bursts mid-refresh.
+  `cronjob-refresh.yaml` (set `KEY_ID`; mounts only `rutli-refresher-tls`). Pin the job's image to
+  the cosigners' release: it signs the ceremony intent the cosigners require by default since
+  0.4.0-rc.6. Since 0.4.0-rc.4 signing goes on during a refresh.
 - **Restore** a replaced node: its data PVC is empty → copy the newest tar out of its backup PVC
   and restore through the cosigner's own container (`docs/disaster-recovery.md`), then delete the
   pod so the daemon reopens its key store. Or (once shipped) repair from `t` survivors.

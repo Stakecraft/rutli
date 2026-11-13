@@ -1,6 +1,6 @@
 # Cluster-hosted keys — operator guide
 
-The cosigner cluster can hold Canton's **non-FROST** key material as well as the namespace key:
+The cosigner cluster can hold Canton's **non-FROST** key material as well as the Ed25519 keys:
 RSA-2048-OAEP-SHA256 and EC P-256 (ECIES) encryption keypairs, and AES-256-GCM symmetric keys. A
 participant configured this way needs **no HSM and no local key state**.
 
@@ -11,14 +11,15 @@ quorum and the replication wrapping look the way they do) is the design record i
 
 **State this plainly wherever it comes up:** hosted keys are **replicated whole keys, not threshold
 shares**. They are generated on one cosigner, sealed at rest on every node, and any node can serve a
-decrypt on its own. The FROST Ed25519 namespace key is unchanged and remains genuine 2-of-3
-threshold MPC — no machine ever holds it whole. Section 5 states the cost of that difference.
+decrypt on its own. The FROST Ed25519 keys (namespace, protocol signing, sequencer authentication)
+are unchanged and remain genuine 2-of-3 threshold MPC — no machine ever holds one whole. Section 5 states the cost of that difference.
 
 ## 1. What it is, and when to use it
 
-Rütli's cluster serves the Ed25519 namespace/identity key. Everything else Canton needs — the
-asymmetric encryption keypair for confidential views, the symmetric key that wraps its private key
-store — comes from one of three places:
+Rütli's cluster serves the Ed25519 keys (namespace, protocol signing, sequencer authentication) as
+FROST threshold keys. Everything else Canton needs — the asymmetric encryption keypair for
+confidential views, the symmetric key that wraps its private key store — comes from one of three
+places:
 
 | | HSM delegate | software delegate (sealed) | **cluster-hosted** |
 |---|---|---|---|
@@ -68,8 +69,9 @@ with Helm or `deploy/k8s` it is `hostedKeys.enabled` plus the pins below):
 On a seal bundle (`secret_file`, the per-node secret — see
 [runbook-per-node-seal.md](runbook-per-node-seal.md)), each node also needs
 `hosted_keys.commitment_key` and every peer's `dist_public_key` pinned in `peers[]`: the node holds
-only its own distribution key. `rutli-cosigner seal split-legacy` (migrating) or `seal new-node`
-(new cluster) prints them. The legacy `"share_seal": { "secret_env": "RUTLI_SEAL_SECRET" }` derives
+only its own distribution key. `rutli-cosigner seal split-legacy` (migrating) prints both; on a new
+cluster `seal new-node` prints each node's distribution key, and the commitment key is one value
+generated for the cluster (`openssl rand -hex 32`). The legacy `"share_seal": { "secret_env": "RUTLI_SEAL_SECRET" }` derives
 them from the shared master instead.
 
 | Field | Default | Meaning |
@@ -93,10 +95,10 @@ headroom n-fold because of that one-leader routing.
 
 **`share_seal` is mandatory.** Config validation refuses to start a node with
 `hosted_keys.enabled` and no `share_seal`: a hosted key is a *whole private key*, and one sitting
-unsealed on disk would be strictly worse than the HSM delegate it replaces. The same operator master
-secret does double duty — it seals the file at rest *and* derives the per-node X25519 distribution
-key used to wrap material for replication — so the daemon also refuses to start if the referenced
-environment variable is unset. A *wrong* secret is not silently tolerated either: sealed files fail
+unsealed on disk would be strictly worse than the HSM delegate it replaces. The node's seal secret
+does double duty — it seals the file at rest *and* holds (seal bundle) or derives (legacy master)
+the node's X25519 distribution key used to wrap material for replication — so the daemon also
+refuses to start if the referenced bundle file or environment variable is missing. A *wrong* secret is not silently tolerated either: sealed files fail
 to open and the affected operation fails closed rather than the node serving a wrong or empty key.
 
 **Write quorum is 2-of-3 by default, deliberately.** Requiring all three would mean you cannot mint
@@ -117,9 +119,10 @@ Key material never crosses the mesh in the clear, even inside mTLS — a service
 terminating TLS would otherwise see plaintext private keys. Each replica is sealed to one recipient
 with ephemeral X25519 → HKDF-SHA256 → AES-256-GCM, with the AAD binding cluster id, key id, spec and
 recipient so an envelope cannot be replayed to another node, another key, or another deployment (the
-cluster id is derived from the CA certificate). Note what this does *not* do: under today's shared
+cluster id is derived from the CA certificate). Note what this does *not* do: under the legacy shared
 master secret every cosigner can derive every peer's distribution key, so this protects against a
-TLS-terminating middlebox and against replay, not against another cosigner.
+TLS-terminating middlebox and against replay, not against another cosigner. On a seal bundle a node
+holds only its own distribution key and wraps only to the key pinned for each peer.
 
 ### Driver
 
@@ -127,7 +130,11 @@ TLS-terminating middlebox and against replay, not against another cosigner.
 config {
   backend = "frost"
   frost = {
-    endpoints    = ["cosigner1:9101", "cosigner2:9102", "cosigner3:9103"]
+    endpoints    = [
+      { url = "cosigner1:9101", tls-name = "cosigner1" },
+      { url = "cosigner2:9102", tls-name = "cosigner2" },
+      { url = "cosigner3:9103", tls-name = "cosigner3" }
+    ]
     hosted-keys  = true
     delegate     = "none"
     key-prefix   = ""        # set per participant when several share this cluster — see below
@@ -164,7 +171,8 @@ Two deliberate absences:
 - **No automatic fallback to the delegate on `NOT_FOUND`.** A fallback would silently re-create split
   custody — some keys in the cluster, some on the host — which is the shape of the August incident.
   Read-repair (section 4) is what makes `NOT_FOUND` authoritative. Endpoint failover stays restricted
-  to `UNAVAILABLE` / `DEADLINE_EXCEEDED`, as for signing — with one exception, for EC keys only: a
+  to a node that is down or broken (`UNAVAILABLE` / `DEADLINE_EXCEEDED`, and `INTERNAL` / `UNKNOWN`
+  for reads and decryptions), as for signing — with one exception, for EC keys only: a
   cosigner that predates `ec-p256-ecies` cannot read-repair one, so its "not found" is not
   authoritative and the driver asks the next cosigner (rollout order, below). Even then it never
   falls back to the delegate.

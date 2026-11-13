@@ -53,7 +53,7 @@ Swapping the CA changes it again. Where the id is used:
 | Hosted-key replication envelopes (`wrap_for`/`unwrap_key` AAD): `GenerateKey` fan-out, read-repair `FetchKey`, anti-entropy push/pull | **No**, in flight only | Replication between nodes with different ids fails (`key envelope failed authentication`). Decrypt/ECDH are served locally and keep working. Anti-entropy heals once the ids agree again. |
 | Split ceremony recipient request (`share-recipient`), dealer check (`rutli-dealer --ca-cert`), share bundle (`import-share` check 3, envelope AAD) | **Yes, while a ceremony is in flight**: `data_dir/ceremony/<key_id>.recipient` (sealed) and the dealer's `r<i>.json` / `share-*-node<i>.json` | A pending recipient or bundle from before the change is refused. Run `abort-import`, then redo the ceremony. |
 | Installed shares (`KeyOrigin`), hosted keys at rest (share-seal AEAD, salted by node id only), hosted-key commitments, `backup`/`restore`, `export-key`/`import-key` files | No id inside | **None.** Nothing at rest has to be rewritten. |
-| Signing and delete intents (audit C2/M2): every intent names the cluster id, and each cosigner refuses one for another cluster (`rutli_sign_policy_refusals_total{reason="cluster"}`) | No (each intent lives ≤ `intent_max_lifetime_secs`) | The driver names the id it **pinned** (`frost.cluster-id`) or **learned** — the value a majority of the endpoints report in `Capabilities` (audit F5), learned again after a cosigner refuses an intent for its cluster. If the id changes under a pinned driver, every sign is refused with PERMISSION_DENIED until `frost.cluster-id` is updated. |
+| Signing, ceremony (DKG/refresh) and delete intents (audit C2/M2): every intent names the cluster id, and each cosigner refuses one for another cluster (`rutli_sign_policy_refusals_total{reason="cluster"}`; ceremonies: `rutli_ceremony_intent_refusals_total{reason="cluster"}`) | No (each intent lives ≤ `intent_max_lifetime_secs`) | The driver names the id it **pinned** (`frost.cluster-id`) or **learned** — the value a majority of the endpoints report in `Capabilities` (audit F5), learned again after a cosigner refuses an intent for its cluster. If the id changes under a pinned driver, every sign is refused with PERMISSION_DENIED until `frost.cluster-id` is updated. The refresh job names the `cluster_id` of its client config, else the roster's majority: update a `cluster_id` pinned in `client-refresher.json` along with `frost.cluster-id`. |
 
 The driver sees the cluster id: it names it in every signing intent. With the cosigner pin in place
 the id never changes, which is one more reason to pin it before the CA file changes. If the driver
@@ -70,8 +70,8 @@ write quorum. The fix is to **pin** the id (`cluster_id` in the cosigner config,
 pin, the id never depends on the CA again. Every node must hold the same value. Never unpin or
 change it on a live cluster.
 
-> **Older images ignore the pin.** `cluster_id` ships after `0.4.0-rc.1` (CHANGELOG, Unreleased →
-> `0.4.0-rc.2` / `0.4.0`). `0.4.0-rc.1` and every older image silently ignore unknown config fields,
+> **Older images ignore the pin.** `cluster_id` shipped in `0.4.0-rc.2`. `0.4.0-rc.1` and every
+> older image silently ignore unknown config fields,
 > so they accept the pin and derive the id anyway. Check the startup line
 > `cluster id <id> (pinned in config)` on **every** pod before any CA byte changes (§5 Phase 0); the
 > per-pod gate does exactly that.
@@ -128,12 +128,12 @@ mesh-check wait) plus Phase 0 and one participant restart.
 
 ## 4. Prerequisites
 
-1. **A cosigner release with `cluster_id`** (this change: `0.4.0-rc.2` / `0.4.0`, **not**
-   `0.4.0-rc.1`), image pinned by digest in the chart. An `rc.1` or older image ignores the pin and
+1. **A cosigner release with `cluster_id`** (`0.4.0-rc.2` or later, **not** `0.4.0-rc.1`), image
+   pinned by digest in the chart. An `rc.1` or older image ignores the pin and
    keeps deriving the id from the CA file; Phase 0's gate catches that (no `(pinned in config)`
    line), so do not start Phase A on such an image. On the soak, fold Phase 0 into the first
    planned cosigner upgrade to a release that carries this change.
-2. **Laptop:** `kubectl` (context `hcloud-cluster`), `helm`, `openssl`, `jq`, `shasum`, and a
+2. **Laptop:** `kubectl` (the cluster's context), `helm`, `openssl`, `jq`, `shasum`, and a
    `rutli-cosigner` binary from the same release (`cd frost && cargo build --release -p
    rutli-cosigner --bin rutli-cosigner`). It runs `verify-key` over port-forwards.
 3. **Escrow destination for the new CA key**, decided **before** generating it: an encrypted copy
@@ -144,8 +144,8 @@ mesh-check wait) plus Phase 0 and one participant restart.
 5. **Inventory of every holder of a cluster certificate.** The soak has one: the soak
    participant's driver (PVC `rutli-kms-bundle` in `stakecraft-devnet-rutli-01`). Check for others:
    a B4 participant, laptops, CI, and every client config this repo ships:
-   - `deploy/k8s/cronjob-refresh.yaml`: Secret `rutli-driver-tls` (driver leaf) + CA from
-     `rutli-cosigner-ca`;
+   - `deploy/k8s/cronjob-refresh.yaml`: Secret `rutli-refresher-tls` (refresher leaf, or the
+     operator leaf on a cluster without one) + CA from `rutli-cosigner-ca`;
    - `deploy/k8s/job-verify-key.example.yaml`: Secret `rutli-operator-tls` (operator leaf) + CA
      from `rutli-cosigner-ca`;
    - `deploy/soak/validator/compose-rutli-kms.yaml`: a validator's driver, `./certs/{ca.crt,
@@ -162,7 +162,13 @@ mesh-check wait) plus Phase 0 and one participant restart.
    rendered by an older chart: it mounts the Secret directly at `/certs`, so the kubelet refreshes
    the files inside running pods. From the Phase 0 upgrade on, the chart's `tls-select` init
    container copies the material into memory at pod start, in both layouts. From Phase A on, a pod's
-   `/certs` therefore shows exactly what it started with.
+   `/certs` therefore shows exactly what it started with. All of this, and the pod names
+   `rutli-cosigner-<ordinal>` used below, is `topology: legacy`. On `topology: perNode` (the chart
+   default; independent of `LAYOUT`, which is `tls.layout`) the pods are `rutli-cosigner-n<id>-0`
+   (the `pf`, `roll` and `kc logs` helpers below need those names), and each mounts its Secrets
+   directly with no init container, so the kubelet updates `/certs` inside a running pod: there,
+   gate step 3 shows the Secret, not what the process loaded. Rely on the `trust anchor` lines the
+   pod logs at start.
 7. **Helper pod admission** in the participant namespace (Phase B): `kc get ns $PNS --show-labels`.
    If it enforces Pod Security `restricted`, the root busybox pod below is rejected. B4 §4.0
    ran the same pod in a sibling namespace. Add a non-root `securityContext` matching the
@@ -171,7 +177,7 @@ mesh-check wait) plus Phase 0 and one participant restart.
 ### Session setup (every terminal)
 
 ```sh
-export KUBECONTEXT=hcloud-cluster NS=rutli PNS=stakecraft-devnet-rutli-01
+export KUBECONTEXT=my-cluster NS=rutli PNS=stakecraft-devnet-rutli-01   # KUBECONTEXT: your kubectl context
 export LAYOUT=shared                      # or perNode — see 4.6
 export PIN=453bb4aea2088bb5               # the current derived id; never changes from here on
 export KEY_ID=frost-namespace             # the soak's FROST namespace key
@@ -266,8 +272,9 @@ CA certificates).
 
 `verify-key` asks every node's Signer API for `KeyStatus` over three port-forwards. It proves the
 laptop's certificate is accepted by every node, and that the laptop's trust file accepts every
-node's server certificate. Port-forward bypasses the NetworkPolicy. The cosigner certs carry
-`IP:127.0.0.1` and the shared SAN `rutli-cosigner`.
+node's server certificate. Port-forward bypasses the NetworkPolicy. `verify-key` checks each
+roster node under its own name `cosigner<id>`, which every cosigner cert carries, old and new; the
+`domain` in the client config is only a fallback for a target outside the roster.
 
 ```sh
 # (Re)start the three port-forwards. They die with their pod: run pf again after every roll.
@@ -365,8 +372,11 @@ for c in cosigner1 cosigner2 cosigner3 operator; do
   openssl x509 -in $R/new/$c.crt -noout -subject -ext subjectAltName,extendedKeyUsage; done
 ```
 
-Expect four `OK`. The CNs are `cosigner1..3` and `operator`. The cosigner SANs match the
-live ones (`DNS:rutli-cosigner, DNS:cosignerN, DNS:cosigner-(N-1), DNS:localhost, IP:127.0.0.1`).
+Expect four `OK`. The CNs are `cosigner1..3` and `operator`. The cosigner SANs are
+`DNS:cosignerN, DNS:cosigner-(N-1), DNS:localhost, IP:127.0.0.1`: the live ones minus the shared
+`DNS:rutli-cosigner` that certificates from before 0.4.0-rc.2 carry. A driver whose
+`frost.endpoints` are bare strings still verifies `tls.domain` (e.g. `rutli-cosigner`) and rejects
+the new leaves: move it to `{ url, tls-name = "cosigner<i>" }` endpoints before Phase C.
 Compare with
 `kc -n $NS get secret rutli-cosigner-tls -o jsonpath='{.data.cosigner1\.crt}' | base64 -d | openssl x509 -noout -ext subjectAltName`.
 The new CA has a **different CN** from the old one, so the two are easy to tell apart in the bundle.
@@ -453,13 +463,13 @@ client_cfg drv-bundle $R/bundle.crt $R/new/driver.crt $R/new/driver.key && vk dr
 `drv-bundle` exercises the exact certificate set this phase gives the driver. rustls stands in here
 for Netty, whose multi-CA trust is covered by `FrostTlsTrustBundleSpec`.
 
-The participant (`deploy/participant`, `strategy: Recreate`, node `agent-cx33-fsn-vkh`) mounts PVC
+The participant (`deploy/participant`, `strategy: Recreate`) mounts PVC
 `rutli-kms-bundle`, subPath `certs`, at `/rutli-certs`. The driver reads `ca.crt`, `driver.crt` and
 `driver.key` only at startup. Write the new files next to the old ones. The PVC is
 ReadWriteOnce, so the helper pod must run on the participant's node.
 
 ```sh
-NODE=$(kc -n $PNS get pod -l app=participant -o jsonpath='{.items[0].spec.nodeName}')   # check the label; expect agent-cx33-fsn-vkh
+NODE=$(kc -n $PNS get pod -l app=participant -o jsonpath='{.items[0].spec.nodeName}')   # check the label and the node
 kc -n $PNS run rutli-kms-ca-rotate --restart=Never --image=docker.io/library/busybox:1.36 \
   --overrides='{"spec":{"nodeSelector":{"kubernetes.io/hostname":"'$NODE'"},"containers":[{"name":"p","image":"docker.io/library/busybox:1.36","command":["sleep","3600"],"volumeMounts":[{"name":"b","mountPath":"/bundle"}]}],"volumes":[{"name":"b","persistentVolumeClaim":{"claimName":"rutli-kms-bundle"}}]}}'
 kc -n $PNS wait --for=condition=Ready pod/rutli-kms-ca-rotate --timeout=180s
@@ -477,10 +487,13 @@ kc -n $PNS exec rutli-kms-ca-rotate -- sh -c 'cd /bundle/certs && for f in ca.cr
 kc -n $PNS delete pod rutli-kms-ca-rotate
 ```
 
-Every other driver-certificate holder from the inventory (4.5) gets the same leaf now, e.g. the
-refresh CronJob's `rutli-driver-tls` (`kc -n $NS create secret tls rutli-driver-tls
---cert=$R/new/driver.crt --key=$R/new/driver.key --dry-run=client -o yaml | kc apply -f -`). Then
-shred the plaintext key; a rollback or a later client re-issues one from escrow:
+Every other driver-certificate holder from the inventory (4.5) gets the same leaf now. The refresh
+CronJob carries the refresher leaf, not the driver's: issue it from escrow the same way
+(`RUTLI_CERTS=refresher`) and replace its Secret (`kc -n $NS create secret tls rutli-refresher-tls
+--cert=$R/new/refresher.crt --key=$R/new/refresher.key --dry-run=client -o yaml | kc apply -f -`)
+before Phase D. If `refreshAllowlist` lists only `operator` (no refresher certificate), put the new
+operator leaf there instead, or add `refresher` to `refreshAllowlist` first. Then shred the
+plaintext key; a rollback or a later client re-issues one from escrow:
 
 ```sh
 shred -u $R/new/driver.key 2>/dev/null || rm -P $R/new/driver.key; rm -rf $R/client/drv-bundle.json $R/client/data-drv-bundle
@@ -631,10 +644,11 @@ that has the pin, an unpinned rotation is not even possible without
 
 ## 9. Other installs
 
-- **Raw manifests** (`deploy/k8s`): add `"cluster_id": "<16 hex>"` to every `cosigner-N.json` in
-  `cosigner-config.yaml` (and keep it there: each node records its id in `data_dir/cluster-id` and
-  refuses another). Secrets as in `secrets.example.yaml` (shared layout). Roll with
-  `kubectl delete pod` as above.
+- **Raw manifests** (`deploy/k8s`): set `clusterId: "<16 hex>"` in `deploy/k8s/values.yaml` and
+  re-render with `scripts/render-k8s.sh` (and keep it there: each node records its id in
+  `data_dir/cluster-id` and refuses another). Secrets as in `secrets.example.yaml` (`perNode`
+  layout: `rutli-cosigner-ca` and `rutli-cosigner-tls-<id>`). Roll with `kubectl delete pod` as
+  above, on the pods `rutli-cosigner-n<id>-0`.
 - **Docker Compose** (`deploy/frost`): the same config field. Restart one container at a time
   (`docker compose restart cosignerN`). The certs are bind-mounted, so replace the files in place.
 - **Adding a node or issuing an operator cert later:** restore the CA key from escrow into a
