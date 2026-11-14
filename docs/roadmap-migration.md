@@ -167,7 +167,8 @@ Soak (Track A) continues in the background and may preempt a day here and there.
 - Splice SV static synchronizer parameters are Canton JCE defaults on every network
   (`apps/sv/.../LocalSynchronizerNode.scala:94`), so `EcP256` and `Rsa2048` are both admitted.
 - `ExportKeyPair(fingerprint, protocol_version, password)` exists and needs
-  `features.enable-preview-commands`. Output: versioned `CryptoKeyPair` holding only the private
+  `features.enable-preview-commands` (Canton 3.7: `parameters.enable-key-download` instead, see
+  [splice-0.10.md](splice-0.10.md)). Output: versioned `CryptoKeyPair` holding only the private
   key (Canton re-derives the public key). *Verified in B1 against source and a real 3.6.1 export:*
   the password form is a versioned `PasswordBasedEncrypted` = Argon2id (m = 12288 KiB, t = 3,
   p = 1, v0x13, 16-byte salt, UTF-8 password) → AES-128-GCM, `iv(12) ‖ ct ‖ tag(16)`, no AAD,

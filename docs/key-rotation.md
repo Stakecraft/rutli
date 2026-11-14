@@ -48,6 +48,13 @@ stays registered. Do not `keys.secret.delete` it: under KMS that deletes the key
 and it may still be needed to decrypt views in flight. Rotate on your normal schedule, or
 immediately if a non-root key is suspected exposed.
 
+**Canton 3.7 (Splice 0.10):** these commands, and `owner_to_key_mappings.add_key(s)` / `remove_key` / `rotate_key`, take an
+optional `synchronizerId`. Without it Canton auto-detects the synchronizer, which only works when exactly one is registered
+and connected. During an LSU window the predecessor and the successor are both registered, so pass the id, or do not
+rotate in the window. PV 37 also caps an owner at 20 signing keys (`max_signing_keys_per_entity`). Rotation removes the
+old key from the `OwnerToKeyMapping`, so the count stays flat. An `add_key` without a matching `remove_key` makes it
+grow. See [splice-0.10.md](splice-0.10.md).
+
 The in-place migration rehearsal (B8, 2026-11-01) rotated the encryption key onto a new hosted
 ECIES key and the signing key onto a new FROST key with `generate_encryption_key` /
 `generate_signing_key` and `owner_to_key_mappings.rotate_key`, with the cosigners on

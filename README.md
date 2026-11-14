@@ -139,9 +139,11 @@ With `backend = "frost"` (the production path):
 
 | Component | Version | Status |
 |---|---|---|
+| Canton | 3.7.x | **Supported, live run pending:** the KMS driver SPI and conformance suite are byte-identical to 3.6.1 (v3.7.0–v3.7.3); operator changes in [docs/splice-0.10.md](docs/splice-0.10.md) |
 | Canton | 3.6.1 | **Tested:** upstream `KmsDriverTest` conformance in CI, DevNet soak, migration rehearsals |
 | Canton | 3.5.x | **Supported:** the KMS driver SPI is byte-identical to 3.6.1; earlier Rütli releases ran end to end on 3.5.6, but 0.4 is not re-tested there |
 | Canton | 3.4 and earlier | **Not supported:** driver-based KMS arrived in Canton 3.5 |
+| Splice | 0.10.x | **Supported, live run pending:** see [docs/splice-0.10.md](docs/splice-0.10.md) (key export and repair flags for migrations, upgrade order) |
 | Splice | 0.9.0 | **Tested:** DevNet validator on Rütli since 2026-10-07 |
 | JVM (driver) | Java 17 | Bytecode pinned to 17, as Canton requires |
 | Driver ↔ cosigners | driver ≥ `0.4.0-rc.4` with cosigners ≥ `0.4.0-rc.6` | From rc.6, cosigners on TLS refuse a DKG or refresh without a client-signed ceremony intent, and drivers older than rc.4 do not sign one. Upgrade the driver to ≥ `0.4.0-rc.4` (and the refresh CronJob's image to the cosigners' release) **before** the cosigners, or set `require_ceremony_intent: false` on every node first; see the rc.6 upgrade note in [CHANGELOG.md](CHANGELOG.md) |
@@ -191,6 +193,7 @@ Before protecting a real key, run the witnessed **[key ceremony](docs/key-ceremo
 | [docs/hosted-keys-design.md](docs/hosted-keys-design.md) | Why they are replicated and not threshold — the design record, with what did and did not ship |
 | [docs/key-ceremony.md](docs/key-ceremony.md) | Witnessed namespace-key generation |
 | [docs/key-rotation.md](docs/key-rotation.md) | Which keys rotate, how, and why the root can't |
+| [docs/splice-0.10.md](docs/splice-0.10.md) | Splice 0.10 / Canton 3.7: what changes for a Rütli validator and its migrations |
 | [docs/approval-quorum.md](docs/approval-quorum.md) | M-of-N signing approval |
 | [docs/disaster-recovery.md](docs/disaster-recovery.md) | Backup, restore, recovery |
 | [docs/observability.md](docs/observability.md) | Prometheus metrics, Grafana dashboard, alerts |

@@ -508,7 +508,7 @@ Properties worth knowing before you rely on them:
 A node moving into the cluster ([roadmap-migration.md](roadmap-migration.md)) can keep its
 encryption key instead of rotating it — discouraged, see [migration.md](migration.md), "Carrying
 the signing and encryption keys". Export it on the old node (`keys.secret.download`, preview
-commands enabled, preferably with a password), then on one cosigner. Its daemon may be running
+commands enabled, and on Canton 3.7 `canton.parameters.enable-key-download = yes`; preferably with a password), then on one cosigner. Its daemon may be running
 (`kubectl exec` into the pod, the export copied onto a tmpfs and deleted afterwards) or stopped:
 
 ```sh
