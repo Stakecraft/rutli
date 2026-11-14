@@ -5,6 +5,264 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-11-14
+
+_Audit code freeze. Pre-1.0 and not yet externally audited: do not put production authority keys behind it before the external audit is complete. No wire or config change from 0.4.0-rc.6: the code is rc.6's, plus a build-time lockfile update and the version number._
+
+Builds on 0.4.0-rc.6. This is the release the external audit reviews (Cure53, start expected
+December 2026 to January 2027, `docs/roadmap.md`). After the freeze only audit fixes enter the
+audited surface (`docs/audit-rfq.md`). Since rc.6: one dependency update for a RustSec advisory that
+does not reach the shipped binaries, and documentation: the in-place migration rehearsal (B8)
+completed, supported keys and Canton compatibility in the README, and the roadmap after 0.4.0.
+
+Evidence behind this release: a Splice DevNet validator has run on Rütli since 2026-10-07
+(`docs/soak-2026-10-devnet.md`); the new-participant migration (Flow 2b) was rehearsed twice, B0
+and B4, and the in-place migration (Flow 2a) once end to end, B8, including the rotation of both
+keys with the cosigners on rc.6 and the SQL cleanup on 2026-11-12
+(`docs/runbook-migration-inplace.md`, `docs/roadmap.md`). Read that evidence with two limits. Both
+DevNet participants ran the 0.4.0-rc.4 driver during the rehearsals; they moved to the rc.6 driver,
+whose code is this release's, on 2026-11-12 and 2026-11-13. And the soak cluster still seals its key
+files with the legacy shared master.
+
+### Security
+
+- **rustix 1.1.4 → 1.1.6** in `frost/Cargo.lock` (RUSTSEC-2026-0486: rustix's xattr functions mark
+  unwritten bytes as initialized when given a zero-length buffer). rustix reaches the Rust workspace
+  only through `tempfile`: a build dependency (`prost-build`, `tonic-build`) and a dev dependency of
+  the cosigner and frost-core tests. The cosigner image and the dealer binary do not contain it.
+  Lockfile-only change (#81).
+
+### Documented
+
+- **B8 completed** (#83). `docs/runbook-migration-inplace.md`, `docs/roadmap.md` and the soak log
+  record the rotation of both keys on 2026-11-01 (a cluster-hosted ECIES key and a FROST signing key
+  from a DKG, cosigners on rc.6), 11 days of observation, the SQL cleanup of the JCE rows and the
+  destruction of the safety dump and the key exports on 2026-11-12. The runbook lists what was not
+  rehearsed (see "Known limitations").
+- **README: "Supported keys and algorithms" and "Compatibility".** Which Canton key is threshold,
+  which is hosted, which is served only through the HSM delegate; which Canton, Splice and Java
+  versions are tested; the driver-before-cosigners rule for rc.6 and later. The README also no
+  longer says Canton's built-in KMS is Enterprise-only (#82).
+- **Roadmap** (#79): milestone and release status; the plan after 0.4.0 (v0.5.0, 1.0, 2.0);
+  threshold ECIES moved to 2.0, with existing nodes moving to it by an ordinary encryption-key
+  rotation. `docs/audit-rfq.md`: Cure53 also reviews the 1.0 features, as a second phase.
+- **Rütli Cluster Explorer** (#80): an interactive page on GitHub Pages (`docs/explorer/`).
+- **Stale statements corrected before the freeze** (#85): the RFQ's pre-read and residuals, the
+  split ceremony's refresh step and its recovery table, the README's hosted-key list and status.
+
+### What 0.4.0 contains since 0.3.2
+
+Each line points to the release candidate that has the detail.
+
+- **Split ceremony (B2):** an existing Canton Ed25519 key, the namespace key in practice, becomes a
+  `t`-of-`n` FROST key with the same fingerprint; offline `rutli-dealer`, `verify-key`, the operator
+  role. [0.4.0-rc.1]
+- **Canton key parser (B1)**, shared by the split ceremony and `import-key`. [0.4.0-rc.1]
+- **ECIES hosted keys (Track C):** EC P-256 encryption keys in the cluster, `EcdhDerive`, `import-key`
+  for a Canton ECIES key. [0.4.0-rc.1]
+- **Audit remediation, batches A and B:** per-node seal bundles, the `perNode` Helm topology,
+  exec-free backup sidecar, group-key agreement and signature verification in the driver, stricter
+  config validation, instance lock, per-peer TLS names, CA-only trust files. [0.4.0-rc.2]
+- **Zero-downtime CA rotation** with the `cluster_id` pin. [0.4.0-rc.2]
+- **Optional carry of the protocol signing and ECIES keys (B6)**, discouraged; `verify-hosted`.
+  [0.4.0-rc.2]
+- **Audit remediation, batch C:** confidential two-phase DKG and refresh with share epochs (C1, H1,
+  M5); epoch-checked signing with stale-share detection and quorum retry; cosigner-enforced signing
+  intents, per-node approvals, rate limits and sign journals, `audit-cross-check` (C2); key-file
+  format v2 and DEK rotation (M4); authorized hosted-key tombstones and the delete role (M2);
+  epoch-checked atomic restore (M1); the refresher role; `docs/security/threat-model.md`.
+  [0.4.0-rc.3]
+- **Ceremony intents** for DKG and refresh, verified by every node; a ceremony fence no longer stalls
+  signing, and signing continues during a DKG or refresh. [0.4.0-rc.4]
+- **Primed alert counters, third-party license notices in every artifact, `cargo deny`**, the
+  in-place migration runbook, and the public release (Apache-2.0, DCO). [0.4.0-rc.5]
+- **Leader-bound ceremonies with durable fence marks, disjoint FROST and hosted key ids, ceremony
+  intents required by default with TLS**, TLS and HTTP/2 crate advisories closed, CI supply chain
+  pinned. [0.4.0-rc.6]
+
+### Upgrading
+
+**From 0.4.0-rc.6:** replace the image and the jar, in either order, one node at a time. Nothing
+else changes.
+
+**From 0.4.0-rc.4 or rc.5:** apply the rc.6 notes below (ceremony intents on by default, hosted ids,
+key prefix). rc.5 itself has no wire or config change ([0.4.0-rc.5], status line).
+
+**From 0.4.0-rc.3:** the rc.4 rollout, then the rc.6 notes.
+
+**From 0.3.2, rc.1 or rc.2:** every note below that applies to your source release, in release
+order, and the batch C rollout of rc.3 in full. Read the sections in full; the list below is an
+index, not a substitute. The DevNet soak cluster was upgraded release by release (0.3.2 → rc.2 →
+rc.3 → rc.4 → rc.6); a direct upgrade from 0.3.2 to 0.4.0 was not rehearsed.
+
+Release order, never mixed:
+
+- **The dealer and the cosigners from the same release.** Share bundles are envelope version 3
+  since rc.2; rc.2 and later cosigners refuse version 2 bundles, and older cosigners refuse version
+  3. A split ceremony in flight across the upgrade is re-run with the new dealer. ([0.4.0-rc.2],
+  "Upgrade notes"; "Changed")
+- **Batch C rollout: every step on every node before the next** (step 0, measure each key's sign
+  rate, through step 9, deletes). ([0.4.0-rc.3], "Rollout order across batch C (phases 1–4)")
+- **DKG and refresh need every cosigner on ceremony protocol 2;** they are refused on a mixed
+  cluster. Pause the refresh CronJob and onboarding DKGs during the roll. Never run a refresh while
+  the cluster is mixed. ([0.4.0-rc.3], "Upgrade notes")
+- **Signing intents: cosigners first, then the driver, then switch enforcement on.** A driver
+  rollback needs `require_intent` off first. ([0.4.0-rc.3], "Upgrade notes")
+- **Ceremony intents: every cosigner, then the driver and the refresh CronJob image, then
+  `require_ceremony_intent`.** Rollback: turn the flag off first. ([0.4.0-rc.4], "Rollout (ceremony
+  intents)")
+- **`require_ceremony_intent` is on by default for every cosigner with TLS.** Before cosigners of
+  rc.6 or later run with the default, the driver must be 0.4.0-rc.4 or later and the refresh
+  CronJob's image the cosigners' release. Otherwise set `require_ceremony_intent: false`
+  (`signingPolicy` in the Helm chart) on every node first, and remove it once both sign intents.
+  Coming from before rc.4, where the order puts the cosigners first, this means rolling the
+  cosigners with the explicit opt-out. ([0.4.0-rc.6], "Changed (breaking default)"; README,
+  "Compatibility")
+
+Defaults that changed:
+
+- **Helm `tls.layout` defaults to `perNode`:** create the per-node TLS Secrets before
+  `helm upgrade`, or set `tls.layout=shared`. ([0.4.0-rc.1], "Upgrade notes (breaking)")
+- **Helm `topology` defaults to `perNode`:** pin `topology: legacy` to upgrade in place, then
+  migrate with `docs/runbook-per-node-seal.md`. ([0.4.0-rc.2], "Upgrade notes")
+- **PVCs default to `ReadWriteOncePod`:** an existing install pins `persistence.accessModes`, or
+  `helm upgrade` is rejected. ([0.4.0-rc.2], "Upgrade notes")
+- **The exec-based backup is removed;** delete its live CronJob, Role, RoleBinding and
+  ServiceAccount by hand. `backup.enabled` now means the per-node sidecar. ([0.4.0-rc.2], "Upgrade
+  notes")
+- **Per-key sign rate limits are on by default** (300/min and 20 000/day per key, per node), and a
+  refusal is final. Measure first. ([0.4.0-rc.3], rollout step 0 and "Upgrade notes")
+- **Hosted-key deletes are refused by default** (`hosted_keys.delete_allowlist` empty), including
+  Canton's `deleteKey` through the driver. ([0.4.0-rc.3], "Upgrade notes")
+- **Hosted keys only under `rutli-` ids.** Before upgrading, check the hosted inventory
+  (`verify-hosted`, `rutli_hosted_keys`) for ids without `rutli-` after the participant's
+  `frost.key-prefix`; rotate such a key in Canton to a driver-minted id, or delete it. The driver
+  refuses a `frost.key-prefix` that contains `frost-` or `rutli-`. ([0.4.0-rc.6], "Security" and
+  "Changed (breaking default)")
+- **Signing-policy enforcement is off by default,** except ceremony intents: `require_intent`,
+  `signer_acl_required` and `require_epoch_match` default to `false`, `signer_may_refresh` to
+  `true`. The threat model holds only with all of them switched on, identically, on every node.
+  (`SECURITY.md`, "What the security properties assume"; `docs/approval-quorum.md`, "Switching
+  enforcement on")
+
+Checks before and during the upgrade:
+
+- **Config validation is stricter**, and a cosigner refuses to start on a trust file holding
+  anything but currently valid CA certificates. The driver applies the same rule to
+  `frost.tls.ca-cert`. ([0.4.0-rc.2], "Upgrade notes"; "Security")
+- **Mesh dials use per-peer TLS names (`cosigner<id>`):** check each certificate's SAN, or set
+  `peers[].tls_server_name`. A driver talking to new certificates needs per-endpoint `tls-name`s.
+  ([0.4.0-rc.2], "Upgrade notes")
+- **`data_dir/cluster-id` is written at the first start;** a node whose cluster id changes then
+  refuses to start. Pin `cluster_id` before any CA change. ([0.4.0-rc.2], "Upgrade notes"; "Added")
+- **The driver fails closed on a malformed signing-journal line or a broken audit-log chain.** Run
+  `StateCheck` on the participant's state first. ([0.4.0-rc.2], "Upgrade notes")
+- **`getPublicKey` needs at least two cosigners that agree** on the group key. ([0.4.0-rc.2],
+  "Upgrade notes")
+- **Plaintext key files stop the daemon when sealing is on.** Check `keys/` first
+  (`rutli-cosigner keyfile status`). ([0.4.0-rc.3], "Upgrade notes")
+- **`restore` takes the instance lock:** run it with the daemon stopped (`maintenanceNodes` on
+  perNode). ([0.4.0-rc.3], "Upgrade notes")
+- **The refresh CronJob runs as a refresher** (`refresh_allowlist`). rc.1 had moved it to the
+  driver certificate; rc.3 replaces that. ([0.4.0-rc.1], "Upgrade notes (breaking)";
+  [0.4.0-rc.3], "Upgrade notes")
+- **ECIES: upgrade every cosigner before any participant is configured for it.** ([0.4.0-rc.1],
+  "Upgrade notes (breaking)")
+- **`rutli-dealer --any-usage` is removed;** use `--expect-usage` and `--namespace-fingerprint`.
+  ([0.4.0-rc.2], "Changed")
+- **Delete approvals collected by an older `rutli-cosigner` are refused;** re-issue the delete.
+  ([0.4.0-rc.3], "Batch C review fixes", F6)
+
+Key files and keys:
+
+- **Key-file format v2 is opt-in** (`keyfile.write_version: 2`, needs `keyfile.cluster_uuid`). From
+  then on a rollback to an older release needs `keyfile downgrade` on each node first.
+  `keyfile.accept_v1: false` once no rollback is wanted. ([0.4.0-rc.3], rollout step 6 and
+  "Upgrade notes")
+- **Treat every key generated or refreshed on 0.4.0-rc.2 or earlier as exposed to that ceremony's
+  leader** (audit C1). A refresh on this release re-isolates the shares of a dealt key; it cannot
+  repair a DKG key. Generate or split keys that matter only on a uniformly upgraded cluster.
+  ([0.4.0-rc.3], "Upgrade notes"; `SECURITY.md`, "Keys from earlier releases")
+- **Retire the legacy seal master** (clusters that came from `secret_env`) after every node has
+  rotated its DEK and every backup sealed under a master-derived DEK has aged out. ([0.4.0-rc.3],
+  rollout steps 7–8)
+
+### Known limitations
+
+Read these before relying on this release. Each item names the file that states it.
+
+- **Not externally audited.** Pre-1.0. Do not put production authority keys behind Rütli before the
+  external audit is complete; the DevNet soak validator runs on it as test material. (`SECURITY.md`,
+  "Status")
+- **Hosted keys are not threshold keys.** ECIES, RSA and AES keys are whole keys, sealed and
+  replicated on every cosigner. One compromised cosigner reads them all, and rotation protects
+  future traffic only. Threshold ECIES is planned for 2.0. (README, "Supported keys and algorithms";
+  `docs/hosted-keys.md`; `docs/security/threat-model.md`, "Residual risks")
+- **The guarantees need the enforcement switches on.** `require_intent`, `signer_acl_required` and
+  `require_epoch_match` are off and `signer_may_refresh` is on by default; only
+  `require_ceremony_intent` is on by default (with TLS). (`SECURITY.md`, "What the security
+  properties assume")
+- **Key-file v2 is opt-in, and M4 counts as closed only once `keyfile.accept_v1: false` on every
+  node.** Until then v1 files and same-key rollbacks are accepted. (`docs/security/threat-model.md`,
+  "Stale backups, snapshot rollbacks, planted files")
+- **The legacy shared seal master still works** (`share_seal.secret_env`, with a deprecation
+  warning). The threat model assumes per-node seal bundles, rotated DEKs and the master destroyed.
+  (`docs/security/threat-model.md`, "Scope and assumptions"; [0.4.0-rc.2], "Security")
+- **One Kubernetes cluster under one administration is one trust domain** (P10). Its
+  administrator holds every share. For keys that matter, put the cosigners in separate clusters or
+  accounts run by different people. (`docs/security/threat-model.md`, "Trust domains")
+- **No TLS-terminating service mesh between cosigners** (P3), and **never snapshot, clone or
+  live-migrate a running cosigner** (L7). Rütli cannot detect either. (`docs/security/threat-model.md`)
+- **One compromised cosigner can stop ceremonies.** At n = 3 it can split a DKG or refresh it takes
+  part in (F3, DS-CR4: availability, detected and recoverable, never the key), veto any ceremony by
+  refusing (n-of-n), and keep a ceremony it bound to itself on an honest node until the 15-minute
+  orphan timeout. ([0.4.0-rc.6], "Security"; `docs/security/threat-model.md`)
+- **A refresh intent does not bind the expected `(epoch, PKP digest)`, and there is no per-key
+  refresh ACL** (follow-ups). (`docs/ceremonies.md`, "Ceremony intents")
+- **A stolen driver certificate** signs non-gated keys within its ACL and the rate limits (journaled,
+  not prevented), and decrypts with hosted keys within the decrypt limit, which is per node: n times
+  the budget across the cluster. (`docs/security/threat-model.md`; `docs/hosted-keys.md`, "Limits
+  worth knowing")
+- **Keys from 0.4.0-rc.2 and earlier are leader-exposed** (P9). The leader-sees-shares finding (C1)
+  is fixed from rc.3 for new ceremonies; it cannot be repaired for a DKG key made before.
+  (`SECURITY.md`, "Keys from earlier releases")
+- **The namespace key cannot be rotated.** There is no recovery from its loss beyond a restore from
+  backup, and none from its compromise beyond offboarding the node. (`SECURITY.md`, "Scope reminder")
+- **A migrated key existed whole.** The split ceremony and both migration flows protect the future,
+  not the past. (`docs/split-ceremony.md`, `docs/migration.md`, "Read this first")
+- **Refresh needs a refresher certificate from the cluster CA** (`refresh_allowlist`), or
+  `signer_may_refresh: true` for the window. A dealt key must be refreshed after import (Gate C).
+  (`docs/runbook-migration-inplace.md`, D4; `docs/split-ceremony.md`, Step 6)
+- **In-place migration (Flow 2a) is not a DA-documented procedure** (a support risk under a DA
+  support contract) and was rehearsed once. Not rehearsed: the post-import refresh (D4), a cosigner
+  key backup after the rotation, deleting object-storage copies, a backup job that resumes after the
+  cleanup, the teardown, and a JCE rollback between the first rotation and the SQL cleanup.
+  (`docs/runbook-migration-inplace.md`, status; `docs/roadmap.md`, "2a")
+- **New-participant migration (Flow 2b)** leaves external parties unhosted, loses non-DSO contracts,
+  and makes wallet users re-onboard. (`docs/roadmap.md`, "2b"; `docs/migration.md`, §7)
+- **No RSA import.** Only an EC P-256 encryption key can be carried; an RSA node gets a fresh key,
+  and the in-place runbook stops on an RSA encryption key. (`docs/hosted-keys.md`;
+  `docs/migration.md`, §8; `docs/runbook-migration-inplace.md`, §0)
+- **A shared cluster separates key ids, not authority.** `frost.key-prefix` does not stop a holder of
+  the cluster's driver certificate from addressing another prefix; use a driver CN per participant
+  with `signer_acl`. Two participants with the same prefix (or none) end up on the same Ed25519
+  keys without an error: a DKG for an id the cluster already holds returns the existing key.
+  (`docs/migration.md`, §7; `docs/approval-quorum.md`; `docs/architecture.md`, "One cluster,
+  several participants")
+- **Imported and DKG keys cannot be deleted from the cluster;** a failed attempt leaves its ids
+  behind. Deleting a hosted key is not erasure: a tombstone keeps the material for the grace period,
+  and old backups keep what they captured. (`docs/migration.md`, §7;
+  `docs/security/threat-model.md`, "Residual risks")
+- **`backend = "hsm"` is verified against SoftHSM only and is outside the audit.** (`SECURITY.md`,
+  "Backends"; `docs/audit-rfq.md`, §3)
+- **No recovery path if every cosigner is lost at once, and the audit log is not yet signed or
+  exported off the host;** both are planned for 1.0. (`docs/roadmap.md`, "After v0.4.0")
+- **Tested versions:** Canton 3.6.1 and Splice 0.9.0. Canton 3.5.x is supported (same driver SPI)
+  but 0.4 is not re-tested there; Canton 3.4 and earlier are not supported. (README,
+  "Compatibility")
+- **DevNet only so far.** The Splice TestNet run (at least 4 weeks before 1.0) starts with this
+  release. (`docs/roadmap.md`, "Releases and path to 1.0")
+
 ## [0.4.0-rc.6] — 2026-10-28
 
 _Release candidate, pre-audit: for soak and review, not for production key custody. **Breaking default:** `require_ceremony_intent` is on for every cosigner with TLS; read "Changed (breaking default)" below before upgrading. No wire change._
@@ -1581,6 +1839,7 @@ not audited. Do not place production authority keys behind it.
 - HSM backend validated only against SoftHSM.
 - No third-party security audit.
 
+[0.4.0]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0
 [0.4.0-rc.6]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.6
 [0.4.0-rc.5]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.5
 [0.4.0-rc.4]: https://github.com/Stakecraft/rutli/releases/tag/v0.4.0-rc.4

@@ -4,8 +4,7 @@
 > four firms; updated 2026-10-16 for the internal security review and on 2026-10-27 for
 > `v0.4.0-rc.4`, the choice of auditor and the funding-dependent start; and on 2026-11-13 for
 > `v0.4.0-rc.6` as the pre-read and the completed in-place rehearsal. Line counts below were
-> measured on 2026-10-14 at `v0.4.0-rc.1` (commit `903d318`, without B6) and will be re-measured at
-> code freeze.
+> re-measured on 2026-11-13 for the `v0.4.0` code freeze.
 > Companion brief for the auditors: [audit-prep.md](audit-prep.md).
 
 **To:** Cure53. **From:** Stakecraft, maintainers of Rütli. **Contact:** Vasily Istomin (commercial)
@@ -18,8 +17,9 @@ and Alex Novacovschi, CTO (technical), both at business@stakecraft.com.
 Rütli is an open-source (Apache-2.0), self-hosted threshold key management system for Canton Network
 and Splice node authority keys. It plugs into an unmodified Canton node through the public KMS Driver
 SPI (a JVM jar loaded by the node, no Canton fork), and forwards each private-key operation to a
-cluster of Rust cosigners. The Ed25519 namespace (identity) key is held as FROST-ed25519 shares
-(2-of-3 by default), one per cosigner, and Canton receives a standard RFC 8032 signature. Canton's
+cluster of Rust cosigners. The node's Ed25519 keys (namespace, protocol signing, sequencer
+authentication) are held as FROST-ed25519 shares (2-of-3 by default), one share of each per
+cosigner, and Canton receives a standard RFC 8032 signature. Canton's
 encryption and symmetric keys can also live in the cluster as replicated, sealed whole keys (not
 threshold).
 
@@ -116,42 +116,51 @@ build-time lockfile update and documentation.
 
 | # | Component | Includes | Where |
 |---|---|---|---|
-| a | **FROST-ed25519 cosigner cluster** | DKG; t-of-n signing (two rounds); crash-safe nonce guard; proactive refresh; share repair; share sealing at rest (AES-256-GCM; per-node seal bundles in rc.2, each node holding only its own share key and hosted-key seed, replacing the shared master); mutual TLS and the `signer_allowlist` / `peer_allowlist` role split; per-key ceremony guards and cluster-wide signing fence; create-once guard | `frost/core`, `frost/cosigner` |
-| b | **Cluster-hosted keys** | Replicated whole keys (RSA-2048-OAEP via `aws-lc-rs`, AES-256-GCM, and EC-P256 ECIES keys, see row g); per-recipient wrapping (ephemeral X25519, HKDF-SHA256, AES-256-GCM, AAD-bound); write quorum, anti-entropy, read-repair; offline passphrase-encrypted export/import; per-key decrypt rate limit | `frost/cosigner` (`hosted`, `wrap`, `export`, `ratelimit`, `peer`) |
+| a | **FROST-ed25519 cosigner cluster** | DKG; t-of-n signing (two rounds); crash-safe nonce guard; proactive refresh; share repair; share sealing at rest (AES-256-GCM; per-node seal bundles in rc.2, each node holding only its own share key and hosted-key seed, replacing the shared master); mutual TLS and the `signer_allowlist` / `peer_allowlist` role split; per-key ceremony guards and a cluster-wide ceremony fence (signing itself is not fenced since rc.4); create-once guard | `frost/core`, `frost/cosigner` |
+| b | **Cluster-hosted keys** | Replicated whole keys (RSA-2048-OAEP via `aws-lc-rs`, AES-256-GCM, and EC-P256 ECIES keys, see row g); per-recipient wrapping (ephemeral X25519, HKDF-SHA256, AES-256-GCM, AAD-bound); write quorum, anti-entropy, read-repair; offline passphrase-encrypted export/import; per-key decrypt rate limit | `frost/cosigner` (`hosted`, `wrap`, `sync`, `export`, `ratelimit`, `peer`, `verify_hosted`) |
 | c | **JVM KMS driver** | Key-id routing (`frost-` / `rutli-` prefixes, `frost.key-prefix`); `FrostBackend` gRPC client with failover rules, group-key agreement and pinning, and signature verification (DS-H2); M-of-N approval gate and policy; hash-chained audit log; signing journal; Canton 34-byte digest handling; ECIES completion for hosted EC keys (`CantonEcies`) | `driver/src/main` |
 | d | **Split ceremony (milestone B2)** | In `v0.4.0-rc.1`; frozen with v0.4.0 (B6 touches its usage guard, row h). Offline dealer binary `rutli-dealer` splits an existing Canton Ed25519 namespace key into t-of-n FROST shares via `frost_ed25519::keys::split`, using RFC 8032 seed-to-scalar conversion (ed25519-dalek's SHA-512, clamp, reduce mod l); before writing anything it proves group key == Canton key, VSS, `min_signers`, every t-subset reconstructs and signs (`verify_strict`). Each share is sealed to a one-time per-ceremony X25519 recipient key the node minted (`share-recipient`; the hosted-key envelope construction with extra AAD fields, not the static distribution key); every request is signed with the node's mTLS key and verified by the dealer to the cluster CA and the `cosigner<N>` CN, plus a human-confirmed SAS. `import-share` (offline CLI) checks bundle vs node, config and expected fingerprint, VSS, package interpolation, then a no-clobber create (`renameat2(RENAME_NOREPLACE)` / `link(2)`); `abort-import`; DKG and hosted keys refuse `frost-import-` ids; read-only `KeyStatus` and fixed-message `CeremonySignTest` RPCs for an `operator_allowlist` role, and `verify-key` (cross-node digest agreement, every t-subset signs); then `Refresh`. Process hardening of the dealer (core dumps, ptrace, core handlers, mlock, swap). Includes the Canton key parser (B1) it depends on | `frost/core/src/dealer.rs`; `frost/cosigner/src/{share_delivery,share_import,request_auth,verify_key,wrap}.rs`, `src/bin/rutli-dealer.rs`; `frost/canton-key`; runbook [split-ceremony.md](split-ceremony.md) |
 | e | **Deployment artifacts** (secondary) | Helm chart with the `perNode` topology (one StatefulSet and Service per node, each pod referencing only its own seal and TLS Secrets), Kubernetes manifests (StatefulSet, NetworkPolicy, PDB, per-pod backup sidecar with no exec RBAC, refresh CronJob), deploy-policy CI gate, Docker Compose TLS config, cert generation script | `deploy/helm`, `deploy/k8s`, `deploy/frost`, `scripts/` |
 | f | **Operational runbooks** (procedural review) | Key ceremony, split ceremony (incl. destruction of the whole key), DR/backup/restore, approval quorum, and the pilot migration runbook (`docs/migration.md`), whose steps were exercised in the DevNet B4 cutover rehearsal on 2026-10-14 | `docs/key-ceremony.md`, `docs/split-ceremony.md`, `docs/disaster-recovery.md`, `docs/approval-quorum.md`, `docs/migration.md` |
 | g | **ECIES hosted keys (Track C)** | Merged and part of `v0.4.0` (in `v0.4.0-rc.1`); no longer a separate release or optional addendum. Hosted EC-P256 keys with an `EcdhDerive` RPC on the cosigner (`aws-lc-rs`) and a driver-side ECIES decrypt path (BouncyCastle `IESEngine`, shared secret supplied by the cluster); `import-key` of a Canton EC P-256 encryption key via the B1 parser. Details and our focus questions in section 2.1 | `frost/cosigner/src/{hosted,export,service,node}.rs`, `cosigner.proto`; `driver/.../backend/{CantonEcies,FrostBackend}.scala` |
-| h | **Optional carry of protocol signing and ECIES encryption keys (milestone B6)** | Implemented and in `v0.4.0-rc.2`. A discouraged path: the recommended migration carries only the namespace key and gives the new node fresh keys. It touches the offline dealer's usage guard (`rutli-dealer --expect-usage`, envelope v3), adds a `rutli-cosigner verify-hosted` RPC/CLI, and docs. Size to be given with the freeze commit | `frost/core/src/dealer.rs`, `frost/cosigner/src/bin/rutli-dealer.rs`, `frost/cosigner` (`verify-hosted`), `docs/` |
+| h | **Optional carry of protocol signing and ECIES encryption keys (milestone B6)** | Implemented and in `v0.4.0-rc.2`. A discouraged path: the recommended migration carries only the namespace key and gives the new node fresh keys. It touches the offline dealer's usage guard (`rutli-dealer --expect-usage`, envelope v3), adds the `HostedKeyStatus` RPC and the `rutli-cosigner verify-hosted` CLI, and docs | `frost/core/src/dealer.rs`, `frost/cosigner/src/bin/rutli-dealer.rs`, `frost/cosigner` (`verify-hosted`), `docs/` |
 | i | **In-place migration of an existing node (Flow 2a)** | Procedure, in `v0.4.0`; rehearsed end to end on DevNet (milestone B8, 2026-10-23 to 2026-11-12). The existing participant keeps its database and UID: all its active keys are carried into the cluster with their fingerprints (namespace via the split ceremony, protocol signing and ECIES via B6), the node is restarted with `crypto.provider = kms`, the keys are registered by KMS id before it reconnects, then rotated per the operator's choice and the old plaintext rows removed. Mostly runbook and Canton console steps, little new code; not a procedure Digital Asset documents. We want the sequence, the rollback story and the residue reviewed. What the rehearsal did not cover is listed in the runbook's status. |
-| j | **Internal-review remediation, batch C** | Shipped in `v0.4.0-rc.3`; a wire change. Confidential peer-to-peer delivery of DKG/refresh round-2 packages over mTLS (DS-C1); cosigner-enforced signed signing intents with per-node approvals, journal and rate limit (DS-C2); two-phase ceremonies with epochs (DS-H1); share format v2 with AAD; hosted-key tombstones. Our priority area for re-review (section 1.1). Size to be given with the freeze commit | `frost/core` (DKG, refresh), `frost/cosigner` (`orchestrator`, `node`, `service`, `keystore`, `peer`), `cosigner.proto`, `driver/src/main` (intent signing, approval gate) |
+| j | **Internal-review remediation, batch C** | Shipped in `v0.4.0-rc.3`; a wire change. Confidential peer-to-peer delivery of DKG/refresh round-2 packages over mTLS (DS-C1); cosigner-enforced signed signing intents with per-node approvals, journal and rate limit (DS-C2); two-phase ceremonies with epochs (DS-H1); share format v2 with AAD; hosted-key tombstones. Our priority area for re-review (section 1.1) | `frost/core` (DKG, refresh), `frost/cosigner` (`orchestrator`, `node`, `service`, `keystore`, `peer`), `cosigner.proto`, `driver/src/main` (intent signing, approval gate) |
 
 ### Approximate size
 
-**These numbers are for `v0.4.0-rc.1`; they predate B6, remediation batches A and B (rc.2) and batch C, which add code (batch C touches the core ceremony and signing paths). We will re-measure at the freeze and send the new table with the commit hash.** Measured on 2026-10-14 at `v0.4.0-rc.1` (`903d318`) with `wc -l` (physical lines, including comments and
+**These numbers are for the `v0.4.0` code freeze.** Measured on 2026-11-13 at the `v0.4.0` release commit (the code
+of `v0.4.0-rc.6` plus a lockfile update) with `wc -l` (physical lines, including comments and
 blanks; `tokei` was not used). Rust non-test lines were counted by cutting each file at its first
 `#[cfg(test)]`. Tests, generated code and build output are excluded from the "reviewable" column and
-listed separately. B2 and Track C code is already included in the crate rows. B6, rc.2 and batch C are not counted.
+listed separately. The first version of this table, measured on 2026-10-14 at `v0.4.0-rc.1`, is the
+baseline for the growth figures below.
 
 | Component | Reviewable lines | Excluded (not counted) |
 |---|---|---|
-| `frost/core` (Rust, crypto core, includes `dealer.rs`) | ~960 | ~430 integration tests, ~280 inline unit tests |
-| `frost/cosigner` (Rust daemon and `rutli-dealer`, `src/`) | ~9,520 | ~2,330 inline unit tests, ~3,750 integration tests |
-| `frost/canton-key` (B1, Canton key parser) | ~1,490 | ~110 inline unit tests, ~600 vector tests, test vectors |
-| `frost/cosigner/proto/cosigner.proto` | ~330 | |
-| `driver/src/main/scala` (JVM driver, hand-written, 18 files) | ~3,310 | ~3,190 tests; 121 checked-in grpc-java generated files under `driver/src/main/java` |
-| `deploy/helm`, `deploy/k8s` (YAML) | ~1,570 | |
-| Runbooks and design docs | ~3,090 (`key-ceremony`, `disaster-recovery`, `approval-quorum`, `hosted-keys*`, `phase-2-frost`, `architecture`, `split-ceremony`, `migration`) | |
+| `frost/core` (Rust, crypto core, includes `dealer.rs`) | ~1,270 | ~530 integration tests, ~380 inline unit tests |
+| `frost/cosigner` (Rust daemon and `rutli-dealer`, `src/`) | ~19,370 | ~8,990 inline unit tests, ~11,940 integration tests |
+| `frost/canton-key` (B1, Canton key parser) | ~1,520 | ~110 inline unit tests, ~600 vector tests, test vectors |
+| `frost/cosigner/proto/cosigner.proto` | ~590 | |
+| `driver/src/main/scala` (JVM driver, hand-written, 23 files) | ~4,630 | ~5,070 tests; 160 checked-in grpc-java generated files under `driver/src/main/java` |
+| `deploy/helm`, `deploy/k8s` (YAML) | ~2,690 | |
+| Runbooks and design docs | ~3,810 (`key-ceremony`, `disaster-recovery`, `approval-quorum`, `hosted-keys*`, `phase-2-frost`, `architecture`, `split-ceremony`, `migration`) | |
 
-Of the cosigner and core rows, the split ceremony (B2) accounts for ~2,850 lines (`dealer.rs`,
+Growth since `v0.4.0-rc.1`, in reviewable lines: `frost/cosigner` +9,850, the driver +1,320 (18 to 23
+files), `frost/core` +310, `cosigner.proto` +260, `frost/canton-key` +30. It comes from B6, the
+remediation batches A, B and C, ceremony intents and the rc.6 review fixes; batch C and the ceremony
+work are in the core ceremony and signing paths. Four documents written since are not in the last
+row: `runbook-migration-inplace` (~680 lines), `ca-rotation` (~640), `ceremonies` (~410) and
+`security/threat-model` (~310).
+
+Measured at `v0.4.0-rc.1` and not re-measured: of the cosigner and core rows, the split ceremony (B2) accounts for ~2,850 lines (`dealer.rs`,
 `share_delivery.rs`, `share_import.rs`, `verify_key.rs`, `request_auth.rs`, `rutli-dealer`), plus
 changes in `wrap`, `keystore`, `node`, `service` and `main`. Track C (ECIES) added about 1,350 lines
 across 11 files, inline tests included, in the 24 commits since its first commit (`e09d07f`),
 mostly `FrostBackend.scala`, `CantonEcies.scala`, `hosted.rs` and `export.rs`.
 
-Rough total: ~15,600 lines of Rust, protobuf and Scala (B1, B2 and Track C included), plus ~1,570
-lines of deployment YAML. Recount at the freeze tag.
+Rough total: ~27,380 lines of Rust, protobuf and Scala (~15,600 at `v0.4.0-rc.1`), plus ~2,690 lines
+of deployment YAML.
 
 ### 2.1 ECIES hosted keys (Track C): detail and where we want attention
 
@@ -244,8 +253,8 @@ Each item below comes from our own design docs (`audit-prep.md`, `phase-2-frost.
 | **Carrying protocol keys (B6)** | Carrying a node's protocol signing and ECIES encryption keys into the cluster is a discouraged path (fresh keys are the default); it depends on the dealer's usage guard (`--expect-usage`) refusing a key of the wrong usage, and on `verify-hosted` proving what the cluster serves. We want that guard and the verification reviewed for ways to carry the wrong key, or to leave a plaintext copy behind unnoticed. In rc.2; runbook in `migration.md` section 8. |
 | **Share delivery (split ceremony)** | Two directions. *Forged requests* (an attacker substituting recipient keys gets real shares): requests are signed by the node's mTLS key and verified to the cluster CA with a CN → identifier rule, backed by a witnessed SAS; we want the X.509 path verification (`request_auth.rs`, aws-lc-rs over x509-parser, no webpki), the identity rule and the canonical encoding reviewed. *Forged bundles*: sealing to a public key gives confidentiality, not sender authentication; we rely on the install-time checks (expected fingerprint, VSS, package interpolation, own verifying share) and on `verify-key`'s cross-node digest comparison and every-quorum signing to make a forged or mixed bundle fail. Also: the AAD binding, recipient-secret lifetime and deletion, the operator role's reach (`CeremonySignTest`), and the reserved-id / no-clobber install races. |
 | **Rollback / stale state** | In rc.2, restoring a stale backup can resurrect a deleted hosted key (documented hazard, `disaster-recovery.md` section 3c); anti-entropy treats a missing key as something to repair. For FROST keys: round-1 nonces live only in RAM under a fresh random session id, and the on-disk single-use markers are keyed by that id (`nonce_store.rs`), so restoring or losing an old nonce store cannot cause nonce reuse. A node restored from a pre-refresh backup holds a stale share; the leader's aggregation verifies every signature share and attributes a bad one (`session.rs`), so it cannot produce a wrong signature, but rc.2 has **no explicit epoch or version check** that keeps such a node from taking part (the `refresh_count` in a share's provenance is informational and exists only for dealt keys). Batch C adds epochs (DS-H1, above; also DS-M1); please check whether they close replay of an old sealed share or backup after a refresh, or whether it needs a further control. Batch C also adds tombstones for hosted keys (DS-M2), aimed at the resurrection hazard: we want the tombstone and anti-entropy interaction reviewed. |
-| **Hosted-key wrapping and replication** | Per-recipient wrap with a recipient key derived (never stored) from the cluster master secret; AAD binds cluster id, key id, spec and recipient; replication never touches FROST shares (stated invariant); conflicting commitments for one id are a hard error, never auto-reconciled. |
-| **Key-id handling** | Ids are opaque strings to cosigners; the driver derives them deterministically from Canton key names and applies `frost.key-prefix`. On a shared cluster a prefix is a namespace, not an authorization boundary: any driver cert can address any id. Look for prefix collisions, routing confusion between `frost-` / `rutli-` / delegate, and approval rules that match on a prefix that omits `key-prefix`. |
+| **Hosted-key wrapping and replication** | Per-recipient wrap to the recipient's X25519 distribution key: its seed sits in that node's own seal bundle and peers' public keys are pinned in config (derived from the shared master only on a legacy cluster); AAD binds cluster id, key id, spec and recipient; replication never touches FROST shares (stated invariant); conflicting commitments for one id are a hard error, never auto-reconciled. |
+| **Key-id handling** | Cosigners read the first `frost-` / `rutli-` tag in an id and create hosted keys only under `rutli-` ids (rc.6); otherwise ids are opaque strings. The driver derives them deterministically from Canton key names and applies `frost.key-prefix`. On a shared cluster a prefix is a namespace, not an authorization boundary: any driver cert can address any id unless `signer_acl` restricts it. Since rc.3 a DKG for an id that every node already holds from a DKG returns the existing key (so that a retry succeeds), so two participants with the same prefix end up on the same keys without an error. Look for prefix collisions, routing confusion between `frost-` / `rutli-` / delegate, and approval rules that match on a prefix that omits `key-prefix`. |
 | **Audit log and journal integrity** | Hash-chained, fsynced write-ahead audit log; fails closed if a successful operation cannot be logged. The signing journal detects replays but cannot see height or round. |
 | **Hosted-key side channels and exposure** | RSA decrypt performs full OAEP (no raw `c^d mod N` oracle) on `aws-lc-rs`, avoiding the pure-Rust `rsa` crate (RUSTSEC-2023-0071). Please check the cosigner-side error and timing behavior of `Decrypt`. |
 | **Operational procedure** | Are the key ceremony, DR and migration runbooks sound? In particular the destruction of the whole key after a split, and the exposure of plaintext keys in old database backups. |
