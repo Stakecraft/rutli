@@ -312,7 +312,7 @@ no forward secrecy; seal-secret protection is software, not HSM or enclave; one 
   upstream Canton KMS driver conformance suite.
 - **Internal security review:** the public findings list `docs/security/internal-review-2026-10.md` (two independent reviews on 2026-10-16 plus the batch C review) and [docs/security/threat-model.md](security/threat-model.md); the batch C design notes on request (section 1.1).
 - **Environment:** an evidence pack from our DevNet soak (3 cosigners backing a Splice DevNet
-  validator, cosigners on rc.6 since 2026-10-28): the soak log, the B0, B4 and B8 runbooks and their evidence (driver audit logs, hashes,
+  validator, cosigners on rc.6 since 2026-10-28 and on 0.4.0 since 2026-11-14): the soak log, the B0, B4 and B8 runbooks and their evidence (driver audit logs, hashes,
   timings), and dashboard exports; a live demo over video call on request. We do not grant access
   to the cluster itself (it is shared with other DevNet validators). The DevNet B4 cutover rehearsal
   (an existing JCE validator moved into the cluster with its namespace and party IDs unchanged) ran
