@@ -3,6 +3,10 @@
 **Status:** plan, ready for review, 2026-10-09; run on 2026-10-14, GO 2026-10-15, destruction 2026-10-15, teardown
 2026-10-16 ([soak log](soak-2026-10-devnet.md)). **Roadmap item:** B4 in [roadmap-migration.md](roadmap-migration.md).
 **Output:** a proven run of [migration.md](migration.md), the pilot runbook, and its corrections.
+
+> **Splice 0.10 / Canton 3.7:** this is a record of a run on Splice 0.9.0. Its commands pin `--version 0.9.0`; never re-run
+> them as written against a participant that has run 0.10.x (Canton 3.7 migrates the schema, and 3.6 will not start on it).
+> What changed for these steps: [splice-0.10.md](splice-0.10.md).
 **Who runs it:** the operator (Alex) runs every command marked **[MUTATES]**. Everything else is read-only preparation
 (`kubectl get/describe/logs`, `helm get/list/status/template`). "Seen 2026-10-09" values come from a read-only
 inspection on that date. Record them again on the day.
@@ -329,6 +333,8 @@ The rehearsal wants realistic backups: ≥ 6 local `pg_dumpall` copies and their
 
 `ExportKeyPair` is refused server-side unless the **participant's** config has `features.enable-preview-commands`
 (`GrpcVaultService.scala:589-597`; the flag reaches the node via `CantonConfig.scala:763`). The console flag alone is not enough.
+*Canton 3.7 (Splice 0.10.x):* the server-side gate is `parameters.enable-key-download` instead (`GrpcVaultService.scala:568-586`
+at v3.7.2), chart value `enableKeyDownload: true`; see [splice-0.10.md](splice-0.10.md).
 ```sh
 helm -n $NS get values participant -o yaml > $D/participant-values.pre-b4.yaml
 grep -c additionalEnvVars $D/participant-values.pre-b4.yaml      # expect 0; if not, merge the list by hand (Helm replaces lists)
