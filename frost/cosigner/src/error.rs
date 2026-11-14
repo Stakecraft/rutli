@@ -242,6 +242,10 @@ impl From<DaemonError> for tonic::Status {
             DaemonError::Core(
                 rutli_frost_core::CoreError::BindingMismatch { .. } | rutli_frost_core::CoreError::InvalidBinding(_),
             ) => tonic::Status::failed_precondition(e.to_string()),
+            // aborted: this node holds no round-1 nonces for the session any more (it restarted,
+            // a ceremony commit replaced the share, the session outlived its TTL). The node and the
+            // key are fine and the request was not wrong: a new session will do.
+            DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_)) => tonic::Status::aborted(e.to_string()),
             // ALREADY_EXISTS, like a DKG over an existing key: the id is taken — by the import
             // mechanism, whether or not the share has been installed yet.
             DaemonError::ReservedKeyId(_) => tonic::Status::already_exists(e.to_string()),
@@ -294,6 +298,10 @@ mod tests {
             DaemonError::from_peer_status(status, "k", Some(leader)),
             DaemonError::StaleShare { peer: p, .. } if p == peer
         ));
+
+        // A round 2 for a session this node no longer holds: ABORTED, not INTERNAL.
+        let lost = DaemonError::Core(rutli_frost_core::CoreError::UnknownSession("sign-1".into()));
+        assert_eq!(tonic::Status::from(lost).code(), tonic::Code::Aborted);
 
         // Any other refusal stays a plain status (an older peer, another reason).
         let plain = tonic::Status::failed_precondition("something else");

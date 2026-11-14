@@ -38,6 +38,9 @@ pub const CEREMONY_UNKNOWN_REFUSED: &str = "rutli_ceremony_unknown_refused_total
 pub const CEREMONY_UNKNOWN_NO_VOTES: &str = "rutli_ceremony_unknown_no_votes";
 /// Peers skipped during sign round 1 (unreachable or refusing) — a quorum-margin canary.
 pub const SIGN_ROUND1_SKIPS: &str = "rutli_sign_round1_skips_total";
+/// Sign round 2 requests for a session this node holds no round-1 nonces for (it restarted or
+/// committed a ceremony since round 1, or the session expired). The leader retries without it.
+pub const SIGN_ROUND2_UNKNOWN_SESSION: &str = "rutli_sign_round2_unknown_session_total";
 /// Leader-issued aborts of in-flight sign sessions (one per given-up signature).
 pub const SIGN_ABORTS: &str = "rutli_sign_aborts_total";
 /// In-flight (round-1, not yet round-2) sign sessions currently held on this node.
@@ -277,6 +280,7 @@ fn prime() {
     metrics::counter!(CEREMONY_UNKNOWN_REFUSED).absolute(0);
     metrics::gauge!(CEREMONY_UNKNOWN_NO_VOTES).set(0.0);
     metrics::counter!(SIGN_ROUND1_SKIPS).absolute(0);
+    metrics::counter!(SIGN_ROUND2_UNKNOWN_SESSION).absolute(0);
     metrics::counter!(EPOCH_MISMATCH).absolute(0);
     metrics::counter!(EPOCH_CHECK_SKIPPED).absolute(0);
     metrics::counter!(SIGN_RETRIES).absolute(0);
@@ -333,6 +337,7 @@ pub fn describe() {
     describe_counter!(CEREMONY_UNKNOWN_REFUSED, "No-votes for unknown ceremonies not recorded because a cap was reached");
     describe_gauge!(CEREMONY_UNKNOWN_NO_VOTES, "No-votes held for ceremony ids peers asked about that this node never knew");
     describe_counter!(SIGN_ROUND1_SKIPS, "Peers skipped during sign round 1 (quorum-margin canary)");
+    describe_counter!(SIGN_ROUND2_UNKNOWN_SESSION, "Sign round 2 requests for a session this node holds no nonces for");
     describe_counter!(SIGN_INTENT_ABSENT, "Sign rounds accepted without a signing intent (require_intent off)");
     describe_counter!(SIGN_POLICY_REFUSALS, "Signing-policy refusals at this node, by reason");
     describe_counter!(CEREMONY_INTENT_REFUSALS, "DKG/refresh ceremony intents refused at this node, by reason");

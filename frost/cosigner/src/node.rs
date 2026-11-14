@@ -1348,6 +1348,9 @@ impl Node {
                 }
             }
         };
+        if matches!(result, Err(DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_)))) {
+            metrics::counter!(crate::metrics::SIGN_ROUND2_UNKNOWN_SESSION).increment(1);
+        }
         self.update_pending_gauge();
         result
     }

@@ -5,6 +5,14 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Changed
+
+- **A sign round 2 for a session the node no longer holds answers `ABORTED`, not `INTERNAL`,** and
+  is counted in the new `rutli_sign_round2_unknown_session_total`. It is what a node answers
+  after a restart or a ceremony commit between the two rounds, or past the session TTL; nothing
+  is wrong with the node. Leaders treat it as before (the member is left out of that signature
+  and another subset signs), whatever release they run.
+
 ### Fixed
 
 - **A cosigner's first signature after a restart could lose its session.** Two requests that used
