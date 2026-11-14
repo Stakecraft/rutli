@@ -17,6 +17,14 @@ All notable changes to Rütli are documented here. Format loosely follows
   first is now kept and the second is dropped unused. No nonce was reused or could be: the
   replaced nonces were unreachable and never signed, and nothing was journaled or burned for the
   lost session.
+- **A share read just before a ceremony commit could be cached after it.** A first use of a key
+  that read the share file, then lost the processor while a refresh committed (new share written,
+  cache entry evicted), went on to cache the share it had read: the old one. The node then signed
+  from the old sharing, which every peer refuses (`epoch mismatch`), until its next restart or
+  commit; the epoch check did not see it, because it reads the file. Found by reading the code
+  for the fix above, not seen in operation: it needs an empty cache (a restart) at the moment of a
+  commit. A load that an eviction overtook now reads the share again. The same guard covers
+  `discard-partial-key`.
 
 ## [0.4.0] — 2026-11-14
 

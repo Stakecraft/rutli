@@ -171,6 +171,9 @@ pub struct Node {
     keystore_health: Arc<crate::health::KeystoreHealth>,
     /// Loaded signing state per key: the share's cosigner and the sharing it belongs to.
     cosigners: Mutex<std::collections::HashMap<String, CachedKey>>,
+    /// How many times a key was evicted from `cosigners` ([`Node::evict`]). Read and bumped only
+    /// while holding that lock; [`Node::cached`] uses it to notice an eviction during its load.
+    cache_evictions: std::sync::atomic::AtomicU64,
     /// Keys whose share this node's epoch check found stale ([`crate::epoch_check`]): round 1 and
     /// leading are refused for them until a check finds the share current again.
     stale: Mutex<std::collections::HashMap<String, StaleMark>>,
@@ -328,6 +331,7 @@ impl Node {
             stale: Mutex::new(Default::default()),
             require_epoch_match: false,
             sign_guard: None,
+            cache_evictions: std::sync::atomic::AtomicU64::new(0),
             ceremonies: Mutex::new(Default::default()),
             ceremony_orphan_timeout,
             ceremony_fence_timeout: CEREMONY_FENCE_TIMEOUT,
@@ -867,28 +871,53 @@ impl Node {
     /// live in the `Cosigner` that made them, so replacing a published one would lose the sessions
     /// already opened on it (they would fail at round 2 as unknown). The one built second is
     /// dropped before any caller saw it; it never held a nonce.
+    ///
+    /// A share read before an eviction ([`Node::evict`]) is never published after it: whoever
+    /// evicts has just changed the key's file, so that share may be the one it replaced. The load
+    /// is run again instead.
     fn cached(&self, key_id: &str) -> Result<CachedKey> {
-        {
-            let map = self.cache();
+        use std::sync::atomic::Ordering::Relaxed;
+        loop {
+            let evictions = {
+                let map = self.cache();
+                if let Some(c) = map.get(key_id) {
+                    return Ok(c.clone());
+                }
+                self.cache_evictions.load(Relaxed)
+            };
+            let share = self.keystore.load(key_id)?;
+            let view = (share.epoch, share.pkp_digest()?);
+            let nonce_store = NonceStore::open(self.keystore.nonce_dir(key_id))?;
+            let cached = CachedKey {
+                cosigner: Arc::new(Cosigner::new(share.key_package, share.public_key_package, nonce_store)),
+                view,
+            };
+            #[cfg(test)]
+            {
+                let hook = crate::sync::recover(&self.hooks.after_cache_load, "test_hook").clone();
+                if let Some(hook) = hook {
+                    hook(key_id);
+                }
+            }
+            let mut map = self.cache();
             if let Some(c) = map.get(key_id) {
                 return Ok(c.clone());
             }
-        }
-        let share = self.keystore.load(key_id)?;
-        let view = (share.epoch, share.pkp_digest()?);
-        let nonce_store = NonceStore::open(self.keystore.nonce_dir(key_id))?;
-        let cached = CachedKey {
-            cosigner: Arc::new(Cosigner::new(share.key_package, share.public_key_package, nonce_store)),
-            view,
-        };
-        #[cfg(test)]
-        {
-            let hook = crate::sync::recover(&self.hooks.after_cache_load, "test_hook").clone();
-            if let Some(hook) = hook {
-                hook(key_id);
+            if self.cache_evictions.load(Relaxed) == evictions {
+                map.insert(key_id.to_string(), cached.clone());
+                return Ok(cached);
             }
         }
-        Ok(self.cache().entry(key_id.to_string()).or_insert(cached).clone())
+    }
+
+    /// Drop `key_id` from the cache after its file changed (a ceremony commit, a discard), so the
+    /// next use loads it again. Call it after the change is on disk: a load that read the file
+    /// before the change either published before this (and is removed here) or sees the eviction
+    /// and reads again ([`Node::cached`]).
+    fn evict(&self, key_id: &str) {
+        let mut map = self.cache();
+        self.cache_evictions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        map.remove(key_id);
     }
 
     /// Apply `signing_policy.require_epoch_match` (see [`crate::config::SigningPolicyConfig`]).
@@ -2437,7 +2466,7 @@ impl Node {
         if state == RecordState::Committed {
             // The next sign loads the committed share, which is newer than anything a stale mark
             // was measured against.
-            self.cache().remove(&rec.key_id);
+            self.evict(&rec.key_id);
             if self.stale_mark(&rec.key_id).is_some() {
                 self.set_stale(&rec.key_id, None);
             }
@@ -2530,7 +2559,7 @@ impl Node {
         if nonces.try_exists()? {
             std::fs::remove_dir(&nonces)?;
         }
-        self.cache().remove(key_id);
+        self.evict(key_id);
         tracing::warn!(key_id, "discarded this node's file for a legacy partial DKG key");
         Ok(())
     }
@@ -2675,7 +2704,7 @@ impl Node {
         self.record_store.write_recovery(&rec, &done)?;
         book.records.insert(ceremony_id.to_string(), done.clone());
         drop(book);
-        self.cache().remove(&rec.key_id);
+        self.evict(&rec.key_id);
         if self.stale_mark(&rec.key_id).is_some() {
             self.set_stale(&rec.key_id, None);
         }
@@ -3744,11 +3773,12 @@ mod sign_across_commit_tests {
     }
 }
 
-/// A key's first use after a restart (an empty cache), raced by another first use of it.
+/// A key's first use after a restart (an empty cache), raced by another first use of it or by a
+/// ceremony commit.
 #[cfg(test)]
 mod cache_first_use_tests {
     use super::*;
-    use crate::orchestrator::run_dkg;
+    use crate::orchestrator::{run_dkg, run_refresh, sign};
     use crate::peer::{LocalPeer, PeerApi};
     use rutli_frost_core::nonce_store::NonceStore;
     use std::sync::mpsc;
@@ -3837,6 +3867,38 @@ mod cache_first_use_tests {
         assert!(node.sign_round2(KEY, session, &msg, &commitments).is_err(), "no second share");
         assert!(node.sign_round1(KEY, session, &ctx).is_err(), "no fresh nonces for a burned session");
         assert_eq!(node.pending_sign_count(KEY), 0);
+    }
+
+    /// A first use reads the share, then a refresh commits (writes the new share, evicts the
+    /// cache) before that load publishes what it read. The old share must not land in the cache
+    /// after the eviction: the node would sign from the old sharing — refused by every peer, and
+    /// by this node as a member of any leader's quorum — until its next restart or commit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_load_overtaken_by_a_refresh_commit_does_not_cache_the_old_share() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (nodes, peers) = cluster(&tmp);
+        let group = run_dkg(&peers, KEY).await.unwrap();
+        let msg = rutli_frost_core::dealer::canton_test_message(b"a load spans a commit");
+        let old_view = nodes[1].signing_view(KEY).unwrap().view;
+        let node = nodes[0].clone();
+        node.cache().clear(); // as after a restart
+
+        let (parked, release) = park_next_load(&node);
+        let other = {
+            let n = node.clone();
+            std::thread::spawn(move || n.signing_view(KEY).map(|v| v.view))
+        };
+        parked.recv_timeout(WAIT).expect("the first load parks");
+
+        assert_eq!(run_refresh(&peers, KEY).await.unwrap(), group);
+        let new_view = nodes[1].signing_view(KEY).unwrap().view;
+        assert_eq!(new_view.0, old_view.0 + 1);
+
+        release.send(()).unwrap();
+        assert_eq!(other.join().unwrap().unwrap(), new_view, "the overtaken load reads the share again");
+        assert_eq!(node.signing_view(KEY).unwrap().view, new_view, "the cache holds the committed sharing");
+        let sig = sign(&node, &peers, KEY, &msg).await.unwrap();
+        assert!(crate::verify_key::signature_verifies(&group, &msg, &sig));
     }
 }
 
