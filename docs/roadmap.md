@@ -1,6 +1,6 @@
 # Rütli roadmap
 
-**Status:** 2026-10-15; audit timing updated 2026-10-27; post-0.4.0 plan added 2026-11-01; milestone and release status updated 2026-11-02; B8 completed 2026-11-12. **Scope:** where Rütli stands, the two ways a Canton/Splice validator ends up on it, and the
+**Status:** 2026-10-15; audit timing updated 2026-10-27; post-0.4.0 plan added 2026-11-01; milestone and release status updated 2026-11-02; B8 completed 2026-11-12; v0.4.0 tagged 2026-11-14. **Scope:** where Rütli stands, the two ways a Canton/Splice validator ends up on it, and the
 path to 1.0. Facts are stated as established only where a rehearsal or a source check backs them; everything else
 is marked **unproven**. The detailed Track B record (migration spike, milestones, findings) is
 [roadmap-migration.md](roadmap-migration.md).
@@ -111,7 +111,7 @@ contract.
 #### 2b: New database, new participant UID (same namespace)
 
 **Status: proven.** B0 (2026-10-09, the soak validator) and B4 (2026-10-14, a scratch JCE validator; the point of no
-return was crossed at 17:05:01Z, gates G1 to G7 green; destruction and teardown follow the GO). Runbook:
+return was crossed at 17:05:01Z, gates G1 to G7 green; GO and destruction 2026-10-15, teardown 2026-10-16). Runbook:
 [migration.md](migration.md); rehearsal plan: [b4-rehearsal.md](b4-rehearsal.md).
 
 The party move uses Splice's migrator (`migrateValidatorParty`, identities dump, `newParticipantIdentifier`). Removing
@@ -166,7 +166,7 @@ namespace and signing keys are threshold keys; the encryption key is not.
 | B1 | Canton key parser | Done |
 | B2 | Split ceremony ([split-ceremony.md](split-ceremony.md)) | Done; Codex adversarial review: nothing above low |
 | B3 | RSA import | Dropped (not needed) |
-| B4 | Cutover rehearsal on a scratch JCE validator | Cutover and verification done 2026-10-14; GO and destruction from 2026-10-15 17:11Z |
+| B4 | Cutover rehearsal on a scratch JCE validator | Done: cutover and verification 2026-10-14, GO and destruction 2026-10-15, teardown 2026-10-16 |
 | B5 | Docs fix (stale "unsupported" claims, exposure caveat) | Done |
 | B6 | Optional carry of signing and ECIES keys | Done: PR #23, merged 2026-10-15 (Opus and Codex reviews addressed) |
 | B7 | 2b rehearsal with wallet end-users: verify re-onboarding keeps their parties and balances | New, proposed |
@@ -185,7 +185,7 @@ Track A (soak and hardening) continues on `stakecraft-devnet-rutli-01`; exit cri
 |---|---|
 | 2026-10-09 | v0.4.0-rc.1 tagged |
 | 2026-10-28 | v0.4.0-rc.6: ceremony leader binding and durable fence marks, disjoint FROST and hosted key ids, TLS crate advisories closed; ceremony intents required by default with TLS |
-| ≈ 2026-11-14 | **v0.4.0 = audit code freeze:** Flow 1, Flow 2a (after B8), Flow 2b, B2, B6, ECIES, C2 fixes, CA rotation |
+| 2026-11-14 | **v0.4.0 tagged = audit code freeze:** Flow 1, Flow 2a (after B8), Flow 2b, B2, B6, ECIES, C2 fixes, CA rotation |
 | Later | Pre-rotate alternative for 2a (research), if B8 shows it is worth it |
 | Day v0.4.0 is tagged | Splice TestNet validator run starts; at least 4 weeks clean before 1.0 |
 | After the audit | **1.0**: the audit's fixes and retest, at least 4 clean weeks on TestNet, and the 1.0 features below |
@@ -208,6 +208,7 @@ v0.4.0.
 |---|---|---|
 | **Now** (docs) | Supported keys and algorithms, Canton compatibility matrix | In the README: which key is threshold, which is hosted, which Canton and Splice versions are tested. Done (#77) |
 | **v0.5.0** | Unified admin CLI | One tool for generate, import, public key and Canton fingerprint (`1220…`), and a documented rotation recipe (`rotate_kms_node_key`, `owner_to_key_mappings.rotate_key`). Today these are spread across `rutli-cosigner` and `rutli-dealer` |
+| **v0.5.0** | Shared-cluster guard | A DKG that returns an existing key says so, and the driver refuses a key it did not create unless the operator allows it. Today two participants with the same `frost.key-prefix` end up on the same Ed25519 keys without an error; only a `signer_acl` per driver certificate prevents it ([architecture.md](architecture.md), "One cluster, several participants") |
 | **v0.5.0** | Canton LocalNet quickstart | Rütli next to Splice's LocalNet, all in local containers, so an operator can try it in minutes without touching a real node |
 | **1.0** | Driver published to a Maven repository | Operators consume the driver as a normal dependency instead of a jar from a GitHub release |
 | **1.0** | Signed audit log, exported off the host | The hash chain is periodically signed and shipped to append-only storage (for example S3 Object Lock or syslog), so a host administrator can no longer rewrite it unnoticed |

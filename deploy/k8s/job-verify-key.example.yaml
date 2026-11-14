@@ -31,7 +31,7 @@ spec:
       securityContext: { fsGroup: 10001, seccompProfile: { type: RuntimeDefault } }
       containers:
         - name: verify-key
-          image: ghcr.io/stakecraft/rutli-cosigner:0.4.0-rc.6@sha256:8304e662d495eb1a8330cb5b04ba86b725ff1bf414fa217283add66b2df45ae3 # ≥ 0.4.0 for verify-key
+          image: ghcr.io/stakecraft/rutli-cosigner:0.4.0@sha256:6e606d2b00b53a6d70864a15693a697e0052c0e458386c18c22307eba4912d98 # ≥ 0.4.0 for verify-key
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "-c"]
           args:
