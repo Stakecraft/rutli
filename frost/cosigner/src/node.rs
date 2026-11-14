@@ -214,6 +214,8 @@ pub struct Node {
 type OnceHook = Box<dyn FnOnce(&Node) + Send>;
 #[cfg(test)]
 type SessionHook = Arc<dyn Fn(&str, &str) + Send + Sync>;
+#[cfg(test)]
+type KeyHook = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Fault and pause seams for this crate's unit tests, absent from every other build (the same
 /// approach as the sign journal's injected faults).
@@ -225,6 +227,9 @@ struct TestHooks {
     /// Run by sign round 2, with the key id and session id, right after it took its handle on the
     /// cached cosigner and before using it (a refresh commit may evict that cosigner meanwhile).
     after_round2_cosigner: Mutex<Option<SessionHook>>,
+    /// Run by [`Node::cached`], with the key id, on a cache miss: after it read the share from the
+    /// key store and before it takes the cache lock again to publish what it built.
+    after_cache_load: Mutex<Option<KeyHook>>,
 }
 
 /// What a node holds under a hosted key id.
@@ -855,6 +860,13 @@ impl Node {
     }
 
     /// Load (and cache) this node's signing state for `key_id`, with the sharing it belongs to.
+    ///
+    /// The share is read outside the cache lock (key-store IO must not hold up signing with keys
+    /// already loaded), so two first uses of a key may each build a `Cosigner`. Only the first one
+    /// published stays in the cache and every caller gets that one: a session's round-1 nonces
+    /// live in the `Cosigner` that made them, so replacing a published one would lose the sessions
+    /// already opened on it (they would fail at round 2 as unknown). The one built second is
+    /// dropped before any caller saw it; it never held a nonce.
     fn cached(&self, key_id: &str) -> Result<CachedKey> {
         {
             let map = self.cache();
@@ -869,9 +881,14 @@ impl Node {
             cosigner: Arc::new(Cosigner::new(share.key_package, share.public_key_package, nonce_store)),
             view,
         };
-        self.cache()
-            .insert(key_id.to_string(), cached.clone());
-        Ok(cached)
+        #[cfg(test)]
+        {
+            let hook = crate::sync::recover(&self.hooks.after_cache_load, "test_hook").clone();
+            if let Some(hook) = hook {
+                hook(key_id);
+            }
+        }
+        Ok(self.cache().entry(key_id.to_string()).or_insert(cached).clone())
     }
 
     /// Apply `signing_policy.require_epoch_match` (see [`crate::config::SigningPolicyConfig`]).
@@ -3724,6 +3741,102 @@ mod sign_across_commit_tests {
 
         let sig = sign(&nodes[0], &peers, KEY, &msg).await.unwrap();
         assert!(crate::verify_key::signature_verifies(&group, &msg, &sig));
+    }
+}
+
+/// A key's first use after a restart (an empty cache), raced by another first use of it.
+#[cfg(test)]
+mod cache_first_use_tests {
+    use super::*;
+    use crate::orchestrator::run_dkg;
+    use crate::peer::{LocalPeer, PeerApi};
+    use rutli_frost_core::nonce_store::NonceStore;
+    use std::sync::mpsc;
+
+    const KEY: &str = "k";
+    const WAIT: Duration = Duration::from_secs(30);
+
+    fn cluster(tmp: &tempfile::TempDir) -> (Vec<Arc<Node>>, Vec<Arc<dyn PeerApi>>) {
+        let nodes: Vec<Arc<Node>> = (1..=3u16)
+            .map(|i| {
+                let ks = KeyStore::open(tmp.path().join(format!("n{i}"))).unwrap();
+                Arc::new(Node::new(Identifier::try_from(i).unwrap(), 3, 2, ks))
+            })
+            .collect();
+        crate::peer::wire_local_mesh(&nodes).unwrap();
+        let peers = nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+        (nodes, peers)
+    }
+
+    /// Park the next cache-miss load on `node` between reading the share and publishing it to the
+    /// cache; every later load passes. Returns (parked, release): `parked` yields once the load is
+    /// parked, a send on `release` lets it go on.
+    fn park_next_load(node: &Node) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (parked_tx, parked) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel::<()>();
+        let slot = Mutex::new(Some((parked_tx, release_rx)));
+        *node.hooks.after_cache_load.lock().unwrap() = Some(Arc::new(move |_key: &str| {
+            let first = slot.lock().unwrap().take();
+            if let Some((parked, release)) = first {
+                parked.send(()).unwrap();
+                release.recv_timeout(WAIT).expect("the parked load was never released");
+            }
+        }));
+        (parked, release)
+    }
+
+    /// Two first uses of a key race on an empty cache: one (here a leader's `signing_view`) has
+    /// read the share and not yet cached it when a round 1 loads the key too, caches its cosigner
+    /// and opens a session on it. The first load must not replace that cosigner: the session's
+    /// nonces live only there, and round 2 would find no session (soak, 2026-11-14: "unknown
+    /// signing session" 11 s after a cosigner restart, the member excluded from that signature).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_round1_racing_another_first_use_of_the_key_keeps_its_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (nodes, peers) = cluster(&tmp);
+        let group = run_dkg(&peers, KEY).await.unwrap();
+        let msg = rutli_frost_core::dealer::canton_test_message(b"first use after a restart");
+        let session = "raced";
+        let view = nodes[1].signing_view(KEY).unwrap().view;
+        let node = nodes[0].clone();
+        node.cache().clear(); // as after a restart
+
+        let (parked, release) = park_next_load(&node);
+        let other = {
+            let n = node.clone();
+            std::thread::spawn(move || n.signing_view(KEY).map(|v| v.view))
+        };
+        parked.recv_timeout(WAIT).expect("the first load parks");
+
+        let ctx = Round1Ctx { leader_view: Some(view), ..Default::default() };
+        let mut commitments = BTreeMap::new();
+        for n in &nodes[..2] {
+            commitments.insert(n.identifier, n.sign_round1(KEY, session, &ctx).unwrap());
+        }
+        assert_eq!(node.pending_sign_count(KEY), 1);
+
+        release.send(()).unwrap();
+        assert_eq!(other.join().unwrap().unwrap(), view);
+        assert_eq!(node.pending_sign_count(KEY), 1, "the cached cosigner is still the one holding the session");
+
+        let mut shares = BTreeMap::new();
+        for n in &nodes[..2] {
+            let share = n.sign_round2(KEY, session, &msg, &commitments).expect("round 2 finds the session round 1 opened");
+            shares.insert(n.identifier, share);
+        }
+        let sig = nodes[1].aggregate(KEY, &msg, &commitments, &shares).unwrap();
+        assert!(crate::verify_key::signature_verifies(&group, &msg, &sig));
+
+        // One share per session, whichever load won.
+        let store = NonceStore::open(node.keystore.nonce_dir(KEY)).unwrap();
+        assert!(store.is_consumed(session).unwrap());
+        assert!(
+            matches!(store.consume(session), Err(rutli_frost_core::CoreError::NonceReuse(_))),
+            "a second burn of {session} is refused"
+        );
+        assert!(node.sign_round2(KEY, session, &msg, &commitments).is_err(), "no second share");
+        assert!(node.sign_round1(KEY, session, &ctx).is_err(), "no fresh nonces for a burned session");
+        assert_eq!(node.pending_sign_count(KEY), 0);
     }
 }
 

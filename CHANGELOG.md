@@ -5,6 +5,19 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **A cosigner's first signature after a restart could lose its session.** Two requests that used
+  a key for the first time at once (a sign round 1 and, say, this node leading another signature)
+  each loaded the share and built their own in-memory signing state; the one that finished second
+  replaced the first in the cache, and with it the round-1 nonces of a session already opened.
+  That session's round 2 then failed on this node with `unknown signing session` (gRPC
+  `INTERNAL`), the leader excluded the node and signed with the others (seen once on the soak
+  cluster, 2026-11-14, 11 s after a cosigner restart; the signature completed). The state loaded
+  first is now kept and the second is dropped unused. No nonce was reused or could be: the
+  replaced nonces were unreachable and never signed, and nothing was journaled or burned for the
+  lost session.
+
 ## [0.4.0] — 2026-11-14
 
 _Audit code freeze. Pre-1.0 and not yet externally audited: do not put production authority keys behind it before the external audit is complete. No wire or config change from 0.4.0-rc.6: the code is rc.6's, plus a build-time lockfile update and the version number._
