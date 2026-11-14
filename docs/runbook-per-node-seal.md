@@ -19,7 +19,7 @@ the cluster while preparing it. Commands marked `# [MUTATES]` change the cluster
 > the leader sees every round-2 package of a DKG/refresh; H1: a refresh interrupted between nodes
 > can leave the nodes on mixed share epochs). This migration does not touch either.
 >
-> As of 0.4.0-rc.6: the fixes shipped in 0.4.0-rc.3 (ceremony protocol 2) and the soak runs rc.6.
+> As of 0.4.0: the fixes shipped in 0.4.0-rc.3 (ceremony protocol 2) and the soak runs 0.4.0.
 > Still run no refresh during this migration.
 
 ## Prerequisites
