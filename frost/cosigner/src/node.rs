@@ -1297,7 +1297,8 @@ impl Node {
     /// had none). With a signing policy: the policy's round-2 checks, then the core binding
     /// checks, then — before the nonce marker burns — the rate-limit charge and the durable
     /// journal entry ([`crate::sign_policy::SignGuard`]); a refusal at any step releases nothing
-    /// and drops the session's nonces.
+    /// and drops the session's nonces. A session this node holds nothing of (no authorization and
+    /// no nonces) is an unknown session with or without a signing policy.
     pub fn sign_round2_with(
         &self,
         key_id: &str,
@@ -1329,7 +1330,16 @@ impl Node {
             None => cosigner.round2(session_id, key_id, message, commitments, intent_digest.as_ref()).map_err(DaemonError::from),
             Some(g) => {
                 let auth = match g.take(key_id, session_id) {
-                    Some(a) => a,
+                    Some(a) => Some(a),
+                    // Neither an authorization nor nonces: the session is not here at all (this
+                    // node restarted between the rounds, or the session outlived its TTL). That is
+                    // not a policy matter: the caller did nothing wrong and no share could leave.
+                    // Answered like the same round 2 on a node without a signing policy, so the
+                    // leader signs with another subset and a client is not told its request was
+                    // refused. The error is made here and round 2 is NOT run: `holds_session` is
+                    // a snapshot, and a round 1 for this session id arriving right after it would
+                    // otherwise have its nonces sign without the policy checks and the journal.
+                    None if !cosigner.holds_session(session_id) => None,
                     None if g.require_intent() => {
                         cosigner.abort(session_id);
                         self.update_pending_gauge();
@@ -1338,21 +1348,24 @@ impl Node {
                             format!("sign round 2 for session {session_id}: no round-1 authorization on this node"),
                         ));
                     }
-                    None => crate::sign_policy::SessionAuth::NoIntent,
+                    None => Some(crate::sign_policy::SessionAuth::NoIntent),
                 };
-                match g.check_round2(&auth, message, intent_digest.as_ref()) {
-                    Err(e) => {
-                        cosigner.abort(session_id);
-                        Err(e)
-                    }
-                    Ok(()) => cosigner.round2_guarded(
-                        session_id,
-                        key_id,
-                        message,
-                        commitments,
-                        intent_digest.as_ref(),
-                        || g.journal_release(key_id, session_id, &auth, message),
-                    ),
+                match auth {
+                    None => Err(DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(session_id.to_string()))),
+                    Some(auth) => match g.check_round2(&auth, message, intent_digest.as_ref()) {
+                        Err(e) => {
+                            cosigner.abort(session_id);
+                            Err(e)
+                        }
+                        Ok(()) => cosigner.round2_guarded(
+                            session_id,
+                            key_id,
+                            message,
+                            commitments,
+                            intent_digest.as_ref(),
+                            || g.journal_release(key_id, session_id, &auth, message),
+                        ),
+                    },
                 }
             }
         };

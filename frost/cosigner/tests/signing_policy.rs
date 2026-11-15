@@ -832,6 +832,79 @@ async fn a_node_that_cannot_journal_releases_no_share() {
     std::fs::set_permissions(&seg, std::fs::Permissions::from_mode(0o600)).unwrap();
 }
 
+/// A node that restarted between the two rounds holds neither the session's nonces nor its
+/// round-1 authorization. Its round 2 is an unknown session (gRPC `ABORTED`, counted), as on a
+/// node without a signing policy, and not a policy refusal: a leader left with a refusal and no
+/// other subset would tell the client its request was refused. With intents required and with
+/// intents only verified when present.
+#[tokio::test]
+async fn a_round2_after_a_restart_is_an_unknown_session_not_a_policy_refusal() {
+    for policy in [strict(), SigningPolicyConfig::default()] {
+        let tmp = tempfile::tempdir().unwrap();
+        let (ids, nodes) = local(tmp.path(), &policy).await;
+        let msg = digest(b"restart between the rounds");
+        let i1 = intent_by(&ids, "driver", KEY, &msg, 85);
+        let ctx = Round1Ctx { message: Some(msg.clone()), signers: Some(vec![1, 2]), intent: Some(i1.clone()), ..Default::default() };
+        let cs = BTreeMap::from([
+            (Identifier::try_from(1u16).unwrap(), nodes[0].sign_round1(KEY, "restarted", &ctx).unwrap()),
+            (Identifier::try_from(2u16).unwrap(), nodes[1].sign_round1(KEY, "restarted", &ctx).unwrap()),
+        ]);
+        let markers = || std::fs::read_dir(tmp.path().join(format!("node-1/keys/{KEY}.nonces"))).map(|d| d.count()).unwrap_or(0);
+        let journaled = || read_key_dir(&tmp.path().join("node-1/journal").join(KEY)).map(|r| r.entries.len()).unwrap_or(0);
+        let (burned, entries) = (markers(), journaled());
+
+        // Restart every node (new process: guards and journals reopened over the same directories).
+        drop(nodes);
+        let nodes: Vec<Arc<Node>> = (1..=N).map(|i| open_node(tmp.path(), &ids, i, &policy)).collect();
+        rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let err = metrics::with_local_recorder(&recorder, || {
+            nodes[0].sign_round2_with(KEY, "restarted", &msg, &cs, Some(intent::intent_digest(&i1))).unwrap_err()
+        });
+        assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))), "{err:?}");
+        assert_eq!(tonic::Status::from(err).code(), tonic::Code::Aborted);
+        let out = handle.render();
+        assert!(out.lines().any(|l| l == "rutli_sign_round2_unknown_session_total 1"), "{out}");
+        assert!(!out.contains("rutli_sign_policy_refusals_total"), "not counted as a policy refusal:\n{out}");
+        assert_eq!((markers(), journaled()), (burned, entries), "nothing burned, nothing journaled");
+
+        // The request itself is fine: a new session signs it.
+        let sig = sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, Some(&i1)).await.unwrap();
+        assert!(rutli_cosigner::verify_key::signature_verifies(&nodes[0].group_key(KEY).unwrap(), &msg, &sig));
+    }
+}
+
+/// The other half: a session whose nonces this node still holds, but whose round-1 authorization
+/// is gone, stays a policy refusal when intents are required. The nonces are dropped and no share
+/// leaves, however the authorization was lost.
+#[tokio::test]
+async fn a_round2_without_its_round1_authorization_is_refused_while_the_nonces_are_held() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ids, nodes) = local(tmp.path(), &strict()).await;
+    let msg = digest(b"authorization lost");
+    let i1 = intent_by(&ids, "driver", KEY, &msg, 86);
+    let ctx = Round1Ctx { message: Some(msg.clone()), signers: Some(vec![1, 2]), intent: Some(i1.clone()), ..Default::default() };
+    let cs = BTreeMap::from([
+        (Identifier::try_from(1u16).unwrap(), nodes[0].sign_round1(KEY, "no-auth", &ctx).unwrap()),
+        (Identifier::try_from(2u16).unwrap(), nodes[1].sign_round1(KEY, "no-auth", &ctx).unwrap()),
+    ]);
+    let markers = || std::fs::read_dir(tmp.path().join(format!("node-1/keys/{KEY}.nonces"))).map(|d| d.count()).unwrap_or(0);
+    let burned = markers();
+    assert!(nodes[0].sign_guard().unwrap().take(KEY, "no-auth").is_some());
+    assert_eq!(nodes[0].pending_sign_count(KEY), 1);
+
+    let err = nodes[0].sign_round2_with(KEY, "no-auth", &msg, &cs, Some(intent::intent_digest(&i1))).unwrap_err();
+    assert!(matches!(err, DaemonError::PolicyRefused(ref m) if m.contains("no round-1 authorization")), "{err:?}");
+    assert_eq!(nodes[0].pending_sign_count(KEY), 0, "the nonces are dropped");
+    assert_eq!(markers(), burned);
+    // And the session is gone for good: a second try finds nothing to sign with.
+    let err = nodes[0].sign_round2_with(KEY, "no-auth", &msg, &cs, Some(intent::intent_digest(&i1))).unwrap_err();
+    assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))), "{err:?}");
+    assert_eq!(markers(), burned);
+}
+
 /// The rolling upgrade: with `require_intent` off, a driver (or leader) that predates intents
 /// still signs; each node journals it as `no-intent` and counts it. An intent that is present is
 /// still verified in full.

@@ -313,6 +313,14 @@ impl Cosigner {
         before - pending.len()
     }
 
+    /// Whether this cosigner holds round-1 nonces that round 2 would still use for `session_id`.
+    /// An entry past the pending TTL does not count: round 2 refuses it as unknown. The answer is
+    /// only a snapshot (a round 1 or an abort may follow), so it must never be the reason to
+    /// release a share, only to say why none is released.
+    pub fn holds_session(&self, session_id: &str) -> bool {
+        self.pending().get(session_id).is_some_and(|p| p.started.elapsed() < PENDING_TTL)
+    }
+
     /// Number of in-flight (round-1, not yet round-2) sessions. For observability/tests.
     pub fn pending_count(&self) -> usize {
         self.pending().len()
@@ -351,10 +359,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let c = cosigner(tmp.path());
         let mine = c.round1("old", SessionBinding::new("k")).unwrap();
+        assert!(c.holds_session("old") && !c.holds_session("never opened"));
         let Some(long_ago) = Instant::now().checked_sub(PENDING_TTL + Duration::from_secs(1)) else {
             return; // monotonic clock too close to its origin to backdate
         };
         c.pending.lock().unwrap().get_mut("old").unwrap().started = long_ago;
+        assert!(!c.holds_session("old"), "an expired session is not held");
         let commitments = BTreeMap::from([(c.identifier(), mine)]);
         let err = c.round2("old", "k", &[0; 34], &commitments, None).unwrap_err();
         assert!(matches!(err, CoreError::UnknownSession(ref s) if s.contains("expired")), "{err:?}");
