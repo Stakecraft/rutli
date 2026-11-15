@@ -11,7 +11,10 @@ All notable changes to Rütli are documented here. Format loosely follows
   is counted in the new `rutli_sign_round2_unknown_session_total`. It is what a node answers
   after a restart or a ceremony commit between the two rounds, or past the session TTL; nothing
   is wrong with the node. Leaders treat it as before (the member is left out of that signature
-  and another subset signs), whatever release they run.
+  and another subset signs), whatever release they run; `sign-test` reports a member's error as
+  it is, so it shows the new code. Not changed: a node that verifies signing intents answers a
+  round 2 after its restart as a policy refusal (the round-1 authorization is gone too), counted
+  in `rutli_sign_policy_refusals_total`.
 
 ### Fixed
 

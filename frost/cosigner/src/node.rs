@@ -173,6 +173,8 @@ pub struct Node {
     cosigners: Mutex<std::collections::HashMap<String, CachedKey>>,
     /// How many times a key was evicted from `cosigners` ([`Node::evict`]). Read and bumped only
     /// while holding that lock; [`Node::cached`] uses it to notice an eviction during its load.
+    /// Emptying the cache on poison ([`Node::cache`]) is not counted: nothing changed on disk, so
+    /// a share read before it is still the live one.
     cache_evictions: std::sync::atomic::AtomicU64,
     /// Keys whose share this node's epoch check found stale ([`crate::epoch_check`]): round 1 and
     /// leading are refused for them until a check finds the share current again.
@@ -867,14 +869,16 @@ impl Node {
     ///
     /// The share is read outside the cache lock (key-store IO must not hold up signing with keys
     /// already loaded), so two first uses of a key may each build a `Cosigner`. Only the first one
-    /// published stays in the cache and every caller gets that one: a session's round-1 nonces
+    /// published stays in the cache and both callers get that one: a session's round-1 nonces
     /// live in the `Cosigner` that made them, so replacing a published one would lose the sessions
     /// already opened on it (they would fail at round 2 as unknown). The one built second is
-    /// dropped before any caller saw it; it never held a nonce.
+    /// dropped before any caller saw it; it never held a nonce. (A call that took its handle
+    /// before a commit evicted the entry keeps using the evicted one: see [`Node::sign_round1`].)
     ///
     /// A share read before an eviction ([`Node::evict`]) is never published after it: whoever
     /// evicts has just changed the key's file, so that share may be the one it replaced. The load
-    /// is run again instead.
+    /// is run again instead. The count is one for all keys, so an eviction of another key costs a
+    /// load in flight one more read.
     fn cached(&self, key_id: &str) -> Result<CachedKey> {
         use std::sync::atomic::Ordering::Relaxed;
         loop {
@@ -914,6 +918,10 @@ impl Node {
     /// next use loads it again. Call it after the change is on disk: a load that read the file
     /// before the change either published before this (and is removed here) or sees the eviction
     /// and reads again ([`Node::cached`]).
+    ///
+    /// Not covered: a commit that replaced the share file and then failed before it got here (its
+    /// record could not be written). The old entry then stays cached until the ceremony is
+    /// resolved again, which evicts.
     fn evict(&self, key_id: &str) {
         let mut map = self.cache();
         self.cache_evictions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -3902,6 +3910,65 @@ mod cache_first_use_tests {
         assert_eq!(node.signing_view(KEY).unwrap().view, new_view, "the cache holds the committed sharing");
         let sig = sign(&node, &peers, KEY, &msg).await.unwrap();
         assert!(crate::verify_key::signature_verifies(&group, &msg, &sig));
+    }
+
+    /// The same window with a discard instead of a commit: a first use reads the share, then the
+    /// key's file is deleted and the cache evicted. The load must not cache the share of a key
+    /// this node no longer holds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_load_overtaken_by_a_discard_does_not_cache_the_deleted_share() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (nodes, peers) = cluster(&tmp);
+        run_dkg(&peers, KEY).await.unwrap();
+        let node = nodes[0].clone();
+        node.cache().clear(); // as after a restart
+
+        let (parked, release) = park_next_load(&node);
+        let other = {
+            let n = node.clone();
+            std::thread::spawn(move || n.signing_view(KEY).map(|v| v.view))
+        };
+        parked.recv_timeout(WAIT).expect("the first load parks");
+
+        node.discard_local_key(KEY).unwrap();
+
+        release.send(()).unwrap();
+        assert!(other.join().unwrap().is_err(), "the overtaken load reads again and finds no share");
+        assert!(node.cache().get(KEY).is_none(), "nothing is cached for the discarded key");
+        assert!(node.signing_view(KEY).is_err());
+        assert!(!node.keystore.nonce_dir(KEY).exists());
+    }
+
+    /// A round 2 for a session whose nonces are gone (here: the cosigner was loaded again, as
+    /// after a restart) is refused as an unknown session, answered `ABORTED` and counted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_round2_for_a_lost_session_is_aborted_and_counted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (nodes, peers) = cluster(&tmp);
+        run_dkg(&peers, KEY).await.unwrap();
+        let msg = rutli_frost_core::dealer::canton_test_message(b"round 2 after a restart");
+        let session = "lost";
+        let node = nodes[0].clone();
+        let ctx = Round1Ctx { leader_view: Some(node.signing_view(KEY).unwrap().view), ..Default::default() };
+        let mut commitments = BTreeMap::new();
+        for n in &nodes[..2] {
+            commitments.insert(n.identifier, n.sign_round1(KEY, session, &ctx).unwrap());
+        }
+        node.cache().clear(); // as after a restart
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let err = metrics::with_local_recorder(&recorder, || node.sign_round2(KEY, session, &msg, &commitments))
+            .expect_err("the nonces of the session are gone");
+        assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))), "{err}");
+        assert_eq!(tonic::Status::from(err).code(), tonic::Code::Aborted);
+        let out = handle.render();
+        let line = format!("{} 1", crate::metrics::SIGN_ROUND2_UNKNOWN_SESSION);
+        assert!(out.lines().any(|l| l == line), "missing {line:?}:\n{out}");
+
+        // The refusal comes before the burn: no marker for the session.
+        let store = NonceStore::open(node.keystore.nonce_dir(KEY)).unwrap();
+        assert!(!store.is_consumed(session).unwrap());
     }
 }
 
