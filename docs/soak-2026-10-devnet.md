@@ -372,6 +372,33 @@ else. The participants' drivers stay on the rc.6 jar.
 - Rollback, not needed: `helm -n rutli rollback rutli 15` (rc.6).
 - Not checked: wallet login and balances; a refresh on 0.4.0; how long the signature at 01:41:44Z took.
 
+**Planned event: both validators to Splice 0.10.1 (Canton 3.7.2), 2026-11-15 21:44 → 22:30 UTC.**
+Done before the DevNet topology freeze of 2026-11-17 14:00 UTC. The driver jar (rc.6) and the cosigners (0.4.0) did
+not change. B8 went first, as the canary.
+- Pre-check, both: the 0.10.1 charts rendered with the exported values differ from 0.9.0 only in the Splice images,
+  the version labels and the `postgres` image of the init containers; live values unchanged since the export;
+  cosigners 3/3; more than 100 signatures in the last hour, none failed.
+- B8 participant: `helm upgrade` 21:44:49Z, container started 21:45:28Z, `Loaded driver rutli (API v1) build
+  0.4.0-rc.6`, first signature 21:46:05Z, 30 s after the schema setup began. 0 restarts.
+- B8 validator, first try 21:46Z: stopped. Helm 4 applies server-side, and four probe fields of the validator
+  Deployment were owned by an earlier `kubectl patch` (the B4 migration). The validator app stayed on 0.9.0 against
+  the 0.10.1 participant for 21 minutes, Ready, with no failed signature. Second try 22:07:56Z with
+  `--force-conflicts`: the probes went back to the chart's values and the validator came up on 0.10.1. It vetted the
+  0.10 DARs, valid from the freeze time, with one namespace-key signature at 22:10:34Z.
+- Soak: participant `helm upgrade` 22:27:05Z, container started 22:27:10Z, first signature 22:27:41Z, 25 s after the
+  schema setup began; validator 22:28:02Z; DARs vetted with one namespace-key signature (`frost-namespace`) at
+  22:29:41Z. 0 restarts. No field-manager conflict here.
+- After, a 30 min window on each: B8 73 signatures, soak 83, all `outcome=ok` with intents, no failover; 0 `ERROR`
+  lines in the participant and validator logs.
+- Rollback point for the soak: the scheduled database backup of 20:44Z. A fresh backup job was started at 22:15Z and
+  deleted before the upgrade: it would have cost 40 minutes, and DevNet's minimum validator version is 0.10.1 from
+  2026-11-16, so a return to 0.9.0 was not a usable path anyway. A running dump holds a lock on every table, so the
+  schema migration must not start under one. B8 had no backup (scratch node).
+- Changed in the pre-check because of the B8 stop: it now does a server-side dry run of the target render, which shows
+  field-manager conflicts before the participant is touched, and it refuses while a database dump is running.
+- Not checked: wallet login and balances; cosigner metrics after the upgrade; both validators across the DevNet
+  synchronizer upgrade of 2026-11-18 14:00 UTC (check planned).
+
 ## Drill calendar
 
 | Week | Drill | Status |
