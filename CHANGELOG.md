@@ -5,6 +5,18 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Documentation
+
+- **Splice 0.10 / Canton 3.7** (`docs/splice-0.10.md`): the driver needs no change, because the KMS driver SPI and the
+  conformance suite are byte-identical from v3.6.1 to v3.7.3. Operators get a new page covering the upgrade order for a
+  Rütli validator: back up first, then the participant, then the validator, with no `--atomic`, and before the network's
+  topology freeze. Canton 3.7 also adds two flags that the migration runbooks now set where needed:
+  `enable-key-download` (`enableKeyDownload`), now the server-side gate for `ExportKeyPair`, and `enable-repair-commands`
+  (`enableRepairCommands`), which Splice's party migrator needs after the point of no return. The page also covers the
+  `synchronizerId` argument of the rotation commands, the PV 37 limit of 20 signing keys, and the HTTP health probes.
+  The rehearsal records that pin `--version 0.9.0` carry a warning, and the README compatibility table lists Canton
+  3.7.x and Splice 0.10.x as supported, with the live run still pending.
+
 ## [0.4.0] — 2026-11-14
 
 _Audit code freeze. Pre-1.0 and not yet externally audited: do not put production authority keys behind it before the external audit is complete. No wire or config change from 0.4.0-rc.6: the code is rc.6's, plus a build-time lockfile update and the version number._

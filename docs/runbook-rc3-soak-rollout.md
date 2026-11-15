@@ -2,6 +2,10 @@
 
 **Status:** phases 1–5 done 2026-10-18 to 2026-10-20. Kept as the record of that rollout.
 
+> **Splice 0.10 / Canton 3.7:** this is a record of a run on Splice 0.9.0. Its commands pin `--version 0.9.0`; never re-run
+> them as written against a participant that has run 0.10.x (Canton 3.7 migrates the schema, and 3.6 will not start on it).
+> What changed for these steps: [splice-0.10.md](splice-0.10.md).
+
 Rolls audit-remediation **batch C** (ceremony protocol 2, epochs, cosigner-enforced signing
 intents, rate limits, sign journals, key-file v2, DEK rotation, hosted-key tombstones) out to the
 DevNet soak, in the order `CHANGELOG.md` gives ("Rollout order across batch C", steps 0–9) and

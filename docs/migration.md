@@ -3,8 +3,9 @@
 **Status:** draft, corrected after the DevNet rehearsal of 2026-10-14 ([b4-rehearsal.md](b4-rehearsal.md), roadmap B4; results in the
 [soak log](soak-2026-10-devnet.md)). The cutover and verification ran green, and destruction (Step 8) and the teardown ran on
 2026-10-15 and 2026-10-16. The corrections are folded in below and listed in "Lessons from the B4 rehearsal".
-**Applies to:** Splice 0.9.x validators on Canton 3.6.x whose keys are held by Canton itself (JCE, keys in Postgres),
-moving into a Rütli cluster ≥ 0.4.0.
+**Applies to:** Splice 0.9.x and 0.10.x validators (Canton 3.6.x and 3.7.x) whose keys are held by Canton itself (JCE, keys in
+Postgres), moving into a Rütli cluster ≥ 0.4.0. On 0.10.x, two steps need an extra flag: Step 2 and Step 6
+([splice-0.10.md](splice-0.10.md)).
 **Audience:** the operator of the existing validator, and the operator of the Rütli cluster, if that is someone else.
 **This page is Flow 2b** (new participant UID, fresh database). To keep the same participant, database and UID and carry
 every key in place (Flow 2a, rehearsed as B8 from 2026-10-23 to 2026-11-12), use [runbook-migration-inplace.md](runbook-migration-inplace.md);
@@ -97,8 +98,11 @@ It is your rollback path until the point of no return, and it goes on the destru
 
 ### Step 2: export the namespace key with a password
 
-1. Enable `canton.features.enable-preview-commands = yes` **on the participant** (an `ADDITIONAL_CONFIG_*` env var) and restart it.
-   The server refuses `ExportKeyPair` without it [2.1].
+1. Enable the export **on the participant** and restart it. On Canton 3.6 (Splice 0.9.x) the gate is
+   `canton.features.enable-preview-commands = yes` (an `ADDITIONAL_CONFIG_*` env var) [2.1]. On Canton 3.7 (Splice 0.10.x) it is
+   `canton.parameters.enable-key-download = yes`, chart value `enableKeyDownload: true`; preview alone no longer opens it.
+   Either way the server refuses `ExportKeyPair` without it, and the console still needs preview commands in its own config.
+   Remove the flag again after the export (Step 4 restarts the participant anyway).
 2. In a Canton console, confirm `NS_FP` three ways: from the console, from the validator's public `GET /api/validator/v0/validator-user`,
    and as the target of the root namespace delegation [2.2].
 3. `keys.secret.download_to(<namespace fingerprint>, "namespace.export", password = Some(<random ≥ 24 chars>))` [2.3].
@@ -153,10 +157,15 @@ Until here the old participant still owns the party, and rollback is a Helm roll
    `participantIdentitiesDumpImport: {secretName, newParticipantIdentifier: NEW_ID}`, `migrateValidatorParty: true` and `NEW_VDB` [4.13].
    Run `helm upgrade --dry-run=server` first. If anything ever `kubectl patch`ed the Deployment, Helm 4 stops with field-manager
    conflicts, and the upgrade needs `--force-conflicts` (Lessons c). Find that out before the PNR, not after.
+   **On Splice 0.10.x, the participant must serve the repair API:** the party migrator imports the ACS through it, after the
+   PNR. Set `enableRepairCommands: true` on the `splice-participant` release before this step, and check it with
+   `helm get values participant`. The 0.10.0–0.10.2 images still enable it in their built-in config, but that is marked
+   for removal ([splice-0.10.md](splice-0.10.md)).
 3. Watch the log. **`Preparing to remove domain trust certificate because we will be migrating <HINT>::…` is the point of no
    return.** Before it, any error, `Uploading node keys`, `Node has no identity` or `need to be rotated` → scale the validator
    to 0 at once and roll back. After it, fix forward only.
-4. Normalise: remove the dump import and the migrate flag, keep `NEW_ID` and `NEW_VDB`, delete the Secret [4.14].
+4. Normalise: remove the dump import and the migrate flag, keep `NEW_ID` and `NEW_VDB`, delete the Secret [4.14]. On 0.10.x, also
+   remove `enableRepairCommands` from the participant.
 
 ### Step 7: verify
 
