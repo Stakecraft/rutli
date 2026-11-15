@@ -1,8 +1,9 @@
 # Rütli on Splice 0.10 / Canton 3.7
 
-**Status:** 2026-11-14. Read against the Splice 0.10.0 and 0.10.1 release notes, the Canton 3.7.0 release notes, the Canton
-source (tags v3.6.1 to v3.7.3) and the Splice 0.10.1 charts and source. **Not yet run live:** the driver on a Splice 0.10.1
-participant. The DevNet canary is next; this page is updated after it.
+**Status:** 2026-11-15. Read against the Splice 0.10.0 and 0.10.1 release notes, the Canton 3.7.0 release notes, the Canton
+source (tags v3.6.1 to v3.7.3) and the Splice 0.10.1 charts and source. **Run live on 2026-11-15:** two DevNet validators on
+Rütli went from Splice 0.9.0 to 0.10.1 with the driver jar unchanged ([soak log](soak-2026-10-devnet.md)). Not yet seen: a
+validator on Rütli across an LSU (DevNet's is on 2026-11-18).
 
 Splice 0.10.0 ships Canton 3.7.1 and 0.10.1 ships Canton 3.7.2. Canton 3.7 adds protocol version 37, which a network adopts
 through a Logical Synchronizer Upgrade (LSU). A validator must run 0.10.x before its network's LSU.
@@ -53,7 +54,14 @@ through, and the `kms` block is unchanged. Render both versions and diff them yo
    driver audit log. Reconnecting to the sequencers signs with the protocol key. Then upgrade the validator.
 4. **No `helm upgrade --atomic`, and no `--wait` with a rollback attached.** A timeout during the schema migration would
    roll back to a 3.6 image on a 3.7 schema.
-5. Rehearsal records in this repo pin `--version 0.9.0` ([b0-cutover-spike.md](b0-cutover-spike.md),
+5. **Look for field-manager conflicts before you touch the participant.** Helm 4 applies server-side. If a Deployment field
+   was ever set with `kubectl patch`, `helm upgrade` of that release stops with `Apply failed with N conflicts`. On our canary
+   that was the validator, after the participant was already on 3.7. Dry-run the target render first:
+   `helm template … | kubectl apply --server-side --dry-run=server --field-manager=helm -f -`. If it reports conflicts,
+   upgrade with `--force-conflicts`; the chart's values then replace the patched ones.
+6. **No database dump while the participant migrates.** A running `pg_dump` holds a lock on every table, and the schema
+   migration waits behind it.
+7. Rehearsal records in this repo pin `--version 0.9.0` ([b0-cutover-spike.md](b0-cutover-spike.md),
    [b4-rehearsal.md](b4-rehearsal.md), [runbook-rc3-soak-rollout.md](runbook-rc3-soak-rollout.md),
    [runbook-migration-inplace.md](runbook-migration-inplace.md)). Never re-run them as written against a participant that
    has run 0.10.x. Use the chart version `helm list` shows.
