@@ -217,7 +217,9 @@ groups:
           description: "{{ $labels.instance }} refused to take part in a signature because its signing policy said no (reason {{ $labels.reason }}). Expected reasons during a rollout: missing (require_intent on before the driver signs intents), approval (a gated key without its approvals), expiry (clock skew beyond clock_skew_secs — check NTP on the driver and the node). Suspicious ones: signer, certificate, signature, pin, cluster, key — something presented an intent this node did not accept, which is what a compromised cosigner or a stolen-but-revoked driver key looks like. The cosigner log names the refusal; cross-check the driver audit log (docs/approval-quorum.md)."
 
       - alert: RutliSignUnknownSessions
-        expr: increase(rutli_sign_round2_unknown_session_total[15m]) > 3
+        # "More than 3": increase() extrapolates to the window's edges, so 3 events can read as a
+        # little over 3 (about 3.2 at a 60 s scrape interval) and 4 as a little under or over 4.
+        expr: increase(rutli_sign_round2_unknown_session_total[15m]) > 3.5
         for: 0m
         labels:
           severity: warning

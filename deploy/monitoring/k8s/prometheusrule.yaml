@@ -201,7 +201,7 @@ spec:
           \ this node did not accept, which is what a compromised cosigner or a stolen-but-revoked driver\
           \ key looks like. The cosigner log names the refusal; cross-check the driver audit log (docs/approval-quorum.md)."
     - alert: RutliSignUnknownSessions
-      expr: increase(rutli_sign_round2_unknown_session_total[15m]) > 3
+      expr: increase(rutli_sign_round2_unknown_session_total[15m]) > 3.5
       for: 0m
       labels:
         severity: warning
