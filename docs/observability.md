@@ -35,7 +35,7 @@ annotations, NetworkPolicy ingress for pods labelled `rutli.io/scraper: "true"`)
 | `rutli_nonce_markers` | gauge | — | Burned-session nonce markers on this node after the last prune pass (audit L4); each costs an inode on the key volume, bounded by the sign rate over the retention window |
 | `rutli_nonce_markers_pruned_total` | counter | — | Burned-session nonce markers removed past their retention |
 | `rutli_sign_round1_skips_total` | counter | — | Peers skipped in sign round 1 — the quorum-margin canary: skips mean you are signing with less headroom than you deployed |
-| `rutli_sign_round2_unknown_session_total` | counter | — | Sign round 2 requests refused as an unknown signing session: the node holds no round-1 nonces for it, because it restarted or committed a ceremony between the two rounds, or the session outlived its 5-minute TTL. The peer answers `ABORTED` and the leader signs with the others. One or two at a restart or a refresh are expected; a steady rate is not. The same with a signing policy: a session the node holds neither nonces nor a round-1 authorization for is counted here, not as a policy refusal |
+| `rutli_sign_round2_unknown_session_total` | counter | — | Sign round 2 requests refused as an unknown signing session: the node holds no round-1 nonces for it, because it restarted or committed a ceremony between the two rounds, or the session outlived its 5-minute TTL. The peer answers `ABORTED` and the leader signs with the others. One or two at a restart or a refresh are expected; a steady rate is not (`RutliSignUnknownSessions`: more than 3 in 15 minutes). The same with a signing policy: a session the node holds no nonces for is counted here, not as a policy refusal |
 | `rutli_sign_aborts_total` | counter | — | Given-up signatures (leader aborted the in-flight session on the quorum) |
 | `rutli_sign_retries_total` | counter | — | Sign attempts beyond the first within one `Signer.Sign`: a t-subset failed and the leader retried with another |
 | `rutli_invalid_signature_shares_total` | counter | — | Signature shares that failed verification at aggregation (attributed to a cosigner and routed around). Any increase means a cosigner returned a bad share (`RutliInvalidSignatureShare`) |
@@ -96,6 +96,7 @@ that alert on increases see it (`deploy/monitoring/prometheus-rules.yml`:
 `RutliSignPolicyRefusals`, `RutliSignIntentAbsent`, `RutliSignRateLimited`, `RutliSignerAclAbsent`,
 `RutliSignJournalErrors`, `RutliDeleteIntentRefused`, `RutliHostedKeyDeleted`,
 `RutliCeremonyIntentRefused`, `RutliCeremonyIntentAbsent`, `RutliLockPoisonRecovered`).
+`rutli_sign_round2_unknown_session_total` is primed too (`RutliSignUnknownSessions`).
 `rutli_stale_share` carries a key id and cannot be primed. `rutli_keyfiles` is set
 once per start (`RutliKeyFilesUnopenable`, `RutliKeyFileMigrationPending`).
 

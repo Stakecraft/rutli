@@ -26,8 +26,10 @@ All notable changes to Rütli are documented here. Format loosely follows
   released either way: there are no nonces to sign with. Still refused as before: a round 2 for
   a session whose nonces the node holds while its authorization is gone. For monitoring: a round
   2 for a session that was never opened used to count as a policy refusal on a node that
-  requires intents and now counts in `rutli_sign_round2_unknown_session_total`, which no
-  shipped alert rule watches yet.
+  requires intents and now counts in `rutli_sign_round2_unknown_session_total`. The new alert
+  `RutliSignUnknownSessions` (`deploy/monitoring`, warning) fires at more than 3 in 15 minutes
+  on a node, so a single such request no longer alerts, and neither do the one or two a restart
+  or a refresh leaves behind.
 
 ### Fixed
 
