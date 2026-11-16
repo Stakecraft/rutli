@@ -905,6 +905,65 @@ async fn a_round2_without_its_round1_authorization_is_refused_while_the_nonces_a
     assert_eq!(markers(), burned);
 }
 
+/// The nonces are gone and the authorization is still here: a refresh committed between the two
+/// rounds (the cosigner is loaded again with the new share, the policy's session map is not
+/// touched). No share can leave, so the round 2 is an unknown session whatever the policy would
+/// say about the authorization by now: here its intent has expired meanwhile.
+#[tokio::test]
+async fn a_round2_after_a_commit_is_an_unknown_session_even_with_a_lapsed_intent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let policy = SigningPolicyConfig { clock_skew_secs: 0, require_ceremony_intent: Some(false), ..strict() };
+    let (ids, nodes) = local(tmp.path(), &policy).await;
+    let msg = digest(b"commit between the rounds");
+    let not_after = now_ms() + 2_000;
+    let i1 = sign(&ids, "driver", unsigned(KEY, &msg, 87, not_after - 60_000, not_after));
+    let ctx = Round1Ctx { message: Some(msg.clone()), signers: Some(vec![1, 2]), intent: Some(i1.clone()), ..Default::default() };
+    let cs = BTreeMap::from([
+        (Identifier::try_from(1u16).unwrap(), nodes[0].sign_round1(KEY, "committed", &ctx).unwrap()),
+        (Identifier::try_from(2u16).unwrap(), nodes[1].sign_round1(KEY, "committed", &ctx).unwrap()),
+    ]);
+    assert_eq!(nodes[0].pending_sign_count(KEY), 1);
+
+    rutli_cosigner::orchestrator::run_refresh(&peers_of(&nodes), KEY).await.unwrap();
+    assert_eq!(nodes[0].pending_sign_count(KEY), 0, "the commit dropped the cosigner that held the nonces");
+    while now_ms() <= not_after {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let err = metrics::with_local_recorder(&recorder, || {
+        nodes[0].sign_round2_with(KEY, "committed", &msg, &cs, Some(intent::intent_digest(&i1))).unwrap_err()
+    });
+    assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))), "{err:?}");
+    let out = handle.render();
+    assert!(out.lines().any(|l| l == "rutli_sign_round2_unknown_session_total 1"), "{out}");
+    assert!(!out.contains("rutli_sign_policy_refusals_total"), "not counted as a policy refusal:\n{out}");
+    assert!(nodes[0].sign_guard().unwrap().take(KEY, "committed").is_none(), "the authorization was taken");
+}
+
+/// A round 2 that arrives after the session was aborted (a leader that gave up on this node and
+/// whose round 2 was still on its way) is an unknown session too, not a policy refusal.
+#[tokio::test]
+async fn a_round2_after_an_abort_is_an_unknown_session() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ids, nodes) = local(tmp.path(), &strict()).await;
+    let msg = digest(b"aborted");
+    let i1 = intent_by(&ids, "driver", KEY, &msg, 88);
+    let ctx = Round1Ctx { message: Some(msg.clone()), signers: Some(vec![1, 2]), intent: Some(i1.clone()), ..Default::default() };
+    let cs = BTreeMap::from([
+        (Identifier::try_from(1u16).unwrap(), nodes[0].sign_round1(KEY, "aborted", &ctx).unwrap()),
+        (Identifier::try_from(2u16).unwrap(), nodes[1].sign_round1(KEY, "aborted", &ctx).unwrap()),
+    ]);
+    nodes[0].abort_sign(KEY, "aborted");
+    assert_eq!(nodes[0].pending_sign_count(KEY), 0);
+    assert!(nodes[0].sign_guard().unwrap().take(KEY, "aborted").is_none(), "the abort forgot the authorization");
+
+    let err = nodes[0].sign_round2_with(KEY, "aborted", &msg, &cs, Some(intent::intent_digest(&i1))).unwrap_err();
+    assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))), "{err:?}");
+    assert!(read_key_dir(&tmp.path().join("node-1/journal").join(KEY)).map(|r| r.entries.is_empty()).unwrap_or(true));
+}
+
 /// The rolling upgrade: with `require_intent` off, a driver (or leader) that predates intents
 /// still signs; each node journals it as `no-intent` and counts it. An intent that is present is
 /// still verified in full.

@@ -13,16 +13,21 @@ All notable changes to Rütli are documented here. Format loosely follows
   is wrong with the node. Leaders treat it as before (the member is left out of that signature
   and another subset signs), whatever release they run; `sign-test` reports a member's error as
   it is, so it shows the new code.
-- **With a signing policy, a round 2 for a session the node holds nothing of is an unknown
+- **With a signing policy, a round 2 for a session the node holds no nonces for is an unknown
   session too, no longer a policy refusal.** A node that restarted between the two rounds has
   lost the session's round-1 authorization with its nonces, and answered `PERMISSION_DENIED`
   (`rutli_sign_policy_refusals_total{reason="missing"}`, or `reason="key"` with `require_intent`
   off). A leader that then found no other subset passed that refusal on to the client, and the
   driver does not try another cosigner on a refusal. Now it answers `ABORTED` like a node
   without a signing policy, the leader signs with another subset or reports `UNAVAILABLE`, and a
-  cosigner restart no longer counts as a policy refusal. Nothing is released either way: there
-  are no nonces to sign with. Still refused as before: a round 2 for a session whose nonces the
-  node holds while its authorization is gone.
+  cosigner restart no longer counts as a policy refusal. The same after a ceremony commit or an
+  abort between the rounds and past the session TTL, whatever the policy would say about the
+  session's intent by then (an intent that expired meanwhile was `reason="expiry"`). Nothing is
+  released either way: there are no nonces to sign with. Still refused as before: a round 2 for
+  a session whose nonces the node holds while its authorization is gone. For monitoring: a round
+  2 for a session that was never opened used to count as a policy refusal on a node that
+  requires intents and now counts in `rutli_sign_round2_unknown_session_total`, which no
+  shipped alert rule watches yet.
 
 ### Fixed
 
