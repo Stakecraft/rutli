@@ -10,6 +10,9 @@ Every Scala block here compiles against the Canton 3.6.1 release jar (checked 20
 of Phases 0–4, 5.1 and 5.2 are generalised from the blocks that ran in B8.
 **Applies to:** Splice 0.9.x validators on Canton 3.6.x whose keys Canton holds itself (JCE, rows in Postgres), moving
 into a Rütli cluster ≥ 0.4.0-rc.4. **Audience:** the validator operator and the cluster operator.
+**On Splice 0.10.x (Canton 3.7):** not rehearsed. The key export (Phase 2) needs `enableKeyDownload: true` on the
+participant, the console's `repair.*` commands need `enableRepairCommands: true`, and `CHART_VER` is the deployed
+version, never `0.9.0` against a participant that has run 0.10.x ([splice-0.10.md](splice-0.10.md)).
 
 Flow 2a keeps **the same participant, the same database and the same UID**. Every active key is carried into the cluster
 with its exact fingerprint, the node restarts on `crypto.provider = kms` and registers the carried keys by KMS id. Nothing
@@ -235,7 +238,9 @@ Expect the new CN and the prefixes in the order above on every node. A refusal r
 
 ## Phase 2: export the three keys, password-protected [MUTATES: creates export copies, L7]
 
-The participant needs `canton.features.enable-preview-commands = yes`; the Splice 0.9.0 image already sets it. Probe with
+The participant needs `canton.features.enable-preview-commands = yes`; the Splice 0.9.0 image already sets it. On Splice
+0.10.x (Canton 3.7) the server-side gate is `canton.parameters.enable-key-download = yes` instead (chart value
+`enableKeyDownload: true`), and the probe below fails with *only allowed when explicitly enabled* until it is set. Probe with
 `con pre ids probe` where `probe.sc` is
 `println(scala.util.Try(p.keys.secret.download(Fingerprint.tryFromString("1220" + "00" * 32))))`: expect a `Failure`
 saying *no private key found*. If it says *only allowed when preview is enabled*, add the flag as an `ADDITIONAL_CONFIG_*`

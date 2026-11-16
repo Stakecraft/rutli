@@ -332,6 +332,73 @@ verified 2 MiB chunks, the running jar kept as `.rc4`, an atomic rename, `rollou
 - Rollback: the `.rc4` copy on each bundle volume, then `rollout restart`. Helm revisions unchanged (soak participant
   rev 8).
 
+**Check: one day on the rc.6 driver, 2026-11-14 00:26 → 00:28 UTC.** Read-only, before the 0.4.0 tag.
+- B8 (25 h since the swap): 2 148 new audit entries, 2 145 signatures and 3 decrypts, all `outcome=ok`, none without
+  an intent, `sig-verify=failed` 0, `ecies-failure=` 0, no failover. `StateCheck` in the pod OK (49 493 entries, hash
+  chain intact; signing journal 49 474 entries). 37 commitments correct, no mismatch, and no `ERROR` or `WARN` line in
+  the retained participant log (about one hour); validator 0 `ERROR` lines in 6 h.
+- Soak (24 h since the swap): 2 078 new audit entries, 2 077 signatures and 1 decrypt, all `outcome=ok`, none without
+  an intent, `sig-verify=failed` 0, no failover. `StateCheck` OK (93 014 entries; signing journal 92 975). 15
+  commitments correct, no mismatch, no `ERROR` or `WARN` line in the retained participant log (about half an hour);
+  validator 0 `ERROR` lines in 24 h. The four database backup jobs of the day completed; the 00:00Z one was still
+  running, inside its usual 40 minutes.
+- Both: the mounted jar is the release's rc.6 jar (sha256 `98da3063…21b8`). Cosigners 3/3 on rc.6 (rev 15), no restart
+  since 2026-11-01; refusal, rate-limit and ceremony-intent counters 0 on every node (27 series each).
+
+**Planned event: cosigners to 0.4.0, 2026-11-14 01:38 → 01:42 UTC (no participant restart).**
+0.4.0 is rc.6's code with the version changed (tag `v0.4.0` on `ebab88b`); the roll replaces the image and nothing
+else. The participants' drivers stay on the rc.6 jar.
+- Pre-check: the 0.4.0 chart from main (`7b1465d`) rendered with the exported values differs from the live manifest
+  only in the image (rc.6 → `0.4.0@sha256:6e606d2b…912d98`, twice: `tls-select` and `cosigner`) and the version labels,
+  28 lines in all. No user-supplied image value in the release; revision 15 `deployed`; the PDB allows one disruption;
+  no CronJob in the namespace. The last 500 audit entries of both participants: `outcome=ok`, all with intents.
+- `helm upgrade` → rev 16 at 01:38:49Z, rolled 2 → 1 → 0: node 3 started 01:39:21Z, node 2 01:40:15Z, node 1
+  01:41:11Z (serving at 01:41:33Z). Every node: ready, 0 restarts, pod spec and image id on the 0.4.0 digest,
+  `require_intent=true require_ceremony_intent=true signer_acl_required=true`, cluster id `453bb4ae…`, no `ERROR` line.
+  The warnings at start are the known ones: legacy shared seal master, and the two B8 keys from the split ceremony
+  never refreshed.
+- Participants, from the upgrade to 01:43Z: soak 6 signatures, 2 of them after a failover to another cosigner; B8 3
+  signatures, 1 after a failover; all `outcome=ok` with intents, `sig-verify=failed` 0. Participant logs: 0 `ERROR`
+  lines; 4 and 2 `UNAVAILABLE` lines, the failovers while a node restarted.
+- One signature lost a member. At 01:41:44Z, 11 s after node 1 began serving, node 2 led a `frost-signing` signature
+  and node 1 answered round 2 with `unknown signing session`; node 2 excluded it and the signature completed with the
+  other two. Likely cause, read from the code and not reproduced: a node loads a key's signing state on first use
+  without holding the cache lock across the load (`Node::cached`), so two concurrent first uses after a restart each
+  build one, the later replaces the earlier, and the session whose round 1 used the earlier one finds no nonces at
+  round 2. Those nonces are dropped, never reused. To fix after the freeze.
+- Metrics after the roll: refusal, rate-limit and ceremony-intent counters 0 on every node (27 series each); no stale
+  share, staged or split ceremony, epoch mismatch, journal error or unreadable key file. 11 `v1` key files on nodes 2
+  and 3; node 1's line was cut in the evidence.
+- Rollback, not needed: `helm -n rutli rollback rutli 15` (rc.6).
+- Not checked: wallet login and balances; a refresh on 0.4.0; how long the signature at 01:41:44Z took.
+
+**Planned event: both validators to Splice 0.10.1 (Canton 3.7.2), 2026-11-15 21:44 → 22:30 UTC.**
+Done before the DevNet topology freeze of 2026-11-17 14:00 UTC. The driver jar (rc.6) and the cosigners (0.4.0) did
+not change. B8 went first, as the canary.
+- Pre-check, both: the 0.10.1 charts rendered with the exported values differ from 0.9.0 only in the Splice images,
+  the version labels and the `postgres` image of the init containers; live values unchanged since the export;
+  cosigners 3/3; more than 100 signatures in the last hour, none failed.
+- B8 participant: `helm upgrade` 21:44:49Z, container started 21:45:28Z, `Loaded driver rutli (API v1) build
+  0.4.0-rc.6`, first signature 21:46:05Z, 30 s after the schema setup began. 0 restarts.
+- B8 validator, first try 21:46Z: stopped. Helm 4 applies server-side, and four probe fields of the validator
+  Deployment were owned by an earlier `kubectl patch` (the B4 migration). The validator app stayed on 0.9.0 against
+  the 0.10.1 participant for 21 minutes, Ready, with no failed signature. Second try 22:07:56Z with
+  `--force-conflicts`: the probes went back to the chart's values and the validator came up on 0.10.1. It vetted the
+  0.10 DARs, valid from the freeze time, with one namespace-key signature at 22:10:34Z.
+- Soak: participant `helm upgrade` 22:27:05Z, container started 22:27:10Z, first signature 22:27:41Z, 25 s after the
+  schema setup began; validator 22:28:02Z; DARs vetted with one namespace-key signature (`frost-namespace`) at
+  22:29:41Z. 0 restarts. No field-manager conflict here.
+- After, a 30 min window on each: B8 73 signatures, soak 83, all `outcome=ok` with intents, no failover; 0 `ERROR`
+  lines in the participant and validator logs.
+- Rollback point for the soak: the scheduled database backup of 20:44Z. A fresh backup job was started at 22:15Z and
+  deleted before the upgrade: it would have cost 40 minutes, and DevNet's minimum validator version is 0.10.1 from
+  2026-11-16, so a return to 0.9.0 was not a usable path anyway. A running dump holds a lock on every table, so the
+  schema migration must not start under one. B8 had no backup (scratch node).
+- Changed in the pre-check because of the B8 stop: it now does a server-side dry run of the target render, which shows
+  field-manager conflicts before the participant is touched, and it refuses while a database dump is running.
+- Not checked: wallet login and balances; cosigner metrics after the upgrade; both validators across the DevNet
+  synchronizer upgrade of 2026-11-18 14:00 UTC (check planned).
+
 ## Drill calendar
 
 | Week | Drill | Status |
