@@ -314,11 +314,21 @@ impl Cosigner {
     }
 
     /// Whether this cosigner holds round-1 nonces that round 2 would still use for `session_id`.
-    /// An entry past the pending TTL does not count: round 2 refuses it as unknown. The answer is
-    /// only a snapshot (a round 1 or an abort may follow), so it must never be the reason to
-    /// release a share, only to say why none is released.
+    /// An entry past the pending TTL does not count: round 2 refuses it as unknown. Such an entry
+    /// is dropped here, as round 2 and the sweeps drop it, so a caller that answers "unknown"
+    /// on a `false` leaves nothing behind. The answer is only a snapshot (a round 1 or an abort
+    /// may follow), so it must never be the reason to release a share, only to say why none is
+    /// released.
     pub fn holds_session(&self, session_id: &str) -> bool {
-        self.pending().get(session_id).is_some_and(|p| p.started.elapsed() < PENDING_TTL)
+        let mut pending = self.pending();
+        match pending.get(session_id) {
+            Some(p) if p.started.elapsed() < PENDING_TTL => true,
+            Some(_) => {
+                pending.remove(session_id);
+                false
+            }
+            None => false,
+        }
     }
 
     /// Number of in-flight (round-1, not yet round-2) sessions. For observability/tests.
@@ -359,17 +369,35 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let c = cosigner(tmp.path());
         let mine = c.round1("old", SessionBinding::new("k")).unwrap();
-        assert!(c.holds_session("old") && !c.holds_session("never opened"));
         let Some(long_ago) = Instant::now().checked_sub(PENDING_TTL + Duration::from_secs(1)) else {
             return; // monotonic clock too close to its origin to backdate
         };
         c.pending.lock().unwrap().get_mut("old").unwrap().started = long_ago;
-        assert!(!c.holds_session("old"), "an expired session is not held");
         let commitments = BTreeMap::from([(c.identifier(), mine)]);
         let err = c.round2("old", "k", &[0; 34], &commitments, None).unwrap_err();
         assert!(matches!(err, CoreError::UnknownSession(ref s) if s.contains("expired")), "{err:?}");
         assert!(!c.nonce_store.is_consumed("old").unwrap(), "an expired session is not burned");
         assert_eq!(c.pending_count(), 0);
+    }
+
+    /// `holds_session` counts only nonces round 2 would still use, and drops an entry past the
+    /// TTL instead of leaving it for the next sweep. It leaves live sessions alone.
+    #[test]
+    fn holds_session_is_true_for_live_nonces_only_and_drops_an_expired_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = cosigner(tmp.path());
+        c.round1("old", SessionBinding::new("k")).unwrap();
+        c.round1("live", SessionBinding::new("k")).unwrap();
+        assert!(c.holds_session("old") && c.holds_session("live") && !c.holds_session("never opened"));
+        assert_eq!(c.pending_count(), 2, "asking changes nothing while the sessions are live");
+        let Some(long_ago) = Instant::now().checked_sub(PENDING_TTL + Duration::from_secs(1)) else {
+            return; // monotonic clock too close to its origin to backdate
+        };
+        c.pending.lock().unwrap().get_mut("old").unwrap().started = long_ago;
+        assert!(!c.holds_session("old"), "an expired session is not held");
+        assert_eq!(c.pending_count(), 1, "the expired entry is gone, the live one is not");
+        assert!(c.holds_session("live"));
+        assert!(!c.nonce_store.is_consumed("old").unwrap(), "nothing is burned for it");
     }
 
     /// The round-2 guard runs only once every binding check passed, before the marker burns; a
