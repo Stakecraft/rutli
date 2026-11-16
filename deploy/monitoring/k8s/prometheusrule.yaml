@@ -200,6 +200,25 @@ spec:
           \ ones: signer, certificate, signature, pin, cluster, key \u2014 something presented an intent\
           \ this node did not accept, which is what a compromised cosigner or a stolen-but-revoked driver\
           \ key looks like. The cosigner log names the refusal; cross-check the driver audit log (docs/approval-quorum.md)."
+    - alert: RutliSignUnknownSessions
+      expr: increase(rutli_sign_round2_unknown_session_total[15m]) > 3.5
+      for: 0m
+      labels:
+        severity: warning
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }} keeps getting sign round 2 for sessions it\
+          \ does not hold"
+        description: '{{ $labels.instance }} answered more than 3 sign round-2 requests in 15 minutes
+          as an unknown signing session: it held no round-1 nonces for them. No share leaves for such
+          a request and the leader signs with the other cosigners, so signatures still complete, with
+          less margin. One or two right after this node restarted or committed a refresh are normal and
+          stay under this threshold. More means one of: the node restarts again and again (check its restart
+          count and log); it keeps dropping its loaded keys (RutliLockPoisonRecovered); or a peer sends
+          round 2 for sessions it never opened here, which a correct cosigner does not do. A leader whose
+          sign lost this node logs it (`excluding a cosigner from this signature`, with `unknown signing
+          session` and the session id). This node does not log the request, so if no leader''s log accounts
+          for the count, suspect the other cosigners. On a node that requires signing intents such a request
+          used to count under RutliSignPolicyRefusals (reason missing).'
     - alert: RutliSignIntentAbsent
       expr: increase(rutli_sign_intent_absent_total[1h]) > 0
       for: 1h

@@ -5,6 +5,53 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Changed
+
+- **A sign round 2 for a session the node no longer holds answers `ABORTED`, not `INTERNAL`,** and
+  is counted in the new `rutli_sign_round2_unknown_session_total`. It is what a node answers
+  after a restart or a ceremony commit between the two rounds, or past the session TTL; nothing
+  is wrong with the node. Leaders treat it as before (the member is left out of that signature
+  and another subset signs), whatever release they run; `sign-test` reports a member's error as
+  it is, so it shows the new code.
+- **With a signing policy, a round 2 for a session the node holds no nonces for is an unknown
+  session too, no longer a policy refusal.** A node that restarted between the two rounds has
+  lost the session's round-1 authorization with its nonces, and answered `PERMISSION_DENIED`
+  (`rutli_sign_policy_refusals_total{reason="missing"}`, or `reason="key"` with `require_intent`
+  off). A leader that then found no other subset passed that refusal on to the client, and the
+  driver does not try another cosigner on a refusal. Now it answers `ABORTED` like a node
+  without a signing policy, the leader signs with another subset or reports `UNAVAILABLE`, and a
+  cosigner restart no longer counts as a policy refusal. The same after a ceremony commit or an
+  abort between the rounds and past the session TTL, whatever the policy would say about the
+  session's intent by then (an intent that expired meanwhile was `reason="expiry"`). Nothing is
+  released either way: there are no nonces to sign with. Still refused as before: a round 2 for
+  a session whose nonces the node holds while its authorization is gone. For monitoring: a round
+  2 for a session that was never opened used to count as a policy refusal on a node that
+  requires intents and now counts in `rutli_sign_round2_unknown_session_total`. The new alert
+  `RutliSignUnknownSessions` (`deploy/monitoring`, warning) fires at more than 3 in 15 minutes
+  on a node, so a single such request no longer alerts, and neither do the one or two a restart
+  or a refresh leaves behind.
+
+### Fixed
+
+- **A cosigner's first signature after a restart could lose its session.** Two requests that used
+  a key for the first time at once (a sign round 1 and, say, this node leading another signature)
+  each loaded the share and built their own in-memory signing state; the one that finished second
+  replaced the first in the cache, and with it the round-1 nonces of a session already opened.
+  That session's round 2 then failed on this node with `unknown signing session` (gRPC
+  `INTERNAL`), the leader excluded the node and signed with the others (seen once on the soak
+  cluster, 2026-11-14, 11 s after a cosigner restart; the signature completed). The state loaded
+  first is now kept and the second is dropped unused. No nonce was reused or could be: the
+  replaced nonces were unreachable and never signed, and nothing was journaled or burned for the
+  lost session.
+- **A share read just before a ceremony commit could be cached after it.** A first use of a key
+  that read the share file, then lost the processor while a refresh committed (new share written,
+  cache entry evicted), went on to cache the share it had read: the old one. The node then signed
+  from the old sharing, which every peer refuses (`epoch mismatch`), until its next restart or
+  commit; the epoch check did not see it, because it reads the file. Found by reading the code
+  for the fix above, not seen in operation: it needs an empty cache (a restart) at the moment of a
+  commit. A load that an eviction overtook now reads the share again. The same guard covers
+  `discard-partial-key`.
+
 ### Documentation
 
 - **Splice 0.10 / Canton 3.7** (`docs/splice-0.10.md`): the driver needs no change, because the KMS driver SPI and the

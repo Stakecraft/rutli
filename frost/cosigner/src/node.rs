@@ -171,6 +171,11 @@ pub struct Node {
     keystore_health: Arc<crate::health::KeystoreHealth>,
     /// Loaded signing state per key: the share's cosigner and the sharing it belongs to.
     cosigners: Mutex<std::collections::HashMap<String, CachedKey>>,
+    /// How many times a key was evicted from `cosigners` ([`Node::evict`]). Read and bumped only
+    /// while holding that lock; [`Node::cached`] uses it to notice an eviction during its load.
+    /// Emptying the cache on poison ([`Node::cache`]) is not counted: nothing changed on disk, so
+    /// a share read before it is still the live one.
+    cache_evictions: std::sync::atomic::AtomicU64,
     /// Keys whose share this node's epoch check found stale ([`crate::epoch_check`]): round 1 and
     /// leading are refused for them until a check finds the share current again.
     stale: Mutex<std::collections::HashMap<String, StaleMark>>,
@@ -214,6 +219,8 @@ pub struct Node {
 type OnceHook = Box<dyn FnOnce(&Node) + Send>;
 #[cfg(test)]
 type SessionHook = Arc<dyn Fn(&str, &str) + Send + Sync>;
+#[cfg(test)]
+type KeyHook = Arc<dyn Fn(&str) + Send + Sync>;
 
 /// Fault and pause seams for this crate's unit tests, absent from every other build (the same
 /// approach as the sign journal's injected faults).
@@ -225,6 +232,14 @@ struct TestHooks {
     /// Run by sign round 2, with the key id and session id, right after it took its handle on the
     /// cached cosigner and before using it (a refresh commit may evict that cosigner meanwhile).
     after_round2_cosigner: Mutex<Option<SessionHook>>,
+    /// Run by [`Node::cached`], with the key id, on a cache miss: after it read the share from the
+    /// key store and before it takes the cache lock again to publish what it built.
+    after_cache_load: Mutex<Option<KeyHook>>,
+    /// Run by sign round 2 on a node with a signing policy, with the key id and session id, after
+    /// it took the session's authorization and asked whether nonces are held, before it answers.
+    after_round2_held: Mutex<Option<SessionHook>>,
+    /// Run by [`Node::abort_sign`], with the key id and session id, between its two steps.
+    mid_abort_sign: Mutex<Option<SessionHook>>,
 }
 
 /// What a node holds under a hosted key id.
@@ -323,6 +338,7 @@ impl Node {
             stale: Mutex::new(Default::default()),
             require_epoch_match: false,
             sign_guard: None,
+            cache_evictions: std::sync::atomic::AtomicU64::new(0),
             ceremonies: Mutex::new(Default::default()),
             ceremony_orphan_timeout,
             ceremony_fence_timeout: CEREMONY_FENCE_TIMEOUT,
@@ -855,23 +871,66 @@ impl Node {
     }
 
     /// Load (and cache) this node's signing state for `key_id`, with the sharing it belongs to.
+    ///
+    /// The share is read outside the cache lock (key-store IO must not hold up signing with keys
+    /// already loaded), so two first uses of a key may each build a `Cosigner`. Only the first one
+    /// published stays in the cache and both callers get that one: a session's round-1 nonces
+    /// live in the `Cosigner` that made them, so replacing a published one would lose the sessions
+    /// already opened on it (they would fail at round 2 as unknown). The one built second is
+    /// dropped before any caller saw it; it never held a nonce. (A call that took its handle
+    /// before a commit evicted the entry keeps using the evicted one: see [`Node::sign_round1`].)
+    ///
+    /// A share read before an eviction ([`Node::evict`]) is never published after it: whoever
+    /// evicts has just changed the key's file, so that share may be the one it replaced. The load
+    /// is run again instead. The count is one for all keys, so an eviction of another key costs a
+    /// load in flight one more read.
     fn cached(&self, key_id: &str) -> Result<CachedKey> {
-        {
-            let map = self.cache();
+        use std::sync::atomic::Ordering::Relaxed;
+        loop {
+            let evictions = {
+                let map = self.cache();
+                if let Some(c) = map.get(key_id) {
+                    return Ok(c.clone());
+                }
+                self.cache_evictions.load(Relaxed)
+            };
+            let share = self.keystore.load(key_id)?;
+            let view = (share.epoch, share.pkp_digest()?);
+            let nonce_store = NonceStore::open(self.keystore.nonce_dir(key_id))?;
+            let cached = CachedKey {
+                cosigner: Arc::new(Cosigner::new(share.key_package, share.public_key_package, nonce_store)),
+                view,
+            };
+            #[cfg(test)]
+            {
+                let hook = crate::sync::recover(&self.hooks.after_cache_load, "test_hook").clone();
+                if let Some(hook) = hook {
+                    hook(key_id);
+                }
+            }
+            let mut map = self.cache();
             if let Some(c) = map.get(key_id) {
                 return Ok(c.clone());
             }
+            if self.cache_evictions.load(Relaxed) == evictions {
+                map.insert(key_id.to_string(), cached.clone());
+                return Ok(cached);
+            }
         }
-        let share = self.keystore.load(key_id)?;
-        let view = (share.epoch, share.pkp_digest()?);
-        let nonce_store = NonceStore::open(self.keystore.nonce_dir(key_id))?;
-        let cached = CachedKey {
-            cosigner: Arc::new(Cosigner::new(share.key_package, share.public_key_package, nonce_store)),
-            view,
-        };
-        self.cache()
-            .insert(key_id.to_string(), cached.clone());
-        Ok(cached)
+    }
+
+    /// Drop `key_id` from the cache after its file changed (a ceremony commit, a discard), so the
+    /// next use loads it again. Call it after the change is on disk: a load that read the file
+    /// before the change either published before this (and is removed here) or sees the eviction
+    /// and reads again ([`Node::cached`]).
+    ///
+    /// Not covered: a commit that replaced the share file and then failed before it got here (its
+    /// record could not be written). The old entry then stays cached until the ceremony is
+    /// resolved again, which evicts.
+    fn evict(&self, key_id: &str) {
+        let mut map = self.cache();
+        self.cache_evictions.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        map.remove(key_id);
     }
 
     /// Apply `signing_policy.require_epoch_match` (see [`crate::config::SigningPolicyConfig`]).
@@ -1243,7 +1302,8 @@ impl Node {
     /// had none). With a signing policy: the policy's round-2 checks, then the core binding
     /// checks, then — before the nonce marker burns — the rate-limit charge and the durable
     /// journal entry ([`crate::sign_policy::SignGuard`]); a refusal at any step releases nothing
-    /// and drops the session's nonces.
+    /// and drops the session's nonces. A session this node holds no live nonces for is an unknown
+    /// session with or without a signing policy.
     pub fn sign_round2_with(
         &self,
         key_id: &str,
@@ -1274,34 +1334,65 @@ impl Node {
         let result = match &self.sign_guard {
             None => cosigner.round2(session_id, key_id, message, commitments, intent_digest.as_ref()).map_err(DaemonError::from),
             Some(g) => {
-                let auth = match g.take(key_id, session_id) {
-                    Some(a) => a,
-                    None if g.require_intent() => {
-                        cosigner.abort(session_id);
-                        self.update_pending_gauge();
-                        return Err(crate::intent::refused(
-                            "missing",
-                            format!("sign round 2 for session {session_id}: no round-1 authorization on this node"),
-                        ));
+                // Taken on every path from here on: a round 2 that gets this far uses up the
+                // session's authorization, whatever it then answers. (One refused before this
+                // point, for its message length or because the key cannot be loaded, leaves the
+                // session as it was, nonces and authorization.)
+                let auth = g.take(key_id, session_id);
+                let held = cosigner.holds_session(session_id);
+                #[cfg(test)]
+                {
+                    let hook = crate::sync::recover(&self.hooks.after_round2_held, "test_hook").clone();
+                    if let Some(hook) = hook {
+                        hook(key_id, session_id);
                     }
-                    None => crate::sign_policy::SessionAuth::NoIntent,
-                };
-                match g.check_round2(&auth, message, intent_digest.as_ref()) {
-                    Err(e) => {
-                        cosigner.abort(session_id);
-                        Err(e)
+                }
+                if !held {
+                    // No nonces here for this session, so no share can leave and there is nothing
+                    // for the policy to decide: this node restarted between the rounds (the
+                    // authorization is gone too), a ceremony commit replaced the cosigner (the
+                    // authorization was still here), the session was aborted or it outlived its
+                    // TTL. Answered like the same round 2 on a node without a signing policy, so
+                    // the leader signs with another subset and a client is not told its request
+                    // was refused. The error is made here and core round 2 is NOT run: `held` is
+                    // a snapshot, and a round 1 for this session id may have landed since. Its
+                    // nonces belong to a round 2 that passes the policy checks and is journaled;
+                    // core round 2 here would take them out of the session map unchecked (and
+                    // sign with them, did this request carry that round 1's commitment).
+                    Err(DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(session_id.to_string())))
+                } else {
+                    let auth = match auth {
+                        Some(a) => a,
+                        None if g.require_intent() => {
+                            cosigner.abort(session_id);
+                            self.update_pending_gauge();
+                            return Err(crate::intent::refused(
+                                "missing",
+                                format!("sign round 2 for session {session_id}: no round-1 authorization on this node"),
+                            ));
+                        }
+                        None => crate::sign_policy::SessionAuth::NoIntent,
+                    };
+                    match g.check_round2(&auth, message, intent_digest.as_ref()) {
+                        Err(e) => {
+                            cosigner.abort(session_id);
+                            Err(e)
+                        }
+                        Ok(()) => cosigner.round2_guarded(
+                            session_id,
+                            key_id,
+                            message,
+                            commitments,
+                            intent_digest.as_ref(),
+                            || g.journal_release(key_id, session_id, &auth, message),
+                        ),
                     }
-                    Ok(()) => cosigner.round2_guarded(
-                        session_id,
-                        key_id,
-                        message,
-                        commitments,
-                        intent_digest.as_ref(),
-                        || g.journal_release(key_id, session_id, &auth, message),
-                    ),
                 }
             }
         };
+        if matches!(result, Err(DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_)))) {
+            metrics::counter!(crate::metrics::SIGN_ROUND2_UNKNOWN_SESSION).increment(1);
+        }
         self.update_pending_gauge();
         result
     }
@@ -1310,12 +1401,22 @@ impl Node {
     /// `session_id` instead of letting them linger until the pending-TTL sweep. No-op if this node
     /// never held nonces for it (cosigner not cached, or round2 already burned the session).
     pub fn abort_sign(&self, key_id: &str, session_id: &str) {
-        if let Some(g) = &self.sign_guard {
-            g.forget(key_id, session_id);
-        }
+        // The nonces first, then the authorization: a round 2 racing this abort (a leader that
+        // timed out on this node and gave up) must not find the nonces without the authorization,
+        // which is a policy refusal. In this order it finds no nonces: an unknown session.
         let cached = self.cache().get(key_id).cloned();
         if let Some(c) = cached {
             c.cosigner.abort(session_id);
+        }
+        #[cfg(test)]
+        {
+            let hook = crate::sync::recover(&self.hooks.mid_abort_sign, "test_hook").clone();
+            if let Some(hook) = hook {
+                hook(key_id, session_id);
+            }
+        }
+        if let Some(g) = &self.sign_guard {
+            g.forget(key_id, session_id);
         }
         self.update_pending_gauge();
     }
@@ -2420,7 +2521,7 @@ impl Node {
         if state == RecordState::Committed {
             // The next sign loads the committed share, which is newer than anything a stale mark
             // was measured against.
-            self.cache().remove(&rec.key_id);
+            self.evict(&rec.key_id);
             if self.stale_mark(&rec.key_id).is_some() {
                 self.set_stale(&rec.key_id, None);
             }
@@ -2513,7 +2614,7 @@ impl Node {
         if nonces.try_exists()? {
             std::fs::remove_dir(&nonces)?;
         }
-        self.cache().remove(key_id);
+        self.evict(key_id);
         tracing::warn!(key_id, "discarded this node's file for a legacy partial DKG key");
         Ok(())
     }
@@ -2658,7 +2759,7 @@ impl Node {
         self.record_store.write_recovery(&rec, &done)?;
         book.records.insert(ceremony_id.to_string(), done.clone());
         drop(book);
-        self.cache().remove(&rec.key_id);
+        self.evict(&rec.key_id);
         if self.stale_mark(&rec.key_id).is_some() {
             self.set_stale(&rec.key_id, None);
         }
@@ -3724,6 +3825,370 @@ mod sign_across_commit_tests {
 
         let sig = sign(&nodes[0], &peers, KEY, &msg).await.unwrap();
         assert!(crate::verify_key::signature_verifies(&group, &msg, &sig));
+    }
+}
+
+/// A key's first use after a restart (an empty cache), raced by another first use of it or by a
+/// ceremony commit.
+#[cfg(test)]
+mod cache_first_use_tests {
+    use super::*;
+    use crate::orchestrator::{run_dkg, run_refresh, sign};
+    use crate::peer::{LocalPeer, PeerApi};
+    use rutli_frost_core::nonce_store::NonceStore;
+    use std::sync::mpsc;
+
+    const KEY: &str = "k";
+    const WAIT: Duration = Duration::from_secs(30);
+
+    fn cluster(tmp: &tempfile::TempDir) -> (Vec<Arc<Node>>, Vec<Arc<dyn PeerApi>>) {
+        let nodes: Vec<Arc<Node>> = (1..=3u16)
+            .map(|i| {
+                let ks = KeyStore::open(tmp.path().join(format!("n{i}"))).unwrap();
+                Arc::new(Node::new(Identifier::try_from(i).unwrap(), 3, 2, ks))
+            })
+            .collect();
+        crate::peer::wire_local_mesh(&nodes).unwrap();
+        let peers = nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+        (nodes, peers)
+    }
+
+    /// Park the next cache-miss load on `node` between reading the share and publishing it to the
+    /// cache; every later load passes. Returns (parked, release): `parked` yields once the load is
+    /// parked, a send on `release` lets it go on.
+    fn park_next_load(node: &Node) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+        let (parked_tx, parked) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel::<()>();
+        let slot = Mutex::new(Some((parked_tx, release_rx)));
+        *node.hooks.after_cache_load.lock().unwrap() = Some(Arc::new(move |_key: &str| {
+            let first = slot.lock().unwrap().take();
+            if let Some((parked, release)) = first {
+                parked.send(()).unwrap();
+                release.recv_timeout(WAIT).expect("the parked load was never released");
+            }
+        }));
+        (parked, release)
+    }
+
+    /// Two first uses of a key race on an empty cache: one (here a leader's `signing_view`) has
+    /// read the share and not yet cached it when a round 1 loads the key too, caches its cosigner
+    /// and opens a session on it. The first load must not replace that cosigner: the session's
+    /// nonces live only there, and round 2 would find no session (soak, 2026-11-14: "unknown
+    /// signing session" 11 s after a cosigner restart, the member excluded from that signature).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_round1_racing_another_first_use_of_the_key_keeps_its_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (nodes, peers) = cluster(&tmp);
+        let group = run_dkg(&peers, KEY).await.unwrap();
+        let msg = rutli_frost_core::dealer::canton_test_message(b"first use after a restart");
+        let session = "raced";
+        let view = nodes[1].signing_view(KEY).unwrap().view;
+        let node = nodes[0].clone();
+        node.cache().clear(); // as after a restart
+
+        let (parked, release) = park_next_load(&node);
+        let other = {
+            let n = node.clone();
+            std::thread::spawn(move || n.signing_view(KEY).map(|v| v.view))
+        };
+        parked.recv_timeout(WAIT).expect("the first load parks");
+
+        let ctx = Round1Ctx { leader_view: Some(view), ..Default::default() };
+        let mut commitments = BTreeMap::new();
+        for n in &nodes[..2] {
+            commitments.insert(n.identifier, n.sign_round1(KEY, session, &ctx).unwrap());
+        }
+        assert_eq!(node.pending_sign_count(KEY), 1);
+
+        release.send(()).unwrap();
+        assert_eq!(other.join().unwrap().unwrap(), view);
+        assert_eq!(node.pending_sign_count(KEY), 1, "the cached cosigner is still the one holding the session");
+
+        let mut shares = BTreeMap::new();
+        for n in &nodes[..2] {
+            let share = n.sign_round2(KEY, session, &msg, &commitments).expect("round 2 finds the session round 1 opened");
+            shares.insert(n.identifier, share);
+        }
+        let sig = nodes[1].aggregate(KEY, &msg, &commitments, &shares).unwrap();
+        assert!(crate::verify_key::signature_verifies(&group, &msg, &sig));
+
+        // One share per session, whichever load won.
+        let store = NonceStore::open(node.keystore.nonce_dir(KEY)).unwrap();
+        assert!(store.is_consumed(session).unwrap());
+        assert!(
+            matches!(store.consume(session), Err(rutli_frost_core::CoreError::NonceReuse(_))),
+            "a second burn of {session} is refused"
+        );
+        assert!(node.sign_round2(KEY, session, &msg, &commitments).is_err(), "no second share");
+        assert!(node.sign_round1(KEY, session, &ctx).is_err(), "no fresh nonces for a burned session");
+        assert_eq!(node.pending_sign_count(KEY), 0);
+    }
+
+    /// A first use reads the share, then a refresh commits (writes the new share, evicts the
+    /// cache) before that load publishes what it read. The old share must not land in the cache
+    /// after the eviction: the node would sign from the old sharing — refused by every peer, and
+    /// by this node as a member of any leader's quorum — until its next restart or commit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_load_overtaken_by_a_refresh_commit_does_not_cache_the_old_share() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (nodes, peers) = cluster(&tmp);
+        let group = run_dkg(&peers, KEY).await.unwrap();
+        let msg = rutli_frost_core::dealer::canton_test_message(b"a load spans a commit");
+        let old_view = nodes[1].signing_view(KEY).unwrap().view;
+        let node = nodes[0].clone();
+        node.cache().clear(); // as after a restart
+
+        let (parked, release) = park_next_load(&node);
+        let other = {
+            let n = node.clone();
+            std::thread::spawn(move || n.signing_view(KEY).map(|v| v.view))
+        };
+        parked.recv_timeout(WAIT).expect("the first load parks");
+
+        assert_eq!(run_refresh(&peers, KEY).await.unwrap(), group);
+        let new_view = nodes[1].signing_view(KEY).unwrap().view;
+        assert_eq!(new_view.0, old_view.0 + 1);
+
+        release.send(()).unwrap();
+        assert_eq!(other.join().unwrap().unwrap(), new_view, "the overtaken load reads the share again");
+        assert_eq!(node.signing_view(KEY).unwrap().view, new_view, "the cache holds the committed sharing");
+        let sig = sign(&node, &peers, KEY, &msg).await.unwrap();
+        assert!(crate::verify_key::signature_verifies(&group, &msg, &sig));
+    }
+
+    /// The same window with a discard instead of a commit: a first use reads the share, then the
+    /// key's file is deleted and the cache evicted. The load must not cache the share of a key
+    /// this node no longer holds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_load_overtaken_by_a_discard_does_not_cache_the_deleted_share() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (nodes, peers) = cluster(&tmp);
+        run_dkg(&peers, KEY).await.unwrap();
+        let node = nodes[0].clone();
+        node.cache().clear(); // as after a restart
+
+        let (parked, release) = park_next_load(&node);
+        let other = {
+            let n = node.clone();
+            std::thread::spawn(move || n.signing_view(KEY).map(|v| v.view))
+        };
+        parked.recv_timeout(WAIT).expect("the first load parks");
+
+        node.discard_local_key(KEY).unwrap();
+
+        release.send(()).unwrap();
+        assert!(other.join().unwrap().is_err(), "the overtaken load reads again and finds no share");
+        assert!(node.cache().get(KEY).is_none(), "nothing is cached for the discarded key");
+        assert!(node.signing_view(KEY).is_err());
+        assert!(!node.keystore.nonce_dir(KEY).exists());
+    }
+
+    /// A round 2 for a session whose nonces are gone (here: the cosigner was loaded again, as
+    /// after a restart) is refused as an unknown session, answered `ABORTED` and counted.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_round2_for_a_lost_session_is_aborted_and_counted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (nodes, peers) = cluster(&tmp);
+        run_dkg(&peers, KEY).await.unwrap();
+        let msg = rutli_frost_core::dealer::canton_test_message(b"round 2 after a restart");
+        let session = "lost";
+        let node = nodes[0].clone();
+        let ctx = Round1Ctx { leader_view: Some(node.signing_view(KEY).unwrap().view), ..Default::default() };
+        let mut commitments = BTreeMap::new();
+        for n in &nodes[..2] {
+            commitments.insert(n.identifier, n.sign_round1(KEY, session, &ctx).unwrap());
+        }
+        node.cache().clear(); // as after a restart
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let err = metrics::with_local_recorder(&recorder, || node.sign_round2(KEY, session, &msg, &commitments))
+            .expect_err("the nonces of the session are gone");
+        assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))), "{err}");
+        assert_eq!(tonic::Status::from(err).code(), tonic::Code::Aborted);
+        let out = handle.render();
+        let line = format!("{} 1", crate::metrics::SIGN_ROUND2_UNKNOWN_SESSION);
+        assert!(out.lines().any(|l| l == line), "missing {line:?}:\n{out}");
+
+        // The refusal comes before the burn: no marker for the session.
+        let store = NonceStore::open(node.keystore.nonce_dir(KEY)).unwrap();
+        assert!(!store.is_consumed(session).unwrap());
+    }
+}
+
+/// Sign round 2 on a node with a signing policy, raced by a round 1 or an abort for the same
+/// session. The races are staged with the test hooks, on one thread: each hook runs the racing
+/// call at the point where the two would interleave.
+#[cfg(test)]
+mod sign_policy_race_tests {
+    use super::*;
+    use crate::config::SigningPolicyConfig;
+    use crate::intent::{self, IntentVerifier};
+    use crate::journal::{read_key_dir, Retention, SignJournal};
+    use crate::orchestrator::run_dkg;
+    use crate::peer::{LocalPeer, PeerApi};
+    use crate::sign_policy::SignGuard;
+    use crate::test_pki::TestPki;
+
+    const KEY: &str = "k";
+    const CLUSTER: &str = "c2testcluster000";
+
+    struct Rig {
+        nodes: Vec<Arc<Node>>,
+        group: [u8; 32],
+        pki: TestPki,
+        tmp: tempfile::TempDir,
+    }
+
+    /// Three in-process nodes (2-of-3) that require a signing intent for every signature, key
+    /// `KEY` generated.
+    async fn rig() -> Rig {
+        let tmp = tempfile::tempdir().unwrap();
+        let pki = TestPki::new();
+        let policy =
+            SigningPolicyConfig { require_intent: true, require_ceremony_intent: Some(false), ..Default::default() };
+        let nodes: Vec<Arc<Node>> = (1..=3u16)
+            .map(|i| {
+                let root = tmp.path().join(format!("n{i}"));
+                let ks = KeyStore::open(root.join("keys")).unwrap();
+                let verifier = IntentVerifier::new(
+                    pki.ca_pem.as_bytes().to_vec(),
+                    false,
+                    CLUSTER.into(),
+                    ["driver".to_string()],
+                    &policy,
+                )
+                .unwrap();
+                let journal =
+                    SignJournal::open(root.join("journal"), i, Retention { days: 90, max_bytes: 64 << 20 }).unwrap();
+                let guard = Arc::new(SignGuard::new(Arc::new(verifier), journal, 10));
+                Arc::new(Node::new(Identifier::try_from(i).unwrap(), 3, 2, ks).with_sign_guard(guard))
+            })
+            .collect();
+        crate::peer::wire_local_mesh(&nodes).unwrap();
+        let peers: Vec<Arc<dyn PeerApi>> =
+            nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+        let group = run_dkg(&peers, KEY).await.unwrap();
+        Rig { nodes, group, pki, tmp }
+    }
+
+    impl Rig {
+        /// A signing intent of the driver for `msg`, request id 16×`request`.
+        fn intent(&self, msg: &[u8], request: u8) -> crate::pb::SignedIntent {
+            let now = intent::now_ms();
+            let unsigned = crate::pb::SignIntent {
+                version: 1,
+                cluster_id: CLUSTER.into(),
+                purpose: "sign".into(),
+                key_id: KEY.into(),
+                digest: msg.to_vec(),
+                request_id: vec![request; 16],
+                issued_at_ms: now,
+                not_after_ms: now + 120_000,
+                approval_nonce: Vec::new(),
+                approvals: Vec::new(),
+            };
+            intent::sign_intent(&self.pki.signer("driver"), &unsigned).unwrap()
+        }
+
+        /// Node 1's burned nonce markers and journal entries for `KEY`.
+        fn released(&self) -> (usize, usize) {
+            let markers = std::fs::read_dir(self.nodes[0].keystore.nonce_dir(KEY)).map(|d| d.count()).unwrap_or(0);
+            let journaled =
+                read_key_dir(&self.tmp.path().join("n1/journal").join(KEY)).map(|r| r.entries.len()).unwrap_or(0);
+            (markers, journaled)
+        }
+    }
+
+    /// A round 2 finds no nonces for its session and is about to answer "unknown session" when a
+    /// round 1 for that session id lands. The answer must not touch what that round 1 opened: its
+    /// nonces stay for a round 2 that passes the policy checks and is journaled. (Running core
+    /// round 2 at that point instead would take the nonces out unchecked.)
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_round1_landing_while_round2_answers_unknown_keeps_its_session_for_the_policy() {
+        let r = rig().await;
+        let node = r.nodes[0].clone();
+        let msg = rutli_frost_core::dealer::canton_test_message(b"round 1 lands late");
+        let session = "late";
+        let i1 = r.intent(&msg, 1);
+        let digest = intent::intent_digest(&i1);
+        let ctx =
+            Round1Ctx { message: Some(msg.to_vec()), signers: Some(vec![1, 2]), intent: Some(i1), ..Default::default() };
+        let c2 = r.nodes[1].sign_round1(KEY, session, &ctx).unwrap();
+
+        // The racing round 1, run where round 2 has looked for nonces and not answered yet.
+        let landed = Arc::new(Mutex::new(None));
+        *node.hooks.after_round2_held.lock().unwrap() = Some(Arc::new({
+            let (n, ctx, landed) = (Arc::downgrade(&node), ctx.clone(), landed.clone());
+            move |key: &str, session: &str| {
+                let n = n.upgrade().unwrap();
+                *landed.lock().unwrap() = Some(n.sign_round1(key, session, &ctx).expect("round 1 opens the session"));
+            }
+        }));
+        // This round 2 cannot know the commitment of a round 1 that has not answered yet.
+        let guess = BTreeMap::from([(node.identifier, c2), (r.nodes[1].identifier, c2)]);
+        let err = node.sign_round2_with(KEY, session, &msg, &guess, Some(digest)).unwrap_err();
+        *node.hooks.after_round2_held.lock().unwrap() = None;
+        assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))), "{err:?}");
+        let c1 = landed.lock().unwrap().take().expect("the round 1 ran");
+        assert_eq!(node.pending_sign_count(KEY), 1, "the session that round 1 opened still has its nonces");
+        assert_eq!(r.released(), (0, 0), "no marker burned, nothing journaled");
+
+        // Its own round 2 goes through the policy: journaled, then released.
+        let cs = BTreeMap::from([(node.identifier, c1), (r.nodes[1].identifier, c2)]);
+        let mut shares = BTreeMap::new();
+        for n in &r.nodes[..2] {
+            let share = n.sign_round2_with(KEY, session, &msg, &cs, Some(digest)).expect("the session completes");
+            shares.insert(n.identifier, share);
+        }
+        let sig = node.aggregate(KEY, &msg, &cs, &shares).unwrap();
+        assert!(crate::verify_key::signature_verifies(&r.group, &msg, &sig));
+        assert_eq!(r.released(), (1, 1), "one marker, one journal entry");
+        assert_eq!(node.pending_sign_count(KEY), 0);
+    }
+
+    /// A round 2 that arrives while its session is being aborted (a leader that timed out on this
+    /// node and gave up, its round 2 still on the way) finds the nonces gone before the
+    /// authorization: an unknown session. In the other order it would find nonces without an
+    /// authorization, which is a policy refusal, and an abort would count as one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_round2_racing_an_abort_is_an_unknown_session_not_a_policy_refusal() {
+        let r = rig().await;
+        let node = r.nodes[0].clone();
+        let msg = rutli_frost_core::dealer::canton_test_message(b"round 2 meets an abort");
+        let session = "aborting";
+        let i1 = r.intent(&msg, 2);
+        let digest = intent::intent_digest(&i1);
+        let ctx =
+            Round1Ctx { message: Some(msg.to_vec()), signers: Some(vec![1, 2]), intent: Some(i1), ..Default::default() };
+        let mut cs = BTreeMap::new();
+        for n in &r.nodes[..2] {
+            cs.insert(n.identifier, n.sign_round1(KEY, session, &ctx).unwrap());
+        }
+        assert_eq!(node.pending_sign_count(KEY), 1);
+
+        // The racing round 2, run between the abort's two steps.
+        let answer = Arc::new(Mutex::new(None));
+        *node.hooks.mid_abort_sign.lock().unwrap() = Some(Arc::new({
+            let (n, answer) = (Arc::downgrade(&node), answer.clone());
+            move |key: &str, session: &str| {
+                let n = n.upgrade().unwrap();
+                *answer.lock().unwrap() = Some(n.sign_round2_with(key, session, &msg, &cs, Some(digest)));
+            }
+        }));
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || node.abort_sign(KEY, session));
+        *node.hooks.mid_abort_sign.lock().unwrap() = None;
+
+        let err = answer.lock().unwrap().take().expect("the round 2 ran").expect_err("an aborted session never signs");
+        assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))), "{err:?}");
+        let out = handle.render();
+        assert!(out.lines().any(|l| l == "rutli_sign_round2_unknown_session_total 1"), "{out}");
+        assert!(!out.contains("rutli_sign_policy_refusals_total"), "not counted as a policy refusal:\n{out}");
+        assert_eq!(node.pending_sign_count(KEY), 0);
+        assert_eq!(r.released(), (0, 0), "no marker burned, nothing journaled");
+        assert!(node.sign_guard().unwrap().take(KEY, session).is_none(), "no authorization is left behind");
     }
 }
 
