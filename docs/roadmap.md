@@ -187,7 +187,7 @@ Track A (soak and hardening) continues on `stakecraft-devnet-rutli-01`; exit cri
 | 2026-10-28 | v0.4.0-rc.6: ceremony leader binding and durable fence marks, disjoint FROST and hosted key ids, TLS crate advisories closed; ceremony intents required by default with TLS |
 | 2026-11-14 | **v0.4.0 tagged = audit code freeze:** Flow 1, Flow 2a (after B8), Flow 2b, B2, B6, ECIES, C2 fixes, CA rotation |
 | Later | Pre-rotate alternative for 2a (research), if B8 shows it is worth it |
-| Day v0.4.0 is tagged | Splice TestNet validator run starts; at least 4 weeks clean before 1.0 |
+| 2026-11-19 (planned) | Splice TestNet validator run starts; at least 4 weeks clean before 1.0 |
 | After the audit | **1.0**: the audit's fixes and retest, at least 4 clean weeks on TestNet, and the 1.0 features below |
 
 - **The audit is the critical path.** Auditor: **Cure53** (chosen 2026-10-27). The RFQ

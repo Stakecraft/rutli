@@ -268,7 +268,7 @@ no forward secrecy; seal-secret protection is software, not HSM or enclave; one 
 | Item | Request |
 |---|---|
 | Start | **After our funding is confirmed**, expected December 2026 to January 2027. Give us your earliest slots from mid-December and the notice you need; the project's 1.0 date follows the audit. |
-| Duration | 2-3 weeks; tell us what you can cover in each. |
+| Duration | Propose it for the scope in section 2. Our guess is 3-4 weeks; if you quote 2-3, tell us what that covers and what it leaves out. |
 | Code freeze | `v0.4.0`, target ~2026-11-14, which includes the split ceremony, the ECIES hosted keys, milestone B6 and remediation batches A to C (section 1.1). We will give you the commit hash on the day; only audit fixes land afterwards. |
 | Our availability | One maintainer engineer, available during the engagement for questions. No feature work lands in the audited surface after the freeze. Walkthrough on request. |
 | Deliverables | Written report with findings and severity ratings; per-finding recommendations; executive summary suitable for publication. |
