@@ -286,7 +286,8 @@ class ApprovalGateSpec extends AnyWordSpec with Matchers {
         driver.sign(Array.fill(34)(7.toByte), keyId, SigningAlgoSpec.Ed25519)(ctx)
       eventually(pendingExists(inbox))
       // Still blocked: the wait times out, and nothing else (a failed sign) passes for that.
-      a[java.util.concurrent.TimeoutException] should be thrownBy Await.result(signF, 300.millis)
+      // (`an`, not `a`: this test has a local value named `a`.)
+      an[java.util.concurrent.TimeoutException] should be thrownBy Await.result(signF, 300.millis)
       signF.isCompleted shouldBe false
 
       // Two distinct approvers authorize -> the sign completes with a real 64-byte signature.
