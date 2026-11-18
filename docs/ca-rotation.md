@@ -60,7 +60,7 @@ the id never changes, which is one more reason to pin it before the CA file chan
 pins it too (`frost.cluster-id`, recommended in production — then no cosigner's `Capabilities`
 answer is trusted for it), it must be the same value. In an incident where intents are refused for
 the cluster id, `frost.sign-intents = off` (driver restart) stops attaching intents until it is
-fixed. That works only on cosigners with `require_intent: false`: since the release after 0.4.0 the
+fixed. That works only on cosigners with `require_intent: false`: since 0.5.0 the
 default with TLS refuses a sign without an intent, so the switch also needs that opt-out on every
 node.
 

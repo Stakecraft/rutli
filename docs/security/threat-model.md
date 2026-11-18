@@ -15,7 +15,7 @@ The statements below hold for a cluster where:
   the release candidate they hold from), on a cluster uniformly upgraded **before** any DKG or refresh
   (`ceremony_protocol` 2 on every node);
 - the enforcement switches are on, identically, on every node: `signing_policy.require_intent`
-  (on by default with TLS since the release after 0.4.0, unless opted out with `false`),
+  (on by default with TLS since 0.5.0, unless opted out with `false`),
   `require_ceremony_intent` (on by default since 0.4.0-rc.6, unless opted out with `false`),
   `signer_acl_required`, `signer_may_refresh: false`, `require_epoch_match`
   (`docs/approval-quorum.md`, "Switching enforcement on");

@@ -3,8 +3,8 @@
 Hold high-value signing operations until a quorum of humans has cryptographically approved them. This
 is the institutional separation-of-duties control. Even with the node, the driver and the FROST cluster
 all healthy, a gated key does not sign until `M` of `N` named approvers have each authorized that
-specific request. With `signing_policy.require_intent` on (the default on a node with TLS since the
-release after 0.4.0), **every cosigner checks the approvals itself**, not only the driver.
+specific request. With `signing_policy.require_intent` on (the default on a node with TLS since
+0.5.0), **every cosigner checks the approvals itself**, not only the driver.
 
 ## What it can and cannot do
 
@@ -122,7 +122,7 @@ All per node, in `signing_policy`. The defaults are in brackets.
 
 | Setting | Meaning |
 |---|---|
-| `require_intent` [unset = on with TLS, since the release after 0.4.0] | A sign round without a valid client-signed intent is refused. The split ceremony's sign test needs none. `false` is the explicit opt-out while the driver is older than 0.4.0-rc.3 or runs with `frost.sign-intents = off`: verified if present, accepted and counted if absent (`rutli_sign_intent_absent_total`), with a startup warning. A plaintext node verifies no intents: unset means off there, and `true` is a config error |
+| `require_intent` [unset = on with TLS, since 0.5.0] | A sign round without a valid client-signed intent is refused. The split ceremony's sign test needs none. `false` is the explicit opt-out while the driver is older than 0.4.0-rc.3 or runs with `frost.sign-intents = off`: verified if present, accepted and counted if absent (`rutli_sign_intent_absent_total`), with a startup warning. A plaintext node verifies no intents: unset means off there, and `true` is a config error |
 | `require_ceremony_intent` [unset = on with TLS, since 0.4.0-rc.6] | A DKG/refresh fence or part 1 without a valid client-signed ceremony intent is refused (`docs/ceremonies.md`, "Ceremony intents"). `false` is the explicit opt-out while the driver is older than 0.4.0-rc.4 or the refresh job's image predates the cosigners' release: verified if present, accepted and counted if absent (`rutli_ceremony_intent_absent_total`), with a startup warning. A plaintext node verifies no intents: unset means off there, and `true` is a config error |
 | `signer_acl` [none] | Client CN → key-id prefixes it may use (`""` = every key). Checked on every key-scoped Signer RPC and on the intent signer at every node. Give each tenant's driver its own CN and prefix |
 | `signer_acl_required` [false] | A signer CN without an ACL entry is refused |
@@ -144,7 +144,7 @@ and `rutli_ceremony_intent_refusals_total{reason}` (`docs/observability.md`), wi
 ## Switching enforcement on
 
 The defaults require both kinds of intent on a node with TLS: ceremony intents since 0.4.0-rc.6,
-signing intents since the release after 0.4.0. Such a cosigner refuses a DKG from a driver older than
+signing intents since 0.5.0. Such a cosigner refuses a DKG from a driver older than
 0.4.0-rc.4 and an intent-less refresh, unless it runs with `require_ceremony_intent: false`, and a
 signature from a driver older than 0.4.0-rc.3 or one with `frost.sign-intents = off`, unless it runs
 with `require_intent: false` (step 4). A driver on 0.4.0-rc.3 or later with the default

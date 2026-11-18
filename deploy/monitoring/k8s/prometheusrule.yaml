@@ -229,9 +229,9 @@ spec:
         summary: "R\xFCtli cosigner {{ $labels.instance }} signs without client intents"
         description: '{{ $labels.instance }} has accepted signatures that carried no client-signed intent
           for over an hour. It does so only where signing_policy.require_intent is off: set to false (the
-          opt-out; on by default with TLS since the release after 0.4.0), or on a node without TLS. Approvals,
-          ACLs and rate limits then bind only in the driver, and a compromised cosigner can still obtain
-          shares for arbitrary digests. Once the driver signs intents (0.4.0-rc.3 or later, frost.sign-intents
+          opt-out; on by default with TLS since 0.5.0), or on a node without TLS. Approvals, ACLs and
+          rate limits then bind only in the driver, and a compromised cosigner can still obtain shares
+          for arbitrary digests. Once the driver signs intents (0.4.0-rc.3 or later, frost.sign-intents
           on), remove the opt-out on every node (docs/approval-quorum.md, Switching enforcement on). On
           a cluster that enforces, this alert should never fire.'
     - alert: RutliCeremonyIntentRefused

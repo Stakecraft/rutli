@@ -167,12 +167,12 @@ impl KeyFileConfig {
 /// policy everywhere.
 ///
 /// **Intent switches** (`require_intent`, `require_ceremony_intent`) are on by default on a node
-/// with TLS: `require_ceremony_intent` since 0.4.0-rc.6, `require_intent` since the release after
-/// 0.4.0. Each has an explicit `false` opt-out for a driver that does not sign those intents, and
-/// the node warns at startup while it is set. The other **enforcement switches**
-/// (`require_epoch_match`, `signer_acl_required`, and `signer_may_refresh` turned off) still default
-/// to the lenient side, so a rolling upgrade keeps working. Turn them on, on every node, once every
-/// cosigner and the driver run this release (docs/approval-quorum.md, "Switching enforcement on").
+/// with TLS: `require_ceremony_intent` since 0.4.0-rc.6, `require_intent` since 0.5.0. Each has an
+/// explicit `false` opt-out for a driver that does not sign those intents, and the node warns at
+/// startup while it is set. The other **enforcement switches** (`require_epoch_match`,
+/// `signer_acl_required`, and `signer_may_refresh` turned off) still default to the lenient side, so a
+/// rolling upgrade keeps working. Turn them on, on every node, once every cosigner and the driver run
+/// this release (docs/approval-quorum.md, "Switching enforcement on").
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SigningPolicyConfig {
@@ -189,7 +189,7 @@ pub struct SigningPolicyConfig {
     /// (and refused if invalid); a sign without one is accepted and counted in
     /// `rutli_sign_intent_absent_total`. The split ceremony's sign test needs no intent either way.
     ///
-    /// **Unset = on** since the release after 0.4.0 ([`SigningPolicyConfig::intent_required`]),
+    /// **Unset = on** since 0.5.0 ([`SigningPolicyConfig::intent_required`]),
     /// except on a plaintext node, which verifies no intents (`true` there is a config error).
     /// `false` is the explicit opt-out, for a driver older than 0.4.0-rc.3 or one running with
     /// `frost.sign-intents = off`; the node then warns at startup.
@@ -1143,7 +1143,7 @@ mod tests {
         assert!(!opt_out.ceremony_intent_required(true));
         let on: SigningPolicyConfig = serde_json::from_str(r#"{"require_ceremony_intent": true}"#).unwrap();
         assert!(on.ceremony_intent_required(true));
-        // require_intent: the same (the release after 0.4.0).
+        // require_intent: the same (0.5.0).
         for p in [&d, &parsed] {
             assert_eq!(p.require_intent, None);
             assert!(p.intent_required(true) && !p.intent_required(false));

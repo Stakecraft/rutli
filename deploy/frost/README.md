@@ -78,7 +78,7 @@ With TLS on, a plaintext client is refused at the handshake.
 
 The example configs keep the defaults: a DKG or refresh needs a client-signed ceremony intent
 (since 0.4.0-rc.6), which the Rütli driver (0.4.0-rc.4 or later) and `rutli-cosigner refresh` sign,
-and a signature needs a client-signed signing intent (since the release after 0.4.0), which the
+and a signature needs a client-signed signing intent (since 0.5.0), which the
 driver (0.4.0-rc.3 or later) signs. A hand-run `grpcurl … Signer/Dkg` or `Signer/Sign` cannot sign
 one and is refused ("carries no ceremony intent", "carries no signing intent"). To try DKG and Sign
 with grpcurl on a throwaway cluster, add
