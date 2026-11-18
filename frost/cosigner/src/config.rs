@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 /// Static cluster configuration for one cosigner node.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// This node's FROST identifier (1..=n).
     pub identifier: u16,
@@ -165,13 +166,15 @@ impl KeyFileConfig {
 /// cluster is only as strict as its most lenient node that a quorum can reach, so set the same
 /// policy everywhere.
 ///
-/// **Enforcement switches** (`require_intent`, `signer_acl_required`, and `signer_may_refresh`
-/// turned off) default to the lenient side in this release, so a rolling upgrade and a driver that
-/// predates intents keep working. Turn them on, on every node, once every cosigner and the driver
-/// run this release (docs/approval-quorum.md, "Switching enforcement on").
-/// `require_ceremony_intent` is the exception: on by default since 0.4.0-rc.6 (with TLS), with an
-/// explicit opt-out for an upgrade from a driver older than 0.4.0-rc.4.
+/// **Intent switches** (`require_intent`, `require_ceremony_intent`) are on by default on a node
+/// with TLS: `require_ceremony_intent` since 0.4.0-rc.6, `require_intent` since the release after
+/// 0.4.0. Each has an explicit `false` opt-out for a driver that does not sign those intents, and
+/// the node warns at startup while it is set. The other **enforcement switches**
+/// (`require_epoch_match`, `signer_acl_required`, and `signer_may_refresh` turned off) still default
+/// to the lenient side, so a rolling upgrade keeps working. Turn them on, on every node, once every
+/// cosigner and the driver run this release (docs/approval-quorum.md, "Switching enforcement on").
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SigningPolicyConfig {
     /// Refuse sign round 1 from a leader that does not say which sharing (epoch, PKP digest) of the
     /// key it signs with. Off by default in this release so leaders on the previous release keep
@@ -180,12 +183,18 @@ pub struct SigningPolicyConfig {
     /// leader that does send its sharing is always checked.
     #[serde(default)]
     pub require_epoch_match: bool,
-    /// Refuse to take part in a signature without a valid client-signed intent (audit C2). Off:
-    /// an intent that is present is verified in full (and refused if invalid); a sign without one
-    /// is accepted and counted in `rutli_sign_intent_absent_total`. On: absence is refusal.
-    /// Requires TLS (intents are verified against the cluster CA).
-    #[serde(default)]
-    pub require_intent: bool,
+    /// Refuse to take part in a signature without a valid client-signed intent (audit C2). On:
+    /// absence is refusal, so one cosigner's mesh certificate cannot get a group signature over a
+    /// digest no authorized client asked for. Off: an intent that is present is verified in full
+    /// (and refused if invalid); a sign without one is accepted and counted in
+    /// `rutli_sign_intent_absent_total`. The split ceremony's sign test needs no intent either way.
+    ///
+    /// **Unset = on** since the release after 0.4.0 ([`SigningPolicyConfig::intent_required`]),
+    /// except on a plaintext node, which verifies no intents (`true` there is a config error).
+    /// `false` is the explicit opt-out, for a driver older than 0.4.0-rc.3 or one running with
+    /// `frost.sign-intents = off`; the node then warns at startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_intent: Option<bool>,
     /// Refuse to take part in a DKG or refresh (its fence and part 1) without a valid client-signed
     /// ceremony intent naming exactly that ceremony. On: absence is refusal — a compromised cosigner
     /// cannot start a DKG or refresh on this node that no authorized client asked for. Off: an
@@ -259,7 +268,7 @@ impl Default for SigningPolicyConfig {
     fn default() -> Self {
         Self {
             require_epoch_match: false,
-            require_intent: false,
+            require_intent: None,
             require_ceremony_intent: None,
             signer_acl_required: false,
             signer_may_refresh: true,
@@ -281,6 +290,7 @@ impl Default for SigningPolicyConfig {
 
 /// A per-prefix sign rate limit (`signing_policy.rate_limits`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RateLimitRule {
     pub key_id_prefix: String,
     pub per_min: u32,
@@ -289,6 +299,7 @@ pub struct RateLimitRule {
 
 /// An approval rule (`signing_policy.rules`), the same shape as the driver's `approval.rules`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApprovalRuleConfig {
     pub key_id_prefix: String,
     /// "quorum" (needs `threshold` approvals) or "auto" (carves an exception out of a broader rule).
@@ -301,6 +312,7 @@ pub struct ApprovalRuleConfig {
 /// An approver (`signing_policy.approvers`): the id and Ed25519 key of the driver's
 /// `approval.approvers` entry (base64 DER SubjectPublicKeyInfo, the same value).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ApproverConfig {
     pub id: String,
     pub public_key_spki_b64: String,
@@ -378,6 +390,20 @@ impl SigningPolicyConfig {
         })
     }
 
+    /// `require_intent` as it applies on a node with (`tls`) or without TLS: as set, else on with
+    /// TLS and off without — a plaintext node verifies no intents, so it could sign nothing.
+    pub fn intent_required(&self, tls: bool) -> bool {
+        self.require_intent.unwrap_or(tls)
+    }
+
+    /// This policy with both intent switches settled for a node with (`tls`) or without TLS, the
+    /// form the daemon hands to the sign guard: neither is left unset.
+    pub fn settled(mut self, tls: bool) -> Self {
+        self.require_intent = Some(self.intent_required(tls));
+        self.require_ceremony_intent = Some(self.ceremony_intent_required(tls));
+        self
+    }
+
     /// `require_ceremony_intent` as it applies on a node with (`tls`) or without TLS: as set, else
     /// on with TLS and off without — a plaintext node verifies no intents, so it could run no
     /// ceremony at all.
@@ -387,7 +413,7 @@ impl SigningPolicyConfig {
 
     fn validate(&self, signers: &[String], tls: bool) -> crate::Result<()> {
         use crate::DaemonError::Config;
-        if self.require_intent && !tls {
+        if self.require_intent == Some(true) && !tls {
             return Err(Config(
                 "signing_policy.require_intent needs tls: intents are verified against the cluster CA".into(),
             ));
@@ -472,6 +498,7 @@ impl SigningPolicyConfig {
 
 /// Cluster-hosted key settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HostedKeysConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -582,6 +609,7 @@ fn default_decrypt_rate_limit() -> u32 {
 /// Where this node's seal keys come from — exactly one of the two. Never the keys themselves: this
 /// config file is not secret.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ShareSealConfig {
     /// Path of this node's seal bundle (`crate::seal::NodeSealBundle`): its own DEK and hosted-key
     /// distribution seed, nothing of any other node. Mount it from a per-node secret as a file
@@ -600,6 +628,7 @@ pub struct ShareSealConfig {
 /// Mutual-TLS material for the cosigner mesh (and the driver→cluster hop). All peers and the driver
 /// present certs signed by the cluster CA; the CA file holds the trust anchors.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TlsConfig {
     /// PEM file of the CA certificate(s) that must sign every peer/client certificate: one CA, or
     /// during a CA rotation the bundle old + new. Every block must be a currently valid CA
@@ -623,6 +652,7 @@ pub struct TlsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PeerConfig {
     pub identifier: u16,
     /// gRPC endpoint of the peer (e.g. http://host:port). Ignored for this node itself.
@@ -712,10 +742,20 @@ impl Config {
         self.peers.iter().map(|p| (p.client_cn(), p.identifier)).collect()
     }
 
+    /// Read, parse and validate the config file at `path`. A key this release does not know (a
+    /// typo such as `require_intnet`, or `requireIntent` in camelCase) is refused rather than
+    /// ignored: an ignored key would leave the control it meant to set at its default. Errors name
+    /// the file.
     pub fn load(path: &std::path::Path) -> crate::Result<Self> {
-        let text = std::fs::read_to_string(path)?;
-        let cfg: Config = serde_json::from_str(&text)?;
-        cfg.validate()?;
+        use crate::DaemonError::Config as ConfigError;
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| ConfigError(format!("cannot read config file {}: {e}", path.display())))?;
+        let cfg: Config = serde_json::from_str(&text)
+            .map_err(|e| ConfigError(format!("config file {}: {e}", path.display())))?;
+        cfg.validate().map_err(|e| match e {
+            ConfigError(msg) => ConfigError(format!("config file {}: {msg}", path.display())),
+            other => other,
+        })?;
         Ok(cfg)
     }
 
@@ -1086,9 +1126,9 @@ mod tests {
     #[test]
     fn the_signing_policy_is_validated() {
         use super::{ApprovalRuleConfig, ApproverConfig};
-        // Defaults: lenient switches but ceremony intents, the documented limits.
+        // Defaults: lenient switches but the two intent switches, the documented limits.
         let d = SigningPolicyConfig::default();
-        assert!(!d.require_intent && !d.signer_acl_required && d.signer_may_refresh);
+        assert!(!d.signer_acl_required && d.signer_may_refresh && !d.require_epoch_match);
         assert_eq!((d.sign_rate_limit_per_min, d.sign_rate_limit_per_day), (300, 20_000));
         let parsed: SigningPolicyConfig = serde_json::from_str("{}").unwrap();
         assert_eq!(parsed.max_shares_per_request, d.max_shares_per_request);
@@ -1103,13 +1143,39 @@ mod tests {
         assert!(!opt_out.ceremony_intent_required(true));
         let on: SigningPolicyConfig = serde_json::from_str(r#"{"require_ceremony_intent": true}"#).unwrap();
         assert!(on.ceremony_intent_required(true));
+        // require_intent: the same (the release after 0.4.0).
+        for p in [&d, &parsed] {
+            assert_eq!(p.require_intent, None);
+            assert!(p.intent_required(true) && !p.intent_required(false));
+        }
+        let opt_out: SigningPolicyConfig = serde_json::from_str(r#"{"require_intent": false}"#).unwrap();
+        assert!(!opt_out.intent_required(true));
+        let on: SigningPolicyConfig = serde_json::from_str(r#"{"require_intent": true}"#).unwrap();
+        assert!(on.intent_required(true) && on.intent_required(false));
+        // What the daemon hands to the sign guard: both switches settled, on with TLS, off without,
+        // an explicit opt-out kept.
+        let s = d.clone().settled(true);
+        assert_eq!((s.require_intent, s.require_ceremony_intent), (Some(true), Some(true)));
+        let s = d.clone().settled(false);
+        assert_eq!((s.require_intent, s.require_ceremony_intent), (Some(false), Some(false)));
+        assert_eq!(opt_out.clone().settled(true).require_intent, Some(false));
+        // Unset stays unset when written back (no `null`, no settled value).
+        assert!(!serde_json::to_string(&d).unwrap().contains("require_intent"));
+        assert!(serde_json::to_string(&opt_out).unwrap().contains(r#""require_intent":false"#));
         base(None, None).validate().unwrap();
         mesh_ok().validate().unwrap();
 
         // require_intent needs TLS.
         let mut plain = base(None, None);
-        plain.signing_policy.require_intent = true;
+        plain.signing_policy.require_intent = Some(true);
         assert!(plain.validate().unwrap_err().to_string().contains("require_intent"));
+        // Unset and the explicit opt-out are fine without TLS.
+        let mut plain = base(None, None);
+        plain.signing_policy.require_intent = Some(false);
+        plain.validate().unwrap();
+        let mut c = mesh_ok();
+        c.signing_policy.require_intent = Some(true);
+        c.validate().unwrap();
         // So does require_ceremony_intent.
         let mut plain = base(None, None);
         plain.signing_policy.require_ceremony_intent = Some(true);
@@ -1529,5 +1595,96 @@ mod hosted_config_tests {
         assert_eq!(h.anti_entropy_interval_secs, 300);
         assert_eq!(h.decrypt_rate_limit_per_min, DEFAULT_DECRYPT_RATE_LIMIT_PER_MIN);
         c.validate().unwrap();
+    }
+}
+
+/// The config file is parsed strictly.
+#[cfg(test)]
+mod strict_parse_tests {
+    use super::*;
+
+    const MINIMAL: &str = r#"{"identifier":1,"listen":"127.0.0.1:9101","threshold":2,"data_dir":"/tmp/x",
+        "peers":[{"identifier":1,"endpoint":"http://a:9101"},{"identifier":2,"endpoint":"http://b:9101"}]"#;
+
+    fn load_text(dir: &std::path::Path, name: &str, text: &str) -> crate::Result<Config> {
+        let path = dir.join(name);
+        std::fs::write(&path, text).unwrap();
+        Config::load(&path)
+    }
+
+    /// A key this release does not know is refused at load, naming the file and the key, at
+    /// the top level and inside every block, so a misspelt switch cannot leave a control off.
+    #[test]
+    fn unknown_config_keys_are_refused_with_the_file_and_the_key() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ok = format!("{MINIMAL}}}");
+        load_text(tmp.path(), "ok.json", &ok).unwrap();
+        for (name, extra, key) in [
+            ("top.json", r#","require_intent":true"#, "require_intent"),
+            ("policy.json", r#","signing_policy":{"require_intnet":true}"#, "require_intnet"),
+            ("camel.json", r#","signing_policy":{"requireIntent":true}"#, "requireIntent"),
+            ("rule.json", r#","signing_policy":{"rate_limits":[{"key_id_prefix":"k","per_min":1,"per_day":1,"burst":2}]}"#, "burst"),
+            ("approval.json", r#","signing_policy":{"rules":[{"key_id_prefix":"k","mode":"auto","treshold":1}]}"#, "treshold"),
+            ("approver.json", r#","signing_policy":{"approvers":[{"id":"a","public_key_spki_b64":"x","name":"A"}]}"#, "name"),
+            ("hosted.json", r#","hosted_keys":{"enabled":false,"write_qourum":2}"#, "write_qourum"),
+            ("seal.json", r#","share_seal":{"secret_env":"S","secret":"x"}"#, "secret"),
+            ("tls.json", r#","tls":{"ca_cert":"/ca","cert":"/c","key":"/k","server_name":"x"}"#, "server_name"),
+            ("keyfile.json", r#","keyfile":{"write_versoin":2}"#, "write_versoin"),
+        ] {
+            let err = load_text(tmp.path(), name, &format!("{MINIMAL}{extra}}}")).unwrap_err().to_string();
+            assert!(err.contains(&format!("unknown field `{key}`")), "{name}: {err}");
+            assert!(err.contains(&tmp.path().join(name).display().to_string()), "{name}: {err}");
+        }
+        // A peer entry too.
+        let peer = MINIMAL.replace(r#""endpoint":"http://b:9101""#, r#""endpoint":"http://b:9101","tls_name":"x""#);
+        let err = load_text(tmp.path(), "peer.json", &format!("{peer}}}")).unwrap_err().to_string();
+        assert!(err.contains("unknown field `tls_name`"), "{err}");
+        // A missing file and a validation error name the file as well.
+        let err = Config::load(&tmp.path().join("absent.json")).unwrap_err().to_string();
+        assert!(err.contains("absent.json"), "{err}");
+        let bad = format!("{}}}", MINIMAL.replace(r#""threshold":2"#, r#""threshold":9"#));
+        let err = load_text(tmp.path(), "bad.json", &bad).unwrap_err().to_string();
+        assert!(err.contains("bad.json") && err.contains("threshold 9"), "{err}");
+    }
+
+    /// Every cosigner config the repository ships loads under the strict parser: the compose
+    /// examples, the operator CLI's client configs, and the Helm chart as rendered into
+    /// deploy/k8s/cosigner.yaml.
+    #[test]
+    fn every_shipped_config_loads() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let tmp = tempfile::tempdir().unwrap();
+        let mut seen = 0;
+        for dir in ["deploy/frost/config", "deploy/frost/config-tls"] {
+            for entry in std::fs::read_dir(repo.join(dir)).unwrap() {
+                let path = entry.unwrap().path();
+                if path.extension().is_some_and(|e| e == "json") {
+                    Config::load(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                    seen += 1;
+                }
+            }
+        }
+        // ConfigMaps: each `<name>.json: |` block scalar is one config.
+        for file in ["deploy/k8s/client-config.yaml", "deploy/k8s/cosigner.yaml"] {
+            let text = std::fs::read_to_string(repo.join(file)).unwrap();
+            let mut lines = text.lines().peekable();
+            while let Some(line) = lines.next() {
+                let trimmed = line.trim_start();
+                let Some(name) = trimmed.strip_suffix(": |").filter(|n| n.ends_with(".json")) else { continue };
+                let indent = line.len() - trimmed.len();
+                let mut json = String::new();
+                while let Some(next) = lines.peek() {
+                    if !next.trim().is_empty() && next.len() - next.trim_start().len() <= indent {
+                        break;
+                    }
+                    json.push_str(lines.next().unwrap());
+                    json.push('\n');
+                }
+                load_text(tmp.path(), name, &json).unwrap_or_else(|e| panic!("{file} {name}: {e}"));
+                seen += 1;
+            }
+        }
+        // 3 + 3 compose configs, 3 client configs, 3 rendered node configs.
+        assert_eq!(seen, 12, "a shipped config was not found");
     }
 }

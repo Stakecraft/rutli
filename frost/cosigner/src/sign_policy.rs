@@ -67,9 +67,10 @@ impl SignGuard {
         journal: SignJournal,
         sign_test_per_min: u32,
     ) -> Self {
-        let require_intent = verifier.policy().require_intent;
-        // Unset = on, the default of a node that verifies intents; the daemon settles it for a
-        // plaintext node ([`crate::config::SigningPolicyConfig::ceremony_intent_required`]).
+        // Both switches: unset = on, the default of a node that verifies intents; the daemon
+        // settles them for a plaintext node ([`crate::config::SigningPolicyConfig::intent_required`],
+        // [`crate::config::SigningPolicyConfig::ceremony_intent_required`]).
+        let require_intent = verifier.policy().require_intent.unwrap_or(true);
         let require_ceremony_intent = verifier.policy().require_ceremony_intent.unwrap_or(true);
         Self {
             verifier,
@@ -189,7 +190,7 @@ impl SignGuard {
             tracing::warn!(
                 key_id,
                 "sign round without a signing intent accepted (signing_policy.require_intent is off) — \
-                 expected only until the driver runs a release with intents; then turn require_intent on"
+                 expected only while the driver does not sign intents; then remove the opt-out"
             );
         }
         Ok(SessionAuth::NoIntent)
