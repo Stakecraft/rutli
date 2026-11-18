@@ -63,6 +63,9 @@ All notable changes to Rütli are documented here. Format loosely follows
   `synchronizerId` argument of the rotation commands, the PV 37 limit of 20 signing keys, and the HTTP health probes.
   The rehearsal records that pin `--version 0.9.0` carry a warning, and the README compatibility table lists Canton
   3.7.x and Splice 0.10.x as tested: two DevNet validators on Rütli run Splice 0.10.1 since 2026-11-15.
+- **The external audit will review v0.5.0, not v0.4.0.** v0.5.0 is v0.4.0 plus hardening from a pre-audit review
+  and the fixes made since; its code freeze is planned for mid-December 2026, and v0.4.0 is the auditors' pre-read
+  (`docs/audit-rfq.md`, `docs/roadmap.md`, `SECURITY.md`).
 - **The sealed software delegate is a test and migration aid, not a production option.** `docs/hosted-keys.md` and
   `docs/disaster-recovery.md` said it stays supported for production keys; `SECURITY.md` said never. The two now agree
   with `SECURITY.md`: it keeps every encryption key on the participant host; use cluster hosting or the HSM delegate.
