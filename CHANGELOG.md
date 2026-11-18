@@ -54,6 +54,10 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Documentation
 
+- **Roadmap dates after threshold ECIES moved into 1.0:** 1.0 follows about 34 weeks after the
+  audit's funding is confirmed, not in the first quarter of 2027, and the four clean TestNet weeks
+  are counted on the audited release. The README's status line names the Splice and Canton
+  versions the DevNet validator runs today.
 - **Threshold ECIES is planned for 1.0, not 2.0** (decided 2026-11-19). `docs/roadmap.md`, the
   README, `docs/hosted-keys.md` and the explorer page say so, and the second audit phase in
   `docs/audit-rfq.md` (section 2.2) now lists four features. No code changes.
