@@ -109,7 +109,8 @@ are test material).
 Repository state to review: tag `v0.5.0`, planned for mid-December 2026, which will be our code freeze.
 Nothing lands in the audited surface after it except audit fixes. Until 2026-11-18 this request named
 `v0.4.0`; `v0.5.0` is `v0.4.0` plus hardening from an internal pre-audit review in November 2026 and the
-fixes made since. We will tell you if a component is added before the freeze.
+fixes made since. It also adds one component, a unified admin CLI (generate, import, public key and Canton
+fingerprint; see [roadmap.md](roadmap.md)). We will add its row and line count to the table below at the freeze.
 
 `v0.4.0` (tagged 2026-11-14, commit `ebab88b`) is the current release and the pre-read. It
 contains the split ceremony (B2), the Canton key parser (B1), the ECIES hosted keys (Track C), the

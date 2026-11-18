@@ -230,7 +230,7 @@ both migration paths for an existing validator were rehearsed there
 ([docs/roadmap.md](docs/roadmap.md)). Run it on DevNet before it holds anything you care about, and
 read [docs/hosted-keys.md](docs/hosted-keys.md) first — replicated keys are a different security property
 from the threshold namespace key, not the same one applied wider. What remains for 1.0: the
-external **security audit**, a **Splice TestNet validator run** of at least four weeks, and the 1.0
+external **security audit**, a **Splice TestNet validator run** of at least four weeks after it, and the 1.0
 features listed in [docs/roadmap.md](docs/roadmap.md). See [CHANGELOG.md](CHANGELOG.md).
 
 ## Security

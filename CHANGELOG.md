@@ -66,6 +66,9 @@ All notable changes to Rütli are documented here. Format loosely follows
 - **The external audit will review v0.5.0, not v0.4.0.** v0.5.0 is v0.4.0 plus hardening from a pre-audit review
   and the fixes made since; its code freeze is planned for mid-December 2026, and v0.4.0 is the auditors' pre-read
   (`docs/audit-rfq.md`, `docs/roadmap.md`, `SECURITY.md`).
+- **The TestNet validator run comes after the audit.** The roadmap listed its start as 2026-11-19. It starts on the
+  audited release, and the four clean weeks that 1.0 needs are counted from there. The unified admin CLI is part of
+  v0.5.0 and so of the audited release (`docs/roadmap.md`, `docs/audit-rfq.md`).
 - **The sealed software delegate is a test and migration aid, not a production option.** `docs/hosted-keys.md` and
   `docs/disaster-recovery.md` said it stays supported for production keys; `SECURITY.md` said never. The two now agree
   with `SECURITY.md`: it keeps every encryption key on the participant host; use cluster hosting or the HSM delegate.

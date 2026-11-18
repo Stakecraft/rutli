@@ -28,7 +28,7 @@ one we recommend whenever a new node is an option.
 - Runbook: [key-ceremony.md](key-ceremony.md).
 - **Status: working.** The DevNet soak validator `stakecraft-devnet-rutli-01` runs this way (soak since 2026-10-07,
   see [soak-2026-10-devnet.md](soak-2026-10-devnet.md)).
-- Remaining before 1.0: a Splice TestNet validator run of at least 4 weeks.
+- Remaining before 1.0: a Splice TestNet validator run of at least 4 weeks, after the audit.
 
 ### Flow 2: existing validator (keys today in the participant DB, JCE)
 
@@ -187,9 +187,9 @@ Track A (soak and hardening) continues on `stakecraft-devnet-rutli-01`; exit cri
 | 2026-10-28 | v0.4.0-rc.6: ceremony leader binding and durable fence marks, disjoint FROST and hosted key ids, TLS crate advisories closed; ceremony intents required by default with TLS |
 | 2026-11-14 | **v0.4.0 tagged** (planned as the audit code freeze; the audit now reviews v0.5.0): Flow 1, Flow 2a (after B8), Flow 2b, B2, B6, ECIES, C2 fixes, CA rotation |
 | Later | Pre-rotate alternative for 2a (research), if B8 shows it is worth it |
-| 2026-11-19 (planned) | Splice TestNet validator run starts; at least 4 weeks clean before 1.0 |
-| Mid-December 2026 (planned) | **v0.5.0 = audit code freeze:** v0.4.0 plus hardening from the November pre-audit review, the fixes made since v0.4.0 and the shared-cluster guard |
-| After the audit | **1.0**: the audit's fixes and retest, at least 4 clean weeks on TestNet, and the 1.0 features below |
+| Mid-December 2026 (planned) | **v0.5.0 = audit code freeze:** v0.4.0 plus hardening from the November pre-audit review, the fixes made since v0.4.0, the shared-cluster guard and the unified admin CLI |
+| After the audit | Splice TestNet validator run starts on the audited release with the audit's fixes. The 4 clean weeks that 1.0 needs are counted from that start; a run before the audit does not count |
+| After the TestNet run | **1.0**: the audit's fixes and retest, at least 4 clean weeks on TestNet, and the 1.0 features below |
 
 - **The audit is the critical path.** Auditor: **Cure53** (chosen 2026-10-27). The RFQ
   ([audit-rfq.md](audit-rfq.md), brief [audit-prep.md](audit-prep.md)) covers ECIES and B6, excludes `HsmBackend`, and

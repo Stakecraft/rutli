@@ -120,7 +120,9 @@ engineering work is not the long pole; the audit's external lead time is. So:
    creep, as the first post-1.0 release. Decide with the auditor at booking time. (As of 2026-11-13: C shipped in
    0.4.0-rc.1, so it is in the v0.4.0 audit scope; see [roadmap.md](roadmap.md).)
 4. **Splice TestNet validator run** is operations, not development. Start it the day v0.4.0 is
-   tagged, in parallel with the audit. Minimum four weeks of clean operation before 1.0.
+   tagged, in parallel with the audit. Minimum four weeks of clean operation before 1.0. (As of 2026-11-18: the
+   run starts after the audit, on the audited release, and the four weeks count from there; see
+   [roadmap.md](roadmap.md).)
 5. **Audit fixes → 1.0.**
 
 ## Sequence and timeline (one engineer, sequential)
