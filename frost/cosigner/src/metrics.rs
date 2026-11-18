@@ -41,6 +41,14 @@ pub const SIGN_ROUND1_SKIPS: &str = "rutli_sign_round1_skips_total";
 /// Sign round 2 requests for a session this node holds no round-1 nonces for (it restarted or
 /// committed a ceremony since round 1, or the session expired). The leader retries without it.
 pub const SIGN_ROUND2_UNKNOWN_SESSION: &str = "rutli_sign_round2_unknown_session_total";
+/// Sign round 2s and aborts this node refused because another caller opened the session, label
+/// `call` (round2|abort). The session stays with its opener. A correct cosigner never sends one:
+/// alert on any increase.
+pub const SIGN_SESSION_OWNER_REFUSALS: &str = "rutli_sign_session_owner_refusals_total";
+/// Sign round 1s this node refused because a cap on sessions waiting for round 2 was reached, label
+/// `cap` (key|opener|request): the key's total from all openers, one opener's share of it, or one
+/// opener's sessions for one signing request. An honest leader stays below each.
+pub const SIGN_SESSIONS_REFUSED: &str = "rutli_sign_sessions_refused_total";
 /// Leader-issued aborts of in-flight sign sessions (one per given-up signature).
 pub const SIGN_ABORTS: &str = "rutli_sign_aborts_total";
 /// In-flight (round-1, not yet round-2) sign sessions currently held on this node.
@@ -218,6 +226,11 @@ pub const LOCK_NAMES: &[&str] = &[
     "sign_sessions",
     "stale_marks",
 ];
+/// The `call` values of `rutli_sign_session_owner_refusals_total` (`not_session_owner` call sites in
+/// `node.rs`).
+pub const SESSION_OWNER_CALLS: &[&str] = &["round2", "abort"];
+/// The `cap` values of `rutli_sign_sessions_refused_total` (`PendingCap::as_str`).
+pub const SESSION_CAPS: &[&str] = &["key", "opener", "request"];
 /// The `op` values of `rutli_hosted_key_ops_total` (`record_hosted_op` call sites in `service.rs`);
 /// `result` is "ok" | "error" (`RutliHostedKeyErrors`).
 pub const HOSTED_KEY_OPS_NAMES: &[&str] =
@@ -313,6 +326,12 @@ fn prime() {
     for lock in LOCK_NAMES {
         metrics::counter!(LOCK_POISON_RECOVERIES, "lock" => *lock).absolute(0);
     }
+    for call in SESSION_OWNER_CALLS {
+        metrics::counter!(SIGN_SESSION_OWNER_REFUSALS, "call" => *call).absolute(0);
+    }
+    for cap in SESSION_CAPS {
+        metrics::counter!(SIGN_SESSIONS_REFUSED, "cap" => *cap).absolute(0);
+    }
     for op in HOSTED_KEY_OPS_NAMES {
         for result in ["ok", "error"] {
             metrics::counter!(HOSTED_KEY_OPS, "op" => *op, "result" => result).absolute(0);
@@ -358,6 +377,11 @@ pub fn describe() {
     describe_gauge!(NONCE_MARKERS, "Burned-session nonce markers on this node after the last prune pass");
     describe_counter!(LOCK_POISON_RECOVERIES, "Locks recovered after a panicking request poisoned them, by lock");
     describe_counter!(SIGN_ABORTS, "Aborted in-flight sign sessions (one per given-up signature)");
+    describe_counter!(
+        SIGN_SESSION_OWNER_REFUSALS,
+        "Sign round 2s and aborts refused because another caller opened the session, by call"
+    );
+    describe_counter!(SIGN_SESSIONS_REFUSED, "Sign round 1s refused by a cap on sessions waiting for round 2, by cap");
     describe_gauge!(PENDING_SIGN_SESSIONS, "In-flight round-1 sign sessions held on this node");
     describe_counter!(ANTI_ENTROPY_REPAIRS, "Hosted keys repaired by anti-entropy");
     describe_counter!(ANTI_ENTROPY_CONFLICTS, "Hosted keys with divergent material across nodes");
@@ -467,6 +491,8 @@ mod tests {
             (DELETE_INTENT_REFUSALS, one("reason", DELETE_INTENT_REASONS)),
             (HOSTED_TOMBSTONES_WRITTEN, one("how", TOMBSTONE_HOWS)),
             (LOCK_POISON_RECOVERIES, one("lock", LOCK_NAMES)),
+            (SIGN_SESSION_OWNER_REFUSALS, one("call", SESSION_OWNER_CALLS)),
+            (SIGN_SESSIONS_REFUSED, one("cap", SESSION_CAPS)),
         ];
         let mut ops = Vec::new();
         for op in HOSTED_KEY_OPS_NAMES {
@@ -676,6 +702,23 @@ mod tests {
             }
         }
         assert!(direct > 0, "no direct LOCK_POISON_RECOVERIES increment found: the scan is stale");
+    }
+
+    /// The primed label values of the sign-session refusal counters are the ones the code emits:
+    /// every `PendingCap`, and every `call` literal passed to `not_session_owner`.
+    #[test]
+    fn session_refusal_labels_match_the_code() {
+        use rutli_frost_core::session::PendingCap;
+        let caps: Vec<&str> = [PendingCap::Key, PendingCap::Opener, PendingCap::Request].map(PendingCap::as_str).into();
+        assert_eq!(caps, SESSION_CAPS);
+        let mut emitted = std::collections::BTreeSet::new();
+        for (file, src) in &crate_sources() {
+            for args in calls(src, "self.not_session_owner") {
+                emitted.insert(literal(args.first(), file).to_owned());
+            }
+        }
+        let listed: std::collections::BTreeSet<String> = SESSION_OWNER_CALLS.iter().map(|c| (*c).to_owned()).collect();
+        assert_eq!(emitted, listed, "not_session_owner call sites vs SESSION_OWNER_CALLS");
     }
 
     /// `TOMBSTONE_HOWS` (what `prime()` starts at 0) is exactly the set of `how` values the

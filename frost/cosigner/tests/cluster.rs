@@ -524,7 +524,7 @@ async fn signing_continues_on_every_node_under_a_cluster_wide_refresh_fence() {
     for (i, n) in nodes.iter().enumerate() {
         let session = format!("sign-during-refresh-{i}");
         n.sign_round1(KEY_ID, &session, &Default::default()).unwrap_or_else(|e| panic!("node {i}: {e:?}"));
-        n.abort_sign(KEY_ID, &session);
+        n.abort_sign_as(KEY_ID, &session, &rutli_cosigner::node::SessionOwner::Local).unwrap();
     }
     let msg = canton_digest(b"under a refresh fence");
     let sig = sign(&nodes[0], &peers, KEY_ID, &msg).await.unwrap();

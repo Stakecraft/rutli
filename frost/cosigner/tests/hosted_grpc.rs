@@ -575,6 +575,45 @@ async fn a_plaintext_dev_cluster_without_hosted_keys_runs_dkg_and_refresh_over_g
     }
 }
 
+/// A sign session belongs to the peer whose certificate opened it. Node 3 is a member and knows
+/// the session id, but its abort and its round 2 for node 1's session on node 2 are refused
+/// (PERMISSION_DENIED, naming both) and take nothing; node 1 then completes the signature, and its
+/// own abort of another session goes through.
+#[tokio::test]
+async fn a_sign_session_belongs_to_the_peer_that_opened_it_over_mtls_grpc() {
+    use rutli_cosigner::node::Round1Ctx;
+    use rutli_cosigner::DaemonError;
+    let m = mesh().await;
+    let key = "frost-grpc-owner";
+    let group = rutli_cosigner::orchestrator::run_dkg(&m.peers[0], key).await.unwrap();
+    let (by1, by3) = (&m.peers[0][1], &m.peers[2][1]); // node 2 as node 1 and as node 3 dial it
+    let msg = rutli_frost_core::dealer::canton_test_message(b"owned over grpc");
+    let ctx = Round1Ctx { message: Some(msg.to_vec()), signers: Some(vec![1, 2]), ..Default::default() };
+    let mut cs = std::collections::BTreeMap::new();
+    cs.insert(m.nodes[0].identifier, m.nodes[0].sign_round1(key, "g-own", &ctx).unwrap());
+    cs.insert(m.nodes[1].identifier, by1.sign_round1(key, "g-own", &ctx).await.unwrap());
+
+    let refused = |e: DaemonError| match e {
+        DaemonError::Status(s) if s.code() == tonic::Code::PermissionDenied => {
+            assert!(s.message().contains("cosigner1") && s.message().contains("cosigner3"), "{s:?}");
+        }
+        other => panic!("expected PERMISSION_DENIED, got {other:?}"),
+    };
+    refused(by3.abort_sign(key, "g-own").await.unwrap_err());
+    refused(by3.sign_round2(key, "g-own", &msg, &cs, None).await.unwrap_err());
+    assert_eq!(m.nodes[1].pending_sign_count(key), 1, "the session keeps its nonces");
+
+    let mut shares = std::collections::BTreeMap::new();
+    shares.insert(m.nodes[1].identifier, by1.sign_round2(key, "g-own", &msg, &cs, None).await.unwrap());
+    shares.insert(m.nodes[0].identifier, m.nodes[0].sign_round2(key, "g-own", &msg, &cs).unwrap());
+    let sig = m.nodes[0].aggregate(key, &msg, &cs, &shares).unwrap();
+    assert!(rutli_cosigner::verify_key::signature_verifies(&group, &msg, &sig));
+
+    by1.sign_round1(key, "g-own-2", &ctx).await.unwrap();
+    by1.abort_sign(key, "g-own-2").await.unwrap();
+    assert_eq!(m.nodes[1].pending_sign_count(key), 0);
+}
+
 #[tokio::test]
 async fn epoch_refusals_and_session_binding_hold_over_mtls_grpc() {
     // H1/M1 and the session binding over real sockets: the refusing node's own sharing rides back

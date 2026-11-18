@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 
-use crate::node::Node;
+use crate::node::{Node, SessionOwner};
 use crate::orchestrator::{self, Peers};
 use crate::pb;
 use crate::pb::peer_server::Peer;
@@ -792,6 +792,15 @@ impl PeerSvc {
         authorize_cn(self.allowed_cns.as_deref(), req, "Peer")
     }
 
+    /// [`PeerSvc::authorize`], and who the caller is as the owner of the sign sessions it opens:
+    /// the CN of its client certificate as the peer allowlist checked it. With no peer allowlist (a
+    /// plaintext dev mesh; the allowlist is required under TLS) no caller is identified, certificate
+    /// or not, and every caller is the one owner [`SessionOwner::Unidentified`], as before sessions
+    /// had owners. Never [`SessionOwner::Local`]: that is this node's own in-process leader.
+    fn session_owner<T>(&self, req: &Request<T>) -> Result<SessionOwner, Status> {
+        Ok(self.authorize(req)?.map_or(SessionOwner::Unidentified, SessionOwner::Peer))
+    }
+
     /// The sender of a round-2 delivery: the caller's certificate identity, which must equal the
     /// `from` it claims (audit C1 — a node delivers only its own packages). With no peer allowlist
     /// (plaintext dev mode, where nothing on the mesh is authenticated) the claim is taken as is.
@@ -843,7 +852,8 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::SignRound1Request>,
     ) -> Result<Response<pb::SignRound1Reply>, Status> {
-        self.authorize(&req)?;
+        // The caller opens the session: only it may send its round 2 or abort it.
+        let opener = self.session_owner(&req)?;
         let r = req.into_inner();
         // An empty digest is a leader from before epochs: no sharing declared (see the proto).
         let leader_view = match r.pkp_digest.len() {
@@ -871,7 +881,7 @@ impl Peer for PeerSvc {
         };
         let commitments = self
             .node
-            .blocking(move |n| n.sign_round1(&r.key_id, &r.session_id, &ctx))
+            .blocking(move |n| n.sign_round1_as(&r.key_id, &r.session_id, &ctx, &opener))
             .await
             .map_err(Status::from)?;
         Ok(Response::new(pb::SignRound1Reply {
@@ -883,7 +893,7 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::SignRound2Request>,
     ) -> Result<Response<pb::SignRound2Reply>, Status> {
-        self.authorize(&req)?;
+        let caller = self.session_owner(&req)?;
         let r = req.into_inner();
         let commitments: BTreeMap<_, _> = de(&r.commitments_map)?;
         // One blocking call, so burn-before-sign stays exactly as it is inline: round 2 creates
@@ -896,7 +906,9 @@ impl Peer for PeerSvc {
         };
         let share = self
             .node
-            .blocking(move |n| n.sign_round2_with(&r.key_id, &r.session_id, &r.message, &commitments, intent_digest))
+            .blocking(move |n| {
+                n.sign_round2_as(&r.key_id, &r.session_id, &r.message, &commitments, intent_digest, &caller)
+            })
             .await
             .map_err(Status::from)?;
         Ok(Response::new(pb::SignRound2Reply { share: json(&share)? }))
@@ -906,9 +918,9 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::AbortSignRequest>,
     ) -> Result<Response<pb::AbortSignReply>, Status> {
-        self.authorize(&req)?;
+        let caller = self.session_owner(&req)?;
         let r = req.into_inner();
-        self.node.abort_sign(&r.key_id, &r.session_id);
+        self.node.abort_sign_as(&r.key_id, &r.session_id, &caller).map_err(Status::from)?;
         Ok(Response::new(pb::AbortSignReply {}))
     }
 
