@@ -114,8 +114,26 @@ availability attack, never a key compromise**. It is detected (`rutli_ceremony_e
 `RutliCeremonySplit`) and recoverable: the aborted node's staged share is quarantined, and
 `ceremony recover-commit` commits it once a peer proves the sharing committed and live
 (`docs/ceremonies.md`). It can make each peer write at most a bounded number of no-vote records by
-asking about made-up ceremony ids (F2), and open at most 1024 waiting sign sessions per key (round 1
-is refused beyond). It **cannot pause signing** by fencing a key for a ceremony (since 0.4.0-rc.4: a
+asking about made-up ceremony ids (F2). It can open at most 256 sign sessions per key on each peer
+that wait for round 2 (and 20 for one signing request); beyond that, round 1 is refused for it
+alone. The key's total is 1024, so the other leaders keep at least 768 and keep signing. Up to
+0.4.0 there was only the total: with one intent it had seen, it could fill all 1024 on every node and
+stop that key's signing for 5 minutes at a time. The caps do not stop it from filling its own 256 (a
+little memory on each peer until the sessions expire), and on a plaintext mesh, where no peer is
+identified, all remote leaders share one opener's room, so one filler takes all of it. As a member of a signature it **cannot
+abort, use up or occupy another member's session** (since 0.5.0). The leader gives each member,
+its own share included, a separate random session id (122 bits from the OS CSPRNG), so the id a
+member learns names nothing on any other node: it cannot open that session there first (the
+leader's round 1 would meet a duplicate), abort it or send its round 2. Behind that, a session
+belongs to the CN of the client certificate that opened it (two certificates with one CN are one
+owner; a certificate without exactly one CN is refused at the allowlist), or to the node's own leader; a round 2 or abort
+from anyone else is refused, takes nothing and is counted (`RutliSignSessionOwnerRefused`). Up to
+0.4.0 a member could do all three, and the leader then excluded the honest node and blamed it; in
+3-of-5 that stopped every signature. What a member can still do to an attempt is fail or delay its
+own part (no answer, a refusal, a round 2 error, a bad share or commitment). The leader then
+excludes that member, and frost's share verification names it, since the commitment map is keyed
+by identifier, not by session. A 0.4.0 leader still uses one id for all members until it is
+upgraded. It **cannot pause signing** by fencing a key for a ceremony (since 0.4.0-rc.4: a
 DKG/refresh guard no longer blocks sign round 1, see `docs/ceremonies.md`, "Signing during a
 ceremony"). Up to rc.3 it could, and with no time limit: a fence that was never followed by part 1
 stopped that key's signing on the fenced nodes until they restarted. That was earlier documented as

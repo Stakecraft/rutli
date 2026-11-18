@@ -243,8 +243,9 @@ Shares of different sharings never combine, so signing is epoch-aware (audit H1,
   sharing) is not stale: its resolver commits it. Recovery is restoring a current backup of that
   node (daemon stopped) or re-enrolling it; the mark clears by itself once the share is current.
 * **Quorum selection with retry.** The leader tries t-subsets of the roster, itself first, then
-  by identifier. Each attempt is a fresh session: a new session id and fresh round-1 commitments
-  from every member, never reused across subsets. A member that fails round 1 or round 2, or whose
+  by identifier. Each attempt is a fresh session: a new random session id for each member (since
+  0.5.0; one shared id before) and fresh round-1 commitments from every member, never reused across
+  subsets. A member that fails round 1 or round 2, or whose
   signature share fails verification at aggregation (frost's cheater detection names it;
   `rutli_invalid_signature_shares_total`), is excluded for the rest of the request; the session is
   aborted on the members still holding nonces, and the next subset without an excluded member is

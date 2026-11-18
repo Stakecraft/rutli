@@ -225,7 +225,25 @@ groups:
           severity: warning
         annotations:
           summary: "Rütli cosigner {{ $labels.instance }} keeps getting sign round 2 for sessions it does not hold"
-          description: "{{ $labels.instance }} answered more than 3 sign round-2 requests in 15 minutes as an unknown signing session: it held no round-1 nonces for them. No share leaves for such a request and the leader signs with the other cosigners, so signatures still complete, with less margin. One or two right after this node restarted or committed a refresh are normal and stay under this threshold. More means one of: the node restarts again and again (check its restart count and log); it keeps dropping its loaded keys (RutliLockPoisonRecovered); or a peer sends round 2 for sessions it never opened here, which a correct cosigner does not do. A leader whose sign lost this node logs it (`excluding a cosigner from this signature`, with `unknown signing session` and the session id). This node does not log the request, so if no leader's log accounts for the count, suspect the other cosigners. On a node that requires signing intents such a request used to count under RutliSignPolicyRefusals (reason missing)."
+          description: "{{ $labels.instance }} answered more than 3 sign round-2 requests in 15 minutes as an unknown signing session: it held no round-1 nonces for them. No share leaves for such a request and the leader signs with the other cosigners, so signatures still complete, with less margin. One or two right after this node restarted or committed a refresh are normal and stay under this threshold. More means one of: the node restarts again and again (check its restart count and log); it keeps dropping its loaded keys (RutliLockPoisonRecovered); or a peer sends round 2 for session ids this node never had, which a correct cosigner does not do (a round 2 for another leader's live session is refused and counted under RutliSignSessionOwnerRefused instead). A leader whose sign lost this node logs it (`excluding a cosigner from this signature`, with `unknown signing session` and the session id). This node does not log the request, so if no leader's log accounts for the count, suspect the other cosigners. On a node that requires signing intents such a request used to count under RutliSignPolicyRefusals (reason missing)."
+
+      - alert: RutliSignSessionOwnerRefused
+        expr: sum by (instance, call) (increase(rutli_sign_session_owner_refusals_total[15m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} refused a sign {{ $labels.call }} from a peer that did not open the session"
+          description: "{{ $labels.instance }} got a sign round 2 or abort ({{ $labels.call }}) for a live session that another caller opened. Since 0.5.0 a sign session belongs to the peer whose certificate CN opened it (or to the node's own leader), so the request was refused and took nothing: no other peer can abort or advance the session. A correct cosigner never sends this. The cosigner log line 'refused a sign … from a caller that did not open the session' names the caller and the owner: investigate the caller as compromised."
+
+      - alert: RutliSignSessionCapReached
+        expr: sum by (instance, cap) (increase(rutli_sign_sessions_refused_total[15m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} refused sign round 1: too many waiting sessions ({{ $labels.cap }})"
+          description: "{{ $labels.instance }} refused a sign round 1 because a cap on sessions waiting for round 2 was reached. cap=opener: one opener (a peer's certificate CN, or the node's own leader) holds 256 sessions for one key; cap=request: one opener holds 20 sessions for one signing request. An honest leader holds about as many as it has signs in flight (normally a few; up to about 128 on a large participant host or a leader serving two participants) plus sessions of calls the driver gave up on, which it now aborts, so either that opener floods this node with round 1s (a compromised cosigner replaying an intent it saw) or it is leaking sessions. Only that opener is refused: other leaders keep their room, and a leader that hears this answer tries other cosigners instead of excluding this one. On a mesh without TLS no peer is identified, so all remote leaders share one opener's room and one filler takes all of it. cap=key: all openers together hold 1024 for the key, which needs at least four openers at their caps. The cosigner log line 'refusing sign round 1: too many sessions waiting for round 2' names the opener; rutli_pending_sign_sessions shows the total. Sessions expire after 5 minutes."
 
       - alert: RutliSignIntentAbsent
         expr: increase(rutli_sign_intent_absent_total[1h]) > 0

@@ -74,6 +74,55 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Fixed
 
+- **A sign session belongs to the peer that opened it.** Up to 0.4.0 a node took a sign round 2
+  or an abort for a session from any peer on the mesh allowlist. A compromised cosigner that was a
+  member of a signature knows the session id, so it could abort another node's copy of the session
+  or use it up with a round 2 of its own. The leader then saw that node fail, excluded it and
+  logged it as the culprit; in 3-of-5 one such cosigner stopped every signature. Now a node records
+  who opened each session at round 1: the peer's certificate CN, or the node's own leader for its
+  own share. It refuses a round 2 or abort from anyone else with `PERMISSION_DENIED`, before
+  anything is taken: the session keeps its nonces and authorization, nothing is charged or
+  journaled, and no other peer can abort or advance the session. The refusal is counted in
+  `rutli_sign_session_owner_refusals_total{call}` (new alert `RutliSignSessionOwnerRefused`) and
+  logged with the caller and the owner. It is not counted as an unknown session. On a node without
+  TLS (no peer allowlist) no caller is identified, with or without a certificate: remote callers
+  are one owner, as before, but none can act on the node's own leader's sessions.
+- **The leader gives each member of a sign attempt its own session id.** Up to 0.4.0 one id served
+  every member. A member that got round 1 early could open that id on a later member first; the
+  leader's round 1 there then failed as a duplicate and the honest member was excluded. Now each
+  member, the leader's own share included, gets a separate random id for its round 1, round 2 and
+  abort, and the id a member sees names nothing on another node. Nothing changes on the wire. One
+  signature now shows a different session id in each node's log and journal; the leader logs an
+  attempt id with the members' identifiers at `debug` (`sign attempt: one session id per member`),
+  not their session ids.
+  `audit-cross-check` matches by request id and digest and is unaffected.
+- **One cosigner can no longer fill a key's waiting sign sessions.** Up to 0.4.0 a node held at
+  most 1024 sessions per key waiting for round 2, for all leaders together. Round 1 charges
+  nothing and one valid intent verifies again and again, so one compromised cosigner holding one
+  intent could open 1024 sessions on every node and stop that key's signing for 5 minutes at a
+  time. Now one opener (a peer's certificate CN, or the node's own leader) holds at most 256 per
+  key, and at most 20 for one signing request. The total stays 1024, so the other leaders always
+  have room. An honest leader holds about as many as it has signs in flight: a few at the soak's
+  peak rate, up to about 128 on a large participant host. A refused round 1 answers `UNAVAILABLE`
+  and says which cap was hit; it is counted in
+  `rutli_sign_sessions_refused_total{cap="key"|"opener"|"request"}` (new alert
+  `RutliSignSessionCapReached`) and logged with the opener. The caps apply with or without
+  `require_intent`. A replay of a request already at its cap is refused before its intent's
+  signature is checked. Without TLS all remote leaders share one opener's room.
+- **A leader no longer leaves sign sessions behind.** A sign the driver gave up on (its deadline,
+  a cancelled call) used to leave the sessions of the running attempt on the members until the
+  5-minute TTL, and a member whose round 1 reply was lost kept its session too. The leader now
+  aborts every session an attempt opened when the attempt fails or is dropped, the member that did
+  not answer included. A member that answers "no room for this leader's sessions" is no longer
+  excluded from the signature: the leader tries the other subsets, asks it once more at the end,
+  and if it still has no room answers `UNAVAILABLE`, so the driver tries another leader.
+
+  **Upgrade note:** no wire change: the owner comes from the mTLS certificate a peer already
+  presents, and the session id was always a per-call string. A 0.4.0 leader and 0.5.0 peers, or the
+  other way round, keep signing during a rolling upgrade. A 0.4.0 leader still uses one id for all
+  members until it is upgraded. Re-apply the alert rules (`deploy/monitoring/prometheus-rules.yml`, or the rendered
+  `deploy/monitoring/k8s/prometheusrule.yaml`).
+
 - **The driver reads an approver's key as `public-key-base64`,** the name the docs and
   `approve keygen` print. Up to 0.4.0 it only read `public-key-base-64`, so an `approval` block
   copied from the docs stopped the participant at startup with `Key not found`. Both names are read
