@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 #
 # cargo-deny policy for the Rust workspace. CI runs `cargo deny check advisories licenses bans sources`;

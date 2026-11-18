@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! A deliberately tiny, strict protobuf reader for the handful of frozen Canton v30 messages this

@@ -1,5 +1,5 @@
 {{/*
-Copyright 2026 StakeCraft
+Copyright 2026 StakeCraft LLC
 SPDX-License-Identifier: Apache-2.0
 Per-node cosigner JSON: node <id> runs cosigner-<id>.json. No secrets in here — only where they are.
 topology=legacy:  pod ordinal i runs cosigner-(i+1).json; peers are the headless pod DNS names

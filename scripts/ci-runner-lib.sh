@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Shared helpers for ci-runner-up.sh / ci-runner-down.sh. Source it; do not execute it.
 # See deploy/ci-runner/README.md for the trust model: the runner must only ever talk to the

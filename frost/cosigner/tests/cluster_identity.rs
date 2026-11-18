@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Review M2, through the real `rutli-cosigner` binary: a `helm upgrade` without `--reuse-values`

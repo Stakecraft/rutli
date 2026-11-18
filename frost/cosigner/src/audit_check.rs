@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! `rutli-cosigner audit-cross-check`: the driver's hash-chained audit log against the cosigners'

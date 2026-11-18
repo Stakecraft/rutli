@@ -94,7 +94,7 @@ CONFORMANCE=1 CANTON_AUTOMATIC_PROTOCOL_VERSION=1 sbt -batch driver/test
   see `frost/deny.toml` and `scripts/third-party-licenses-jvm.py`.
 - **An SPDX header** on new source files, the same as the existing ones:
   ```
-  // Copyright 2026 StakeCraft
+  // Copyright 2026 StakeCraft LLC
   // SPDX-License-Identifier: Apache-2.0
   ```
   (`#` comments in shell and YAML).

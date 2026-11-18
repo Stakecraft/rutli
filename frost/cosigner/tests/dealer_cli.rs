@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! The `rutli-dealer` binary end to end, on B1's real Canton 3.6.1 key vectors: what it writes,

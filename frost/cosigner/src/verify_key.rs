@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! `rutli-cosigner verify-key`: does every cosigner hold a consistent share of the key the operator

@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Ceremony intents (refresh-fence remediation, layer L2): a DKG or refresh happens only when an

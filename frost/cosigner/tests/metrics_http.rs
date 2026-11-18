@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! End-to-end smoke test for the Prometheus /metrics endpoint: install the real exporter, emit

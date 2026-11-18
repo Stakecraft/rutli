@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Build the FROST cosigner daemon. protoc is vendored via a build-dependency, so no system protobuf.
 

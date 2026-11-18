@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Durable per-node ceremony records: this node's vote in a two-phase DKG or refresh (H1, M5).
