@@ -85,6 +85,52 @@ class ApprovalGateSpec extends AnyWordSpec with Matchers {
     }
   }
 
+  "ApprovalPolicy rules" should {
+    val approvers = List(approver("a", approverKeypair()))
+
+    "refuse any mode but quorum or auto, naming the rule and the value" in {
+      for (mode <- Seq("quorom", "Quorum", "AUTO", "", "quorum "))
+        withClue(s"mode '$mode'") {
+          val e = the[IllegalArgumentException] thrownBy
+            ApprovalPolicy(List(ApprovalRule("frost-", mode, 1)), approvers, newInbox())
+          e.getMessage should include("\"frost-\"")
+          e.getMessage should include(s"\"$mode\"")
+        }
+    }
+
+    "gate a quorum rule and not an auto rule" in {
+      val p = ApprovalPolicy(
+        List(ApprovalRule("frost-import-sig-", "auto"), ApprovalRule("frost-", "quorum", 1)),
+        approvers,
+        newInbox(),
+      )
+      p.thresholdFor("frost-ns") shouldBe Some(1)
+      p.thresholdFor("frost-import-sig-1") shouldBe None
+      p.thresholdFor("rutli-enc-1") shouldBe None // no rule matches
+    }
+
+    "refuse a quorum rule with no approvers, and one an earlier auto rule covers" in {
+      val noApprovers = ApprovalPolicy.ruleProblems(List(ApprovalRule("frost-", "quorum", 1)), approverCount = 0)
+      noApprovers.map(_.index) shouldBe List(0)
+      noApprovers.head.message should include("threshold 1")
+      val shadowed = ApprovalPolicy.ruleProblems(
+        List(ApprovalRule("frost-", "auto"), ApprovalRule("frost-ns", "quorum", 1)),
+        approverCount = 1,
+      )
+      shadowed.map(_.index) shouldBe List(1)
+      shadowed.head.message should include("never applies")
+      ApprovalPolicy.ruleProblems(
+        List(ApprovalRule("", "auto"), ApprovalRule("frost-", "quorum", 1)),
+        approverCount = 1,
+      ).map(_.index) shouldBe List(1)
+      // A more specific auto rule first is the documented carve-out, not a problem.
+      ApprovalPolicy.ruleProblems(
+        List(ApprovalRule("frost-import-sig-", "auto"), ApprovalRule("frost-import-", "quorum", 1)),
+        approverCount = 1,
+      ) shouldBe empty
+    }
+  }
+
   "FileApprovalGate" should {
 
     "auto-approve keys that match no rule" in {
@@ -239,7 +285,9 @@ class ApprovalGateSpec extends AnyWordSpec with Matchers {
       val signF: Future[Array[Byte]] =
         driver.sign(Array.fill(34)(7.toByte), keyId, SigningAlgoSpec.Ed25519)(ctx)
       eventually(pendingExists(inbox))
-      an[Exception] should be thrownBy Await.result(signF, 300.millis) // still blocked (times out here)
+      // Still blocked: the wait times out, and nothing else (a failed sign) passes for that.
+      a[java.util.concurrent.TimeoutException] should be thrownBy Await.result(signF, 300.millis)
+      signF.isCompleted shouldBe false
 
       // Two distinct approvers authorize -> the sign completes with a real 64-byte signature.
       dropApproval(inbox, "alice", a.getPrivate)
