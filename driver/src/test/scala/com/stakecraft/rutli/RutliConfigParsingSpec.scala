@@ -54,7 +54,7 @@ class RutliConfigParsingSpec extends AnyWordSpec with Matchers {
         aproval {
           inbox-dir = "/var/rutli/approvals"
           rules = [{ key-id-prefix = "frost-", mode = "quorum", threshold = 1 }]
-          approvers = [{ id = "alice", public-key-base-64 = "MCowBQYDK2VwAyEA" }]
+          approvers = [{ id = "alice", public-key-base64 = "MCowBQYDK2VwAyEA" }]
         }
       """,
         "aproval",
@@ -89,7 +89,7 @@ class RutliConfigParsingSpec extends AnyWordSpec with Matchers {
         approval {
           inbox-dir = "/var/rutli/approvals"
           rules = [{ key-id-prefix = "frost-", mode = "quorum", treshold = 1 }]
-          approvers = [{ id = "alice", public-key-base-64 = "MCowBQYDK2VwAyEA" }]
+          approvers = [{ id = "alice", public-key-base64 = "MCowBQYDK2VwAyEA" }]
         }
       """,
         "treshold",
@@ -118,8 +118,44 @@ class RutliConfigParsingSpec extends AnyWordSpec with Matchers {
     }
   }
 
-  // An approver's key is `public-key-base-64`: what pureconfig derives from the field
-  // `publicKeyBase64` (a digit run is its own word).
+  "an approver's key" should {
+    def approvers(entry: String): String =
+      s"""approval { inbox-dir = "/var/rutli/approvals", rules = [], approvers = [ $entry ] }"""
+
+    def refused(entry: String): String =
+      ConfigSource.string(approvers(entry)).load[RutliConfig] match {
+        case Right(c)  => fail(s"approver $entry parsed: $c")
+        case Left(err) => dotted(err.prettyPrint())
+      }
+
+    "be read under public-key-base64, the name the docs and `approve keygen` print" in {
+      val c = parse(approvers("""{ id = "alice", public-key-base64 = "MCowBQYDK2VwAyEA" }"""))
+      c.approval.map(_.approvers.map(a => a.id -> a.publicKeyBase64)) shouldBe Some(List("alice" -> "MCowBQYDK2VwAyEA"))
+    }
+
+    "be read under public-key-base-64 too, the only name releases up to 0.4.0 read" in {
+      val c = parse(approvers("""{ id = "alice", public-key-base-64 = "MCowBQYDK2VwAyEA" }"""))
+      c.approval.map(_.approvers.map(a => a.id -> a.publicKeyBase64)) shouldBe Some(List("alice" -> "MCowBQYDK2VwAyEA"))
+    }
+
+    "be refused when both names are set" in {
+      refused("""{ id = "alice", public-key-base64 = "MCowBQYDK2VwAyEA", public-key-base-64 = "MCowBQYDK2VwAyEB" }""") should
+        include("keep one")
+    }
+
+    "be refused when it is missing, naming the documented key" in {
+      refused("""{ id = "alice" }""") should include("public-key-base64")
+    }
+
+    "not hide an unknown key next to it" in {
+      refusedFor(
+        approvers("""{ id = "alice", public-key-base64 = "MCowBQYDK2VwAyEA", pubkey = "x" }"""),
+        "pubkey",
+        "approval.approvers.0.pubkey",
+      )
+    }
+  }
+
   "a config with every block set" should {
     lazy val full = parse("""
       backend = "frost"
@@ -137,7 +173,7 @@ class RutliConfigParsingSpec extends AnyWordSpec with Matchers {
           { key-id-prefix = "soak1-frost-", mode = "quorum", threshold = 2 }
         ]
         approvers = [
-          { id = "alice", public-key-base-64 = "MCowBQYDK2VwAyEA" },
+          { id = "alice", public-key-base64 = "MCowBQYDK2VwAyEA" },
           { id = "bob",   public-key-base-64 = "MCowBQYDK2VwAyEB" }
         ]
       }

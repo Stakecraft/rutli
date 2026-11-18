@@ -45,7 +45,33 @@ final class RutliDriverFactory extends KmsDriverFactory {
       ConfigReader[String].map(FrostEndpoint(_)).orElse(deriveReader[FrostEndpoint])
     implicit val frostReader: ConfigReader[FrostConfig] = deriveReader[FrostConfig]
     implicit val ruleReader: ConfigReader[ApprovalRule] = deriveReader[ApprovalRule]
-    implicit val approverReader: ConfigReader[Approver] = deriveReader[Approver]
+    // An approver's key has two names. `public-key-base64` is what the docs and `approve keygen`
+    // print. `public-key-base-64` is what pureconfig derives from the field `publicKeyBase64` (a
+    // digit run is its own word) and the only name releases up to 0.4.0 read, so a config copied
+    // from the docs stopped the participant with "Key not found". Both are read; exactly one must
+    // be set, and any other key is refused as in every other block.
+    implicit val approverReader: ConfigReader[Approver] = ConfigReader.fromCursor[Approver] { cur =>
+      import pureconfig.error.{CannotConvert, ConfigReaderFailures, ConvertFailure, UnknownKey}
+      val keyNames = List("public-key-base64", "public-key-base-64")
+      cur.asObjectCursor.flatMap { obj =>
+        val unknown = obj.map.toList.collect {
+          case (k, keyCur) if k != "id" && !keyNames.contains(k) => keyCur.failureFor(UnknownKey(k))
+        }
+        (unknown, keyNames.filter(obj.map.contains)) match {
+          case (h :: t, _) => Left(ConfigReaderFailures(h, t: _*))
+          case (Nil, both @ List(_, _)) =>
+            val reason = CannotConvert(both.mkString(" and "), "Approver", "both names of the key are set; keep one")
+            Left(ConfigReaderFailures(ConvertFailure(reason, obj)))
+          case (Nil, present) =>
+            // With neither name set this fails with "Key not found" for the documented name.
+            val name = present.headOption.getOrElse(keyNames.head)
+            for {
+              id <- obj.atKey("id").flatMap(_.asString)
+              key <- obj.atKey(name).flatMap(_.asString)
+            } yield Approver(id, key)
+        }
+      }
+    }
     implicit val policyReader: ConfigReader[ApprovalPolicy] = deriveReader[ApprovalPolicy]
     implicit val journalReader: ConfigReader[SigningJournalConfig] = deriveReader[SigningJournalConfig]
     implicit val softwareReader: ConfigReader[SoftwareConfig] = deriveReader[SoftwareConfig]

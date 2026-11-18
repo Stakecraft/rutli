@@ -99,6 +99,9 @@ approval {
 }
 ```
 
+A driver up to 0.4.0 reads the approver's key only as `public-key-base-64` and stops with
+`Key not found` on the name above. Later releases read both names.
+
 On **every cosigner**, the same rules and approver keys go in `signing_policy` (Helm:
 `signingPolicy`). The values are the same: the approver's `public-key-base64` becomes
 `public_key_spki_b64`. The cosigners are authoritative. If their policy and the driver's drift apart,

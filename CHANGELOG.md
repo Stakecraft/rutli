@@ -74,6 +74,10 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Fixed
 
+- **The driver reads an approver's key as `public-key-base64`,** the name the docs and
+  `approve keygen` print. Up to 0.4.0 it only read `public-key-base-64`, so an `approval` block
+  copied from the docs stopped the participant at startup with `Key not found`. Both names are read
+  now. Give one of them per approver; an entry with both is refused.
 - **A cosigner's first signature after a restart could lose its session.** Two requests that used
   a key for the first time at once (a sign round 1 and, say, this node leading another signature)
   each loaded the share and built their own in-memory signing state; the one that finished second
