@@ -1,6 +1,6 @@
 # Rütli roadmap
 
-**Status:** 2026-10-15; audit timing updated 2026-10-27; post-0.4.0 plan added 2026-11-01; milestone and release status updated 2026-11-02; B8 completed 2026-11-12; v0.4.0 tagged 2026-11-14. **Scope:** where Rütli stands, the two ways a Canton/Splice validator ends up on it, and the
+**Status:** 2026-10-15; audit timing updated 2026-10-27; post-0.4.0 plan added 2026-11-01; milestone and release status updated 2026-11-02; B8 completed 2026-11-12; v0.4.0 tagged 2026-11-14; audit target moved to v0.5.0 on 2026-11-18. **Scope:** where Rütli stands, the two ways a Canton/Splice validator ends up on it, and the
 path to 1.0. Facts are stated as established only where a rehearsal or a source check backs them; everything else
 is marked **unproven**. The detailed Track B record (migration spike, milestones, findings) is
 [roadmap-migration.md](roadmap-migration.md).
@@ -185,14 +185,15 @@ Track A (soak and hardening) continues on `stakecraft-devnet-rutli-01`; exit cri
 |---|---|
 | 2026-10-09 | v0.4.0-rc.1 tagged |
 | 2026-10-28 | v0.4.0-rc.6: ceremony leader binding and durable fence marks, disjoint FROST and hosted key ids, TLS crate advisories closed; ceremony intents required by default with TLS |
-| 2026-11-14 | **v0.4.0 tagged = audit code freeze:** Flow 1, Flow 2a (after B8), Flow 2b, B2, B6, ECIES, C2 fixes, CA rotation |
+| 2026-11-14 | **v0.4.0 tagged** (planned as the audit code freeze; the audit now reviews v0.5.0): Flow 1, Flow 2a (after B8), Flow 2b, B2, B6, ECIES, C2 fixes, CA rotation |
 | Later | Pre-rotate alternative for 2a (research), if B8 shows it is worth it |
-| Day v0.4.0 is tagged | Splice TestNet validator run starts; at least 4 weeks clean before 1.0 |
+| 2026-11-19 (planned) | Splice TestNet validator run starts; at least 4 weeks clean before 1.0 |
+| Mid-December 2026 (planned) | **v0.5.0 = audit code freeze:** v0.4.0 plus hardening from the November pre-audit review, the fixes made since v0.4.0 and the shared-cluster guard |
 | After the audit | **1.0**: the audit's fixes and retest, at least 4 clean weeks on TestNet, and the 1.0 features below |
 
 - **The audit is the critical path.** Auditor: **Cure53** (chosen 2026-10-27). The RFQ
   ([audit-rfq.md](audit-rfq.md), brief [audit-prep.md](audit-prep.md)) covers ECIES and B6, excludes `HsmBackend`, and
-  replaces live access with an evidence pack. The audit starts once its funding is confirmed, expected December 2026
+  replaces live access with an evidence pack. It reviews v0.5.0; v0.4.0 is the pre-read. The audit starts once its funding is confirmed, expected December 2026
   to January 2027, so 1.0 follows in the first quarter of 2027 rather than in December.
 - **External deadline:** Splice's `splice-postgres` chart is unsupported after 2026-11-12 (PostgreSQL 14 end of life).
   As of 2026-11-13 the soak validator still runs on that chart; its move to another PostgreSQL deployment is planned

@@ -5,9 +5,9 @@ secret a node holds. Treat every change as security-critical.
 
 ## Status
 
-- **Pre-1.0 and not yet externally audited.** The latest release is `0.4.0`, which is the code
-  freeze an independent third-party audit will review; its report will be published in this
-  repository.
+- **Pre-1.0 and not yet externally audited.** The latest release is `0.4.0`. An independent
+  third-party audit will review `0.5.0`, whose code freeze is planned for mid-December 2026; its report
+  will be published in this repository.
 - **Internal security review, October 2026.** Two independent reviews of `0.4.0-rc.1`. Every
   critical and high finding is fixed in `0.4.0-rc.2` and `0.4.0-rc.3`. The findings and their status
   are in [docs/security/internal-review-2026-10.md](docs/security/internal-review-2026-10.md).
