@@ -54,7 +54,7 @@ class RutliConfigParsingSpec extends AnyWordSpec with Matchers {
         aproval {
           inbox-dir = "/var/rutli/approvals"
           rules = [{ key-id-prefix = "frost-", mode = "quorum", threshold = 1 }]
-          approvers = [{ id = "alice", public-key-base64 = "MCowBQYDK2VwAyEA" }]
+          approvers = [{ id = "alice", public-key-base-64 = "MCowBQYDK2VwAyEA" }]
         }
       """,
         "aproval",
@@ -89,7 +89,7 @@ class RutliConfigParsingSpec extends AnyWordSpec with Matchers {
         approval {
           inbox-dir = "/var/rutli/approvals"
           rules = [{ key-id-prefix = "frost-", mode = "quorum", treshold = 1 }]
-          approvers = [{ id = "alice", public-key-base64 = "MCowBQYDK2VwAyEA" }]
+          approvers = [{ id = "alice", public-key-base-64 = "MCowBQYDK2VwAyEA" }]
         }
       """,
         "treshold",
@@ -118,6 +118,8 @@ class RutliConfigParsingSpec extends AnyWordSpec with Matchers {
     }
   }
 
+  // An approver's key is `public-key-base-64`: what pureconfig derives from the field
+  // `publicKeyBase64` (a digit run is its own word).
   "a config with every block set" should {
     lazy val full = parse("""
       backend = "frost"
@@ -135,8 +137,8 @@ class RutliConfigParsingSpec extends AnyWordSpec with Matchers {
           { key-id-prefix = "soak1-frost-", mode = "quorum", threshold = 2 }
         ]
         approvers = [
-          { id = "alice", public-key-base64 = "MCowBQYDK2VwAyEA" },
-          { id = "bob",   public-key-base64 = "MCowBQYDK2VwAyEB" }
+          { id = "alice", public-key-base-64 = "MCowBQYDK2VwAyEA" },
+          { id = "bob",   public-key-base-64 = "MCowBQYDK2VwAyEB" }
         ]
       }
       frost = {
