@@ -201,15 +201,16 @@ Where we would like attention, in order:
 
 ### 2.2 Phase 2, before 1.0 (separate line item)
 
-After the v0.4.0 engagement, three features are planned for Rütli 1.0. They are new code on the key
+After the first engagement, four features are planned for Rütli 1.0. They are new code on the key
 path, so we want them reviewed by the same team before 1.0 is tagged, as a second, smaller phase once
 they are code-complete (expected in the first half of 2027):
 
 | Feature | What it does | Where we want attention |
 |---|---|---|
+| **Threshold ECIES** | The P-256 encryption key held as shares: it is generated as shares, each cosigner computes its part of the ECDH, and the driver combines the parts | That no single cosigner learns the key or a shared secret, that a wrong partial result is detected, and the change that makes the share code work for a second curve, which touches code reviewed in the first phase |
 | **Emergency recovery** | Shares encrypted to offline keys held by several recovery officers, for the case where every cosigner is lost at once | It is a path to the whole key: the threshold of officers, the ceremony, storage and destruction of recovery material, and what an officer or a stolen recovery kit can do |
 | **Signed audit log export** | The hash-chained audit log is periodically signed and shipped to append-only storage off the host | That a host administrator cannot rewrite or truncate history unnoticed; key handling for the signing key; gaps and replays |
-| **Encryption-key rotation, mixed mode** | A runbook and driver support for rotating the participant's encryption key, serving an old hosted ECIES key and a new one side by side, with versioned key ids | That a decrypt can never be routed to the wrong key or kind of key, that an old key is retired only when no traffic needs it, and the preparation for threshold ECIES in 2.0 |
+| **Encryption-key rotation, mixed mode** | A runbook and driver support for rotating the participant's encryption key, serving an old hosted ECIES key and a new one side by side, with versioned key ids | That a decrypt can never be routed to the wrong key or kind of key, that an old key is retired only when no traffic needs it, and the move of existing nodes to the threshold key |
 
 Please quote phase 2 separately, with your best estimate of effort; we will confirm its scope and date
 when the code is frozen.

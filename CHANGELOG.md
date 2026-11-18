@@ -54,6 +54,9 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Documentation
 
+- **Threshold ECIES is planned for 1.0, not 2.0** (decided 2026-11-19). `docs/roadmap.md`, the
+  README, `docs/hosted-keys.md` and the explorer page say so, and the second audit phase in
+  `docs/audit-rfq.md` (section 2.2) now lists four features. No code changes.
 - **Splice 0.10 / Canton 3.7** (`docs/splice-0.10.md`): the driver needs no change, because the KMS driver SPI and the
   conformance suite are byte-identical from v3.6.1 to v3.7.3. Operators get a new page covering the upgrade order for a
   Rütli validator: back up first, then the participant, then the validator, with no `--atomic`, and before the network's
