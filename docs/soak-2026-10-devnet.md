@@ -397,7 +397,18 @@ not change. B8 went first, as the canary.
 - Changed in the pre-check because of the B8 stop: it now does a server-side dry run of the target render, which shows
   field-manager conflicts before the participant is touched, and it refuses while a database dump is running.
 - Not checked: wallet login and balances; cosigner metrics after the upgrade; both validators across the DevNet
-  synchronizer upgrade of 2026-11-18 14:00 UTC (check planned).
+  synchronizer upgrade of 2026-11-18 14:00 UTC (checked on 2026-11-18, see the next entry).
+
+**Network event: DevNet Logical Synchronizer Upgrade to protocol version 37, 2026-11-18 14:00 UTC.** No action on our
+side. Checked read-only at 20:06 UTC.
+- Both participants are on the successor synchronizer: their logs reference physical synchronizer serial `37-8`
+  (PV 37). The predecessors `36-7` and earlier appear only in older topology history.
+- Driver audit log, 12:00 to 17:00 UTC, in 10-minute buckets: signatures in every bucket on both validators, 10 to 43
+  per bucket, with no gap around 14:00 and every one `outcome=ok`.
+- Post-check over the 6 hours before 20:06 UTC: both on 0.10.1, Ready, HTTP probes, 0 restarts; B8 531 signatures, soak
+  685, all `ok` with intents; 0 `ERROR` lines in the participant and validator logs.
+- Not checked: the exact switch time in the participant log, since the retained log starts after it. Also not checked:
+  wallet login and balances, and the cosigner metrics across the switch.
 
 ## Drill calendar
 
