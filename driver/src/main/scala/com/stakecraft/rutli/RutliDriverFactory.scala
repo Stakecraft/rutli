@@ -7,6 +7,7 @@ import com.digitalasset.canton.crypto.kms.driver.api.v1.KmsDriverFactory
 import com.stakecraft.rutli.backend.{FrostBackend, HsmBackend, KmsBackend, SoftwareBackend}
 import org.slf4j.Logger
 import pureconfig.{ConfigReader, ConfigWriter}
+import pureconfig.generic.ProductHint
 
 import scala.concurrent.ExecutionContext
 
@@ -30,6 +31,13 @@ final class RutliDriverFactory extends KmsDriverFactory {
   override def configReader: ConfigReader[RutliConfig] = {
     import pureconfig.generic.semiauto._
     import com.stakecraft.rutli.policy.{Approver, ApprovalRule, ApprovalPolicy}
+    // Refuse unknown keys in every block. pureconfig ignores them by default, so a misspelt key
+    // silently left a control off: `aproval { ... }` meant no approval block and therefore
+    // AutoApproveGate. Field naming stays the default (camelCase field -> kebab-case key).
+    // Canton passes `crypto.kms.config` to this reader verbatim (KmsConfig.Driver.config, handed
+    // to DriverLoader.load), with no keys of its own, so nothing needs to be tolerated. Canton's
+    // own config reader uses the same hint (CantonConfig.preventAllUnknownKeys, pureconfig 0.14.0).
+    implicit def strictKeys[T]: ProductHint[T] = ProductHint[T](allowUnknownKeys = false)
     implicit val hsmReader: ConfigReader[HsmConfig] = deriveReader[HsmConfig]
     implicit val frostTlsReader: ConfigReader[FrostTlsConfig] = deriveReader[FrostTlsConfig]
     // An endpoint is `{ url, tls-name }` or, as before, a bare url string.
