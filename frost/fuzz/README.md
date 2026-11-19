@@ -49,15 +49,16 @@ mkdir -p fuzz/corpus/intent fuzz/seeds/intent "$TMPDIR/empty"
 ```
 
 ```bash
-RUTLI_FUZZ_SEED_DIR="$PWD/fuzz/seeds/intent" cargo +nightly-2026-11-15 fuzz run intent "$TMPDIR/empty" -- -runs=0 -detect_leaks=0
+RUTLI_FUZZ_SEED_DIR="$PWD/fuzz/seeds/intent" cargo +nightly-2026-11-15 fuzz run intent "$TMPDIR/empty" -- -runs=0
 ```
 
 ```bash
-cargo +nightly-2026-11-15 fuzz run intent fuzz/corpus/intent fuzz/seeds/intent -- -max_total_time=300 -detect_leaks=0
+cargo +nightly-2026-11-15 fuzz run intent fuzz/corpus/intent fuzz/seeds/intent -- -max_total_time=300
 ```
 
-`-detect_leaks=0`: the harness keeps a tokio runtime and key stores in process-wide statics, which
-LeakSanitizer reports at exit. A crash is written to `fuzz/artifacts/<target>/`. Minimize it (`cargo fuzz tmin <target> <file>`),
+For `grpc`, add `-detect_leaks=0` to both commands: each input runs on a fresh in-process mesh
+whose nodes reference each other and cannot be unwired, so every input leaks one cycle (the harness,
+not the code under test; see `.github/workflows/fuzz.yml`). A crash is written to `fuzz/artifacts/<target>/`. Minimize it (`cargo fuzz tmin <target> <file>`),
 then commit it under `regressions/<target>/` with the fix.
 
 ## In the normal test suite

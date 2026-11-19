@@ -499,6 +499,9 @@ const MESH_T: u16 = 2;
 struct Template {
     rt: tokio::runtime::Runtime,
     dir: tempfile::TempDir,
+    /// The nodes that made the key stores, kept for the life of the process: their mesh
+    /// (`wire_local_mesh`) is a reference cycle, which dropping them would leak (LeakSanitizer).
+    _nodes: Vec<Arc<rutli_cosigner::node::Node>>,
 }
 
 fn template() -> &'static Template {
@@ -511,7 +514,7 @@ fn template() -> &'static Template {
             .build()
             .expect("runtime");
         let dir = tempfile::tempdir().expect("template dir");
-        let (_nodes, signer, _) = mesh_in(dir.path());
+        let (nodes, signer, _) = mesh_in(dir.path());
         rt.block_on(async {
             rutli_cosigner::orchestrator::run_dkg(&signer.peers, KEY_ID).await.expect("dkg");
             for (key_id, spec) in [(HOSTED_AES, "aes-256-gcm"), (HOSTED_EC, "ec-p256-ecies")] {
@@ -519,7 +522,7 @@ fn template() -> &'static Template {
                 signer.generate_key(tonic::Request::new(req)).await.expect("generate hosted key");
             }
         });
-        Template { rt, dir }
+        Template { rt, dir, _nodes: nodes }
     })
 }
 
