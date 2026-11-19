@@ -159,7 +159,7 @@ async fn verify_key(nodes: &[Arc<Node>], peers: &Peers, fingerprint: &str, sign_
         })
         .collect();
     let roster: Vec<u16> = (1..=N).collect();
-    let mut report = check_views(KEY, fingerprint, &roster, T, &views);
+    let mut report = check_views(KEY, Some(fingerprint), &roster, T, &views);
     if sign_test && report.ok {
         // What `verify-key --sign-test` does over gRPC: every t-subset, leader rotating.
         for (leader, signers) in sign_test_plan(&roster, T) {

@@ -1164,3 +1164,115 @@ async fn only_the_fencing_cosigner_runs_parts_over_grpc() {
     // The refusal left the session alone: the leader can still abort it as its own.
     assert!(c.nodes[1].ceremony_record(&xid).is_none(), "nothing recorded by the refused part 3");
 }
+
+// ── the operator role ─────────────────────────────────────────────────────────────────────────
+
+/// The operator certificate (CN on `operator_allowlist` only) is what `key show`, `verify-key` and
+/// `verify-hosted` run with. Over real mTLS it reaches the three operator RPCs (`KeyStatus`,
+/// `HostedKeyStatus`, `CeremonySignTest`) and the two open ones (`Health`, `Capabilities`); every
+/// other Signer RPC answers PERMISSION_DENIED, even carrying the driver's own valid intents. Every
+/// `rpc` of `service Signer` in the proto must be classified here, so a new RPC cannot slip past
+/// this test unclassified.
+#[tokio::test]
+async fn the_operator_certificate_reaches_only_the_operator_rpcs_and_every_signer_rpc_is_classified() {
+    use rutli_cosigner::node::CeremonyKind;
+    const OPEN: [&str; 2] = ["Health", "Capabilities"];
+    const OPERATOR: [&str; 3] = ["KeyStatus", "HostedKeyStatus", "CeremonySignTest"];
+
+    let c = cluster(|_| strict(), Some(vec!["refresher".into()])).await;
+    let mut op = c.signer("operator", 0).await;
+    let key = || KEY.to_string();
+    let msg = digest(b"the operator tries to sign");
+    let sign = pb::SignRequest { key_id: key(), message: msg.clone(), intent: Some(intent_by(&c.ids, "driver", KEY, &msg, 40)) };
+    let dkg_id = "frost-participant1-new";
+    let dkg = pb::DkgRequest { key_id: dkg_id.into(), intent: Some(ceremony_by(&c.ids, "driver", CeremonyKind::Dkg, dkg_id, 0x41)) };
+    let refresh = pb::RefreshRequest { key_id: key(), intent: Some(ceremony_by(&c.ids, "driver", CeremonyKind::Refresh, KEY, 0x42)) };
+    let hosted = || "rutli-enc-1".to_string();
+    let calls: Vec<(&str, std::result::Result<(), tonic::Status>)> = vec![
+        ("Health", op.health(pb::HealthRequest {}).await.map(drop)),
+        ("Capabilities", op.capabilities(pb::CapabilitiesRequest {}).await.map(drop)),
+        ("KeyStatus", op.key_status(pb::KeyStatusRequest { key_id: key() }).await.map(drop)),
+        ("HostedKeyStatus", op.hosted_key_status(pb::HostedKeyStatusRequest { key_id: hosted() }).await.map(drop)),
+        (
+            "CeremonySignTest",
+            op.ceremony_sign_test(pb::CeremonySignTestRequest { key_id: key(), signers: vec![1, 2] }).await.map(drop),
+        ),
+        ("GroupKey", op.group_key(pb::GroupKeyRequest { key_id: key() }).await.map(drop)),
+        ("Dkg", op.dkg(dkg).await.map(drop)),
+        ("Sign", op.sign(sign).await.map(drop)),
+        ("Refresh", op.refresh(refresh).await.map(drop)),
+        (
+            "GenerateKey",
+            op.generate_key(pb::GenerateKeyRequest { key_id: hosted(), spec: "ec-p256-ecies".into() }).await.map(drop),
+        ),
+        ("PublicKey", op.public_key(pb::PublicKeyRequest { key_id: hosted() }).await.map(drop)),
+        ("KeyInfo", op.key_info(pb::KeyInfoRequest { key_id: hosted() }).await.map(drop)),
+        // Refused for every client here (no delete_allowlist on this cluster) — the operator too.
+        ("DeleteKey", op.delete_key(pb::DeleteKeyRequest { key_id: hosted(), intent: None }).await.map(drop)),
+        (
+            "Decrypt",
+            op.decrypt(pb::DecryptRequest { key_id: hosted(), ciphertext: vec![0; 256] }).await.map(drop),
+        ),
+        (
+            "EcdhDerive",
+            op.ecdh_derive(pb::EcdhDeriveRequest { key_id: hosted(), peer_point: vec![4; 65] }).await.map(drop),
+        ),
+        (
+            "SymmetricEncrypt",
+            op.symmetric_encrypt(pb::SymmetricRequest { key_id: hosted(), data: vec![1] }).await.map(drop),
+        ),
+        (
+            "SymmetricDecrypt",
+            op.symmetric_decrypt(pb::SymmetricRequest { key_id: hosted(), data: vec![1] }).await.map(drop),
+        ),
+    ];
+
+    // Every rpc of `service Signer`, from the proto itself, is called above exactly once.
+    let proto_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("proto");
+    let mut in_proto = Vec::new();
+    for entry in std::fs::read_dir(&proto_dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_some_and(|e| e == "proto") {
+            let text = std::fs::read_to_string(&path).unwrap();
+            let mut lines = text.lines().map(str::trim).skip_while(|l| !l.starts_with("service Signer {"));
+            assert!(lines.next().is_none_or(|l| l == "service Signer {"), "{}", path.display());
+            for line in lines.take_while(|l| *l != "}") {
+                if let Some(rest) = line.strip_prefix("rpc ") {
+                    in_proto.push(rest.split('(').next().unwrap().trim().to_string());
+                }
+            }
+        }
+    }
+    let called: Vec<String> = calls.iter().map(|(name, _)| name.to_string()).collect();
+    let (mut proto_sorted, mut called_sorted) = (in_proto.clone(), called.clone());
+    proto_sorted.sort();
+    called_sorted.sort();
+    assert_eq!(proto_sorted, called_sorted, "every Signer rpc must be classified by this test");
+    assert_eq!(in_proto.len(), 17, "service Signer changed: classify the new rpc here deliberately");
+
+    for (name, result) in &calls {
+        if OPEN.contains(name) || OPERATOR.contains(name) {
+            assert!(
+                result.as_ref().err().is_none_or(|s| s.code() != tonic::Code::PermissionDenied),
+                "{name} must be open to the operator: {result:?}"
+            );
+        } else {
+            let s = result.as_ref().expect_err(name);
+            assert_eq!(s.code(), tonic::Code::PermissionDenied, "{name}: {s:?}");
+        }
+    }
+    // The operator RPCs got past authorization and did their own work: the key's status; the
+    // hosted-key status of a node without hosted keys; the sign test's refusal of a DKG key (no
+    // split-ceremony provenance), from the leader, before any peer is asked.
+    let status = c.signer("operator", 1).await.key_status(pb::KeyStatusRequest { key_id: key() }).await.unwrap();
+    assert_eq!(status.into_inner().group_verifying_key, c.group_key().to_vec());
+    let code_of = |name: &str| calls.iter().find(|(n, _)| *n == name).unwrap().1.as_ref().err().map(|s| s.code());
+    assert_eq!(code_of("KeyStatus"), None);
+    assert_eq!(code_of("HostedKeyStatus"), Some(tonic::Code::FailedPrecondition));
+    let sign_test = calls.iter().find(|(n, _)| *n == "CeremonySignTest").unwrap().1.as_ref().unwrap_err();
+    assert!(sign_test.code() == tonic::Code::FailedPrecondition && sign_test.message().contains("split-ceremony"), "{sign_test:?}");
+    // Nothing the operator asked for happened: no new key, no signature journaled, same epoch.
+    assert!(!c.nodes[0].has_key(dkg_id));
+    assert!((0..3).all(|i| c.journal(i).is_empty()));
+    assert!(c.nodes.iter().all(|n| n.key_epoch(KEY).unwrap().epoch == 1));
+}

@@ -1438,3 +1438,104 @@ async fn hosted_commitments_are_node_independent_and_match_the_031_value() {
         assert_eq!(n.hosted_commitment(&key).unwrap(), legacy);
     }
 }
+
+// ── key show: the reports `rutli-cosigner key show` prints, over a real cluster ──────────────────
+
+/// Every node's answer to the status RPC `key show` routes `key_id` to, through the Signer service
+/// itself (as `verify-key` / `verify-hosted` collect them over gRPC, minus the transport).
+async fn key_show_views(
+    nodes: &[Arc<Node>],
+    peers: &Peers,
+    key_id: &str,
+) -> (Vec<rutli_cosigner::verify_key::NodeView>, Vec<rutli_cosigner::verify_hosted::HostedView>) {
+    use rutli_cosigner::pb::{self, signer_server::Signer};
+    let (mut frost, mut hosted) = (Vec::new(), Vec::new());
+    for (n, id) in nodes.iter().zip(1u16..) {
+        let svc = rutli_cosigner::service::SignerSvc {
+            node: n.clone(),
+            peers: peers.clone(),
+            allowed_cns: None,
+            operator_cns: None,
+            hosted_write_quorum: DEFAULT_WRITE_QUORUM,
+            decrypt_limiter: Arc::new(rutli_cosigner::ratelimit::DecryptRateLimiter::new(0)),
+            ceremony_test_limiter: Arc::new(rutli_cosigner::ratelimit::DecryptRateLimiter::new(0)),
+            sign_guard: None,
+            refresh_cns: None,
+        };
+        let text = |s: tonic::Status| format!("{:?}: {}", s.code(), s.message());
+        let status = svc.key_status(tonic::Request::new(pb::KeyStatusRequest { key_id: key_id.into() })).await;
+        let endpoint = format!("local-{id}");
+        let view = rutli_cosigner::verify_key::NodeView {
+            identifier: id,
+            endpoint: endpoint.clone(),
+            status: status.map(|r| r.into_inner()).map_err(text),
+        };
+        frost.push(view);
+        let request = pb::HostedKeyStatusRequest { key_id: key_id.into() };
+        let status = svc.hosted_key_status(tonic::Request::new(request)).await;
+        hosted.push(rutli_cosigner::verify_hosted::HostedView {
+            identifier: id,
+            endpoint,
+            status: status.map(|r| r.into_inner()).map_err(text),
+        });
+    }
+    (frost, hosted)
+}
+
+/// `key show` on a real cluster holding a DKG key and two hosted keys: each id routes to its own
+/// kind, the report without an expectation is ok and names the key's Canton fingerprint (the one
+/// computed here from the DKG's group key / the generated SPKI), the right expectation passes, a
+/// wrong one fails — and the other kind's status RPC never makes a key appear under an id.
+#[tokio::test]
+async fn key_show_reports_each_kind_with_its_canton_fingerprint_and_never_the_other_kind() {
+    use rutli_cosigner::key_cli::KeyKind;
+    use rutli_cosigner::verify_hosted::check_hosted_views;
+    use rutli_cosigner::verify_key::check_views;
+    let tmp = tempfile::tempdir().unwrap();
+    let (nodes, peers) = hosted_cluster(&tmp);
+    let roster: Vec<u16> = (1..=N).collect();
+    let wrong = format!("1220{}", "ab".repeat(32));
+
+    let frost_id = "frost-participant1-namespace";
+    assert_eq!(KeyKind::of(frost_id), KeyKind::Frost);
+    let group_key = run_dkg(&peers, frost_id).await.unwrap();
+    let fp = rutli_cosigner::share_delivery::ed25519_fingerprint(&group_key);
+    let (frost_views, hosted_views) = key_show_views(&nodes, &peers, frost_id).await;
+    let r = check_views(frost_id, None, &roster, T, &frost_views);
+    assert!(r.ok, "{:?}", r.problems);
+    assert_eq!((r.kind, r.expected_fingerprint.as_deref()), ("frost", None));
+    assert_eq!(r.fingerprint.as_deref(), Some(fp.as_str()));
+    assert_eq!(r.group_verifying_key, Some(hex::encode(group_key)));
+    assert_eq!((r.origin.as_deref(), r.epoch, r.refresh_count, r.threshold), (Some("dkg"), Some(1), Some(0), T));
+    assert!(r.nodes.iter().all(|n| n.present && n.fingerprint == fp && n.own_share_in_package), "{:?}", r.nodes);
+    assert!(check_views(frost_id, Some(&fp), &roster, T, &frost_views).ok);
+    let r = check_views(frost_id, Some(&wrong), &roster, T, &frost_views);
+    assert!(!r.ok && r.problems.iter().all(|p| p.contains("is not the expected")), "{:?}", r.problems);
+    // Asked as a hosted key, the FROST id holds nothing on any node.
+    let r = check_hosted_views(frost_id, None, &roster, &hosted_views);
+    assert!(!r.ok && r.fingerprint.is_none() && r.public_key_der.is_none(), "{:?}", r.problems);
+    assert!(r.nodes.iter().all(|n| !n.present), "{:?}", r.nodes);
+
+    for (spec, hosted_id) in [(HostedSpec::EcP256, "rutli-enc-ecies-1"), (HostedSpec::Rsa2048, "rutli-enc-rsa-1")] {
+        assert_eq!(KeyKind::of(hosted_id), KeyKind::Hosted);
+        let (key, created, replicas) =
+            generate_hosted_key(&nodes[0], &peers, hosted_id, spec, DEFAULT_WRITE_QUORUM).await.unwrap();
+        assert!(created && replicas == usize::from(N), "on every node: {replicas}");
+        let der = key.public_key_der().unwrap();
+        let fp = rutli_canton_key::PublicKey::from_spki_der(&der).unwrap().fingerprint();
+        let (frost_views, hosted_views) = key_show_views(&nodes, &peers, hosted_id).await;
+        let r = check_hosted_views(hosted_id, None, &roster, &hosted_views);
+        assert!(r.ok, "{spec:?}: {:?}", r.problems);
+        assert_eq!((r.kind, r.expected_fingerprint.as_deref()), ("hosted", None));
+        assert_eq!((r.spec.as_deref(), r.public_key_der.clone()), (Some(spec.as_str()), Some(hex::encode(&der))));
+        assert_eq!(r.fingerprint.as_deref(), Some(fp.as_str()), "{spec:?}");
+        assert!(r.nodes.iter().all(|n| n.present && n.fingerprint == fp), "{:?}", r.nodes);
+        assert!(check_hosted_views(hosted_id, Some(&fp), &roster, &hosted_views).ok);
+        let r = check_hosted_views(hosted_id, Some(&wrong), &roster, &hosted_views);
+        assert!(!r.ok && r.problems.iter().all(|p| p.contains("not the expected")), "{:?}", r.problems);
+        // Asked as a FROST key, the hosted id is no share on any node.
+        let r = check_views(hosted_id, None, &roster, T, &frost_views);
+        assert!(!r.ok && r.fingerprint.is_none() && r.group_verifying_key.is_none(), "{:?}", r.problems);
+        assert!(r.nodes.iter().all(|n| n.error.is_some()), "{:?}", r.nodes);
+    }
+}

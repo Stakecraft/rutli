@@ -477,19 +477,19 @@ async fn verify_hosted_sees_each_nodes_own_copy_and_the_canton_fingerprint() {
     nodes[0].hosted_store(id, &imported.key).unwrap();
 
     // Only node 1 holds it. Asking node 2 does not repair it there.
-    let r = check_hosted_views(id, &fp, &[1, 2, 3], &hosted_views(&nodes, &peers, id).await);
+    let r = check_hosted_views(id, Some(&fp), &[1, 2, 3], &hosted_views(&nodes, &peers, id).await);
     assert!(!r.ok);
     assert!(r.problems.iter().any(|p| p == "node 2: does not hold the key"), "{:?}", r.problems);
     assert!(!nodes[1].hosted_exists(id), "HostedKeyStatus must not read-repair");
 
     // Anti-entropy pushes it everywhere; now the cluster agrees on Canton's key.
     anti_entropy_sweep(&nodes[0], &peers).await.unwrap();
-    let r = check_hosted_views(id, &fp, &[1, 2, 3], &hosted_views(&nodes, &peers, id).await);
+    let r = check_hosted_views(id, Some(&fp), &[1, 2, 3], &hosted_views(&nodes, &peers, id).await);
     assert!(r.ok, "{:?}", r.problems);
     let canton_pub = rutli_canton_key::parse_public_key(&read("encryption.pub.bin")).unwrap();
     assert_eq!(r.public_key_der, Some(hex::encode(canton_pub.public.spki_der())));
     // ... but not the key some other fingerprint names.
-    assert!(!check_hosted_views(id, &fingerprint_of("namespace"), &[1, 2, 3], &hosted_views(&nodes, &peers, id).await).ok);
+    assert!(!check_hosted_views(id, Some(&fingerprint_of("namespace")), &[1, 2, 3], &hosted_views(&nodes, &peers, id).await).ok);
 
     // A node that holds other material under the id (a second import of the wrong file before the
     // sweep): anti-entropy refuses to merge, verify-hosted names it.
@@ -498,7 +498,7 @@ async fn verify_hosted_sees_each_nodes_own_copy_and_the_canton_fingerprint() {
     nodes[0].hosted_store(id, &imported.key).unwrap();
     nodes[2].hosted_store(id, &HostedKey::generate(HostedSpec::EcP256, 1).unwrap()).unwrap();
     anti_entropy_sweep(&nodes[0], &peers).await.unwrap();
-    let r = check_hosted_views(id, &fp, &[1, 2, 3], &hosted_views(&nodes, &peers, id).await);
+    let r = check_hosted_views(id, Some(&fp), &[1, 2, 3], &hosted_views(&nodes, &peers, id).await);
     assert!(r.problems.iter().any(|p| p.contains("2 different public keys")), "{:?}", r.problems);
     assert!(r.problems.iter().any(|p| p.starts_with("node 3: its public key has Canton fingerprint")));
 
@@ -536,7 +536,7 @@ async fn verify_hosted_sees_each_nodes_own_copy_and_the_canton_fingerprint() {
             .await
             .unwrap_err();
         assert!(e.message().contains("inconsistent"), "{spec:?}: {e:?}");
-        let r = check_hosted_views(&id, &fp, &[1, 2, 3], &hosted_views(&nodes, &peers, &id).await);
+        let r = check_hosted_views(&id, Some(&fp), &[1, 2, 3], &hosted_views(&nodes, &peers, &id).await);
         assert!(r.problems.iter().any(|p| p.starts_with("node 1:") && p.contains("inconsistent")), "{:?}", r.problems);
         // A consistent key reports its derived SPKI.
         let honest = HostedKey::generate(spec, 1).unwrap();
@@ -637,7 +637,7 @@ async fn import_key_into_a_running_node_races_safely_with_anti_entropy() {
     let (_, pushed) = anti_entropy_sweep(&nodes[0], &peers).await.unwrap();
     assert_eq!(pushed, 2);
     let views = hosted_views(&nodes, &peers, id).await;
-    assert!(rutli_cosigner::verify_hosted::check_hosted_views(id, &fp, &[1, 2, 3], &views).ok);
+    assert!(rutli_cosigner::verify_hosted::check_hosted_views(id, Some(&fp), &[1, 2, 3], &views).ok);
 }
 
 // ── the import-key CLI ─────────────────────────────────────────────────────────────────────────

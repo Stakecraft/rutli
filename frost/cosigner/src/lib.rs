@@ -28,6 +28,7 @@ pub mod hosted;
 pub mod instance_lock;
 pub mod intent;
 pub mod journal;
+pub mod key_cli;
 pub mod keystore;
 pub mod metrics;
 pub mod node;
