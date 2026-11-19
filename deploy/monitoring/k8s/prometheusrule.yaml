@@ -111,13 +111,18 @@ spec:
         severity: critical
       annotations:
         summary: "R\xFCtli cosigner {{ $labels.instance }} holds a stale share of {{ $labels.key }}"
-        description: "{{ $labels.instance }} found its share of {{ $labels.key }} behind the cluster:\
-          \ a newer committed sharing (epoch) exists that this node never voted for, or its own ceremony\
-          \ record names a newer epoch than its share. Typical cause: a restore from an old backup or\
-          \ a volume snapshot rollback. It refuses to sign or lead for the key, so signing continues on\
-          \ the other cosigners \u2014 at 2-of-3 with no margin left. Fix: restore a current backup of\
-          \ this node (daemon stopped) or re-enrol it; the mark clears by itself once the share is current\
-          \ (docs/ceremonies.md, Signing across epochs). Never copy another node's share file."
+        description: "{{ $labels.instance }} marked its share of {{ $labels.key }} stale and refuses to\
+          \ sign or lead for the key, so signing continues on the other cosigners \u2014 at 2-of-3 with\
+          \ no margin left. First read the reason in the node's log (`this node's share is STALE`). If\
+          \ it says the claim is unconfirmed, one cosigner claims a newer epoch and none that holds this\
+          \ node's epoch answered: a wrong or compromised cosigner can cause that while the others restart\
+          \ or a refresh is still committing. Do not restore anything yet: compare `rutli-cosigner verify-key`\
+          \ across the nodes; the mark clears by itself on the next pass that reaches a cosigner on this\
+          \ node's epoch, at most 30 s later. Otherwise a newer committed sharing exists that this node\
+          \ never voted for, or its own ceremony record names a newer epoch than its share \u2014 typically\
+          \ a restore from an old backup or a volume snapshot rollback. Fix: restore a current backup\
+          \ of this node (daemon stopped) or re-enrol it; the mark clears by itself once the share is\
+          \ current (docs/ceremonies.md, Signing across epochs). Never copy another node's share file."
     - alert: RutliEpochMismatch
       expr: increase(rutli_epoch_mismatch_total[15m]) > 0
       for: 0m
@@ -357,6 +362,30 @@ spec:
           may have been dropped, ceremony votes reloaded from disk), but a panic is a bug: find it in
           the cosigner log just before ''recovered a lock poisoned by a panicking request'' and report
           it.'
+    - alert: RutliGrpcAcceptErrors
+      expr: increase(rutli_grpc_accept_errors_total[15m]) > 0
+      for: 0m
+      labels:
+        severity: warning
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }} failed to accept gRPC connections"
+        description: '{{ $labels.instance }} could not accept new gRPC connections and is retrying with
+          a backoff; meanwhile the driver and the peers cannot reach it. Usually the process is out of
+          file descriptors: compare rutli_fd_limit with rutli_grpc_connections and the node''s open descriptors,
+          and look for ''accepting a gRPC connection failed'' in its log. Raise the container''s nofile
+          limit if rutli_fd_limit is low.'
+    - alert: RutliGrpcConnectionsNearLimit
+      expr: rutli_grpc_connections / rutli_grpc_connection_limit > 0.9
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }} is near its gRPC connection limit"
+        description: '{{ $labels.instance }} has had more than 90% of its gRPC connection slots in use
+          for 5 minutes. Past the limit, new connections wait in the listen backlog, so the driver or
+          a peer may time out. A cosigner normally needs a handful of connections (the drivers and the
+          peers multiplex calls); many more come from a misbehaving client or something holding connections
+          open. Check the sources of the connections to the gRPC port.'
     - alert: RutliBackgroundLoopRestarted
       expr: increase(rutli_background_loop_restarts_total[1h]) > 0
       for: 0m

@@ -14,6 +14,7 @@
 // DaemonError wraps large frost/tonic types; boxing every Err site is not worth the churn.
 #![allow(clippy::result_large_err)]
 
+pub mod accept;
 pub mod audit_check;
 pub mod carry;
 pub mod ceremony;
@@ -23,6 +24,7 @@ pub mod config;
 pub mod epoch_check;
 pub mod error;
 pub mod export;
+pub mod fdlimit;
 pub mod health;
 pub mod hosted;
 pub mod instance_lock;

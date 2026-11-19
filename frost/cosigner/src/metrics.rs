@@ -109,6 +109,17 @@ pub const NONCE_MARKERS: &str = "rutli_nonce_markers";
 /// Locks recovered after a panicking request poisoned them (audit L3), by `lock`. The node kept
 /// serving; the panic itself is a bug — alert on any increase and report it.
 pub const LOCK_POISON_RECOVERIES: &str = "rutli_lock_poison_recoveries_total";
+/// The soft open-file limit after the start-up raise ([`crate::fdlimit`]).
+pub const FD_LIMIT: &str = "rutli_fd_limit";
+/// Open gRPC connections (accepted, TLS handshake done or under way) ([`crate::accept`]).
+pub const GRPC_CONNECTIONS: &str = "rutli_grpc_connections";
+/// The most gRPC connections served at once; past it new ones wait in the listen backlog.
+pub const GRPC_CONNECTION_LIMIT: &str = "rutli_grpc_connection_limit";
+/// Failed accepts of a gRPC connection that needed a backoff (not a client that gave up before the
+/// accept); the loop retries. Usually the process is out of file descriptors.
+pub const GRPC_ACCEPT_ERRORS: &str = "rutli_grpc_accept_errors_total";
+/// gRPC connections cut because their TLS handshake did not finish in time.
+pub const GRPC_HANDSHAKE_TIMEOUTS: &str = "rutli_grpc_handshake_timeouts_total";
 /// Background loops restarted after a panic in a pass ([`crate::supervise`]), by `loop`. The node
 /// kept going; the panic itself is a bug — alert on any increase and report it.
 pub const BACKGROUND_LOOP_RESTARTS: &str = "rutli_background_loop_restarts_total";
@@ -293,6 +304,8 @@ fn prime() {
     metrics::counter!(INVALID_SIGNATURE_SHARES).absolute(0);
     metrics::counter!(NONCE_MARKERS_PRUNED).absolute(0);
     metrics::counter!(ANTI_ENTROPY_REPAIRS).absolute(0);
+    metrics::counter!(GRPC_ACCEPT_ERRORS).absolute(0);
+    metrics::counter!(GRPC_HANDSHAKE_TIMEOUTS).absolute(0);
     metrics::counter!(ANTI_ENTROPY_CONFLICTS).absolute(0);
     metrics::gauge!(HOSTED_KEYS).set(0.0);
     metrics::counter!(UNREADABLE_KEY_FILES).absolute(0);
@@ -366,6 +379,11 @@ pub fn describe() {
     describe_counter!(NONCE_MARKERS_PRUNED, "Burned-session nonce markers removed past their retention");
     describe_gauge!(NONCE_MARKERS, "Burned-session nonce markers on this node after the last prune pass");
     describe_counter!(LOCK_POISON_RECOVERIES, "Locks recovered after a panicking request poisoned them, by lock");
+    describe_gauge!(FD_LIMIT, "Soft open-file limit after the start-up raise");
+    describe_gauge!(GRPC_CONNECTIONS, "Open gRPC connections");
+    describe_gauge!(GRPC_CONNECTION_LIMIT, "Most gRPC connections served at once");
+    describe_counter!(GRPC_ACCEPT_ERRORS, "Failed accepts of a gRPC connection (retried)");
+    describe_counter!(GRPC_HANDSHAKE_TIMEOUTS, "gRPC connections cut for not finishing the TLS handshake in time");
     describe_counter!(BACKGROUND_LOOP_RESTARTS, "Background loops restarted after a panic in a pass, by loop");
     describe_counter!(SIGN_ABORTS, "Aborted in-flight sign sessions (one per given-up signature)");
     describe_gauge!(PENDING_SIGN_SESSIONS, "In-flight round-1 sign sessions held on this node");
