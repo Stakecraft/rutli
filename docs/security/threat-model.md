@@ -136,6 +136,12 @@ the per-asker and total caps (F2). What remains:
 - it can split (above) a DKG or refresh that a client **did** ask for and that it takes part in;
 - it can stop a requested ceremony: by refusing (n-of-n), or by presenting its intent as a second
   leader, which fails and spends the id;
+- it cannot refresh a key more often than `refresh_min_interval_secs` (0.5.0), even with a refresh
+  intent from a stolen refresher certificate: every honest node checks the interval at its own fence
+  and part 1, from its own ceremony records. Setting `refresh_interval_waived_at` on itself, or
+  dropping the limit from its own config, changes nothing on the honest nodes. By voting no after
+  the others staged it can make a requested refresh abort late; that refresh still counts on the
+  honest nodes, which only spends a slot it could block anyway;
 - it cannot take a requested ceremony over (since 0.4.0-rc.6). Every node binds the ceremony to the
   leader whose fence took its guard (the caller's certificate CN, or the node itself) and accepts
   parts 1–3, a second fence, an abort of the live ceremony and the release of that fence only from
@@ -189,10 +195,14 @@ with every share journaled on every participating node (`audit-cross-check` expo
 driver audit log lacks); decrypt with hosted keys within `decrypt_rate_limit_per_min` per node.
 
 **Can also** run a DKG of a new id inside its `signer_acl` prefixes (it signs the ceremony intent
-every node verifies).
+every node verifies). There is no cap on how many: each new key is a set of files on every node and
+in every backup (disk growth, no key knowledge). And while `signer_may_refresh` is on (the default,
+kept for rollout compatibility), it can refresh keys inside its ACL like the refresher below, once
+per `refresh_min_interval_secs`. Turn `signer_may_refresh` off.
 
-**Cannot:** sign a gated key without `M` approver signatures; refresh (`signer_may_refresh: false`,
-checked by every node on the ceremony intent);
+**Cannot:** sign a gated key without `M` approver signatures; refresh once `signer_may_refresh` is
+off (checked by every node on the ceremony intent); refresh a key more than once per interval, or
+lift the interval;
 use another tenant's prefixes; delete hosted keys (unless an operator put the driver CN on
 `hosted_keys.delete_allowlist`, which is off by default — and then only recoverably, within the
 grace period, and with approvals if `delete_approval_threshold` is set). Revocation without the CA:
@@ -207,6 +217,18 @@ be used to cause load or to abort, not to learn anything or change the key. Toge
 compromised cosigner, every refresh it requests is a split opportunity (DS-CR4). Cannot sign, cannot
 run a DKG. Revoked by replacing its SPKI pin or removing its CN from `refresh_allowlist`. There is no
 per-key refresh ACL (follow-up).
+
+**Refresh rate (0.5.0).** Every refresh moves every node to a new epoch, and a node's backups of an
+older epoch no longer restore it. Before 0.5.0 this certificate could refresh a key continuously, so
+the nodes' backups never shared an epoch and a later loss of nodes could lose the key for good. Now
+every node takes part in at most one refresh of a key per `signing_policy.refresh_min_interval_secs`
+(default 72 h), counted from its own ceremony records and checked at its own fence, so no leader can
+get around it. What stays: one refresh per key per interval, each still a split opportunity with a
+compromised cosigner, and it can use up the slot before the weekly CronJob (that run is then refused
+and alerts; a refresh did happen). It cannot lift the interval: the incident waiver
+(`refresh_interval_waived_at`) is node config. While a waiver is set, it can take the one refresh the
+waiver allows; that refresh still moves the key to a fresh epoch after the operator's decision.
+Backups must follow every refresh (disaster-recovery.md).
 
 ### Holder of the operator certificate
 
@@ -306,6 +328,11 @@ keys stay test material.
 - A driver-key thief signs non-gated keys within the ACL and rate limits (bounded and journaled,
   not prevented).
 - No defence against a TLS-terminating mesh (P3) or a memory snapshot of a running cosigner (L7).
+- A stolen refresher certificate, or the driver certificate while `signer_may_refresh` is on, can
+  refresh each key once per `refresh_min_interval_secs` (72 h). Each refresh makes older backups
+  unable to restore a node; back up after every refresh. A compromised cosigner cannot lead past the
+  interval (every honest node checks it) and cannot start a refresh without a client intent. A
+  stolen driver certificate can still mint new FROST keys inside its ACL without a cap (disk growth).
 - With n = 3, a compromised cosigner can split (DS-CR4) any DKG or refresh it takes part in, but
   with `require_ceremony_intent` on only one a client asked for. It can veto every ceremony,
   onboarding DKGs included (n-of-n). Not bound into a refresh intent yet: the expected

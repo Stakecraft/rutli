@@ -122,6 +122,75 @@ generation or deletion anyway, by refusing. An intent on such a fence is a proto
 compromised cosigner keeps is listed in the [threat model](security/threat-model.md): the n-of-n
 veto, and the split (DS-CR4) of a ceremony a client **did** ask for.
 
+### Refresh interval
+
+Since 0.5.0 every node takes part in at most one refresh of a key per
+`signing_policy.refresh_min_interval_secs`: default 259200 (72 h), at most 30 days, `0` turns it
+off (the node then warns at startup).
+
+Why: a refresh moves every node to a new epoch, and from its commit a node's older backups no longer
+restore that node ([disaster-recovery.md](disaster-recovery.md#1-restore-a-single-cosigner-from-backup)).
+Without a limit, whoever holds the refresher certificate, or the driver certificate while
+`signer_may_refresh` is on, could refresh a key again and again, faster than backups follow. The
+nodes' backups would then share no epoch, and a later loss of nodes would lose the key for good.
+
+How it works:
+
+* **Every node checks it itself**, at the fence and at part 1, after the ceremony intent and before
+  it takes the guard, writes a fence mark, unseals its share or opens a session. The leader also
+  checks it on `Signer.Refresh` before it contacts any peer. A refresh needs every roster node, so
+  one honest node that refuses stops it: a leader without the limit (a compromised cosigner, a node
+  on 0.4.0) is held to it by the others.
+* **What counts** is the last refresh of the key that this node **staged**: committed, or aborted
+  after it staged — counted from when it committed (or aborted) on that node, not from when it
+  staged, so a commit delayed past the interval still holds the next refresh off for a full interval
+  after it. The node reads it from its own ceremony records (`keys/.ceremonies/`), so a
+  restart does not reset it. Backups do not carry the records: a node rebuilt or restored from
+  backup enforces nothing until its next refresh, while the other nodes still do (one is enough to
+  stop a refresh); only if every node lost its records is one refresh free. A refresh that failed before staging (a refused fence, a failed
+  part 1 or 2, a leader that died) does not count, so starting and abandoning refreshes cannot block
+  the next one. A refresh aborted after staging does count: only a cosigner that took part can cause
+  that, it could block the refresh anyway by refusing, and otherwise it could loop refreshes that
+  leave a staged share and a record on every node each time. DKGs do not count.
+* **A refused refresh** fails with FAILED_PRECONDITION, `refresh of <key> refused: this node took
+  part in refresh <id> at <time>, less than signing_policy.refresh_min_interval_secs … ago` and the
+  trailer `rutli-error: refresh-too-soon`. Each node logs it at warn (at most once a minute per key)
+  and counts it in `rutli_refresh_interval_refusals_total` (alert `RutliRefreshRefused`). Nothing is
+  staged and no guard is left. Refused at the leader, nothing is written anywhere; refused at a
+  peer's fence, the leader's rollback leaves the usual no-vote that spends the intent's id.
+
+The shipped CronJob refreshes weekly, well outside the interval. A failed run can be retried at once
+if it failed before staging; otherwise 72 h after the last refresh. The rule
+`RutliRefreshOffSchedule` fires when a node commits more than one refresh of a key in 6 days (a day
+shorter than the schedule, so a weekly run that lands a little early does not fire it).
+
+**An incident refresh that cannot wait** (a suspected compromise, a node just evicted or replaced:
+[key-rotation.md](key-rotation.md#if-the-root-is-actually-compromised),
+[disaster-recovery.md](disaster-recovery.md)) uses node config, not a certificate. On every node:
+
+1. Set `signing_policy.refresh_interval_waived_at` to the UTC time of your decision, e.g.
+   `"2026-11-19T14:00:00Z"` (`signingPolicy.refresh_interval_waived_at` in the chart), and roll it
+   out.
+2. Run the refresh (`rutli-cosigner refresh --key-id …`, once per key), then `verify-key`.
+3. Back up every node (disaster-recovery.md), and remove the setting.
+
+Each node then lets **one** refresh of each key through after that time, logs it at warn and counts
+it in `rutli_refresh_interval_waived_total`. The next refresh is held to the interval from that one,
+whether the setting is still there or not. The setting lapses 24 h after its time. A time up to
+`clock_skew_secs` (default 120 s) ahead of the node's clock is accepted, because clocks differ, and
+takes effect once the node's clock reaches it; a time further ahead is a config error and the node
+does not start. Every start with the setting present logs it at warn, with its time and when it
+lapses, so one left behind is seen. No client certificate can set it. A compromised cosigner that sets it
+on itself changes nothing on the honest nodes. While it is set, the one refresh it allows can come
+from any refresher certificate: if `verify-key` shows a refresh you did not run, the key still moved
+to a fresh epoch after your decision; replace the refresher certificate's pin.
+
+**Mixed versions.** A 0.4.0 node enforces no interval. While the cluster is mixed, the 0.5.0 nodes
+enforce it for every refresh, because a refresh needs every node. A refresh led by a 0.4.0 node is
+refused at the first 0.5.0 node's fence, before part 1; the 0.4.0 leader rolls back, and its client
+sees the refusal wrapped in INTERNAL. A 0.4.0 node taking part in a refresh a 0.5.0 node leads
+changes nothing. So the limit holds as soon as one node in the roster runs 0.5.0.
+
 ### Signing during a ceremony
 
 Since 0.4.0-rc.4, signing goes on while a DKG or refresh runs, from the fence through commit. Up to
@@ -359,7 +428,8 @@ key-safe: an honest COMMITTED node committed only after confirming every node's 
 outcome, so it is a complete sharing of the same group key. A *lying* COMMITTED report could at
 worst move this node onto a sharing the other honest node does not hold — availability, as before
 — so confirm the committed node is not the suspect first. Then run `verify-key`, and replace the
-compromised node (re-enrol it, then refresh).
+compromised node (re-enrol it, then refresh, with the operator's waiver if the last refresh is inside the
+interval: "Refresh interval" above).
 
 If the share should not be recovered (the committed node is the suspect, or the key will be rebuilt
 anyway), drop it and clear the alert:
@@ -400,6 +470,10 @@ from 0.4.0-rc.6. So before cosigners of 0.4.0-rc.6 or later run with the default
 be 0.4.0-rc.4 or later (it signs DKG intents) and the refresh job's image the cosigners' release
 (it signs refresh intents); until then set `require_ceremony_intent: false` on every node, and
 remove it once both sign them. To roll the driver or the refresh job back, set it to `false` first.
+
+The refresh interval (0.5.0) needs no protocol change either: each 0.5.0 node refuses a refresh
+inside the interval at its own fence, and a 0.4.0 leader passes that refusal on as an error before
+any node stages a share ("Refresh interval" above).
 
 Every key generated or refreshed on a release before ceremony protocol 2 must be treated as
 exposed to that ceremony's leader (audit C1). A post-upgrade refresh re-isolates the shares of a
