@@ -1022,7 +1022,7 @@ class FrostBackend(
     * A cosigner's `EcdhDerive` only counts as served once its Z has opened the ciphertext (MAC and
     * padding). One holding stale or corrupt EC material under the right id answers a well-formed,
     * wrong Z; it must not become the preferred leader on that answer, or every later decrypt would
-    * lead from it and fail (Codex review of C2). So the ECDH *and* the local decrypt run per
+    * lead from it and fail (second review of C2). So the ECDH *and* the local decrypt run per
     * cosigner inside [[withEcFailover]], and a Z that does not open the blob is a stale answer: the
     * next cosigner is asked (`ec-failover=… reason=ECIES_AFTER_ECDH`), the node that gave it is not
     * preferred, and the failure surfaces only when no cosigner's Z opens the blob. A forged

@@ -4,7 +4,8 @@
 > four firms; updated 2026-10-16 for the internal security review and on 2026-10-27 for
 > `v0.4.0-rc.4`, the choice of auditor and the funding-dependent start; and on 2026-11-13 for
 > `v0.4.0-rc.6` as the pre-read and the completed in-place rehearsal. Line counts below were
-> re-measured on 2026-11-13 for the `v0.4.0` code freeze.
+> re-measured on 2026-11-13 for `v0.4.0`. Updated 2026-11-18: the state to review is `v0.5.0`, not
+> `v0.4.0` (section 2).
 > Companion brief for the auditors: [audit-prep.md](audit-prep.md).
 
 **To:** Cure53. **From:** Stakecraft, maintainers of Rütli. **Contact:** Vasily Istomin (commercial)
@@ -105,21 +106,23 @@ are test material).
 
 ## 2. Scope (in)
 
-Repository state to review: tag `v0.4.0`, target ~2026-11-14, which is also our code freeze. The
-in-place migration rehearsal it depended on (row i) completed on 2026-11-12. Nothing else lands in the audited surface after the freeze except audit fixes.
-The release candidate `v0.4.0-rc.6` (tagged 2026-10-28, commit `e69ed3f`) is the current pre-read: it
+Repository state to review: tag `v0.5.0`, planned for mid-December 2026, which will be our code freeze.
+Nothing lands in the audited surface after it except audit fixes. Until 2026-11-18 this request named
+`v0.4.0`; `v0.5.0` is `v0.4.0` plus hardening from an internal pre-audit review in November 2026 and the
+fixes made since. We will tell you if a component is added before the freeze.
+
+`v0.4.0` (tagged 2026-11-14, commit `ebab88b`) is the current release and the pre-read. It
 contains the split ceremony (B2), the Canton key parser (B1), the ECIES hosted keys (Track C), the
 optional carry of protocol keys (B6, row h) and remediation batches A, B and C (row j, including its
-wire change), plus ceremony intents (rc.4), the in-place migration procedure (row i, rc.5) and the
-rc.6 review fixes. Earlier release candidates are superseded. Between rc.6 and `v0.4.0` there is one
-build-time lockfile update and documentation.
+wire change), plus ceremony intents (rc.4), the in-place migration procedure (row i, rc.5, rehearsal
+completed 2026-11-12) and the rc.6 review fixes. The release candidates are superseded.
 
 | # | Component | Includes | Where |
 |---|---|---|---|
 | a | **FROST-ed25519 cosigner cluster** | DKG; t-of-n signing (two rounds); crash-safe nonce guard; proactive refresh; share repair; share sealing at rest (AES-256-GCM; per-node seal bundles in rc.2, each node holding only its own share key and hosted-key seed, replacing the shared master); mutual TLS and the `signer_allowlist` / `peer_allowlist` role split; per-key ceremony guards and a cluster-wide ceremony fence (signing itself is not fenced since rc.4); create-once guard | `frost/core`, `frost/cosigner` |
 | b | **Cluster-hosted keys** | Replicated whole keys (RSA-2048-OAEP via `aws-lc-rs`, AES-256-GCM, and EC-P256 ECIES keys, see row g); per-recipient wrapping (ephemeral X25519, HKDF-SHA256, AES-256-GCM, AAD-bound); write quorum, anti-entropy, read-repair; offline passphrase-encrypted export/import; per-key decrypt rate limit | `frost/cosigner` (`hosted`, `wrap`, `sync`, `export`, `ratelimit`, `peer`, `verify_hosted`) |
 | c | **JVM KMS driver** | Key-id routing (`frost-` / `rutli-` prefixes, `frost.key-prefix`); `FrostBackend` gRPC client with failover rules, group-key agreement and pinning, and signature verification (DS-H2); M-of-N approval gate and policy; hash-chained audit log; signing journal; Canton 34-byte digest handling; ECIES completion for hosted EC keys (`CantonEcies`) | `driver/src/main` |
-| d | **Split ceremony (milestone B2)** | In `v0.4.0-rc.1`; frozen with v0.4.0 (B6 touches its usage guard, row h). Offline dealer binary `rutli-dealer` splits an existing Canton Ed25519 namespace key into t-of-n FROST shares via `frost_ed25519::keys::split`, using RFC 8032 seed-to-scalar conversion (ed25519-dalek's SHA-512, clamp, reduce mod l); before writing anything it proves group key == Canton key, VSS, `min_signers`, every t-subset reconstructs and signs (`verify_strict`). Each share is sealed to a one-time per-ceremony X25519 recipient key the node minted (`share-recipient`; the hosted-key envelope construction with extra AAD fields, not the static distribution key); every request is signed with the node's mTLS key and verified by the dealer to the cluster CA and the `cosigner<N>` CN, plus a human-confirmed SAS. `import-share` (offline CLI) checks bundle vs node, config and expected fingerprint, VSS, package interpolation, then a no-clobber create (`renameat2(RENAME_NOREPLACE)` / `link(2)`); `abort-import`; DKG and hosted keys refuse `frost-import-` ids; read-only `KeyStatus` and fixed-message `CeremonySignTest` RPCs for an `operator_allowlist` role, and `verify-key` (cross-node digest agreement, every t-subset signs); then `Refresh`. Process hardening of the dealer (core dumps, ptrace, core handlers, mlock, swap). Includes the Canton key parser (B1) it depends on | `frost/core/src/dealer.rs`; `frost/cosigner/src/{share_delivery,share_import,request_auth,verify_key,wrap}.rs`, `src/bin/rutli-dealer.rs`; `frost/canton-key`; runbook [split-ceremony.md](split-ceremony.md) |
+| d | **Split ceremony (milestone B2)** | In `v0.4.0-rc.1`; in `v0.4.0` (B6 touches its usage guard, row h). Offline dealer binary `rutli-dealer` splits an existing Canton Ed25519 namespace key into t-of-n FROST shares via `frost_ed25519::keys::split`, using RFC 8032 seed-to-scalar conversion (ed25519-dalek's SHA-512, clamp, reduce mod l); before writing anything it proves group key == Canton key, VSS, `min_signers`, every t-subset reconstructs and signs (`verify_strict`). Each share is sealed to a one-time per-ceremony X25519 recipient key the node minted (`share-recipient`; the hosted-key envelope construction with extra AAD fields, not the static distribution key); every request is signed with the node's mTLS key and verified by the dealer to the cluster CA and the `cosigner<N>` CN, plus a human-confirmed SAS. `import-share` (offline CLI) checks bundle vs node, config and expected fingerprint, VSS, package interpolation, then a no-clobber create (`renameat2(RENAME_NOREPLACE)` / `link(2)`); `abort-import`; DKG and hosted keys refuse `frost-import-` ids; read-only `KeyStatus` and fixed-message `CeremonySignTest` RPCs for an `operator_allowlist` role, and `verify-key` (cross-node digest agreement, every t-subset signs); then `Refresh`. Process hardening of the dealer (core dumps, ptrace, core handlers, mlock, swap). Includes the Canton key parser (B1) it depends on | `frost/core/src/dealer.rs`; `frost/cosigner/src/{share_delivery,share_import,request_auth,verify_key,wrap}.rs`, `src/bin/rutli-dealer.rs`; `frost/canton-key`; runbook [split-ceremony.md](split-ceremony.md) |
 | e | **Deployment artifacts** (secondary) | Helm chart with the `perNode` topology (one StatefulSet and Service per node, each pod referencing only its own seal and TLS Secrets), Kubernetes manifests (StatefulSet, NetworkPolicy, PDB, per-pod backup sidecar with no exec RBAC, refresh CronJob), deploy-policy CI gate, Docker Compose TLS config, cert generation script | `deploy/helm`, `deploy/k8s`, `deploy/frost`, `scripts/` |
 | f | **Operational runbooks** (procedural review) | Key ceremony, split ceremony (incl. destruction of the whole key), DR/backup/restore, approval quorum, and the pilot migration runbook (`docs/migration.md`), whose steps were exercised in the DevNet B4 cutover rehearsal on 2026-10-14 | `docs/key-ceremony.md`, `docs/split-ceremony.md`, `docs/disaster-recovery.md`, `docs/approval-quorum.md`, `docs/migration.md` |
 | g | **ECIES hosted keys (Track C)** | Merged and part of `v0.4.0` (in `v0.4.0-rc.1`); no longer a separate release or optional addendum. Hosted EC-P256 keys with an `EcdhDerive` RPC on the cosigner (`aws-lc-rs`) and a driver-side ECIES decrypt path (BouncyCastle `IESEngine`, shared secret supplied by the cluster); `import-key` of a Canton EC P-256 encryption key via the B1 parser. Details and our focus questions in section 2.1 | `frost/cosigner/src/{hosted,export,service,node}.rs`, `cosigner.proto`; `driver/.../backend/{CantonEcies,FrostBackend}.scala` |
@@ -129,7 +132,7 @@ build-time lockfile update and documentation.
 
 ### Approximate size
 
-**These numbers are for the `v0.4.0` code freeze.** Measured on 2026-11-13 at the `v0.4.0` release commit (the code
+**These numbers are for `v0.4.0`; we will re-measure at the `v0.5.0` freeze and expect them to move little.** Measured on 2026-11-13 at the `v0.4.0` release commit (the code
 of `v0.4.0-rc.6` plus a lockfile update) with `wc -l` (physical lines, including comments and
 blanks; `tokei` was not used). Rust non-test lines were counted by cutting each file at its first
 `#[cfg(test)]`. Tests, generated code and build output are excluded from the "reviewable" column and
@@ -198,15 +201,16 @@ Where we would like attention, in order:
 
 ### 2.2 Phase 2, before 1.0 (separate line item)
 
-After the v0.4.0 engagement, three features are planned for Rütli 1.0. They are new code on the key
+After the first engagement, four features are planned for Rütli 1.0. They are new code on the key
 path, so we want them reviewed by the same team before 1.0 is tagged, as a second, smaller phase once
-they are code-complete (expected in the first half of 2027):
+they are code-complete (expected in mid-2027):
 
 | Feature | What it does | Where we want attention |
 |---|---|---|
+| **Threshold ECIES** | The P-256 encryption key held as shares: it is generated as shares, each cosigner computes its part of the ECDH, and the driver combines the parts | That no single cosigner learns the key or a shared secret, that a wrong partial result is detected, and the change that makes the share code work for a second curve, which touches code reviewed in the first phase |
 | **Emergency recovery** | Shares encrypted to offline keys held by several recovery officers, for the case where every cosigner is lost at once | It is a path to the whole key: the threshold of officers, the ceremony, storage and destruction of recovery material, and what an officer or a stolen recovery kit can do |
 | **Signed audit log export** | The hash-chained audit log is periodically signed and shipped to append-only storage off the host | That a host administrator cannot rewrite or truncate history unnoticed; key handling for the signing key; gaps and replays |
-| **Encryption-key rotation, mixed mode** | A runbook and driver support for rotating the participant's encryption key, serving an old hosted ECIES key and a new one side by side, with versioned key ids | That a decrypt can never be routed to the wrong key or kind of key, that an old key is retired only when no traffic needs it, and the preparation for threshold ECIES in 2.0 |
+| **Encryption-key rotation, mixed mode** | A runbook and driver support for rotating the participant's encryption key, serving an old hosted ECIES key and a new one side by side, with versioned key ids | That a decrypt can never be routed to the wrong key or kind of key, that an old key is retired only when no traffic needs it, and the move of existing nodes to the threshold key |
 
 Please quote phase 2 separately, with your best estimate of effort; we will confirm its scope and date
 when the code is frozen.
@@ -268,8 +272,8 @@ no forward secrecy; seal-secret protection is software, not HSM or enclave; one 
 | Item | Request |
 |---|---|
 | Start | **After our funding is confirmed**, expected December 2026 to January 2027. Give us your earliest slots from mid-December and the notice you need; the project's 1.0 date follows the audit. |
-| Duration | 2-3 weeks; tell us what you can cover in each. |
-| Code freeze | `v0.4.0`, target ~2026-11-14, which includes the split ceremony, the ECIES hosted keys, milestone B6 and remediation batches A to C (section 1.1). We will give you the commit hash on the day; only audit fixes land afterwards. |
+| Duration | Propose it for the scope in section 2. Our guess is 3-4 weeks; if you quote 2-3, tell us what that covers and what it leaves out. |
+| Code freeze | `v0.5.0`, planned for mid-December 2026: `v0.4.0` (the split ceremony, the ECIES hosted keys, milestone B6 and remediation batches A to C, section 1.1) plus hardening from our November pre-audit review. We will give you the commit hash on the day; only audit fixes land afterwards. |
 | Our availability | One maintainer engineer, available during the engagement for questions. No feature work lands in the audited surface after the freeze. Walkthrough on request. |
 | Deliverables | Written report with findings and severity ratings; per-finding recommendations; executive summary suitable for publication. |
 | Verification of internal fixes | Verifying the internal-review fixes (rc.2 and batch C, section 1.1) is part of the engagement; please show it and the batch C re-review as separate line items. |
@@ -292,7 +296,7 @@ no forward secrecy; seal-secret protection is software, not HSM or enclave; one 
 
 ## 7. Materials we provide
 
-- **Repository:** `https://github.com/Stakecraft/rutli` (public). Tag `v0.4.0-rc.6` (2026-10-28, commit `e69ed3f`) is the current pre-read; earlier release candidates are superseded. Tag `v0.4.0` will be cut at code freeze.
+- **Repository:** `https://github.com/Stakecraft/rutli` (public). Tag `v0.4.0` (2026-11-14, commit `ebab88b`) is the current pre-read; the release candidates are superseded. Tag `v0.5.0` will be cut at code freeze.
 - **Design and operator docs** (relative to the repository root):
   - [README.md](../README.md), [SECURITY.md](../SECURITY.md), [CHANGELOG.md](../CHANGELOG.md)
   - [docs/audit-prep.md](audit-prep.md): engagement brief and evidence index

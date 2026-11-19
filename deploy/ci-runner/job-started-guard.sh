@@ -11,8 +11,9 @@
 # outside anything a PR can change.
 #
 # Allowed: push, schedule, workflow_dispatch, and pull_request whose head is a branch of this
-# repository (only people with write access can push one). Everything else is refused, including
-# pull_request_target, issue_comment and workflow_run. Fails closed: a missing event file, a
+# repository (only people with write access can push one), unless Dependabot opened it or started
+# the run: its pull requests bring action versions nobody has reviewed yet. Everything else is
+# refused, including pull_request_target, issue_comment and workflow_run. Fails closed: a missing event file, a
 # missing jq or an unexpected repository refuses the job.
 #
 # Install: root-owned, 0755, and `ACTIONS_RUNNER_HOOK_JOB_STARTED=<path>` in the runner's .env
@@ -28,6 +29,7 @@ refuse() {
 }
 
 [[ "${GITHUB_REPOSITORY:-}" == "$EXPECTED_REPO" ]] || refuse "repository '${GITHUB_REPOSITORY:-unset}'"
+[[ "${GITHUB_ACTOR:-}" != "dependabot[bot]" ]] || refuse "run started by dependabot[bot]"
 
 case "${GITHUB_EVENT_NAME:-}" in
   push | schedule | workflow_dispatch)
@@ -38,6 +40,8 @@ case "${GITHUB_EVENT_NAME:-}" in
     [[ -r "${GITHUB_EVENT_PATH:-}" ]] || refuse "event file unreadable"
     head_repo="$(jq -r '.pull_request.head.repo.full_name // empty' "$GITHUB_EVENT_PATH" 2>/dev/null)"
     [[ "$head_repo" == "$EXPECTED_REPO" ]] || refuse "pull request from '${head_repo:-unknown}'"
+    pr_user="$(jq -r '.pull_request.user.login // empty' "$GITHUB_EVENT_PATH" 2>/dev/null)"
+    [[ -n "$pr_user" && "$pr_user" != "dependabot[bot]" ]] || refuse "pull request opened by '${pr_user:-unknown}'"
     exit 0
     ;;
   *)
