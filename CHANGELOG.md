@@ -33,6 +33,10 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Fixed
 
+- **`{:?}` on a cluster-hosted key printed its private key.** `HostedKey` derived `Debug`, so a
+  test assertion, a log field or a panic message that formatted a key (or a tombstone still
+  holding one) would have shown `private_der`. No log line did. Its `Debug` now prints
+  `<redacted>` for the private half.
 - **A cosigner's first signature after a restart could lose its session.** Two requests that used
   a key for the first time at once (a sign round 1 and, say, this node leading another signature)
   each loaded the share and built their own in-memory signing state; the one that finished second
