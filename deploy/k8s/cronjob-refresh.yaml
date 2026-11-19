@@ -29,6 +29,13 @@
 # cert paths to the operator files. Do NOT use the driver certificate: once
 # `signing_policy.signer_may_refresh` is off (the target state) the cosigners refuse it, and a job
 # that carries the driver key is a signing credential sitting in a CronJob.
+#
+# From 0.5.0 every cosigner takes part in at most one refresh of a key per
+# `signing_policy.refresh_min_interval_secs` (default 72 h), so a manual run soon after this one is
+# refused (FAILED_PRECONDITION "refresh … refused", rutli_refresh_interval_refusals_total). Every
+# refresh leaves the nodes' older backups unable to restore them; the backup sidecar notices the
+# changed key files and backs up each node within about 5 minutes of the commit
+# (backup.checkEverySecs; docs/disaster-recovery.md).
 apiVersion: batch/v1
 kind: CronJob
 metadata:

@@ -133,6 +133,10 @@ refreshAllowlist: []
 # with `require_intent: false`. The cosigners warn at startup while an opt-out is set; remove it once
 # the driver signs. Switch the other enforcement on (signer_acl_required, signer_may_refresh: false)
 # only after every cosigner AND the driver run this release.
+# Refreshes: each node takes part in at most one refresh of a key per
+# `refresh_min_interval_secs` (default 259200 = 72 h; the shipped CronJob is weekly). For an incident
+# refresh that cannot wait, set `refresh_interval_waived_at: "<UTC time of the decision>"` on every
+# node, roll out, refresh, then remove it (docs/ceremonies.md, "Refresh interval").
 # Example:
 #   signingPolicy:
 #     signer_acl_required: true
@@ -321,10 +325,21 @@ extraEnv: []
 # Each run logs one line, `BACKUP_OK node=<id> files=<n> bytes=<n> dest=<…>` or
 # `BACKUP_FAILED node=<id> …`. The sidecar never exits non-zero (a crashing sidecar would flip the
 # pod's readiness and eat the PDB), so alert on the log line or on the destination's newest object.
+#
+# Every refresh moves each node to a new epoch, and a node's backups of an older epoch no longer
+# restore it. So besides the daily run the sidecar checks every `checkEverySecs` whether this
+# node's committed key files changed (a refresh commit, a new or deleted key) and backs up then:
+# a backup follows every refresh within about 5 minutes, with no manual step. It logs
+# `BACKUP_TRIGGER node=<id> reason=key-files-changed` before such a run.
 backup:
   enabled: false
-  # Daily at this UTC time (HH:MM). Keep refresh drills away from it.
+  # Daily at this UTC time (HH:MM).
   dailyAtUtc: "03:17"
+  # How often to check the key files for a change (seconds). The check is a checksum of a few small
+  # files; a failed backup after a change is retried at this pace until it succeeds. 0 turns the
+  # check off (daily run only), for the split ceremony's window, where a new key file holds dealt
+  # shares until the first refresh (docs/split-ceremony.md).
+  checkEverySecs: 300
   # Also take one backup as soon as the pod starts (shows the destination works right away).
   runOnStart: true
   destination:

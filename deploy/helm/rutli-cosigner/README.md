@@ -96,7 +96,7 @@ Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org A
 | `clusterIdChangeAllowed` | `false` | Let the cosigners start under a different cluster id than the one each recorded in `data_dir/cluster-id`. Deliberate changes only, for one rollout |
 | `operatorAllowlist` | `[]` | Operator role for `verify-key` and `verify-hosted` (KeyStatus + HostedKeyStatus + CeremonySignTest only), e.g. `[operator]` |
 | `refreshAllowlist` | `[]` | Refresher role for the refresh job (Refresh + KeyStatus only, never Sign), e.g. `[refresher]`; may be `[operator]` until a refresher cert exists |
-| `signingPolicy` | `{}` | Cosigner signing policy (audit C2), rendered verbatim as `signing_policy`: `require_intent`, `require_ceremony_intent`, `signer_acl_required`, `signer_may_refresh`, `signer_acl`, `signer_pins`, rate limits, journal retention, approval `rules`/`approvers` — see `docs/approval-quorum.md`. Empty = defaults: ceremony intents required (since 0.4.0-rc.6; opt out with `require_ceremony_intent: false` while the driver is older than 0.4.0-rc.4 or the refresh job's image predates the cosigners' release), signing intents required (since 0.5.0; opt out with `require_intent: false` while the driver is older than 0.4.0-rc.3 or runs with `frost.sign-intents = off`). An unknown key stops the cosigner at startup |
+| `signingPolicy` | `{}` | Cosigner signing policy (audit C2), rendered verbatim as `signing_policy`: `require_intent`, `require_ceremony_intent`, `signer_acl_required`, `signer_may_refresh`, `signer_acl`, `signer_pins`, rate limits, journal retention, approval `rules`/`approvers` — see `docs/approval-quorum.md`. Empty = defaults: ceremony intents required (since 0.4.0-rc.6; opt out with `require_ceremony_intent: false` while the driver is older than 0.4.0-rc.4 or the refresh job's image predates the cosigners' release), signing intents required (since 0.5.0; opt out with `require_intent: false` while the driver is older than 0.4.0-rc.3 or runs with `frost.sign-intents = off`). Each node takes part in at most one refresh of a key per `refresh_min_interval_secs` (default 72 h; incident path: `refresh_interval_waived_at`, docs/ceremonies.md "Refresh interval"). An unknown key stops the cosigner at startup |
 | `hostedKeys.enabled` | `false` | Cluster-hosted RSA/ECIES/AES keys — replicated whole keys, not threshold shares |
 | `hostedKeys.deleteAllowlist` | `[]` | Delete role (audit M2): client CNs whose signed delete intents tombstone hosted keys. Empty = no deletes; never a cosigner CN. `deleteAcl`, `deleteApprovalThreshold` (≥ 1 in production), `deleteGraceSecs` (604800) — `docs/hosted-keys.md`, Delete |
 | `keyfile` | `{}` | Key-file format (audit M4), rendered verbatim as `keyfile`: `cluster_uuid`, `write_version` (1 or 2), `accept_v1` — `docs/disaster-recovery.md` §3h |
@@ -175,7 +175,7 @@ pin must be ≥ 0.3.1.
 ## Backups
 
 `backup.enabled=true` (topology perNode) adds a `backup` sidecar to each cosigner pod. Once a day
-(`backup.dailyAtUtc`, default 03:17 UTC; plus once at pod start) it tars that node's **sealed**
+(`backup.dailyAtUtc`, default 03:17 UTC; once at pod start; and after a change, below) it tars that node's **sealed**
 `keys/*.json` — never dotfiles, nonce markers or temps — its cleared-delete-intent markers
 (`keys/.cleared/`) and its sign journals (`journal/`), and hands the tar to that node's destination:
 
@@ -194,6 +194,16 @@ one node's destination yields one node's sealed files, below threshold. Each run
 `BACKUP_OK node=<id> files=<n> bytes=<n> …` or `BACKUP_FAILED node=<id> reason=…` line; the sidecar
 never exits non-zero (a crashing sidecar would make the pod unready and eat the PDB), so alert on the
 log line or the destination's newest object.
+
+**A backup follows every refresh.** A refresh moves every node to a new epoch, and from its commit
+a node's older backups no longer restore that node (`restore` refuses an older epoch). Besides the
+daily run, the sidecar checks every `backup.checkEverySecs` (default 300) whether the node's
+committed key files changed — a refresh commit, a new or deleted key — and backs up then, logging
+`BACKUP_TRIGGER node=<id> reason=key-files-changed` first; a failed one is retried at that pace. So
+each node's backup of a new epoch exists within about 5 minutes of the commit, with no manual step.
+Staged shares (`keys/.staged/`) are never copied: a backup taken during a refresh holds the epoch
+that is live on that node at that moment. Each node takes part in at most one refresh of a key per
+`signingPolicy.refresh_min_interval_secs` (72 h by default). See `docs/disaster-recovery.md`.
 
 There is **no backup CronJob and no `pods/exec` RBAC** any more. Earlier releases ran
 `rutli-cosigner backup` inside each cosigner via `kubectl exec` from a ServiceAccount whose Role
