@@ -984,6 +984,99 @@ mod tests {
         assert_eq!(id, GOLDEN_REQUEST_ID);
     }
 
+    fn verifier_with(policy: &SigningPolicyConfig) -> IntentVerifier {
+        IntentVerifier::new(Vec::new(), false, "cluster-a".into(), Vec::<String>::new(), policy).unwrap()
+    }
+
+    #[test]
+    fn the_intent_digest_is_the_sha256_of_the_intent_bytes() {
+        let a = pb::SignedIntent { intent: b"one".to_vec(), ..Default::default() };
+        let b = pb::SignedIntent { intent: b"two".to_vec(), ..Default::default() };
+        assert_eq!(intent_digest(&a), <[u8; 32]>::from(Sha256::digest(b"one")));
+        assert_ne!(intent_digest(&a), intent_digest(&b));
+    }
+
+    #[test]
+    fn request_ids_are_random() {
+        assert_ne!(new_request_id(), new_request_id());
+    }
+
+    #[test]
+    fn an_approver_key_is_a_44_byte_ed25519_spki() {
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let mut der = ED25519_SPKI_PREFIX.to_vec();
+        der.extend_from_slice(&[9; 32]);
+        assert_eq!(ed25519_key_from_spki_b64(&b64(&der)).unwrap(), [9; 32]);
+        let mut wrong_oid = der.clone();
+        wrong_oid[8] ^= 1;
+        assert!(ed25519_key_from_spki_b64(&b64(&wrong_oid)).is_err(), "right length, wrong prefix");
+        assert!(ed25519_key_from_spki_b64(&b64(&der[..43])).is_err(), "right prefix, wrong length");
+        assert!(ed25519_key_from_spki_b64("not base64!").is_err());
+    }
+
+    #[test]
+    fn the_ceremony_id_is_read_only_from_an_intent_of_a_sane_size() {
+        let err = ceremony_id_of(&pb::SignedIntent::default(), CeremonyKind::Dkg).unwrap_err();
+        assert!(err.to_string().contains("intent of 0 bytes"), "{err}");
+        // Exactly the size limit is still read; one byte more is not.
+        let mut intent = pb::SignIntent { request_id: vec![1; REQUEST_ID_LEN], ..Default::default() };
+        let base = intent.encoded_len();
+        intent.key_id = "k".repeat(MAX_INTENT_BYTES - base - 3); // tag + 2-byte length prefix
+        let bytes = intent.encode_to_vec();
+        assert_eq!(bytes.len(), MAX_INTENT_BYTES);
+        let signed = pb::SignedIntent { intent: bytes, ..Default::default() };
+        assert_eq!(ceremony_id_of(&signed, CeremonyKind::Dkg).unwrap(), ceremony_id_for(CeremonyKind::Dkg, &[1; REQUEST_ID_LEN]));
+        let mut longer = signed.clone();
+        longer.intent.push(0);
+        let err = ceremony_id_of(&longer, CeremonyKind::Dkg).unwrap_err();
+        assert!(err.to_string().contains(&format!("intent of {} bytes", MAX_INTENT_BYTES + 1)), "{err}");
+    }
+
+    /// The validity window is closed at both ends, and the clock skew stretches it on both sides.
+    #[test]
+    fn intent_validity_boundaries() {
+        let policy = SigningPolicyConfig { intent_max_lifetime_secs: 60, clock_skew_secs: 5, ..Default::default() };
+        let v = verifier_with(&policy);
+        assert_eq!(v.skew_ms(), 5_000);
+        assert_eq!(v.cluster_id(), "cluster-a");
+        let t = 1_800_000_000_000u64;
+        let ok = |i, n, now| v.check_times(i, n, now).is_ok();
+        assert!(ok(t, t, t), "a zero-length window");
+        assert!(!ok(t, t - 1, t), "a negative window");
+        assert!(ok(t, t + 60_000, t), "exactly the maximum lifetime");
+        assert!(!ok(t, t + 60_001, t), "longer than the maximum lifetime");
+        assert!(ok(t, t + 1_000, t - 5_000), "issued exactly the skew in the future");
+        assert!(!ok(t, t + 1_000, t - 5_001));
+        assert!(ok(t, t + 1_000, t + 6_000), "expired exactly the skew ago");
+        assert!(!ok(t, t + 1_000, t + 6_001));
+        let live = VerifiedIntent {
+            digest: [0; 32],
+            key_id: "k".into(),
+            message: vec![],
+            request_id: [0; REQUEST_ID_LEN],
+            signer_cn: "driver".into(),
+            signer_spki_sha256: [0; 32],
+            issued_at_ms: t,
+            not_after_ms: t + 1_000,
+            approvers: vec![],
+        };
+        v.check_live(&live, t + 500).unwrap();
+        assert!(matches!(v.check_live(&live, t + 6_001), Err(DaemonError::PolicyRefused(_))));
+    }
+
+    #[test]
+    fn the_key_acl_limits_listed_clients_and_unlisted_ones_only_when_required() {
+        let acl = std::collections::BTreeMap::from([("driver".to_string(), vec!["frost-p1-".to_string()])]);
+        let open = verifier_with(&SigningPolicyConfig { signer_acl: acl.clone(), ..Default::default() });
+        open.check_acl("driver", "frost-p1-namespace").unwrap();
+        assert!(matches!(open.check_acl("driver", "frost-p2-namespace"), Err(DaemonError::PolicyRefused(_))));
+        open.check_acl("other", "frost-p2-namespace").unwrap();
+        let strict =
+            verifier_with(&SigningPolicyConfig { signer_acl: acl, signer_acl_required: true, ..Default::default() });
+        strict.check_acl("driver", "frost-p1-namespace").unwrap();
+        assert!(matches!(strict.check_acl("other", "frost-p1-namespace"), Err(DaemonError::PolicyRefused(_))));
+    }
+
     /// The vector both test trees pin (see the test above).
     pub const GOLDEN_REQUEST_ID: &str = "e51b7d9a70d36a6b10e31ab7cf1da987175195c3862bf25f43f2a33a27a096cf";
 

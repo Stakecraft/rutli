@@ -199,6 +199,7 @@ Before protecting a real key, run the witnessed **[key ceremony](docs/key-ceremo
 | [docs/disaster-recovery.md](docs/disaster-recovery.md) | Backup, restore, recovery |
 | [docs/observability.md](docs/observability.md) | Prometheus metrics, Grafana dashboard, alerts |
 | [docs/performance.md](docs/performance.md) | Sign/DKG latency evidence (DevNet multi-region numbers) |
+| [docs/mutation-testing.md](docs/mutation-testing.md) | Weekly mutation testing of the signing path, and how to read its report |
 | [docs/testnet-soak.md](docs/testnet-soak.md) | Splice DevNet validator soak: setup, drills, exit criteria |
 | [docs/wire-contract.md](docs/wire-contract.md) | Exactly what Canton sends the driver |
 | [docs/audit-prep.md](docs/audit-prep.md) | Engagement brief and evidence index for a third-party review |

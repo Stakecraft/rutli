@@ -30,6 +30,8 @@ Status: **pre-production, not yet audited**. Use this as the engagement brief an
 - [ ] Driver tests: `scripts/publish-canton-deps.sh v3.6.1` (the KMS Driver API is not on Maven
   Central), then `sbt driver/test`
 - [ ] CI TLS smoke: `scripts/ci-frost-tls-smoke.sh` (also `.github/workflows/ci.yml` job `frost-tls-smoke`)
+- [ ] Mutation testing of the signing path: `scripts/mutants.sh`, weekly report `mutants-summary.json`
+  (`.github/workflows/mutants.yml`, `docs/mutation-testing.md`)
 - [ ] Soak harness + runbook: `deploy/soak/`, `docs/testnet-soak.md`
 - [ ] Hardening history: `CHANGELOG.md` security sections, `[0.2.0]` and `[0.4.0-rc.1]` to
   `[0.4.0-rc.6]`; `docs/security/internal-review-2026-10.md`, `docs/security/threat-model.md`

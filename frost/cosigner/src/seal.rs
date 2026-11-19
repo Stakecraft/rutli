@@ -914,6 +914,53 @@ mod tests {
         assert!(s.unseal(&tampered).is_err());
     }
 
+    /// Both envelope fields are checked: a v1 envelope that says it is not sealed is refused even
+    /// though it would decrypt.
+    #[test]
+    fn an_envelope_must_be_v1_and_sealed() {
+        let s = Sealer::from_master_secret(b"correct horse battery staple", 1);
+        let sealed = s.seal(b"share bytes").unwrap();
+        for (v, flag) in [(1, false), (2, true)] {
+            let mut env: SealedEnvelope = serde_json::from_slice(&sealed).unwrap();
+            env.v = v;
+            env.sealed = flag;
+            let err = s.unseal(&serde_json::to_vec(&env).unwrap()).unwrap_err();
+            assert!(err.to_string().contains("unsupported sealed envelope"), "v={v} sealed={flag}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_legacy_master_of_exactly_the_minimum_length_is_accepted() {
+        let var = "RUTLI_SEAL_TEST_MIN_LEN_MASTER";
+        std::env::set_var(var, "x".repeat(MIN_MASTER_LEN));
+        let ok = read_master_env(var).map(|m| m.len());
+        std::env::set_var(var, "x".repeat(MIN_MASTER_LEN - 1));
+        let short = read_master_env(var);
+        std::env::remove_var(var);
+        assert_eq!(ok.unwrap(), MIN_MASTER_LEN);
+        assert!(matches!(short, Err(DaemonError::Config(_))));
+    }
+
+    #[test]
+    fn a_sealer_has_previous_deks_only_during_a_rotation() {
+        let bundle = NodeSealBundle::random(1);
+        assert!(!bundle.sealer().has_previous());
+        let rotated = bundle.rotated();
+        assert!(rotated.sealer().has_previous());
+        assert!(!rotated.without_previous().sealer().has_previous());
+    }
+
+    #[test]
+    fn seal_keys_say_where_they_came_from_and_never_the_keys() {
+        let legacy = SealKeys::LegacyMaster { env: "SEAL_ENV".into(), master: Zeroizing::new("s3cret".repeat(8)) };
+        assert!(legacy.is_legacy());
+        assert_eq!(legacy.describe(), "legacy shared master env=SEAL_ENV");
+        let bundle =
+            SealKeys::Bundle { path: std::path::PathBuf::from("/seal/node2.json"), bundle: NodeSealBundle::random(2) };
+        assert!(!bundle.is_legacy());
+        assert_eq!(bundle.describe(), "bundle node=2 file=/seal/node2.json");
+    }
+
     #[test]
     fn plaintext_is_not_sealed() {
         assert!(!Sealer::is_sealed(b"{\"key_package\": {}}"));
