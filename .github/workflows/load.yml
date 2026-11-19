@@ -39,8 +39,10 @@ concurrency:
 jobs:
   load:
     name: Load scenarios (compose)
-    # As in ci.yml: the repository's own runner when it is configured, and never for a fork.
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    # Weekly and manual runs on the repository's own runner when it is configured: the same
+    # machine every week, so latencies compare. A pull request (which compares nothing) runs on a
+    # GitHub-hosted runner and leaves the repository's runners to the per-commit CI.
+    runs-on: ${{ github.event_name != 'pull_request' && vars.CI_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 330 || 60 }}
     permissions:
       contents: read
