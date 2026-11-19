@@ -124,7 +124,10 @@ impl HostedSpec {
 /// Canton's `PublicKey` expects (for P-256: `id-ecPublicKey`, named curve `prime256v1`,
 /// uncompressed point, byte-identical to what BouncyCastle writes) — and empty for symmetric keys. Both are hex so the record stays plain JSON inside the sealed
 /// envelope, matching how FROST shares are stored.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is written by hand and never prints `private_der` (a test assertion, a `{:?}` in a log
+/// line or a panic message must not leak the key); `Tombstone`'s derived `Debug` relies on it.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct HostedKey {
     pub spec: HostedSpec,
     pub created_at: u64,
@@ -136,6 +139,18 @@ pub struct HostedKey {
     /// re-deleted by the very tombstone it was restored from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub undeleted_at_ms: Option<u64>,
+}
+
+impl std::fmt::Debug for HostedKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostedKey")
+            .field("spec", &self.spec)
+            .field("created_at", &self.created_at)
+            .field("private_der", &"<redacted>")
+            .field("public_der", &self.public_der)
+            .field("undeleted_at_ms", &self.undeleted_at_ms)
+            .finish()
+    }
 }
 
 impl HostedKey {
@@ -826,5 +841,45 @@ mod tests {
         let n = hex::decode("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551").unwrap();
         assert!(HostedKey::ec_p256_from_scalar(&n, 1).is_err());
         assert!(HostedKey::ec_p256_from_scalar(&[1u8; 31], 1).is_err(), "wrong length");
+    }
+
+    #[test]
+    fn debug_never_prints_the_private_material() {
+        for spec in [HostedSpec::Aes256Gcm, HostedSpec::EcP256, HostedSpec::Rsa2048] {
+            let key = HostedKey::generate(spec, 1).unwrap();
+            assert!(key.private_der.len() >= 64, "{spec:?}: test needs real material to look for");
+            let shown = format!("{key:?} {key:#?}");
+            assert!(!shown.contains(&key.private_der), "{spec:?}: Debug leaked private_der");
+            // No 16-byte (32 hex) window of the material either, at any byte offset, in case a
+            // format ever truncates or shifts it. PKCS#8 embeds the public half (the EC point, the
+            // RSA modulus) and shares OID bytes with the SPKI, which is printed on purpose, so
+            // windows that also occur in the public half are not secret.
+            for w in key.private_der.as_bytes().windows(32).step_by(2) {
+                let w = std::str::from_utf8(w).unwrap();
+                if !key.public_der.contains(w) {
+                    assert!(!shown.contains(w), "{spec:?}: Debug leaked part of private_der");
+                }
+            }
+            assert!(shown.contains("<redacted>"));
+            if spec.is_asymmetric() {
+                assert!(shown.contains(&key.public_der), "{spec:?}: the public half stays visible");
+            }
+
+            // A tombstone within its grace period holds the key; its derived Debug goes through the
+            // redacting one.
+            let t = Tombstone {
+                key_id: "rutli-test".into(),
+                spec: spec.as_str().into(),
+                created_at: 1,
+                commitment: String::new(),
+                deleted_at_ms: 2,
+                purge_after_ms: 3,
+                delete_intent: String::new(),
+                retained: Some(key.clone()),
+            };
+            let shown = format!("{t:?} {t:#?}");
+            assert!(!shown.contains(&key.private_der), "{spec:?}: Tombstone Debug leaked private_der");
+            assert!(shown.contains("<redacted>"));
+        }
     }
 }

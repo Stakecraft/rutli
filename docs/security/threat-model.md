@@ -14,7 +14,8 @@ The statements below hold for a cluster where:
 - every cosigner and the driver run `0.4.0` (batch C shipped in `0.4.0-rc.3`; later statements name
   the release candidate they hold from), on a cluster uniformly upgraded **before** any DKG or refresh
   (`ceremony_protocol` 2 on every node);
-- the enforcement switches are on, identically, on every node: `signing_policy.require_intent`,
+- the enforcement switches are on, identically, on every node: `signing_policy.require_intent`
+  (on by default with TLS since 0.5.0, unless opted out with `false`),
   `require_ceremony_intent` (on by default since 0.4.0-rc.6, unless opted out with `false`),
   `signer_acl_required`, `signer_may_refresh: false`, `require_epoch_match`
   (`docs/approval-quorum.md`, "Switching enforcement on");
@@ -92,6 +93,12 @@ refuses a `frost.key-prefix` that contains either tag. A hosted record already s
 another id (squatted before rc.6) can still be deleted where it is, on one node or several;
 `hosted-clear-tombstone` then frees the id. A restore never puts such a record back where none is
 live.
+
+This holds only while every honest node it can reach requires intents. With
+`require_intent: false` on a node (the opt-out; up to 0.4.0, the default), that node accepts a sign
+round without an intent and counts it (`RutliSignIntentAbsent`): the compromised cosigner can lead
+a signature over any 34-byte digest with its mesh certificate, and in a 2-of-3 cluster one such
+honest peer is enough for a group signature.
 
 **Can:** read every hosted key (inherent to replicated whole keys — `docs/hosted-keys-design.md`),
 refuse or corrupt its own contributions (routed around by t-subset retry, flagged by
