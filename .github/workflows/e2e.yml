@@ -6,10 +6,12 @@
 #   scripts/e2e-split-ceremony.sh       split ceremony, refresh, signing policy (no Canton)
 #   scripts/e2e-carry-protocol-keys.sh  carried signing, sequencer-auth and ECIES keys on Canton 3.6.1
 #   scripts/e2e-ecies-hosted.sh         hosted ECIES keys on Canton 3.6.1, key-file v2 and deletes
+#   scripts/e2e-migration.sh            the whole migration of docs/migration.md on Canton 3.6.1
+#                                       (export, split, new participant, rollback, party move, verify)
 #
 # One job builds the cosigner and the driver jar once and runs the scripts one after another, so the
 # whole workflow takes one runner. Each script is its own step (its own time in the run summary)
-# and runs even when an earlier one failed, so a run reports all three. A failure on main opens an
+# and runs even when an earlier one failed, so a run reports all of them. A failure on main opens an
 # issue (or comments on the open one).
 #
 # Schedule (docs/release-process.md): every push to main, every release candidate tag, on demand,
@@ -217,6 +219,14 @@ jobs:
           SKIP_BUILD: "1"
           KEYFILE_V2_DELETES: "1"
         run: timeout -k 30s 28m scripts/e2e-ecies-hosted.sh
+
+      - name: e2e-migration.sh
+        if: ${{ !cancelled() && steps.build-rust.outcome == 'success' && steps.build-jar.outcome == 'success' }}
+        timeout-minutes: 30
+        env:
+          TMPDIR: ${{ env.E2E_TMP }}
+          SKIP_BUILD: "1"
+        run: timeout -k 30s 28m scripts/e2e-migration.sh
 
       # Logs, configs, journals and the driver audit of every script, on any failure (and when the job
       # timeout cancels a run that is not a superseded pull request run). Key material
