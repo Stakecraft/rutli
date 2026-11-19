@@ -1,9 +1,9 @@
 # Rütli on Splice 0.10 / Canton 3.7
 
-**Status:** 2026-11-15. Read against the Splice 0.10.0 and 0.10.1 release notes, the Canton 3.7.0 release notes, the Canton
+**Status:** 2026-11-18. Read against the Splice 0.10.0 and 0.10.1 release notes, the Canton 3.7.0 release notes, the Canton
 source (tags v3.6.1 to v3.7.3) and the Splice 0.10.1 charts and source. **Run live on 2026-11-15:** two DevNet validators on
-Rütli went from Splice 0.9.0 to 0.10.1 with the driver jar unchanged ([soak log](soak-2026-10-devnet.md)). Not yet seen: a
-validator on Rütli across an LSU (DevNet's is on 2026-11-18).
+Rütli went from Splice 0.9.0 to 0.10.1 with the driver jar unchanged ([soak log](soak-2026-10-devnet.md)). **Across an LSU
+on 2026-11-18:** both followed DevNet's upgrade to protocol version 37 with no gap in signing and no failed signature.
 
 Splice 0.10.0 ships Canton 3.7.1 and 0.10.1 ships Canton 3.7.2. Canton 3.7 adds protocol version 37, which a network adopts
 through a Logical Synchronizer Upgrade (LSU). A validator must run 0.10.x before its network's LSU.
@@ -68,7 +68,9 @@ through, and the `kms` block is unchanged. Render both versions and diff them yo
 
 The LSU itself needs nothing from Rütli. The participant moves to the successor synchronizer by itself, and the driver sees
 only the usual sequencer-authentication signatures. No topology transaction is re-signed: PV 37 stores still accept v30
-topology transactions. Watch the driver audit log and the participant log across the LSU anyway.
+topology transactions. Watch the driver audit log and the participant log across the LSU anyway. On DevNet's LSU of
+2026-11-18 14:00 UTC, both Rütli validators kept signing through the switch, every signature `ok`, with no restart
+and nothing to do.
 
 ## Key export during a migration (Flow 2a and 2b)
 
