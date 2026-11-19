@@ -46,6 +46,85 @@ All notable changes to Rütli are documented here. Format loosely follows
   - Clusters that already set `require_intent: true` see no change.
   - Docs: `docs/approval-quorum.md` ("Switching enforcement on"), `docs/security/threat-model.md`.
 
+### Security
+
+- **A cosigner no longer makes hosted key material servable on one peer's word.** Up to 0.4.0 one
+  compromised cosigner could get an honest node to store its own material for a hosted key id that
+  node did not hold yet: by pushing it during another node's `GenerateKey`, by fencing the id
+  itself and pushing, by answering a read-repair first, or through the sweep's push, which then
+  spread the copy. A leader also counted a node holding other material as a failed replica, so the
+  leader and one more node could report a key created while a third served something else. Now:
+  - A node stores a hosted key it does not hold only when two peers return the same material and
+    every other peer answers, with no other material, no copy it cannot check and no valid
+    tombstone (read-repair, the anti-entropy sweep, a leader that finds the key on its peers). Only
+    an answer counts: a silent peer is unknown, never "does not hold it". Short of that it stores
+    nothing and answers `UNAVAILABLE` (trailer `rutli-error: hosted-unconfirmed`); it answers
+    `NOT_FOUND` only when `n - write_quorum + 1` nodes said they hold nothing under the id, or a node
+    holds a tombstone for it (which a node lacking the key now applies before it pulls). This holds
+    on every path that reads a key: `PublicKey`, `KeyInfo`, `Decrypt`, `EcdhDerive`,
+    `SymmetricEncrypt`, `SymmetricDecrypt`. Read-repair fan-outs are capped at 20 a second per node;
+    past that a lookup answers `UNAVAILABLE`, never `NOT_FOUND`.
+  - The anti-entropy sweep no longer pushes. Each node pulls what it lacks, once per key per sweep.
+  - A push into an id a node lacks is accepted only from the caller holding that node's generation
+    fence for the id under the ceremony id it names, and only if no other peer that answers holds
+    different material, a copy the node cannot check, or a valid tombstone.
+  - A conflict aborts a generation: the leader rolls it back and answers `ABORTED` (trailer
+    `rutli-error: hosted-conflict`). A rollback that misses a node is logged and counted
+    (`rutli_hosted_rollback_incomplete_total`, `RutliHostedRollbackIncomplete`). A leader that lacks
+    the id adopts a key its peers confirm instead of minting one, refuses over an unconfirmed
+    copy, and mints only when `n - write_quorum + 1` nodes answered that they hold nothing under
+    the id (with five nodes and `write_quorum: 2`, two nodes down stop generation). The leader
+    writes a new key to its own disk only after the write quorum holds it. A rollback purge undoes
+    only a write made under the same fence instance, and ends that fence on the node it reaches.
+  - Each pull or push check is charged to a per-node fan-out ceiling, and one sweep pulls at most
+    256 missing ids (64 per listing peer; ids more peers list first); the rest wait for the next
+    sweep. Decrypt budgets are charged once the key is loaded.
+  - Times on a pulled key are the latest of the agreeing peers', not the earliest.
+  - The sweep lists its peers at the same time, 10 s each, and goes on without a peer that hangs.
+  - A key from a peer whose creation or undelete time lies in the future (beyond
+    `signing_policy.clock_skew_secs`) is refused, so it cannot make itself undeletable. An RSA key
+    whose public half is not its own is refused, as EC keys already were.
+  - Every refusal is logged with the peer and the key and counted in the new
+    `rutli_hosted_replication_refusals_total{reason}`; conflicts also count in
+    `rutli_anti_entropy_conflicts_total`. Keys held with a future time are reported in the new
+    `rutli_hosted_keys_future_timestamp`. New alerts `RutliHostedReplicationRefused` and
+    `RutliHostedKeyFutureTimestamp`.
+  - `GenerateKeyReply` carries the leader's `commitment`, and `KeyInfo` with `local_only` reports a
+    node's own copy (`commitment`, derived `public_key_der`, no read-repair), for the driver's check
+    after a generation in a later release.
+
+  What stays open, in `docs/security/threat-model.md`: a compromised cosigner can still fence an id
+  nobody has created yet, store its own material on one honest node and keep a copy itself; it is
+  then the second agreeing peer, so the material spreads by pull and a later generation adopts it.
+  The next change closes this with a client-signed intent for creating a hosted key. A plant still
+  lands when every other holder is unreachable from the receiving node, and with `write_quorum: 2`
+  it can be one of the two holders without keeping a copy. With honest nodes only, a leader that
+  dies after writing one replica, with that replica's node down when the client retries, can still
+  leave the id forked (paged as a conflict); `docs/hosted-keys.md` has the step table.
+
+  **What changes for operators:**
+  - A key held by one node only is no longer copied automatically. That is a key whose other
+    holders are gone for good, a key written with `write_quorum: 1`, or a cluster of two cosigners.
+    `RutliHostedKeyCriticallyUnderReplicated` pages for it; copy it by hand with `export-key` and
+    `import-key` (`docs/hosted-keys.md` §4, `docs/disaster-recovery.md` §3c).
+  - `import-key` writes to one node, and the sweep no longer spreads it from there: run it on every
+    cosigner, or on two and let the third pull.
+  - After losing the whole cluster, restore two nodes' backups (or one, plus a hand copy).
+  - The daemon warns at startup when `hosted_keys.write_quorum` is below 2 or the roster has fewer
+    than three cosigners.
+
+  **Upgrade note (from 0.4.0):** upgrade one cosigner at a time, and **do not create or delete
+  hosted keys while the cluster is mixed**; existing keys keep being served. Upgraded nodes enforce
+  the new rules only on what they accept. A 0.4.0 node still accepts a push from any peer, pulls
+  the first copy and, as leader, writes its own copy first and treats a conflict as a failed
+  replica; a 0.4.0 leader that dies after its own write can still fork the id with a retry. A 0.4.0
+  node answers NOT_FOUND for a deleted key (it ignores `include_tombstone`), so until every node is
+  upgraded a deleted key can be pulled back from two old replicas until the next sweep applies the
+  tombstone. A 0.4.0 node's sweep push to an upgraded node is refused (`reason="unfenced"`,
+  `RutliHostedReplicationRefused`) until the upgraded node has pulled the key itself. Before you start, run `verify-hosted` for every hosted key and check
+  `rutli_anti_entropy_conflicts_total`: a replica that diverged earlier is not repaired by the
+  upgrade (`docs/hosted-keys.md` §4).
+
 ### Changed
 
 - **A sign round 2 for a session the node no longer holds answers `ABORTED`, not `INTERNAL`,** and

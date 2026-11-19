@@ -46,9 +46,13 @@ annotations, NetworkPolicy ingress for pods labelled `rutli.io/scraper: "true"`)
 | `rutli_ceremony_sign_test_rate_limited_total` | counter | — | Split-ceremony `CeremonySignTest` calls refused by the per-key rate limit. A `verify-key --sign-test` run never trips it |
 | `rutli_unreadable_key_files_total` | counter | — | Key files present on disk that could not be unsealed (wrong seal secret, partial restore, corruption) and were therefore skipped from the hosted-key inventory, or could not even be opened (ownership/permissions) by the key-store probe while the rest of the store could |
 | `rutli_hosted_key_ops_total` | counter | `op`=generate\|decrypt\|ecdh_derive\|symmetric_encrypt\|symmetric_decrypt\|delete, `result`=ok\|error | Signer-side hosted-key operation outcomes |
-| `rutli_anti_entropy_repairs_total` | counter | — | Hosted keys a sweep pulled to this node or pushed to a peer that lacked them |
+| `rutli_anti_entropy_repairs_total` | counter | — | Hosted keys a sweep pulled to this node, each confirmed by two peers (since 0.5.0 the sweep pushes nothing; up to 0.4.0 it also counted pushes) |
 | `rutli_key_replicas` | gauge | — | Fewest cosigners holding any one hosted key, as of the last anti-entropy sweep (`NaN` until a sweep sees a hosted key, so comparisons never fire on an idle cluster). Below the cluster size means a write has not healed yet |
-| `rutli_anti_entropy_conflicts_total` | counter | — | Hosted keys found with *different* material on this node and a peer under the same key id — an invariant violation, never auto-reconciled |
+| `rutli_anti_entropy_conflicts_total` | counter | — | *Different* material seen under one hosted key id: this node and a peer (the sweep), peers this node would pull from, a push refused over another copy, or a generation this node led aborted — an invariant violation, never auto-reconciled |
+| `rutli_hosted_replication_refusals_total` | counter | `reason`=unfenced\|conflict\|disagreement\|unconfirmed\|invalid\|timestamp\|generate-conflict\|unverifiable\|throttled | Hosted key material this node refused to store, or a generation it aborted (0.5.0; reasons in `docs/hosted-keys.md`, section 4, "Pushes a node refuses"). `unconfirmed` is normal while a node is down |
+| `rutli_anti_entropy_pull_failures_total` | counter | — | Missing hosted keys a sweep tried to pull and did not (unconfirmed, conflicting, or an error); the key id is in the debug log, refusals also by reason |
+| `rutli_hosted_rollback_incomplete_total` | counter | — | Nodes the rollback of an aborted hosted-key generation did not reach; each may keep a copy nobody was given (0.5.0) |
+| `rutli_hosted_keys_future_timestamp` | gauge | — | Hosted keys held here whose creation or undelete time lies in the future beyond the clock skew allowance (they refuse every delete until then); set at startup and by every sweep |
 | `rutli_sign_intent_absent_total` | counter | — | Signatures this node took part in without a client-signed intent (accepted only where `signing_policy.require_intent` is off: set to false, or a node without TLS; on by default with TLS). Must stop growing once the driver signs intents; never moves on an enforcing cluster |
 | `rutli_ceremony_intent_absent_total` | counter | — | DKG/refresh fences and part 1s this node accepted without a client-signed ceremony intent (accepted only while `signing_policy.require_ceremony_intent` is off) |
 | `rutli_ceremony_intent_refusals_total` | counter | `reason`=missing\|malformed\|certificate\|signer\|pin\|signature\|cluster\|purpose\|key\|expiry\|acl\|ceremony-id | DKG/refresh ceremony intents this node refused: at the fence or part 1 of a ceremony a peer leads, or as leader on `Signer.Dkg`/`Signer.Refresh`. A refusal on the peer path means a leader asked for a ceremony no authorized client requested |
@@ -85,8 +89,9 @@ exhaustive. Three collection details matter when writing rules:
   steadily for as long as it sits there. Alert on a sustained increase rather
   than on a single bump, and read the key id out of the logs — it is never a label.
 
-`rutli_hosted_keys`, `rutli_unreadable_key_files_total` and both `anti_entropy_*` counters are
-primed to zero at startup, so they exist even where hosted keys are disabled; `rutli_key_replicas`
+`rutli_hosted_keys`, `rutli_unreadable_key_files_total`, both `anti_entropy_*` counters,
+`rutli_hosted_keys_future_timestamp` and every `reason` of `rutli_hosted_replication_refusals_total`
+are primed to zero at startup, so they exist even where hosted keys are disabled; `rutli_key_replicas`
 is primed to `NaN` for the same reason (zero would page an idle cluster instantly).
 `rutli_hosted_key_ops_total` is primed for every `op` and `result`.
 
@@ -134,7 +139,10 @@ sum(rate(rutli_sign_duration_seconds_sum{result="ok"}[1h]))
   pending-session growth, ceremony failure (critical), repeated aborts, hosted-key op errors, a
   hosted key under-replicated (below the cluster size) or critically under-replicated (a single
   copy — critical), hosted-key counts diverging across the job, unreadable key files, hosted-key
-  conflict (critical). CI runs `promtool check rules` (pinned `prom/prometheus` image) on this file
+  conflict (critical), hosted key material refused (`RutliHostedReplicationRefused`: unfenced,
+  invalid, timestamp, unverifiable, throttled), a held hosted key with a time in the future
+  (`RutliHostedKeyFutureTimestamp`), an aborted generation's rollback that missed a node
+  (`RutliHostedRollbackIncomplete`). CI runs `promtool check rules` (pinned `prom/prometheus` image) on this file
   and on the rendered PrometheusRule, and fails if the render is stale:
   `scripts/ci-prometheus-rules.sh` (set `PROMTOOL=` to use a local binary instead of docker).
 - Dashboard: import
@@ -190,25 +198,32 @@ sum(rate(rutli_sign_duration_seconds_sum{result="ok"}[1h]))
 6. **`rutli_key_replicas` below the cluster size** (or `rutli_hosted_keys` differing across
    instances, the same signal seen sideways) — a key exists on fewer nodes than the cluster is
    configured for. Writes commit at `write_quorum` (default 2 of 3) and roll back below it, so a
-   node that was down during a `GenerateKey` legitimately lags until anti-entropy heals it;
-   `rutli_anti_entropy_repairs_total` should tick when it does. A shortfall that persists past
+   node that was down during a `GenerateKey` legitimately lags until its own sweep pulls the key
+   from two peers; `rutli_anti_entropy_repairs_total` should tick when it does. A key held by one
+   node only is never copied automatically (`rutli_hosted_replication_refusals_total{reason=
+   "unconfirmed"}` climbs on the nodes that lack it): copy it by hand (`docs/hosted-keys.md`,
+   section 4). A shortfall that persists past
    several sweep intervals means healing is failing, and the cluster is running with less
    redundancy than it reports: two replicas survive one node loss, one survives none. The gauge is
    a cluster-wide minimum with no key id — take that from the sweep logs.
 7. **Any `rutli_anti_entropy_conflicts_total` increase** — two nodes hold *different* material
-   under the same key id. Hosted keys are create-once-immutable, so this is not lag and not a
-   merge conflict; it is an invariant violation (a reused key id, a restore from a foreign
-   cluster's backup, or storage corruption). The sweep deliberately refuses to reconcile it —
-   picking a side automatically could destroy the only copy that can decrypt already-recorded
-   traffic. Page, freeze rotation for that key, and resolve it by hand.
+   under the same key id, or a node refused a push or aborted a generation because of it. Hosted
+   keys are create-once-immutable, so this is not lag and not a merge conflict; it is an invariant
+   violation (a reused key id, a restore from a foreign cluster's backup, storage corruption, or a
+   compromised cosigner planting a key). Nothing reconciles it automatically — picking a side could
+   destroy the only copy that can decrypt already-recorded traffic. Page, freeze rotation for that
+   key, and resolve it by hand (`docs/hosted-keys.md`, section 4).
+   `rutli_hosted_replication_refusals_total` says which path saw it; the log line names the key
+   and the peer. The counter goes up every time the conflict is seen, so one unresolved conflict
+   adds to it at every sweep; the alert stays on until about an hour after it is resolved.
 8. **`rutli_unreadable_key_files_total` non-zero** — a key file is present on disk but cannot be
    unsealed, so it is logged at error level, counted, and *skipped* from the hosted-key inventory
    (or cannot be opened at all — wrong ownership/permissions on that one file — which the
    key-store probe counts and logs at warn level; fix the file's ownership).
    Skipping is deliberate: failing the whole listing would stop anti-entropy for every healthy key
    too, turning one damaged file into a cluster-wide halt of self-healing. The cost is that the
-   damaged key is invisible to replication — it is neither pushed to peers nor pulled back from
-   them, and (6) stays even across the cluster while that key has fewer copies than you think.
+   damaged key is invisible to replication — peers do not see this node's copy, and this node
+   does not pull it back, and (6) stays even across the cluster while that key has fewer copies than you think.
    Usual causes: a seal master secret rotated without re-sealing the existing files, a partial
    restore or one taken from a foreign cluster, disk corruption. None of these self-heal; the file
    will sit there until an operator resolves it. Take the key id from the log line, then either

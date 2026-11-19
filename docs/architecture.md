@@ -171,8 +171,10 @@ rationale in [hosted-keys-design.md](hosted-keys-design.md)):
   pin, it refuses to start when that pin does not match its seal keys, so a wrong bundle or wrong
   mount is caught *before* any key exists. Without the own pin the mismatch shows only when peers
   refuse to replicate to it.
-- **Anti-entropy and read-repair.** A sweep every 300 s pulls keys this node lacks and pushes keys a
-  peer lacks; a request landing on a lagging replica pulls on demand. Hosted keys are
+- **Anti-entropy and read-repair.** A sweep every 300 s pulls keys this node lacks; a request
+  landing on a lagging replica pulls on demand. Since 0.5.0 a node stores a key it lacks only when
+  two peers return the same copy, the sweep never pushes, and a peer's push into an id the node
+  lacks is accepted only from the leader holding its generation fence (`docs/hosted-keys.md` §4). Hosted keys are
   create-once-immutable (Canton rotates by minting a new id plus a topology transaction), so a
   commitment mismatch between two nodes under one key id is a **hard error** — page-worthy, never
   auto-reconciled.
