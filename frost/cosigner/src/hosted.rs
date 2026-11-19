@@ -276,20 +276,54 @@ impl HostedKey {
             .map_err(|_| DaemonError::Config("stored EC P-256 key is unusable".into()))
     }
 
-    /// Check that the stored material is internally consistent: for EC P-256, that the stored
-    /// public key is the one the private scalar derives. Run on every path that accepts key
-    /// material from outside this node (replication, import), so a peer or an artifact can never
-    /// pair a private key with somebody else's public key — Canton would then publish a key this
-    /// cluster cannot decrypt for. RSA and AES material is checked by its own operations' parsers.
+    /// Check that the stored material is internally consistent: for EC P-256 and RSA, that the
+    /// stored public key is the one the private key derives; for AES-256, that the key is 32 bytes.
+    /// Run on every path that accepts key material from outside this node (replication, import),
+    /// so a peer or an artifact can never pair a private key with somebody else's public key —
+    /// Canton would then publish a key this cluster cannot decrypt for.
     pub fn validate(&self) -> Result<()> {
-        if self.spec == HostedSpec::EcP256 {
-            let sk = self.ec_private_key()?;
-            if ec_spki(&sk)? != self.public_key_der()? {
-                return Err(DaemonError::Config(
-                    "EC P-256 key material is inconsistent: the stored public key is not the one \
-                     the private key derives"
-                        .into(),
-                ));
+        match self.spec {
+            HostedSpec::EcP256 => {
+                let sk = self.ec_private_key()?;
+                if ec_spki(&sk)? != self.public_key_der()? {
+                    return Err(DaemonError::Config(
+                        "EC P-256 key material is inconsistent: the stored public key is not the one \
+                         the private key derives"
+                            .into(),
+                    ));
+                }
+            }
+            // Re-derives the public key from the PKCS#8 and compares it with the stored one.
+            HostedSpec::Rsa2048 => {
+                self.derived_public_key_der()?;
+            }
+            HostedSpec::Aes256Gcm => {
+                if self.private_bytes()?.len() != 32 {
+                    return Err(DaemonError::Config("aes-256-gcm key material is not 32 bytes".into()));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Refuse timestamps that lie in the future: `created_at` (seconds) and `undeleted_at_ms` must
+    /// not be later than `now_ms + skew_ms`. The delete check compares a delete intent's issue time
+    /// with [`HostedKey::live_since_ms`], so a time in the future would make the key refuse every
+    /// delete until then. Checked on every key that arrives from a peer; the times are not part of
+    /// the commitment.
+    pub fn check_times(&self, now_ms: u64, skew_ms: u64) -> Result<()> {
+        let limit = now_ms.saturating_add(skew_ms);
+        if self.created_at.saturating_mul(1000) > limit {
+            return Err(DaemonError::HostedInvalid(format!(
+                "created_at {} s lies in the future (now {} ms, clock skew allowance {} ms)",
+                self.created_at, now_ms, skew_ms
+            )));
+        }
+        if let Some(u) = self.undeleted_at_ms {
+            if u > limit {
+                return Err(DaemonError::HostedInvalid(format!(
+                    "undeleted_at {u} ms lies in the future (now {now_ms} ms, clock skew allowance {skew_ms} ms)"
+                )));
             }
         }
         Ok(())
