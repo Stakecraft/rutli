@@ -13,6 +13,7 @@ import com.stakecraft.rutli.grpc.{
   DkgRequest,
   EcdhDeriveReply,
   EcdhDeriveRequest,
+  GenerateKeyReply,
   GenerateKeyRequest,
   GroupKeyRequest,
   HealthRequest,
@@ -43,6 +44,7 @@ import scala.annotation.tailrec
 import scala.jdk.CollectionConverters._
 import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContext, Future, blocking}
+import scala.util.control.NonFatal
 
 /** Phase 2 backend: routes the Ed25519 namespace/identity key to the external FROST cosigner
   * cluster (threshold signing, no node ever holds the whole key). Every other operation — ECDSA
@@ -788,16 +790,230 @@ class FrostBackend(
     * and may fail over on a timeout as well as a refused connection — unlike DKG, where a retry
     * could run a second ceremony. It is still a write, so a leader-side INTERNAL is surfaced, not
     * routed around (see [[FrostBackend.isNodeDown]]).
+    *
+    * The request carries a generate intent (purpose `generate-key`) signed with the mTLS identity,
+    * naming the key, its spec and the cosigner asked to lead: every cosigner verifies it at the
+    * generation's fence. A FRESH intent per endpoint tried, as for a DKG: the intent names its
+    * leader, and its request id is spent on every node the previous attempt fenced. Before each
+    * attempt the endpoint is asked which roster slot it serves (`Capabilities.node_identifier`, on
+    * the same channel); an endpoint that cannot say (a cosigner older than 0.5.0) is refused.
+    *
+    * The leader's reply is one cosigner's word. Before the key id goes back to Canton every endpoint
+    * is asked for its own copy ([[confirmHostedCopies]]), inside the failover: a reply the other
+    * nodes contradict (absent copies, other material, a wrong spec) fails the call without retry; a
+    * reply short of confirmations only because endpoints were silent moves on to the next endpoint,
+    * which leads the same id under a fresh intent (it holds the key, adopts it from agreeing peers or
+    * refuses; it never mints over a copy) and is checked again. Each endpoint is tried at most once.
+    * A leader whose reply fails the check loses the lead and does not become the preferred one.
     */
   private def generateHosted(keyId: String, spec: String): Future[String] = {
-    val req = GenerateKeyRequest.newBuilder().setKeyId(keyId).setSpec(spec).build()
-    clusterCall("generateKey", isNodeDown, isLeaderSick)(_.generateKey(req)).map { reply =>
+    val notes = currentNotes.get
+    val cluster: Option[String] =
+      if (!signIntents) None
+      else
+        intentSigner.flatMap { _ =>
+          val c = learnClusterId()
+          if (c.isEmpty)
+            logger.warn(
+              s"FROST: hosted key $keyId is generated WITHOUT a generate intent: no cosigner reports a cluster id " +
+                "(frost.cluster-id unset); cosigners with signing_policy.require_ceremony_intent will refuse it."
+            )
+          c
+        }
+    val withIntent = intentSigner.isDefined && cluster.isDefined
+    def request(stub: SignerGrpc.SignerBlockingStub): GenerateKeyRequest = {
+      val b = GenerateKeyRequest.newBuilder().setKeyId(keyId).setSpec(spec)
+      for (signer <- intentSigner; c <- cluster) {
+        val leader = stub.capabilities(CapabilitiesRequest.newBuilder().build()).getNodeIdentifier
+        if (leader <= 0)
+          throw Status.FAILED_PRECONDITION
+            .withDescription(
+              s"cannot generate hosted key $keyId through this cosigner: it does not report its roster identifier " +
+                "(a cosigner older than 0.5.0) — upgrade the cosigners; a generate intent must name its leader"
+            )
+            .asRuntimeException()
+        val requestId = FrostIntentSigner.newRequestId()
+        b.setIntent(signer.signGenerate(c, keyId, spec, leader, requestId, System.currentTimeMillis(), intentLifetime.toMillis))
+        logger.info(
+          s"FROST: hosted key $keyId: generate intent for cosigner $leader " +
+            s"(ceremony ${FrostIntentSigner.generateCeremonyId(requestId)})"
+        )
+      }
+      b.build()
+    }
+    Future(blocking {
+      val start = preferred.get
+      val answered = new AtomicInteger(-1)
+      // A refusal (thrown) fails the call at once and costs the leader the lead here; a rejection
+      // (returned) is demoted and failed over by withCheckedFailover.
+      val check = (endpoint: String, reply: GenerateKeyReply) => {
+        val leader = answered.get
+        try confirmHostedCopies(keyId, spec, reply, withIntent, endpoint, notes)
+        catch {
+          case e: KmsDriverException =>
+            demote(leader)
+            throw e
+        }
+      }
+      // NoPreference: answering does not make the leader preferred here; only a reply that passes
+      // the check does.
+      val reply = withCheckedFailover[GenerateKeyReply](
+        "generateKey",
+        isNodeDown,
+        isLeaderSick,
+        notes,
+        check,
+        NoPreference,
+        start,
+        (i: Int) => answered.set(i),
+      )(stub => stub.generateKey(request(stub)))
+      preferred.compareAndSet(start, answered.get)
+      reply
+    }).map { reply =>
       learnSpec(keyId, spec)
       logger.info(
         s"FROST: hosted key $keyId ready (created=${reply.getCreated}, replicas=${reply.getReplicas})"
       )
       keyId
     }
+  }
+
+  /** Copies of a new hosted key the driver needs to see before it believes the leader: two, or the
+    * lone endpoint of a single-endpoint (dev) roster, as for a group key. A constant: the driver
+    * does not know the cluster's write quorum, and a cosigner could lie about it. */
+  private val requiredCopies: Int = if (channels.size == 1) 1 else 2
+
+  /** The check of a `GenerateKey` reply from `leaderEndpoint` (a new key or an existing one): every
+    * endpoint is asked for its OWN copy (`KeyInfo` with `local_only`, no read-repair), in parallel.
+    * Accepted (None) only when at least [[requiredCopies]] nodes hold a copy with the reply's
+    * commitment, spec and public key, and no node reports other material under the id. Silent
+    * endpoints, nodes without a copy and nodes too old to report a commitment count neither way.
+    *
+    * Two outcomes when it is not accepted:
+    *  - a [[Rejected]] (code `UNCONFIRMED`) when too few copies confirm only because endpoints were
+    *    silent: the silent ones could have confirmed. The caller fails over to the next endpoint,
+    *    and when none is left the rejection's error (non-retryable, naming the silent endpoints)
+    *    ends the call;
+    *  - a thrown non-retryable [[KmsDriverException]] for everything else (a wrong spec, no
+    *    commitment where one is due, a node reporting other material, too few copies although the
+    *    nodes answered). The key id never reaches Canton: a leader whose reply the cluster does not
+    *    confirm may have chosen material only it holds, and the id is left to an operator
+    *    (docs/hosted-keys.md).
+    *
+    * A reply without a commitment is from a cosigner older than 0.5.0: refused when the request
+    * carried an intent (only a 0.5.0 leader accepts one, and it always sends a commitment), else the
+    * check is skipped with a WARN — the cosigners then accept generations without an intent anyway
+    * (`require_ceremony_intent: false`, or no TLS). */
+  private def confirmHostedCopies(
+      keyId: String,
+      spec: String,
+      reply: GenerateKeyReply,
+      withIntent: Boolean,
+      leaderEndpoint: String,
+      notes: AuditNotes,
+  ): Option[Rejected] = {
+    def refuse(why: String): Nothing = {
+      notes.add("hosted-check=failed")
+      logger.error(s"FROST: hosted key $keyId from $leaderEndpoint REFUSED: $why")
+      throw KmsDriverException(new SecurityException(s"hosted key $keyId: $why"), retryable = false)
+    }
+    if (reply.getSpec != spec) refuse(s"the leader reports spec '${reply.getSpec}', the request was for '$spec'")
+    if (reply.getCommitment.isEmpty) {
+      if (withIntent) refuse("the leader's reply carries no commitment, which every cosigner that accepts a generate intent sends")
+      notes.add("hosted-check=skipped")
+      logger.warn(
+        s"FROST: hosted key $keyId: the leader $leaderEndpoint sent no commitment (a cosigner older than 0.5.0); " +
+          "its copies are not checked"
+      )
+      None
+    } else checkCopies(keyId, reply, leaderEndpoint, notes, refuse)
+  }
+
+  /** One endpoint's answer to the copy probe: its `KeyInfo`, or why it gave none (`Left`, silent). */
+  private def probeCopies(keyId: String): Vector[(String, Either[String, KeyInfoReply])] = {
+    val req = KeyInfoRequest.newBuilder().setKeyId(keyId).setLocalOnly(true).build()
+    val deadline = requestTimeout.min(10.seconds)
+    val probes: Vector[Future[(String, Either[String, KeyInfoReply])]] = channels.indices.toVector.map { i =>
+      Future(blocking {
+        val answer: Either[String, KeyInfoReply] =
+          try
+            Right(
+              SignerGrpc
+                .newBlockingStub(channels(i))
+                .withDeadlineAfter(deadline.toMillis, TimeUnit.MILLISECONDS)
+                .keyInfo(req)
+            )
+          catch {
+            case e: StatusRuntimeException => Left(e.getStatus.getCode.toString)
+            case NonFatal(e)               => Left(e.getClass.getSimpleName)
+          }
+        endpoints(i) -> answer
+      })
+    }
+    // Each call has its own deadline, so this wait normally ends with every probe complete. If it
+    // fires anyway (a starved pool), the answers already in hand are kept and the rest are silent.
+    try scala.concurrent.Await.ready(Future.sequence(probes), deadline + 2.seconds)
+    catch { case _: java.util.concurrent.TimeoutException => () }
+    probes.zipWithIndex.map { case (f, i) =>
+      f.value match {
+        case Some(scala.util.Success(answer)) => answer
+        case Some(scala.util.Failure(e))      => endpoints(i) -> Left(e.getClass.getSimpleName)
+        case None                             => endpoints(i) -> Left("NO_ANSWER")
+      }
+    }
+  }
+
+  /** The copies part of [[confirmHostedCopies]], for a reply that carries a commitment. */
+  private def checkCopies(
+      keyId: String,
+      reply: GenerateKeyReply,
+      leaderEndpoint: String,
+      notes: AuditNotes,
+      refuse: String => Nothing,
+  ): Option[Rejected] = {
+    val answers = probeCopies(keyId)
+    def same(r: KeyInfoReply): Boolean =
+      r.getCommitment == reply.getCommitment && r.getSpec == reply.getSpec && r.getPublicKeyDer == reply.getPublicKeyDer
+    val confirming = answers.collect { case (e, Right(r)) if r.getExists && !r.getCommitment.isEmpty && same(r) => e }
+    val other = answers.collect { case (e, Right(r)) if r.getExists && !r.getCommitment.isEmpty && !same(r) => e }
+    val silent = answers.collect { case (e, Left(_)) => e }
+    def describe: String =
+      answers
+        .map {
+          case (e, Left(code))                          => s"$e=$code"
+          case (e, Right(r)) if !r.getExists            => s"$e=absent"
+          case (e, Right(r)) if r.getCommitment.isEmpty => s"$e=unknown"
+          case (e, Right(r)) if same(r)                 => s"$e=confirms"
+          case (e, Right(r))                            => s"$e=other(${hexOf(r.getCommitment).take(16)}…, ${r.getSpec})"
+        }
+        .mkString(", ")
+    // Fail closed, as a cosigner aborts a generation on a conflict. The claim is the endpoint's own
+    // and is not verified here: a faulty or compromised node can make it falsely, and so veto this
+    // generation (availability only; it could refuse the generation at the cosigner level anyway).
+    if (other.nonEmpty)
+      refuse(
+        s"${other.mkString(", ")} report(s) holding OTHER material under the id than the leader reported " +
+          s"(${hexOf(reply.getCommitment).take(16)}…). This is that endpoint's own statement and may be false " +
+          "(a faulty or compromised node can make it); either way one of the cosigners is not consistent. " +
+          s"Not given to Canton. Answers: $describe"
+      )
+    if (confirming.size >= requiredCopies) {
+      notes.add(s"hosted-check=ok copies=${confirming.size}")
+      None
+    } else if (confirming.size + silent.size >= requiredCopies) {
+      // Short only because endpoints were silent: they could have confirmed. Retried on the next
+      // endpoint by the caller; the error ends the call when none is left.
+      val why =
+        s"only ${confirming.size} cosigner(s) confirm the material the leader $leaderEndpoint reported, " +
+          s"$requiredCopies needed; silent: ${silent.mkString(", ")}. Not given to Canton. Answers: $describe"
+      notes.add("hosted-check=unconfirmed")
+      logger.warn(s"FROST: hosted key $keyId from $leaderEndpoint not confirmed: $why")
+      Some(Rejected(Unconfirmed, KmsDriverException(new SecurityException(s"hosted key $keyId: $why"), retryable = false)))
+    } else
+      refuse(
+        s"only ${confirming.size} cosigner(s) confirm the material the leader reported, $requiredCopies needed — " +
+          s"not given to Canton. Answers: $describe"
+      )
   }
 
   override def sign(data: Array[Byte], keyId: String, algo: SigningAlgoSpec): Future[Array[Byte]] =
@@ -1368,8 +1584,16 @@ object FrostBackend {
   private def isClusterRefusal(s: Status): Boolean =
     s.getCode == Status.Code.PERMISSION_DENIED && Option(s.getDescription).exists(_.contains("intent is for cluster"))
 
+  /** `observed` for a [[withCheckedFailover]] call whose answer must not make its node the
+    * preferred leader by itself (no endpoint has this index, so the compare-and-set never hits). */
+  private val NoPreference = -1
+
   /** The failover note's reason for a signature the pinned group key does not verify. */
   private val BadSignature = "BAD_SIGNATURE"
+
+  /** The failover note's reason for a hosted-key reply too few cosigners confirmed because some
+    * were silent. */
+  private val Unconfirmed = "UNCONFIRMED"
 
   /** An answer the driver checked and refused to use (see `withCheckedFailover`): `code` names it
     * in the `failover=` note, `error` is what the call fails with when no cosigner is left. */
