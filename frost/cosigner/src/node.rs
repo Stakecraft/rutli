@@ -4046,7 +4046,7 @@ mod sign_policy_race_tests {
         let tmp = tempfile::tempdir().unwrap();
         let pki = TestPki::new();
         let policy =
-            SigningPolicyConfig { require_intent: true, require_ceremony_intent: Some(false), ..Default::default() };
+            SigningPolicyConfig { require_intent: Some(true), require_ceremony_intent: Some(false), ..Default::default() };
         let nodes: Vec<Arc<Node>> = (1..=3u16)
             .map(|i| {
                 let root = tmp.path().join(format!("n{i}"));

@@ -16,9 +16,10 @@
 # intent with its client certificate — runs on every node under the intent's ceremony id (the
 # driver's refresh refused: signer_may_refresh off, audit C2); verify-key again
 # (new digest, refresh count 1); a re-import after refresh is refused; restart of every node then
-# verify-key; a Sign with one node down and no signing intent (accepted: require_intent off, the
-# rolling-upgrade mode, journaled as no-intent), verified independently by OpenSSL; then
-# require_intent on: the same intent-less Sign is refused, and verify-key --sign-test still passes.
+# verify-key; a Sign with one node down and no signing intent (accepted: the explicit opt-out
+# require_intent false, journaled as no-intent), verified independently by OpenSSL; then
+# require_intent at its default (on with TLS): the same intent-less Sign is refused, and verify-key
+# --sign-test still passes.
 #
 # Requires: cargo, openssl (3.x, for Ed25519 verify), jq, grpcurl.
 set -euo pipefail
@@ -76,8 +77,11 @@ mkconfig() { # node-config-name  cert-name  out
     | .tls.key = "\($work)/certs/\($cert).key"
     | .refresh_allowlist = ["refresher"]
     | .signing_policy.signer_may_refresh = false
+    | .signing_policy.require_intent = false
     | del(.metrics_listen)' "$REPO/deploy/frost/config-tls/$1.json" >"$3"
 }
+# require_intent false: step 9 signs with grpcurl, which cannot sign an intent (the opt-out is what
+# it tests); step 10 removes it again.
 for i in 1 2 3; do mkconfig "cosigner$i" "cosigner$i" "$WORK/c$i.json"; done
 # The operator role (operator_allowlist: KeyStatus + CeremonySignTest only) runs verify-key; the
 # refresher role (refresh_allowlist: Refresh + KeyStatus only), like the refresh CronJob, runs
@@ -274,7 +278,7 @@ for i in 1 2 3; do wait_healthy "$i"; done
 rep="$(cli --config "$WORK/operator.json" verify-key --key-id "$KEY_ID" --expect-fingerprint "$FP" --sign-test --json || true)"
 jq -e '.ok and .refresh_count == 1' <<<"$rep" >/dev/null || fail "verify-key after restart: $rep"
 
-step "9. Sign with node 3 down and no signing intent (require_intent off), verified by OpenSSL under the Canton public key"
+step "9. Sign with node 3 down and no signing intent (require_intent false), verified by OpenSSL under the Canton public key"
 stop 3
 MSG_HEX="1220$(printf 'rutli e2e split ceremony' | openssl dgst -sha256 -hex | awk '{print $NF}')"
 MSG_B64="$(printf '%s' "$MSG_HEX" | xxd -r -p | base64)"
@@ -293,9 +297,9 @@ grep -q '"purpose":"sign-test"' "$WORK"/node1/journal/"$KEY_ID"/*.jsonl \
   || fail "node 1 did not journal the ceremony sign tests"
 echo "journaled on node 1: the sign tests and the intent-less signature"
 
-step "10. require_intent on (every node): an intent-less Sign is refused, the ceremony sign test still passes"
+step "10. require_intent at its default, on with TLS (every node): an intent-less Sign is refused, the ceremony sign test still passes"
 for i in 1 2 3; do
-  jq '.signing_policy.require_intent = true' "$WORK/c$i.json" >"$WORK/c$i.json.new" && mv "$WORK/c$i.json.new" "$WORK/c$i.json"
+  jq 'del(.signing_policy.require_intent)' "$WORK/c$i.json" >"$WORK/c$i.json.new" && mv "$WORK/c$i.json.new" "$WORK/c$i.json"
 done
 for i in 1 2; do stop "$i"; done
 for i in 1 2 3; do start "$i"; done
