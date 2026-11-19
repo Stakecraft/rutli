@@ -46,6 +46,30 @@ All notable changes to Rütli are documented here. Format loosely follows
   - Clusters that already set `require_intent: true` see no change.
   - Docs: `docs/approval-quorum.md` ("Switching enforcement on"), `docs/security/threat-model.md`.
 
+### Security
+
+- **The cosigner keeps serving when it runs short of file descriptors, and never stops serving
+  without saying so.** At start-up it raises its soft open-file limit to the hard limit and logs
+  both (`rutli_fd_limit`). It accepts gRPC connections in its own loop: an accept error such as
+  running out of descriptors is retried after a short backoff and reported
+  (`rutli_grpc_accept_errors_total`, alert `RutliGrpcAcceptErrors`), where it used to end the
+  server. Open connections are capped below the descriptor limit (the soft limit less 256, or half
+  of it under a limit below 512, at most 4096); past the cap new connections wait in the listen backlog
+  (`rutli_grpc_connections`, `rutli_grpc_connection_limit`, alert `RutliGrpcConnectionsNearLimit`).
+  A new connection gets 5 s to finish its TLS handshake (without TLS: to send its first
+  bytes; `rutli_grpc_handshake_timeouts_total`), and an error during a handshake no longer ends
+  the server. The server sends HTTP/2 keepalive pings
+  (every 60 s, 20 s timeout), so connections to peers that vanished are closed. If the gRPC server
+  ever returns without a shutdown request, the daemon logs it and exits non-zero.
+- **heapless 0.7.17: nine `unsound` RustSec advisories (RUSTSEC-2026-0574 to -0582) are ignored in
+  `frost/deny.toml`, with the reason recorded per advisory.** heapless comes in only through
+  frost-core 2.2.0 → postcard 1.1.3, and no release of either moves it to the fixed heapless 0.9.4.
+  frost-core calls only postcard's `to_allocvec` and `from_bytes`, which do not touch heapless;
+  postcard itself uses only heapless' `Vec` and `String`, in functions frost-core does not call;
+  and the cosigner and dealer binaries contain no heapless code (checked on their symbol tables).
+  No code change; the same holds for 0.4.0 as released. In the lockfile, spin moves from 0.9.8 to
+  0.9.9, because 0.9.8 was yanked.
+
 ### Changed
 
 - **A sign round 2 for a session the node no longer holds answers `ABORTED`, not `INTERNAL`,** and
@@ -74,6 +98,39 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Fixed
 
+- **A cosigner that answers a sign wrongly no longer stays the driver's leader.** Up to 0.4.0 the
+  driver made any node that answered its preferred leader before it checked the signature. One
+  compromised cosigner that returned a signature that does not verify, or `NOT_FOUND`,
+  `FAILED_PRECONDITION` or `PERMISSION_DENIED`, failed that sign and got every later one, so every
+  FROST sign failed until the roster was changed. If it was the first endpoint, this held from
+  startup. The bad signature was never released. Now:
+  - A signature that does not verify against the pinned group key is withheld and the sign goes to
+    the next cosigner in the same call, with the same signing intent. The audit entry shows
+    `sig-verify=failed failover=<from>→<to> reason=BAD_SIGNATURE`.
+  - A sign also fails over on every status except `PERMISSION_DENIED`, `UNAUTHENTICATED`,
+    `RESOURCE_EXHAUSTED` and `INVALID_ARGUMENT`. Those still go back to Canton at once: a policy
+    refusal by one cosigner is not retried on another.
+  - Only a verified signature makes a cosigner the preferred leader for signs. A leader that fails
+    loses that place, and so does one that refuses a sign carrying an intent, since every cosigner
+    checks the intent itself. A refusal for a stale cluster id, or of a sign without an intent,
+    keeps the lead.
+  - Each cosigner charges its rate limit once per intent request id. Each leader tried can make a
+    node release one more signature share for that id, up to `max_shares_per_request`. In 3-of-5,
+    a call that fails over more than once can reach that bound and is then refused.
+  - Other operations (decrypt, symmetric crypto, hosted keys, key reads) cannot be checked by the
+    driver. They keep the lead on a refusal such as `RESOURCE_EXHAUSTED`, as before, and lose it
+    only when the node is unreachable or failing. A DKG loses the lead only on `UNAVAILABLE`.
+  - The non-retryable "does not verify" error now means that every cosigner was asked and none
+    gave a valid signature. Nothing to configure.
+- **A misspelt approval rule mode no longer means auto-approve.** `mode = "quorom"` or
+  `mode = "Quorum"` made that rule auto-approve without a word, so the key signed with no
+  approvals. The driver now stops at startup with a config error at the rule, for example
+  `approval.rules.0.mode`, that names the rule and the value. The modes are `quorum` and `auto`, in
+  lowercase, as on the cosigners. The driver also refuses a quorum rule that an earlier `auto` rule
+  fully covers (for example `key-id-prefix = ""`), because it could never apply. A quorum
+  `threshold` outside 1 to the number of approvers, refused before with a stack trace, is now a
+  config error at `approval.rules`. Check your `approval` block before you upgrade:
+  `docs/approval-quorum.md`.
 - **A sign session belongs to the peer that opened it.** Up to 0.4.0 a node took a sign round 2
   or an abort for a session from any peer on the mesh allowlist. A compromised cosigner that was a
   member of a signature knows the session id, so it could abort another node's copy of the session
@@ -127,6 +184,24 @@ All notable changes to Rütli are documented here. Format loosely follows
   `approve keygen` print. Up to 0.4.0 it only read `public-key-base-64`, so an `approval` block
   copied from the docs stopped the participant at startup with `Key not found`. Both names are read
   now. Give one of them per approver; an entry with both is refused.
+- **`export-key` could write a key into an existing file with its old permissions.** The 0600 mode
+  only applied to a file the export created: an `--out` that already existed (for example 0644)
+  kept its mode and received the artifact, with `--unsafe-plaintext` the raw private key, and a
+  symlink at `--out` was followed. `export-key` now refuses an existing `--out` or a symlink, like
+  the other commands that write key material.
+- **The cosigner did not stop on SIGTERM.** It handled only SIGINT, and in its image it runs as
+  PID 1, where the kernel ignores a signal without a handler: every pod stop waited out the grace
+  period and ended in SIGKILL, with no drain of in-flight requests. It now shuts down gracefully on
+  SIGTERM or SIGINT.
+- **`{:?}` on a cluster-hosted key printed its private key.** `HostedKey` derived `Debug`, so a
+  test assertion, a log field or a panic message that formatted a key (or a tombstone still
+  holding one) would have shown `private_der`. No log line did. Its `Debug` now prints
+  `<redacted>` for the private half.
+- **Loading a FROST share left an unwiped copy of its signing share in memory.** The key store
+  parsed each decrypted key file into a `serde_json::Value` first, which copies every string, the
+  share's hex included, into heap memory that is freed without being wiped. It now parses the
+  record straight from the decrypted buffer (which is wiped), so the share's hex is no longer
+  copied on the way. Copies made inside the FROST library itself are unchanged.
 - **A cosigner's first signature after a restart could lose its session.** Two requests that used
   a key for the first time at once (a sign round 1 and, say, this node leading another signature)
   each loaded the share and built their own in-memory signing state; the one that finished second
@@ -145,9 +220,75 @@ All notable changes to Rütli are documented here. Format loosely follows
   for the fix above, not seen in operation: it needs an empty cache (a restart) at the moment of a
   commit. A load that an eviction overtook now reads the share again. The same guard covers
   `discard-partial-key`.
+- **One lying cosigner and one restart could bench both honest cosigners for good.** The
+  stale-share check ignored every peer that reported itself stale, also when that peer held this
+  node's exact sharing. With A and B honest and C claiming a newer epoch: while B restarted, A
+  heard only C and marked itself stale; B came back, ignored A, believed C and marked itself stale
+  too; from then on each ignored the other, signing for the key stopped, and the alerts said both
+  had been rolled back. A peer that holds this node's sharing now vouches for it even when it is
+  marked stale on peers' answers. Two honest nodes on the same sharing that can reach each other
+  recover on their next pass, also when one of them still runs 0.4.0. A peer marked stale by its
+  own ceremony record does not vouch: `KeyEpoch` gains `stale_by_own_record` (field 12) to say so.
+  A 0.4.0 peer leaves it unset and still vouches; 0.4.0 and 0.5.0 nodes keep working together. A
+  stale peer's claim of a newer epoch never marks a node stale, but with no voucher it keeps the
+  previous verdict instead of clearing a mark.
+- **A staged node went stale when a peer claimed an epoch beyond the one it voted for.** The check
+  compared its staged vote only with the newest epoch a peer claimed. Now any live peer on the
+  staged sharing makes it wait for its resolver, as intended.
+- **Stale keys are re-checked every 25–30 s** (random, so nodes do not poll in step) instead of
+  every 5 minutes, and a stale mark is logged again only when the state or the epochs change, not
+  when the wording of the reason does. One cosigner alone can still bench a node while no peer that
+  holds this node's sharing answers (a restart, or a refresh still committing); the stale reason
+  then says the claim is unconfirmed, the mark clears on the next pass that reaches such a peer,
+  and `RutliStaleShare` now leads with what to check before restoring anything.
+- **`scripts/e2e-split-ceremony.sh` passes again, and CI now runs it.** It had failed since
+  0.4.0-rc.6: `require_ceremony_intent` became the default with TLS, so its raw Dkg probe on the
+  import id was refused for the missing intent before reaching the reserved-id check. The script
+  now starts with the setting off and turns it on at step 6, as it was written. The new workflow
+  `.github/workflows/e2e.yml` runs it, `e2e-carry-protocol-keys.sh` and `e2e-ecies-hosted.sh`
+  (`KEYFILE_V2_DELETES=1`). It runs on pushes to main, on pull requests that touch the code these
+  scripts test, and on release-candidate tags; a failure on main opens an issue. The two Canton
+  scripts now take `JAVA_HOME` when `CANTON_JAVA_HOME` is unset, and allow more time for console
+  waits and polling on a slow host.
+
+### Security
+
+- **Release images are built on GitHub-hosted runners, signed and attested.** `publish-image.yml` no
+  longer runs on the self-hosted CI runners (`vars.CI_RUNNER`), where a job is root on the runner's
+  Docker host. It builds linux/amd64 and linux/arm64 natively on hosted runners (no QEMU), pushes
+  each by digest and assembles the multi-arch index, which lists BuildKit's SBOM and provenance for
+  both platforms (the job fails otherwise). A last job, the only one with the signing identity and
+  no third-party action, gives the index a keyless cosign signature and a GitHub build provenance
+  attestation and then runs the operator's verification commands. Operators: verify the digest you
+  pin with the commands in `SECURITY.md`, "Verify the image", before deploying. Images up to 0.4.0
+  are not signed.
+- **Every GitHub Action is pinned to a full commit SHA**, with its version in a comment, in `ci.yml`
+  and `publish-image.yml`; `.github/dependabot.yml` proposes updates (actions weekly, the runtime
+  base image digest monthly). Dependabot's pull requests run CI on GitHub-hosted runners only, and
+  the self-hosted runner guard refuses them (reinstall `deploy/ci-runner/job-started-guard.sh` on
+  each runner). Helm in CI is downloaded and checked against pinned sha256 sums instead of
+  `azure/setup-helm`, which checks none.
+- **`frost/Dockerfile` builds with `cargo build --locked`** and pins both base images by the digest
+  of their multi-arch index (`rust:1.100.0-slim`, `debian:stable-slim`). The image contents are
+  otherwise unchanged.
+- **One Rust version for CI and the release image:** `frost/rust-toolchain.toml` (1.100.0). CI
+  installs that version instead of whatever `stable` is that day; the Dockerfile builds on the rust
+  image of the same version.
+- **New workflow `image-build-check.yml`** builds the release image for both platforms on hosted
+  runners without pushing or signing, on pull requests that touch `frost/` or a workflow, and
+  weekly, and checks the result has the attestation structure the release requires. It also fails
+  if an action is not pinned by SHA or if the Dockerfile and `rust-toolchain.toml` name different
+  Rust versions.
 
 ### Documentation
 
+- **Roadmap dates after threshold ECIES moved into 1.0:** 1.0 follows about 34 weeks after the
+  audit's funding is confirmed, not in the first quarter of 2027, and the four clean TestNet weeks
+  are counted on the audited release. The README's status line names the Splice and Canton
+  versions the DevNet validator runs today.
+- **Threshold ECIES is planned for 1.0, not 2.0** (decided 2026-11-19). `docs/roadmap.md`, the
+  README, `docs/hosted-keys.md` and the explorer page say so, and the second audit phase in
+  `docs/audit-rfq.md` (section 2.2) now lists four features. No code changes.
 - **Splice 0.10 / Canton 3.7** (`docs/splice-0.10.md`): the driver needs no change, because the KMS driver SPI and the
   conformance suite are byte-identical from v3.6.1 to v3.7.3. Operators get a new page covering the upgrade order for a
   Rütli validator: back up first, then the participant, then the validator, with no `--atomic`, and before the network's
@@ -156,7 +297,13 @@ All notable changes to Rütli are documented here. Format loosely follows
   (`enableRepairCommands`), which Splice's party migrator needs after the point of no return. The page also covers the
   `synchronizerId` argument of the rotation commands, the PV 37 limit of 20 signing keys, and the HTTP health probes.
   The rehearsal records that pin `--version 0.9.0` carry a warning, and the README compatibility table lists Canton
-  3.7.x and Splice 0.10.x as supported, with the live run still pending.
+  3.7.x and Splice 0.10.x as tested: two DevNet validators on Rütli run Splice 0.10.1 since 2026-11-15.
+- **The external audit will review v0.5.0, not v0.4.0.** v0.5.0 is v0.4.0 plus hardening from a pre-audit review
+  and the fixes made since; its code freeze is planned for mid-December 2026, and v0.4.0 is the auditors' pre-read
+  (`docs/audit-rfq.md`, `docs/roadmap.md`, `SECURITY.md`).
+- **The sealed software delegate is a test and migration aid, not a production option.** `docs/hosted-keys.md` and
+  `docs/disaster-recovery.md` said it stays supported for production keys; `SECURITY.md` said never. The two now agree
+  with `SECURITY.md`: it keeps every encryption key on the participant host; use cluster hosting or the HSM delegate.
 
 ## [0.4.0] — 2026-11-14
 
@@ -1256,7 +1403,7 @@ still to come — see the warnings below; keys born or refreshed on this release
 - `docs/migration.md` §8: a gate before the split — no namespace delegation may name a carried
   key as its target (`--namespace-fingerprint` excludes only the root).
 - **ECIES now fails over past a cosigner that answers `EcdhDerive` with the wrong shared secret**
-  (Codex review of C2, medium, availability). The driver made an endpoint the preferred leader as
+  (second review of C2, medium, availability). The driver made an endpoint the preferred leader as
   soon as its `EcdhDerive` RPC succeeded, before the local MAC/padding check — so one cosigner with
   stale or corrupt EC material under the right key id failed every ECIES decrypt that led from it,
   and stayed preferred. An `EcdhDerive` now counts only once its shared secret opens the ciphertext;
@@ -1268,7 +1415,7 @@ still to come — see the warnings below; keys born or refreshed on this release
   is wiped on every path. No key-extraction impact.
 
 ### Documented
-- **`hosted_keys.decrypt_rate_limit_per_min` is per node, not per cluster** (Codex review of C2,
+- **`hosted_keys.decrypt_rate_limit_per_min` is per node, not per cluster** (second review of C2,
   medium). Each cosigner keeps its own buckets, so a stolen driver certificate that calls every
   node gets n × the budget per key (18 000/min on 3 nodes at the default). Now stated in the config
   doc, the Helm values, `docs/hosted-keys.md` §2 (new table row + sizing: `cluster_budget / n`,

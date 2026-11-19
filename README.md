@@ -32,10 +32,11 @@ If it leaks, an attacker controls the node. If it's lost, every party and Canton
 under that node is gone — permanently. And it **cannot be rotated**: there is no "issue a new one".
 
 Today the ways to protect it are all compromises: Canton's built-in KMS is **cloud-only** (AWS or GCP);
-the self-hosted alternatives are **proprietary** (Blockdaemon Builder Vault, MPCH
-Stronghold), and custody platforms (Fireblocks, Dfns) protect party and asset keys rather than the
-node's own. None is open-source, self-hosted, *and* real threshold-MPC — one a bank could run and
-certify entirely inside its own SOC 2 / ISO 27001 / DORA boundary.
+the self-hosted alternatives are either **proprietary** (Blockdaemon Builder Vault, MPCH
+Stronghold) or keep the whole key in a single KMS or HSM (Saxon's open-source drivers, proposed in
+[Dev Fund #950](https://github.com/canton-foundation/canton-dev-fund/pull/950)); and custody platforms
+(Fireblocks, Dfns) protect party and asset keys rather than the node's own. None is open-source,
+self-hosted, *and* real threshold-MPC — one a bank could run and certify entirely inside its own SOC 2 / ISO 27001 / DORA boundary.
 
 Rütli is that missing option — **the "Web3Signer/Teku of Canton."**
 
@@ -128,7 +129,7 @@ With `backend = "frost"` (the production path):
 | Other signing specs (ECDSA P-256, P-384, secp256k1) | | Not served by the cluster; only through `frost.delegate = "hsm"` (PKCS#11, single token, not threshold) |
 
 - Hosted keys are not threshold-shared: one compromised cosigner can read them. Threshold ECIES is
-  planned for 2.0; existing nodes will move to it by an ordinary encryption-key rotation
+  planned for 1.0; existing nodes will move to it by an ordinary encryption-key rotation
   ([docs/roadmap.md](docs/roadmap.md)).
 - `backend = "hsm"` (PKCS#11) signs with EC P-256, P-384 and secp256k1 (and Ed25519 if the token
   supports it) and decrypts RSA-2048 OAEP. It is verified against SoftHSM only and is outside the
@@ -225,7 +226,7 @@ no PKCS#11 module and no key material on the participant host. It has been exerc
 ([`deploy/devnet/canton-hosted.conf`](deploy/devnet/canton-hosted.conf)): three Ed25519 keys born by
 cluster DKG and threshold-signed, plus an RSA-2048 encryption key generated in the cluster and
 replicated to all three cosigners. A Splice DevNet validator has run on Rütli since 2026-10-07, now
-on Splice 0.9.0 and Canton 3.6.1 ([docs/soak-2026-10-devnet.md](docs/soak-2026-10-devnet.md)), and
+on Splice 0.10.1 and Canton 3.7.2 ([docs/soak-2026-10-devnet.md](docs/soak-2026-10-devnet.md)), and
 both migration paths for an existing validator were rehearsed there
 ([docs/roadmap.md](docs/roadmap.md)). Run it on DevNet before it holds anything you care about, and
 read [docs/hosted-keys.md](docs/hosted-keys.md) first — replicated keys are a different security property
@@ -242,8 +243,9 @@ vulnerabilities privately via GitHub's
 
 ## Contributing
 
-Issues and PRs welcome. `sbt driver/test` (JVM) and `cd frost && cargo test && cargo clippy` (Rust)
-must pass; CI runs both on every PR.
+Issues and PRs welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first: setup, the checks CI runs,
+what a pull request needs, and how work is tracked. Releases follow
+[docs/release-process.md](docs/release-process.md).
 
 ## License
 

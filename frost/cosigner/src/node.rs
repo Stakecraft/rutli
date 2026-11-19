@@ -579,6 +579,7 @@ impl Node {
         }
         if let Some(mark) = self.stale_mark(key_id) {
             reply.stale = true;
+            reply.stale_by_own_record = mark.by_own_record;
             reply.stale_reason = mark.reason;
         }
         if let Some(r) = self.staged_records_checked()?.into_iter().find(|r| r.key_id == key_id) {
@@ -1021,11 +1022,12 @@ impl Node {
     }
 
     /// Record the epoch check's verdict for `key_id`: `Some` marks the share stale (round 1 and
-    /// leading refused), `None` clears a mark. Keeps `rutli_stale_share{key}` in step.
+    /// leading refused), `None` clears a mark. Keeps `rutli_stale_share{key}` in step. Logs only
+    /// when the state or the epochs change: a new wording of the same reason is stored silently.
     pub fn set_stale(&self, key_id: &str, mark: Option<StaleMark>) {
         let mut stale = self.stale_marks();
         let changed = match &mark {
-            Some(m) => stale.insert(key_id.to_string(), m.clone()).as_ref() != Some(m),
+            Some(m) => !stale.insert(key_id.to_string(), m.clone()).is_some_and(|old| old.same_state(m)),
             None => stale.remove(key_id).is_some(),
         };
         drop(stale);
@@ -3053,7 +3055,16 @@ pub struct StaleMark {
     pub own_epoch: u64,
     /// The newer committed epoch that makes it stale.
     pub newer_epoch: u64,
+    /// The mark comes from this node's own committed ceremony record, not from peers' answers.
+    pub by_own_record: bool,
     pub reason: String,
+}
+
+impl StaleMark {
+    /// Whether `other` says the same thing: the reason's wording may differ between passes.
+    pub(crate) fn same_state(&self, other: &StaleMark) -> bool {
+        (self.own_epoch, self.newer_epoch, self.by_own_record) == (other.own_epoch, other.newer_epoch, other.by_own_record)
+    }
 }
 
 /// What a leader needs to sign with key K: the threshold, its own sharing, and whether it is stale.

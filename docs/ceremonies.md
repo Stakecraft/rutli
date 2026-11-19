@@ -231,17 +231,30 @@ Shares of different sharings never combine, so signing is epoch-aware (audit H1,
   A leader on a release before epochs sends no sharing: the check is skipped with a warning and
   `rutli_epoch_check_skipped_total`, unless `signing_policy.require_epoch_match` is set (then it
   is refused). Turn that flag on once every cosigner runs this release.
-* **Stale-share check.** At startup and every 5 minutes (every 30 s while a peer has not
-  answered) each node compares its sharing of every FROST key with its peers' (`Peer.KeyEpoch`).
-  It marks a key **stale** when its own COMMITTED ceremony record names a newer epoch than its
-  share, or when a peer holds the same group key at a newer committed epoch, no peer holds this
-  node's sharing, and this node has no staged vote for the newer one. A stale node refuses every
-  round 1 for the key (`rutli-error: stale-share`), refuses to lead it (UNAVAILABLE, so the driver
-  fails over), and reports `stale` in `KeyEpoch`, `KeyStatus` and `verify-key`; the gauge
-  `rutli_stale_share{key}` is 1. This catches a restore from an old backup, a volume snapshot
-  rollback and backup mix-ups. A node that is only waiting to commit (it voted for the newer
-  sharing) is not stale: its resolver commits it. Recovery is restoring a current backup of that
-  node (daemon stopped) or re-enrolling it; the mark clears by itself once the share is current.
+* **Stale-share check.** At startup and every 5 minutes (every 25–30 s while a peer has not
+  answered or a key is stale) each node compares its sharing of every FROST key with its peers'
+  (`Peer.KeyEpoch`). It marks a key **stale** when its own COMMITTED ceremony record names a newer
+  epoch than its share, or when a peer holds the same group key at a newer committed epoch, no peer
+  vouches for this node's sharing, and this node has no staged vote for the newer one. A peer
+  vouches when it holds this node's exact sharing, also when it is marked stale on peers' answers,
+  so two honest nodes on the same sharing that can reach each other never bench each other. A
+  peer marked stale by its own ceremony record (`stale_by_own_record` in `KeyEpoch`) does not
+  vouch: its record proves that sharing was superseded. A peer on 0.4.0 does not report why it is
+  stale, so it still vouches. A stale peer's claim of a newer epoch never marks a node stale, but
+  without a voucher it keeps an existing mark. The peer evidence is unsigned: while no cosigner
+  that holds this node's sharing answers (the others restarting, or a refresh still committing on
+  them), one wrong or compromised cosigner can bench a healthy node. The stale reason then says
+  the claim is unconfirmed, and the mark clears on the next pass that reaches such a cosigner, at
+  most 30 s later. Before restoring a node flagged by a single cosigner, compare
+  `rutli-cosigner verify-key` across the nodes. A stale node refuses every round 1 for the key
+  (`rutli-error: stale-share`), refuses to lead it (UNAVAILABLE, so the driver fails over), and
+  reports `stale` in `KeyEpoch`, `KeyStatus` and `verify-key`; the gauge `rutli_stale_share{key}`
+  is 1. This catches a restore from an old backup, a volume snapshot rollback and backup mix-ups.
+  What stays true by design: t nodes restored to the same old sharing without their ceremony
+  records (two nodes in 2-of-3) vouch for each other and can sign with it, because t shares of
+  any sharing are the key. A node that is only waiting to commit (it voted for the newer sharing)
+  is not stale: its resolver commits it. Recovery is restoring a current backup of that node
+  (daemon stopped) or re-enrolling it; the mark clears by itself once the share is current.
 * **Quorum selection with retry.** The leader tries t-subsets of the roster, itself first, then
   by identifier. Each attempt is a fresh session: a new random session id for each member (since
   0.5.0; one shared id before) and fresh round-1 commitments from every member, never reused across

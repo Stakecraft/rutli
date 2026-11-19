@@ -647,7 +647,7 @@ async fn epoch_refusals_and_session_binding_hold_over_mtls_grpc() {
     );
 
     // A stale node refuses over the wire with its own trailer, and the leader signs around it.
-    m.nodes[1].set_stale(key, Some(StaleMark { own_epoch: 1, newer_epoch: 2, reason: "test".into() }));
+    m.nodes[1].set_stale(key, Some(StaleMark { own_epoch: 1, newer_epoch: 2, by_own_record: false, reason: "test".into() }));
     let ok = Round1Ctx { leader_view: Some(view2), ..Default::default() };
     assert!(matches!(node2.sign_round1(key, "g-stale", &ok).await.unwrap_err(), DaemonError::StaleShare { .. }));
     let msg = rutli_frost_core::dealer::canton_test_message(b"around a stale node");
