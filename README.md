@@ -193,6 +193,7 @@ Before protecting a real key, run the witnessed **[key ceremony](docs/key-ceremo
 | [docs/hosted-keys.md](docs/hosted-keys.md) | Cluster-hosted keys (ECIES, RSA, AES): what they are, what they are not |
 | [docs/hosted-keys-design.md](docs/hosted-keys-design.md) | Why they are replicated and not threshold — the design record, with what did and did not ship |
 | [docs/key-ceremony.md](docs/key-ceremony.md) | Witnessed namespace-key generation |
+| [docs/admin-cli.md](docs/admin-cli.md) | Which command does what to a key, and with which credential |
 | [docs/key-rotation.md](docs/key-rotation.md) | Which keys rotate, how, and why the root can't |
 | [docs/splice-0.10.md](docs/splice-0.10.md) | Splice 0.10 / Canton 3.7: what changes for a Rütli validator and its migrations |
 | [docs/approval-quorum.md](docs/approval-quorum.md) | M-of-N signing approval |

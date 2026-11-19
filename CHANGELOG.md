@@ -5,7 +5,28 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Added
+
+- **`rutli-cosigner key show` and `key fingerprint`: the read-only admin CLI** (`docs/admin-cli.md`).
+  `key show --key-id ID [--expect-fingerprint FP] [--json]` asks every cosigner what it holds
+  under an id and prints the public key, the Canton fingerprint (`1220…`), origin and epoch, and
+  whether the nodes agree, for a FROST key or a cluster-hosted key (an id with the `rutli-` tag is
+  read as hosted, any other as FROST, the cosigners' own rule). It runs the checks of `verify-key`
+  and `verify-hosted` over the same two read-only RPCs with the same operator certificate; with
+  `--expect-fingerprint` the verdict is the same. Without it the output is the cluster's own
+  report, compared with nothing: do not take an import's or a migration's expected fingerprint
+  from it. `key fingerprint --in FILE` computes the fingerprint of a public key file offline
+  (SubjectPublicKeyInfo as DER, PEM or hex, a Canton `keys.public.download` file, or a raw
+  Ed25519 key as 64 hex digits). No new RPC, role, config key or wire change, and nothing that
+  generates, imports or lists keys.
+
 ### Changed
+
+- **`verify-key` and `verify-hosted` print a little more.** The first line names the kind of key
+  (`(FROST)`, `(hosted)`), and the summary adds the agreed fingerprint and, for a FROST key,
+  origin, epoch, refresh count and threshold. `--json` gains `kind` and `fingerprint`. For a
+  symmetric hosted key the empty `public key (SPKI)` line is replaced by a sentence. Checks and
+  exit codes are unchanged.
 
 - **A sign round 2 for a session the node no longer holds answers `ABORTED`, not `INTERNAL`,** and
   is counted in the new `rutli_sign_round2_unknown_session_total`. It is what a node answers
@@ -54,6 +75,12 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Documentation
 
+- **One rotation recipe** (`docs/key-rotation.md`): generate the new key through the driver, then
+  `owner_to_key_mappings.rotate_key`, as rehearsed in B8, with the check of the new key in the
+  cluster and the Canton 3.7 `synchronizerId` caveat. `rotate_node_key(s)` is marked as not
+  rehearsed, and `rotate_kms_node_key` as not applicable to keys Canton generates in Rütli. The
+  roadmap's v0.5.0 row no longer promises a `rotate_kms_node_key` recipe and describes the admin
+  CLI as it ships: read-only.
 - **Threshold ECIES is planned for 1.0, not 2.0** (decided 2026-11-19). `docs/roadmap.md`, the
   README, `docs/hosted-keys.md` and the explorer page say so, and the second audit phase in
   `docs/audit-rfq.md` (section 2.2) now lists four features. No code changes.
