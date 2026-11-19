@@ -85,6 +85,39 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Fixed
 
+- **A cosigner that answers a sign wrongly no longer stays the driver's leader.** Up to 0.4.0 the
+  driver made any node that answered its preferred leader before it checked the signature. One
+  compromised cosigner that returned a signature that does not verify, or `NOT_FOUND`,
+  `FAILED_PRECONDITION` or `PERMISSION_DENIED`, failed that sign and got every later one, so every
+  FROST sign failed until the roster was changed. If it was the first endpoint, this held from
+  startup. The bad signature was never released. Now:
+  - A signature that does not verify against the pinned group key is withheld and the sign goes to
+    the next cosigner in the same call, with the same signing intent. The audit entry shows
+    `sig-verify=failed failover=<from>→<to> reason=BAD_SIGNATURE`.
+  - A sign also fails over on every status except `PERMISSION_DENIED`, `UNAUTHENTICATED`,
+    `RESOURCE_EXHAUSTED` and `INVALID_ARGUMENT`. Those still go back to Canton at once: a policy
+    refusal by one cosigner is not retried on another.
+  - Only a verified signature makes a cosigner the preferred leader for signs. A leader that fails
+    loses that place, and so does one that refuses a sign carrying an intent, since every cosigner
+    checks the intent itself. A refusal for a stale cluster id, or of a sign without an intent,
+    keeps the lead.
+  - Each cosigner charges its rate limit once per intent request id. Each leader tried can make a
+    node release one more signature share for that id, up to `max_shares_per_request`. In 3-of-5,
+    a call that fails over more than once can reach that bound and is then refused.
+  - Other operations (decrypt, symmetric crypto, hosted keys, key reads) cannot be checked by the
+    driver. They keep the lead on a refusal such as `RESOURCE_EXHAUSTED`, as before, and lose it
+    only when the node is unreachable or failing. A DKG loses the lead only on `UNAVAILABLE`.
+  - The non-retryable "does not verify" error now means that every cosigner was asked and none
+    gave a valid signature. Nothing to configure.
+- **A misspelt approval rule mode no longer means auto-approve.** `mode = "quorom"` or
+  `mode = "Quorum"` made that rule auto-approve without a word, so the key signed with no
+  approvals. The driver now stops at startup with a config error at the rule, for example
+  `approval.rules.0.mode`, that names the rule and the value. The modes are `quorum` and `auto`, in
+  lowercase, as on the cosigners. The driver also refuses a quorum rule that an earlier `auto` rule
+  fully covers (for example `key-id-prefix = ""`), because it could never apply. A quorum
+  `threshold` outside 1 to the number of approvers, refused before with a stack trace, is now a
+  config error at `approval.rules`. Check your `approval` block before you upgrade:
+  `docs/approval-quorum.md`.
 - **A panic in a background pass no longer stops that loop for good.** The ceremony resolver, the
   epoch check, the nonce-marker pruner and hosted-key anti-entropy each run as a loop in its own
   task. A panic in one pass ended the task, and nothing showed it after the one panic line in the
@@ -133,6 +166,15 @@ All notable changes to Rütli are documented here. Format loosely follows
   for the fix above, not seen in operation: it needs an empty cache (a restart) at the moment of a
   commit. A load that an eviction overtook now reads the share again. The same guard covers
   `discard-partial-key`.
+- **`scripts/e2e-split-ceremony.sh` passes again, and CI now runs it.** It had failed since
+  0.4.0-rc.6: `require_ceremony_intent` became the default with TLS, so its raw Dkg probe on the
+  import id was refused for the missing intent before reaching the reserved-id check. The script
+  now starts with the setting off and turns it on at step 6, as it was written. The new workflow
+  `.github/workflows/e2e.yml` runs it, `e2e-carry-protocol-keys.sh` and `e2e-ecies-hosted.sh`
+  (`KEYFILE_V2_DELETES=1`). It runs on pushes to main, on pull requests that touch the code these
+  scripts test, and on release-candidate tags; a failure on main opens an issue. The two Canton
+  scripts now take `JAVA_HOME` when `CANTON_JAVA_HOME` is unset, and allow more time for console
+  waits and polling on a slow host.
 
 ### Security
 
