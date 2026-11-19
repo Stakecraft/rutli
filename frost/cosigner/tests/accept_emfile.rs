@@ -37,13 +37,33 @@ fn set_soft(lim: libc::rlimit, soft: u64) {
     assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &want) }, 0);
 }
 
-/// The highest descriptor number open now.
-fn highest_fd() -> u64 {
-    std::fs::read_dir("/dev/fd")
+/// Descriptors open now: (how many, the highest number).
+fn open_fds() -> (usize, u64) {
+    let fds: Vec<u64> = std::fs::read_dir("/dev/fd")
         .unwrap()
         .filter_map(|e| e.ok()?.file_name().to_str()?.parse::<u64>().ok())
-        .max()
-        .unwrap()
+        .collect();
+    (fds.len(), fds.iter().copied().max().unwrap())
+}
+
+/// Fill every free descriptor number below the soft limit, then free `spare` of them: what the
+/// process holds open (an inherited high-numbered descriptor leaves gaps below it) does not matter.
+fn leave_free(spare: usize) -> Vec<std::fs::File> {
+    let mut burned = Vec::new();
+    loop {
+        match std::fs::File::open("/dev/null") {
+            Ok(f) => burned.push(f),
+            Err(e) if e.raw_os_error() == Some(libc::EMFILE) => break,
+            Err(e) => panic!("opening /dev/null: {e}"),
+        }
+    }
+    assert!(
+        burned.len() >= spare,
+        "only {} free descriptors under the lowered limit",
+        burned.len()
+    );
+    burned.truncate(burned.len() - spare);
+    burned
 }
 
 #[test]
@@ -69,7 +89,12 @@ fn descriptor_exhaustion_neither_ends_the_accept_loop_nor_loses_connections() {
         let clients: Vec<std::net::TcpStream> = (0..WAITING).map(|_| std::net::TcpStream::connect(addr).unwrap()).collect();
 
         let original = nofile();
-        set_soft(original, highest_fd() + SPARE);
+        let (open, highest) = open_fds();
+        // EMFILE comes from descriptor numbers, not counts: the kernel hands out the lowest free
+        // number below the soft limit. Lower the limit near the highest open number, then fill the
+        // gaps below it, so exactly SPARE accepts succeed.
+        set_soft(original, highest + SPARE + 1);
+        let burned = leave_free(SPARE as usize);
         let mut served = Vec::new();
         // Accept until the descriptors run out: the stream then stalls, it does not end or err.
         loop {
@@ -80,7 +105,11 @@ fn descriptor_exhaustion_neither_ends_the_accept_loop_nor_loses_connections() {
                 Err(_) => break, // stalled: out of descriptors, retrying with a backoff
             }
         }
-        assert!(served.len() < WAITING, "the lowered limit must stop accepting early (served {})", served.len());
+        assert!(
+            served.len() < WAITING,
+            "the lowered limit must stop accepting early (served {}; {open} descriptors open, highest {highest})",
+            served.len()
+        );
         let errors = scrape.render();
         let failed: f64 = errors
             .lines()
@@ -91,6 +120,7 @@ fn descriptor_exhaustion_neither_ends_the_accept_loop_nor_loses_connections() {
 
         // Descriptors back: every connection still waiting is served.
         set_soft(original, original.rlim_cur as u64);
+        drop(burned);
         while served.len() < WAITING {
             match tokio::time::timeout(Duration::from_secs(10), stream.next()).await {
                 Ok(Some(Ok(conn))) => served.push(conn),
