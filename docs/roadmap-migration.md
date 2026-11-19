@@ -113,7 +113,8 @@ engineering work is not the long pole; the audit's external lead time is. So:
    Candidates with threshold-signature track record: Least Authority,
    Trail of Bits, NCC Group, Kudelski. Ask for a 2–3 week engagement with a fixed start date.
 2. **Track B to v0.4.0** is the pre-audit code freeze target. Nothing else lands in the audited
-   surface after it except audit fixes.
+   surface after it except audit fixes. (As of 2026-11-18: the audit reviews v0.5.0, which is v0.4.0 plus
+   hardening; see [roadmap.md](roadmap.md).)
 3. **Track C (ECIES) runs while the auditors work.** The engineer is otherwise idle in that window.
    It ships as v0.5.0 either inside the audit as an addendum or, if the auditor refuses scope
    creep, as the first post-1.0 release. Decide with the auditor at booking time. (As of 2026-11-13: C shipped in
