@@ -58,10 +58,12 @@ of the same name.
 |---|---|---|
 | `upgrade` | `helm upgrade` from the previous release to `--upgrade-image` under 5 signatures a second | a key is missing or changed afterwards, or does not sign; signatures that fail while the cosigners restart are counted, not forbidden (the chart restarts all three at once) |
 | `scenarios` | the scenarios of [`load-testing.md`](load-testing.md): steady stream, burst, several clients, ECIES, a cosigner pod killed under load, the cold-cache restart, and the limits | as described there |
-| `disrupt` | under the steady stream: a node lost, a data volume lost, a partition between two cosigners' nodes, added network delay | a signature fails, a cosigner is not healthy afterwards; a step without its hook is reported as skipped |
+| `disrupt` | under the steady stream: a node lost, a data volume lost, a partition between two cosigners' nodes, added network delay; afterwards, rounds of signatures until the cluster signs within the SLO again (`recovery_secs`) | a signature fails, a cosigner is not healthy afterwards, or the cluster does not sign normally again within `--settle-secs` (600); a step without its hook is reported as skipped |
 | `keys` | for each key count of the profile (1, 10, 100): that many FROST keys and hosted keys over ten tenant prefixes (`perf-t<n>-…`), sign latency over all of them, and each cosigner's Peer API `ListKeys` time | a setup, signature or listing fails |
 | `ramp` | the profile's baseline load × 1, 3, 10, 30, 100, … for `step_secs` each | never: the ramp stops at the first step over the SLO or with an error, and reports the last step that passed as the **headroom factor** |
 
+They run in the order `upgrade`, `scenarios`, `keys`, `ramp`, `disrupt` (disruption last, so that
+what it leaves behind cannot skew the measurements of the others); `--suites` picks a subset.
 Every scenario also checks that no cosigner restarted unless the scenario did it, and that their
 memory and file descriptors stay within bounds.
 

@@ -6,7 +6,7 @@
 Bring a kubeconfig and a namespace; install with scripts/perf/k8s-deploy.sh, then
 
   cluster.py --namespace NS --profile scripts/perf/profiles/placeholder.json --out result.json \\
-             [--suites upgrade,scenarios,disrupt,keys,ramp] [--upgrade-image REF --work DIR]
+             [--suites upgrade,scenarios,keys,ramp,disrupt] [--upgrade-image REF --work DIR]
 
 writes one JSON file. scripts/perf/compare.py compares it with a previous one.
 
@@ -189,6 +189,38 @@ class Suite(base.Runner):
             r["seconds_with_failed_signatures"] = sum(1 for sec in timeline if sec.get("errors"))
         self.close(r)
 
+    # -- recovery ------------------------------------------------------------------------------
+
+    def setup_keys(self, args, wall_timeout):
+        """`setup` for a suite's keys, tried three times a minute apart: a DKG needs every cosigner
+        reachable, and a suite should not fail on a moment when one was not. Each failed attempt
+        is logged."""
+        for attempt in range(3):
+            r = self.loadgen(args, timeout_secs=120, wall_timeout=wall_timeout)
+            if "failed" not in r:
+                return r
+            log(f"  key setup failed (attempt {attempt + 1} of 3): {r.get('stderr', r['failed'])[-300:]}")
+            if attempt < 2:
+                time.sleep(60)
+        return r
+
+    def settle(self, within=None):
+        """Wait until the cluster signs normally again: rounds of 20 signatures through every
+        cosigner as leader until one round has no error and a p99 under the profile's SLO.
+        Health alone is not enough: a node can be healthy while its connections to its peers are
+        still dead after a disruption. Returns the seconds it took, or None if it did not settle."""
+        within = within or self.args.settle_secs
+        slo = float(self.profile.get("slo", {}).get("p99_ms", 1000))
+        started = time.time()
+        while time.time() - started < within:
+            r = self.loadgen(["sign", "--key", base.KEY_STEADY, "--name", "settle", "--count", "20", "--clients", "6",
+                              "--no-failover"], timeout_secs=15, wall_timeout=300)
+            client = r.get("client", {})
+            if "failed" not in r and not client.get("errors") and client.get("latency", {}).get("p99_ms", 1e9) <= slo:
+                return round(time.time() - started, 1)
+            time.sleep(5)
+        return None
+
     # -- disruption ----------------------------------------------------------------------------
 
     def under_load(self, name, victims, strike, recover, allowed=()):
@@ -216,10 +248,16 @@ class Suite(base.Runner):
                     problems.append({"failed": f"recover: {e}"})
             report = self.loadgen_finish(proc, secs + 900)
             if not self.wait_healthy(900):
-                problems.append({"failed": f"{', '.join(victims)} did not become healthy again"})
+                problems.append({"failed": f"{', '.join(victims) or 'a cosigner'} did not become healthy again"})
+            settled[0] = self.settle()
+            if settled[0] is None:
+                problems.append({"failed": f"the cluster did not sign normally again within {self.args.settle_secs} s"})
             return [report] + problems
 
+        settled = [None]
         r, _ = self.scenario(name, body, restarted=tuple(victims), allowed=allowed)
+        # How long after the disruption ended the cluster took to sign within the SLO again.
+        r["recovery_secs"] = settled[0]
         self.close(r)
 
     def victims(self):
@@ -301,8 +339,8 @@ class Suite(base.Runner):
             frost = [f"perf-t{i % 10}-kc-{i}" for i in range(n)]
             hosted = [f"rutli-perf-t{i % 10}-kc-{i}" for i in range(n)]
             log(f"keys: {n}")
-            setup = self.loadgen(["setup"] + [x for k in frost for x in ("--frost-key", k)]
-                                 + [x for k in hosted for x in ("--ecies-key", k)], timeout_secs=120, wall_timeout=3600)
+            setup = self.setup_keys(["setup"] + [x for k in frost for x in ("--frost-key", k)]
+                                    + [x for k in hosted for x in ("--ecies-key", k)], wall_timeout=3600)
             entry = {"count": n, "setup_failed": setup.get("failed")}
             if "failed" not in setup:
                 load = self.loadgen(["sign", "--name", f"keys-{n}", "--rate", f"{rate:g}", "--clients", "6",
@@ -340,8 +378,8 @@ class Suite(base.Runner):
         sign_keys = [f"perf-ramp-{i}" for i in range(n_keys)]
         n_hosted = max(1, int(base_mix.get("ecdh_keys", 1)))
         ecdh_keys = [f"rutli-perf-ramp-{i}" for i in range(n_hosted)]
-        setup = self.loadgen(["setup"] + [x for k in sign_keys for x in ("--frost-key", k)]
-                             + [x for k in ecdh_keys for x in ("--ecies-key", k)], wall_timeout=1800)
+        setup = self.setup_keys(["setup"] + [x for k in sign_keys for x in ("--frost-key", k)]
+                                + [x for k in ecdh_keys for x in ("--ecies-key", k)], wall_timeout=1800)
         steps, headroom = [], 0
         if "failed" in setup:
             self.ramp = {"failed": f"setup: {setup['failed']}", "steps": [], "headroom_factor": 0}
@@ -401,7 +439,8 @@ def main():
     p.add_argument("--namespace", default="rutli-perf")
     p.add_argument("--profile", required=True, help="the load profile (scripts/perf/profiles/)")
     p.add_argument("--out", required=True)
-    p.add_argument("--suites", default="upgrade,scenarios,disrupt,keys,ramp")
+    # Disruption last: whatever it leaves behind cannot skew the measurements of the others.
+    p.add_argument("--suites", default="upgrade,scenarios,keys,ramp,disrupt")
     p.add_argument("--env-name", default="k8s",
                    help="what the result calls its environment; runs are compared within one only")
     p.add_argument("--upgrade-image", default="", help="upgrade suite: the image to upgrade to")
@@ -412,6 +451,8 @@ def main():
     p.add_argument("--rate", type=int, default=None, help="steady stream signatures/s; default: the profile's, else 20")
     p.add_argument("--disrupt-secs", type=int, default=120)
     p.add_argument("--net-delay-ms", type=int, default=50)
+    p.add_argument("--settle-secs", type=int, default=600,
+                   help="after a disruption, how long the cluster may take to sign normally again")
     p.add_argument("--max-rss-mib", type=int, default=None, help="default: the profile's, else 256 (the chart's limit)")
     p.add_argument("--max-fd-growth", type=int, default=64)
     p.add_argument("--commit", default=os.environ.get("GITHUB_SHA", "unknown"))
