@@ -1,14 +1,18 @@
-<!-- Security fixes for undisclosed vulnerabilities do not go in a public PR: see SECURITY.md. -->
-
 ## What and why
+
+<!-- One concern per PR. What was wrong or missing, what this changes. -->
+
+Closes #
 
 ## How it was tested
 
+<!-- Tests added or changed. For a fix: the test fails without it. Anything that could not run locally. -->
+
 ## Checklist
 
-- [ ] Tests cover the change (a bug fix includes the test that reproduces it)
-- [ ] `CHANGELOG.md` updated under `[Unreleased]`, if users or operators would notice
-- [ ] Docs and runbooks updated, if behaviour or configuration changed
-- [ ] Compatibility stated: rolling-upgrade order, wire / key-file / config format changes, rollback
-- [ ] No key material, secrets or tokens added, not even test ones (tests generate keys at run time)
-- [ ] Every commit is signed off (`git commit -s`, DCO)
+- [ ] Commits signed off (`git commit -s`)
+- [ ] Tests cover the change
+- [ ] `CHANGELOG.md` updated under `Unreleased` (or not user-visible)
+- [ ] Independent review done, if this touches signing, DKG, sealing, key storage, the wire protocol or the approval gate
+- [ ] No infrastructure details (hosts, IPs, cluster names, credentials)
+- [ ] Not a disclosure: a security fix describes the change, not the attack (see CONTRIBUTING.md)

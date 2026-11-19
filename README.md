@@ -243,8 +243,9 @@ vulnerabilities privately via GitHub's
 
 ## Contributing
 
-Issues and PRs welcome. `sbt driver/test` (JVM) and `cd frost && cargo test && cargo clippy` (Rust)
-must pass; CI runs both on every PR.
+Issues and PRs welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) first: how work is tracked, what a
+PR needs before merge, and the quality checks CI runs. Releases follow
+[docs/release-process.md](docs/release-process.md).
 
 ## License
 
