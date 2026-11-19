@@ -80,8 +80,8 @@ is fixed or moved to the nightly run.
 | When | What | If it fails |
 |---|---|---|
 | Before pushing | `cargo test` and `clippy` for the crates touched; `sbt driver/test` if the driver changed | Do not push |
-| Every pull request | Unit tests, clippy, cargo-deny, deploy policy, alert rules, TLS cluster smoke, DCO; the quality ratchet (linters for every language, formatting, Semgrep, gitleaks); property tests at a low case count. Jobs are filtered by path | The pull request does not merge |
-| Every push to `main` | Everything above, plus the three e2e ceremony scripts (split, carry, ECIES hosted), coverage for Rust and Scala, and the image build check | `prio:p0` issue: `main` stays green |
+| Every pull request | Unit tests, clippy, cargo-deny, deploy policy, alert rules, TLS cluster smoke, DCO; the quality ratchet (linters for every language, formatting, Semgrep, gitleaks); property tests at a low case count; the three e2e ceremony scripts (split, carry, ECIES hosted) when the cosigner, the driver or the scripts change. Jobs are filtered by path | The pull request does not merge |
+| Every push to `main` | Everything above with no path filter, plus coverage for Rust and Scala and the image build check | `prio:p0` issue: `main` stays green |
 | Nightly, 02:00 UTC | Fuzzing, 10 minutes per target; property tests at a high case count; `cargo audit` against the latest advisories; image scan | `type:test` `prio:p1` issue |
 | Weekly, Monday 06:00 UTC | Canton conformance suite; `cargo mutants` on the signing path (nonces, sign sessions, sign policy, intents, sealing); `buf breaking` against the last release; the weekly quality report | `prio:p1` issue |
 | Release candidate | All of the above on the candidate tag, plus fuzzing for one hour per target, the full mutation run and the QA tracks in step 4 | `prio:p0` means a new candidate |
