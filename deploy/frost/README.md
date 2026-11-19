@@ -5,7 +5,8 @@ ever holds the whole namespace key. The Canton KMS driver's `FrostBackend` conne
 `Signer` API to run DKG and to sign.
 
 Two compose files (default image `ghcr.io/stakecraft/rutli-cosigner:0.4.0`, pinned by digest; override with
-`RUTLI_COSIGNER_IMAGE` or `--build` from `frost/`):
+`RUTLI_COSIGNER_IMAGE` or `--build` from `frost/`; from 0.5.0 on, verify a release digest as
+[SECURITY.md, "Verify the image"](../../SECURITY.md#verify-the-image) shows):
 - `docker-compose.yml` — **dev**: plaintext gRPC, unsealed shares. Fastest to try.
 - `docker-compose.tls.yml` — **production-flavored**: mutual TLS + AES-256-GCM sealed shares
   (verified end-to-end). Needs certs + a seal secret first (below).
