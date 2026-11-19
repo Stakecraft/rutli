@@ -176,6 +176,8 @@ class Cluster(unittest.TestCase):
     def test_another_profile_is_not_compared(self):
         _, problems = self.verdicts(cluster_run(headroom=100, profile="soak-2026-11"), cluster_run(headroom=1))
         self.assertEqual(problems, [])
+        _, problems = self.verdicts(cluster_run(keys_p99=5, profile="soak-2026-11"), cluster_run(keys_p99=50))
+        self.assertEqual(problems, [])
 
     def test_a_failed_key_count_fails_on_its_own(self):
         _, problems = self.verdicts(None, cluster_run(keys_ok=False))

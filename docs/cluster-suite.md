@@ -68,9 +68,9 @@ memory and file descriptors stay within bounds.
 ## Provider hooks
 
 What only the infrastructure can do — power a machine off, detach a disk, cut the network — goes
-through hook executables named by environment variables. Each is called with `start` and later
-with `stop` (always, even when the scenario failed), with `KUBECONFIG` and `RUTLI_NAMESPACE` set,
-and must exit 0:
+through hook executables named by environment variables. Each is called with `start` once the
+scenario's load runs, and then with `stop`, also when `start` or the load failed, with
+`KUBECONFIG` and `RUTLI_NAMESPACE` set. Both must exit 0:
 
 | Variable | Arguments | Expected effect |
 |---|---|---|
@@ -79,12 +79,15 @@ and must exit 0:
 | `HOOK_PARTITION` | `start\|stop NODE_A NODE_B` | no traffic between the two nodes / restored |
 | `HOOK_NET_DELAY` | `start\|stop MS NODE...` | MS milliseconds added to the nodes' traffic / removed |
 
-Without `HOOK_KILL_NODE` the suite falls back to Kubernetes alone: it cordons the node and deletes
-the cosigner's pod (`node-cordon`), and uncordons it afterwards. The other three are skipped and
-listed under `skipped` in the result.
+Without `HOOK_KILL_NODE` the suite falls back to Kubernetes alone (`node-cordon`): it cordons the
+cosigner's node and deletes its pod, which then stays Pending (its volume and the other cosigners
+keep it off the other nodes) until the node is uncordoned at the end of the scenario. That is a
+cosigner gone for the length of the scenario, not a machine that stops answering: its peers see
+refused connections, not timeouts. The other three are skipped and listed under `skipped` in the
+result.
 
 `scripts/perf/hooks/` holds examples for kind (pausing a node's container; iptables rules in the
-node containers), which CI uses. Hooks for a real provider live with the cluster's own tooling.
+node containers between the two cosigner pods), which CI uses. Hooks for a real provider live with the cluster's own tooling.
 
 ## The load profile
 
@@ -126,7 +129,11 @@ cosigners on 9101 and 9200 and to DNS. The pod itself is `restricted` too, with 
 file system and a small in-memory `/tmp`.
 
 `k8s-deploy.sh` labels the namespace `rutli.io/client-ns=true` and
-`pod-security.kubernetes.io/enforce=restricted`. Where the suite may not label namespaces, the
+`pod-security.kubernetes.io/enforce=restricted`, and annotates it `rutli-perf/installed=true`:
+`uninstall` refuses a namespace without that annotation, and deletes only objects labelled
+`rutli-perf/suite=1` (the cosigners' volumes included) and the release. The seal bundles are
+generated in a short-lived pod of the image the cosigners start on, the previous release with
+`--previous`. Where the suite may not label namespaces, the
 namespace's owner sets both before the install.
 
 If the cluster's policies restrict DNS to the cluster DNS pods, or admit only signed or

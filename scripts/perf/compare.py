@@ -91,7 +91,8 @@ def compare_ramp(previous, current, threshold, floor_ms, rows, problems):
 def compare_keys(previous, current, threshold, floor_ms, rows, problems):
     """The cluster suite's key-count dimension: per key count, sign p95/p99 and the slowest
     cosigner's mean ListKeys time."""
-    old = {k.get("count"): k for k in (previous or {}).get("keys") or []}
+    same_profile = previous is not None and previous.get("profile") == current.get("profile")
+    old = {k.get("count"): k for k in (previous or {}).get("keys") or []} if same_profile else {}
     for k in current.get("keys") or []:
         name = f"keys {k.get('count')}"
         if not k.get("passed"):
