@@ -56,9 +56,16 @@ fn session_id() -> String {
     format!("bench-{}", NEXT.fetch_add(1, Ordering::Relaxed))
 }
 
+/// A throwaway secret, new on every run.
+fn random_32() -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
+    bytes
+}
+
 /// Cosigners 1 and 2 of a 2-of-3 key, each with its own marker directory under `dir`.
 fn cosigners(dir: &std::path::Path) -> (Cosigner, Cosigner) {
-    let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&[5; 32], &[1, 2, 3], 2).unwrap();
+    let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&random_32(), &[1, 2, 3], 2).unwrap();
     let cosigner = |i: usize| {
         let kp = frost::keys::KeyPackage::try_from(shares[i].clone()).unwrap();
         Cosigner::new(kp, pkp.clone(), NonceStore::open(dir.join(format!("nonces-{}", i + 1))).unwrap())

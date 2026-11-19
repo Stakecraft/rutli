@@ -55,6 +55,13 @@ fn bench_dir() -> tempfile::TempDir {
     .expect("a temporary directory for the benchmark")
 }
 
+/// A throwaway secret, new on every run.
+fn random_32() -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
+    bytes
+}
+
 fn intent_verify(c: &mut Criterion) {
     let pki = pki::TestPki::new();
     let cluster = pki.cluster_id();
@@ -124,7 +131,7 @@ fn journal_append(c: &mut Criterion) {
 
 fn seal_unseal(c: &mut Criterion) {
     // A real share record: what the key store seals for a FROST key.
-    let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&[5; 32], &[1, 2, 3], 2).unwrap();
+    let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&random_32(), &[1, 2, 3], 2).unwrap();
     let share = Share {
         key_package: frost_ed25519::keys::KeyPackage::try_from(shares[0].clone()).unwrap(),
         public_key_package: pkp,
@@ -135,7 +142,7 @@ fn seal_unseal(c: &mut Criterion) {
     let plain = serde_json::to_vec(&share).unwrap();
     let digest = share.pkp_digest().unwrap();
     let meta = RecordMeta { kind: RecordKind::FrostShare, key_id: KEY, epoch: share.epoch, digest: &digest };
-    let sealer = Sealer::from_master_secret(&[7; 32], 1).with_binding(KeyFileBinding {
+    let sealer = Sealer::from_master_secret(&random_32(), 1).with_binding(KeyFileBinding {
         node: 1,
         cluster_uuid: Some("0b0e6a52-8f0c-4a3e-9d57-5c1f2f3a4b5c".into()),
         write_version: 2,
