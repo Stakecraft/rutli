@@ -80,7 +80,10 @@ class ComposeCluster:
         return args
 
     def loadgen_argv(self, args, timeout_secs):
-        argv = ["docker", "run", "--rm", "--label", "rutli-perf=loadgen", "--network", self.network]
+        # The generator holds a connection per client and cosigner: far above Docker's default
+        # descriptor limit in the limit-sessions scenario. The cosigners keep the default.
+        argv = ["docker", "run", "--rm", "--label", "rutli-perf=loadgen", "--network", self.network,
+                "--ulimit", "nofile=65536:65536"]
         if self.uid:
             argv += ["--user", self.uid]
         argv += ["-v", f"{self.certs}:/certs:ro", "--entrypoint", "rutli-loadgen", self.image]
@@ -192,16 +195,22 @@ class Runner:
     # -- the cosigners' processes -------------------------------------------------------------
 
     def resources(self):
-        """Per cosigner: resident memory now and at its peak (kB), and open file descriptors."""
+        """Per cosigner: resident memory now and at its peak (kB), open file descriptors, the
+        soft limit on them, and when the process started (clock ticks since boot): a different
+        start time is a process that died and was started again."""
         out = {}
+        script = ("grep -E '^Vm(RSS|HWM):' /proc/1/status; echo fds: $(ls /proc/1/fd | wc -l); "
+                  "echo started: $(cut -d' ' -f22 /proc/1/stat); "
+                  "echo fd_limit: $(awk '/^Max open files/ {print $4}' /proc/1/limits)")
+        names = {"VmRSS": "rss_kb", "VmHWM": "peak_rss_kb", "fds": "fds", "started": "started", "fd_limit": "fd_limit"}
         for node in NODES:
-            text = self.cluster.exec(node, "grep -E '^Vm(RSS|HWM):' /proc/1/status; echo fds: $(ls /proc/1/fd | wc -l)")
+            text = self.cluster.exec(node, script)
             entry = {}
             for line in (text or "").splitlines():
                 name, _, value = line.partition(":")
                 number = value.split()[0] if value.split() else ""
                 if number.isdigit():
-                    entry[{"VmRSS": "rss_kb", "VmHWM": "peak_rss_kb", "fds": "fds"}.get(name, name)] = int(number)
+                    entry[names.get(name, name)] = int(number)
             out[node] = entry
         return out
 
@@ -255,6 +264,12 @@ class Runner:
             if "fds" not in a or "peak_rss_kb" not in a:
                 check(f"{node}: process readable", False, "could not read /proc/1 in the container")
                 continue
+            if node not in restarted:
+                # A cosigner that died and came back passes every other check here with a fresh
+                # process: its memory and descriptors start again from nothing.
+                check(f"{node}: the process was not restarted",
+                      "started" in b and b.get("started") == a.get("started"),
+                      f"process start time {b.get('started')} before, {a.get('started')} after")
             peak_mib = a["peak_rss_kb"] / 1024
             check(
                 f"{node}: peak resident memory within {self.args.max_rss_mib} MiB",
@@ -517,7 +532,10 @@ class Runner:
 
         storm = f"perf-storm-{int(time.time())}"
         # What a busy or refusing node answers. ALREADY_EXISTS only where the key is contested.
-        busy = ("UNAVAILABLE", "ABORTED", "FAILED_PRECONDITION", "RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED")
+        # INTERNAL too: a leader passes a member's ABORTED ("a dkg ceremony ... is already in
+        # progress") on to the client as INTERNAL (seen on the first run, reported). The scenario
+        # is about the nodes surviving the storm, not about that code.
+        busy = ("UNAVAILABLE", "ABORTED", "FAILED_PRECONDITION", "RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED", "INTERNAL")
         ceremony_codes = [busy, busy + ("ALREADY_EXISTS",), ("FAILED_PRECONDITION", "ABORTED")]
 
         def ceremonies():

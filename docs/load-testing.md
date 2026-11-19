@@ -64,7 +64,8 @@ builds it, plus the generator.
 | `limit-sessions` | 1 500 signatures of one key asked of one leader at the same moment | refusals and timeouts are allowed, wrong answers are not; the nodes stay up |
 | `recovery` | a short stream on both keys after all of the above | every request succeeds |
 
-Every scenario also fails if a cosigner is unhealthy afterwards, if its peak resident memory
+Every scenario also fails if a cosigner process died and was started again during it (unless
+the scenario restarts it on purpose), if a cosigner is unhealthy afterwards, if its peak resident memory
 exceeds 512 MiB (`--max-rss-mib`), or if it holds over 64 more file descriptors than before the
 scenario (`--max-fd-growth`). Both are read from `/proc` inside the container.
 
