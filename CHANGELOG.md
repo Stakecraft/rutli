@@ -37,6 +37,11 @@ All notable changes to Rütli are documented here. Format loosely follows
   test assertion, a log field or a panic message that formatted a key (or a tombstone still
   holding one) would have shown `private_der`. No log line did. Its `Debug` now prints
   `<redacted>` for the private half.
+- **Loading a FROST share left an unwiped copy of its signing share in memory.** The key store
+  parsed each decrypted key file into a `serde_json::Value` first, which copies every string, the
+  share's hex included, into heap memory that is freed without being wiped. It now parses the
+  record straight from the decrypted buffer (which is wiped), so the share's hex is no longer
+  copied on the way. Copies made inside the FROST library itself are unchanged.
 - **A cosigner's first signature after a restart could lose its session.** Two requests that used
   a key for the first time at once (a sign round 1 and, say, this node leading another signature)
   each loaded the share and built their own in-memory signing state; the one that finished second
