@@ -2263,9 +2263,10 @@ fn export_key_command(
                     .into(),
             )
         })?;
-        let passphrase = std::env::var(env_name).map_err(|_| {
+        // Wiped on drop, like the import path's passphrase.
+        let passphrase = zeroize::Zeroizing::new(std::env::var(env_name).map_err(|_| {
             DaemonError::Config(format!("export passphrase: env var {env_name} is not set"))
-        })?;
+        })?);
         rutli_cosigner::export::export_encrypted(key_id, &key, &passphrase)?
     };
 
