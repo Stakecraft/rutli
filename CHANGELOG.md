@@ -72,6 +72,35 @@ All notable changes to Rütli are documented here. Format loosely follows
   commit. A load that an eviction overtook now reads the share again. The same guard covers
   `discard-partial-key`.
 
+### Security
+
+- **Release images are built on GitHub-hosted runners, signed and attested.** `publish-image.yml` no
+  longer runs on the self-hosted CI runners (`vars.CI_RUNNER`), where a job is root on the runner's
+  Docker host. It builds linux/amd64 and linux/arm64 natively on hosted runners (no QEMU), pushes
+  each by digest and assembles the multi-arch index, which lists BuildKit's SBOM and provenance for
+  both platforms (the job fails otherwise). A last job, the only one with the signing identity and
+  no third-party action, gives the index a keyless cosign signature and a GitHub build provenance
+  attestation and then runs the operator's verification commands. Operators: verify the digest you
+  pin with the commands in `SECURITY.md`, "Verify the image", before deploying. Images up to 0.4.0
+  are not signed.
+- **Every GitHub Action is pinned to a full commit SHA**, with its version in a comment, in `ci.yml`
+  and `publish-image.yml`; `.github/dependabot.yml` proposes updates (actions weekly, the runtime
+  base image digest monthly). Dependabot's pull requests run CI on GitHub-hosted runners only, and
+  the self-hosted runner guard refuses them (reinstall `deploy/ci-runner/job-started-guard.sh` on
+  each runner). Helm in CI is downloaded and checked against pinned sha256 sums instead of
+  `azure/setup-helm`, which checks none.
+- **`frost/Dockerfile` builds with `cargo build --locked`** and pins both base images by the digest
+  of their multi-arch index (`rust:1.100.0-slim`, `debian:stable-slim`). The image contents are
+  otherwise unchanged.
+- **One Rust version for CI and the release image:** `frost/rust-toolchain.toml` (1.100.0). CI
+  installs that version instead of whatever `stable` is that day; the Dockerfile builds on the rust
+  image of the same version.
+- **New workflow `image-build-check.yml`** builds the release image for both platforms on hosted
+  runners without pushing or signing, on pull requests that touch `frost/` or a workflow, and
+  weekly, and checks the result has the attestation structure the release requires. It also fails
+  if an action is not pinned by SHA or if the Dockerfile and `rust-toolchain.toml` name different
+  Rust versions.
+
 ### Documentation
 
 - **Roadmap dates after threshold ECIES moved into 1.0:** 1.0 follows about 34 weeks after the
