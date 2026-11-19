@@ -33,6 +33,15 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Fixed
 
+- **`export-key` could write a key into an existing file with its old permissions.** The 0600 mode
+  only applied to a file the export created: an `--out` that already existed (for example 0644)
+  kept its mode and received the artifact, with `--unsafe-plaintext` the raw private key, and a
+  symlink at `--out` was followed. `export-key` now refuses an existing `--out` or a symlink, like
+  the other commands that write key material.
+- **The cosigner did not stop on SIGTERM.** It handled only SIGINT, and in its image it runs as
+  PID 1, where the kernel ignores a signal without a handler: every pod stop waited out the grace
+  period and ended in SIGKILL, with no drain of in-flight requests. It now shuts down gracefully on
+  SIGTERM or SIGINT.
 - **A cosigner's first signature after a restart could lose its session.** Two requests that used
   a key for the first time at once (a sign round 1 and, say, this node leading another signature)
   each loaded the share and built their own in-memory signing state; the one that finished second

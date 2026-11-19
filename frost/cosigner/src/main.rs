@@ -65,7 +65,8 @@ enum Command {
         /// The hosted key to export (a `rutli-…` key id).
         #[arg(long)]
         key_id: String,
-        /// File to write the export artifact to.
+        /// File to write the export artifact to. It must not exist yet: the export refuses to
+        /// overwrite a file or follow a symlink.
         #[arg(long)]
         out: std::path::PathBuf,
         /// Env var holding the passphrase that protects the artifact (Argon2id + AES-256-GCM).
@@ -2080,8 +2081,13 @@ fn write_new_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     let mut f = rutli_cosigner::share_delivery::private_create_new(path).map_err(|e| {
         DaemonError::Config(format!("cannot create {} (refusing to overwrite): {e}", path.display()))
     })?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
+    if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
+        // The file is ours (create_new): remove the partial copy, so a retry with the same path is
+        // not refused as an overwrite.
+        drop(f);
+        let _ = std::fs::remove_file(path);
+        return Err(e.into());
+    }
     Ok(())
 }
 
@@ -2263,8 +2269,10 @@ fn export_key_command(
         rutli_cosigner::export::export_encrypted(key_id, &key, &passphrase)?
     };
 
-    // 0600 before any bytes land: an export must never be briefly world-readable.
-    write_private_file(out, &serde_json::to_vec_pretty(&envelope)?)?;
+    // A new file, 0600 before any bytes land: an export must never be briefly world-readable. The
+    // mode only applies to a file this call creates, so an existing path (with whatever mode it
+    // has) or a symlink is refused, never written through.
+    write_new_private_file(out, &serde_json::to_vec_pretty(&envelope)?)?;
     // Deliberately audible in the node's log: an export is a privileged, rare event, and the log is
     // often the only record that a portable copy of a key now exists.
     tracing::warn!(
@@ -2364,23 +2372,6 @@ fn import_key_command(
     Ok(())
 }
 
-/// Create `path` with owner-only permissions BEFORE writing, so the contents are never briefly
-/// readable by other users on the host.
-fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let mut f = opts.open(path)?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
-    Ok(())
-}
-
 /// Copy regular files from `src` to `dst`. When `!overwrite`, existing destination files are an
 /// error (so a restore never clobbers a live share by accident).
 ///
@@ -2442,9 +2433,50 @@ fn identifier_index(id: Identifier) -> Vec<u8> {
     id.serialize()
 }
 
-async fn shutdown() {
-    let _ = tokio::signal::ctrl_c().await;
-    tracing::info!("shutdown signal received");
+/// Resolves on SIGINT or SIGTERM. SIGTERM matters most: Kubernetes stops a pod with it, and the
+/// cosigner runs as PID 1 in its image, where the kernel ignores a signal that has no handler, so
+/// without this every pod stop waited out the grace period and ended in SIGKILL with no drain.
+/// A signal that cannot be registered is logged and never resolves: it must not stop the server.
+///
+/// The SIGTERM handler is installed when this is called (inside the runtime), not on first poll, so
+/// from that point on a SIGTERM is caught rather than fatal.
+fn shutdown() -> impl std::future::Future<Output = ()> {
+    #[cfg(unix)]
+    let term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(term) => Some(term),
+        Err(e) => {
+            tracing::error!(error = %e, "cannot listen for SIGTERM");
+            None
+        }
+    };
+    async move {
+        let interrupt = async {
+            match tokio::signal::ctrl_c().await {
+                Ok(()) => "SIGINT",
+                Err(e) => {
+                    tracing::error!(error = %e, "cannot listen for SIGINT");
+                    std::future::pending().await
+                }
+            }
+        };
+        #[cfg(unix)]
+        let terminate = async move {
+            match term {
+                Some(mut term) => {
+                    term.recv().await;
+                    "SIGTERM"
+                }
+                None => std::future::pending().await,
+            }
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<&str>();
+        let signal = tokio::select! {
+            s = interrupt => s,
+            s = terminate => s,
+        };
+        tracing::info!(signal, "shutdown signal received, draining in-flight requests");
+    }
 }
 
 #[cfg(test)]
@@ -2484,5 +2516,25 @@ mod tests {
         assert_eq!(copy_journal(&src, &dst).unwrap(), 1);
         assert!(dst.join("frost-k").join("00000000000000000001.jsonl").exists());
         assert!(!dst.join("frost-k").join("not-a-segment.tmp").exists());
+    }
+
+    /// Kubernetes stops a pod with SIGTERM, and the cosigner is PID 1 in its image: without a
+    /// handler the signal is ignored and the pod is SIGKILLed after the grace period.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sigterm_starts_a_graceful_shutdown() {
+        // `shutdown()` installs the SIGTERM handler before it returns, so the signal below is
+        // caught, not fatal to the test process. The signal is process-wide; it is safe here
+        // because no other test in this binary installs or expects a signal handler.
+        let stopped = tokio::spawn(shutdown());
+        let kill = std::process::Command::new("kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .status()
+            .unwrap();
+        assert!(kill.success());
+        tokio::time::timeout(std::time::Duration::from_secs(10), stopped)
+            .await
+            .expect("SIGTERM must resolve the shutdown future")
+            .unwrap();
     }
 }
