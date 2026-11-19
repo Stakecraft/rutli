@@ -622,7 +622,7 @@ async fn load_command(ctx: Arc<Ctx>, command: &'static str, op: Op, cluster: Str
         }
     }
     let started_at_ms = intent::now_ms();
-    let (before, _) = scrape(&ctx).await;
+    let (before, mut scrape_errors) = scrape(&ctx).await;
     let failover = !load.no_failover && op.may_fail_over();
     let run = Arc::new(Run {
         ctx: ctx.clone(),
@@ -637,7 +637,8 @@ async fn load_command(ctx: Arc<Ctx>, command: &'static str, op: Op, cluster: Str
         "{command} {}: {} requests, {} ok, errors {:?}, p50 {} ms, p99 {} ms",
         load.name, client.requests, client.ok, client.errors, client.latency.p50_ms, client.latency.p99_ms
     );
-    let (after, scrape_errors) = scrape(&ctx).await;
+    let (after, after_errors) = scrape(&ctx).await;
+    scrape_errors.extend(after_errors);
     let names: Vec<String> = ctx.metrics.iter().map(|(n, _)| n.clone()).collect();
     let server = prom::report(&before, &after, &names, &load.restarted, scrape_errors);
     Ok(LoadReport {

@@ -8,7 +8,8 @@ Usage: compare.py [--threshold 0.20] [--floor-ms 2] [--markdown FILE] PREVIOUS C
 Prints a table and exits 1 when
   - a p95 or p99 of the current run is more than the threshold (default 20 %) above the previous
     run's, for a scenario both runs made with the same load (and the difference is more than the
-    floor, default 2 ms: below that it is timer and scheduler noise, not a regression); or
+    floor, default 2 ms: below that it is timer and scheduler noise, not a regression). A two-hour
+    run is not compared with a one-minute run: the load must be the same, its length included; or
   - the current run has a failed scenario: a request that ended in a code the scenario does not
     allow, an answer that did not verify, an unhealthy cosigner, memory or descriptors out of
     bounds. That is judged on the current run alone.
@@ -30,7 +31,7 @@ import sys
 def load_params(scenario):
     """What must be equal for two runs' latencies to be comparable."""
     loads = [l for l in scenario.get("loads", []) if "failed" not in l]
-    return [(l.get("command"), l.get("rate"), l.get("clients"), l.get("count")) for l in loads]
+    return [(l.get("command"), l.get("rate"), l.get("clients"), l.get("count"), l.get("duration_secs")) for l in loads]
 
 
 def latencies(scenario):

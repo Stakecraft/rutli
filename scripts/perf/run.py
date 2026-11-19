@@ -152,7 +152,9 @@ class Runner:
     # -- judging ------------------------------------------------------------------------------
 
     def scenario(self, name, body, allowed=(), required=(), compare_latency=False, restarted=()):
-        """Run `body` (which returns the load generator's report or a list of them) and judge it."""
+        """Run `body` (which returns the load generator's report or a list of them) and judge it.
+        `allowed`: the codes a request may end in besides OK; a list of such tuples judges each
+        of the body's loads by its own."""
         log(f"scenario {name}")
         before = self.resources()
         started = time.time()
@@ -170,25 +172,25 @@ class Runner:
         def check(what, ok, detail=""):
             checks.append({"check": what, "ok": bool(ok), "detail": detail})
 
-        errors, samples, bad, total_ok = {}, {}, 0, 0
-        for load in loads:
+        per_load = bool(allowed) and isinstance(allowed[0], (tuple, list))
+        errors, samples, bad, total_ok, unexpected = {}, {}, 0, 0, []
+        for i, load in enumerate(loads):
             if "failed" in load:
                 check("the load generator ran", False, load["failed"])
                 continue
             client = load.get("client", {})
             total_ok += client.get("ok", 0)
             bad += client.get("bad_answers", 0)
+            may = (allowed[i] if i < len(allowed) else ()) if per_load else allowed
             for code, n in client.get("errors", {}).items():
                 errors[code] = errors.get(code, 0) + n
+                if code not in may:
+                    sample = client.get("error_samples", {}).get(code, "")[:160]
+                    unexpected.append(f"{load.get('name') or name}: {n} x {code} ({sample})")
             samples.update(client.get("error_samples", {}))
             unhealthy = sorted(n for n, ok in load.get("health", {}).items() if not ok)
             check("every cosigner is healthy afterwards", not unhealthy, ", ".join(unhealthy))
-        unexpected = {c: n for c, n in errors.items() if c not in allowed}
-        check(
-            "no request ended in a code the scenario does not allow",
-            not unexpected,
-            "; ".join(f"{n} x {c} ({samples.get(c, '')[:160]})" for c, n in sorted(unexpected.items())),
-        )
+        check("no request ended in a code the scenario does not allow", not unexpected, "; ".join(unexpected))
         check("every answer verifies", bad == 0, f"{bad} answers did not verify: {samples.get('OK', '')[:160]}")
         for code in required:
             check(f"the limit was reached ({code} seen)", errors.get(code, 0) > 0, f"errors by code: {errors}")
@@ -214,7 +216,7 @@ class Runner:
         result = {
             "name": name,
             "compare_latency": compare_latency,
-            "allowed_codes": sorted(allowed),
+            "allowed_codes": [sorted(x) for x in allowed] if per_load else sorted(allowed),
             "required_codes": sorted(required),
             "seconds": round(time.time() - started, 1),
             "ok": total_ok,
@@ -346,8 +348,9 @@ class Runner:
         self.close(r)
 
         storm = f"perf-storm-{int(time.time())}"
-        ceremony_codes = ("UNAVAILABLE", "ABORTED", "ALREADY_EXISTS", "FAILED_PRECONDITION",
-                          "RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED")
+        # What a busy or refusing node answers. ALREADY_EXISTS only where the key is contested.
+        busy = ("UNAVAILABLE", "ABORTED", "FAILED_PRECONDITION", "RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED")
+        ceremony_codes = [busy, busy + ("ALREADY_EXISTS",), ("FAILED_PRECONDITION", "ABORTED")]
 
         def ceremonies():
             return [
@@ -365,9 +368,11 @@ class Runner:
         r, check = self.scenario("limit-ceremony", ceremonies, allowed=ceremony_codes)
         if len(r["loads"]) == 3 and "failed" not in r["loads"][1]:
             check("a DKG of the contested key succeeded", r["loads"][1].get("client", {}).get("ok", 0) >= 1)
+        if r["loads"] and "failed" not in r["loads"][0]:
+            check("some of the 80 DKGs succeeded", r["loads"][0].get("client", {}).get("ok", 0) >= 1)
         self.close(r)
 
-        r, _ = self.scenario(
+        r, check = self.scenario(
             "limit-decrypt",
             lambda: self.loadgen(
                 ["ecdh", "--key", KEY_ECIES, "--name", "limit-decrypt", "--count", str(2 * DECRYPT_PER_MIN), "--clients", "64",
@@ -376,6 +381,13 @@ class Runner:
             allowed=("RESOURCE_EXHAUSTED",),
             required=("RESOURCE_EXHAUSTED",),
         )
+        for load in r["loads"]:
+            wall = load.get("client", {}).get("wall_seconds", 0)
+            # A bucket of one minute's worth, refilled at the per-minute rate while the run lasts,
+            # and already drawn on by the `ecies` scenario. 5 % for the edges of the refill.
+            ceiling = int(DECRYPT_PER_MIN * (1 + wall / 60) * 1.05)
+            ok = load.get("client", {}).get("ok", 0)
+            check(f"no more than {ceiling} decryptions passed the {DECRYPT_PER_MIN}/min ceiling", ok <= ceiling, f"{ok} ok")
         self.close(r)
 
         # Far more signatures in flight on one key through one leader than a node keeps sessions

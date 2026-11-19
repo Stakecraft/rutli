@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import compare  # noqa: E402
 
 
-def run(steady_p95=20.0, steady_p99=30.0, server_p95=18.0, failed=(), rate=20, compare_latency=True):
+def run(steady_p95=20.0, steady_p99=30.0, server_p95=18.0, failed=(), rate=20, compare_latency=True, secs=60):
     scenario = {
         "name": "steady",
         "compare_latency": compare_latency,
@@ -23,6 +23,7 @@ def run(steady_p95=20.0, steady_p99=30.0, server_p95=18.0, failed=(), rate=20, c
                 "rate": rate,
                 "clients": 4,
                 "count": 0,
+                "duration_secs": secs,
                 "client": {"latency": {"count": 1200, "p95_ms": steady_p95, "p99_ms": steady_p99}},
                 "server": {"sign_duration": {"count": 1200, "p95_ms": server_p95, "p99_ms": 24.0}},
             }
@@ -100,6 +101,10 @@ class Compare(unittest.TestCase):
 
     def test_another_load_is_not_compared(self):
         v, problems = self.verdicts(run(rate=20, steady_p95=20.0), run(rate=40, steady_p95=90.0))
+        self.assertEqual(problems, [])
+        self.assertEqual(v[("steady", "client p95")], "not compared: the load differs")
+        # A release candidate's two hours against the weekly minute: not the same load either.
+        v, problems = self.verdicts(run(secs=60, steady_p95=20.0), run(secs=7200, steady_p95=90.0))
         self.assertEqual(problems, [])
         self.assertEqual(v[("steady", "client p95")], "not compared: the load differs")
 

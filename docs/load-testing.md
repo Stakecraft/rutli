@@ -60,7 +60,7 @@ builds it, plus the generator.
 | `cold-cache` | one cosigner restarted, then 300 signatures at once through it | every request succeeds and no cosigner loses a session between the two rounds (`rutli_sign_round2_unknown_session_total` does not move) |
 | `limit-rate` | 400 signatures on a key limited to 120 a minute | at least 120 and at most 180 succeed (each is charged on the two nodes that signed it), the rest are `RESOURCE_EXHAUSTED` |
 | `limit-ceremony` | 80 DKGs at once (a node holds 64 ceremony sessions), 10 DKGs of one key at once, two refreshes back to back | refusals only with the codes a busy or refusing node gives; every DKG of the contested key that succeeds answers the same group key; a refresh leaves the group key unchanged |
-| `limit-decrypt` | 12 000 `EcdhDerive` on a key limited to 6 000 a minute | the surplus is `RESOURCE_EXHAUSTED` |
+| `limit-decrypt` | 12 000 `EcdhDerive` on a key limited to 6 000 a minute | no more than the bucket and its refill succeed, the surplus is `RESOURCE_EXHAUSTED` |
 | `limit-sessions` | 1 500 signatures of one key asked of one leader at the same moment | refusals and timeouts are allowed, wrong answers are not; the nodes stay up |
 | `recovery` | a short stream on both keys after all of the above | every request succeeds |
 
@@ -68,7 +68,11 @@ Every scenario also fails if a cosigner is unhealthy afterwards, if its peak res
 exceeds 512 MiB (`--max-rss-mib`), or if it holds over 64 more file descriptors than before the
 scenario (`--max-fd-growth`). Both are read from `/proc` inside the container.
 
-A limit scenario that never reaches its limit fails too: it would prove nothing.
+`limit-rate` and `limit-decrypt` also fail if the limit is never reached, or if more passes than
+the limit allows: a limit test that hit no limit proves nothing. `limit-ceremony` and
+`limit-sessions` do not require a refusal: whether 80 DKGs or 1 500 signatures are ever in
+flight at the same moment depends on the machine. They show that the nodes survive the attempt
+and answer nothing wrong.
 
 The cluster runs the example configs of `deploy/frost/config-tls` with one change: the sign rate
 limit (300 a minute per key by default, below what the scenarios send) is lifted, except for keys
@@ -84,7 +88,8 @@ and descriptors before and after (`resources`), the checks with their verdicts (
 `scripts/perf/compare.py PREVIOUS CURRENT` prints a table and exits 1 when
 
 - a p95 or p99 is more than 20 % above the previous run's (`--threshold`), for the scenarios
-  `steady`, `burst`, `clients` and `ecies`, on the client side or in the cosigners' histogram.
+  `steady`, `burst`, `clients` and `ecies`, on the client side or in the cosigners' histogram,
+  where both runs sent the same load for the same length of time.
   A difference under 2 ms is not counted (`--floor-ms`). The histogram's percentiles are
   interpolated inside its buckets (10, 25, 50, 75, 100 ms, …), so they move in steps;
 - or the current run has a failed scenario.

@@ -125,8 +125,9 @@ pub struct TargetReport {
 
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct ServerReport {
-    /// `rutli_sign_duration_seconds{result="ok"}` over the run. `None`: no cosigner was scraped
-    /// both times, or none led a successful signature.
+    /// `rutli_sign_duration_seconds{result="ok"}` over the run, from the cosigners scraped both
+    /// before and after it (or restarted in between). `None`: there was none, or none led a
+    /// successful signature.
     pub sign_duration: Option<HistogramReport>,
     /// Counter deltas summed over the cosigners (zero deltas left out).
     pub counters: BTreeMap<String, f64>,
@@ -162,7 +163,18 @@ pub fn report(
             out.targets.insert(name.clone(), target);
             continue;
         };
-        let b = before.get(name).unwrap_or(&empty);
+        let Some(b) = before.get(name).or_else(|| restarted.contains(name).then_some(&empty)) else {
+            // No baseline: everything this cosigner counted since it started would pass for the
+            // run's own. Its gauges are still what they are.
+            for (series, &value) in &a.series {
+                if a.types.get(metric_name(series)).is_some_and(|t| t == "gauge") {
+                    target.gauges.insert(series.clone(), value);
+                }
+            }
+            out.scrape_errors.push(format!("{name}: not scraped before the run, so its counters are left out"));
+            out.targets.insert(name.clone(), target);
+            continue;
+        };
         let cumulative = |series: &str| {
             let metric = metric_name(series);
             let base = metric
@@ -344,6 +356,12 @@ rutli_untyped_thing 7
         assert!(t.scraped_before && t.scraped_after && !t.counters_reset);
         assert_eq!(t.gauges["rutli_pending_sign_sessions"], 0.0);
         assert!(!r.targets["cosigner2"].scraped_after);
+        assert_eq!(r.scrape_errors.len(), 1);
+
+        // Scraped only after the run: without a baseline its lifetime counters are not the run's.
+        let r = report(&BTreeMap::new(), &a, &names[..1], &[], Vec::new());
+        assert!(r.counters.is_empty() && r.sign_duration.is_none(), "{:?}", r.counters);
+        assert_eq!(r.targets["cosigner1"].gauges["rutli_pending_sign_sessions"], 0.0);
         assert_eq!(r.scrape_errors.len(), 1);
     }
 
