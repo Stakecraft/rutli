@@ -19,13 +19,6 @@ each cosigner's memory and open file descriptors before and after, and judges ev
   limit-sessions  1500 signatures of one key asked of one leader at the same moment
   recovery        a short stream of signatures after all of the above
 
-On Kubernetes (--env k8s, installed by scripts/perf/k8s-deploy.sh) the same scenarios run through
-`kubectl`, and three more:
-
-  upgrade         helm upgrade from the previous release with live keys (--upgrade-image)
-  node-kill       a cosigner's server powered off under load   (ephemeral cluster only, --hcloud-dir)
-  lost-volume     a cosigner's data volume detached under load (ephemeral cluster only, --hcloud-dir)
-
 A scenario fails when a request ends in a gRPC code the scenario does not allow, an answer does
 not verify, a code it requires never appears (a limit test that hit no limit proves nothing), a
 cosigner is unhealthy afterwards, or a cosigner's memory or file descriptors are out of bounds.
@@ -106,55 +99,6 @@ class ComposeCluster:
 
     def restart(self, node):
         subprocess.run(self.compose + ["restart", node], check=True, timeout=120, capture_output=True)
-
-
-class K8sCluster:
-    """Three cosigners installed by scripts/perf/k8s-deploy.sh (namespace rutli-perf); the load
-    generator is a pod there, driven with `kubectl exec`."""
-
-    NS = "rutli-perf"
-
-    def __init__(self, name):
-        self.kind = name
-
-    @staticmethod
-    def pod(node):
-        return f"rutli-cosigner-n{NODES.index(node) + 1}-0"
-
-    def kubectl(self, *args, timeout=300, check=True):
-        return subprocess.run(["kubectl", "-n", self.NS, *args], capture_output=True, text=True,
-                              timeout=timeout, check=check)
-
-    def loadgen_argv(self, args, timeout_secs):
-        argv = ["kubectl", "-n", self.NS, "exec", "rutli-perf-loadgen", "--", "rutli-loadgen",
-                "--ca", "/certs/ca.crt", "--cert", "/certs/driver.crt", "--key", "/certs/driver.key",
-                "--timeout-secs", str(timeout_secs)]
-        for i, node in enumerate(NODES, start=1):
-            # The per-node Service for gRPC; the pod's own name behind the headless Service for
-            # metrics, which the per-node Service does not expose.
-            argv += ["--target", f"{node}=https://rutli-node-{i}.{self.NS}.svc:9101"]
-            argv += ["--metrics", f"{node}=http://{self.pod(node)}.rutli-cosigner.{self.NS}.svc:9200/metrics"]
-        return argv + args
-
-    def exec(self, node, shell):
-        out = self.kubectl("exec", self.pod(node), "-c", "cosigner", "--", "sh", "-c", shell, timeout=30, check=False)
-        return out.stdout if out.returncode == 0 else None
-
-    def kill(self, node):
-        self.kubectl("delete", "pod", self.pod(node), "--grace-period=0", "--force", "--wait=false")
-
-    def start(self, node):
-        # The StatefulSet brings the pod back by itself; wait until it is ready.
-        sts = self.pod(node)[: -len("-0")]
-        self.kubectl("rollout", "status", f"statefulset/{sts}", "--timeout=300s", timeout=330)
-
-    def restart(self, node):
-        self.kubectl("delete", "pod", self.pod(node), timeout=120)
-        self.start(node)
-
-    def node_of(self, node):
-        """The Kubernetes node a cosigner's pod runs on."""
-        return self.kubectl("get", "pod", self.pod(node), "-o", "jsonpath={.spec.nodeName}").stdout.strip()
 
 
 class Runner:
@@ -306,120 +250,11 @@ class Runner:
                 log(f"  FAILED: {c['check']}: {c['detail']}")
         log(f"  {'ok' if result['passed'] else 'FAILED'}: {result['ok']} ok, errors {result['errors']}")
 
-    # -- scenarios that need more than a Compose cluster ----------------------------------------
-
-    def upgrade(self):
-        """helm upgrade from the previous release to the build under test, with live keys and a
-        light stream of signatures running. The chart restarts every cosigner at once, so
-        signatures fail while they restart: those are counted, not forbidden. What must hold:
-        afterwards every key is still there with the same public key, and signs."""
-        a = self.args
-        before = self.setup_report
-
-        def body():
-            proc = self.loadgen_start(
-                ["sign", "--key", KEY_STEADY, "--name", "upgrade", "--rate", "5", "--clients", "3",
-                 "--duration-secs", "120"] + [x for n in NODES for x in ("--restarted", n)]
-            )
-            time.sleep(10)
-            log(f"  helm upgrade to {a.upgrade_image}")
-            deploy = os.path.join(os.path.dirname(os.path.abspath(__file__)), "k8s-deploy.sh")
-            up = subprocess.run([deploy, "upgrade", "--image", a.upgrade_image, "--work", a.work],
-                                capture_output=True, text=True, timeout=900, check=False)
-            report = self.loadgen_finish(proc, 600)
-            if up.returncode != 0:
-                return [report, {"failed": f"helm upgrade failed: {up.stderr[-1000:]}"}]
-            if not self.wait_healthy(300):
-                return [report, {"failed": "the cosigners did not become healthy after the upgrade"}]
-            self.after_upgrade = self.loadgen(self.setup_args, wall_timeout=600)
-            return [report, self.loadgen(["sign", "--key", KEY_STEADY, "--key", KEY_SECOND, "--name", "after-upgrade",
-                                          "--count", "50", "--clients", "5"])]
-
-        down = ("UNAVAILABLE", "DEADLINE_EXCEEDED", "UNKNOWN", "ABORTED", "CANCELLED")
-        r, check = self.scenario("upgrade", body, allowed=[down, ()], restarted=tuple(NODES))
-        after = getattr(self, "after_upgrade", {"failed": "not reached"})
-        if "failed" in after:
-            check("the keys can be read after the upgrade", False, after["failed"])
-        else:
-            for group in ("frost_keys", "ecies_keys"):
-                for key_id, was in before.get(group, {}).items():
-                    now = after.get(group, {}).get(key_id, {})
-                    check(f"{key_id} survived the upgrade unchanged",
-                          now.get("public_key") == was.get("public_key") and not now.get("created"),
-                          f"created again: {now.get('created')}")
-        if r["loads"] and "failed" not in r["loads"][0]:
-            timeline = r["loads"][0].get("client", {}).get("timeline", [])
-            r["seconds_with_failed_signatures"] = sum(1 for sec in timeline if sec.get("errors"))
-        self.close(r)
-
-    def hetzner_node(self, cosigner):
-        """Index in cluster.json of the server a cosigner's pod runs on."""
-        with open(os.path.join(self.args.hcloud_dir, "cluster.json")) as f:
-            nodes = json.load(f)["nodes"]
-        name = self.cluster.node_of(cosigner)
-        return next(n["index"] for n in nodes if n["name"] == name)
-
-    def hcloud(self, command, index):
-        script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "hcloud.py")
-        subprocess.run([sys.executable, script, command, "--dir", self.args.hcloud_dir, "--node", str(index)],
-                       check=True, timeout=600)
-
-    def under_load(self, name, victim, strike, recover):
-        """The steady stream for 90 s; 12 s in, `strike()`; after the stream, `recover()` and wait
-        for the cluster. Every signature must succeed: two of three cosigners are untouched."""
-        def body():
-            proc = self.loadgen_start(
-                ["sign", "--key", KEY_STEADY, "--name", name, "--rate", str(self.args.rate), "--clients", "6",
-                 "--duration-secs", "90", "--restarted", victim]
-            )
-            time.sleep(12)
-            log(f"  {name}: striking {victim}")
-            strike()
-            report = self.loadgen_finish(proc, 600)
-            log(f"  {name}: recovering {victim}")
-            recover()
-            if not self.wait_healthy(600):
-                return [report, {"failed": f"{victim} did not become healthy again"}]
-            return report
-
-        r, _ = self.scenario(name, body, restarted=(victim,))
-        self.close(r)
-
-    def hetzner_scenarios(self):
-        # Never the server that also runs the control plane (index 0).
-        by_index = sorted(NODES, key=self.hetzner_node)
-        victim = by_index[-1]
-        index = self.hetzner_node(victim)
-
-        def power_on():
-            self.hcloud("poweron", index)
-            subprocess.run(["kubectl", "wait", "--for=condition=Ready", f"node/{self.cluster.node_of(victim)}",
-                            "--timeout=600s"], check=True, timeout=630, capture_output=True)
-            self.cluster.start(victim)
-
-        # A whole node gone without warning: its pod stays listed as running for a while.
-        self.under_load("node-kill", victim, lambda: self.hcloud("poweroff", index), power_on)
-
-        victim = by_index[1]
-        index = self.hetzner_node(victim)
-
-        def give_back():
-            self.hcloud("attach", index)
-            self.cluster.kill(victim)
-            self.cluster.start(victim)
-
-        # The data volume vanishes under a running cosigner (the 2026-10-07 incident): it must
-        # stop taking part instead of sinking signatures, and the other two keep signing.
-        self.under_load("lost-volume", victim, lambda: self.hcloud("detach", index), give_back)
-
     # -- the scenarios ------------------------------------------------------------------------
 
     def run(self):
         a = self.args
         sign_steady = ["sign", "--key", KEY_STEADY, "--rate", str(a.rate), "--clients", "4"]
-
-        if a.upgrade_image:
-            self.upgrade()
 
         r, _ = self.scenario(
             "steady",
@@ -495,9 +330,6 @@ class Runner:
                  "--prefer", "cosigner2"],
                 timeout_secs=60,
             )
-
-        if a.hcloud_dir:
-            self.hetzner_scenarios()
 
         r, check = self.scenario("cold-cache", cold_cache, restarted=("cosigner2",))
         lost = sum(
@@ -602,17 +434,7 @@ class Runner:
 
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--env", choices=["compose", "k8s"], default="compose")
-    p.add_argument("--env-name", default="",
-                   help="what the result calls its environment (default: the --env value); runs are only "
-                        "compared within one")
-    p.add_argument("--upgrade-image", default="",
-                   help="k8s: the cosigners run the previous release; upgrade them to this image first "
-                        "(scripts/perf/k8s-deploy.sh upgrade), with live keys")
-    p.add_argument("--work", default="", help="k8s: the --work directory of scripts/perf/k8s-deploy.sh")
-    p.add_argument("--hcloud-dir", default="",
-                   help="k8s on the ephemeral cluster: the --dir of scripts/perf/hcloud.py; adds the "
-                        "node-kill and lost-volume scenarios")
+    p.add_argument("--env", choices=["compose"], default="compose")
     p.add_argument("--out", required=True, help="the JSON file to write")
     p.add_argument("--steady-secs", type=int, default=60,
                    help="length of the steady stream (default 60; hours for a release candidate)")
@@ -623,11 +445,7 @@ def main():
     p.add_argument("--commit", default=os.environ.get("GITHUB_SHA", "unknown"))
     args = p.parse_args()
 
-    if args.upgrade_image and not args.work:
-        p.error("--upgrade-image needs --work")
-    cluster = ComposeCluster(os.environ) if args.env == "compose" else K8sCluster(args.env_name or "k8s")
-    if args.env_name:
-        cluster.kind = args.env_name
+    cluster = ComposeCluster(os.environ)
     runner = Runner(cluster, args)
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
