@@ -98,6 +98,73 @@ cluster where:
 earlier sent round-2 packages through the coordinating node, which could reconstruct the key.
 Generate or split any key that matters on `0.4.0-rc.3` or later, on a uniformly upgraded cluster.
 
+## Verify the image
+
+From `0.5.0` on, the cosigner image `ghcr.io/stakecraft/rutli-cosigner` is built by
+[`.github/workflows/publish-image.yml`](.github/workflows/publish-image.yml) on GitHub-hosted
+runners, never on the project's self-hosted CI runners, and only from a `v*` tag. Both platforms
+(linux/amd64, linux/arm64) are built natively, without emulation. What a release carries:
+
+- **The multi-arch index** (the digest the deploy files pin). Its `manifests` list holds the two
+  platform images and, for each, an attestation manifest that refers to that image
+  (`vnd.docker.reference.type: attestation-manifest`, `vnd.docker.reference.digest: <image>`) and
+  holds BuildKit's SBOM (SPDX) and provenance for it. That is how BuildKit stores attestations,
+  and `docker buildx imagetools create` keeps those entries when it merges the two platforms; the
+  release job fails unless the index has both entries and both SBOMs and provenances read back.
+- **A keyless cosign signature of the index digest**, made with the workflow's GitHub OIDC identity
+  and recorded in Sigstore's public transparency log (Rekor). The index digest is the hash of the
+  index, which names every image and attestation manifest above by its digest, so the signature
+  covers them. The SBOM and provenance inside are not signed separately.
+- **A SLSA build provenance attestation from GitHub for the index digest**, signed with the same
+  identity, stored with the repository and pushed to the registry next to the image.
+
+Images up to `0.4.0` were built on the self-hosted runners and are neither signed nor attested.
+
+Verify the digest you deploy before you deploy it (the Helm chart, `deploy/k8s` and the compose
+files pin it). You need cosign 3 or newer and the GitHub CLI (`gh`, 2.103 or newer):
+
+```bash
+TAG=v0.5.0
+IMAGE=ghcr.io/stakecraft/rutli-cosigner@sha256:<index digest>
+
+# Signature: made by publish-image.yml in Stakecraft/rutli, run on that tag
+cosign verify "$IMAGE" \
+  --certificate-identity "https://github.com/Stakecraft/rutli/.github/workflows/publish-image.yml@refs/tags/$TAG" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+# Provenance: same workflow and tag, signed on a GitHub-hosted runner
+gh attestation verify "oci://$IMAGE" --repo Stakecraft/rutli \
+  --signer-workflow Stakecraft/rutli/.github/workflows/publish-image.yml \
+  --source-ref "refs/tags/$TAG" --deny-self-hosted-runners
+
+# The same, from the copy of the attestation stored in the registry instead of GitHub's API
+gh attestation verify "oci://$IMAGE" --repo Stakecraft/rutli --bundle-from-oci \
+  --signer-workflow Stakecraft/rutli/.github/workflows/publish-image.yml \
+  --source-ref "refs/tags/$TAG" --deny-self-hosted-runners
+```
+
+The release workflow runs these exact commands as its last step. The first two must succeed; the
+third checks the registry copy and is useful where GitHub's API is unreachable. The certificate
+identity is exact and case-sensitive:
+`https://github.com/Stakecraft/rutli/.github/workflows/publish-image.yml@refs/tags/v<version>`, issuer
+`https://token.actions.githubusercontent.com`. A signature from another workflow, ref or repository
+is not a Rütli release. `--deny-self-hosted-runners` checks the runner of the job that made the
+attestation (the signing job), not the build jobs; those run on hosted runners because the workflow
+file at that tag, which the certificate identity names, says so. To read the SBOM of one platform:
+`docker buildx imagetools inspect "$IMAGE" --format '{{ json (index .SBOM "linux/amd64").SPDX }}'`.
+
+What this does not protect against. A signature shows where and from which tag an image was built,
+not that what was built is benign. Anyone who can push a `v*` tag (an admin account) gets a
+correctly signed image of whatever that tag points at, and can edit the workflow in the commit
+the tag points at. Anyone with write access can also start the workflow by hand on an existing
+release tag: it builds, signs and attests a new index under the same identity and moves the
+version tags (`0.5.0`, `0.5`, `latest`) to it, unless the repository's `release` environment
+requires a reviewer. Pin by digest, not by tag. A compromised action at its pinned commit, a
+compromised base image at its pinned digest or a malicious crate version in `frost/Cargo.lock`
+runs inside the build and ends up signed too. Pinning means none of these can change without a
+commit in this repository; reviewing those commits, and the commit a tag points at, is what guards
+against them.
+
 ## Design invariants (must not be violated)
 
 - Canton never sees a private key. The driver returns only public keys, signatures and plaintexts

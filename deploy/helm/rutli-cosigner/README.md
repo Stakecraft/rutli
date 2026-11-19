@@ -3,7 +3,9 @@
 Deploys a `t`-of-`n` FROST cosigner cluster with mTLS, sealed shares, PDB, and NetworkPolicy.
 Default image: `ghcr.io/stakecraft/rutli-cosigner:0.4.0` pinned by multi-arch digest
 (`sha256:6e606d2b00b53a6d70864a15693a697e0052c0e458386c18c22307eba4912d98`). `latest` on GHCR moves
-only on a final (non-rc) release tag.
+only on a final (non-rc) release tag. From 0.5.0 on, release images are signed and carry build
+provenance: verify the digest before installing, as
+[SECURITY.md, "Verify the image"](../../../SECURITY.md#verify-the-image) shows.
 
 Two layouts (`topology`):
 

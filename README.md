@@ -226,7 +226,7 @@ no PKCS#11 module and no key material on the participant host. It has been exerc
 ([`deploy/devnet/canton-hosted.conf`](deploy/devnet/canton-hosted.conf)): three Ed25519 keys born by
 cluster DKG and threshold-signed, plus an RSA-2048 encryption key generated in the cluster and
 replicated to all three cosigners. A Splice DevNet validator has run on Rütli since 2026-10-07, now
-on Splice 0.9.0 and Canton 3.6.1 ([docs/soak-2026-10-devnet.md](docs/soak-2026-10-devnet.md)), and
+on Splice 0.10.1 and Canton 3.7.2 ([docs/soak-2026-10-devnet.md](docs/soak-2026-10-devnet.md)), and
 both migration paths for an existing validator were rehearsed there
 ([docs/roadmap.md](docs/roadmap.md)). Run it on DevNet before it holds anything you care about, and
 read [docs/hosted-keys.md](docs/hosted-keys.md) first — replicated keys are a different security property

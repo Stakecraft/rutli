@@ -23,7 +23,10 @@ is reviewed as security-critical. This page explains how to get a change in.
 Prerequisites (details in [QUICKSTART.md](QUICKSTART.md)):
 
 - **JDK 17** and **sbt**, for the driver;
-- **Rust stable** with `clippy`, for the cosigner, dealer and FROST core;
+- **Rust** with `clippy`, for the cosigner, dealer and FROST core: the version in
+  `frost/rust-toolchain.toml`, which rustup selects inside `frost/` (if it does not install it on
+  first use, run `rustup toolchain install` and `rustup component add clippy` there). CI and the
+  release image build with the same version;
 - **Docker** with the compose plugin, for the TLS cluster smoke test;
 - **Helm 3**, `kubectl`, `yq` v4 and `jq`, for the deployment policy checks.
 

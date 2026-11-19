@@ -1,0 +1,8 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+# The one Rust compiler for this workspace: CI (.github/workflows/ci.yml) installs this version, and
+# frost/Dockerfile builds the release image on the rust image of the same version. Bump both together;
+# the image build check (.github/workflows/image-build-check.yml) fails when they differ.
+[toolchain]
+channel = "1.100.0"
+profile = "minimal"
