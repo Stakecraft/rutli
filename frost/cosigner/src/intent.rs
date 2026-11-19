@@ -996,6 +996,22 @@ mod tests {
         assert_ne!(intent_digest(&a), intent_digest(&b));
     }
 
+    /// The driver enforces the same intent size limit.
+    #[test]
+    fn the_intent_size_limit_is_16_kib() {
+        assert_eq!(MAX_INTENT_BYTES, 16_384);
+    }
+
+    #[test]
+    fn deletes_are_enabled_only_for_listed_clients() {
+        let v = verifier_with(&SigningPolicyConfig::default());
+        assert!(!v.deletes_enabled() && !v.may_delete("ops"));
+        let policy = DeletePolicy { allowlist: ["ops".to_string()].into(), ..Default::default() };
+        let v = v.with_delete_policy(policy);
+        assert!(v.deletes_enabled() && v.may_delete("ops") && !v.may_delete("driver"));
+        assert!(v.delete_policy().allowlist.contains("ops"));
+    }
+
     #[test]
     fn request_ids_are_random() {
         assert_ne!(new_request_id(), new_request_id());

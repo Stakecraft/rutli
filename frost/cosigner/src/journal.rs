@@ -677,6 +677,13 @@ mod tests {
         assert_eq!(read_key_dir(&tmp.path().join("k")).unwrap().entries.len(), 17);
     }
 
+    /// The window lengths and the segment size are the documented ones.
+    #[test]
+    fn window_lengths_and_segment_size() {
+        assert_eq!((MINUTE_MS, DAY_MS), (60_000, 86_400_000));
+        assert_eq!(SEGMENT_BYTES, 4 << 20);
+    }
+
     /// The windows are half-open: a charge counts for exactly one minute and one day, not a
     /// millisecond more — in memory and after a reopen.
     #[test]
