@@ -49,14 +49,15 @@ mkdir -p fuzz/corpus/intent fuzz/seeds/intent "$TMPDIR/empty"
 ```
 
 ```bash
-RUTLI_FUZZ_SEED_DIR="$PWD/fuzz/seeds/intent" cargo +nightly-2026-11-15 fuzz run intent "$TMPDIR/empty" -- -runs=0
+RUTLI_FUZZ_SEED_DIR="$PWD/fuzz/seeds/intent" cargo +nightly-2026-11-15 fuzz run intent "$TMPDIR/empty" -- -runs=0 -detect_leaks=0
 ```
 
 ```bash
-cargo +nightly-2026-11-15 fuzz run intent fuzz/corpus/intent fuzz/seeds/intent -- -max_total_time=300
+cargo +nightly-2026-11-15 fuzz run intent fuzz/corpus/intent fuzz/seeds/intent -- -max_total_time=300 -detect_leaks=0
 ```
 
-A crash is written to `fuzz/artifacts/<target>/`. Minimize it (`cargo fuzz tmin <target> <file>`),
+`-detect_leaks=0`: the harness keeps a tokio runtime and key stores in process-wide statics, which
+LeakSanitizer reports at exit. A crash is written to `fuzz/artifacts/<target>/`. Minimize it (`cargo fuzz tmin <target> <file>`),
 then commit it under `regressions/<target>/` with the fix.
 
 ## In the normal test suite
