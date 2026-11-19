@@ -44,8 +44,9 @@ pub struct SignerSvc {
     /// Each call writes a durable nonce marker on every signer, so the operator role must not be
     /// able to loop it.
     pub ceremony_test_limiter: Arc<crate::ratelimit::DecryptRateLimiter>,
-    /// The signing policy (audit C2): intents, key ACLs, SPKI pins. `None` (tests, plaintext dev):
-    /// no intents are checked here and every allowlisted caller may use every key.
+    /// The signing policy (audit C2): intents, key ACLs, SPKI pins. `None` (a service built by hand,
+    /// as some tests do; the daemon always installs one, also without TLS): no intents are checked
+    /// here and every allowlisted caller may use every key.
     pub sign_guard: Option<Arc<crate::sign_policy::SignGuard>>,
     /// Client-cert CNs of the **refresher** role (`Config::refresh_allowlist`): `Refresh` and
     /// `KeyStatus` only. `None` = no refresher role.
@@ -629,7 +630,8 @@ impl SignerSvc {
                     "missing",
                     format!(
                         "Sign for {} carries no signing intent and this node requires one \
-                         (signing_policy.require_intent) — upgrade the driver",
+                         (signing_policy.require_intent, on by default with TLS) — upgrade the driver or \
+                         turn frost.sign-intents on",
                         r.key_id
                     ),
                 )));

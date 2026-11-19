@@ -48,10 +48,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# The example configs keep the default: DKG and refresh need a client-signed ceremony intent. The
-# smoke drives DKG through grpcurl, which cannot sign one, so it runs on copies that opt out
-# (docker-compose.tls.smoke.yml mounts them).
-echo "==> Writing the smoke configs (ceremony intents opted out)"
+# The example configs keep the defaults: DKG and refresh need a client-signed ceremony intent, and a
+# signature a client-signed signing intent. The smoke drives DKG and Sign through grpcurl, which
+# cannot sign either, so it runs on copies that opt out of both (docker-compose.tls.smoke.yml mounts
+# them).
+echo "==> Writing the smoke configs (ceremony and signing intents opted out)"
 rm -rf "$SMOKE_CONFIG"
 mkdir -p "$SMOKE_CONFIG"
 python3 - "$SMOKE_CONFIG" deploy/frost/config-tls/cosigner*.json <<'PY'
@@ -61,6 +62,7 @@ for src in sys.argv[2:]:
     with open(src) as f:
         cfg = json.load(f)
     cfg.setdefault("signing_policy", {})["require_ceremony_intent"] = False
+    cfg["signing_policy"]["require_intent"] = False
     with open(os.path.join(out, os.path.basename(src)), "w") as f:
         json.dump(cfg, f, indent=2)
         f.write("\n")

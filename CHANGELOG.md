@@ -5,6 +5,47 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Changed (breaking default)
+
+- **A cosigner refuses to start on a config key it does not know.** Until now only the `keyfile`
+  block was parsed strictly. A misspelt key such as `require_intnet`, or `requireIntent` in
+  camelCase, was dropped without a word and the control it meant to set stayed at its default. Now
+  every block of the config file (top level, `tls`, `peers`, `share_seal`, `hosted_keys`,
+  `signing_policy` with its `rate_limits`, `rules` and `approvers`) refuses unknown keys. The error
+  names the file, the key and its line, for example ``rutli-cosigner: configuration: config file
+  /config/cosigner-1.json: unknown field `require_intnet`, expected one of … at line 48 column 20``.
+  The same applies to the operator CLI, which reads the same file. No config shipped in `deploy/`
+  carried an unknown key, and the configs the Helm chart renders for its CI values and the soak's
+  values load unchanged. A unit test keeps the JSON configs under `deploy/frost` and `deploy/k8s`
+  loading; the Helm renders were checked by hand.
+- **The driver refuses a config key it does not know,** in every block of `crypto.kms.config`.
+  Before, a misspelt key was ignored: `aproval { … }` meant no approval block, so every sign was
+  auto-approved. The participant now stops at startup with `Unknown key` and the key's path, for
+  example `frost.tls.allow-expired`.
+- **`signing_policy.require_intent` is on by default** for every cosigner with TLS: a sign round
+  without a valid client-signed signing intent is refused. Before, one cosigner's mesh certificate
+  could lead a signature over any 34-byte digest and get a share from every peer that did not set
+  `require_intent: true`. The setting now works like `require_ceremony_intent`: unset is on with TLS
+  and off on a plaintext dev node, `true` without TLS is a config error, and `false` is the explicit
+  opt-out, with a startup warning and `rutli_sign_intent_absent_total`. The split ceremony's sign
+  test (`verify-key --sign-test`) needs no intent, as before. The TLS compose example keeps the
+  default, so a hand-run `grpcurl … Signer/Sign` against it is refused; the CI smoke test runs on
+  copies that opt out (`scripts/ci-frost-tls-smoke.sh`).
+
+  **Upgrade note (from 0.4.0):**
+  - Check the config for keys the cosigner does not know before you roll out: start one node, or
+    run `rutli-cosigner --config <file> health` with the new image, and fix what it names. With
+    Helm, check `signingPolicy` and `keyfile`, which are copied into the config as they are.
+  - Do the same for the driver: check that the participant starts with your current
+    `crypto.kms.config`. A key that used to do nothing now stops it.
+  - A driver on 0.4.0-rc.3 or later with `frost.sign-intents` at its default (`on`) signs every
+    sign, and a leader on 0.4.0 forwards that intent to its peers, so a rolling upgrade from 0.4.0
+    keeps signing. A driver older than 0.4.0-rc.3, or one with `frost.sign-intents = off`, needs
+    `require_intent: false` in `signing_policy` (`signingPolicy` in the Helm chart) on every node
+    first. Remove it once the driver signs intents.
+  - Clusters that already set `require_intent: true` see no change.
+  - Docs: `docs/approval-quorum.md` ("Switching enforcement on"), `docs/security/threat-model.md`.
+
 ### Security
 
 - **heapless 0.7.17: nine `unsound` RustSec advisories (RUSTSEC-2026-0574 to -0582) are ignored in
@@ -44,6 +85,10 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Fixed
 
+- **The driver reads an approver's key as `public-key-base64`,** the name the docs and
+  `approve keygen` print. Up to 0.4.0 it only read `public-key-base-64`, so an `approval` block
+  copied from the docs stopped the participant at startup with `Key not found`. Both names are read
+  now. Give one of them per approver; an entry with both is refused.
 - **`export-key` could write a key into an existing file with its old permissions.** The 0600 mode
   only applied to a file the export created: an `--out` that already existed (for example 0644)
   kept its mode and received the artifact, with `--unsafe-plaintext` the raw private key, and a
@@ -53,6 +98,15 @@ All notable changes to Rütli are documented here. Format loosely follows
   PID 1, where the kernel ignores a signal without a handler: every pod stop waited out the grace
   period and ended in SIGKILL, with no drain of in-flight requests. It now shuts down gracefully on
   SIGTERM or SIGINT.
+- **`{:?}` on a cluster-hosted key printed its private key.** `HostedKey` derived `Debug`, so a
+  test assertion, a log field or a panic message that formatted a key (or a tombstone still
+  holding one) would have shown `private_der`. No log line did. Its `Debug` now prints
+  `<redacted>` for the private half.
+- **Loading a FROST share left an unwiped copy of its signing share in memory.** The key store
+  parsed each decrypted key file into a `serde_json::Value` first, which copies every string, the
+  share's hex included, into heap memory that is freed without being wiped. It now parses the
+  record straight from the decrypted buffer (which is wiped), so the share's hex is no longer
+  copied on the way. Copies made inside the FROST library itself are unchanged.
 - **A cosigner's first signature after a restart could lose its session.** Two requests that used
   a key for the first time at once (a sign round 1 and, say, this node leading another signature)
   each loaded the share and built their own in-memory signing state; the one that finished second

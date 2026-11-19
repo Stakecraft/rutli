@@ -266,7 +266,7 @@ async fn cluster_with(policy: impl Fn(&Ids, u16) -> SigningPolicyConfig, refresh
 }
 
 fn strict() -> SigningPolicyConfig {
-    SigningPolicyConfig { require_intent: true, ..Default::default() }
+    SigningPolicyConfig { require_intent: Some(true), ..Default::default() }
 }
 
 impl Cluster {
@@ -527,7 +527,7 @@ async fn only_the_driver_signs_with_its_own_intent_and_every_participant_journal
 #[tokio::test]
 async fn the_refresher_refreshes_but_never_signs_and_the_driver_stops_refreshing() {
     let policy = SigningPolicyConfig {
-        require_intent: true,
+        require_intent: Some(true),
         require_ceremony_intent: Some(false),
         signer_may_refresh: false,
         ..Default::default()
@@ -552,7 +552,7 @@ async fn the_refresher_refreshes_but_never_signs_and_the_driver_stops_refreshing
 #[tokio::test]
 async fn a_signer_without_an_acl_for_a_key_is_refused_when_acls_are_required() {
     let policy = SigningPolicyConfig {
-        require_intent: true,
+        require_intent: Some(true),
         signer_acl_required: true,
         signer_acl: BTreeMap::from([
             ("driver".to_string(), vec!["frost-participant1-".to_string()]),
@@ -581,7 +581,7 @@ async fn a_signer_without_an_acl_for_a_key_is_refused_when_acls_are_required() {
 async fn an_spki_pin_revokes_a_ca_valid_but_unpinned_driver_key() {
     let c = cluster_with(
         |ids, _| SigningPolicyConfig {
-            require_intent: true,
+            require_intent: Some(true),
             signer_pins: BTreeMap::from([("driver".to_string(), vec![ids.spki_sha256("driver")])]),
             ..Default::default()
         },
@@ -633,7 +633,7 @@ impl Approver {
 async fn an_approval_gated_key_is_refused_at_the_cosigners_without_enough_valid_approvals() {
     let (alice, bob, carol, mallory) = (Approver::new("alice"), Approver::new("bob"), Approver::new("carol"), Approver::new("mallory"));
     let policy = SigningPolicyConfig {
-        require_intent: true,
+        require_intent: Some(true),
         rules: vec![ApprovalRuleConfig { key_id_prefix: "frost-participant1-namespace".into(), mode: "quorum".into(), threshold: 2 }],
         approvers: vec![alice.config(), bob.config(), carol.config()],
         ..Default::default()
@@ -753,7 +753,7 @@ fn peers_of(nodes: &[Arc<Node>]) -> Peers {
 #[tokio::test]
 async fn the_rate_limit_is_charged_once_per_request_id_across_retries_and_survives_a_restart() {
     let tmp = tempfile::tempdir().unwrap();
-    let policy = SigningPolicyConfig { require_intent: true, sign_rate_limit_per_min: 1, sign_rate_limit_per_day: 100, ..Default::default() };
+    let policy = SigningPolicyConfig { require_intent: Some(true), sign_rate_limit_per_min: 1, sign_rate_limit_per_day: 100, ..Default::default() };
     let (ids, nodes) = local(tmp.path(), &policy).await;
     let msg = digest(b"retried");
     let i1 = intent_by(&ids, "driver", KEY, &msg, 70);
@@ -789,7 +789,7 @@ async fn the_rate_limit_is_charged_once_per_request_id_across_retries_and_surviv
 #[tokio::test]
 async fn a_replayed_intent_is_capped_per_request() {
     let tmp = tempfile::tempdir().unwrap();
-    let policy = SigningPolicyConfig { require_intent: true, max_shares_per_request: 2, ..Default::default() };
+    let policy = SigningPolicyConfig { require_intent: Some(true), max_shares_per_request: 2, ..Default::default() };
     let (ids, nodes) = local(tmp.path(), &policy).await;
     let msg = digest(b"replayed");
     let i1 = intent_by(&ids, "driver", KEY, &msg, 72);
@@ -964,13 +964,14 @@ async fn a_round2_after_an_abort_is_an_unknown_session() {
     assert!(read_key_dir(&tmp.path().join("node-1/journal").join(KEY)).map(|r| r.entries.is_empty()).unwrap_or(true));
 }
 
-/// The rolling upgrade: with `require_intent` off, a driver (or leader) that predates intents
+/// The opt-out: with `require_intent: false`, a driver (or leader) that predates intents
 /// still signs; each node journals it as `no-intent` and counts it. An intent that is present is
 /// still verified in full.
 #[tokio::test]
 async fn verify_if_present_accepts_an_old_driver_with_a_metric_and_still_checks_a_present_intent() {
     let tmp = tempfile::tempdir().unwrap();
-    let (ids, nodes) = local(tmp.path(), &SigningPolicyConfig::default()).await;
+    let opt_out = SigningPolicyConfig { require_intent: Some(false), ..Default::default() };
+    let (ids, nodes) = local(tmp.path(), &opt_out).await;
     let msg = digest(b"old driver");
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
@@ -1163,4 +1164,25 @@ async fn only_the_fencing_cosigner_runs_parts_over_grpc() {
     assert!(part3.message().contains("led by peer \"cosigner1\""), "{part3:?}");
     // The refusal left the session alone: the leader can still abort it as its own.
     assert!(c.nodes[1].ceremony_record(&xid).is_none(), "nothing recorded by the refused part 3");
+}
+
+/// Unset `require_intent` is on (with TLS, which every node here has): a round 1 without an
+/// intent is refused before any nonce exists, so one cosigner's mesh certificate cannot get a
+/// share over a digest no client asked for. The sign test is still accepted only for the node's
+/// own test digest (covered above); a present intent signs as before.
+#[tokio::test]
+async fn by_default_a_sign_round_without_an_intent_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ids, nodes) = local(tmp.path(), &SigningPolicyConfig::default()).await;
+    assert!(nodes[1].sign_guard().unwrap().require_intent());
+    let msg = digest(b"no intent, default policy");
+    let ctx = Round1Ctx { message: Some(msg.clone()), signers: Some(vec![1, 2]), ..Default::default() };
+    let err = nodes[1].sign_round1(KEY, "no-intent", &ctx).unwrap_err();
+    assert!(matches!(err, DaemonError::PolicyRefused(ref m) if m.contains("no signing intent")), "{err:?}");
+    assert_eq!(nodes[1].pending_sign_count(KEY), 0);
+    let err = sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, None).await.unwrap_err();
+    assert!(matches!(err, DaemonError::PolicyRefused(_)), "{err:?}");
+    let i1 = intent_by(&ids, "driver", KEY, &msg, 86);
+    let sig = sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, Some(&i1)).await.unwrap();
+    assert!(rutli_cosigner::verify_key::signature_verifies(&nodes[0].group_key(KEY).unwrap(), &msg, &sig));
 }
