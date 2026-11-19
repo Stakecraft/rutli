@@ -30,9 +30,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # libFuzzer needs a nightly compiler (-Zsanitizer). Pinned, so a nightly regression does not turn
-  # the job red overnight; bump it deliberately.
-  FUZZ_TOOLCHAIN: nightly-2026-11-15
   CARGO_FUZZ_VERSION: "0.13.2"
 
 jobs:
@@ -56,6 +53,12 @@ jobs:
         with:
           persist-credentials: false
 
+      # The pinned nightly of frost/fuzz/rust-toolchain.toml (libFuzzer needs -Zsanitizer).
+      - name: Fuzz toolchain
+        run: |
+          v="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/fuzz/rust-toolchain.toml)"
+          test -n "$v"
+          echo "FUZZ_TOOLCHAIN=$v" >> "$GITHUB_ENV"
       # dtolnay/rust-toolchain has no releases: pinned to a commit of its master branch, with the
       # toolchain passed explicitly.
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
@@ -78,7 +81,7 @@ jobs:
 
       - name: Install cargo-fuzz
         if: steps.cargo-fuzz-cache.outputs.cache-hit != 'true'
-        run: cargo install cargo-fuzz --version "$CARGO_FUZZ_VERSION" --locked --root ~/.cargo-fuzz-bin
+        run: cargo +"$FUZZ_TOOLCHAIN" install cargo-fuzz --version "$CARGO_FUZZ_VERSION" --locked --root ~/.cargo-fuzz-bin
 
       - run: echo "$HOME/.cargo-fuzz-bin/bin" >> "$GITHUB_PATH"
 
@@ -102,10 +105,10 @@ jobs:
           seeds="$PWD/fuzz/seeds/$TARGET"
           empty="$(mktemp -d)"
           mkdir -p "$corpus" "$seeds"
-          RUTLI_FUZZ_SEED_DIR="$seeds" cargo fuzz run "$TARGET" "$empty" -- -runs=0
+          RUTLI_FUZZ_SEED_DIR="$seeds" cargo +"$FUZZ_TOOLCHAIN" fuzz run "$TARGET" "$empty" -- -runs=0
           extra=()
           if [ "$TARGET" = canton_key ]; then extra=("$PWD/canton-key/testdata/vectors"); fi
-          cargo fuzz run "$TARGET" "$corpus" "$seeds" "${extra[@]}" -- \
+          cargo +"$FUZZ_TOOLCHAIN" fuzz run "$TARGET" "$corpus" "$seeds" "${extra[@]}" -- \
             -max_total_time="$SECONDS_PER_TARGET" -timeout=60 -rss_limit_mb=4096 -print_final_stats=1
 
       - name: Save corpus
