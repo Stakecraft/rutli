@@ -1,0 +1,85 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Property tests at a high case count (docs/release-process.md, "Test schedule"). Pull requests run
+# the same tests at their low default counts inside `cargo test` (ci.yml); this run raises every
+# count with PROPTEST_CASES. A scheduled failure opens a `type:test` `prio:p1` issue.
+name: Property tests (nightly)
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      cases:
+        description: "PROPTEST_CASES (cases per property)"
+        required: false
+        default: "1000"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: proptest-nightly
+  cancel-in-progress: false
+
+jobs:
+  proptest:
+    name: Property tests, high case count
+    # Scheduled and manual runs only, so always this repository's own code: the self-hosted
+    # runner when `vars.CI_RUNNER` is set (as in ci.yml).
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 90
+    env:
+      PROPTEST_CASES: ${{ inputs.cases || '1000' }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Rust version
+        id: rust
+        run: |
+          v=stable
+          if [ -f frost/rust-toolchain.toml ]; then
+            v="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/rust-toolchain.toml)"
+          fi
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      # dtolnay/rust-toolchain has no releases: pinned to a commit of its master branch.
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: frost
+      - name: Property tests (PROPTEST_CASES=${{ env.PROPTEST_CASES }})
+        working-directory: frost
+        run: cargo test --locked --test 'prop_*'
+
+  report:
+    name: Open an issue on a scheduled failure
+    needs: proptest
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    permissions:
+      issues: write
+    steps:
+      # curl + jq rather than `gh`: the self-hosted runner image ships jq, not the GitHub CLI.
+      - name: Open or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          API: ${{ github.api_url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Nightly property tests failed"
+          api() { curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$@"; }
+          existing="$(api "$API/repos/$REPO/issues?state=open&labels=type:test&per_page=100" \
+            | jq -r --arg t "$title" '[.[] | select(.title == $t and (has("pull_request") | not))][0].number // empty')"
+          if [ -n "$existing" ]; then
+            jq -n --arg b "Failed again: $RUN_URL" '{body: $b}' \
+              | api -X POST "$API/repos/$REPO/issues/$existing/comments" -d @- >/dev/null
+          else
+            jq -n --arg t "$title" --arg b "The nightly property-test run failed: $RUN_URL. The failing property prints its minimal input in the log; add it to the suite as a regression test with the fix." \
+              '{title: $t, body: $b, labels: ["type:test", "prio:p1"]}' \
+              | api -X POST "$API/repos/$REPO/issues" -d @- >/dev/null
+          fi
