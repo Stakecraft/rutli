@@ -477,8 +477,8 @@ mod tests {
             assert_eq!(c.pass(B, &all), Verdict::Current, "n = {n}");
             // Every peer on the newer epoch marked stale (say, by a liar earlier): their claims are
             // no evidence, so nothing changes — the mark stays, and an unmarked node stays unmarked.
-            for p in 1..n {
-                c.marks[p] = Some(false);
+            for mark in c.marks.iter_mut().take(n).skip(1) {
+                *mark = Some(false);
             }
             assert_eq!(c.pass(A, &all), Verdict::Inconclusive, "n = {n}");
             assert_eq!(c.marks[A], Some(false));
