@@ -7,10 +7,14 @@
 #   CANTON_HOME=~/.cache/canton-3.6.1/canton-open-source-3.6.1 scripts/e2e-migration.sh
 #   (from the repo root; KEEP=1 keeps the work dir; SKIP_BUILD=1 reuses existing binaries)
 #
-# A local 2-of-3 cosigner cluster (mTLS, sealed, hosted keys, the signing policy fully enforced)
-# runs as native processes on 127.0.0.1, as in scripts/e2e-split-ceremony.sh. One Canton process
-# runs a sequencer, a mediator and four participants; its bootstrap script and this script take
-# turns, each waiting for the other's marker file under $WORK/sync:
+# This file is the procedure. How the cosigners and Canton are started and reached is the
+# environment, in scripts/e2e-migration-env-$E2E_ENV.sh (default `local`: a 2-of-3 cosigner cluster
+# as native processes on 127.0.0.1, mTLS, sealed, hosted keys, the signing policy fully enforced,
+# and one Canton process). The step functions below talk to the environment only through its env_*
+# functions, listed at the top of the local one.
+#
+# Canton runs a sequencer, a mediator and four participants; its bootstrap script and this script
+# take turns, each waiting for the other's marker file in $SYNC:
 #
 #   oldp   the validator to migrate: plain JCE keys, its database in a file (H2), so it can be
 #          stopped and started again as a rollback does
@@ -22,37 +26,42 @@
 #
 #   Step 1    baselines: party id, the party's contracts, the three key fingerprints.
 #   Step 2    NS_FP confirmed from the node id, the party id and the root namespace delegation;
-#             `keys.secret.download_to(…, password = Some(…))`; sha256 of the export file.
+#             `keys.secret.download_to(…, password = Some(…))` through the admin API; sha256.
 #   Step 3    split ceremony (docs/split-ceremony.md §4) into the running cluster: recipient
 #             requests, Gate 0 (SAS), split, dry run (Gate A), install, verify-key --sign-test with
 #             the operator certificate (Gate B), refresh with the refresher certificate, verify-key
 #             again (Gate C), founding backups.
 #             Refused on the way: a wrong export password, no password, a wrong fingerprint at the
-#             dealer, at import-share and at verify-key, and a dealt bundle after the refresh.
+#             dealer, at import-share and at verify-key, and a dealt bundle after the refresh (an
+#             identical re-import before it is accepted as already installed).
 #   Step 4    the old participant disconnected, reference ACS exported, old participant stopped;
 #             a new participant on a fresh database with the rutli KMS block of Step 4.3.
 #   Step 5    register the namespace key by id (must return NS_FP), a fresh FROST signing key and a
 #             fresh hosted ECIES key, init_id_from_uid(NEW_ID::NS_FP), the identity snapshot, the
-#             OTK without signedBy, connect_by_config with the old node's connection config.
+#             OTK without signedBy, connect_by_config with the old node's connection config saved
+#             and restored as Lessons a says.
 #   §6        rollback before the point of no return, with newp1 already onboarded: newp1 stopped,
 #             oldp started on its old database, the party still there and transacting, the orphan
-#             member offboarded from oldp. Then Steps 4 and 5 again with newp2 and another NEW_ID.
+#             member offboarded from oldp. Then Steps 4 and 5 again with newp2, another NEW_ID and
+#             another signing key name.
 #   Step 6    NOT the Splice re-onboard (it needs a Splice validator app, Scan and a DSO; see
-#             "Not covered" below). In its place, the same topology changes its party migrator
-#             makes, issued from newp2 and signed by the imported namespace key through FROST:
-#             the party unhosted from the old participant, the old trust certificate removed
-#             (the point of no return), the party hosted on newp2, and the reference ACS of Step 4
-#             imported with repair.import_acs.
+#             "Not covered" below). In its place, the topology changes its party migrator makes,
+#             issued from newp2 and signed by the imported namespace key through FROST: the old
+#             trust certificate removed (the point of no return), the party (the old participant's
+#             admin party, as with Splice's default hint) hosted on newp2, and the reference ACS of
+#             Step 4 imported with repair.import_acs.
 #   Step 7    party id unchanged, hosted only on PAR::NEW_ID::NS_FP, old trust certificate gone,
 #             the ACS is the reference ACS, the new participant exercises a choice on a migrated
-#             contract and creates a new one with the counter-party, pings both ways, no ACS
-#             commitment mismatch over several reconciliation intervals; the driver audit shows
-#             signatures with the imported namespace key and the fresh signing key and ECIES
-#             decryptions, none failed; at least two cosigners journaled each of them.
-#   Step 8    what can be checked by a script: the export file, the old database, the dealer
-#             output and the request files are deleted, no recipient secret and no pre-refresh
-#             backup is left on a cosigner, the offboarded member's OTK is removed, and after all
-#             of that verify-key --sign-test passes and the new participant still transacts.
+#             contract, confirms one the counter-party exercises, creates a new one, pings both
+#             ways; no ACS commitment mismatch logged over five 5-second reconciliation intervals;
+#             the driver audit shows signatures with the imported namespace key and the fresh
+#             signing key and ECIES decryptions, none failed; at least two cosigners journaled
+#             signatures with each of the two keys, every one under a driver intent.
+#   Step 8    what a script can check: the export file, the old database, the dealer output and the
+#             request files are deleted, no copy of the export is left in the work dir, no recipient
+#             secret on a cosigner, the only cosigner backups are the founding ones; then the
+#             offboarded member's OTK is removed (AlienMember), verify-key --sign-test passes and the
+#             new participant still transacts.
 #
 # Not covered, and why:
 #   - Step 6 as written (dump Secret, `migrateValidatorParty`, ACS import from Scan, wallet,
@@ -67,247 +76,285 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-: "${CANTON_HOME:?Set CANTON_HOME to an extracted Canton 3.6.1 release}"
-JAVA_HOME="${CANTON_JAVA_HOME:-${JAVA_HOME:-/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home}}"
-export JAVA_HOME
-BASE_PORT="${E2E_BASE_PORT:-19800}"
-CANTON_PORT="${E2E_CANTON_PORT:-15800}"
+E2E_ENV="${E2E_ENV:-local}"
 
-# docs/migration.md §2. NS_FP, OLD_ID and KEY_ID are read from the old participant in Step 2.
+# docs/migration.md §2. NS_FP, OLD_UID and KEY_ID are read from the old participant in Step 2.
 PREFIX="mig1-"
+OLD_ID="oldp" # = HINT, the Splice default (§3): the validator party is the old node's admin party
 NEW_ID_ROLLED_BACK="oldp-r1"
 NEW_ID="oldp-r2"
 CEREMONY="e2e-migration-$(date +%s)"
 
-WORK="$(mktemp -d "${TMPDIR:-/tmp}/rutli-e2e-migration.XXXXXX")"
-PIDS=(0 0 0 0)
-CANTON_PID=0
+BUNDLE=()           # the dealt bundle of each node, as that node reads it
+FOUNDING_BACKUPS=() # each node's founding backup, as that node sees it
 
 step() { printf '\n==> %s\n' "$*"; }
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-cleanup() {
-  rc=$?
-  if [ "$CANTON_PID" != 0 ]; then
-    pkill -P "$CANTON_PID" 2>/dev/null || true
-    kill "$CANTON_PID" 2>/dev/null || true
-  fi
-  for i in 1 2 3; do
-    [ "${PIDS[$i]}" != 0 ] && kill "${PIDS[$i]}" 2>/dev/null || true
-  done
-  wait 2>/dev/null || true
-  if [ "$rc" -ne 0 ]; then
-    for i in 1 2 3; do
-      echo "--- node$i log (tail) ---"
-      tail -n 20 "$WORK/node$i.log" 2>/dev/null || true
-    done
-    echo "--- canton output (tail) ---"
-    tail -n 80 "$WORK/canton.out" 2>/dev/null || true
-  fi
-  if [ "${KEEP:-0}" = 1 ]; then echo "work dir kept: $WORK"; else rm -rf "$WORK"; fi
+# shellcheck source=scripts/e2e-migration-env-local.sh
+. "$REPO/scripts/e2e-migration-env-$E2E_ENV.sh"
+
+on_exit() {
+  local rc=$?
+  env_cleanup "$rc"
   [ "$rc" -eq 0 ] && echo "==> migration e2e OK"
   return "$rc"
 }
-trap cleanup EXIT
+trap on_exit EXIT
 
-BIN="$REPO/frost/target/debug"
-COSIGNER="$BIN/rutli-cosigner"
-DEALER="$BIN/rutli-dealer"
-DRIVER_JAR="$REPO/driver/target/scala-2.13/rutli-driver.jar"
-if [ "${SKIP_BUILD:-0}" != 1 ]; then
-  step "Build rutli-cosigner, rutli-dealer and the driver fat jar from the working tree"
-  (cd "$REPO/frost" && cargo build ${CARGO_FLAGS:-} -p rutli-cosigner --bins)
-  (cd "$REPO" && sbt -batch driver/assembly >/dev/null)
-fi
-for f in "$COSIGNER" "$DEALER"; do [ -x "$f" ] || fail "no $f"; done
-[ -f "$DRIVER_JAR" ] || fail "no $DRIVER_JAR"
-[ -f "$CANTON_HOME/dars/CantonExamples.dar" ] || fail "no dars/CantonExamples.dar in $CANTON_HOME"
-
-# ---------------------------------------------------------------------------------------------
-# §3 "Before you start": the Rütli cluster, mTLS and share_seal on, an operator certificate on
-# operator_allowlist and a refresher certificate on refresh_allowlist.
-# ---------------------------------------------------------------------------------------------
-step "mTLS trust domain, seal secret, configs (127.0.0.1:$((BASE_PORT + 1))..$((BASE_PORT + 3)))"
-"$REPO/scripts/gen-frost-certs.sh" 3 "$WORK/certs" >/dev/null
-export RUTLI_SEAL_SECRET
-RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
-# The cosigner signing policy fully enforced (audit C2): every signature needs a driver-signed
-# intent, the driver may use only this migration's prefix, its key is pinned, only the refresher
-# refreshes, and DKG and refresh need a ceremony intent.
-DRIVER_PIN="$(openssl x509 -in "$WORK/certs/driver.crt" -noout -pubkey | openssl pkey -pubin -outform DER \
-  | openssl dgst -sha256 -hex | awk '{print $NF}')"
-mkconfig() { # node-config-name  cert-name  out
-  jq --arg work "$WORK" --arg cert "$2" --argjson base "$BASE_PORT" --arg prefix "$PREFIX" --arg pin "$DRIVER_PIN" '
-      .listen = "127.0.0.1:\($base + .identifier)"
-    | .data_dir = "\($work)/node\(.identifier)"
-    | .peers |= map(.endpoint = "https://127.0.0.1:\($base + .identifier)")
-    | .tls.ca_cert = "\($work)/certs/ca.crt"
-    | .tls.cert = "\($work)/certs/\($cert).crt"
-    | .tls.key = "\($work)/certs/\($cert).key"
-    | .hosted_keys.anti_entropy_interval_secs = 10
-    | .refresh_allowlist = ["refresher"]
-    | .signing_policy = { require_intent: true, require_ceremony_intent: true, require_epoch_match: true, signer_acl_required: true,
-        signer_may_refresh: false, signer_acl: { driver: [$prefix] }, signer_pins: { driver: [$pin] } }
-    | del(.metrics_listen)' "$REPO/deploy/frost/config-tls/$1.json" >"$3"
-}
-for i in 1 2 3; do mkconfig "cosigner$i" "cosigner$i" "$WORK/c$i.json"; done
-# The operator role (KeyStatus, HostedKeyStatus, CeremonySignTest) runs verify-key; the refresher
-# (refresh_allowlist), like the refresh CronJob, runs refresh.
-mkconfig cosigner1 operator "$WORK/operator.json"
-mkconfig cosigner1 refresher "$WORK/refresher.json"
-
-start() {
-  RUST_LOG=info "$COSIGNER" --config "$WORK/c$1.json" serve >>"$WORK/node$1.log" 2>&1 &
-  PIDS[$1]=$!
-}
-wait_healthy() { # up to 60 s; a cold debug build on a busy runner can take a while
-  for _ in $(seq 1 240); do
-    "$COSIGNER" --config "$WORK/c$1.json" health >/dev/null 2>&1 && return 0
-    sleep 0.25
-  done
-  fail "node $1 did not become healthy"
-}
-cli() { RUST_LOG=off "$COSIGNER" "$@"; }
-verify_key() { # extra args: the report as JSON on stdout, whatever the exit code
-  cli --config "$WORK/operator.json" verify-key --key-id "$KEY_ID" --expect-fingerprint "$NS_FP" "$@" --json || true
-}
-
-step "Start three cosigners (mTLS, sealed, hosted keys); every step below runs against them live"
-for i in 1 2 3; do start "$i"; done
-for i in 1 2 3; do wait_healthy "$i"; done
-
-# ---------------------------------------------------------------------------------------------
-# Canton: one process, started now and driven through marker files until the end.
-# ---------------------------------------------------------------------------------------------
-mkdir -p "$WORK/sync" "$WORK/export" "$WORK/old-db"
-# Canton and this script tell each other where they are with files under $WORK/sync: `<name>` is a
-# marker, `<name>.env` the KEY=value lines that go with it (written before the marker).
+# --- the handshake with the Canton bootstrap script ----------------------------------------------
+# `$SYNC/<name>` is a marker, `$SYNC/<name>.env` the KEY=value lines that go with it (written first).
 wait_marker() { # marker-name  [timeout-seconds]
   for _ in $(seq 1 $((${2:-600} * 2))); do
-    [ -e "$WORK/sync/$1" ] && return 0
-    if ! kill -0 "$CANTON_PID" 2>/dev/null; then
-      grep -h "^E2E" "$WORK/canton.out" 2>/dev/null | tail -n 5 || true
+    [ -e "$SYNC/$1" ] && return 0
+    if ! env_canton_alive; then
+      env_canton_out | grep "^E2E" | tail -n 5 || true
       fail "Canton exited before '$1'"
     fi
     sleep 0.5
   done
   fail "timed out waiting for Canton to reach '$1'"
 }
-mark() { : >"$WORK/sync/$1"; }
-value() { # env-file  key
-  sed -n "s/^$2=//p" "$WORK/sync/$1.env" | head -n 1
+mark() { : >"$SYNC/$1"; }
+value() { sed -n "s/^$2=//p" "$SYNC/$1.env" | head -n 1; } # env-file  key
+
+verify_key() { # extra args; prints the report as JSON, whatever the exit code
+  env_client operator verify-key --key-id "$KEY_ID" --expect-fingerprint "$NS_FP" "$@" --json || true
+}
+refused() { # what  expected-message  command…
+  local what=$1 expect=$2
+  shift 2
+  if "$@" >"$WORK/refused.out" 2>&1; then fail "$what: accepted"; fi
+  grep -q -- "$expect" "$WORK/refused.out" || fail "$what: refused for the wrong reason: $(cat "$WORK/refused.out")"
+  echo "$what -> refused"
+}
+# Lessons f: on macOS GNU coreutils can shadow /bin/rm, which has -P. Files on the operator's machine.
+shred_local() { if [ "$(uname)" = Darwin ]; then /bin/rm -P -rf "$@"; else rm -rf "$@"; fi; }
+commitment_errors() {
+  local log
+  while IFS= read -r log; do
+    grep -hE "ACS_COMMITMENT_MISMATCH|ACS_MISMATCH_NO_SHARED_CONTRACTS|ACS_COMMITMENT_ALARM" "$log" 2>/dev/null || true
+  done < <(env_canton_logs)
 }
 
-step "Canton config: sequencer1, mediator1, oldp (JCE, H2 file), peer (JCE), newp1 and newp2 (rutli KMS, prefix $PREFIX)"
-P=$CANTON_PORT
-h2() { # database file under $WORK (no extension)
-  cat <<EOF
-storage {
-      type = h2
-      config {
-        url = "jdbc:h2:file:$WORK/$1;MODE=PostgreSQL;LOCK_TIMEOUT=10000;DB_CLOSE_DELAY=-1"
-        user = "canton"
-        password = "morethansafe"
-        driver = org.h2.Driver
-      }
-    }
-EOF
+# --- Steps 1 and 2 run in Canton: baselines, NS_FP three ways, the export --------------------------
+step_1_2_export() {
+  step "Steps 1-2. Baselines; the namespace key exported with a password (keys.secret.download_to)"
+  wait_marker exported
+  env_canton_out | grep "^E2E" || true
+  NS_FP="$(value exported NS_FP)"
+  OLD_UID="$(value exported OLD_UID)"
+  PARTY="$(value exported PARTY)"
+  OLD_SIG_FP="$(value exported OLD_SIG_FP)"
+  [[ "$NS_FP" =~ ^1220[0-9a-f]{64}$ ]] || fail "NS_FP from the old participant: '$NS_FP'"
+  [ "$OLD_UID" = "$OLD_ID::$NS_FP" ] || fail "old participant $OLD_UID is not $OLD_ID::NS_FP"
+  [ "$PARTY" = "$OLD_UID" ] || fail "party $PARTY is not the old participant's admin party"
+  KEY_ID="${PREFIX}frost-import-${NS_FP:4:8}" # migration.md §2
+  [ -s "$EXPORT_FILE" ] || fail "no export file"
+  EXPORT_SHA="$(openssl dgst -sha256 -hex "$EXPORT_FILE" | awk '{print $NF}')"
+  echo "old participant $OLD_UID, party $PARTY"
+  echo "export file sha256 $EXPORT_SHA; KEY_ID $KEY_ID"
 }
-new_participant() { # name  port-offset  database
-  cat <<EOF
-  participants.$1 {
-    $(h2 "$3")
-    ledger-api.port = $((P + $2 + 1))
-    admin-api.port = $((P + $2 + 2))
-    http-ledger-api.port = $((P + $2 + 3))
-    // What the Splice participant chart sets: the node waits for its id, and keys and identity
-    // transactions come from the operator (Step 5), not from Canton's auto-init.
-    init.identity.type = manual
-    init.generate-topology-transactions-and-keys = false
-    // Step 4.3, the Rütli KMS block.
-    crypto {
-      provider = kms
-      kms {
-        type = driver
-        name = "rutli"
-        config = {
-          backend = "frost"
-          audit-logging = true
-          audit-log-path = "$WORK/driver-audit-$1.jsonl"
-          frost = {
-            endpoints = [
-              { url = "127.0.0.1:$((BASE_PORT + 1))", tls-name = "cosigner1" },
-              { url = "127.0.0.1:$((BASE_PORT + 2))", tls-name = "cosigner2" },
-              { url = "127.0.0.1:$((BASE_PORT + 3))", tls-name = "cosigner3" }
-            ]
-            hosted-keys = true
-            delegate = "none"
-            key-prefix = "$PREFIX"
-            tls = {
-              ca-cert = "$WORK/certs/ca.crt"
-              cert    = "$WORK/certs/driver.crt"
-              key     = "$WORK/certs/driver.key"
-            }
-          }
-        }
-      }
-      signing.keys.default = ec-curve-25519
-      signing.algorithms.default = ed-25519
-      encryption.keys.default = ec-p-256
-      encryption.algorithms.default = ecies-hkdf-hmac-sha-256-aes-128-cbc
-    }
-  }
-EOF
-}
-cat >"$WORK/canton.conf" <<EOF
-canton {
-  parameters.non-standard-config = yes
-  // Nothing starts by itself: the bootstrap script starts and stops each node where the runbook does.
-  parameters.manual-start = yes
-  // Console waits (retry_until_true, admin commands, pings) default to 1 min and 30 s. A loaded CI
-  // runner can be slower than that without anything being wrong; a real failure still fails.
-  parameters.timeouts.console { bounded = 3.minutes, ledger-command = 3.minutes, ping = 2.minutes }
-  // Step 2.1: the participant refuses ExportKeyPair without it, and the console needs it as well.
-  features.enable-preview-commands = yes
-  // repair.import_acs (the stand-in for the Splice party migrator's ACS import).
-  features.enable-repair-commands = yes
-  sequencers.sequencer1 {
-    storage.type = memory
-    public-api.port = $((P + 1))
-    admin-api.port = $((P + 2))
-    sequencer.type = BFT
-  }
-  mediators.mediator1 {
-    storage.type = memory
-    admin-api.port = $((P + 3))
-  }
-  // OLD_DB: the validator to migrate, on Canton's own (JCE) keys, stored in this database.
-  participants.oldp {
-    $(h2 old-db/participant_1)
-    ledger-api.port = $((P + 11))
-    admin-api.port = $((P + 12))
-    http-ledger-api.port = $((P + 13))
-  }
-  participants.peer {
-    storage.type = memory
-    ledger-api.port = $((P + 21))
-    admin-api.port = $((P + 22))
-    http-ledger-api.port = $((P + 23))
-  }
-$(new_participant newp1 30 new-db/participant_r1)
-$(new_participant newp2 40 new-db/participant_r2)
-  // The operator's remote console on the old participant (b0-cutover-spike.md §1.3): the export of
-  // Step 2 goes through the admin API, where the participant applies its own gate.
-  remote-participants.oldpRemote {
-    admin-api { address = "127.0.0.1", port = $((P + 12)) }
-    ledger-api { address = "127.0.0.1", port = $((P + 11)) }
-  }
-}
-EOF
-mkdir -p "$WORK/new-db"
 
-# The bootstrap script takes everything from the environment, so it needs no shell quoting.
-cat >"$WORK/e2e.canton" <<'EOF'
+# --- Step 3: the split ceremony (docs/split-ceremony.md §4) against the running cluster -----------
+# The runbook's dealer host is air-gapped, live-booted and has neither swap nor a core handler; a
+# laptop or a CI runner has both: --allow-swap --allow-core-handler. --confirm-sas types the SAS.
+dealer() { # expected-fingerprint  out-dir  [password option…]
+  local fp=$1 out=$2
+  shift 2
+  "$DEALER" split-key --in "$EXPORT_FILE" "$@" \
+    --expect-fingerprint "$fp" --key-id "$KEY_ID" --threshold 2 --ca-cert "$WORK/certs/ca.crt" \
+    --recipient "$WORK/r1.json" --recipient "$WORK/r2.json" --recipient "$WORK/r3.json" \
+    --out-dir "$out" --allow-swap --allow-core-handler --confirm-sas "$SAS_LIST"
+}
+
+step_3_split_ceremony() {
+  local i out rep witness sas=() bundle
+  step "Step 3. Recipient requests and Gate 0 (SAS read back from each node's sealed state)"
+  for i in 1 2 3; do
+    out="$(env_cosigner "$i" share-recipient --key-id "$KEY_ID" --ceremony-id "$CEREMONY" \
+      --out "$(env_node_out "$i" "r$i.json")")"
+    env_fetch "$i" "$(env_node_out "$i" "r$i.json")" "$WORK/r$i.json"
+    sas+=("$(awk -v n="$i" '$1 == "SAS" && $3 == n {print $4}' <<<"$out")")
+    [ -n "${sas[$((i - 1))]}" ] || fail "share-recipient on node $i printed no SAS"
+    witness="$(env_cosigner "$i" recipient-sas --key-id "$KEY_ID" | awk '{print $4}')"
+    [ "$witness" = "${sas[$((i - 1))]}" ] || fail "recipient-sas on node $i disagrees: $witness"
+  done
+  SAS_LIST="$(IFS=,; echo "${sas[*]}")"
+
+  step "   the dealer refuses a wrong password, no password, and a wrong fingerprint"
+  export EXPORT_PW_WRONG="not-the-export-password"
+  refused "wrong export password" "wrong password" dealer "$NS_FP" "$WORK/dealer-refused" --password-env EXPORT_PW_WRONG
+  refused "no export password" "password-protected" dealer "$NS_FP" "$WORK/dealer-refused"
+  refused "wrong fingerprint (the old signing key's)" "not the expected" dealer "$OLD_SIG_FP" "$WORK/dealer-refused" --password-env EXPORT_PW
+  [ ! -e "$WORK/dealer-refused" ] || fail "a refused dealer run left output behind"
+
+  step "   split on the dealer (rutli-dealer split-key --password-env)"
+  dealer "$NS_FP" "$WORK/dealer" --password-env EXPORT_PW
+  DIGEST="$(jq -r .pkp_digest "$WORK/dealer/dealer-record.json")"
+  GROUP="$(jq -r .group_verifying_key "$WORK/dealer/dealer-record.json")"
+  for i in 1 2 3; do BUNDLE[i]="$(env_push "$i" "$WORK/dealer/share-$KEY_ID-node$i.json")"; done
+
+  step "   dry run (Gate A), a wrong fingerprint refused, install, an identical re-import accepted"
+  for i in 1 2 3; do
+    rep="$(env_cosigner "$i" import-share --in "${BUNDLE[i]}" --expect-fingerprint "$NS_FP" --dry-run)"
+    jq -e --arg d "$DIGEST" '.outcome == "dry-run" and .pkp_digest == $d' <<<"$rep" >/dev/null \
+      || fail "dry run on node $i: $rep"
+  done
+  refused "import-share with a wrong fingerprint" "refusing to install a different key" \
+    env_cosigner 1 import-share --in "${BUNDLE[1]}" --expect-fingerprint "$OLD_SIG_FP"
+  for i in 1 2 3; do
+    rep="$(env_cosigner "$i" import-share --in "${BUNDLE[i]}" --expect-fingerprint "$NS_FP")"
+    jq -e --arg d "$DIGEST" '.outcome == "installed" and .pkp_digest == $d' <<<"$rep" >/dev/null \
+      || fail "import on node $i: $rep"
+  done
+  rep="$(env_cosigner 2 import-share --in "${BUNDLE[2]}" --expect-fingerprint "$NS_FP")"
+  jq -e '.outcome == "already-installed"' <<<"$rep" >/dev/null || fail "identical re-import before the refresh: $rep"
+  echo "identical re-import before the refresh -> already-installed"
+
+  step "   verify-key --sign-test with the operator certificate (Gate B)"
+  rep="$(verify_key --sign-test)"
+  jq -e --arg d "$DIGEST" '.ok and .pkp_digest == $d and .refresh_count == 0 and (.sign_test | length == 3)
+    and all(.sign_test[]; .ok)' <<<"$rep" >/dev/null || fail "verify-key: $rep"
+  refused "verify-key with a wrong fingerprint" "is not the expected" \
+    env_client operator verify-key --key-id "$KEY_ID" --expect-fingerprint "$OLD_SIG_FP"
+  echo "Gate B: 3/3 nodes, digest $DIGEST, every 2-of-3 quorum signs"
+
+  step "   refresh with the refresher certificate, verify-key again (Gate C)"
+  out="$(env_client refresher refresh --key-id "$KEY_ID")"
+  grep -q "$GROUP" <<<"$out" || fail "refresh changed the group key: $out"
+  rep="$(verify_key --sign-test)"
+  jq -e --arg d "$DIGEST" '.ok and .pkp_digest != $d and .refresh_count == 1 and all(.sign_test[]; .ok)' <<<"$rep" >/dev/null \
+    || fail "verify-key after refresh: $rep"
+  echo "Gate C: group key unchanged, new digest $(jq -r .pkp_digest <<<"$rep"), refresh count 1"
+
+  step "   the same dealt bundle is refused after the refresh"
+  for i in 1 2 3; do
+    refused "node $i: re-import of the dealt bundle after the refresh" "already exists" \
+      env_cosigner "$i" import-share --in "${BUNDLE[i]}" --expect-fingerprint "$NS_FP"
+  done
+
+  step "   founding backups, after the refresh (daemons running, as the chart's backup sidecar takes them)"
+  for i in 1 2 3; do
+    bundle="$(env_node_out "$i" "backup-founding-node$i")"
+    out="$(env_cosigner "$i" backup --out "$bundle")"
+    grep -q "^backed up [1-9][0-9]* share file(s)" <<<"$out" || fail "founding backup of node $i: $out"
+    env_node_ls "$i" "$bundle" | grep -q -- "$KEY_ID" || fail "the founding backup of node $i lacks $KEY_ID"
+    FOUNDING_BACKUPS[i]="$bundle"
+  done
+  rep="$(verify_key)"
+  jq -e '.ok and .refresh_count == 1' <<<"$rep" >/dev/null || fail "verify-key after the backups: $rep"
+}
+
+# --- Steps 4-7 run in Canton: the cutover rolled back, the cutover that goes through, verify -------
+step_4_to_7_cutover() {
+  step "Steps 4-7. Cutover rolled back (§6), cutover again, the party moved, verification"
+  printf 'KEY_ID=%s\n' "$KEY_ID" >"$SYNC/ceremony.env"
+  mark ceremony
+  wait_marker migrated 900
+  env_canton_out | grep "^E2E" || true
+  env_canton_out | grep -q "^E2E-ROLLBACK " || fail "the rollback did not run"
+  NEW_PID="$(value migrated NEW_PID)"
+  SIG_KMS_ID="$(value migrated SIG_KMS_ID)"
+  ENC_KMS_ID="$(value migrated ENC_KMS_ID)"
+  [ "$NEW_PID" = "PAR::${NEW_ID}::${NS_FP}" ] || fail "new participant id $NEW_PID"
+  [ "$(value migrated PARTY)" = "$PARTY" ] || fail "the party id changed: $(value migrated PARTY)"
+  [ "$(value migrated NS_KMS_ID)" = "$KEY_ID" ] || fail "the namespace key is registered as $(value migrated NS_KMS_ID)"
+  [ "$SIG_KMS_ID" = "${PREFIX}frost-signing-2" ] || fail "the signing key is $SIG_KMS_ID"
+  case "$ENC_KMS_ID" in "${PREFIX}rutli-enc-encryption-"*) ;; *) fail "the encryption key is $ENC_KMS_ID" ;; esac
+  echo "party $PARTY unchanged, hosted on $NEW_PID; keys $KEY_ID, $SIG_KMS_ID, $ENC_KMS_ID"
+
+  step "Step 4.3. The driver loaded and the cluster offers ECIES"
+  local logs=() log
+  while IFS= read -r log; do logs+=("$log"); done < <(env_canton_logs)
+  grep -qh "Loaded driver rutli" "${logs[@]}" 2>/dev/null || fail "no 'Loaded driver rutli' in the Canton log"
+  grep -qh "every cosigner hosts non-FROST keys (.*ec-p256-ecies" "${logs[@]}" 2>/dev/null \
+    || fail "the driver never saw ec-p256-ecies in Capabilities"
+}
+
+step_7_audit() {
+  step "Step 7. The driver's audit: threshold signatures with the imported namespace key, nothing failed"
+  local audit ns_ok sig_ok enc_ok bad kid i n journaled nointent
+  audit="$(env_driver_audit newp2)"
+  [ -s "$audit" ] || fail "no driver audit log for the new participant"
+  _ok() { grep -F "\"op\":\"$1\",\"detail\":\"keyId=$2 " "$audit" | grep -c "outcome=ok" || true; } # op key-id
+  ns_ok="$(_ok sign "$KEY_ID")"
+  sig_ok="$(_ok sign "$SIG_KMS_ID")"
+  enc_ok="$(_ok decryptAsymmetric "$ENC_KMS_ID")"
+  bad="$(cat "$(env_driver_audit newp1)" "$audit" 2>/dev/null | grep -c "outcome=failed" || true)"
+  echo "sign ok: $KEY_ID $ns_ok, $SIG_KMS_ID $sig_ok; ECIES decrypt ok: $ENC_KMS_ID $enc_ok; failed: $bad"
+  # OTK, trust certificate, package vetting, the old trust certificate's removal, the party's hosting.
+  [ "$ns_ok" -ge 4 ] || fail "only $ns_ok signatures with the imported namespace key $KEY_ID"
+  [ "$sig_ok" -gt 0 ] || fail "no signature with the fresh signing key $SIG_KMS_ID"
+  [ "$enc_ok" -gt 0 ] || fail "no ECIES decryption with the hosted key $ENC_KMS_ID"
+  [ "$bad" -eq 0 ] || fail "$bad driver operations failed"
+  grep -q 'intent=[0-9a-f]\{32\}' "$audit" || fail "the driver audit log names no signing intent"
+  # Threshold signatures: at least two cosigners journaled signatures with the namespace key and with
+  # the fresh signing key, each under an intent the driver signed; none without one.
+  for kid in "$KEY_ID" "$SIG_KMS_ID"; do
+    journaled=0
+    for i in 1 2 3; do
+      n="$(env_node_cat "$i" "$(env_node_path "$i" "journal/$kid")/*.jsonl" | grep -c '"purpose":"sign".*"signer_cn":"driver"' || true)"
+      echo "node $i journaled $n signature(s) with $kid under a driver intent"
+      [ "$n" -gt 0 ] && journaled=$((journaled + 1))
+    done
+    [ "$journaled" -ge 2 ] || fail "only $journaled cosigner(s) journaled signatures with $kid"
+  done
+  nointent=0
+  for i in 1 2 3; do
+    n="$(env_node_cat "$i" "$(env_node_path "$i" journal)/*/*.jsonl" | grep -c '"purpose":"no-intent"' || true)"
+    nointent=$((nointent + n))
+  done
+  [ "$nointent" -eq 0 ] || fail "$nointent signature(s) without an intent under require_intent"
+
+  step "Step 7. No ACS commitment mismatch logged on the new participant or the counter-party"
+  local errs
+  errs="$(commitment_errors)"
+  [ -z "$errs" ] || fail "ACS commitment errors: $(head -n 3 <<<"$errs")"
+}
+
+# --- Step 8: destroy every old copy the script can reach, with the checks a script can make -------
+step_8_destroy() {
+  step "Step 8. Destruction: the export file, the old database, the dealer output, the request files"
+  local f i gone rep
+  [ "$(openssl dgst -sha256 -hex "$EXPORT_FILE" | awk '{print $NF}')" = "$EXPORT_SHA" ] || fail "the export file changed since Step 2"
+  env_old_db_exists || fail "the old participant's database is not where the config put it"
+  shred_local "$EXPORT_DIR" "$WORK/dealer" "$WORK"/r[0-9].json "$WORK"/acs-old-attempt1.gz
+  env_destroy_old_db
+  for gone in "$EXPORT_DIR" "$WORK/dealer" "$WORK/r1.json" "$WORK/r2.json" "$WORK/r3.json"; do
+    [ ! -e "$gone" ] || fail "$gone is still there"
+  done
+  ! env_old_db_exists || fail "the old participant's database is still there"
+  # Ceremony residue on the cosigners: the one-time recipient secrets died at install, and the only
+  # backups are the founding ones, taken after the refresh.
+  for i in 1 2 3; do
+    ! env_node_exists "$i" "$(env_node_path "$i" "ceremony/$KEY_ID.recipient")" || fail "node $i kept its recipient secret"
+    env_node_exists "$i" "${FOUNDING_BACKUPS[i]}" || fail "node $i lost its founding backup"
+  done
+  # No file left in the work dir is the export (by content), wherever it might have been copied.
+  while IFS= read -r f; do
+    [ "$(openssl dgst -sha256 -hex "$f" | awk '{print $NF}')" != "$EXPORT_SHA" ] || fail "a copy of the export file survives: $f"
+  done < <(find "$WORK" -type f -size -64k)
+  rep="$(verify_key --sign-test)"
+  jq -e '.ok and .refresh_count == 1 and all(.sign_test[]; .ok)' <<<"$rep" >/dev/null || fail "verify-key after the destruction: $rep"
+  echo "destroyed; verify-key --sign-test OK on the refreshed shares"
+
+  step "   after the destruction: the old member's OTK removed, the new participant still transacts"
+  mark destroyed
+  env_canton_wait
+  env_canton_out | grep -q "^E2E-DONE" || fail "the bootstrap script did not finish"
+  env_canton_out | grep "^E2E-AFTER-DESTRUCTION"
+  local bad errs
+  bad="$(cat "$(env_driver_audit newp2)" | grep -c "outcome=failed" || true)"
+  [ "$bad" -eq 0 ] || fail "$bad driver operations failed after the destruction"
+  errs="$(commitment_errors)"
+  [ -z "$errs" ] || fail "ACS commitment errors: $(head -n 3 <<<"$errs")"
+}
+
+# --- the Canton bootstrap script (Steps 1, 2, 4-7 and the end of 8) -------------------------------
+write_bootstrap() { # out
+  # Everything comes from the environment, so the script needs no shell quoting.
+  cat >"$1" <<'EOF'
 import com.digitalasset.canton.console.{LocalParticipantReference, ParticipantReference}
 import com.digitalasset.canton.crypto.{EncryptionKeySpec, EncryptionPublicKey, SigningKeySpec, SigningKeyUsage, SigningPublicKey}
 import com.digitalasset.canton.examples.java.iou.{Amount, Iou}
@@ -517,12 +564,13 @@ println(s"E2E-ROLLBACK ${ROLLED_BACK_PID.toProtoPrimitive} offboarded, $VALIDATO
 // ------------------------------------------------------------------------------------------------
 val ACS_FILE = Paths.get(WORK, "acs-old.gz").toString
 val ACS_REFERENCE = stopOld(ACS_FILE)
-val (newPid, newSigning, newEncryption) = onboard(newp2, NEW_ID, "signing-2", syncCfg)
+val (newPid, newSigning, newEncryption) = onboard(newp2, NEW_ID, "signing-2", restoredCfg)
 val NEW_PID = newPid
 check(newSigning.fingerprint != rolledBackSigning.fingerprint, "the retry got the signing key of the rolled-back attempt")
 newp2.dars.upload(DAR)
 newp2.health.ping(peer)
-check(trusted(peer, OLD_PID) && hosts(peer).isEmpty, "the party moved before the point of no return")
+// (An admin party has no explicit hosting mapping in plain Canton: it follows the trust certificate.)
+check(trusted(peer, OLD_PID) && !hosts(peer).contains(NEW_PID), "the party moved before the point of no return")
 
 // Step 6 without Splice. Its party migrator makes these changes, in this order; here the new
 // participant issues them, signed by the imported namespace key through the cosigner cluster.
@@ -573,6 +621,9 @@ println("E2E-TRANSACT OK: exercise as submitter, exercise as confirmer, create, 
 // ACS commitments between the new participant and the counter-party, over several intervals.
 sequencer1.topology.synchronizer_parameters.propose_update(
   SYNC_ID, _.update(reconciliationInterval = PositiveDurationSeconds.ofSeconds(5)))
+utils.retry_until_true(
+  newp2.topology.synchronizer_parameters.get_dynamic_synchronizer_parameters(SYNC_ID).reconciliationInterval == PositiveDurationSeconds.ofSeconds(5) &&
+    peer.topology.synchronizer_parameters.get_dynamic_synchronizer_parameters(SYNC_ID).reconciliationInterval == PositiveDurationSeconds.ofSeconds(5))
 val commitmentsFrom = Instant.now
 for (_ <- 1 to 5) { Thread.sleep(5000); newp2.health.ping(peer) }
 // Informational: with protocol version 36 these inspection commands may see nothing. The shell
@@ -604,227 +655,25 @@ println("E2E-AFTER-DESTRUCTION the old member's OTK is removed; the new particip
 println("E2E-DONE")
 sys.exit(0)
 EOF
-
-export EXPORT_PW
-EXPORT_PW="$(openssl rand -base64 24)" # Step 2.3: random, at least 24 characters, in the environment only
-EXPORT_FILE="$WORK/export/namespace.export"
-
-step "Run Canton 3.6.1 ($JAVA_HOME); it stays up until the end"
-(
-  cd "$WORK"
-  export E2E_WORK="$WORK" E2E_OLD_ID="oldp" E2E_NEW_ID_ROLLED_BACK="$NEW_ID_ROLLED_BACK" E2E_NEW_ID="$NEW_ID" \
-    E2E_DAR="$CANTON_HOME/dars/CantonExamples.dar" EXTRA_CLASSPATH="$DRIVER_JAR"
-  exec "$CANTON_HOME/bin/canton" run "$WORK/e2e.canton" \
-    --config "$WORK/canton.conf" --no-tty --log-file-name "$WORK/canton.log" --kms-log-file-name "$WORK/canton_kms.log" \
-    >"$WORK/canton.out" 2>&1
-) &
-CANTON_PID=$!
-
-# ---------------------------------------------------------------------------------------------
-# Steps 1 and 2 (in Canton): baselines, NS_FP, the export.
-# ---------------------------------------------------------------------------------------------
-step "Steps 1-2. Baselines; the namespace key exported with a password (keys.secret.download_to)"
-wait_marker exported
-grep "^E2E" "$WORK/canton.out" || true
-NS_FP="$(value exported NS_FP)"
-OLD_UID="$(value exported OLD_UID)"
-PARTY="$(value exported PARTY)"
-OLD_SIG_FP="$(value exported OLD_SIG_FP)"
-[[ "$NS_FP" =~ ^1220[0-9a-f]{64}$ ]] || fail "NS_FP from the old participant: '$NS_FP'"
-[ "$PARTY" = "${OLD_UID%%::*}::$NS_FP" ] || fail "party $PARTY is not <hint>::NS_FP"
-KEY_ID="${PREFIX}frost-import-${NS_FP:4:8}" # migration.md §2
-[ -s "$EXPORT_FILE" ] || fail "no export file"
-EXPORT_SHA="$(openssl dgst -sha256 -hex "$EXPORT_FILE" | awk '{print $NF}')"
-echo "old participant $OLD_UID, party $PARTY"
-echo "export file sha256 $EXPORT_SHA; KEY_ID $KEY_ID"
-
-# ---------------------------------------------------------------------------------------------
-# Step 3: split ceremony (docs/split-ceremony.md §4), against the running cluster.
-# ---------------------------------------------------------------------------------------------
-step "Step 3. Recipient requests and Gate 0 (SAS read back from each node's sealed state)"
-SAS=()
-for i in 1 2 3; do
-  out="$(cli --config "$WORK/c$i.json" share-recipient --key-id "$KEY_ID" --ceremony-id "$CEREMONY" \
-    --out "$WORK/r$i.json")"
-  SAS+=("$(awk -v n="$i" '$1 == "SAS" && $3 == n {print $4}' <<<"$out")")
-  [ -n "${SAS[$((i - 1))]}" ] || fail "share-recipient on node $i printed no SAS"
-  witness="$(cli --config "$WORK/c$i.json" recipient-sas --key-id "$KEY_ID" | awk '{print $4}')"
-  [ "$witness" = "${SAS[$((i - 1))]}" ] || fail "recipient-sas on node $i disagrees: $witness"
-done
-SAS_LIST="$(IFS=,; echo "${SAS[*]}")"
-
-# The runbook's dealer host is air-gapped, live-booted and has neither swap nor a core handler; a
-# laptop or a CI runner has both: --allow-swap --allow-core-handler. --confirm-sas types the SAS.
-dealer() { # expected-fingerprint  out-dir  [password option…]
-  local fp=$1 out=$2
-  shift 2
-  "$DEALER" split-key --in "$EXPORT_FILE" "$@" \
-    --expect-fingerprint "$fp" --key-id "$KEY_ID" --threshold 2 --ca-cert "$WORK/certs/ca.crt" \
-    --recipient "$WORK/r1.json" --recipient "$WORK/r2.json" --recipient "$WORK/r3.json" \
-    --out-dir "$out" --allow-swap --allow-core-handler --confirm-sas "$SAS_LIST"
-}
-refused() { # what  expected-message  command…
-  local what=$1 expect=$2
-  shift 2
-  if "$@" >"$WORK/refused.out" 2>&1; then fail "$what: accepted"; fi
-  grep -q -- "$expect" "$WORK/refused.out" || fail "$what: refused for the wrong reason: $(cat "$WORK/refused.out")"
-  echo "$what -> refused"
 }
 
-step "   the dealer refuses a wrong password, no password, and a wrong fingerprint"
-export EXPORT_PW_WRONG="not-the-export-password"
-refused "wrong export password" "wrong password" dealer "$NS_FP" "$WORK/dealer-refused" --password-env EXPORT_PW_WRONG
-refused "no export password" "password-protected" dealer "$NS_FP" "$WORK/dealer-refused"
-refused "wrong fingerprint (the old signing key's)" "not the expected" dealer "$OLD_SIG_FP" "$WORK/dealer-refused" --password-env EXPORT_PW
-[ -e "$WORK/dealer-refused" ] && fail "a refused dealer run left output behind"
+main() {
+  env_init
+  EXPORT_DIR="$WORK/export"
+  EXPORT_FILE="$EXPORT_DIR/namespace.export"
+  export EXPORT_PW
+  EXPORT_PW="$(openssl rand -base64 24)" # Step 2.3: random, at least 24 characters, in the environment only
+  export E2E_OLD_ID="$OLD_ID" E2E_NEW_ID_ROLLED_BACK="$NEW_ID_ROLLED_BACK" E2E_NEW_ID="$NEW_ID"
 
-step "   split on the dealer (rutli-dealer split-key --password-env)"
-dealer "$NS_FP" "$WORK/dealer" --password-env EXPORT_PW
-DIGEST="$(jq -r .pkp_digest "$WORK/dealer/dealer-record.json")"
-GROUP="$(jq -r .group_verifying_key "$WORK/dealer/dealer-record.json")"
+  step "Run Canton 3.6.1; it stays up until the end"
+  write_bootstrap "$WORK/e2e.canton"
+  env_canton_start "$WORK/e2e.canton"
 
-step "   dry run (Gate A), a wrong fingerprint refused, install"
-for i in 1 2 3; do
-  rep="$(cli --config "$WORK/c$i.json" import-share --in "$WORK/dealer/share-$KEY_ID-node$i.json" \
-    --expect-fingerprint "$NS_FP" --dry-run)"
-  jq -e --arg d "$DIGEST" '.outcome == "dry-run" and .pkp_digest == $d' <<<"$rep" >/dev/null \
-    || fail "dry run on node $i: $rep"
-done
-if cli --config "$WORK/c1.json" import-share --in "$WORK/dealer/share-$KEY_ID-node1.json" \
-  --expect-fingerprint "$OLD_SIG_FP" >/dev/null 2>&1; then fail "import-share accepted a wrong fingerprint"; fi
-echo "import-share with a wrong fingerprint -> refused"
-for i in 1 2 3; do
-  rep="$(cli --config "$WORK/c$i.json" import-share --in "$WORK/dealer/share-$KEY_ID-node$i.json" \
-    --expect-fingerprint "$NS_FP")"
-  jq -e --arg d "$DIGEST" '.outcome == "installed" and .pkp_digest == $d' <<<"$rep" >/dev/null \
-    || fail "import on node $i: $rep"
-done
-
-step "   verify-key --sign-test with the operator certificate (Gate B)"
-rep="$(verify_key --sign-test)"
-jq -e --arg d "$DIGEST" '.ok and .pkp_digest == $d and .refresh_count == 0 and (.sign_test | length == 3)
-  and all(.sign_test[]; .ok)' <<<"$rep" >/dev/null || fail "verify-key: $rep"
-if cli --config "$WORK/operator.json" verify-key --key-id "$KEY_ID" --expect-fingerprint "$OLD_SIG_FP" >/dev/null 2>&1; then
-  fail "verify-key accepted a wrong fingerprint"
-fi
-echo "Gate B: 3/3 nodes, digest $DIGEST, every 2-of-3 quorum signs; a wrong fingerprint -> refused"
-
-step "   refresh with the refresher certificate, verify-key again (Gate C)"
-out="$(cli --config "$WORK/refresher.json" refresh --key-id "$KEY_ID")"
-grep -q "$GROUP" <<<"$out" || fail "refresh changed the group key: $out"
-rep="$(verify_key --sign-test)"
-jq -e --arg d "$DIGEST" '.ok and .pkp_digest != $d and .refresh_count == 1 and all(.sign_test[]; .ok)' <<<"$rep" >/dev/null \
-  || fail "verify-key after refresh: $rep"
-echo "Gate C: group key unchanged, new digest $(jq -r .pkp_digest <<<"$rep"), refresh count 1"
-
-step "   a dealt bundle is refused after the refresh"
-for i in 1 2 3; do
-  if cli --config "$WORK/c$i.json" import-share --in "$WORK/dealer/share-$KEY_ID-node$i.json" \
-    --expect-fingerprint "$NS_FP" >/dev/null 2>&1; then fail "node $i re-imported a dealt bundle over a refreshed key"; fi
-done
-echo "re-import after refresh -> refused on every node"
-
-step "   founding backups, after the refresh (daemons running, as the chart's backup sidecar takes them)"
-for i in 1 2 3; do
-  out="$(cli --config "$WORK/c$i.json" backup --out "$WORK/backup-founding/node$i")"
-  grep -q "^backed up [1-9][0-9]* share file(s)" <<<"$out" || fail "founding backup of node $i: $out"
-  ls "$WORK/backup-founding/node$i" | grep -q -- "$KEY_ID" || fail "the founding backup of node $i lacks $KEY_ID"
-done
-rep="$(verify_key)"
-jq -e '.ok and .refresh_count == 1' <<<"$rep" >/dev/null || fail "verify-key after the backups: $rep"
-
-# ---------------------------------------------------------------------------------------------
-# Steps 4-7 (in Canton): the cutover that is rolled back, the cutover that goes through, verify.
-# ---------------------------------------------------------------------------------------------
-step "Steps 4-7. Cutover rolled back (§6), cutover again, the party moved, verification"
-printf 'KEY_ID=%s\n' "$KEY_ID" >"$WORK/sync/ceremony.env"
-mark ceremony
-wait_marker migrated 900
-grep "^E2E" "$WORK/canton.out" || true
-grep -q "^E2E-ROLLBACK " "$WORK/canton.out" || fail "the rollback did not run"
-NEW_PID="$(value migrated NEW_PID)"
-SIG_KMS_ID="$(value migrated SIG_KMS_ID)"
-ENC_KMS_ID="$(value migrated ENC_KMS_ID)"
-[ "$NEW_PID" = "PAR::${NEW_ID}::${NS_FP}" ] || fail "new participant id $NEW_PID"
-[ "$(value migrated PARTY)" = "$PARTY" ] || fail "the party id changed: $(value migrated PARTY)"
-[ "$(value migrated NS_KMS_ID)" = "$KEY_ID" ] || fail "the namespace key is registered as $(value migrated NS_KMS_ID)"
-[ "$SIG_KMS_ID" = "${PREFIX}frost-signing-2" ] || fail "the signing key is $SIG_KMS_ID"
-case "$ENC_KMS_ID" in "${PREFIX}rutli-enc-encryption-"*) ;; *) fail "the encryption key is $ENC_KMS_ID" ;; esac
-echo "party $PARTY unchanged, hosted on $NEW_PID; keys $KEY_ID, $SIG_KMS_ID, $ENC_KMS_ID"
-
-step "Step 4.3. The driver loaded and the cluster offers ECIES"
-grep -qh "Loaded driver rutli" "$WORK"/canton*.log || fail "no 'Loaded driver rutli' in the Canton log"
-grep -qh "every cosigner hosts non-FROST keys (.*ec-p256-ecies" "$WORK"/canton*.log || fail "the driver never saw ec-p256-ecies in Capabilities"
-
-step "Step 7. The driver's audit: threshold signatures with the imported namespace key, nothing failed"
-AUDIT="$WORK/driver-audit-newp2.jsonl"
-[ -s "$AUDIT" ] || fail "no driver audit log for the new participant"
-count() { # op  key-id
-  grep -F "\"op\":\"$1\",\"detail\":\"keyId=$2 " "$AUDIT" | grep -c "outcome=ok" || true
+  step_1_2_export
+  step_3_split_ceremony
+  step_4_to_7_cutover
+  step_7_audit
+  step_8_destroy
 }
-NS_OK="$(count sign "$KEY_ID")"
-SIG_OK="$(count sign "$SIG_KMS_ID")"
-ENC_OK="$(count decryptAsymmetric "$ENC_KMS_ID")"
-BAD="$(cat "$WORK"/driver-audit-newp*.jsonl | grep -c "outcome=failed" || true)"
-echo "sign ok: $KEY_ID $NS_OK, $SIG_KMS_ID $SIG_OK; ECIES decrypt ok: $ENC_KMS_ID $ENC_OK; failed: $BAD"
-# OTK, trust certificate, package vetting, the old trust certificate's removal, the party's hosting.
-[ "$NS_OK" -ge 4 ] || fail "only $NS_OK signatures with the imported namespace key $KEY_ID"
-[ "$SIG_OK" -gt 0 ] || fail "no signature with the fresh signing key $SIG_KMS_ID"
-[ "$ENC_OK" -gt 0 ] || fail "no ECIES decryption with the hosted key $ENC_KMS_ID"
-[ "$BAD" -eq 0 ] || fail "$BAD driver operations failed: $(cat "$WORK"/driver-audit-newp*.jsonl | grep "outcome=failed" | head -n 3)"
-grep -q 'intent=[0-9a-f]\{32\}' "$AUDIT" || fail "the driver audit log names no signing intent"
-# A threshold signature: at least two cosigners journaled signatures with the namespace key, each
-# under an intent the driver signed; none without one.
-JOURNALED=0
-for i in 1 2 3; do
-  n="$(cat "$WORK/node$i/journal/$KEY_ID"/*.jsonl 2>/dev/null | grep -c '"purpose":"sign".*"signer_cn":"driver"' || true)"
-  echo "node $i journaled $n signature(s) with $KEY_ID under a driver intent"
-  [ "$n" -gt 0 ] && JOURNALED=$((JOURNALED + 1))
-done
-[ "$JOURNALED" -ge 2 ] || fail "only $JOURNALED cosigner(s) journaled signatures with $KEY_ID"
-NOINTENT="$(cat "$WORK"/node*/journal/*/*.jsonl | grep -c '"purpose":"no-intent"' || true)"
-[ "$NOINTENT" -eq 0 ] || fail "$NOINTENT signature(s) without an intent under require_intent"
 
-step "Step 7. No ACS commitment mismatch on the new participant or the counter-party"
-if grep -hE "ACS_COMMITMENT_MISMATCH|ACS_MISMATCH_NO_SHARED_CONTRACTS|ACS_COMMITMENT_ALARM" "$WORK/canton.log" >"$WORK/commitments.txt"; then
-  fail "ACS commitment errors: $(head -n 3 "$WORK/commitments.txt")"
-fi
-
-# ---------------------------------------------------------------------------------------------
-# Step 8: destroy every old copy on this machine, with the checks a script can make.
-# ---------------------------------------------------------------------------------------------
-step "Step 8. Destruction: the export file, the old database, the dealer output, the request files"
-# Lessons f: on macOS GNU coreutils can shadow /bin/rm, which has -P.
-destroy() { if [ "$(uname)" = Darwin ]; then /bin/rm -P -rf "$@"; else rm -rf "$@"; fi; }
-[ "$(openssl dgst -sha256 -hex "$EXPORT_FILE" | awk '{print $NF}')" = "$EXPORT_SHA" ] || fail "the export file changed since Step 2"
-ls "$WORK/old-db"/participant_1* >/dev/null 2>&1 || fail "the old participant's database is not where the config put it"
-ls -l "$WORK/export" "$WORK/old-db" "$WORK/dealer"
-destroy "$WORK/export" "$WORK/old-db" "$WORK/dealer" "$WORK"/r[0-9].json "$WORK"/acs-old-attempt1.gz
-for gone in "$WORK/export" "$WORK/old-db" "$WORK/dealer" "$WORK/r1.json" "$WORK/r2.json" "$WORK/r3.json"; do
-  [ ! -e "$gone" ] || fail "$gone is still there"
-done
-# Ceremony residue on the cosigners: the one-time recipient secrets died at install, and the only
-# backups are the founding ones, taken after the refresh.
-for i in 1 2 3; do
-  [ ! -e "$WORK/node$i/ceremony/$KEY_ID.recipient" ] || fail "node $i kept its recipient secret"
-done
-[ "$(find "$WORK" -maxdepth 1 -name 'backup-*' | wc -l | tr -d ' ')" = 1 ] || fail "a backup other than the founding one exists"
-# No file left in the work dir is the export (by content), wherever it might have been copied.
-while IFS= read -r f; do
-  [ "$(openssl dgst -sha256 -hex "$f" | awk '{print $NF}')" != "$EXPORT_SHA" ] || fail "a copy of the export file survives: $f"
-done < <(find "$WORK" -type f -size -64k)
-rep="$(verify_key --sign-test)"
-jq -e '.ok and .refresh_count == 1 and all(.sign_test[]; .ok)' <<<"$rep" >/dev/null || fail "verify-key after the destruction: $rep"
-echo "destroyed; verify-key --sign-test OK on the refreshed shares"
-
-step "   after the destruction: the old member's OTK removed, the new participant still transacts"
-mark destroyed
-if ! wait "$CANTON_PID"; then CANTON_PID=0; fail "Canton run failed"; fi
-CANTON_PID=0
-grep -q "^E2E-DONE" "$WORK/canton.out" || fail "the bootstrap script did not finish"
-grep "^E2E-AFTER-DESTRUCTION" "$WORK/canton.out"
-BAD="$(cat "$WORK"/driver-audit-newp*.jsonl | grep -c "outcome=failed" || true)"
-[ "$BAD" -eq 0 ] || fail "$BAD driver operations failed after the destruction"
-if grep -hE "ACS_COMMITMENT_MISMATCH|ACS_MISMATCH_NO_SHARED_CONTRACTS|ACS_COMMITMENT_ALARM" "$WORK/canton.log" >"$WORK/commitments.txt"; then
-  fail "ACS commitment errors: $(head -n 3 "$WORK/commitments.txt")"
-fi
+main "$@"

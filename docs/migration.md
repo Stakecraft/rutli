@@ -219,7 +219,8 @@ p.topology.owner_to_key_mappings.propose(member = o.item.member, keys = o.item.k
   store = TopologyStoreId.Synchronizer(SYNC_ID), force = ForceFlags(ForceFlag.AlienMember))
 ```
 
-The filter matters: `filterKeyOwnerUid` matches by prefix, so it also lists `NEW_ID` when `NEW_ID` starts with `OLD_ID`.
+The member filter matters: `filterKeyOwnerUid` matches the id and the namespace each by prefix, so even the full `OLD_UID`
+also lists `NEW_ID` when `NEW_ID` starts with `OLD_ID` (as `acme-validator-1-r` does).
 
 ## 5. Point of no return, in one place
 
