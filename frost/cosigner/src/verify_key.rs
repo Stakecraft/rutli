@@ -144,6 +144,8 @@ impl VerifyReport {
         });
         if let Err(e) = &outcome {
             self.ok = false;
+            // A report with a problem names no fingerprint as the cluster's.
+            self.fingerprint = None;
             self.problems.push(format!("sign test by {signers:?} (led by node {leader}): {e}"));
         }
         self.sign_test.push(SignRow {
@@ -545,7 +547,9 @@ mod tests {
         let (v, fp) = views([1u8; 32]);
         let mut r = check_views(KEY, Some(&fp), &[1, 2, 3], 2, &v);
         let msg = verify_message("c", KEY);
+        assert_eq!(r.fingerprint.as_deref(), Some(fp.as_str()));
         r.record_signature(1, &[1, 2], Err("UNAVAILABLE".into()));
+        assert!(!r.ok && r.fingerprint.is_none());
         r.record_signature(2, &[1, 3], Ok((msg.to_vec(), vec![0u8; 64])));
         // A valid-looking reply over a message the operator did not expect is a failure too.
         r.record_signature(3, &[2, 3], Ok((verify_message("other", KEY).to_vec(), vec![0u8; 64])));
