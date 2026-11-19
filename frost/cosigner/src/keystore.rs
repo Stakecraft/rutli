@@ -1311,9 +1311,9 @@ mod tests {
     use super::*;
     use crate::hosted::{HostedKey, HostedSpec};
 
-    /// Codex L3: key files are 0600 and the directory 0700 even with sealing off and a permissive
-    /// directory to start from — through create (DKG, import-share, hosted create) and save
-    /// (refresh, hosted save), including over a leftover temp with another mode.
+    /// 2026-10-15 review, L3: key files are 0600 and the directory 0700 even with sealing off and
+    /// a permissive directory to start from — through create (DKG, import-share, hosted create)
+    /// and save (refresh, hosted save), including over a leftover temp with another mode.
     #[cfg(unix)]
     #[test]
     fn key_files_are_owner_only_even_unsealed() {

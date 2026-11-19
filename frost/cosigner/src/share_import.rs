@@ -597,8 +597,8 @@ mod tests {
         assert!(!n.keystore.exists(KEY));
         assert!(share_delivery::recipient_path(&n.ctx.data_dir, KEY).unwrap().exists());
 
-        // An upper-case (or padded) --expect-fingerprint is the same fingerprint (Codex L2); a
-        // malformed one is refused as such.
+        // An upper-case (or padded) --expect-fingerprint is the same fingerprint (2026-10-15
+        // review, L2); a malformed one is refused as such.
         let upper = format!(" {} ", fingerprint().to_uppercase());
         let dry = import_share(&n.ctx, &n.keystore, &n.sealer, &bundles[0], &upper, true).unwrap();
         assert_eq!((dry.outcome, dry.canton_fingerprint.as_str()), ("dry-run", fingerprint().as_str()));

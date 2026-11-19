@@ -1,0 +1,136 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+name: Image build check
+
+# publish-image.yml runs only on a v* tag, so a pull request cannot exercise it. This workflow runs
+# the same image build for both platforms on the same GitHub-hosted runners, with the same SBOM and
+# provenance settings, and pushes and signs nothing. It checks the built index has the structure the
+# release job requires (an attestation manifest with an SBOM and a provenance for the image), so the
+# first tag is not the first test. Keep its build step in step with publish-image.yml. Fork pull
+# requests run it too: it needs no secret and no write permission, and runs only on hosted runners.
+on:
+  pull_request:
+    paths:
+      # The whole Rust workspace: the Dockerfile, the toolchain file, the lockfile and the sources
+      # the image compiles, so a green check means this commit's cosigner builds in the image.
+      - "frost/**"
+      - ".github/workflows/**"
+      - ".github/dependabot.yml"
+  push:
+    branches: [main]
+    paths:
+      # The whole Rust workspace: the Dockerfile, the toolchain file, the lockfile and the sources
+      # the image compiles, so a green check means this commit's cosigner builds in the image.
+      - "frost/**"
+      - ".github/workflows/**"
+  # Weekly: catches a change on the hosted runners or in an action before tag day, not on it.
+  schedule:
+    - cron: "0 5 * * 3"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pins:
+    name: Actions pinned, one Rust version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Every action is pinned to a full commit SHA
+        run: |
+          set -euo pipefail
+          bad="$(grep -nE '^[[:space:]-]*uses:' .github/workflows/*.yml | grep -vE 'uses:[[:space:]]*[^@[:space:]]+@[0-9a-f]{40}([[:space:]]+#.*)?$' || true)"
+          if [ -n "$bad" ]; then
+            echo "::error::actions not pinned to a commit SHA:"
+            echo "$bad"
+            exit 1
+          fi
+          echo "OK: all actions pinned by SHA"
+      - name: frost/Dockerfile builds with the Rust version of frost/rust-toolchain.toml
+        run: |
+          set -euo pipefail
+          want="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/rust-toolchain.toml)"
+          have="$(sed -n 's/^FROM rust:\([^@ -]*\)-slim@sha256:[0-9a-f]\{64\} AS build$/\1/p' frost/Dockerfile)"
+          [ -n "$want" ] && [ "$want" = "$have" ] || {
+            echo "::error::rust-toolchain.toml says '${want}', frost/Dockerfile builds on rust '${have}' (or its FROM is not digest-pinned)"
+            exit 1
+          }
+          grep -qE '^FROM debian:[^@ ]+@sha256:[0-9a-f]{64}$' frost/Dockerfile || {
+            echo "::error::the runtime base image in frost/Dockerfile is not pinned by digest"
+            exit 1
+          }
+          echo "OK: Rust ${want} in both, base images pinned by digest"
+      - name: The two release build jobs differ only in platform and runner
+        run: |
+          set -euo pipefail
+          f=.github/workflows/publish-image.yml
+          job() { awk -v s="  $1:" -v e="  $2:" '$0 == s {on = 1; next} $0 == e {on = 0} on' "$f" \
+            | grep -vE 'amd64|arm64|runs-on:'; }
+          a="$(job build-amd64 build-arm64)"; b="$(job build-arm64 index)"
+          [ -n "$a" ] && [ "$a" = "$b" ] || { echo "::error::build-amd64 and build-arm64 in $f have drifted apart"; diff <(echo "$a") <(echo "$b") || true; exit 1; }
+          echo "OK: build jobs identical"
+
+  build:
+    name: Build ${{ matrix.platform }} (no push)
+    # An unpinned action stops the run before any build step executes.
+    needs: pins
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      # An OCI archive on the runner instead of a registry push, so the SBOM and provenance are
+      # generated as in a release.
+      - name: Build (as publish-image.yml, without pushing)
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: frost
+          file: frost/Dockerfile
+          platforms: ${{ matrix.platform }}
+          provenance: mode=max
+          sbom: true
+          push: false
+          outputs: type=oci,dest=${{ runner.temp }}/image.tar
+
+      # The structure publish-image.yml's index job requires, for this platform: the image, and an
+      # attestation manifest in the same index that refers to it and holds an SPDX SBOM and a SLSA
+      # provenance (BuildKit's attestation storage).
+      - name: The index holds the image, its SBOM and its provenance
+        run: |
+          set -euo pipefail
+          oci="${RUNNER_TEMP}/oci"
+          mkdir -p "$oci"
+          tar -xf "${RUNNER_TEMP}/image.tar" -C "$oci"
+          blob() { echo "${oci}/blobs/sha256/${1#sha256:}"; }
+          # index.json either lists the manifests or points at one image index that does.
+          idx="${oci}/index.json"
+          if [ "$(jq -r '.manifests[0].mediaType' "$idx")" = "application/vnd.oci.image.index.v1+json" ]; then
+            idx="$(blob "$(jq -r '.manifests[0].digest' "$idx")")"
+          fi
+          jq . "$idx"
+          img="$(jq -r '[.manifests[] | select(.platform.os == "linux")]
+            | if length == 1 then .[0].digest else error("expected one image, found \(length)") end' "$idx")"
+          att="$(jq -r --arg d "$img" '[.manifests[]
+              | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest"
+                and (.annotations["vnd.docker.reference.digest"] // .annotations["com.docker.reference.digest"]) == $d)]
+            | if length == 1 then .[0].digest else error("no attestation manifest refers to the image") end' "$idx")"
+          jq . "$(blob "$att")"
+          jq -e '[.layers[].annotations["in-toto.io/predicate-type"] // empty] as $p
+            | any($p[]; startswith("https://spdx.dev/")) and any($p[]; startswith("https://slsa.dev/provenance/"))' \
+            "$(blob "$att")" >/dev/null || { echo "::error::the attestation manifest lacks an SPDX SBOM or a SLSA provenance"; exit 1; }
+          echo "OK: image ${img}, attestation manifest ${att} with SBOM and provenance"
