@@ -83,7 +83,10 @@ const ED25519_SPKI_HEAD: [u8; 12] = [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0
 /// - a Canton public key file (console `keys.public.download`).
 ///
 /// Every route ends in `rutli-canton-key`'s validation: a point on the curve or a well-formed
-/// RSA-2048 key, in canonical encoding. Private keys are refused, never decoded.
+/// RSA-2048 key, in canonical encoding. A PEM private key is refused by its label, before
+/// anything is decoded, and PKCS#8 or a Canton key export is not a public key in any of these
+/// forms. 64 hex digits, however, are always read as a public key: a raw Ed25519 seed looks the
+/// same, so this command must only ever be given public values.
 pub fn parse_public_input(input: &[u8]) -> Result<PublicInput> {
     let refuse = |why: String| DaemonError::Config(format!("not a public key this command reads: {why}"));
     if input.len() > MAX_PUBLIC_KEY_INPUT {
@@ -126,10 +129,11 @@ fn public_pem_to_der(text: &str) -> std::result::Result<Vec<u8>, String> {
     let mut lines = text.lines().map(str::trim);
     let first = lines.next().unwrap_or_default();
     if first != PEM_PUBLIC_BEGIN {
+        // The line itself is not repeated: nothing of the input goes into an error.
         return Err(if first.contains("PRIVATE KEY") {
             "the file is a PRIVATE key; `key fingerprint` reads public keys only".to_string()
         } else {
-            format!("PEM must be one `PUBLIC KEY` block, found {first:?}")
+            "PEM must be one `PUBLIC KEY` block, and this is another kind".to_string()
         });
     }
     let mut body = String::new();
@@ -259,14 +263,22 @@ mod tests {
             let r = refusal(format!("-----BEGIN {label}-----\n!!!\n-----END {label}-----\n").as_bytes());
             assert!(r.contains("PRIVATE key") && !r.contains("base64"), "{r}");
         }
-        assert!(refusal(b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n").contains("one `PUBLIC KEY` block"));
+        let r = refusal(b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n");
+        assert!(r.contains("one `PUBLIC KEY` block") && !r.contains("CERTIFICATE"), "{r}");
         // One block, whole, and nothing around it.
         let one = pem(&der);
         assert!(refusal(format!("{one}{one}").as_bytes()).contains("after the PEM END line"));
         assert!(refusal(one.replace(PEM_PUBLIC_END, "").as_bytes()).contains("END line missing"));
         assert!(refusal(format!("{PEM_PUBLIC_BEGIN}\n!!!\n{PEM_PUBLIC_END}\n").as_bytes()).contains("base64"));
-        // Hex of the wrong length, a point not on the curve, a truncated or padded SPKI.
-        assert!(refusal(&RFC8032_PUBLIC.as_bytes()[..62]).contains("not a public key"));
+        // Hex of the wrong length, a point not on the curve, a truncated or padded SPKI. 31 or 33
+        // bytes of hex are never padded or cut to a key: they are read as (bad) SPKI.
+        for digits in [62, 66] {
+            let hex = format!("{RFC8032_PUBLIC}00");
+            assert!(refusal(&hex.as_bytes()[..digits]).contains("SubjectPublicKeyInfo: "), "{digits}");
+        }
+        // 31 zero bytes: padded to 32 they would be a valid point (y = 0).
+        assert!(ed25519_dalek::VerifyingKey::from_bytes(&[0u8; 32]).is_ok());
+        assert!(refusal("00".repeat(31).as_bytes()).contains("SubjectPublicKeyInfo: "));
         assert!(refusal(&RFC8032_PUBLIC.as_bytes()[..63]).contains("hex"));
         // A y with no x on edwards25519 (about every second one).
         let off_curve = (2u8..)

@@ -19,14 +19,15 @@ air-gapped dealer host and is not in the cosigner image.
 | Show a cluster key: public key, fingerprint, origin, epoch | `rutli-cosigner key show --key-id ID` | An operator certificate (`operator_allowlist`) |
 | Fingerprint of a public key file | `rutli-cosigner key fingerprint --in FILE` | None. Offline |
 | Verify a key against the fingerprint you expect | `key show --expect-fingerprint FP`, or `verify-key` (FROST, adds `--sign-test`) and `verify-hosted` | An operator certificate |
-| Refresh the shares of a FROST key | `rutli-cosigner refresh --key-id ID`. [key-rotation.md](key-rotation.md#2-share-refresh--rotate-the-secret-keep-the-key-rütli) | A refresher certificate (`refresh_allowlist`). It signs the ceremony intent |
+| Refresh the shares of a FROST key | `rutli-cosigner refresh --key-id ID`. [key-rotation.md](key-rotation.md#2-share-refresh--rotate-the-secret-keep-the-key-rütli) | A refresher certificate (`refresh_allowlist`), or the driver certificate while `signing_policy.signer_may_refresh` is on. It signs the ceremony intent |
 | Rotate a signing or encryption key | Canton console. [key-rotation.md](key-rotation.md#the-recipe) | The namespace key, through the driver |
 | Delete a hosted key | `rutli-cosigner delete-hosted-key`; undo with `hosted-undelete` on each node. [hosted-keys.md](hosted-keys.md#delete) | A certificate on `hosted_keys.delete_allowlist`, plus approvals if configured |
 | Delete a FROST key | No command for a key in use. `abort-import` backs out of a split ceremony, `discard-partial-key` removes a legacy partial DKG ([ceremonies.md](ceremonies.md)) | |
 
-The operator certificate can read key status and run the fixed sign test. It cannot sign, decrypt,
-generate, refresh or delete. `deploy/k8s/client-config.yaml` has a client config for it
-(`client-operator.json`).
+The operator role (`operator_allowlist`) can read key status and run the fixed sign test, and
+nothing else: no signing, decrypting, generating, refreshing or deleting, unless the same
+certificate name is also put on another allowlist. `deploy/k8s/client-config.yaml` has a client
+config for it (`client-operator.json`).
 
 Backup, restore, `export-key` and the key-file commands are in
 [disaster-recovery.md](disaster-recovery.md), seal bundles in
@@ -51,14 +52,21 @@ key show acme1-frost-signing (FROST) — no expected fingerprint: the nodes' own
 OK
 ```
 
+The `fingerprint` line, and `fingerprint` in the JSON report, are there only when every check
+passed. A report that ends in `FAILED` names no fingerprint for the cluster; each node's own is in
+its line.
+
 It asks every node in the config's roster and exits non-zero unless all of them hold the key and
 agree on it. A `<prefix>rutli-…` id is read as a hosted key, any other id as a FROST key, the
 same rule the cosigners apply. The checks are those of `verify-key` and `verify-hosted`: the same
 two read-only RPCs, the same code. `--json` prints the report; its `kind` is `frost` or `hosted`.
 
-For a hosted key it prints the spec, the public key (SPKI, hex) and the fingerprint. A symmetric
-key (AES) has neither. `key show` then says only that every node holds a key of that spec under the
-id, not that it is the same key.
+For a hosted key it prints the public key (SPKI, hex) and the fingerprint; the spec is in each
+node's line. A symmetric key (AES) has neither. `OK` then means only that every node holds a key of
+that spec under the id, not that it is the same key.
+
+A hosted key under an id without the `rutli-` tag can only be left over from before 0.4.0-rc.6.
+`key show` looks for a FROST key there and fails; use `verify-hosted` for such an id.
 
 **The output is the cluster's own report.** Each node says what it holds. Without
 `--expect-fingerprint` nothing is compared with anything you know from elsewhere, so `OK` means the
@@ -84,7 +92,9 @@ no config and no network. It reads:
   prints for a hosted key),
 - a raw Ed25519 public key as 64 hex digits (what `key show` prints as the group key).
 
-Public keys only. A private key file is refused.
+Public keys only. A private key in PEM, PKCS#8 or a Canton key export is refused. 64 hex digits
+are always read as a public key, and a raw Ed25519 private seed looks the same: never give this
+command a secret.
 
 ## What the CLI does not do
 

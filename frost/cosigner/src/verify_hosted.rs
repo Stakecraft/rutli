@@ -70,7 +70,8 @@ pub struct HostedReport {
     pub spec: Option<String>,
     /// Hex SPKI DER; empty for a symmetric key.
     pub public_key_der: Option<String>,
-    /// The Canton fingerprint of that public key, if it is one Canton reads.
+    /// The Canton fingerprint of that public key, only when every check passed (`ok`): a report
+    /// with problems names no fingerprint as the cluster's. Each node's own is in its row.
     pub fingerprint: Option<String>,
     pub nodes: Vec<HostedRow>,
 }
@@ -145,6 +146,7 @@ pub fn check_hosted_views(
     let agreed = (served.len() == 1).then(|| served.keys().next().cloned()).flatten();
     let fingerprint = agreed
         .as_ref()
+        .filter(|_| problems.is_empty())
         .and_then(|(_, der)| rutli_canton_key::PublicKey::from_spki_der(der).ok())
         .map(|public| public.fingerprint());
     HostedReport {
@@ -251,34 +253,43 @@ mod tests {
         assert_eq!(json.as_object_mut().unwrap().remove("expected_fingerprint"), Some(fp.clone().into()));
         assert_eq!(json, serde_json::to_value(&shown).unwrap());
 
+        // A report with a problem names no fingerprint as the cluster's.
         let problems = |v: &[HostedView]| {
             let r = check_hosted_views(KEY, None, &[1, 2, 3], v);
-            assert!(!r.ok);
-            (r.problems.join(" | "), r.fingerprint)
+            assert!(!r.ok && r.fingerprint.is_none(), "{:?}", r.fingerprint);
+            r.problems.join(" | ")
         };
-        // A node without the key, and one that cannot be asked: the two that answer still agree.
+        // A node without the key: the two that hold it agree, and each row says what it serves.
         let (mut v, _) = views(&key);
         v[1].status = Ok(HostedKeyStatusReply { present: false, ..reply(2, &key) });
-        let (p, shown_fp) = problems(&v);
-        assert!(p.contains("node 2: does not hold the key") && shown_fp.as_deref() == Some(fp.as_str()), "{p}");
-        // Another key under the id on one node: no fingerprint is reported as the cluster's.
+        assert!(problems(&v).contains("node 2: does not hold the key"));
+        let r = check_hosted_views(KEY, None, &[1, 2, 3], &v);
+        assert_eq!((r.nodes[0].fingerprint.as_str(), r.nodes[1].fingerprint.as_str()), (fp.as_str(), ""));
+        // Another key under the id on one node.
         let (mut v, _) = views(&key);
         v[2].status = Ok(reply(3, &other));
-        let (p, shown_fp) = problems(&v);
-        assert!(p.contains("2 different public keys") && shown_fp.is_none(), "{p}");
+        assert!(problems(&v).contains("2 different public keys"));
         let (mut v, _) = views(&key);
         v[0].status = Ok(reply(2, &key));
-        assert!(problems(&v).0.contains("answers as node 2"));
+        assert!(problems(&v).contains("answers as node 2"));
         let (mut v, _) = views(&key);
         v.pop();
-        assert!(problems(&v).0.contains("the roster is"));
+        assert!(problems(&v).contains("the roster is"));
         let (mut v, _) = views(&key);
         v[0].status = Ok(HostedKeyStatusReply { public_key_der: vec![0x30, 0x00], ..reply(1, &key) });
-        assert!(problems(&v).0.contains("could not read"));
+        assert!(problems(&v).contains("could not read"));
         // An asymmetric spec with no public key is not a symmetric key.
         let (mut v, _) = views(&key);
         v[0].status = Ok(HostedKeyStatusReply { public_key_der: Vec::new(), ..reply(1, &key) });
-        assert!(problems(&v).0.contains("serves no public key"));
+        assert!(problems(&v).contains("serves no public key"));
+        // Nor does a wrong or malformed expectation: every node agrees, the report still names none.
+        let (v, _) = views(&key);
+        let wrong = format!("1220{}", "0".repeat(64));
+        for expected in [wrong.as_str(), "1220abc"] {
+            let r = check_hosted_views(KEY, Some(expected), &[1, 2, 3], &v);
+            assert!(!r.ok && r.fingerprint.is_none() && r.public_key_der.is_some(), "{:?}", r.problems);
+            assert!(r.nodes.iter().all(|n| n.fingerprint == fp));
+        }
     }
 
     /// A symmetric key has nothing to fingerprint. Shown without an expectation it is no problem —

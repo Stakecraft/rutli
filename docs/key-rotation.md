@@ -49,7 +49,11 @@ signing key onto a new FROST key this way. The full console blocks, with their a
 
    ```scala
    p.topology.owner_to_key_mappings.rotate_key(p.id.member, encOld, encNew)
+   // and for the signing key
+   p.topology.owner_to_key_mappings.rotate_key(p.id.member, sigOld, sigNew)
    ```
+
+   `encOld` and `sigOld` are the public keys being replaced, from `keys.secret.list`.
 
    Wait until the old fingerprint has left the synchronizer's mapping. After a signing-key
    rotation, disconnect and reconnect the synchronizer so that sequencer authentication uses the

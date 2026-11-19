@@ -1251,7 +1251,9 @@ async fn the_operator_certificate_reaches_only_the_operator_rpcs_and_every_signe
     assert_eq!(in_proto.len(), 17, "service Signer changed: classify the new rpc here deliberately");
 
     for (name, result) in &calls {
-        if OPEN.contains(name) || OPERATOR.contains(name) {
+        if OPEN.contains(name) {
+            assert!(result.is_ok(), "{name} is open to everyone: {result:?}");
+        } else if OPERATOR.contains(name) {
             assert!(
                 result.as_ref().err().is_none_or(|s| s.code() != tonic::Code::PermissionDenied),
                 "{name} must be open to the operator: {result:?}"

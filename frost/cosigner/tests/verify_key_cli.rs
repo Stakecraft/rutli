@@ -258,6 +258,14 @@ fn key_show_reads_both_kinds_with_an_operator_certificate_and_key_fingerprint_ag
         })
         .collect();
     daemons.iter_mut().for_each(Daemon::wait_serving);
+    // "gRPC serving" is logged just before the listener is bound: wait until each port accepts.
+    for port in nodes {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while std::net::TcpStream::connect(("127.0.0.1", *port)).is_err() {
+            assert!(Instant::now() < deadline, "node on port {port} never accepted a connection");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
     // The operator's own `listen` is free: a `key show` that fell through to the daemon would serve
     // there and never exit, rather than fail on a taken port.
     let op = roster_config(dir, "operator", 1, operator_port, nodes, "operator", serde_json::json!({}));
@@ -305,6 +313,16 @@ fn key_show_reads_both_kinds_with_an_operator_certificate_and_key_fingerprint_ag
         let (ok, out, err) = cli(Some(&op), &["key", "show", "--key-id", id, "--expect-fingerprint", &wrong]);
         assert!(!ok && out.contains("not the expected") && err.contains("key show: 3 problem(s)"), "{out}{err}");
 
+        // The older commands still take the expectation to the check: right passes, wrong fails.
+        let legacy = if kind == "frost" { "verify-key" } else { "verify-hosted" };
+        let (ok, out, err) = cli(Some(&op), &[legacy, "--key-id", id, "--expect-fingerprint", fp]);
+        assert!(ok && out.contains(&format!("expected {fp}")), "{out}{err}");
+        let (ok, out, err) = cli(Some(&op), &[legacy, "--key-id", id, "--expect-fingerprint", &wrong]);
+        assert!(!ok && out.contains("not the expected"), "{out}{err}");
+        assert!(err.contains(&format!("{legacy}: 3 problem(s)")), "{err}");
+        // A failed report names no fingerprint as the cluster's.
+        assert!(!out.lines().any(|l| l.starts_with("  fingerprint ")), "{out}");
+
         // Offline, from what `key show` printed: the same fingerprint, alone on stdout.
         let file = dir.join(format!("{kind}.pub"));
         std::fs::write(&file, format!("{}\n", printed.1)).unwrap();
@@ -320,5 +338,62 @@ fn key_show_reads_both_kinds_with_an_operator_certificate_and_key_fingerprint_ag
         let (ok, out, err) = cli(Some(&op), &["key", "show", "--key-id", id]);
         assert!(!ok && out.contains(why) && err.contains("key show: 3 problem(s)"), "{out}{err}");
         assert!(started.elapsed() < Duration::from_secs(20), "{:?}", started.elapsed());
+    }
+}
+
+/// Needs no cluster and no listener: every node of the roster is unreachable. What it shows is the
+/// wiring in `main`: `verify-key`, `verify-hosted` and `key show` hand a given
+/// `--expect-fingerprint` on to the check (a malformed one is reported as such), `key show`
+/// without one says so, each command returns with its own verdict instead of going on to start a
+/// daemon, and a report with problems names no fingerprint.
+#[test]
+fn every_command_takes_its_expectation_to_the_check_and_returns_its_verdict() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    // Plaintext, and nothing listens on ports 1 to 3.
+    let cfg = serde_json::json!({
+        "identifier": 1, "listen": "127.0.0.1:0", "threshold": 2, "data_dir": dir.join("data"),
+        "peers": (1..=3).map(|i| serde_json::json!({ "identifier": i, "endpoint": format!("http://127.0.0.1:{i}") })).collect::<Vec<_>>(),
+    });
+    let config = dir.join("client.json");
+    std::fs::write(&config, serde_json::to_vec(&cfg).unwrap()).unwrap();
+
+    let malformed = "\"1220zz\" is not a 1220";
+    for (command, id, kind, name) in [
+        (&["verify-key"][..], "frost-participant1-namespace", "FROST", "verify-key"),
+        (&["verify-hosted"][..], "rutli-enc-1", "hosted", "verify-hosted"),
+        (&["key", "show"][..], "frost-participant1-namespace", "FROST", "key show"),
+        (&["key", "show"][..], "rutli-enc-1", "hosted", "key show"),
+        // No routing tag: never a hosted key, so a FROST lookup.
+        (&["key", "show"][..], "namespace-participant1", "FROST", "key show"),
+    ] {
+        let args = |extra: &[&'static str]| [command, &["--key-id", id], extra].concat();
+        let (ok, out, err) = cli(Some(&config), &args(&["--expect-fingerprint", "1220zz"]));
+        assert!(!ok, "{out}{err}");
+        assert!(out.starts_with(&format!("{name} {id} ({kind}) — expected 1220zz\n")), "{out}");
+        assert!(out.contains("PROBLEM: --expect-fingerprint: ") && out.contains(malformed), "{out}");
+        assert!(out.ends_with("FAILED\n"), "{out}");
+        assert!(err.contains(&format!("{name}: 4 problem(s)")), "{err}");
+        assert!(!out.lines().any(|l| l.starts_with("  fingerprint ")), "{out}");
+
+        let (ok, out, err) = cli(Some(&config), &args(&["--expect-fingerprint", "1220zz", "--json"]));
+        let report: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}{err}"));
+        assert!(!ok && report["ok"] == false && report["fingerprint"].is_null(), "{out}");
+        assert_eq!(report["expected_fingerprint"], "1220zz");
+        assert_eq!(report["kind"], kind.to_lowercase());
+
+        if name == "key show" {
+            let (ok, out, err) = cli(Some(&config), &args(&[]));
+            assert!(!ok && out.contains("compared with nothing") && !out.contains("--expect-fingerprint"), "{out}");
+            assert!(out.ends_with("FAILED\n") && err.contains("key show: 3 problem(s)"), "{out}{err}");
+            let (_, out, _) = cli(Some(&config), &args(&["--json"]));
+            let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+            assert!(report.get("expected_fingerprint").is_none() && report["fingerprint"].is_null(), "{out}");
+        }
+    }
+    // Without an expectation the older commands do not run at all.
+    for command in ["verify-key", "verify-hosted"] {
+        let (ok, _, err) = cli(Some(&config), &[command, "--key-id", "frost-participant1-namespace"]);
+        assert!(!ok && err.contains("--expect-fingerprint"), "{err}");
     }
 }

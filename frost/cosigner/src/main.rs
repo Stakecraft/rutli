@@ -551,6 +551,9 @@ async fn main() -> Result<()> {
                 }
             };
         }
+        // Handled before the config is read; named here so that it can never reach `_` below and
+        // start the daemon.
+        Some(Command::Key { command: KeyCommand::Fingerprint { r#in } }) => return key_fingerprint_command(&r#in),
         Some(Command::Health) => health_command(&cfg),
         Some(Command::Ceremony { command: CeremonyCommand::Resolve { ceremony_id, assume_lost } }) => {
             return ceremony_resolve_command(&cfg, &ceremony_id, &assume_lost).await
@@ -1444,11 +1447,11 @@ async fn verify_hosted_command(
             }
         }
         match (&report.spec, &report.public_key_der) {
-            (Some(spec), Some(der)) if der.is_empty() => println!(
+            (Some(spec), Some(der)) if der.is_empty() && report.ok => println!(
                 "  {spec}: a symmetric key has no public key or fingerprint — every node holds a key of \
                  this spec under the id; that it is the same key is not shown"
             ),
-            (_, Some(der)) => println!("  public key (SPKI) {der}"),
+            (_, Some(der)) if !der.is_empty() => println!("  public key (SPKI) {der}"),
             _ => {}
         }
         if let Some(fp) = &report.fingerprint {

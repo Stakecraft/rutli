@@ -15,7 +15,7 @@ All notable changes to Rütli are documented here. Format loosely follows
   and `verify-hosted` over the same two read-only RPCs with the same operator certificate; with
   `--expect-fingerprint` the verdict is the same. Without it the output is the cluster's own
   report, compared with nothing: do not take an import's or a migration's expected fingerprint
-  from it. `key fingerprint --in FILE` computes the fingerprint of a public key file offline
+  from it. A report with any problem names no fingerprint for the cluster. `key fingerprint --in FILE` computes the fingerprint of a public key file offline
   (SubjectPublicKeyInfo as DER, PEM or hex, a Canton `keys.public.download` file, or a raw
   Ed25519 key as 64 hex digits). No new RPC, role, config key or wire change, and nothing that
   generates, imports or lists keys.
@@ -23,10 +23,11 @@ All notable changes to Rütli are documented here. Format loosely follows
 ### Changed
 
 - **`verify-key` and `verify-hosted` print a little more.** The first line names the kind of key
-  (`(FROST)`, `(hosted)`), and the summary adds the agreed fingerprint and, for a FROST key,
-  origin, epoch, refresh count and threshold. `--json` gains `kind` and `fingerprint`. For a
-  symmetric hosted key the empty `public key (SPKI)` line is replaced by a sentence. Checks and
-  exit codes are unchanged.
+  (`(FROST)`, `(hosted)`) and prints the expected fingerprint in its canonical form. When every
+  check passed, the summary adds the fingerprint; for a FROST key it also adds origin, epoch,
+  refresh count and threshold when the nodes agree on them. `--json` gains `kind` and
+  `fingerprint` (null unless every check passed). For a symmetric hosted key the empty
+  `public key (SPKI)` line is gone. Checks and exit codes are unchanged.
 
 - **A sign round 2 for a session the node no longer holds answers `ABORTED`, not `INTERNAL`,** and
   is counted in the new `rutli_sign_round2_unknown_session_total`. It is what a node answers

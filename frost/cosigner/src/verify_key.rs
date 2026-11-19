@@ -95,7 +95,8 @@ pub struct VerifyReport {
     pub ok: bool,
     pub problems: Vec<String>,
     pub group_verifying_key: Option<String>,
-    /// The Canton fingerprint of the group key every node reports, when they report one key.
+    /// The Canton fingerprint of the group key, only when every check passed (`ok`): a report with
+    /// problems names no fingerprint as the cluster's. Each node's own is in its row.
     pub fingerprint: Option<String>,
     pub pkp_digest: Option<String>,
     pub threshold: u16,
@@ -303,6 +304,7 @@ pub fn check_views(
     let group_verifying_key = single(&groups);
     let fingerprint = group_verifying_key
         .as_ref()
+        .filter(|_| problems.is_empty())
         .and_then(|h| <[u8; 32]>::try_from(hex::decode(h).ok()?).ok())
         .map(|g| crate::share_delivery::ed25519_fingerprint(&g));
     VerifyReport {
@@ -493,10 +495,11 @@ mod tests {
         assert_eq!(json.as_object_mut().unwrap().remove("expected_fingerprint"), Some(fp.clone().into()));
         assert_eq!(json, serde_json::to_value(&shown).unwrap());
 
-        // Everything `verify-key` catches other than "not the expected key" is caught here too.
+        // Everything `verify-key` catches other than "not the expected key" is caught here too,
+        // and a report with a problem names no fingerprint as the cluster's.
         let problems = |v: &[NodeView]| {
             let r = check_views(KEY, None, &[1, 2, 3], 2, v);
-            assert!(!r.ok);
+            assert!(!r.ok && r.fingerprint.is_none(), "{:?}", r.fingerprint);
             r.problems.join(" | ")
         };
         let (mut v, _) = views([1u8; 32]);
@@ -528,6 +531,13 @@ mod tests {
         assert!(problems(&v).contains("the roster is"));
         let (v, _) = views([1u8; 32]);
         assert!(!check_views(KEY, None, &[1, 2, 3], 3, &v).ok);
+        // Nor does a wrong or malformed expectation: every node agrees, the report still names none.
+        let wrong = format!("1220{}", "0".repeat(64));
+        for expected in [wrong.as_str(), "1220zz"] {
+            let r = check_views(KEY, Some(expected), &[1, 2, 3], 2, &v);
+            assert!(!r.ok && r.fingerprint.is_none() && r.group_verifying_key.is_some(), "{:?}", r.problems);
+            assert!(r.nodes.iter().all(|n| n.fingerprint == fp));
+        }
     }
 
     #[test]
