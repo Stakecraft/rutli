@@ -214,7 +214,7 @@ groups:
           severity: warning
         annotations:
           summary: "Rütli cosigner {{ $labels.instance }} refused signatures by policy ({{ $labels.reason }})"
-          description: "{{ $labels.instance }} refused to take part in a signature because its signing policy said no (reason {{ $labels.reason }}). Expected reasons during a rollout: missing (require_intent on before the driver signs intents), approval (a gated key without its approvals), expiry (clock skew beyond clock_skew_secs — check NTP on the driver and the node). Suspicious ones: signer, certificate, signature, pin, cluster, key — something presented an intent this node did not accept, which is what a compromised cosigner or a stolen-but-revoked driver key looks like. The cosigner log names the refusal; cross-check the driver audit log (docs/approval-quorum.md)."
+          description: "{{ $labels.instance }} refused to take part in a signature because its signing policy said no (reason {{ $labels.reason }}). Expected reasons during a rollout: missing (require_intent on, its default with TLS, while the driver does not sign intents: a driver older than 0.4.0-rc.3 or frost.sign-intents = off), approval (a gated key without its approvals), expiry (clock skew beyond clock_skew_secs — check NTP on the driver and the node). Suspicious ones: signer, certificate, signature, pin, cluster, key — something presented an intent this node did not accept, which is what a compromised cosigner or a stolen-but-revoked driver key looks like. The cosigner log names the refusal; cross-check the driver audit log (docs/approval-quorum.md)."
 
       - alert: RutliSignUnknownSessions
         # "More than 3": increase() extrapolates to the window's edges, so 3 events can read as a
@@ -234,7 +234,7 @@ groups:
           severity: warning
         annotations:
           summary: "Rütli cosigner {{ $labels.instance }} signs without client intents"
-          description: "{{ $labels.instance }} has accepted signatures that carried no client-signed intent for over an hour. That is the transition state of this release (signing_policy.require_intent off): approvals, ACLs and rate limits then bind only in the driver, and a compromised cosigner can still obtain shares for arbitrary digests. Finish the rollout: upgrade the driver, then set require_intent on every node (docs/approval-quorum.md, Switching enforcement on). On a cluster that already enforces, this alert should never fire."
+          description: "{{ $labels.instance }} has accepted signatures that carried no client-signed intent for over an hour. It does so only where signing_policy.require_intent is off: set to false (the opt-out; on by default with TLS since 0.5.0), or on a node without TLS. Approvals, ACLs and rate limits then bind only in the driver, and a compromised cosigner can still obtain shares for arbitrary digests. Once the driver signs intents (0.4.0-rc.3 or later, frost.sign-intents on), remove the opt-out on every node (docs/approval-quorum.md, Switching enforcement on). On a cluster that enforces, this alert should never fire."
 
       - alert: RutliCeremonyIntentRefused
         expr: sum by (instance, reason) (increase(rutli_ceremony_intent_refusals_total[15m])) > 0
@@ -252,7 +252,7 @@ groups:
           severity: info
         annotations:
           summary: "Rütli cosigner {{ $labels.instance }} ran a DKG/refresh without a client ceremony intent"
-          description: "{{ $labels.instance }} took part in a DKG or refresh that carried no client-signed ceremony intent, accepted because signing_policy.require_ceremony_intent is set to false on this node (the opt-out; on by default since 0.4.0-rc.6). A compromised cosigner can still start (and split) ceremonies on it. Once the driver (0.4.0-rc.4 or later) and the refresh job sign ceremony intents, remove the opt-out on every node (docs/approval-quorum.md, Switching enforcement on). On a cluster that enforces, this never fires."
+          description: "{{ $labels.instance }} took part in a DKG or refresh that carried no client-signed ceremony intent, accepted because signing_policy.require_ceremony_intent is off on this node: set to false (the opt-out; on by default with TLS since 0.4.0-rc.6), or the node runs without TLS. A compromised cosigner can still start (and split) ceremonies on it. Once the driver (0.4.0-rc.4 or later) and the refresh job sign ceremony intents, remove the opt-out on every node (docs/approval-quorum.md, Switching enforcement on). On a cluster that enforces, this never fires."
 
       - alert: RutliSignRateLimited
         expr: increase(rutli_sign_rate_limited_total[10m]) > 0

@@ -5,7 +5,8 @@ ever holds the whole namespace key. The Canton KMS driver's `FrostBackend` conne
 `Signer` API to run DKG and to sign.
 
 Two compose files (default image `ghcr.io/stakecraft/rutli-cosigner:0.4.0`, pinned by digest; override with
-`RUTLI_COSIGNER_IMAGE` or `--build` from `frost/`):
+`RUTLI_COSIGNER_IMAGE` or `--build` from `frost/`; from 0.5.0 on, verify a release digest as
+[SECURITY.md, "Verify the image"](../../SECURITY.md#verify-the-image) shows):
 - `docker-compose.yml` — **dev**: plaintext gRPC, unsealed shares. Fastest to try.
 - `docker-compose.tls.yml` — **production-flavored**: mutual TLS + AES-256-GCM sealed shares
   (verified end-to-end). Needs certs + a seal secret first (below).
@@ -76,11 +77,14 @@ Example TLS configs are in `config-tls/` (mount `certs/` at `/certs`). The drive
 a `tls-name` per endpoint (above).
 With TLS on, a plaintext client is refused at the handshake.
 
-The example configs keep the default from 0.4.0-rc.6: a DKG or refresh needs a client-signed
-ceremony intent, which the Rütli driver (0.4.0-rc.4 or later) and `rutli-cosigner refresh` sign. A
-hand-run `grpcurl … Signer/Dkg` cannot sign one and is refused ("carries no ceremony intent"). To try
-DKG with grpcurl on a throwaway cluster, add `"signing_policy": { "require_ceremony_intent": false }`
-to each config (never on a cluster that holds real keys), as the CI smoke test does on its own copies
+The example configs keep the defaults: a DKG or refresh needs a client-signed ceremony intent
+(since 0.4.0-rc.6), which the Rütli driver (0.4.0-rc.4 or later) and `rutli-cosigner refresh` sign,
+and a signature needs a client-signed signing intent (since 0.5.0), which the
+driver (0.4.0-rc.3 or later) signs. A hand-run `grpcurl … Signer/Dkg` or `Signer/Sign` cannot sign
+one and is refused ("carries no ceremony intent", "carries no signing intent"). To try DKG and Sign
+with grpcurl on a throwaway cluster, add
+`"signing_policy": { "require_ceremony_intent": false, "require_intent": false }` to each config
+(never on a cluster that holds real keys), as the CI smoke test does on its own copies
 (`scripts/ci-frost-tls-smoke.sh`) — see [approval-quorum.md](../../docs/approval-quorum.md).
 
 ### On Linux: cert ownership

@@ -693,7 +693,7 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "description": "Signature rounds without a client-signed intent (rutli_sign_intent_absent_total) plus key operations by a Signer CN with no signer_acl entry (rutli_signer_acl_absent_total), last hour. Expected only during the rollout window, before require_intent / signer_acl_required are on. Alerts: RutliSignIntentAbsent, RutliSignerAclAbsent.",
+      "description": "Signature rounds without a client-signed intent (rutli_sign_intent_absent_total) plus key operations by a Signer CN with no signer_acl entry (rutli_signer_acl_absent_total), last hour. Expected only while a node runs with require_intent: false or signer_acl_required off. Alerts: RutliSignIntentAbsent, RutliSignerAclAbsent.",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
@@ -779,7 +779,7 @@
     },
     {
       "datasource": { "type": "prometheus", "uid": "${datasource}" },
-      "description": "Per node: rutli_sign_intent_absent_total (accepted only while signing_policy.require_intent is off) and rutli_signer_acl_absent_total (allowed only while signer_acl_required is off). Both must be flat on an enforcing cluster.",
+      "description": "Per node: rutli_sign_intent_absent_total (accepted only where signing_policy.require_intent is off: set to false, or a node without TLS) and rutli_signer_acl_absent_total (allowed only while signer_acl_required is off). Both must be flat on an enforcing cluster.",
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "palette-classic" },

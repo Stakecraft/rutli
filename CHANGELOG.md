@@ -5,6 +5,47 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Changed (breaking default)
+
+- **A cosigner refuses to start on a config key it does not know.** Until now only the `keyfile`
+  block was parsed strictly. A misspelt key such as `require_intnet`, or `requireIntent` in
+  camelCase, was dropped without a word and the control it meant to set stayed at its default. Now
+  every block of the config file (top level, `tls`, `peers`, `share_seal`, `hosted_keys`,
+  `signing_policy` with its `rate_limits`, `rules` and `approvers`) refuses unknown keys. The error
+  names the file, the key and its line, for example ``rutli-cosigner: configuration: config file
+  /config/cosigner-1.json: unknown field `require_intnet`, expected one of … at line 48 column 20``.
+  The same applies to the operator CLI, which reads the same file. No config shipped in `deploy/`
+  carried an unknown key, and the configs the Helm chart renders for its CI values and the soak's
+  values load unchanged. A unit test keeps the JSON configs under `deploy/frost` and `deploy/k8s`
+  loading; the Helm renders were checked by hand.
+- **The driver refuses a config key it does not know,** in every block of `crypto.kms.config`.
+  Before, a misspelt key was ignored: `aproval { … }` meant no approval block, so every sign was
+  auto-approved. The participant now stops at startup with `Unknown key` and the key's path, for
+  example `frost.tls.allow-expired`.
+- **`signing_policy.require_intent` is on by default** for every cosigner with TLS: a sign round
+  without a valid client-signed signing intent is refused. Before, one cosigner's mesh certificate
+  could lead a signature over any 34-byte digest and get a share from every peer that did not set
+  `require_intent: true`. The setting now works like `require_ceremony_intent`: unset is on with TLS
+  and off on a plaintext dev node, `true` without TLS is a config error, and `false` is the explicit
+  opt-out, with a startup warning and `rutli_sign_intent_absent_total`. The split ceremony's sign
+  test (`verify-key --sign-test`) needs no intent, as before. The TLS compose example keeps the
+  default, so a hand-run `grpcurl … Signer/Sign` against it is refused; the CI smoke test runs on
+  copies that opt out (`scripts/ci-frost-tls-smoke.sh`).
+
+  **Upgrade note (from 0.4.0):**
+  - Check the config for keys the cosigner does not know before you roll out: start one node, or
+    run `rutli-cosigner --config <file> health` with the new image, and fix what it names. With
+    Helm, check `signingPolicy` and `keyfile`, which are copied into the config as they are.
+  - Do the same for the driver: check that the participant starts with your current
+    `crypto.kms.config`. A key that used to do nothing now stops it.
+  - A driver on 0.4.0-rc.3 or later with `frost.sign-intents` at its default (`on`) signs every
+    sign, and a leader on 0.4.0 forwards that intent to its peers, so a rolling upgrade from 0.4.0
+    keeps signing. A driver older than 0.4.0-rc.3, or one with `frost.sign-intents = off`, needs
+    `require_intent: false` in `signing_policy` (`signingPolicy` in the Helm chart) on every node
+    first. Remove it once the driver signs intents.
+  - Clusters that already set `require_intent: true` see no change.
+  - Docs: `docs/approval-quorum.md` ("Switching enforcement on"), `docs/security/threat-model.md`.
+
 ### Security
 
 - **heapless 0.7.17: nine `unsound` RustSec advisories (RUSTSEC-2026-0574 to -0582) are ignored in
@@ -44,6 +85,28 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Fixed
 
+- **The driver reads an approver's key as `public-key-base64`,** the name the docs and
+  `approve keygen` print. Up to 0.4.0 it only read `public-key-base-64`, so an `approval` block
+  copied from the docs stopped the participant at startup with `Key not found`. Both names are read
+  now. Give one of them per approver; an entry with both is refused.
+- **`export-key` could write a key into an existing file with its old permissions.** The 0600 mode
+  only applied to a file the export created: an `--out` that already existed (for example 0644)
+  kept its mode and received the artifact, with `--unsafe-plaintext` the raw private key, and a
+  symlink at `--out` was followed. `export-key` now refuses an existing `--out` or a symlink, like
+  the other commands that write key material.
+- **The cosigner did not stop on SIGTERM.** It handled only SIGINT, and in its image it runs as
+  PID 1, where the kernel ignores a signal without a handler: every pod stop waited out the grace
+  period and ended in SIGKILL, with no drain of in-flight requests. It now shuts down gracefully on
+  SIGTERM or SIGINT.
+- **`{:?}` on a cluster-hosted key printed its private key.** `HostedKey` derived `Debug`, so a
+  test assertion, a log field or a panic message that formatted a key (or a tombstone still
+  holding one) would have shown `private_der`. No log line did. Its `Debug` now prints
+  `<redacted>` for the private half.
+- **Loading a FROST share left an unwiped copy of its signing share in memory.** The key store
+  parsed each decrypted key file into a `serde_json::Value` first, which copies every string, the
+  share's hex included, into heap memory that is freed without being wiped. It now parses the
+  record straight from the decrypted buffer (which is wiped), so the share's hex is no longer
+  copied on the way. Copies made inside the FROST library itself are unchanged.
 - **A cosigner's first signature after a restart could lose its session.** Two requests that used
   a key for the first time at once (a sign round 1 and, say, this node leading another signature)
   each loaded the share and built their own in-memory signing state; the one that finished second
@@ -72,8 +135,41 @@ All notable changes to Rütli are documented here. Format loosely follows
   scripts now take `JAVA_HOME` when `CANTON_JAVA_HOME` is unset, and allow more time for console
   waits and polling on a slow host.
 
+### Security
+
+- **Release images are built on GitHub-hosted runners, signed and attested.** `publish-image.yml` no
+  longer runs on the self-hosted CI runners (`vars.CI_RUNNER`), where a job is root on the runner's
+  Docker host. It builds linux/amd64 and linux/arm64 natively on hosted runners (no QEMU), pushes
+  each by digest and assembles the multi-arch index, which lists BuildKit's SBOM and provenance for
+  both platforms (the job fails otherwise). A last job, the only one with the signing identity and
+  no third-party action, gives the index a keyless cosign signature and a GitHub build provenance
+  attestation and then runs the operator's verification commands. Operators: verify the digest you
+  pin with the commands in `SECURITY.md`, "Verify the image", before deploying. Images up to 0.4.0
+  are not signed.
+- **Every GitHub Action is pinned to a full commit SHA**, with its version in a comment, in `ci.yml`
+  and `publish-image.yml`; `.github/dependabot.yml` proposes updates (actions weekly, the runtime
+  base image digest monthly). Dependabot's pull requests run CI on GitHub-hosted runners only, and
+  the self-hosted runner guard refuses them (reinstall `deploy/ci-runner/job-started-guard.sh` on
+  each runner). Helm in CI is downloaded and checked against pinned sha256 sums instead of
+  `azure/setup-helm`, which checks none.
+- **`frost/Dockerfile` builds with `cargo build --locked`** and pins both base images by the digest
+  of their multi-arch index (`rust:1.100.0-slim`, `debian:stable-slim`). The image contents are
+  otherwise unchanged.
+- **One Rust version for CI and the release image:** `frost/rust-toolchain.toml` (1.100.0). CI
+  installs that version instead of whatever `stable` is that day; the Dockerfile builds on the rust
+  image of the same version.
+- **New workflow `image-build-check.yml`** builds the release image for both platforms on hosted
+  runners without pushing or signing, on pull requests that touch `frost/` or a workflow, and
+  weekly, and checks the result has the attestation structure the release requires. It also fails
+  if an action is not pinned by SHA or if the Dockerfile and `rust-toolchain.toml` name different
+  Rust versions.
+
 ### Documentation
 
+- **Roadmap dates after threshold ECIES moved into 1.0:** 1.0 follows about 34 weeks after the
+  audit's funding is confirmed, not in the first quarter of 2027, and the four clean TestNet weeks
+  are counted on the audited release. The README's status line names the Splice and Canton
+  versions the DevNet validator runs today.
 - **Threshold ECIES is planned for 1.0, not 2.0** (decided 2026-11-19). `docs/roadmap.md`, the
   README, `docs/hosted-keys.md` and the explorer page say so, and the second audit phase in
   `docs/audit-rfq.md` (section 2.2) now lists four features. No code changes.
@@ -1191,7 +1287,7 @@ still to come — see the warnings below; keys born or refreshed on this release
 - `docs/migration.md` §8: a gate before the split — no namespace delegation may name a carried
   key as its target (`--namespace-fingerprint` excludes only the root).
 - **ECIES now fails over past a cosigner that answers `EcdhDerive` with the wrong shared secret**
-  (Codex review of C2, medium, availability). The driver made an endpoint the preferred leader as
+  (second review of C2, medium, availability). The driver made an endpoint the preferred leader as
   soon as its `EcdhDerive` RPC succeeded, before the local MAC/padding check — so one cosigner with
   stale or corrupt EC material under the right key id failed every ECIES decrypt that led from it,
   and stayed preferred. An `EcdhDerive` now counts only once its shared secret opens the ciphertext;
@@ -1203,7 +1299,7 @@ still to come — see the warnings below; keys born or refreshed on this release
   is wiped on every path. No key-extraction impact.
 
 ### Documented
-- **`hosted_keys.decrypt_rate_limit_per_min` is per node, not per cluster** (Codex review of C2,
+- **`hosted_keys.decrypt_rate_limit_per_min` is per node, not per cluster** (second review of C2,
   medium). Each cosigner keeps its own buckets, so a stolen driver certificate that calls every
   node gets n × the budget per key (18 000/min on 3 nodes at the default). Now stated in the config
   doc, the Helm values, `docs/hosted-keys.md` §2 (new table row + sizing: `cluster_budget / n`,

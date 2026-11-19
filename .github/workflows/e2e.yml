@@ -89,16 +89,15 @@ jobs:
           mkdir -p "$RUNNER_TEMP/e2e"
           echo "E2E_TMP=$RUNNER_TEMP/e2e" >> "$GITHUB_ENV"
 
-      # The version in frost/rust-toolchain.toml when there is one, otherwise stable.
-      - name: Rust version
+      # The version in frost/rust-toolchain.toml, as in ci.yml and the release image.
+      - name: Rust version (frost/rust-toolchain.toml)
         id: rust
         run: |
-          v=""
-          if [ -f frost/rust-toolchain.toml ]; then
-            v="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/rust-toolchain.toml)"
-          fi
-          echo "version=${v:-stable}" >> "$GITHUB_OUTPUT"
-      # dtolnay/rust-toolchain has no releases: pinned to a commit of its master branch.
+          v="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/rust-toolchain.toml)"
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      # dtolnay/rust-toolchain has no releases: pinned to a commit of its master branch, with the
+      # version passed explicitly (it also installs rustup where a runner has none).
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
         with:
           toolchain: ${{ steps.rust.outputs.version }}

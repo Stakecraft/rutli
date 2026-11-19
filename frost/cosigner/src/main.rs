@@ -65,7 +65,8 @@ enum Command {
         /// The hosted key to export (a `rutli-…` key id).
         #[arg(long)]
         key_id: String,
-        /// File to write the export artifact to.
+        /// File to write the export artifact to. It must not exist yet: the export refuses to
+        /// overwrite a file or follow a symlink.
         #[arg(long)]
         out: std::path::PathBuf,
         /// Env var holding the passphrase that protects the artifact (Argon2id + AES-256-GCM).
@@ -453,7 +454,15 @@ async fn main() -> Result<()> {
     let config_path = args.config.ok_or_else(|| {
         DaemonError::Config("--config (or RUTLI_COSIGNER_CONFIG) is required".into())
     })?;
-    let cfg = Config::load(&config_path)?;
+    // Printed with Display, not as main's `Error: Config("…")` debug dump: an operator reading a
+    // crash loop must see which file and which key in one plain line.
+    let cfg = match Config::load(&config_path) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("rutli-cosigner: {e}");
+            std::process::exit(1);
+        }
+    };
 
     match args.command {
         Some(Command::Refresh { key_id, target, tls_server_name }) => {
@@ -727,9 +736,9 @@ async fn main() -> Result<()> {
     // approvals, the per-key sign rate limit, and the durable sign journal every released share is
     // written to first.
     let sign_guard = {
-        // `require_ceremony_intent` settled for this node: unset = on with TLS, off without.
-        let mut policy = cfg.signing_policy.clone();
-        policy.require_ceremony_intent = Some(policy.ceremony_intent_required(cfg.tls.is_some()));
+        // `require_intent` and `require_ceremony_intent` settled for this node: unset = on with
+        // TLS, off without.
+        let policy = cfg.signing_policy.clone().settled(cfg.tls.is_some());
         let policy = &policy;
         let ca_pem = match &cfg.tls {
             Some(t) => std::fs::read(&t.ca_cert)?,
@@ -786,7 +795,7 @@ async fn main() -> Result<()> {
             },
         )?;
         tracing::info!(
-            require_intent = policy.require_intent,
+            require_intent = policy.intent_required(cfg.tls.is_some()),
             require_ceremony_intent = policy.ceremony_intent_required(cfg.tls.is_some()),
             signer_acl_required = policy.signer_acl_required,
             signer_may_refresh = policy.signer_may_refresh,
@@ -799,20 +808,33 @@ async fn main() -> Result<()> {
             journal = %journal.dir().display(),
             "signing policy"
         );
-        if !policy.require_intent {
+        // With TLS a switch is off only through its explicit opt-out; without TLS both are off
+        // whatever the file says (`true` there is a config error), so there is no opt-out to remove.
+        let tls = cfg.tls.is_some();
+        if !tls {
             tracing::warn!(
-                "signing_policy.require_intent is off: a signature without a client-signed intent is \
-                 accepted (counted in rutli_sign_intent_absent_total) — turn it on, on every node, once \
-                 every cosigner and the driver run this release (docs/approval-quorum.md)"
+                "this node runs without TLS, so it verifies no intents: a signature, a DKG or a \
+                 refresh without a client-signed intent is accepted (counted in \
+                 rutli_sign_intent_absent_total and rutli_ceremony_intent_absent_total) — plaintext \
+                 is for development only"
             );
         }
-        if !policy.ceremony_intent_required(cfg.tls.is_some()) {
+        if tls && !policy.intent_required(tls) {
             tracing::warn!(
-                "signing_policy.require_ceremony_intent is off: a DKG or refresh without a client-signed \
-                 ceremony intent is accepted (counted in rutli_ceremony_intent_absent_total), so a \
-                 compromised cosigner can start one on this node — remove the opt-out, on every node, once \
-                 the driver (0.4.0-rc.4 or later) and the refresh job sign ceremony intents \
+                "signing_policy.require_intent is off (set to false): a signature without a client-signed \
+                 intent is accepted (counted in rutli_sign_intent_absent_total), so a compromised \
+                 cosigner can get this node's share for any digest — remove the opt-out, on every \
+                 node, once the driver (0.4.0-rc.3 or later, frost.sign-intents on) signs intents \
                  (docs/approval-quorum.md)"
+            );
+        }
+        if tls && !policy.ceremony_intent_required(tls) {
+            tracing::warn!(
+                "signing_policy.require_ceremony_intent is off (set to false): a DKG or refresh without a \
+                 client-signed ceremony intent is accepted (counted in \
+                 rutli_ceremony_intent_absent_total), so a compromised cosigner can start one on this \
+                 node — remove the opt-out, on every node, once the driver (0.4.0-rc.4 or later) and \
+                 the refresh job sign ceremony intents (docs/approval-quorum.md)"
             );
         }
         if policy.signer_may_refresh {
@@ -2080,8 +2102,13 @@ fn write_new_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     let mut f = rutli_cosigner::share_delivery::private_create_new(path).map_err(|e| {
         DaemonError::Config(format!("cannot create {} (refusing to overwrite): {e}", path.display()))
     })?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
+    if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
+        // The file is ours (create_new): remove the partial copy, so a retry with the same path is
+        // not refused as an overwrite.
+        drop(f);
+        let _ = std::fs::remove_file(path);
+        return Err(e.into());
+    }
     Ok(())
 }
 
@@ -2257,14 +2284,17 @@ fn export_key_command(
                     .into(),
             )
         })?;
-        let passphrase = std::env::var(env_name).map_err(|_| {
+        // Wiped on drop, like the import path's passphrase.
+        let passphrase = zeroize::Zeroizing::new(std::env::var(env_name).map_err(|_| {
             DaemonError::Config(format!("export passphrase: env var {env_name} is not set"))
-        })?;
+        })?);
         rutli_cosigner::export::export_encrypted(key_id, &key, &passphrase)?
     };
 
-    // 0600 before any bytes land: an export must never be briefly world-readable.
-    write_private_file(out, &serde_json::to_vec_pretty(&envelope)?)?;
+    // A new file, 0600 before any bytes land: an export must never be briefly world-readable. The
+    // mode only applies to a file this call creates, so an existing path (with whatever mode it
+    // has) or a symlink is refused, never written through.
+    write_new_private_file(out, &serde_json::to_vec_pretty(&envelope)?)?;
     // Deliberately audible in the node's log: an export is a privileged, rare event, and the log is
     // often the only record that a portable copy of a key now exists.
     tracing::warn!(
@@ -2364,23 +2394,6 @@ fn import_key_command(
     Ok(())
 }
 
-/// Create `path` with owner-only permissions BEFORE writing, so the contents are never briefly
-/// readable by other users on the host.
-fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let mut f = opts.open(path)?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
-    Ok(())
-}
-
 /// Copy regular files from `src` to `dst`. When `!overwrite`, existing destination files are an
 /// error (so a restore never clobbers a live share by accident).
 ///
@@ -2442,9 +2455,50 @@ fn identifier_index(id: Identifier) -> Vec<u8> {
     id.serialize()
 }
 
-async fn shutdown() {
-    let _ = tokio::signal::ctrl_c().await;
-    tracing::info!("shutdown signal received");
+/// Resolves on SIGINT or SIGTERM. SIGTERM matters most: Kubernetes stops a pod with it, and the
+/// cosigner runs as PID 1 in its image, where the kernel ignores a signal that has no handler, so
+/// without this every pod stop waited out the grace period and ended in SIGKILL with no drain.
+/// A signal that cannot be registered is logged and never resolves: it must not stop the server.
+///
+/// The SIGTERM handler is installed when this is called (inside the runtime), not on first poll, so
+/// from that point on a SIGTERM is caught rather than fatal.
+fn shutdown() -> impl std::future::Future<Output = ()> {
+    #[cfg(unix)]
+    let term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(term) => Some(term),
+        Err(e) => {
+            tracing::error!(error = %e, "cannot listen for SIGTERM");
+            None
+        }
+    };
+    async move {
+        let interrupt = async {
+            match tokio::signal::ctrl_c().await {
+                Ok(()) => "SIGINT",
+                Err(e) => {
+                    tracing::error!(error = %e, "cannot listen for SIGINT");
+                    std::future::pending().await
+                }
+            }
+        };
+        #[cfg(unix)]
+        let terminate = async move {
+            match term {
+                Some(mut term) => {
+                    term.recv().await;
+                    "SIGTERM"
+                }
+                None => std::future::pending().await,
+            }
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<&str>();
+        let signal = tokio::select! {
+            s = interrupt => s,
+            s = terminate => s,
+        };
+        tracing::info!(signal, "shutdown signal received, draining in-flight requests");
+    }
 }
 
 #[cfg(test)]
@@ -2484,5 +2538,25 @@ mod tests {
         assert_eq!(copy_journal(&src, &dst).unwrap(), 1);
         assert!(dst.join("frost-k").join("00000000000000000001.jsonl").exists());
         assert!(!dst.join("frost-k").join("not-a-segment.tmp").exists());
+    }
+
+    /// Kubernetes stops a pod with SIGTERM, and the cosigner is PID 1 in its image: without a
+    /// handler the signal is ignored and the pod is SIGKILLed after the grace period.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sigterm_starts_a_graceful_shutdown() {
+        // `shutdown()` installs the SIGTERM handler before it returns, so the signal below is
+        // caught, not fatal to the test process. The signal is process-wide; it is safe here
+        // because no other test in this binary installs or expects a signal handler.
+        let stopped = tokio::spawn(shutdown());
+        let kill = std::process::Command::new("kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .status()
+            .unwrap();
+        assert!(kill.success());
+        tokio::time::timeout(std::time::Duration::from_secs(10), stopped)
+            .await
+            .expect("SIGTERM must resolve the shutdown future")
+            .unwrap();
     }
 }

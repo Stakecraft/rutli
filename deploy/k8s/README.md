@@ -164,8 +164,9 @@ seal bundle, so one node must not be able to act as, or decrypt for, another.
 - The refresh CronJob mounts only the refresher's cert (`rutli-refresher-tls`, CN on
   `refresh_allowlist`: Refresh and KeyStatus, never Sign — audit C2); the operator cert for
   `verify-key` is never a standing Secret (`job-verify-key.example.yaml` creates and deletes it).
-- Every signature needs a driver-signed intent that each participating node verifies itself, once
-  `signing_policy.require_intent` is on (docs/approval-quorum.md); each node journals every share it
+- Every signature needs a driver-signed intent that each participating node verifies itself
+  (`signing_policy.require_intent`, on by default with TLS; `false` is an opt-out for a driver that
+  does not sign intents, docs/approval-quorum.md); each node journals every share it
   releases under `data_dir/journal` (`rutli-cosigner audit-cross-check`, docs/audit-cross-check.md).
 - Each node verifies each peer under the peer's own TLS name (`cosigner<id>`) and identifies a mesh
   caller by its exact client CN (audit M3); the driver does the same per endpoint (§4).
@@ -256,6 +257,8 @@ and mounts the same volume read-only. A CSI volume snapshot is fine (storage lay
 
 - The image is pinned by tag and digest in `kustomization.yaml` (currently `0.4.0`). To use your own build, pin it by digest:
   `kustomize edit set image ghcr.io/stakecraft/rutli-cosigner@sha256:…`
+  From 0.5.0 on, release images are signed and carry build provenance; verify a release digest
+  before you deploy it ([SECURITY.md, "Verify the image"](../../SECURITY.md#verify-the-image)).
 - Required pod anti-affinity + zone topology spread are in every node's StatefulSet (on the shared
   labels, so they apply across nodes).
 - Label the Canton **namespace** `rutli.io/client-ns=true` and the participant pod
