@@ -7,7 +7,8 @@ pinning the image digest and the release assets are in [releasing.md](releasing.
 ## 1. Development
 
 Work lands on `main` through pull requests (see [CONTRIBUTING.md](../CONTRIBUTING.md)). Each PR keeps the
-quality ratchet from getting worse. The release milestone lists what is planned.
+quality ratchet from getting worse. The release milestone lists what is planned. Tests run on the
+schedule at the end of this page.
 
 ## 2. Feature freeze
 
@@ -69,3 +70,21 @@ All of these hold, or the release waits:
 A maintainer tags `vX.Y.Z` and follows [releasing.md](releasing.md): image digest pinned in the
 docs, release assets attached. The release notes carry the quality report. The baseline for the
 quality ratchet moves to the new tag.
+
+## Test schedule
+
+Fast, deterministic checks gate every pull request; slow ones run on a schedule, outside working
+hours, so the two self-hosted runners stay free for pull requests. A test that is flaky in the gate
+is fixed or moved to the nightly run.
+
+| When | What | If it fails |
+|---|---|---|
+| Before pushing | `cargo test` and `clippy` for the crates touched; `sbt driver/test` if the driver changed | Do not push |
+| Every pull request | Unit tests, clippy, cargo-deny, deploy policy, alert rules, TLS cluster smoke, DCO; the quality ratchet (linters for every language, formatting, Semgrep, gitleaks); property tests at a low case count. Jobs are filtered by path | The pull request does not merge |
+| Every push to `main` | Everything above, plus the three e2e ceremony scripts (split, carry, ECIES hosted), coverage for Rust and Scala, and the image build check | `prio:p0` issue: `main` stays green |
+| Nightly, 02:00 UTC | Fuzzing, 10 minutes per target; property tests at a high case count; `cargo audit` against the latest advisories; image scan | `type:test` `prio:p1` issue |
+| Weekly, Monday 06:00 UTC | Canton conformance suite; `cargo mutants` on the signing path (nonces, sign sessions, sign policy, intents, sealing); `buf breaking` against the last release; the weekly quality report | `prio:p1` issue |
+| Release candidate | All of the above on the candidate tag, plus fuzzing for one hour per target, the full mutation run and the QA tracks in step 4 | `prio:p0` means a new candidate |
+| Soak | The candidate on the DevNet soak validators, step 5 | No go/no-go until it passes |
+
+Scheduled failures open an issue automatically; the issue gets an owner the same day.
