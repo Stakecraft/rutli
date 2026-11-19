@@ -5,13 +5,13 @@ v0.4.0-rc.1 (commit 903d318). The review used a third-party audit of cosmos/kms 
 remote signer; double-signing/equivocation) as its lens and translated each of that audit's bug
 classes into Rütli's threat model: FROST nonce reuse, unauthorized signing with the namespace key,
 permanent key loss, cluster-wide signing outage, silent use of a wrong or rolled-back key epoch.
-Two independent passes (Claude Opus, OpenAI Codex) were cross-checked against the code; every
+Two independent review passes (A and B) were cross-checked against the code; every
 finding below was confirmed by reading the code.
 
 ## Identifier namespace
 
 IDs in this document carry the prefix **`DS-`**. In CHANGELOG and runbooks they appear as
-"audit C1", "audit M1", etc. (same numbering), and Codex's pass used `RUTLI-01..08` (mapped below).
+"audit C1", "audit M1", etc. (same numbering), and pass B used `RUTLI-01..08` (mapped below).
 
 **Not the same namespace:** "review M1", "review M2", "review L2/L7/L8/L9" in CHANGELOG
 0.4.0-rc.2 refer to the separate CA-rotation review (trust files, cluster-id pin). They are
@@ -26,7 +26,7 @@ _Note (2026-11-13): batch C shipped in 0.4.0-rc.3 (CHANGELOG). `require_ceremony
 default on every TLS cosigner since 0.4.0-rc.6. Findings of the later reviews (rc.3 → rc.6) are in
 CHANGELOG and [threat-model.md](threat-model.md), not in this table._
 
-| ID | Sev. | Codex alias | Finding | Status |
+| ID | Sev. | Pass B alias | Finding | Status |
 |---|---|---|---|---|
 | DS-C1 | CRITICAL | — | DKG and refresh round-2 packages (secret share evaluations) relayed through the leader in plaintext; the leader can reconstruct the whole key, refresh gives no protection against it; round-1 broadcast unauthenticated. | batch C: direct peer-to-peer round-2 delivery over mTLS, round-1 digest echo, relay RPCs refused, ceremony protocol gating. **Keys DKG'd or refreshed on ≤ 0.4.0-rc.2 are leader-exposed.** |
 | DS-C2 | CRITICAL | RUTLI-01, RUTLI-02 | No cosigner-side signing policy: a holder of the driver cert or one compromised cosigner (driving Peer SignRound1/2 on an honest peer) obtains namespace-key signatures over arbitrary digests, bypassing approvals, journal and rate limit (driver-only). | batch C: driver-signed SignedIntent verified by every cosigner in round 1 and round 2; per-node approvals, rate limit, durable sign journal; refresher role; signer ACLs; SPKI pins. Enforced once `require_intent` is on. |

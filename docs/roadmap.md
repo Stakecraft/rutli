@@ -63,7 +63,7 @@ its database, and the safety dump and the key exports were destroyed. Still open
 validator. Runbook: [runbook-migration-inplace.md](runbook-migration-inplace.md). Decided 2026-10-15: 2a
 ships in v0.4.0, before the audit, so the auditors review it.
 
-*Mechanics.* Independently checked against the Canton 3.6.1 source by two reviewers (Opus and Codex), who agree:
+*Mechanics.* Checked against the Canton 3.6.1 source by two independent reviewers, who agree:
 
 - `crypto.provider` is configuration only; it is not persisted.
 - With `provider = kms` the node builds the KMS private store and **ignores** the JCE rows in
@@ -164,14 +164,14 @@ namespace and signing keys are threshold keys; the encryption key is not.
 |---|---|---|
 | B0 | Cutover spike on the soak validator | Done: **GO** 2026-10-09 |
 | B1 | Canton key parser | Done |
-| B2 | Split ceremony ([split-ceremony.md](split-ceremony.md)) | Done; Codex adversarial review: nothing above low |
+| B2 | Split ceremony ([split-ceremony.md](split-ceremony.md)) | Done; independent adversarial review: nothing above low |
 | B3 | RSA import | Dropped (not needed) |
 | B4 | Cutover rehearsal on a scratch JCE validator | Done: cutover and verification 2026-10-14, GO and destruction 2026-10-15, teardown 2026-10-16 |
 | B5 | Docs fix (stale "unsupported" claims, exposure caveat) | Done |
-| B6 | Optional carry of signing and ECIES keys | Done: PR #23, merged 2026-10-15 (Opus and Codex reviews addressed) |
+| B6 | Optional carry of signing and ECIES keys | Done: PR #23, merged 2026-10-15 (both independent reviews addressed) |
 | B7 | 2b rehearsal with wallet end-users: verify re-onboarding keeps their parties and balances | New, proposed |
 | B8 | In-place rehearsal (2a), carry-first sequence, on a fresh scratch JCE validator on DevNet | Phases 0–4 + 5.1 **passed 2026-10-26**; rotation **passed 2026-11-01** (cosigners on `v0.4.0-rc.6`); observation, SQL cleanup and destruction **passed 2026-11-12**. Open: teardown. Runbook [runbook-migration-inplace.md](runbook-migration-inplace.md) |
-| C1 to C3 | ECIES hosted keys | Done; shipped in v0.4.0-rc.1. The two availability fixes from Codex's review are merged |
+| C1 to C3 | ECIES hosted keys | Done; shipped in v0.4.0-rc.1. The two availability fixes from the second review are merged |
 | CA rotation | Pin plus runbook | Done; shipped in v0.4.0-rc.2 |
 
 Track A (soak and hardening) continues on `stakecraft-devnet-rutli-01`; exit criteria are in
