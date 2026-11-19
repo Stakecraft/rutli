@@ -37,7 +37,9 @@ service Signer {
   // What this cluster supports. The driver queries it at startup instead of hardcoding specs, so
   // adding a key type later needs no driver release.
   rpc Capabilities(CapabilitiesRequest) returns (CapabilitiesReply);
-  // Generate a hosted key. key_id is caller-supplied, making retries idempotent.
+  // Generate a hosted key. key_id is caller-supplied, making retries idempotent. Since 0.5.0 it
+  // carries a client-signed generate intent (GenerateKeyRequest.intent), which every node verifies
+  // at its fence (CeremonyFenceRequest.intent).
   rpc GenerateKey(GenerateKeyRequest) returns (GenerateKeyReply);
   // X.509 SubjectPublicKeyInfo DER for an asymmetric hosted key.
   rpc PublicKey(PublicKeyRequest) returns (PublicKeyReply);
@@ -228,13 +230,16 @@ message SignRequest {
 // What a client authorizes: one signature by key_id over digest, until not_after_ms — or, with
 // purpose "delete-key", the deletion of hosted key key_id — or, with purpose "dkg" / "refresh", one
 // DKG / share refresh of key_id (a ceremony intent: digest and approvals empty; the ceremony id is
-// "<purpose>-" ‖ hex(request_id), so one intent names exactly one ceremony on every node). Carried
-// serialized inside SignedIntent.intent, so the verified bytes are exactly the signed bytes. The
-// purpose separates the domains: no node accepts an intent of one purpose for another.
+// "<purpose>-" ‖ hex(request_id), so one intent names exactly one ceremony on every node) — or,
+// with purpose "generate-key", the creation of hosted key key_id of spec hosted_spec, led by the
+// cosigner whose roster identifier is leader (digest and approvals empty; the ceremony id is
+// "genkey-" ‖ hex(request_id)). Carried serialized inside SignedIntent.intent, so the verified
+// bytes are exactly the signed bytes. The purpose separates the domains: no node accepts an intent
+// of one purpose for another.
 message SignIntent {
   uint32 version = 1;            // 1
   string cluster_id = 2;         // the cosigners' cluster id (Capabilities.cluster_id) — no cross-cluster replay
-  string purpose = 3;            // "sign" | "delete-key" | "dkg" | "refresh"
+  string purpose = 3;            // "sign" | "delete-key" | "dkg" | "refresh" | "generate-key"
   string key_id = 4;
   // "sign": exactly the 34-byte Canton digest the signature is over. "delete-key": the 32 bytes
   // SHA-256("rutli-delete-key-v1\n" ‖ key_id) (approvals are over this digest, like a sign's).
@@ -248,6 +253,13 @@ message SignIntent {
   // rutli-approve signs (FileApprovalGate.requestIdFor). Every cosigner counts them itself.
   bytes approval_nonce = 9;
   repeated IntentApproval approvals = 10;
+  // "generate-key" only (empty for every other purpose): the spec of the key to create
+  // ("rsa-2048-oaep-sha256", "aes-256-gcm", "ec-p256-ecies") and the roster identifier of the
+  // cosigner the client asked to lead it (CapabilitiesReply.node_identifier of the endpoint it
+  // called). A node accepts the generation's fence only from that cosigner, so a cosigner shown the
+  // intent in a fence cannot lead the generation itself.
+  string hosted_spec = 11;
+  uint32 leader = 12;
 }
 message IntentApproval {
   string approver_id = 1;
@@ -325,10 +337,17 @@ message CeremonyFenceRequest {
   // forwarded unchanged. This node verifies it itself — signature, chain to the cluster CA, the
   // signer's role (dkg: signer_allowlist + signer_acl; refresh: refresh_allowlist, or the signer
   // role while signer_may_refresh) and SPKI pin, cluster, purpose == kind, key, validity — and that
-  // ceremony_id is the one the intent names, before it takes the guard. Refused on genkey/delkey.
-  // Absent (a leader that predates ceremony intents): accepted, counted, unless the node sets
-  // signing_policy.require_ceremony_intent. No protocol bump: an older node ignores the field.
+  // ceremony_id is the one the intent names, before it takes the guard.
+  // genkey (since 0.5.0): the client's generate intent (GenerateKeyRequest.intent), verified the
+  // same way (signer role, signer_acl, purpose "generate-key", key, spec == `spec`, and leader == the
+  // roster identifier of the calling cosigner). A 0.4.0 node refuses a genkey fence that carries one
+  // (INVALID_ARGUMENT). Refused on delkey (deletes carry delete intents).
+  // Absent (a leader or client that predates these intents): accepted, counted, unless the node
+  // sets signing_policy.require_ceremony_intent (on by default with TLS).
   SignedIntent intent = 7;
+  // genkey: the spec the leader generates. The guard keeps it, and a push of another spec under
+  // this fence is refused. Empty from a 0.4.0 leader.
+  string spec = 8;
 }
 message CeremonyFenceReply {}
 
@@ -371,11 +390,18 @@ message CapabilitiesReply {
   // The cluster id signing intents must name (SignIntent.cluster_id): the pinned `cluster_id`, else
   // derived from the CA file. Public. Empty from a cosigner that predates intents.
   string cluster_id = 3;
+  // This cosigner's roster identifier: what a generate intent sent to it names as SignIntent.leader.
+  // 0 from a cosigner older than 0.5.0; the driver then does not ask it to generate a hosted key.
+  uint32 node_identifier = 4;
 }
 
 message GenerateKeyRequest {
   string key_id = 1;  // caller-supplied; regenerating the same id is a no-op, not an error
   string spec = 2;    // "rsa-2048-oaep-sha256", "aes-256-gcm" or "ec-p256-ecies"
+  // The client's generate intent (SignIntent purpose "generate-key" for key_id and spec, naming this
+  // cosigner as leader), signed by the calling client. Required unless every node sets
+  // signing_policy.require_ceremony_intent to false. A 0.4.0 cosigner ignores it.
+  SignedIntent intent = 3;
 }
 message GenerateKeyReply {
   string key_id = 1;
@@ -409,6 +435,8 @@ message KeyInfoReply {
   // (X.509 SPKI; empty for symmetric keys). Empty from a cosigner older than 0.5.0.
   bytes commitment = 5;
   bytes public_key_der = 6;
+  // 7 and 8 are kept free for a later release (the state of a copy that is not yet confirmed).
+  reserved 7, 8;
 }
 
 message DeleteKeyRequest {
@@ -483,6 +511,8 @@ message FetchKeyRequest {
   // instead of NOT_FOUND, so the caller never pulls a deleted key back. Without it (a 0.4.0
   // caller) a tombstone reads as NOT_FOUND, as before.
   bool include_tombstone = 2;
+  // Kept free for a later release (copies that are not yet confirmed).
+  reserved 3;
 }
 message FetchKeyReply {
   string spec = 1;
@@ -491,6 +521,8 @@ message FetchKeyReply {
   // The tombstone (as in ListKeys) when the caller set include_tombstone and the key is deleted
   // here; spec, public_key_der and wrapped are then empty.
   KeyManifest tombstone = 4;
+  // Kept free for a later release (copies that are not yet confirmed).
+  reserved 5, 6;
 }
 
 message ListKeysRequest {}
@@ -531,6 +563,10 @@ message NodeInfoReply {
   // 0 (absent) from an older cosigner. A leader refuses a ceremony unless every node reports >= 2.
   // dist_public_key is empty when hosted keys are off (this reply no longer fails then).
   uint32 ceremony_protocol = 4;
+  // The hosted-key creation protocol this node speaks: 2 = it verifies a client generate intent at
+  // its genkey fence (SignIntent purpose "generate-key"); 0 (absent) from a cosigner older than
+  // 0.5.0. A leader asked to generate with an intent refuses while a reachable node reports < 2.
+  uint32 hosted_protocol = 5;
 }
 
 // ── two-phase ceremonies (mesh only) ───────────────────────────────────────────────────────────

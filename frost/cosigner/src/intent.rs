@@ -60,6 +60,12 @@ pub const PURPOSE_SIGN_TEST: &str = "sign-test";
 pub const PURPOSE_DKG: &str = "dkg";
 /// A ceremony intent for one share refresh of `key_id`.
 pub const PURPOSE_REFRESH: &str = "refresh";
+/// A generate intent: the creation of one cluster-hosted key, of one spec, led by one cosigner
+/// (see [`IntentVerifier::verify_generate`]).
+pub const PURPOSE_GENERATE_KEY: &str = "generate-key";
+/// The prefix of the ceremony id a generate intent names: `genkey-<hex(request_id)>`. The same word
+/// as the hosted-key fence kind.
+pub const GENKEY_CEREMONY_PREFIX: &str = "genkey";
 pub const REQUEST_ID_LEN: usize = 16;
 /// Far above a real intent (a few hundred bytes plus approvals), small enough to bound the work a
 /// hostile caller can make a node do before anything is verified.
@@ -293,6 +299,48 @@ pub fn ceremony_id_of(signed: &pb::SignedIntent, kind: CeremonyKind) -> Result<S
         .try_into()
         .map_err(|_| refused_ceremony("malformed", format!("request id of {} bytes", intent.request_id.len())))?;
     Ok(ceremony_id_for(kind, &request_id))
+}
+
+/// The ceremony id a generate intent names: `genkey-<hex(request_id)>`. Ceremony ids of other kinds
+/// never start with `genkey-`, so a generate intent can never name a DKG or refresh, nor the other
+/// way round.
+pub fn generate_ceremony_id(request_id: &[u8; REQUEST_ID_LEN]) -> String {
+    format!("{GENKEY_CEREMONY_PREFIX}-{}", hex::encode(request_id))
+}
+
+/// The ceremony id `signed` names as a generate intent, from its request id — **unverified**: what
+/// a leader names the generation it runs for a client. Every node verifies the intent and this
+/// binding itself ([`IntentVerifier::verify_generate`]).
+pub fn generate_ceremony_id_of(signed: &pb::SignedIntent) -> Result<String> {
+    if signed.intent.is_empty() || signed.intent.len() > MAX_INTENT_BYTES {
+        return Err(refused_ceremony("malformed", format!("intent of {} bytes", signed.intent.len())));
+    }
+    let intent = pb::SignIntent::decode(signed.intent.as_slice())
+        .map_err(|e| refused_ceremony("malformed", format!("intent does not decode: {e}")))?;
+    let request_id: [u8; REQUEST_ID_LEN] = intent
+        .request_id
+        .as_slice()
+        .try_into()
+        .map_err(|_| refused_ceremony("malformed", format!("request id of {} bytes", intent.request_id.len())))?;
+    Ok(generate_ceremony_id(&request_id))
+}
+
+/// A generate intent this node verified ([`IntentVerifier::verify_generate`]): what a genkey guard
+/// keeps, so a push under the guard is a push under this intent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedGenerate {
+    pub key_id: String,
+    /// The spec, as the intent names it.
+    pub spec: String,
+    /// The roster identifier of the cosigner the client asked to lead.
+    pub leader: u16,
+    /// `genkey-<hex(request_id)>`.
+    pub ceremony_id: String,
+    pub request_id: [u8; REQUEST_ID_LEN],
+    pub signer_cn: String,
+    pub signer_spki_sha256: [u8; 32],
+    pub issued_at_ms: u64,
+    pub not_after_ms: u64,
 }
 
 /// Which role a ceremony intent's signer acted in.
@@ -719,10 +767,15 @@ impl IntentVerifier {
                 format!("intent is for key {}, the ceremony is for {key_id}", intent.key_id),
             ));
         }
-        if !intent.digest.is_empty() || !intent.approval_nonce.is_empty() || !intent.approvals.is_empty() {
+        if !intent.digest.is_empty()
+            || !intent.approval_nonce.is_empty()
+            || !intent.approvals.is_empty()
+            || !intent.hosted_spec.is_empty()
+            || intent.leader != 0
+        {
             return Err(refused_ceremony(
                 "malformed",
-                "a ceremony intent carries no digest and no approvals".into(),
+                "a ceremony intent carries no digest, no approvals, no hosted spec and no leader".into(),
             ));
         }
         let request_id: [u8; REQUEST_ID_LEN] = intent
@@ -749,6 +802,94 @@ impl IntentVerifier {
             signer_cn: cn,
             signer_spki_sha256: spki,
             role,
+            issued_at_ms: intent.issued_at_ms,
+            not_after_ms: intent.not_after_ms,
+        })
+    }
+
+    /// Verify a generate intent at `now_ms`: the creation of hosted key `key_id` of `spec`, led by
+    /// the cosigner with roster identifier `leader`, under `ceremony_id`. Signed by a client on the
+    /// signer role (`signer_allowlist`, as for a DKG), its key pinned if the CN is; for this
+    /// cluster, purpose `generate-key`, this key, this spec, this leader, no digest and no
+    /// approvals, a 16-byte request id, within its validity; the signer's `signer_acl`; and
+    /// `ceremony_id` exactly the id the intent names ([`generate_ceremony_id`]). Every failure is
+    /// [`DaemonError::PolicyRefused`], counted in `rutli_ceremony_intent_refusals_total{reason}`.
+    pub fn verify_generate(
+        &self,
+        signed: &pb::SignedIntent,
+        key_id: &str,
+        spec: &str,
+        leader: u16,
+        ceremony_id: &str,
+        now_ms: u64,
+    ) -> Result<VerifiedGenerate> {
+        let (cn, spki, intent) = self.verify_signer(
+            signed,
+            |cn| {
+                if self.signers.contains(cn) {
+                    Ok(())
+                } else {
+                    Err(format!("generate intent signed by {cn:?}, which is not on this node's signer_allowlist"))
+                }
+            },
+            refused_ceremony,
+        )?;
+        if intent.purpose != PURPOSE_GENERATE_KEY {
+            return Err(refused_ceremony(
+                "purpose",
+                format!("intent purpose {:?}, expected \"generate-key\"", intent.purpose),
+            ));
+        }
+        if intent.key_id != key_id {
+            return Err(refused_ceremony(
+                "key",
+                format!("intent is for key {}, the generation is for {key_id}", intent.key_id),
+            ));
+        }
+        if intent.hosted_spec != spec {
+            return Err(refused_ceremony(
+                "spec",
+                format!("intent creates a {:?} key, the generation is of {spec:?}", intent.hosted_spec),
+            ));
+        }
+        if u32::from(leader) != intent.leader {
+            return Err(refused_ceremony(
+                "leader",
+                format!(
+                    "intent asks cosigner {} to lead the generation of {key_id}, but cosigner {leader} leads it — \
+                     an intent is only valid through the cosigner the client called",
+                    intent.leader
+                ),
+            ));
+        }
+        if !intent.digest.is_empty() || !intent.approval_nonce.is_empty() || !intent.approvals.is_empty() {
+            return Err(refused_ceremony(
+                "malformed",
+                "a generate intent carries no digest and no approvals".into(),
+            ));
+        }
+        let request_id: [u8; REQUEST_ID_LEN] = intent
+            .request_id
+            .as_slice()
+            .try_into()
+            .map_err(|_| refused_ceremony("malformed", format!("request id of {} bytes", intent.request_id.len())))?;
+        self.check_times_with(intent.issued_at_ms, intent.not_after_ms, now_ms, refused_ceremony)?;
+        self.check_acl_with(&cn, key_id, refused_ceremony)?;
+        let named = generate_ceremony_id(&request_id);
+        if ceremony_id != named {
+            return Err(refused_ceremony(
+                "ceremony-id",
+                format!("the intent names ceremony {named}, the leader runs {ceremony_id}"),
+            ));
+        }
+        Ok(VerifiedGenerate {
+            key_id: intent.key_id,
+            spec: intent.hosted_spec,
+            leader,
+            ceremony_id: named,
+            request_id,
+            signer_cn: cn,
+            signer_spki_sha256: spki,
             issued_at_ms: intent.issued_at_ms,
             not_after_ms: intent.not_after_ms,
         })
@@ -936,6 +1077,32 @@ pub fn ceremony_intent(
     }
 }
 
+/// A generate intent for hosted key `key_id` of `spec`, led by the cosigner with roster identifier
+/// `leader`, unsigned: version 1, `cluster_id`, purpose `generate-key`, `request_id`, valid from
+/// `issued_at_ms` for `lifetime_ms`. What the driver builds (`FrostIntentSigner.generateIntent`).
+pub fn generate_intent(
+    cluster_id: &str,
+    key_id: &str,
+    spec: &str,
+    leader: u16,
+    request_id: [u8; REQUEST_ID_LEN],
+    issued_at_ms: u64,
+    lifetime_ms: u64,
+) -> pb::SignIntent {
+    pb::SignIntent {
+        version: INTENT_VERSION,
+        cluster_id: cluster_id.to_string(),
+        purpose: PURPOSE_GENERATE_KEY.to_string(),
+        key_id: key_id.to_string(),
+        request_id: request_id.to_vec(),
+        issued_at_ms,
+        not_after_ms: issued_at_ms.saturating_add(lifetime_ms),
+        hosted_spec: spec.to_string(),
+        leader: u32::from(leader),
+        ..Default::default()
+    }
+}
+
 /// The cluster id a client believes from its roster's `Capabilities.cluster_id` answers (empty
 /// ones ignored): the value at least two answers agree on (the lone node of a one-node roster
 /// counts alone) and that more answers report than any other value — the driver's rule (audit F5),
@@ -1083,6 +1250,33 @@ mod tests {
         assert_eq!(agree_on_cluster_id(&s(&["a"]), 1).as_deref(), Some("a"), "a one-node dev roster");
         assert_eq!(agree_on_cluster_id(&s(&[]), 3), None);
     }
+
+    /// Parity with the driver: `FrostIntentSigner.generateIntent("c2testcluster000",
+    /// "participant1-rutli-enc-golden", "rsa-2048-oaep-sha256", 2, 16×0x01, 1_700_000_000_000,
+    /// 120_000)` serializes to exactly these bytes, and `FrostIntentSigner.generateCeremonyId` names
+    /// the same ceremony (FrostGenerateIntentSpec pins both).
+    #[test]
+    fn generate_intents_match_the_drivers_golden_vector() {
+        let rid = [0x01; REQUEST_ID_LEN];
+        let g = generate_intent(
+            "c2testcluster000",
+            "participant1-rutli-enc-golden",
+            "rsa-2048-oaep-sha256",
+            2,
+            rid,
+            1_700_000_000_000,
+            120_000,
+        );
+        assert_eq!(hex::encode(g.encode_to_vec()), GOLDEN_GENERATE_INTENT);
+        assert_eq!(generate_ceremony_id(&rid), "genkey-01010101010101010101010101010101");
+        crate::keystore::validate_ceremony_id(&generate_ceremony_id(&[0xff; REQUEST_ID_LEN])).unwrap();
+        // The leader derives the id from the (unverified) intent, like a ceremony's.
+        let signed = pb::SignedIntent { intent: g.encode_to_vec(), ..Default::default() };
+        assert_eq!(generate_ceremony_id_of(&signed).unwrap(), "genkey-01010101010101010101010101010101");
+        assert!(generate_ceremony_id_of(&pb::SignedIntent::default()).is_err());
+    }
+
+    pub const GOLDEN_GENERATE_INTENT: &str = "08011210633274657374636c75737465723030301a0c67656e65726174652d6b6579221d7061727469636970616e74312d7275746c692d656e632d676f6c64656e3210010101010101010101010101010101013880d095ffbc3140c0f99cffbc315a147273612d323034382d6f6165702d7368613235366002";
 
     /// Parity with the driver's `FrostIntentSigner.deleteDigest` (FrostSigningIntentSpec pins it).
     #[test]

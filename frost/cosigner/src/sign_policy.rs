@@ -22,13 +22,18 @@
 //! verified in full ([`crate::intent::IntentVerifier::verify_ceremony`]), including that the
 //! ceremony id is the one it names; a ceremony without one is refused when
 //! `require_ceremony_intent` is on, else accepted and counted.
+//!
+//! And to every hosted-key generation it takes part in ([`SignGuard::authorize_generate`], at the
+//! genkey fence, before the guard): the client's generate intent, verified in full
+//! ([`crate::intent::IntentVerifier::verify_generate`]) — key, spec, the leader it names, the
+//! ceremony id — under the same switch (`require_ceremony_intent`).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::intent::{refused, refused_ceremony, IntentVerifier, VerifiedCeremony, VerifiedIntent};
+use crate::intent::{refused, refused_ceremony, IntentVerifier, VerifiedCeremony, VerifiedGenerate, VerifiedIntent};
 use crate::node::CeremonyKind;
 use crate::pb;
 use crate::journal::{JournalEntry, Limits, SignJournal};
@@ -137,6 +142,59 @@ impl SignGuard {
                  expected only until the driver and the refresh job run a release that signs them; then \
                  turn require_ceremony_intent on",
                 kind.as_str()
+            );
+        }
+        Ok(None)
+    }
+
+    /// A genkey fence for `ceremony_id` of hosted key `key_id` of `spec`, led by the cosigner with
+    /// roster identifier `leader` (`None`: this node cannot tell who leads — no caller identity):
+    /// the client's generate intent, verified ([`IntentVerifier::verify_generate`]); `None` = none
+    /// was carried and this node accepts that (`require_ceremony_intent` off; counted in
+    /// `rutli_ceremony_intent_absent_total` and logged at most once a minute). An intent that is
+    /// carried is verified in full whatever the switch says.
+    pub fn authorize_generate(
+        &self,
+        key_id: &str,
+        spec: &str,
+        leader: Option<u16>,
+        ceremony_id: &str,
+        intent: Option<&pb::SignedIntent>,
+    ) -> Result<Option<VerifiedGenerate>> {
+        if let Some(signed) = intent {
+            let Some(leader) = leader else {
+                return Err(refused_ceremony(
+                    "leader",
+                    format!(
+                        "genkey {ceremony_id} of {key_id} carries a generate intent, but this node cannot tell \
+                         which cosigner leads it (the caller is not a roster node) — refused"
+                    ),
+                ));
+            };
+            return self
+                .verifier
+                .verify_generate(signed, key_id, spec, leader, ceremony_id, crate::intent::now_ms())
+                .map(Some);
+        }
+        if self.require_ceremony_intent {
+            return Err(refused_ceremony(
+                "missing",
+                format!(
+                    "genkey {ceremony_id} of {key_id} carries no generate intent and this node requires one \
+                     (signing_policy.require_ceremony_intent) — the driver or the leading cosigner predates \
+                     generate intents (0.5.0), or no client asked for this key"
+                ),
+            ));
+        }
+        metrics::counter!(crate::metrics::CEREMONY_INTENT_ABSENT).increment(1);
+        let now = crate::intent::now_ms() / 60_000;
+        if self.last_ceremony_absent_warning.swap(now, Ordering::Relaxed) != now {
+            tracing::warn!(
+                key_id,
+                ceremony_id,
+                "hosted-key generation without a generate intent accepted (signing_policy.require_ceremony_intent \
+                 is off) — a compromised cosigner can create a hosted key on this node; expected only until \
+                 the driver and every cosigner run 0.5.0, then turn require_ceremony_intent on"
             );
         }
         Ok(None)

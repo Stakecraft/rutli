@@ -1268,9 +1268,17 @@ async fn a_same_id_guard_on_another_key_cannot_stand_in_for_the_leaders() {
         map.insert(p.identifier(), p.ceremony_part1(&xid, KEY, CeremonyKind::Refresh, &[1, 2, 3], Some(&x)).await.unwrap());
     }
     for i in 0..8 {
-        match p3[1].ceremony_fence(&xid, &format!("rutli-enc-planted-{i}"), "genkey").await {
+        // A delete fence takes no client intent, so on an enforcing node it reaches the guard
+        // check: the ceremony id already guards KEY here.
+        match p3[1].ceremony_fence(&xid, &format!("rutli-enc-planted-{i}"), "delkey").await {
             Err(DaemonError::CeremonyRefused(m)) => assert!(m.contains("one ceremony id guards one key"), "{m}"),
             other => panic!("a second key under the ceremony id must be refused, got {other:?}"),
+        }
+        // A generation fence (0.5.0) is refused before the guards: it carries no generate intent,
+        // and a valid one could not name this id (generate ceremony ids are `genkey-…`).
+        match p3[1].ceremony_fence(&xid, &format!("rutli-enc-planted-{i}"), "genkey").await {
+            Err(DaemonError::PolicyRefused(m)) => assert!(m.contains("no generate intent"), "{m}"),
+            other => panic!("a genkey fence without an intent must be refused, got {other:?}"),
         }
     }
     not_the_leader(p3[1].ceremony_abort(&xid).await);
