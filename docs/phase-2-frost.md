@@ -146,7 +146,9 @@ The `FrostBackend` is a **dumb client**: it submits `{keyId, digest}` and awaits
 signature. Round orchestration lives *inside* the cluster:
 
 1. The node the driver contacts is the leader for that request (static leader; the driver fails over
-   to another cosigner if it's unreachable or answers `INTERNAL`/`UNKNOWN` — a fresh session there
+   to another cosigner if it's unreachable, answers any status except `PERMISSION_DENIED`,
+   `UNAUTHENTICATED`, `RESOURCE_EXHAUSTED` and `INVALID_ARGUMENT` (those four are returned to Canton
+   at once), or returns a signature that does not verify against the pinned group key — a fresh session there
    with fresh nonces, the abandoned one's nonces burnt by `AbortSign`/TTL — no Raft, see the note
    above). The leader drives the session.
 2. **Round 1 (commit):** leader collects nonce commitments `(Dᵢ, Eᵢ)` from ≥ `t` cosigners.

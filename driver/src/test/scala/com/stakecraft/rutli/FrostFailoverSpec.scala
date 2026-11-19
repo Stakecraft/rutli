@@ -35,7 +35,9 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
   private val logger = LoggerFactory.getLogger(classOf[FrostFailoverSpec])
   private def await[T](f: Future[T]): T = Await.result(f, 10.seconds)
 
-  private val PermissionDenied = Status.INTERNAL.withDescription("io: Permission denied (os error 13)")
+  /** What the 2026-10-07 incident looked like: INTERNAL, with an OS "permission denied" text. Not a
+    * policy refusal (that is a real PERMISSION_DENIED, tested separately). */
+  private val InternalIoError = Status.INTERNAL.withDescription("io: Permission denied (os error 13)")
 
   /** The cluster's Ed25519 key: the driver pins its public half and verifies every signature. */
   private val GroupKeyPair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
@@ -44,6 +46,13 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
   private def groupSign(msg: Array[Byte]): Array[Byte] = {
     val s = java.security.Signature.getInstance("Ed25519")
     s.initSign(GroupKeyPair.getPrivate); s.update(msg); s.sign()
+  }
+
+  /** A well-formed Ed25519 signature by a key that is not the group key: what a lying leader sends. */
+  private val OtherKeyPair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
+  private def otherSign(msg: Array[Byte]): Array[Byte] = {
+    val s = java.security.Signature.getInstance("Ed25519")
+    s.initSign(OtherKeyPair.getPrivate); s.update(msg); s.sign()
   }
 
   /** One fake cosigner: per-RPC call counters and a switchable failure per RPC (`None` = serve). */
@@ -56,6 +65,10 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
     val generateKeyCalls = new AtomicInteger
 
     @volatile var signFails: Option[Status] = None
+    /** Answer every Sign with a 64-byte signature the group key does not verify. */
+    @volatile var signLies: Boolean = false
+    /** Per-call override, by call number (1 = first Sign): runs before the answer, may block. */
+    @volatile var signGate: Int => Option[Status] = _ => None
     @volatile var dkgFails: Option[Status] = None
     @volatile var groupKeyFails: Option[Status] = None
     @volatile var generateKeyFails: Option[Status] = None
@@ -67,9 +80,10 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
       }
 
     override def sign(req: SignRequest, obs: StreamObserver[SignReply]): Unit = {
-      signCalls.incrementAndGet()
-      answer(signFails, obs)(
-        SignReply.newBuilder().setSignature(ByteString.copyFrom(groupSign(req.getMessage.toByteArray))).build()
+      val call = signCalls.incrementAndGet()
+      val msg = req.getMessage.toByteArray
+      answer(signGate(call).orElse(signFails), obs)(
+        SignReply.newBuilder().setSignature(ByteString.copyFrom(if (signLies) otherSign(msg) else groupSign(msg))).build()
       )
     }
 
@@ -135,7 +149,7 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
 
     "route a sign around a leader that answers INTERNAL, and note the hop for the audit entry" in {
       withCluster(2) { case (backend, Seq(a, b)) =>
-        a.signFails = Some(PermissionDenied)
+        a.signFails = Some(InternalIoError)
         val notes = new AuditNotes
         signNoted(backend, notes) shouldBe Signed
         a.signCalls.get shouldBe 1
@@ -146,7 +160,7 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
 
     "lead from the last healthy cosigner afterwards, without re-trying the sick one" in {
       withCluster(2) { case (backend, Seq(a, b)) =>
-        a.signFails = Some(PermissionDenied)
+        a.signFails = Some(InternalIoError)
         signNoted(backend, new AuditNotes) shouldBe Signed
 
         val second = new AuditNotes
@@ -160,7 +174,7 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
 
     "never re-run a DKG ceremony on another leader after a leader-side INTERNAL" in {
       withCluster(2) { case (backend, Seq(a, b)) =>
-        a.dkgFails = Some(PermissionDenied)
+        a.dkgFails = Some(InternalIoError)
         val notes = new AuditNotes
         val err = intercept[io.grpc.StatusRuntimeException] {
           await(backend.withAuditNotes(notes)(backend.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns"))))
@@ -169,6 +183,12 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
         a.dkgCalls.get shouldBe 1
         b.dkgCalls.get shouldBe 0
         notes.isEmpty shouldBe true
+
+        // ...and the next DKG starts on A again: the INTERNAL does not take the lead from it.
+        a.dkgFails = None
+        await(backend.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns"))) shouldBe "frost-ns"
+        a.dkgCalls.get shouldBe 2
+        b.dkgCalls.get shouldBe 0
       }
     }
 
@@ -180,31 +200,56 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
         }.getStatus.getCode shouldBe Status.Code.DEADLINE_EXCEEDED
         b.dkgCalls.get shouldBe 0
 
+        // The ceremony may still be running on A, so A keeps the lead: the next DKG starts there,
+        // and a refused connection fails over to B.
         a.dkgFails = Some(Status.UNAVAILABLE)
         val notes = new AuditNotes
         await(backend.withAuditNotes(notes)(backend.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")))) shouldBe
           "frost-ns"
+        a.dkgCalls.get shouldBe 2
         b.dkgCalls.get shouldBe 1
         notes.render shouldBe s"failover=${a.name}→${b.name} reason=UNAVAILABLE"
       }
     }
 
-    "surface a real answer from a live leader immediately, and keep leading from it" in {
-      for (code <- Seq(Status.NOT_FOUND, Status.RESOURCE_EXHAUSTED, Status.INVALID_ARGUMENT, Status.PERMISSION_DENIED))
+    "return a policy, auth, rate-limit or request refusal at once, without trying another node" in {
+      for (
+        code <- Seq(Status.PERMISSION_DENIED, Status.UNAUTHENTICATED, Status.RESOURCE_EXHAUSTED, Status.INVALID_ARGUMENT)
+      )
         withClue(code.getCode) {
           withCluster(2) { case (backend, Seq(a, b)) =>
             a.signFails = Some(code)
             val notes = new AuditNotes
             intercept[io.grpc.StatusRuntimeException](signNoted(backend, notes)).getStatus.getCode shouldBe
               code.getCode
-            b.signCalls.get shouldBe 0
+            b.signCalls.get shouldBe 0 // not retried on another node
             notes.isEmpty shouldBe true
 
-            // The node answered, so it is still the preferred leader.
+            // These signs carry no intent (no TLS here): the leader alone checks who asks, so its
+            // refusal does not move the next call to another node. (With an intent it does; see
+            // FrostSigningIntentSpec.)
             a.signFails = None
             signNoted(backend, new AuditNotes) shouldBe Signed
             a.signCalls.get shouldBe 2
             b.signCalls.get shouldBe 0
+          }
+        }
+    }
+
+    "fail a sign over on a leader's NOT_FOUND, FAILED_PRECONDITION or ABORTED, and lead from the next node" in {
+      // The group key is pinned before a sign, so the cluster agreed the key exists: these answers
+      // are about that leader's own state, and another leader can sign.
+      for (code <- Seq(Status.NOT_FOUND, Status.FAILED_PRECONDITION, Status.ABORTED, Status.UNIMPLEMENTED))
+        withClue(code.getCode) {
+          withCluster(2) { case (backend, Seq(a, b)) =>
+            a.signFails = Some(code)
+            val notes = new AuditNotes
+            signNoted(backend, notes) shouldBe Signed
+            notes.render shouldBe s"failover=${a.name}→${b.name} reason=${code.getCode}"
+
+            signNoted(backend, new AuditNotes) shouldBe Signed
+            a.signCalls.get shouldBe 1
+            b.signCalls.get shouldBe 2
           }
         }
     }
@@ -250,7 +295,7 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
         signNoted(backend, new AuditNotes) shouldBe Signed
         // ...then make C sick: the next leader tried is A (ring order), not B.
         a.signFails = None
-        c.signFails = Some(PermissionDenied)
+        c.signFails = Some(InternalIoError)
         val notes = new AuditNotes
         signNoted(backend, notes) shouldBe Signed
         notes.render shouldBe s"failover=${c.name}→${a.name} reason=INTERNAL"
@@ -260,22 +305,153 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
 
     "not fail a hosted-key write over on a leader-side INTERNAL" in {
       withCluster(2, hostedKeys = true) { case (backend, Seq(a, b)) =>
-        a.generateKeyFails = Some(PermissionDenied)
+        a.generateKeyFails = Some(InternalIoError)
         intercept[io.grpc.StatusRuntimeException] {
           await(backend.generateEncryptionKeyPair(EncryptionKeySpec.Rsa2048, Some("enc")))
         }.getStatus.getCode shouldBe Status.Code.INTERNAL
         b.generateKeyCalls.get shouldBe 0
 
         // ...but it still fails over when the node is down: GenerateKey is idempotent by key id.
-        a.generateKeyFails = Some(Status.UNAVAILABLE)
+        // (A's error took its preference, so this call starts at B.)
+        a.generateKeyFails = None
+        b.generateKeyFails = Some(Status.UNAVAILABLE)
         await(backend.generateEncryptionKeyPair(EncryptionKeySpec.Rsa2048, Some("enc"))) should startWith("rutli-enc")
         b.generateKeyCalls.get shouldBe 1
+        a.generateKeyCalls.get shouldBe 2
+      }
+    }
+
+    "withhold a signature that does not verify, and sign through the next leader in the same call" in {
+      withCluster(3) { case (backend, Seq(a, b, c)) =>
+        a.signLies = true
+        val notes = new AuditNotes
+        signNoted(backend, notes) shouldBe Signed
+        notes.render shouldBe s"sig-verify=failed failover=${a.name}→${b.name} reason=BAD_SIGNATURE"
+        Seq(a, b, c).map(_.signCalls.get) shouldBe Seq(1, 1, 0)
+      }
+    }
+
+    "not lead from a cosigner that returned a bad signature on later calls" in {
+      withCluster(3) { case (backend, Seq(a, b, c)) =>
+        a.signLies = true
+        signNoted(backend, new AuditNotes) shouldBe Signed
+        val later = new AuditNotes
+        signNoted(backend, later) shouldBe Signed
+        signNoted(backend, later) shouldBe Signed
+        later.isEmpty shouldBe true
+        Seq(a, b, c).map(_.signCalls.get) shouldBe Seq(1, 3, 0)
+      }
+    }
+
+    "route around endpoint 0 lying from process start, for every call" in {
+      // Endpoint 0 is the first preferred leader; before, its bad answer kept it preferred and every
+      // sign failed. Now no call after the first one asks it at all.
+      withCluster(3) { case (backend, Seq(a, b, c)) =>
+        a.signLies = true
+        (1 to 5).foreach(_ => signNoted(backend, new AuditNotes) shouldBe Signed)
+        Seq(a, b, c).map(_.signCalls.get) shouldBe Seq(1, 5, 0)
+      }
+    }
+
+    "take the preference from a leader that starts lying after it was preferred" in {
+      withCluster(3) { case (backend, Seq(a, b, c)) =>
+        a.signFails = Some(Status.UNAVAILABLE)
+        signNoted(backend, new AuditNotes) shouldBe Signed // B is now the preferred leader
+        a.signFails = None
+        b.signLies = true
+        val notes = new AuditNotes
+        signNoted(backend, notes) shouldBe Signed
+        notes.render shouldBe s"sig-verify=failed failover=${b.name}→${c.name} reason=BAD_SIGNATURE"
+        signNoted(backend, new AuditNotes) shouldBe Signed
+        Seq(a, b, c).map(_.signCalls.get) shouldBe Seq(1, 2, 2)
+      }
+    }
+
+    "fail non-retryably with does-not-verify when every cosigner lies, asking each once" in {
+      withCluster(3) { case (backend, Seq(a, b, c)) =>
+        Seq(a, b, c).foreach(_.signLies = true)
+        val notes = new AuditNotes
+        val err = intercept[KmsDriverException](signNoted(backend, notes))
+        err.retryable shouldBe false
+        err.getMessage should include("does not verify")
+        notes.render shouldBe
+          s"sig-verify=failed failover=${a.name}→${b.name} reason=BAD_SIGNATURE " +
+          s"sig-verify=failed failover=${b.name}→${c.name} reason=BAD_SIGNATURE sig-verify=failed"
+        Seq(a, b, c).map(_.signCalls.get) shouldBe Seq(1, 1, 1)
+      }
+    }
+
+    "keep an honest leader preferred call after call, and the healthy one after a failover" in {
+      withCluster(3) { case (backend, Seq(a, b, c)) =>
+        (1 to 4).foreach(_ => signNoted(backend, new AuditNotes) shouldBe Signed)
+        Seq(a, b, c).map(_.signCalls.get) shouldBe Seq(4, 0, 0)
+
+        a.signFails = Some(Status.UNAVAILABLE)
+        signNoted(backend, new AuditNotes) shouldBe Signed
+        a.signFails = None // recovered, but B served last and stays the leader
+        (1 to 3).foreach(_ => signNoted(backend, new AuditNotes) shouldBe Signed)
+        Seq(a, b, c).map(_.signCalls.get) shouldBe Seq(5, 4, 0)
+      }
+    }
+
+    "refuse a bad signature from a single-endpoint roster, non-retryably" in {
+      withCluster(1) { case (backend, Seq(a)) =>
+        a.signLies = true
+        val notes = new AuditNotes
+        val err = intercept[KmsDriverException](signNoted(backend, notes))
+        err.retryable shouldBe false
+        err.getMessage should include("does not verify")
+        notes.render shouldBe "sig-verify=failed"
+        a.signCalls.get shouldBe 1
+      }
+    }
+
+    "keep a read on the same node after it answers RESOURCE_EXHAUSTED" in {
+      withCluster(2) { case (backend, Seq(a, b)) =>
+        a.groupKeyFails = Some(Status.RESOURCE_EXHAUSTED)
+        intercept[io.grpc.StatusRuntimeException](await(backend.keyExistsAndIsActive("frost-ns"))).getStatus.getCode shouldBe
+          Status.Code.RESOURCE_EXHAUSTED
+        a.groupKeyFails = None
+        await(backend.keyExistsAndIsActive("frost-ns"))
+        a.groupKeyCalls.get shouldBe 2
+        b.groupKeyCalls.get shouldBe 0
+      }
+    }
+
+    "not let a slow success put back a leader that a newer call demoted" in {
+      withCluster(2) { case (backend, Seq(a, b)) =>
+        val entered = new java.util.concurrent.CountDownLatch(1)
+        val release = new java.util.concurrent.CountDownLatch(1)
+        // A's first sign waits for the test and then succeeds; its later ones fail UNAVAILABLE.
+        a.signGate = { call =>
+          if (call == 1) {
+            entered.countDown()
+            release.await(10, java.util.concurrent.TimeUnit.SECONDS)
+            None
+          } else Some(Status.UNAVAILABLE)
+        }
+        val slow = backend.sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519)
+        entered.await(10, java.util.concurrent.TimeUnit.SECONDS) shouldBe true
+
+        // A newer call finds A failing, demotes it and signs on B.
+        val second = new AuditNotes
+        signNoted(backend, second) shouldBe Signed
+        second.render shouldBe s"failover=${a.name}→${b.name} reason=UNAVAILABLE"
+
+        // The slow call now succeeds on A, but must not make A the leader again.
+        release.countDown()
+        await(slow) shouldBe Signed
+        val third = new AuditNotes
+        signNoted(backend, third) shouldBe Signed
+        third.isEmpty shouldBe true
+        a.signCalls.get shouldBe 2
+        b.signCalls.get shouldBe 2
       }
     }
 
     "still fail over when the caller supplies no audit notes" in {
       withCluster(2) { case (backend, Seq(a, b)) =>
-        a.signFails = Some(PermissionDenied)
+        a.signFails = Some(InternalIoError)
         await(backend.sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519)) shouldBe Signed
       }
     }
@@ -313,8 +489,8 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
           backend.supportedEncryptionAlgoSpecs,
         )
         val ctx = Context.root()
-        a.signFails = Some(PermissionDenied)
-        a.dkgFails = Some(PermissionDenied)
+        a.signFails = Some(InternalIoError)
+        a.dkgFails = Some(InternalIoError)
 
         // DKG first, while A is still the preferred leader: refused, not retried elsewhere.
         intercept[KmsDriverException] {
@@ -323,6 +499,8 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
         b.dkgCalls.get shouldBe 0
         c.dkgCalls.get shouldBe 0
 
+        // A DKG's INTERNAL does not take the lead (the ceremony may still be running there), so
+        // the sign starts at A and fails over.
         await(driver.sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519)(ctx)) shouldBe Signed
 
         val dkgEntry = sink.entries.collectFirst { case ("generateSigningKeyPair", d) => d }.get

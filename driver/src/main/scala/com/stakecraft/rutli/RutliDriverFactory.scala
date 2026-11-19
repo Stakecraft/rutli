@@ -44,7 +44,20 @@ final class RutliDriverFactory extends KmsDriverFactory {
     implicit val frostEndpointReader: ConfigReader[FrostEndpoint] =
       ConfigReader[String].map(FrostEndpoint(_)).orElse(deriveReader[FrostEndpoint])
     implicit val frostReader: ConfigReader[FrostConfig] = deriveReader[FrostConfig]
-    implicit val ruleReader: ConfigReader[ApprovalRule] = deriveReader[ApprovalRule]
+    // A rule's mode is `quorum` or `auto`, exactly; anything else fails here, at its own key.
+    implicit val ruleReader: ConfigReader[ApprovalRule] = {
+      val derived = deriveReader[ApprovalRule]
+      ConfigReader.fromCursor[ApprovalRule] { cur =>
+        derived.from(cur).flatMap { rule =>
+          ApprovalPolicy.modeProblem(rule) match {
+            case None => Right(rule)
+            case Some(problem) =>
+              val at: pureconfig.ConfigCursor = cur.asObjectCursor.flatMap(_.atKey("mode")).getOrElse(cur)
+              Left(pureconfig.error.ConfigReaderFailures(at.failureFor(RutliDriverFactory.InvalidApprovalRule(problem))))
+          }
+        }
+      }
+    }
     // An approver's key has two names. `public-key-base64` is what the docs and `approve keygen`
     // print. `public-key-base-64` is what pureconfig derives from the field `publicKeyBase64` (a
     // digit run is its own word) and the only name releases up to 0.4.0 read, so a config copied
@@ -72,7 +85,30 @@ final class RutliDriverFactory extends KmsDriverFactory {
         }
       }
     }
-    implicit val policyReader: ConfigReader[ApprovalPolicy] = deriveReader[ApprovalPolicy]
+    // The rules are checked while the config is read, not left to the ApprovalPolicy constructor:
+    // an exception out of this reader reaches the operator as a stack trace (Canton's DriverLoader
+    // catches none here), not as a config error with its path. A misspelt mode (`quorom`,
+    // `Quorum`) once meant auto-approve; it is refused at the rule's `mode`, e.g.
+    // `approval.rules.0.mode`. What needs the whole policy (a threshold against the approvers, a
+    // quorum rule an earlier auto rule shadows) is refused at `approval.rules`, naming the rule.
+    implicit val policyReader: ConfigReader[ApprovalPolicy] = {
+      val derived = deriveReader[ApprovalPolicy]
+      ConfigReader.fromCursor[ApprovalPolicy] { cur =>
+        for {
+          obj <- cur.asObjectCursor
+          rulesCur <- obj.atKey("rules")
+          rules <- ConfigReader[List[ApprovalRule]].from(rulesCur)
+          approvers <- obj.atKey("approvers").flatMap(c => ConfigReader[List[Approver]].from(c))
+          _ <- ApprovalPolicy.ruleProblems(rules, approvers.size) match {
+            case Nil => Right(())
+            case problems =>
+              val failures = problems.map(p => rulesCur.failureFor(RutliDriverFactory.InvalidApprovalRule(p.message)))
+              Left(pureconfig.error.ConfigReaderFailures(failures.head, failures.tail: _*))
+          }
+          policy <- derived.from(cur)
+        } yield policy
+      }
+    }
     implicit val journalReader: ConfigReader[SigningJournalConfig] = deriveReader[SigningJournalConfig]
     implicit val softwareReader: ConfigReader[SoftwareConfig] = deriveReader[SoftwareConfig]
     deriveReader[RutliConfig]
@@ -247,6 +283,9 @@ object RutliDriverFactory {
 
   /** The driver name referenced by the Canton node config: `crypto.kms.name = "rutli"`. */
   val driverName: String = "rutli"
+
+  /** An `approval.rules` entry the driver refuses (see [[com.stakecraft.rutli.policy.ApprovalPolicy.ruleProblems]]). */
+  final case class InvalidApprovalRule(override val description: String) extends pureconfig.error.FailureReason
 
   /** A bounded pool of daemon threads for blocking work (FROST RPCs, approval polling). Daemon so
     * it never blocks JVM shutdown; bounded so it can't spawn unboundedly under load. */

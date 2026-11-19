@@ -72,8 +72,41 @@ substitute for that.
   node verifies; a rollback purge removes only a key the peer created in the same still-fenced
   generation, and (since 0.4.0-rc.6) only at the request of that generation's leader (M2).
 
-**Can:** abort ceremonies and signatures it leads (the driver fails over), burn round-1 nonces,
-and refuse to forward. Availability, not integrity.
+**Can:** abort ceremonies and signatures it leads, burn round-1 nonces, and refuse to forward.
+Availability, not integrity.
+
+How the driver limits this for a signature:
+
+- The driver verifies every signature against the pinned group key. One that does not verify is
+  withheld, never released, and the driver asks the next cosigner in the same call.
+- It also asks the next cosigner when the leader is unreachable or answers any error except
+  `PERMISSION_DENIED`, `UNAUTHENTICATED`, `RESOURCE_EXHAUSTED` or `INVALID_ARGUMENT`. Those four go
+  back to Canton at once. A cosigner sends every signing-policy refusal as `PERMISSION_DENIED` and
+  a rate limit as `RESOURCE_EXHAUSTED`, so a refusal is never retried on another node.
+- Only a verified signature makes a cosigner the driver's preferred leader. A leader that fails,
+  or returns a bad signature, loses that place.
+- A leader that refuses a sign carrying a signing intent also loses that place, so the next call
+  starts at the next cosigner. This does not weaken the policy: a signature needs a quorum, and
+  each cosigner checks the intent on its own share (signer allowlist, pin, cluster, key ACL,
+  validity, approvals) and charges its own rate limit. Which node leads does not change what can
+  be signed. Keeping the lead on a refusing node would let one compromised cosigner stop every
+  sign, from startup when it is the first endpoint.
+- Two exceptions keep the lead where it is. A refusal because the intent names another cluster
+  makes the driver learn the cluster id again and retry on the same node. A refusal of a sign
+  without an intent (`frost.sign-intents = off`, no TLS, or no cluster id known) keeps the lead,
+  because then the other cosigners cannot see who asks: only the leader checks the Signer
+  allowlist, the pin and the key ACL. In that mode one compromised leader can stop signing until
+  it fails in another way.
+- Each leader that one call tries can make a node release one more signature share for that
+  intent request id, up to `max_shares_per_request` (8 by default). The rate limit is charged
+  once per request id.
+
+For other operations the driver cannot check the answer. A refusal (`RESOURCE_EXHAUSTED`,
+`PERMISSION_DENIED`, `NOT_FOUND`, ...) goes back to Canton and the node keeps the lead; only an
+unreachable or failing node (`UNAVAILABLE`, `DEADLINE_EXCEEDED`, `INTERNAL`, `UNKNOWN`) loses it. A
+DKG fails over, and loses the lead, only on `UNAVAILABLE`. After a timeout or `INTERNAL` it is not
+re-run elsewhere and the next DKG starts on the same node, because the ceremony may still be
+running there.
 
 ### A single compromised cosigner (its share, DEK, TLS key, memory)
 

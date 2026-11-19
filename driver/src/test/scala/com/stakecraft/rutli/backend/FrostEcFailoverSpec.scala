@@ -270,6 +270,13 @@ class FrostEcFailoverSpec extends AnyWordSpec with Matchers {
         notes should not include "failover="
         limited.ecdhCalls.get shouldBe 1
         good.ecdhCalls.get shouldBe 0
+
+        // ...and the next decrypt goes to the same node: a node's decrypt budget must not become
+        // n times the budget by moving to the next cosigner.
+        val (again, _) = decryptWithNotes(r.backend, cantonEncrypt(kp.getPublic, "y".getBytes), "rutli-enc-ec")
+        code(again.get) shouldBe Status.Code.RESOURCE_EXHAUSTED
+        limited.ecdhCalls.get shouldBe 2
+        good.ecdhCalls.get shouldBe 0
       }
     }
 
