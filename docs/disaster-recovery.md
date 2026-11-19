@@ -384,7 +384,9 @@ renewals. Losing it (the DevNet soak, found 2026-10-09) does not stop anything t
   rotation away from it. Each cosigner logs `trust anchor … not_after=…` at startup and warns from
   30 days before.
 - **If the key may be exposed rather than lost**, it is a security incident. Whoever holds it can
-  mint a certificate with CN `driver` and use the Signer API: the allowlists match CNs, not issuers.
+  mint a certificate with CN `driver` and use the Signer API: the allowlists match CNs, not issuers,
+  and only `signing_policy.signer_pins` ties a client CN to a key. A minted `cosignerN` is refused
+  by every node that pins node N's key (`peers[].tls_spki_sha256`, required with TLS since 0.5.0).
   Rotate immediately, drop the old CA from cosigners and driver without waiting for a planned
   restart ([ca-rotation.md](ca-rotation.md) §6), and treat `Sign` calls in that window as suspect
   (driver audit log).
