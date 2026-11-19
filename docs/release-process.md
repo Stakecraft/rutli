@@ -1,7 +1,8 @@
 # Release process
 
-How a Rütli release goes from `main` to a tag. Written for `0.5.0`, the version the external audit
-reviews; later releases follow the same steps.
+How a Rütli release goes from `main` to a tag: who decides what, and when. Written for `0.5.0`, the
+version the external audit reviews; later releases follow the same steps. The mechanics of tagging,
+pinning the image digest and the release assets are in [releasing.md](releasing.md).
 
 ## 1. Development
 
@@ -65,5 +66,6 @@ All of these hold, or the release waits:
 
 ## 8. Tag and publish
 
-A maintainer tags `vX.Y.Z`, publishes the GitHub release with notes and the quality report, and
-pins the image digest in the docs. The baseline for the quality ratchet moves to the new tag.
+A maintainer tags `vX.Y.Z` and follows [releasing.md](releasing.md): image digest pinned in the
+docs, release assets attached. The release notes carry the quality report. The baseline for the
+quality ratchet moves to the new tag.
