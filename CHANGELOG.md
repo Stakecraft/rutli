@@ -7,9 +7,10 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [0.4.1]
 
-_0.4.0 with one security fix in the cosigner, and the cosigner now stops on SIGTERM. No wire,
-key-file or config change; roll the cosigners in any order. The driver is unchanged apart from its
-version number._
+_0.4.0 with two security fixes in the cosigner (serving under a low file-descriptor limit;
+`export-key` and existing files), and the cosigner now stops on SIGTERM. No wire, key-file or
+config change; roll the cosigners in any order. The driver is unchanged apart from its version
+number._
 
 ### Security
 
@@ -26,6 +27,13 @@ version number._
   the server. The server sends HTTP/2 keepalive pings
   (every 60 s, 20 s timeout), so connections to peers that vanished are closed. If the gRPC server
   ever returns without a shutdown request, the daemon logs it and exits non-zero.
+- **`export-key` refuses an existing `--out` or a symlink.** The 0600 mode only applied to a
+  file the export created: an `--out` that already existed (for example 0644) kept its mode and
+  received the artifact, with `--unsafe-plaintext` the raw private key, and a symlink at `--out`
+  was followed. `export-key` now creates a new owner-only file, like the other commands that write
+  key material, and removes it again if the write fails. The export passphrase is wiped from memory
+  after use.
+
 ### Fixed
 
 - **The cosigner stops on SIGTERM.** It handled only SIGINT, and in its image it runs as PID 1,

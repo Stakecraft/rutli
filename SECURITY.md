@@ -5,8 +5,8 @@ secret a node holds. Treat every change as security-critical.
 
 ## Status
 
-- **Pre-1.0 and not yet externally audited.** The latest release is `0.4.1`: `0.4.0` with one
-  security fix. An independent third-party audit will review a later release; its report will be
+- **Pre-1.0 and not yet externally audited.** The latest release is `0.4.1`: `0.4.0` with two
+  security fixes. An independent third-party audit will review a later release; its report will be
   published in this repository.
 - **Internal security review, October 2026.** Two independent reviews of `0.4.0-rc.1`. Every
   critical and high finding is fixed in `0.4.0-rc.2` and `0.4.0-rc.3`. The findings and their status
