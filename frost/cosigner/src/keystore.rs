@@ -297,7 +297,7 @@ impl KeyStore {
             .as_ref()
             .ok_or_else(|| DaemonError::Config("share sealing is not configured — nothing to migrate to".into()))?;
         let path = self.path(key_id)?;
-        let bytes = std::fs::read(&path)?;
+        let bytes = zeroize::Zeroizing::new(std::fs::read(&path)?);
         if Sealer::is_sealed(&bytes) {
             return Err(DaemonError::Config(format!("{} is already sealed", path.display())));
         }
@@ -614,26 +614,45 @@ impl KeyStore {
     }
 
     /// Classify and parse a key file's plaintext, and check it against its name and header.
+    ///
+    /// The plaintext is parsed twice, straight from `plain`: once for the two tag fields, once into
+    /// the record type. Not through a `serde_json::Value`: that tree copies every string, the FROST
+    /// signing share's hex included, into heap `String`s that are freed without being wiped. Parsed
+    /// from the slice, serde_json hands the share's hex to frost's deserializer borrowed from
+    /// `plain` (which the callers wipe) — for a string without JSON escapes, which hex never has;
+    /// an escaped string is unescaped into serde_json's scratch buffer first.
+    ///
+    /// A tag that is not a string counts as absent, as it did through `Value::as_str`. One
+    /// difference: a field given twice in one object is now an error (the `Value` kept the last).
+    /// Our writers never repeat a field.
     fn parse_record(&self, key_id: &str, plain: &[u8], hdr: Option<&KeyFileHeader>) -> Result<Record> {
-        let value: serde_json::Value = serde_json::from_slice(plain)?;
-        let tag = value.get("kind").and_then(|k| k.as_str()).map(str::to_owned);
-        let named = value.get("key_id").and_then(|k| k.as_str()).map(str::to_owned);
-        if named.as_deref().is_some_and(|n| !n.is_empty() && n != key_id) {
+        /// Only the tags; every other field (secrets included) is skipped without being copied.
+        #[derive(Deserialize)]
+        struct Tags {
+            #[serde(default)]
+            kind: Option<serde_json::Value>,
+            #[serde(default)]
+            key_id: Option<serde_json::Value>,
+        }
+        let tags: Tags = serde_json::from_slice(plain)?;
+        let tag = tags.kind.as_ref().and_then(serde_json::Value::as_str);
+        let named = tags.key_id.as_ref().and_then(serde_json::Value::as_str);
+        if named.is_some_and(|n| !n.is_empty() && n != key_id) {
             return Err(DaemonError::KeyFile(format!(
                 "the file for {key_id} holds key {} — a key file renamed or copied over another",
                 named.unwrap_or_default()
             )));
         }
-        let record = if tag.as_deref() == Some(KIND_HOSTED) {
-            Record::Hosted(Box::new(serde_json::from_value(value)?))
-        } else if tag.as_deref() == Some(KIND_TOMBSTONE) {
-            let t: crate::hosted::Tombstone = serde_json::from_value(value)?;
+        let record = if tag == Some(KIND_HOSTED) {
+            Record::Hosted(Box::new(serde_json::from_slice(plain)?))
+        } else if tag == Some(KIND_TOMBSTONE) {
+            let t: crate::hosted::Tombstone = serde_json::from_slice(plain)?;
             if t.key_id != key_id {
                 return Err(DaemonError::KeyFile(format!("the file for {key_id} holds the tombstone of {}", t.key_id)));
             }
             Record::Tombstone(Box::new(t))
         } else {
-            Record::Frost(Box::new(serde_json::from_value(value)?))
+            Record::Frost(Box::new(serde_json::from_slice(plain)?))
         };
         self.check_record(key_id, &record, hdr)?;
         Ok(record)
@@ -1377,6 +1396,82 @@ mod tests {
             Err(_) => {} // frost rejects the empty packages; classification is what matters here
         }
         assert!(ks.list_hosted().is_err() || ks.list_hosted().unwrap().is_empty());
+    }
+
+    /// `parse_record` reads the tags and the record straight from the plaintext (not through a
+    /// `serde_json::Value`): every record kind still loads back as written, sealed and unsealed,
+    /// and a file copied over another key id is still refused.
+    #[test]
+    fn every_record_kind_loads_back_and_a_copied_file_is_refused() {
+        for sealed in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let ks = store(&tmp, sealed);
+            let dir = tmp.path().join("keys");
+
+            let share = dealt_share(Some(origin()));
+            ks.save("frost-a", &share).unwrap();
+            let hosted = HostedKey::generate(HostedSpec::EcP256, 7).unwrap();
+            ks.save_hosted("rutli-h", &hosted).unwrap();
+            let retained = HostedKey::generate(HostedSpec::Aes256Gcm, 8).unwrap();
+            let tomb = crate::hosted::Tombstone {
+                key_id: "rutli-t".into(),
+                spec: retained.spec.as_str().into(),
+                created_at: 8,
+                commitment: String::new(),
+                deleted_at_ms: 10,
+                purge_after_ms: 20,
+                delete_intent: String::new(),
+                retained: Some(retained.clone()),
+            };
+            ks.save_tombstone("rutli-t", &tomb).unwrap();
+
+            match ks.load_record("frost-a").unwrap() {
+                Record::Frost(s) => {
+                    assert_eq!(s.key_package.signing_share().serialize(), share.key_package.signing_share().serialize());
+                    assert_eq!(s.pkp_digest().unwrap(), share.pkp_digest().unwrap());
+                    assert_eq!(s.origin, share.origin);
+                    assert_eq!(s.key_id, "frost-a");
+                }
+                _ => panic!("sealed={sealed}: a FROST share must load as a share"),
+            }
+            match ks.load_record("rutli-h").unwrap() {
+                Record::Hosted(k) => {
+                    assert_eq!(k.private_der, hosted.private_der);
+                    assert_eq!(k.public_der, hosted.public_der);
+                    assert_eq!(k.created_at, 7);
+                }
+                _ => panic!("sealed={sealed}: a hosted key must load as hosted"),
+            }
+            match ks.load_record("rutli-t").unwrap() {
+                Record::Tombstone(t) => {
+                    assert_eq!(t.key_id, "rutli-t");
+                    assert_eq!(t.purge_after_ms, 20);
+                    assert_eq!(t.retained.as_ref().unwrap().private_der, retained.private_der);
+                }
+                _ => panic!("sealed={sealed}: a tombstone must load as a tombstone"),
+            }
+
+            // Unsealed, the plaintext names its key id: a file copied over another id is refused by
+            // the tag check (sealed files are refused earlier, by their header's key id).
+            if !sealed {
+                for (from, to) in [("frost-a", "frost-b"), ("rutli-h", "rutli-x"), ("rutli-t", "rutli-y")] {
+                    std::fs::copy(dir.join(format!("{from}.json")), dir.join(format!("{to}.json"))).unwrap();
+                    let err = match ks.load_record(to) {
+                        Ok(_) => panic!("{from} copied to {to} must be refused"),
+                        Err(e) => e.to_string(),
+                    };
+                    assert!(err.contains("holds key") || err.contains("holds the tombstone of"), "{to}: {err}");
+                }
+
+                // A tag that is not a string counts as absent, as it did when the plaintext went
+                // through a `serde_json::Value`: such a share still loads as a share.
+                let path = dir.join("frost-a.json");
+                let mut odd: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                odd["kind"] = serde_json::json!(0);
+                std::fs::write(&path, serde_json::to_vec(&odd).unwrap()).unwrap();
+                assert!(matches!(ks.load_record("frost-a"), Ok(Record::Frost(_))), "a non-string kind is ignored");
+            }
+        }
     }
 
     /// A real 2-of-3 dealt share for node 1, with or without an origin.
