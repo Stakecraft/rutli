@@ -159,7 +159,9 @@ the rest of the suite is unchanged. No such command exists yet.
 
 `cluster.json` holds the scenarios (as in `load-testing.md`), `skipped`, `keys` (per key count:
 sign latency, server-side histogram, `ListKeys` per cosigner), `ramp` (per step: rates, p95/p99
-per operation, why it stopped) and `headroom_factor` at the top.
+per operation, why it stopped), and two top-level numbers: `headroom_factor`, and
+`recovery_secs`, per disruption the seconds from its end until the cluster signed within the SLO
+again.
 
 `scripts/perf/compare.py PREVIOUS CURRENT` fails on
 

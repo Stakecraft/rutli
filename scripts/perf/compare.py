@@ -214,6 +214,10 @@ def main(argv=None):
         lines += [note, ""]
     if current.get("headroom_factor") is not None:
         lines += [f"Headroom factor: {current['headroom_factor']} (profile {current.get('profile')})", ""]
+    for name, secs in (current.get("recovery_secs") or {}).items():
+        lines += [f"Recovery after {name}: {'not within the limit' if secs is None else f'{secs:g} s'}"]
+    if current.get("recovery_secs"):
+        lines += [""]
     lines += [table(rows) if rows else "Nothing to compare.", ""]
     if problems:
         lines += [f"{len(problems)} problem(s):"] + [f"- {x}" for x in problems]

@@ -514,6 +514,9 @@ def main():
         # The ramp's result as one number: how many times the baseline load the cluster carried
         # within the SLO. None: the ramp did not run.
         "headroom_factor": suite.ramp.get("headroom_factor") if suite.ramp else None,
+        # Per disruption: seconds from its end until the cluster signed within the SLO again;
+        # None: it never did within --settle-secs.
+        "recovery_secs": {r["name"]: r.get("recovery_secs") for r in suite.results if "recovery_secs" in r},
         "setup": setup,
         "scenarios": suite.results,
         "skipped": suite.skipped,
