@@ -49,6 +49,12 @@ FROST core, cosigner and dealer (tests and lints):
 cd frost && cargo test --locked && cargo clippy --all-targets -- -D warnings
 ```
 
+This includes property tests (`proptest`, files `prop_*.rs` under each crate's `tests/`): nonce
+single use across restarts, key-file and export formats, fingerprints, the sign rate limit, the epoch
+check and signing intents. Case counts are set per test to keep the run short; for a longer local
+run, raise them with `PROPTEST_CASES=2000 cargo test --test 'prop_*'`. A failing case prints its minimal
+input: add it to the suite as a plain regression test.
+
 Deployment manifests (Helm lint, render, and the policy that forbids `pods/exec` RBAC, seal
 secrets in env and shared secrets):
 
