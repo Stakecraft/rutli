@@ -146,6 +146,15 @@ All notable changes to Rütli are documented here. Format loosely follows
   holds this node's sharing answers (a restart, or a refresh still committing); the stale reason
   then says the claim is unconfirmed, the mark clears on the next pass that reaches such a peer,
   and `RutliStaleShare` now leads with what to check before restoring anything.
+- **`scripts/e2e-split-ceremony.sh` passes again, and CI now runs it.** It had failed since
+  0.4.0-rc.6: `require_ceremony_intent` became the default with TLS, so its raw Dkg probe on the
+  import id was refused for the missing intent before reaching the reserved-id check. The script
+  now starts with the setting off and turns it on at step 6, as it was written. The new workflow
+  `.github/workflows/e2e.yml` runs it, `e2e-carry-protocol-keys.sh` and `e2e-ecies-hosted.sh`
+  (`KEYFILE_V2_DELETES=1`). It runs on pushes to main, on pull requests that touch the code these
+  scripts test, and on release-candidate tags; a failure on main opens an issue. The two Canton
+  scripts now take `JAVA_HOME` when `CANTON_JAVA_HOME` is unset, and allow more time for console
+  waits and polling on a slow host.
 
 ### Security
 
