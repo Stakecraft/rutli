@@ -111,13 +111,18 @@ spec:
         severity: critical
       annotations:
         summary: "R\xFCtli cosigner {{ $labels.instance }} holds a stale share of {{ $labels.key }}"
-        description: "{{ $labels.instance }} found its share of {{ $labels.key }} behind the cluster:\
-          \ a newer committed sharing (epoch) exists that this node never voted for, or its own ceremony\
-          \ record names a newer epoch than its share. Typical cause: a restore from an old backup or\
-          \ a volume snapshot rollback. It refuses to sign or lead for the key, so signing continues on\
-          \ the other cosigners \u2014 at 2-of-3 with no margin left. Fix: restore a current backup of\
-          \ this node (daemon stopped) or re-enrol it; the mark clears by itself once the share is current\
-          \ (docs/ceremonies.md, Signing across epochs). Never copy another node's share file."
+        description: "{{ $labels.instance }} marked its share of {{ $labels.key }} stale and refuses to\
+          \ sign or lead for the key, so signing continues on the other cosigners \u2014 at 2-of-3 with\
+          \ no margin left. First read the reason in the node's log (`this node's share is STALE`). If\
+          \ it says the claim is unconfirmed, one cosigner claims a newer epoch and none that holds this\
+          \ node's epoch answered: a wrong or compromised cosigner can cause that while the others restart\
+          \ or a refresh is still committing. Do not restore anything yet: compare `rutli-cosigner verify-key`\
+          \ across the nodes; the mark clears by itself on the next pass that reaches a cosigner on this\
+          \ node's epoch, at most 30 s later. Otherwise a newer committed sharing exists that this node\
+          \ never voted for, or its own ceremony record names a newer epoch than its share \u2014 typically\
+          \ a restore from an old backup or a volume snapshot rollback. Fix: restore a current backup\
+          \ of this node (daemon stopped) or re-enrol it; the mark clears by itself once the share is\
+          \ current (docs/ceremonies.md, Signing across epochs). Never copy another node's share file."
     - alert: RutliEpochMismatch
       expr: increase(rutli_epoch_mismatch_total[15m]) > 0
       for: 0m

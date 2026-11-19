@@ -171,6 +171,27 @@ All notable changes to Rütli are documented here. Format loosely follows
   for the fix above, not seen in operation: it needs an empty cache (a restart) at the moment of a
   commit. A load that an eviction overtook now reads the share again. The same guard covers
   `discard-partial-key`.
+- **One lying cosigner and one restart could bench both honest cosigners for good.** The
+  stale-share check ignored every peer that reported itself stale, also when that peer held this
+  node's exact sharing. With A and B honest and C claiming a newer epoch: while B restarted, A
+  heard only C and marked itself stale; B came back, ignored A, believed C and marked itself stale
+  too; from then on each ignored the other, signing for the key stopped, and the alerts said both
+  had been rolled back. A peer that holds this node's sharing now vouches for it even when it is
+  marked stale on peers' answers. Two honest nodes on the same sharing that can reach each other
+  recover on their next pass, also when one of them still runs 0.4.0. A peer marked stale by its
+  own ceremony record does not vouch: `KeyEpoch` gains `stale_by_own_record` (field 12) to say so.
+  A 0.4.0 peer leaves it unset and still vouches; 0.4.0 and 0.5.0 nodes keep working together. A
+  stale peer's claim of a newer epoch never marks a node stale, but with no voucher it keeps the
+  previous verdict instead of clearing a mark.
+- **A staged node went stale when a peer claimed an epoch beyond the one it voted for.** The check
+  compared its staged vote only with the newest epoch a peer claimed. Now any live peer on the
+  staged sharing makes it wait for its resolver, as intended.
+- **Stale keys are re-checked every 25–30 s** (random, so nodes do not poll in step) instead of
+  every 5 minutes, and a stale mark is logged again only when the state or the epochs change, not
+  when the wording of the reason does. One cosigner alone can still bench a node while no peer that
+  holds this node's sharing answers (a restart, or a refresh still committing); the stale reason
+  then says the claim is unconfirmed, the mark clears on the next pass that reaches such a peer,
+  and `RutliStaleShare` now leads with what to check before restoring anything.
 - **`scripts/e2e-split-ceremony.sh` passes again, and CI now runs it.** It had failed since
   0.4.0-rc.6: `require_ceremony_intent` became the default with TLS, so its raw Dkg probe on the
   import id was refused for the missing intent before reaching the reserved-id check. The script

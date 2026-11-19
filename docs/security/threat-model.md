@@ -139,6 +139,15 @@ refuse or corrupt its own contributions (routed around by t-subset retry, flagge
 digest within its validity (harmless, capped by `max_shares_per_request`), and refuse to propagate
 tombstones (its own copy of a deleted key stays readable to it — it already had it).
 
+It can also **lie in `KeyEpoch`**, which is unsigned. Claiming a newer epoch of a key benches an
+honest node only while no peer that holds the node's exact sharing answers (the others restarting,
+or a refresh still committing on them): the stale reason says the claim is unconfirmed, and the
+mark clears on the next pass that reaches such a peer, at most 30 s later, even if that peer was
+benched the same way. Echoing a rolled-back node's old sharing keeps that node from being marked
+stale, unless the node's own ceremony record survived the rollback; the node still cannot sign
+with honest peers on the newer epoch (round 1 refuses another epoch). Claiming to be stale by its
+own record only withdraws its own vouching, which it can do anyway by not answering.
+
 It can also **split a DKG or refresh it takes part in** (audit F3): ceremony votes are reported
 unsigned, so it can tell one honest node STAGED and the other ABORTED; one commits, the other aborts,
 and every signature then needs the liar (a refresh meant to evict it does not). With n = 3, f = 1
@@ -313,6 +322,11 @@ epoch, another sharing, or a hosted key over its tombstone even with `--force`, 
 break-glass. A key file renamed to another id, copied from another node or cluster, or of another
 kind fails its v2 header check; a plaintext file under sealing stops the daemon. A genuine older
 file of the same key and node (a rollback) passes the AEAD — the epoch checks are what catch it.
+
+What stays true by design: t nodes restored to the same old sharing without their ceremony records
+(two nodes in 2-of-3) vouch for each other in the stale-share check and can sign with it, because t
+shares of any sharing are the key. A node whose record survived marks itself stale and does not
+vouch for the others (from 0.5.0; a 0.4.0 peer does not say why it is stale and still vouches).
 
 **M4 is closed only once `keyfile.accept_v1: false` on every node** (audit F10). Until then any v1
 file sealed under the node's DEK is accepted (only its in-plaintext key id and the FROST identifier
