@@ -55,3 +55,6 @@ libc = "0.2"
 # with the same features (ring, tls12), so tonic's own TLS is unchanged.
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "ring", "tls12"] }
 rustls-pemfile = "2"
+# Micro-benchmarks only (dev-dependency of core and cosigner; see scripts/bench.sh). Without the
+# default features: no plotting and no rayon, so the benchmark build adds few crates.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }

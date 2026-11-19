@@ -60,3 +60,9 @@ protoc-bin-vendored = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 rcgen = { workspace = true }
+criterion = { workspace = true }
+
+# scripts/bench.sh
+[[bench]]
+name = "sign_path"
+harness = false
