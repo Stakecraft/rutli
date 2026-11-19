@@ -85,6 +85,14 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Fixed
 
+- **A panic in a background pass no longer stops that loop for good.** The ceremony resolver, the
+  epoch check, the nonce-marker pruner and hosted-key anti-entropy each run as a loop in its own
+  task. A panic in one pass ended the task, and nothing showed it after the one panic line in the
+  log: STAGED ceremonies stayed unresolved, or nonce markers piled up, or hosted keys stopped
+  healing. The loop is now restarted 30 s after a panic (anti-entropy then also waits its usual
+  interval before the next sweep). The new counter
+  `rutli_background_loop_restarts_total{loop}` and the alert `RutliBackgroundLoopRestarted` report
+  it. The panic is still a bug to report; its message is in the log line. Closes #127.
 - **The driver reads an approver's key as `public-key-base64`,** the name the docs and
   `approve keygen` print. Up to 0.4.0 it only read `public-key-base-64`, so an `approval` block
   copied from the docs stopped the participant at startup with `Key not found`. Both names are read

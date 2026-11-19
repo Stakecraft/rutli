@@ -163,9 +163,10 @@ pub async fn check_key(node: &Arc<Node>, key_id: &str) -> crate::Result<Verdict>
 }
 
 /// The background check: a pass now (startup), then every [`CHECK_INTERVAL`] — or every
-/// [`RETRY_INTERVAL`] while some key had no usable peer answer.
+/// [`RETRY_INTERVAL`] while some key had no usable peer answer. Restarted after a panic
+/// ([`crate::supervise`]).
 pub fn spawn(node: Arc<Node>) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    crate::supervise::spawn_supervised("epoch_check", node, |node| async move {
         loop {
             let inconclusive = check_all(&node).await;
             tokio::time::sleep(if inconclusive > 0 { RETRY_INTERVAL } else { CHECK_INTERVAL }).await;

@@ -1029,9 +1029,9 @@ impl Node {
     /// The background nonce-marker pruner: a pass now (startup), then every
     /// [`NONCE_PRUNE_INTERVAL`] — sooner while a pass hits [`NONCE_PRUNE_BUDGET`]. Each pass runs on
     /// the blocking pool, and the next one starts only after it returns, so a hung volume parks one
-    /// thread, never a pile of them.
+    /// thread, never a pile of them. Restarted after a panic ([`crate::supervise`]).
     pub fn spawn_nonce_pruner(node: Arc<Node>) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
+        crate::supervise::spawn_supervised("nonce_pruner", node, |node| async move {
             loop {
                 let pass = node
                     .blocking(|n| n.prune_nonce_markers(rutli_frost_core::session::MARKER_RETENTION, NONCE_PRUNE_BUDGET))

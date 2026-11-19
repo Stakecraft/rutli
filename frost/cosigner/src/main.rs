@@ -938,11 +938,11 @@ async fn main() -> Result<()> {
 
     // Anti-entropy: pull hosted keys this node lacks and push ones a peer lacks. This is what
     // heals an under-quorum write and a node restored from a stale backup, so the 2-of-3 write
-    // quorum is only safe with it running.
+    // quorum is only safe with it running, so a panic in a sweep restarts the loop.
     if let Some(h) = cfg.hosted_keys.as_ref().filter(|h| h.enabled) {
-        let (sweep_node, sweep_peers) = (node.clone(), peers.clone());
+        let sweep = (node.clone(), peers.clone());
         let interval = std::time::Duration::from_secs(h.anti_entropy_interval_secs.max(10));
-        tokio::spawn(async move {
+        rutli_cosigner::supervise::spawn_supervised("anti_entropy", sweep, move |(sweep_node, sweep_peers)| async move {
             loop {
                 tokio::time::sleep(interval).await;
                 match rutli_cosigner::orchestrator::anti_entropy_sweep(&sweep_node, &sweep_peers).await {
