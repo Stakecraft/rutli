@@ -412,7 +412,7 @@ mod tests {
         assert!(r.agreed_group_key().is_some());
         assert_eq!(r.refresh_count, Some(0));
         assert_eq!((r.carried_for.as_deref(), r.recorded_usage.as_deref()), (Some("namespace"), Some("namespace")));
-        // The operator's fingerprint is compared in canonical form (Codex L2).
+        // The operator's fingerprint is compared in canonical form (2026-10-15 review, L2).
         let r = check_views(KEY, &format!(" {} ", fp.to_uppercase()), &[1, 2, 3], 2, &v);
         assert!(r.ok, "{:?}", r.problems);
         assert_eq!(r.expected_fingerprint, fp);

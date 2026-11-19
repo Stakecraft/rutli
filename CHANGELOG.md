@@ -1171,7 +1171,7 @@ still to come — see the warnings below; keys born or refreshed on this release
 - `docs/migration.md` §8: a gate before the split — no namespace delegation may name a carried
   key as its target (`--namespace-fingerprint` excludes only the root).
 - **ECIES now fails over past a cosigner that answers `EcdhDerive` with the wrong shared secret**
-  (Codex review of C2, medium, availability). The driver made an endpoint the preferred leader as
+  (second review of C2, medium, availability). The driver made an endpoint the preferred leader as
   soon as its `EcdhDerive` RPC succeeded, before the local MAC/padding check — so one cosigner with
   stale or corrupt EC material under the right key id failed every ECIES decrypt that led from it,
   and stayed preferred. An `EcdhDerive` now counts only once its shared secret opens the ciphertext;
@@ -1183,7 +1183,7 @@ still to come — see the warnings below; keys born or refreshed on this release
   is wiped on every path. No key-extraction impact.
 
 ### Documented
-- **`hosted_keys.decrypt_rate_limit_per_min` is per node, not per cluster** (Codex review of C2,
+- **`hosted_keys.decrypt_rate_limit_per_min` is per node, not per cluster** (second review of C2,
   medium). Each cosigner keeps its own buckets, so a stolen driver certificate that calls every
   node gets n × the budget per key (18 000/min on 3 nodes at the default). Now stated in the config
   doc, the Helm values, `docs/hosted-keys.md` §2 (new table row + sizing: `cluster_budget / n`,

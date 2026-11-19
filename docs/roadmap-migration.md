@@ -26,7 +26,7 @@ namespace or any party ID.
   participant; Splice says participant ids cannot be reused. The working shape is: **new participant
   UID under the same namespace, then move the parties** (Splice `newParticipantIdentifier` +
   `migrateValidatorParty`). Party IDs survive because they live under the namespace. Found
-  2026-10-08 while writing the B0 runbook; deep-reasoner and Codex agree independently.
+  2026-10-08 while writing the B0 runbook; two independent analyses agree.
 - `RegisterKmsSigningKey` only fetches the public key through the driver and checks its spec; there
   is no namespace or existing-identity check (`KmsPrivateCrypto.scala:78-104`).
 - Rütli today: Ed25519 keys are born by DKG only. No import of an existing key as shares, no
@@ -197,8 +197,8 @@ Soak (Track A) continues in the background and may preempt a day here and there.
   `<backup-bucket>`. After a migration, every one of them still holds the whole
   namespace key: purge, and say so in the runbook.
 
-**Reports behind the estimates:** deep-reasoner (read Canton source; A 7–11 d, B 7–10 d, spike
-2–3 d) and Codex (A 19–31 d, B 16–28 d, blind to Canton source). The table above takes the
+**Reports behind the estimates:** two independent estimates, one from the Canton source (A 7–11 d,
+B 7–10 d, spike 2–3 d) and one without it (A 19–31 d, B 16–28 d). The table above takes the
 former's decomposition with part of the latter's buffer.
 
 ## Risks, by severity
