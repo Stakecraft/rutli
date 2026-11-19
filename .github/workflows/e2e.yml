@@ -43,18 +43,23 @@ on:
 
 env:
   CANTON_TAG: v3.6.1
+  # The Canton open-source release the two Canton scripts run, pinned by sha256 (GitHub's digest of
+  # the release asset). To bump: change CANTON_TAG, CANTON_VERSION and CANTON_SHA256 together.
+  CANTON_VERSION: "3.6.1"
+  CANTON_SHA256: 45285086270327cb3a7a095cc501d850f274490032aa2a13ff8811f72ba3bfee
   SBT_OPTS: "-Xmx4g -Xss8m"
 
 # Least privilege; nothing here writes to the repository.
 permissions:
   contents: read
 
-# A new push to a pull request cancels its older run; main and the nightly run always finish.
+# A new push to a pull request cancels its older run. Every other run (main, nightly, manual) has
+# a group of its own, so none replaces or cancels another.
 concurrency:
-  group: e2e-${{ github.event.pull_request.number || github.ref }}
+  group: e2e-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Runner routing as in ci.yml: `vars.CI_RUNNER` (the self-hosted runners) for this repository's own
+# Runner routing as in ci.yml, and stricter: `vars.CI_RUNNER` (the self-hosted runners) for this repository's own
 # branches, `ubuntu-latest` for fork and Dependabot pull requests. The runner's job-started guard
 # (deploy/ci-runner/job-started-guard.sh) enforces the same rule, since a fork PR can edit this file.
 jobs:
@@ -116,20 +121,15 @@ jobs:
         if: steps.canton-api-cache.outputs.cache-hit != 'true'
         run: scripts/publish-canton-deps.sh "$CANTON_TAG"
 
-      # The Canton open-source release the two Canton scripts run (one JVM: sequencer, mediator,
-      # two participants). Pinned by sha256 (GitHub's digest of the release asset). To bump: change
-      # CANTON_VERSION and CANTON_SHA256 together, and CANTON_TAG above.
+      # The Canton release (one JVM: sequencer, mediator, two participants); see CANTON_VERSION.
       - name: Cache Canton release
         id: canton-release-cache
         uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: ~/.cache/rutli-e2e/canton-open-source-3.6.1
-          key: canton-release-${{ runner.os }}-3.6.1-45285086-v1
+          path: ~/.cache/rutli-e2e/canton-open-source-${{ env.CANTON_VERSION }}
+          key: canton-release-${{ runner.os }}-${{ env.CANTON_VERSION }}-${{ env.CANTON_SHA256 }}
       - name: Download Canton release
         if: steps.canton-release-cache.outputs.cache-hit != 'true'
-        env:
-          CANTON_VERSION: "3.6.1"
-          CANTON_SHA256: 45285086270327cb3a7a095cc501d850f274490032aa2a13ff8811f72ba3bfee
         run: |
           set -euo pipefail
           tarball="canton-open-source-${CANTON_VERSION}.tar.gz"
@@ -143,7 +143,7 @@ jobs:
           rm -rf "$tmp"
           test -x "$HOME/.cache/rutli-e2e/canton-open-source-${CANTON_VERSION}/bin/canton"
       - name: CANTON_HOME
-        run: echo "CANTON_HOME=$HOME/.cache/rutli-e2e/canton-open-source-3.6.1" >> "$GITHUB_ENV"
+        run: echo "CANTON_HOME=$HOME/.cache/rutli-e2e/canton-open-source-${CANTON_VERSION}" >> "$GITHUB_ENV"
 
       # grpcurl (the split ceremony's raw gRPC calls) is pinned by version and sha256 and installed
       # without sudo. To bump: set GRPCURL_VERSION, then GRPCURL_SHA256 to the linux_x86_64 line of
@@ -165,13 +165,15 @@ jobs:
           rm -rf "$tmp"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+      # xxd only matters to the split script: without it that step fails, the other two still run.
       - name: Tools the scripts need
         run: |
           missing=""
-          for t in jq openssl xxd grpcurl java sbt cargo; do
+          for t in jq openssl grpcurl java sbt cargo; do
             command -v "$t" >/dev/null || missing="$missing $t"
           done
           [ -z "$missing" ] || { echo "::error::missing on this runner:$missing"; exit 1; }
+          command -v xxd >/dev/null || echo "::warning::xxd is missing: e2e-split-ceremony.sh will fail"
           openssl version
           grpcurl -version
           java -version 2>&1 | head -1
@@ -185,15 +187,17 @@ jobs:
         id: build-jar
         run: sbt -batch driver/assembly
 
-      # Step timeouts: each script takes a few minutes when healthy. They are several times that, so
+      # Timeouts: each script takes a few minutes when healthy. The limits are several times that, so
       # a slow runner does not fail a good run, and short enough that a hung Canton or cosigner
       # (waiting on a peer that never answers) fails the step instead of holding the runner.
+      # `timeout` signals the script's whole process group (the cosigners and the Canton JVM too),
+      # 2 min before the step's own timeout, which only signals the shell and stays as a backstop.
       - name: e2e-split-ceremony.sh
         if: ${{ !cancelled() && steps.build-rust.outcome == 'success' }}
         timeout-minutes: 20
         env:
           TMPDIR: ${{ env.E2E_TMP }}
-        run: scripts/e2e-split-ceremony.sh
+        run: timeout -k 30s 18m scripts/e2e-split-ceremony.sh
 
       - name: e2e-carry-protocol-keys.sh
         if: ${{ !cancelled() && steps.build-rust.outcome == 'success' && steps.build-jar.outcome == 'success' }}
@@ -201,7 +205,7 @@ jobs:
         env:
           TMPDIR: ${{ env.E2E_TMP }}
           SKIP_BUILD: "1"
-        run: scripts/e2e-carry-protocol-keys.sh
+        run: timeout -k 30s 28m scripts/e2e-carry-protocol-keys.sh
 
       - name: e2e-ecies-hosted.sh (with the key-file v2 and delete variant)
         if: ${{ !cancelled() && steps.build-rust.outcome == 'success' && steps.build-jar.outcome == 'success' }}
@@ -210,13 +214,14 @@ jobs:
           TMPDIR: ${{ env.E2E_TMP }}
           SKIP_BUILD: "1"
           KEYFILE_V2_DELETES: "1"
-        run: scripts/e2e-ecies-hosted.sh
+        run: timeout -k 30s 28m scripts/e2e-ecies-hosted.sh
 
-      # Logs, configs, journals and the driver audit of every script, on any failure. Key material
+      # Logs, configs, journals and the driver audit of every script, on any failure (and when the job
+      # timeout cancels a run that is not a superseded pull request run). Key material
       # (certificates and keys, shares, dealer output, key files) stays out: all of it is throwaway
       # test data, but there is no reason to publish it.
       - name: Upload e2e logs
-        if: ${{ failure() }}
+        if: ${{ failure() || (cancelled() && github.event_name != 'pull_request') }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         continue-on-error: true
         with:
