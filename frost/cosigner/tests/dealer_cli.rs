@@ -293,8 +293,8 @@ fn split_key_writes_one_sealed_bundle_per_node_and_a_public_record() {
     refused(&c.dealer("namespace.export-pw.bin", &fp, &["--password-env", PASSWORD_ENV, SWAP]), "exists");
 }
 
-/// Codex L2: the expected fingerprint is compared in canonical form, so the operator may paste it
-/// in upper case; a malformed one is refused before anything is read.
+/// 2026-10-15 review, L2: the expected fingerprint is compared in canonical form, so the operator
+/// may paste it in upper case; a malformed one is refused before anything is read.
 #[test]
 fn an_upper_case_expected_fingerprint_is_the_same_fingerprint() {
     let fp = fingerprint_of("namespace");
@@ -699,9 +699,9 @@ fn an_all_usage_key_is_only_carried_with_the_namespace_the_operator_read() {
     assert_eq!(record["namespace_fingerprint"], ns.as_str());
     c.assert_reconstructs(&sig);
 
-    // Review (Codex) M1: the usage list is unsigned metadata. A namespace key whose container was
-    // relabelled to say [signing] is refused in protocol mode: the namespace is always required,
-    // and the operator's UID says it is this key.
+    // 2026-10-15 review, M1: the usage list is unsigned metadata. A namespace key whose container
+    // was relabelled to say [signing] is refused in protocol mode: the namespace is always
+    // required, and the operator's UID says it is this key.
     let relabelled_root = file("namespace", &[4]);
     let c = Ceremony::for_key(&import_id("sig-", &ns));
     refused(&c.dealer_on(&relabelled_root, &ns, &["--expect-usage", "protocol", SWAP]), "unsigned metadata");

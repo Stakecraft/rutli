@@ -30,15 +30,14 @@ concurrency:
 
 env:
   CARGO_MUTANTS_VERSION: "27.1.0"
-  # The toolchain when frost/rust-toolchain.toml does not name one.
-  RUST_FALLBACK: "1.100.0"
   CARGO_TERM_COLOR: never
 
 jobs:
   mutants:
     name: cargo-mutants (${{ matrix.module }})
-    # Same runner selection as ci.yml: a fork's pull request never reaches the self-hosted runners.
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    # Same runner selection as ci.yml: a fork's or Dependabot's pull request never reaches the
+    # self-hosted runners.
+    runs-on: ${{ github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) && vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 240
     strategy:
       fail-fast: false
@@ -52,14 +51,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - name: Rust version
+      # The workspace's one Rust version, as in ci.yml.
+      - name: Rust version (frost/rust-toolchain.toml)
         id: rust
         run: |
-          v=""
-          if [ -f frost/rust-toolchain.toml ]; then
-            v="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/rust-toolchain.toml)"
-          fi
-          echo "version=${v:-$RUST_FALLBACK}" >> "$GITHUB_OUTPUT"
+          v="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/rust-toolchain.toml)"
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
       # dtolnay/rust-toolchain has no releases: pinned to a commit of its master branch.
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
         with:
@@ -99,7 +97,7 @@ jobs:
     name: Missed mutants per module (JSON)
     needs: mutants
     if: always()
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) && vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
