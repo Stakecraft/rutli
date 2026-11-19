@@ -113,6 +113,7 @@ impl Ids {
             key: kp,
             domain: None,
             allow_expired_ca: false,
+            require_peer_pins: None,
         }
     }
 }
@@ -229,7 +230,7 @@ async fn cluster_with(policy: impl Fn(&Ids, u16) -> SigningPolicyConfig, refresh
                         GrpcPeer::connect_lazy(
                             Identifier::try_from(j as u16 + 1).unwrap(),
                             &endpoints[j],
-                            Some(tls[i].client_for(&format!("cosigner{}", j + 1))),
+                            Some(tls[i].dial_as(&format!("cosigner{}", j + 1), None, 0).unwrap()),
                         )
                         .unwrap(),
                     )
@@ -251,6 +252,7 @@ async fn cluster_with(policy: impl Fn(&Ids, u16) -> SigningPolicyConfig, refresh
             node: nodes[i].clone(),
             allowed_cns: Some(peer_cns.clone()),
             peer_ids: Some(Arc::new((1..=N).map(|k| (format!("cosigner{k}"), k)).collect())),
+            peer_pins: None,
         };
         let server = tonic::transport::Server::builder()
             .tls_config(tls[i].server.clone())

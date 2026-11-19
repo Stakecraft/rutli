@@ -145,6 +145,17 @@ pub const KEY_REPLICAS: &str = "rutli_key_replicas";
 /// `Signer.Health` call; not the same as [`UNREADABLE_KEY_FILES`] (one file failing to unseal).
 pub const KEYSTORE_UNREADABLE: &str = "rutli_keystore_unreadable";
 
+/// Mesh connections refused because the peer's TLS certificate carries a key not pinned in its
+/// `peers[].tls_spki_sha256`. Labels: `direction` = "inbound" (a peer called this node) |
+/// "outbound" (this node dialled a peer). A stale pin after a key roll, or a certificate that is
+/// not that node's: alert on any increase.
+pub const PEER_PIN_REFUSALS: &str = "rutli_peer_pin_refusals_total";
+/// Roster peers this node accepts by certificate name alone (no `tls_spki_sha256`), possible only
+/// with `tls.require_peer_pins: false`. 0 on a fully pinned node.
+pub const PEER_PINS_UNPINNED: &str = "rutli_peer_pins_unpinned";
+/// The `direction` values of `rutli_peer_pin_refusals_total`.
+pub const PEER_PIN_DIRECTIONS: &[&str] = &["inbound", "outbound"];
+
 /// Every `reason` label value `rutli_sign_policy_refusals_total` can carry (the string literals the
 /// `refused(..)` call sites in `intent.rs`, `sign_policy.rs`, `service.rs` and `node.rs` pass).
 /// Primed to 0 at start so the first refusal moves the series from 0 to 1 and `increase()` sees it
@@ -323,11 +334,16 @@ fn prime() {
     metrics::counter!(SIGN_ABORTS).absolute(0);
     metrics::gauge!(PENDING_SIGN_SESSIONS).set(0.0);
     metrics::gauge!(KEYSTORE_UNREADABLE).set(0.0);
+    for direction in PEER_PIN_DIRECTIONS {
+        metrics::counter!(PEER_PIN_REFUSALS, "direction" => *direction).absolute(0);
+    }
 }
 
 /// Register help texts (shown in the Prometheus exposition; harmless without a recorder).
 pub fn describe() {
     describe_counter!(SIGN_REQUESTS, "Leader-side Sign RPC outcomes, by result");
+    describe_counter!(PEER_PIN_REFUSALS, "Mesh connections refused for a TLS key not pinned in peers[].tls_spki_sha256, by direction");
+    describe_gauge!(PEER_PINS_UNPINNED, "Roster peers accepted by certificate name alone (tls.require_peer_pins: false)");
     describe_histogram!(SIGN_DURATION, Unit::Seconds, "Leader-side Sign RPC latency, by result");
     describe_counter!(CEREMONY_REQUESTS, "DKG/refresh ceremony outcomes, by kind and result");
     describe_counter!(CEREMONY_RESOLUTIONS, "Two-phase ceremonies resolved on this node, by result");

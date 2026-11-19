@@ -52,6 +52,8 @@ base64 = { workspace = true }
 # verify-key's TLS probe (tls_probe.rs).
 tokio-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
+# The pinned mesh dial (tls.rs).
+hyper-util = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }
