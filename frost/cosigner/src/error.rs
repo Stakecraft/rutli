@@ -126,6 +126,13 @@ pub enum DaemonError {
     #[error("{0}")]
     PolicyRefused(String),
 
+    /// A refresh this node refuses to take part in because it took part in a refresh of the same
+    /// key less than `signing_policy.refresh_min_interval_secs` ago. FAILED_PRECONDITION with the
+    /// `rutli-error: refresh-too-soon` trailer, so a leader passes a peer's refusal on as this
+    /// error; counted in `rutli_refresh_interval_refusals_total`.
+    #[error("{0}")]
+    RefreshTooSoon(String),
+
     /// This node's sign journal for a key cannot be read or appended to; it refuses to release a
     /// share it cannot journal.
     #[error("sign journal: {0}")]
@@ -165,6 +172,7 @@ pub const PKP_DIGEST_TRAILER: &str = "rutli-pkp-digest";
 const EPOCH_MISMATCH: &str = "epoch-mismatch";
 const STALE_SHARE: &str = "stale-share";
 const POLICY_REFUSED: &str = "policy-refused";
+const REFRESH_TOO_SOON: &str = "refresh-too-soon";
 
 fn with_view(code: tonic::Code, message: String, reason: &'static str, view: &KeyVersion) -> tonic::Status {
     let mut md = tonic::metadata::MetadataMap::new();
@@ -205,11 +213,23 @@ impl DaemonError {
                 reason: status.message().to_owned(),
             },
             (Some(POLICY_REFUSED), _) => DaemonError::PolicyRefused(status.message().to_owned()),
+            (Some(REFRESH_TOO_SOON), _) => DaemonError::RefreshTooSoon(status.message().to_owned()),
             _ if status.code() == tonic::Code::ResourceExhausted => {
                 DaemonError::RateLimited(status.message().to_owned())
             }
             _ => DaemonError::Status(status),
         }
+    }
+}
+
+/// A peer's refusal of a ceremony fence: [`DaemonError::RefreshTooSoon`] when the status carries
+/// that trailer, else the plain status (as before).
+pub fn from_fence_status(status: tonic::Status) -> DaemonError {
+    let too_soon = status.metadata().get(ERROR_TRAILER).and_then(|v| v.to_str().ok()) == Some(REFRESH_TOO_SOON);
+    if too_soon {
+        DaemonError::RefreshTooSoon(status.message().to_owned())
+    } else {
+        DaemonError::Status(status)
     }
 }
 
@@ -226,6 +246,11 @@ impl From<DaemonError> for tonic::Status {
                 let mut md = tonic::metadata::MetadataMap::new();
                 md.insert(ERROR_TRAILER, tonic::metadata::MetadataValue::from_static(POLICY_REFUSED));
                 tonic::Status::with_metadata(tonic::Code::PermissionDenied, e.to_string(), md)
+            }
+            DaemonError::RefreshTooSoon(_) => {
+                let mut md = tonic::metadata::MetadataMap::new();
+                md.insert(ERROR_TRAILER, tonic::metadata::MetadataValue::from_static(REFRESH_TOO_SOON));
+                tonic::Status::with_metadata(tonic::Code::FailedPrecondition, e.to_string(), md)
             }
             DaemonError::Journal(_) => tonic::Status::unavailable(e.to_string()),
             DaemonError::UnknownKey(_) | DaemonError::UnknownDkg(_) => {
@@ -302,6 +327,13 @@ mod tests {
         // A round 2 for a session this node no longer holds: ABORTED, not INTERNAL.
         let lost = DaemonError::Core(rutli_frost_core::CoreError::UnknownSession("sign-1".into()));
         assert_eq!(tonic::Status::from(lost).code(), tonic::Code::Aborted);
+
+        // A refresh refused for coming too soon keeps its kind across the mesh.
+        let status = tonic::Status::from(DaemonError::RefreshTooSoon("refresh of k refused".into()));
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert!(matches!(from_fence_status(status.clone()), DaemonError::RefreshTooSoon(m) if m == "refresh of k refused"));
+        assert!(matches!(DaemonError::from_peer_status(status, "k", None), DaemonError::RefreshTooSoon(_)));
+        assert!(matches!(from_fence_status(tonic::Status::failed_precondition("x")), DaemonError::Status(_)));
 
         // Any other refusal stays a plain status (an older peer, another reason).
         let plain = tonic::Status::failed_precondition("something else");

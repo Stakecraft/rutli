@@ -798,6 +798,7 @@ async fn main() -> Result<()> {
             require_ceremony_intent = policy.ceremony_intent_required(cfg.tls.is_some()),
             signer_acl_required = policy.signer_acl_required,
             signer_may_refresh = policy.signer_may_refresh,
+            refresh_min_interval_secs = policy.refresh_min_interval_secs,
             acl_entries = policy.signer_acl.len(),
             pinned_cns = policy.signer_pins.len(),
             approval_rules = policy.rules.len(),
@@ -840,6 +841,27 @@ async fn main() -> Result<()> {
             tracing::info!(
                 "signing_policy.signer_may_refresh is on: the driver certificate may still call Refresh \
                  — turn it off once the refresh job uses a refresh_allowlist certificate"
+            );
+        }
+        if policy.refresh_min_interval_secs == 0 {
+            tracing::warn!(
+                "signing_policy.refresh_min_interval_secs is 0: this node takes part in refreshes of a key \
+                 as often as asked, so a stolen refresher (or driver) certificate can move the key to new \
+                 epochs faster than backups follow — set it back (default 72 h; docs/ceremonies.md)"
+            );
+        }
+        if let (Some(at), Some(ms)) = (&policy.refresh_interval_waived_at, policy.refresh_waiver_ms()) {
+            // Always at warn, live or lapsed, so a waiver left in the config is seen.
+            let lapses_ms = ms + rutli_cosigner::config::REFRESH_WAIVER_LIFETIME_MS;
+            let lapses_at = rutli_cosigner::audit_check::fmt_ms(lapses_ms);
+            let state = if rutli_cosigner::intent::now_ms() < lapses_ms { "active" } else { "lapsed, no effect" };
+            tracing::warn!(
+                waived_at = %at,
+                lapses_at = %lapses_at,
+                state,
+                "signing_policy.refresh_interval_waived_at is present: from that time until 24 h after it \
+                 (up to clock_skew_secs early is accepted), one refresh of each key is let through \
+                 refresh_min_interval_secs — remove it from every node's config once the incident refresh is done"
             );
         }
         Arc::new(rutli_cosigner::sign_policy::SignGuard::new(

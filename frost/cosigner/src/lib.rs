@@ -34,6 +34,7 @@ pub mod node;
 pub mod orchestrator;
 pub mod peer;
 pub mod ratelimit;
+pub mod refresh_interval;
 pub mod request_auth;
 pub mod restore;
 pub mod seal;

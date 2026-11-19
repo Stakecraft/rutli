@@ -438,11 +438,8 @@ impl Node {
                 Err(_) => false,
             };
             if promoted {
-                let done = CeremonyRecord {
-                    state: RecordState::Committed,
-                    updated_ms: crate::ceremony_record::now_ms(),
-                    ..rec.clone()
-                };
+                let now = crate::ceremony_record::now_ms();
+                let done = CeremonyRecord { state: RecordState::Committed, updated_ms: now, resolved_ms: now, ..rec.clone() };
                 self.record_store.write(Some(&rec), &done)?;
                 records.insert(done.ceremony_id.clone(), done);
                 tracing::info!(
@@ -1569,6 +1566,7 @@ impl Node {
             )));
         }
         self.refuse_if_staged(key_id)?;
+        let mut waived = None;
         match kind {
             CeremonyKind::Dkg => {
                 if self.keystore.exists(key_id) {
@@ -1576,6 +1574,9 @@ impl Node {
                 }
             }
             CeremonyKind::Refresh => {
+                // Before the share is even unsealed, and before any fence mark or guard.
+                let requested_by = verified.as_ref().map(|v| v.signer_cn.as_str());
+                waived = self.check_refresh_interval(key_id, Some(ceremony_id), requested_by, leader)?;
                 let share = self.keystore.load(key_id)?;
                 if let Some((epoch, digest)) = expect {
                     let mine = share.pkp_digest()?;
@@ -1597,6 +1598,7 @@ impl Node {
         // A fence without an intent (allowed only where intents are not required) never writes a
         // mark, but it is refused under a marked id all the same: otherwise a node that opted out
         // would let any peer re-fence a client's ceremony once its leader's guard went.
+        let requested_by = verified.as_ref().map(|v| v.signer_cn.clone());
         match verified {
             Some(_) => self.mark_fenced(ceremony_id, key_id, leader)?,
             None => self.refuse_if_fenced(ceremony_id)?,
@@ -1610,6 +1612,9 @@ impl Node {
                 "ceremony {ceremony_id} already holds the guard for {key_id} on this node — a second \
                  fence under one ceremony id (a second leader for one client intent) is refused"
             )));
+        }
+        if let Some((last, at)) = &waived {
+            self.note_waiver_used(key_id, ceremony_id, last, *at, requested_by.as_deref(), leader);
         }
         Ok(())
     }
@@ -1665,6 +1670,103 @@ impl Node {
             )));
         }
         Ok(())
+    }
+
+    /// The refresh-interval verdict for `key_id` on this node now
+    /// ([`crate::refresh_interval::verdict`]). No signing policy (a node built by hand, as some
+    /// tests do; the daemon always installs one): no limit, as no intents.
+    pub fn refresh_interval_verdict(&self, key_id: &str) -> Result<crate::refresh_interval::Verdict> {
+        let Some(g) = &self.sign_guard else { return Ok(crate::refresh_interval::Verdict::Allowed) };
+        let policy = g.verifier().policy();
+        let last = crate::refresh_interval::last_counted(self.book()?.records.values(), key_id);
+        Ok(crate::refresh_interval::verdict(
+            last.as_ref(),
+            crate::ceremony_record::now_ms(),
+            policy.refresh_min_interval_secs,
+            policy.refresh_waiver_ms(),
+        ))
+    }
+
+    /// The leader's own refresh-interval check, on `Signer.Refresh` before it contacts any peer:
+    /// a refresh this node would refuse at its own fence is refused before anything starts.
+    /// `requested_by`: the calling client's CN, for the log.
+    pub fn refuse_refresh_too_soon(&self, key_id: &str, requested_by: Option<&str>) -> Result<()> {
+        self.check_refresh_interval(key_id, None, requested_by, None).map(|_| ())
+    }
+
+    /// Log and count a refresh this node let through the interval under the operator's waiver —
+    /// called only once the fence (or part 1's session) was actually taken under it, so a burst of
+    /// fences for a waived key counts the one that got the guard, not every attempt.
+    fn note_waiver_used(
+        &self,
+        key_id: &str,
+        ceremony_id: &str,
+        w: &crate::refresh_interval::CountedRefresh,
+        waived_at_ms: u64,
+        requested_by: Option<&str>,
+        leader: Option<&str>,
+    ) {
+        metrics::counter!(crate::metrics::REFRESH_INTERVAL_WAIVED).increment(1);
+        tracing::warn!(
+            key_id,
+            ceremony_id,
+            node = self.index().unwrap_or_default(),
+            requested_by = requested_by.unwrap_or("<no intent>"),
+            leader = leader.unwrap_or("<this node>"),
+            last_refresh = %w.ceremony_id,
+            last_refresh_at = %crate::audit_check::fmt_ms(w.at_ms),
+            waived_at = %crate::audit_check::fmt_ms(waived_at_ms),
+            "refresh inside refresh_min_interval_secs let through by \
+             signing_policy.refresh_interval_waived_at (one per key after that time) — remove \
+             the waiver from every node's config once the incident refresh is done"
+        );
+    }
+
+    /// Refuse a refresh of `key_id` within `signing_policy.refresh_min_interval_secs` of the last
+    /// one this node took part in ([`crate::refresh_interval`]), before any guard, fence mark,
+    /// session or crypto. `ceremony_id`: the fence or part 1 asking (`None`: the leader's own
+    /// check on `Signer.Refresh`). `Ok(Some(..))`: let through by the waiver — the caller notes it
+    /// ([`Node::note_waiver_used`]) once it holds the guard. Refusals are counted every time and
+    /// logged at most once a minute per key.
+    fn check_refresh_interval(
+        &self,
+        key_id: &str,
+        ceremony_id: Option<&str>,
+        requested_by: Option<&str>,
+        leader: Option<&str>,
+    ) -> Result<Option<(crate::refresh_interval::CountedRefresh, u64)>> {
+        use crate::refresh_interval::Verdict;
+        match self.refresh_interval_verdict(key_id)? {
+            Verdict::Allowed => Ok(None),
+            Verdict::Waived { last, waived_at_ms } => Ok(Some((last, waived_at_ms))),
+            Verdict::TooSoon { last, next_ms } => {
+                metrics::counter!(crate::metrics::REFRESH_INTERVAL_REFUSALS).increment(1);
+                let interval = self.sign_guard.as_ref().map_or(0, |g| g.verifier().policy().refresh_min_interval_secs);
+                let msg = format!(
+                    "refresh of {key_id} refused by node {}: it took part in refresh {} at {}, less than \
+                     signing_policy.refresh_min_interval_secs ({interval} s) ago; it takes part in the next \
+                     refresh of the key from {}. An incident refresh that cannot wait needs \
+                     signing_policy.refresh_interval_waived_at on every node (docs/ceremonies.md, \
+                     \"Refresh interval\")",
+                    self.index().unwrap_or_default(),
+                    last.ceremony_id,
+                    crate::audit_check::fmt_ms(last.at_ms),
+                    crate::audit_check::fmt_ms(next_ms),
+                );
+                if refresh_refusal_log_due(key_id) {
+                    tracing::warn!(
+                        key_id,
+                        ceremony_id = ceremony_id.unwrap_or("<leader pre-check>"),
+                        requested_by = requested_by.unwrap_or("<no intent>"),
+                        leader = leader.unwrap_or("<this node>"),
+                        last_refresh = %last.ceremony_id,
+                        "{msg} — outside a documented incident nobody refreshes this often: check who holds \
+                         the refresher (and, while signer_may_refresh is on, the driver) certificate"
+                    );
+                }
+                Err(DaemonError::RefreshTooSoon(msg))
+            }
+        }
     }
 
     fn refuse_if_staged(&self, key_id: &str) -> Result<()> {
@@ -1869,7 +1971,9 @@ impl Node {
     ) -> Result<round1::Package> {
         crate::keystore::validate_ceremony_id(ceremony_id)?;
         crate::keystore::validate_key_id(key_id)?;
-        let verified = self.authorize_ceremony(kind, key_id, ceremony_id, intent)?.is_some();
+        let verified_by = self.authorize_ceremony(kind, key_id, ceremony_id, intent)?.map(|v| v.signer_cn);
+        let verified = verified_by.is_some();
+        let mut waived = None;
         let old = match kind {
             CeremonyKind::Dkg => {
                 // `…frost-import-…` ids belong to the split ceremony. Refusing them here, on every
@@ -1888,13 +1992,21 @@ impl Node {
                 if !self.keystore.exists(key_id) {
                     return Err(DaemonError::UnknownKey(key_id.to_string()));
                 }
+                // Again at part 1: where intents are not required, part 1 may run with no fence.
+                waived = self.check_refresh_interval(key_id, Some(ceremony_id), verified_by.as_deref(), leader)?;
                 // No reverse fence over in-flight signs: see `ceremony_fence`.
                 let share = self.keystore.load(key_id)?;
                 Some((share.epoch, share.pkp_digest()?))
             }
         };
         self.check_roster(roster)?;
-        self.start_session(ceremony_id, key_id, kind, roster.to_vec(), old, leader, verified)
+        // A waiver use is noted where the guard is taken: here only when no fence took it first.
+        let fenced = self.guards().get(key_id).is_some_and(|g| g.owner == ceremony_id);
+        let package = self.start_session(ceremony_id, key_id, kind, roster.to_vec(), old, leader, verified)?;
+        if let (Some((last, at)), false) = (&waived, fenced) {
+            self.note_waiver_used(key_id, ceremony_id, last, *at, verified_by.as_deref(), leader);
+        }
+        Ok(package)
     }
 
     /// Part 2: check the leader's round-1 map — exactly the roster, and this node's own package
@@ -2215,6 +2327,7 @@ impl Node {
             peers_settled: false,
             created_ms: now,
             updated_ms: now,
+            resolved_ms: 0,
             quarantined: false,
             split_detected_ms: 0,
             unknown_asked_by: None,
@@ -2511,6 +2624,7 @@ impl Node {
             state,
             reason,
             updated_ms: now,
+            resolved_ms: now,
             quarantined: aborted && quarantine,
             split_detected_ms: if aborted && split { now } else { 0 },
             ..rec.clone()
@@ -2720,6 +2834,33 @@ impl Node {
 
     /// Ceremonies this node aborted while a peer reports them COMMITTED, quarantine still held:
     /// `rutli_ceremonies_split`.
+    /// Publish `rutli_refreshes_6d{key}`: refreshes of each key this node committed in the last
+    /// 6 days (by commit time), from its ceremony records (a key whose refreshes aged out reads 0).
+    pub fn publish_refresh_gauge(&self) {
+        let Ok(book) = self.book() else { return };
+        let since = crate::ceremony_record::now_ms().saturating_sub(6 * 24 * 3600 * 1000);
+        let keys: std::collections::BTreeSet<&str> =
+            book.records.values().filter(|r| r.kind == "refresh" && !r.key_id.is_empty()).map(|r| r.key_id.as_str()).collect();
+        let counts: Vec<(String, usize)> = keys
+            .into_iter()
+            .map(|k| (k.to_string(), crate::refresh_interval::committed_since(book.records.values(), k, since)))
+            .collect();
+        drop(book);
+        // Keys published before whose records have since been garbage-collected read 0, not stale.
+        static PUBLISHED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+            std::sync::Mutex::new(std::collections::BTreeSet::new());
+        let mut published = PUBLISHED.lock().unwrap_or_else(|p| p.into_inner());
+        let gone: Vec<String> = published.iter().filter(|k| !counts.iter().any(|(c, _)| c == *k)).cloned().collect();
+        for key in gone {
+            metrics::gauge!(crate::metrics::REFRESHES_6D, "key" => key.clone()).set(0.0);
+            published.remove(&key);
+        }
+        for (key, n) in counts {
+            metrics::gauge!(crate::metrics::REFRESHES_6D, "key" => key.clone()).set(n as f64);
+            published.insert(key);
+        }
+    }
+
     pub fn split_count(&self) -> usize {
         self.quarantined_records().iter().filter(|r| r.split_detected_ms != 0).count()
     }
@@ -2754,6 +2895,7 @@ impl Node {
             recovered: true,
             reason: format!("recovered by the operator after: {}", rec.reason),
             updated_ms: now,
+            resolved_ms: now,
             ..rec.clone()
         };
         self.record_store.write_recovery(&rec, &done)?;
@@ -2878,6 +3020,21 @@ pub struct StagedOutcome {
 
 /// Hosted keys may never live under an id reserved for the split ceremony (`…frost-import-…`).
 /// The refusal for a write under a tombstoned id: ALREADY_EXISTS, naming the break-glass.
+/// Whether a refresh-interval refusal for `key_id` should be logged now: at most once a minute per
+/// key (every refusal is counted in `rutli_refresh_interval_refusals_total`), so a client looping
+/// refreshes cannot flood the log.
+fn refresh_refusal_log_due(key_id: &str) -> bool {
+    static LAST: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>> = std::sync::Mutex::new(None);
+    let minute = crate::ceremony_record::now_ms() / 60_000;
+    let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
+    let map = last.get_or_insert_with(Default::default);
+    // Key ids that reach this point passed validate_key_id and exist here; bound the map anyway.
+    if map.len() > 256 {
+        map.clear();
+    }
+    map.insert(key_id.to_string(), minute) != Some(minute)
+}
+
 pub(crate) fn tombstoned(key_id: &str) -> DaemonError {
     DaemonError::KeyExists(format!(
         "{key_id} is tombstoned (deleted): hosted key ids are never reused — undelete it \

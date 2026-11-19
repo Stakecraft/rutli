@@ -79,6 +79,19 @@ pub const SIGN_JOURNAL_ERRORS: &str = "rutli_sign_journal_errors_total";
 /// signature, cluster, purpose, key, expiry, acl, malformed, ceremony-id, missing). A refusal on the
 /// mesh path means a leader asked for a ceremony no authorized client requested: alert on it.
 pub const CEREMONY_INTENT_REFUSALS: &str = "rutli_ceremony_intent_refusals_total";
+/// Counter: refreshes this node refused to take part in (as leader, at a fence or at part 1)
+/// because it took part in a refresh of the same key less than
+/// `signing_policy.refresh_min_interval_secs` ago. Outside a documented incident nobody should
+/// refresh that often: alert on it.
+pub const REFRESH_INTERVAL_REFUSALS: &str = "rutli_refresh_interval_refusals_total";
+/// Counter: refreshes this node let through the interval because of
+/// `signing_policy.refresh_interval_waived_at` (the operator's incident path).
+pub const REFRESH_INTERVAL_WAIVED: &str = "rutli_refresh_interval_waived_total";
+/// Gauge, label `key`: refreshes of the key this node committed in the last 6 days (by commit
+/// time), from its ceremony records (so it survives a restart). The shipped schedule is weekly; the
+/// window is a day shorter so a weekly run that lands a little early is not two in the window.
+/// Above 1 means a refresh outside the schedule.
+pub const REFRESHES_6D: &str = "rutli_refreshes_6d";
 /// Counter: DKG/refresh fences and part 1s this node accepted without a ceremony intent (a leader
 /// or client that predates them), because `signing_policy.require_ceremony_intent` is off.
 pub const CEREMONY_INTENT_ABSENT: &str = "rutli_ceremony_intent_absent_total";
@@ -294,6 +307,8 @@ fn prime() {
     metrics::counter!(CEREMONY_SIGN_TEST_RATE_LIMITED).absolute(0);
     metrics::counter!(SIGN_INTENT_ABSENT).absolute(0);
     metrics::counter!(CEREMONY_INTENT_ABSENT).absolute(0);
+    metrics::counter!(REFRESH_INTERVAL_REFUSALS).absolute(0);
+    metrics::counter!(REFRESH_INTERVAL_WAIVED).absolute(0);
     metrics::counter!(SIGN_RATE_LIMITED).absolute(0);
     metrics::counter!(SIGNER_ACL_ABSENT).absolute(0);
     metrics::counter!(SIGN_JOURNAL_ENTRIES).absolute(0);
@@ -341,6 +356,15 @@ pub fn describe() {
     describe_counter!(SIGN_INTENT_ABSENT, "Sign rounds accepted without a signing intent (require_intent off)");
     describe_counter!(SIGN_POLICY_REFUSALS, "Signing-policy refusals at this node, by reason");
     describe_counter!(CEREMONY_INTENT_REFUSALS, "DKG/refresh ceremony intents refused at this node, by reason");
+    describe_counter!(
+        REFRESH_INTERVAL_REFUSALS,
+        "Refreshes refused at this node because the key was refreshed less than refresh_min_interval_secs ago"
+    );
+    describe_counter!(
+        REFRESH_INTERVAL_WAIVED,
+        "Refreshes let through the interval at this node by refresh_interval_waived_at"
+    );
+    describe_gauge!(REFRESHES_6D, "Refreshes of the key this node committed in the last 6 days");
     describe_counter!(
         CEREMONY_INTENT_ABSENT,
         "DKG/refresh fences and part 1s accepted without a ceremony intent (require_ceremony_intent off)"
