@@ -23,6 +23,9 @@ pub struct Outcome {
     /// The cluster answered OK with something that does not verify (a bad signature, a wrong
     /// ECDH secret, another group key).
     pub bad_answer: bool,
+    /// The cosigner that gave the final answer (the leader of a signature); `None` if the
+    /// request never reached one.
+    pub leader: Option<String>,
 }
 
 /// The upper-case name of a gRPC code, as the driver's audit log and the cosigner docs write it.
@@ -88,6 +91,16 @@ pub struct ClientReport {
     /// Successful requests per second of wall time.
     pub ok_per_second: f64,
     pub timeline: Vec<Second>,
+    /// Per cosigner that gave the final answer: its successes, its errors and the latency of
+    /// its successes (a request that failed over counts for the cosigner it ended on).
+    pub by_leader: BTreeMap<String, LeaderReport>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, PartialEq)]
+pub struct LeaderReport {
+    pub ok: u64,
+    pub errors: u64,
+    pub latency: Latency,
 }
 
 /// Collects outcomes during a run.
@@ -117,7 +130,16 @@ impl Recorder {
         let mut ok_micros: Vec<u64> = Vec::new();
         let mut timeline: BTreeMap<u64, Second> = BTreeMap::new();
         let mut bad_answers = 0;
+        let mut leaders: BTreeMap<String, (u64, Vec<u64>)> = BTreeMap::new();
         for o in &self.outcomes {
+            if let Some(name) = &o.leader {
+                let entry = leaders.entry(name.clone()).or_default();
+                if o.code == "OK" && !o.bad_answer {
+                    entry.1.push(o.latency.as_micros() as u64);
+                } else {
+                    entry.0 += 1;
+                }
+            }
             let sec = timeline.entry(o.at.as_secs()).or_insert_with(|| Second { t: o.at.as_secs(), ..Default::default() });
             if o.code == "OK" && !o.bad_answer {
                 ok_micros.push(o.latency.as_micros() as u64);
@@ -152,6 +174,12 @@ impl Recorder {
             wall_seconds: round3(wall_seconds),
             ok_per_second: if wall_seconds > 0.0 { round3(ok as f64 / wall_seconds) } else { 0.0 },
             timeline: timeline.into_values().collect(),
+            by_leader: leaders
+                .into_iter()
+                .map(|(name, (errors, mut micros))| {
+                    (name, LeaderReport { ok: micros.len() as u64, errors, latency: latency(&mut micros) })
+                })
+                .collect(),
         }
     }
 }
@@ -197,6 +225,7 @@ mod tests {
             code,
             failovers: Vec::new(),
             bad_answer: false,
+            leader: Some(if latency_ms.is_multiple_of(2) { "cosigner1" } else { "cosigner2" }.to_string()),
         }
     }
 
@@ -243,5 +272,10 @@ mod tests {
         assert_eq!(rep.timeline.len(), 2);
         assert_eq!((rep.timeline[0].ok, rep.timeline[0].errors, rep.timeline[0].max_ms), (2, 0, 30.0));
         assert_eq!((rep.timeline[1].ok, rep.timeline[1].errors, rep.timeline[1].max_ms), (1, 4, 40.0));
+        // Split by the cosigner that answered (even latencies cosigner1, odd cosigner2 here).
+        let c1 = &rep.by_leader["cosigner1"];
+        assert_eq!((c1.ok, c1.errors, c1.latency.max_ms), (3, 2, 40.0));
+        let c2 = &rep.by_leader["cosigner2"];
+        assert_eq!((c2.ok, c2.errors), (0, 2));
     }
 }

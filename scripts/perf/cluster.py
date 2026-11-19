@@ -18,7 +18,8 @@ Suites:
   scenarios  the scenarios of scripts/perf/run.py: steady, burst, clients, ecies, a cosigner pod
              killed under load, cold cache, and the limits.
   disrupt    a cosigner's node lost, its data volume lost, a network partition between two
-             cosigners' nodes, added network delay — each under the steady stream, through the
+             cosigners' nodes, one cosigner cut off from both others, added network delay — each
+             under the steady stream, through the
              provider hooks below. Without a hook, a node loss falls back to cordoning the node
              and deleting the pod; the other three are reported as skipped.
   keys       the key-count dimension: for each count of the profile, that many FROST keys and
@@ -258,6 +259,12 @@ class Suite(base.Runner):
         r, _ = self.scenario(name, body, restarted=tuple(victims), allowed=allowed)
         # How long after the disruption ended the cluster took to sign within the SLO again.
         r["recovery_secs"] = settled[0]
+        # Latency split by the cosigner that answered: which leaders waited on the disruption.
+        if r["loads"] and "failed" not in r["loads"][0]:
+            for leader, rep in sorted(r["loads"][0].get("client", {}).get("by_leader", {}).items()):
+                lat = rep.get("latency", {})
+                log(f"  answered by {leader}: {rep.get('ok')} ok, {rep.get('errors')} errors, "
+                    f"p50 {lat.get('p50_ms')} ms, p99 {lat.get('p99_ms')} ms")
         self.close(r)
 
     def victims(self):
@@ -307,15 +314,30 @@ class Suite(base.Runner):
         else:
             self.skip("lost-volume", "HOOK_DETACH_VOLUME is not set")
 
-        a, b = order[0], order[1] if len(order) > 1 else order[0]
-        na, nb = c.node_of(a), c.node_of(b)
+        a, b, third = order[0], order[1 % len(order)], order[2 % len(order)]
+        na, nb, nc = c.node_of(a), c.node_of(b), c.node_of(third)
         if os.environ.get("HOOK_PARTITION"):
             # Two cosigners lose each other; each still reaches the third, so every leader still
             # has a threshold. Signatures through a leader on either side must succeed.
             self.under_load("partition", [], lambda: self.hook("HOOK_PARTITION", "start", na, nb),
                             lambda: self.hook("HOOK_PARTITION", "stop", na, nb))
+
+            # One cosigner cut off from both others, as when a data centre loses its links: it
+            # cannot reach a threshold, so signatures it leads fail and clients move on; the other
+            # two keep signing with each other.
+            def isolate():
+                self.hook("HOOK_PARTITION", "start", na, nb)
+                self.hook("HOOK_PARTITION", "start", na, nc)
+
+            def reconnect():
+                try:
+                    self.hook("HOOK_PARTITION", "stop", na, nb)
+                finally:
+                    self.hook("HOOK_PARTITION", "stop", na, nc)
+            self.under_load("partition-isolated", [], isolate, reconnect)
         else:
             self.skip("partition", "HOOK_PARTITION is not set")
+            self.skip("partition-isolated", "HOOK_PARTITION is not set")
 
         if os.environ.get("HOOK_NET_DELAY"):
             ms = str(self.args.net_delay_ms)

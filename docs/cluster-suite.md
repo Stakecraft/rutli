@@ -58,7 +58,7 @@ of the same name.
 |---|---|---|
 | `upgrade` | `helm upgrade` from the previous release to `--upgrade-image` under 5 signatures a second | a key is missing or changed afterwards, or does not sign; signatures that fail while the cosigners restart are counted, not forbidden (the chart restarts all three at once) |
 | `scenarios` | the scenarios of [`load-testing.md`](load-testing.md): steady stream, burst, several clients, ECIES, a cosigner pod killed under load, the cold-cache restart, and the limits | as described there |
-| `disrupt` | under the steady stream: a node lost, a data volume lost, a partition between two cosigners' nodes, added network delay; afterwards, rounds of signatures until the cluster signs within the SLO again (`recovery_secs`) | a signature fails, a cosigner is not healthy afterwards, or the cluster does not sign normally again within `--settle-secs` (600); a step without its hook is reported as skipped |
+| `disrupt` | under the steady stream: a node lost, a data volume lost, a partition between two cosigners' nodes (`partition`), one cosigner cut off from both others (`partition-isolated`, as when a data centre loses its links), added network delay; afterwards, rounds of signatures until the cluster signs within the SLO again (`recovery_secs`) | a signature fails, a cosigner is not healthy afterwards, or the cluster does not sign normally again within `--settle-secs` (600); a step without its hook is reported as skipped |
 | `keys` | for each key count of the profile (1, 10, 100): that many FROST keys and hosted keys over ten tenant prefixes (`perf-t<n>-…`), sign latency over all of them, and each cosigner's Peer API `ListKeys` time | a setup, signature or listing fails |
 | `ramp` | the profile's baseline load × 1, 3, 10, 30, 100, … for `step_secs` each | never: the ramp stops at the first step over the SLO or with an error, and reports the last step that passed as the **headroom factor** |
 
@@ -80,6 +80,9 @@ scenario's load runs, and then with `stop`, also when `start` or the load failed
 | `HOOK_DETACH_VOLUME` | `start\|stop NODE NAMESPACE/PVC` | the volume behind the claim disappears from the node / comes back |
 | `HOOK_PARTITION` | `start\|stop NODE_A NODE_B` | no traffic between the two nodes / restored |
 | `HOOK_NET_DELAY` | `start\|stop MS NODE...` | MS milliseconds added to the nodes' traffic / removed |
+
+Each disruption's result splits the latency by the cosigner that answered (`by_leader`), which
+shows which leaders waited on the disruption.
 
 Without `HOOK_KILL_NODE` the suite falls back to Kubernetes alone (`node-cordon`): it cordons the
 cosigner's node and deletes its pod, which then stays Pending (its volume and the other cosigners

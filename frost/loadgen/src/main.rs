@@ -265,16 +265,23 @@ struct Client {
     leader: AtomicUsize,
 }
 
+/// How one request travelled: the codes that made the client move to another cosigner, and the
+/// cosigner (index into the targets) that gave the final answer.
+#[derive(Default)]
+struct Route {
+    failovers: Vec<&'static str>,
+    leader: Option<usize>,
+}
+
 impl Client {
     /// Run `call` against the leader; while the answer is [`not_serving`] and `failover` is on,
-    /// move to the next cosigner and stay there. Returns the final answer and the codes that
-    /// caused each move.
+    /// move to the next cosigner and stay there. Returns the final answer and its [`Route`].
     async fn call<T, Fut>(
         &self,
         failover: bool,
         limit: Duration,
         call: impl Fn(SignerClient<Channel>) -> Fut,
-    ) -> (Result<T, tonic::Status>, Vec<&'static str>)
+    ) -> (Result<T, tonic::Status>, Route)
     where
         Fut: std::future::Future<Output = Result<tonic::Response<T>, tonic::Status>>,
     {
@@ -288,7 +295,7 @@ impl Client {
                     at = (at + 1) % n;
                     self.leader.store(at, Ordering::Relaxed);
                 }
-                answer => return (answer, moves),
+                answer => return (answer, Route { failovers: moves, leader: Some(at) }),
             }
         }
     }
@@ -340,8 +347,8 @@ impl Run {
         let failover = self.failover && self.op.may_fail_over();
         let at = self.started.elapsed();
         let begun = Instant::now();
-        // (the final answer as "what was wrong with an OK", the codes of the moves)
-        let (answer, moves): (Result<Option<String>, tonic::Status>, Vec<&'static str>) = match &self.op {
+        // (the final answer as "what was wrong with an OK", how it travelled)
+        let (answer, moves): (Result<Option<String>, tonic::Status>, Route) = match &self.op {
             Op::Sign { keys } => {
                 let (key_id, group) = &keys[(seq % keys.len() as u64) as usize];
                 // Canton's sign payload: 0x1220 ‖ a SHA-256 digest (docs/wire-contract.md).
@@ -361,7 +368,7 @@ impl Run {
                     approvals: Vec::new(),
                 };
                 match intent::sign_intent(&self.ctx.signer, &unsigned) {
-                    Err(e) => (Err(tonic::Status::internal(format!("client: {e}"))), Vec::new()),
+                    Err(e) => (Err(tonic::Status::internal(format!("client: {e}"))), Route::default()),
                     Ok(signed) => {
                         // One intent for the call: a failover presents the same one, as the
                         // driver does, so the cosigners charge it once.
@@ -393,7 +400,7 @@ impl Run {
             Op::Dkg { prefix, same_key, first_key } => {
                 let key_id = if *same_key { prefix.clone() } else { format!("{prefix}-{seq}") };
                 match self.ceremony_intent(CeremonyKind::Dkg, &key_id) {
-                    Err(status) => (Err(status), Vec::new()),
+                    Err(status) => (Err(status), Route::default()),
                     Ok(signed) => {
                         let request = pb::DkgRequest { key_id, intent: Some(signed) };
                         let (answer, moves) = client
@@ -420,7 +427,7 @@ impl Run {
                 }
             }
             Op::Refresh { key_id, group_key } => match self.ceremony_intent(CeremonyKind::Refresh, key_id) {
-                Err(status) => (Err(status), Vec::new()),
+                Err(status) => (Err(status), Route::default()),
                 Ok(signed) => {
                     let request = pb::RefreshRequest { key_id: key_id.clone(), intent: Some(signed) };
                     let (answer, moves) = client
@@ -442,7 +449,8 @@ impl Run {
             Ok(Some(wrong)) => ("OK", true, Some(wrong)),
             Err(status) => (code_name(status.code()), false, Some(status.message().to_string())),
         };
-        let outcome = Outcome { at, latency, code, failovers: moves, bad_answer };
+        let leader = moves.leader.map(|i| self.ctx.targets[i].0.clone());
+        let outcome = Outcome { at, latency, code, failovers: moves.failovers, bad_answer, leader };
         self.recorder.lock().unwrap_or_else(|p| p.into_inner()).record(outcome, message);
     }
 }
