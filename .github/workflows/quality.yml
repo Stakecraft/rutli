@@ -1,0 +1,273 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Quality ratchet: collects the metrics in scripts/quality/metrics.json for every language in the
+# repository and compares them with quality/baseline.json. Old debt does not block a change; new
+# debt does. See quality/README.md and docs/release-process.md ("Test schedule").
+#
+#   pull request      the areas the change touches (scripts/quality/changed-areas.sh), no
+#                     coverage; fails on a regression
+#   push to main      every area with coverage; a regression opens (or updates) an issue
+#   nightly 02:00     cargo audit and a trivy scan of the released image; same, an issue
+#   Monday 06:00      quality report: last release tag against main (artifact and job summary)
+#   manual            with base and head: that report for any two refs; without: as a push to main
+name: Quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 2 * * *"
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "Report: older ref, e.g. the previous release tag (empty: run as on main)"
+        required: false
+        default: ""
+      head:
+        description: "Report: newer ref, e.g. the release candidate"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels its older run; runs on main and scheduled runs finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    # Explicit, so every step gets -o pipefail.
+    shell: bash
+
+env:
+  CANTON_TAG: v3.6.1
+  SBT_OPTS: "-Xmx4g -Xss8m"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  quality:
+    name: Quality ratchet
+    # Runner choice as in ci.yml: `vars.CI_RUNNER` for this repository's own branches, GitHub's
+    # `ubuntu-latest` for pull requests from forks.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 240
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      regressed: ${{ steps.ratchet.outputs.regressed }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Full history and tags: changed areas, buf breaking against the last release tag, and
+          # report mode all need them.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Plan
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          INPUT_BASE: ${{ inputs.base }}
+          INPUT_HEAD: ${{ inputs.head }}
+        run: |
+          all=rust,scala,shell,python,docker,actions,k8s,proto,semgrep,repo
+          base="" head=""
+          case "$EVENT" in
+            pull_request) mode=pr areas="$(scripts/quality/changed-areas.sh "$PR_BASE" HEAD)" ;;
+            schedule)
+              if [ "$SCHEDULE" = "0 2 * * *" ]; then
+                mode=nightly areas=audit,image
+              else
+                mode=report areas="$all,audit" head=origin/main
+                base="$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-*' origin/main)"
+              fi
+              ;;
+            workflow_dispatch)
+              if [ -n "$INPUT_BASE" ] && [ -n "$INPUT_HEAD" ]; then
+                for r in "$INPUT_BASE" "$INPUT_HEAD"; do
+                  [[ "$r" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || { echo "not a ref name: $r" >&2; exit 1; }
+                done
+                mode=report areas="$all,audit" base="$INPUT_BASE" head="$INPUT_HEAD"
+              else
+                mode=main areas="$all"
+              fi
+              ;;
+            *) mode=main areas="$all" ;;
+          esac
+          {
+            echo "mode=$mode"
+            echo "areas=$areas"
+            echo "base=$base"
+            echo "head=$head"
+            # Toolchains are set up only for the areas that run.
+            echo "rust=$([[ ",$areas," == *,rust,* ]] && echo true || echo false)"
+            echo "scala=$([[ ",$areas," == *,scala,* ]] && echo true || echo false)"
+          } >>"$GITHUB_OUTPUT"
+          echo "mode $mode, areas $areas${base:+, report $base..$head}"
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        if: steps.plan.outputs.mode != 'nightly'
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        if: steps.plan.outputs.scala == 'true'
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: sbt
+
+      - uses: sbt/setup-sbt@7e114eae4f32ec3f93c851c2793376a77f384409 # v1.5.15
+        if: steps.plan.outputs.scala == 'true'
+
+      - name: Cache Canton API artifacts (ivy local)
+        id: canton-cache
+        if: steps.plan.outputs.scala == 'true'
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.ivy2/local/com.daml
+          key: canton-api-${{ runner.os }}-${{ runner.arch }}-${{ env.CANTON_TAG }}-v1
+
+      - name: Publish Canton kms-driver-api locally
+        if: steps.plan.outputs.scala == 'true' && steps.canton-cache.outputs.cache-hit != 'true'
+        run: scripts/publish-canton-deps.sh "$CANTON_TAG"
+
+      # The version in frost/rust-toolchain.toml, as in ci.yml, with the components the collectors
+      # need. A tree measured in report mode that pins another version gets its components from
+      # rust.sh (QUALITY_RUSTUP_COMPONENTS).
+      - name: Rust version (frost/rust-toolchain.toml)
+        id: rustver
+        if: steps.plan.outputs.rust == 'true'
+        run: |
+          v="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/rust-toolchain.toml 2>/dev/null || true)"
+          echo "version=${v:-stable}" >>"$GITHUB_OUTPUT"
+          echo "QUALITY_RUSTUP_COMPONENTS=1" >>"$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
+        if: steps.plan.outputs.rust == 'true'
+        with:
+          toolchain: ${{ steps.rustver.outputs.version }}
+          components: clippy, rustfmt, llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: steps.plan.outputs.rust == 'true'
+        with:
+          workspaces: frost
+
+      # Binaries are checked against the sha256 in scripts/quality/tools.txt on every run; the
+      # cache only saves downloads and the cargo-install builds.
+      - name: Cache quality tools
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/rutli-quality-tools
+          key: quality-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/quality/tools.txt', 'scripts/quality/semgrep-requirements.txt') }}
+
+      - name: Install quality tools (pinned)
+        env:
+          MODE: ${{ steps.plan.outputs.mode }}
+        run: |
+          dir="$HOME/.cache/rutli-quality-tools"
+          if [ "$MODE" = nightly ]; then
+            scripts/quality/install-tools.sh "$dir" cargo-audit trivy
+          else
+            scripts/quality/install-tools.sh "$dir"
+          fi
+          echo "QUALITY_TOOLS_DIR=$dir" >>"$GITHUB_ENV"
+
+      - name: Collect metrics
+        if: steps.plan.outputs.mode != 'report'
+        env:
+          MODE: ${{ steps.plan.outputs.mode }}
+          AREAS: ${{ steps.plan.outputs.areas }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/quality"
+          # Coverage runs on main only; pull requests are compared without it.
+          if [ "$MODE" = pr ]; then export QUALITY_COVERAGE=0; fi
+          scripts/quality/collect.sh --only "$AREAS" --ref "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" \
+            --out "$RUNNER_TEMP/quality/current.json"
+          scripts/quality/render.sh quality/baseline.json "$RUNNER_TEMP/quality/current.json" \
+            "Quality ($MODE): baseline → this run" >"$RUNNER_TEMP/quality/current.md"
+          cat "$RUNNER_TEMP/quality/current.md" >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Ratchet (fails if a gated metric is worse than quality/baseline.json)
+        id: ratchet
+        if: steps.plan.outputs.mode != 'report'
+        run: |
+          rc=0
+          scripts/quality/ratchet.sh quality/baseline.json "$RUNNER_TEMP/quality/current.json" \
+            >"$RUNNER_TEMP/quality/ratchet.txt" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/quality/ratchet.txt"
+          { echo; echo '## Ratchet'; echo; echo '```'; cat "$RUNNER_TEMP/quality/ratchet.txt"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+          if [ "$rc" != 0 ]; then echo "regressed=true" >>"$GITHUB_OUTPUT"; fi
+          exit "$rc"
+
+      - name: Report (quality-report.sh base head)
+        if: steps.plan.outputs.mode == 'report'
+        env:
+          BASE: ${{ steps.plan.outputs.base }}
+          HEAD: ${{ steps.plan.outputs.head }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/quality"
+          scripts/quality-report.sh "$BASE" "$HEAD" --json "$RUNNER_TEMP/quality/report.json" \
+            >"$RUNNER_TEMP/quality/report.md"
+          cat "$RUNNER_TEMP/quality/report.md" >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        # Convenience only, as in ci.yml: an upload failure must not turn the run red.
+        continue-on-error: true
+        with:
+          name: quality-metrics
+          path: ${{ runner.temp }}/quality/
+          retention-days: 30
+
+  # On main and nightly a regression cannot be blocked any more: open an issue, or comment on the
+  # open one, with the ratchet output. The only job with write access, and it runs no repository
+  # code.
+  issue:
+    name: Report regression
+    needs: quality
+    if: always() && needs.quality.outputs.regressed == 'true' && github.event_name != 'pull_request'
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: quality-metrics
+          path: quality
+      - name: Open or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MODE: ${{ needs.quality.outputs.mode }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          if [ "$MODE" = nightly ]; then
+            title="Quality: new advisories (nightly cargo audit / image scan)"
+          else
+            title="Quality: regression on main"
+          fi
+          details="$(grep -v '^ok' quality/ratchet.txt 2>/dev/null || echo 'ratchet output missing, see the run')"
+          body="$(printf 'The quality ratchet found a metric worse than quality/baseline.json at %s.\n\nRun: %s\n\n~~~\n%s\n~~~\n' \
+            "$SHA" "$RUN_URL" "$details")"
+          api() { curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$@"; }
+          number="$(api "https://api.github.com/repos/$REPO/issues?state=open&per_page=100" \
+            | jq -r --arg t "$title" '[.[] | select(.pull_request == null and .title == $t)][0].number // empty')"
+          if [ -n "$number" ]; then
+            api -X POST "https://api.github.com/repos/$REPO/issues/$number/comments" \
+              -d "$(jq -n --arg b "$body" '{body: $b}')" >/dev/null
+            echo "commented on #$number"
+          else
+            api -X POST "https://api.github.com/repos/$REPO/issues" \
+              -d "$(jq -n --arg t "$title" --arg b "$body" '{title: $t, body: $b}')" | jq -r '"opened #\(.number)"'
+          fi
