@@ -76,8 +76,11 @@ mkconfig() { # node-config-name  cert-name  out
     | .tls.key = "\($work)/certs/\($cert).key"
     | .refresh_allowlist = ["refresher"]
     | .signing_policy.signer_may_refresh = false
+    | .signing_policy.require_ceremony_intent = false
     | del(.metrics_listen)' "$REPO/deploy/frost/config-tls/$1.json" >"$3"
 }
+# require_ceremony_intent is on by default with TLS (since 0.4.0-rc.6). It starts off here, so the
+# raw intent-less Dkg probes reach the reserved-id check (AlreadyExists); step 6 turns it on.
 for i in 1 2 3; do mkconfig "cosigner$i" "cosigner$i" "$WORK/c$i.json"; done
 # The operator role (operator_allowlist: KeyStatus + CeremonySignTest only) runs verify-key; the
 # refresher role (refresh_allowlist: Refresh + KeyStatus only), like the refresh CronJob, runs

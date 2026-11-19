@@ -9,7 +9,11 @@
 #
 # One job builds the cosigner and the driver jar once and runs the scripts one after another, so the
 # whole workflow takes one runner. Each script is its own step (its own time in the run summary)
-# and runs even when an earlier one failed, so a run reports all three.
+# and runs even when an earlier one failed, so a run reports all three. A failure on main opens an
+# issue (or comments on the open one).
+#
+# Schedule (docs/release-process.md): every push to main, every release candidate tag, on demand,
+# and pull requests that touch what the scripts exercise (the three take a few minutes together).
 name: E2E ceremonies
 
 on:
@@ -26,6 +30,8 @@ on:
       - ".github/workflows/e2e.yml"
   push:
     branches: [main]
+    # Release candidates (v0.5.0-rc.1, ...). Path filters do not apply to tag pushes.
+    tags: ["v*-rc*"]
     paths:
       - "frost/**"
       - "driver/**"
@@ -37,9 +43,6 @@ on:
       - "scripts/publish-canton-deps.sh"
       - ".github/workflows/e2e.yml"
   workflow_dispatch:
-  schedule:
-    # Nightly (03:30 UTC): the runners and the cached toolchains drift even when the code does not.
-    - cron: "30 3 * * *"
 
 env:
   CANTON_TAG: v3.6.1
@@ -53,14 +56,14 @@ env:
 permissions:
   contents: read
 
-# A new push to a pull request cancels its older run. Every other run (main, nightly, manual) has
+# A new push to a pull request cancels its older run. Every other run (main, tag, manual) has
 # a group of its own, so none replaces or cancels another.
 concurrency:
   group: e2e-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Runner routing as in ci.yml, and stricter: `vars.CI_RUNNER` (the self-hosted runners) for this repository's own
-# branches, `ubuntu-latest` for fork and Dependabot pull requests. The runner's job-started guard
+# Runner routing as in ci.yml, and stricter: `vars.CI_RUNNER` (the self-hosted runners) for this
+# repository's own branches, `ubuntu-latest` for fork and Dependabot pull requests. The runner's job-started guard
 # (deploy/ci-runner/job-started-guard.sh) enforces the same rule, since a fork PR can edit this file.
 jobs:
   e2e:
@@ -237,3 +240,33 @@ jobs:
             ${{ env.E2E_TMP }}/rutli-e2e-*/node*/journal/**
           if-no-files-found: ignore
           retention-days: 7
+
+  # A failure on main (a push, or a manual run on main) opens an issue, type:test + prio:p0, or adds a
+  # comment to the one still open, so a red main is never only a red badge. Hosted runner: it only
+  # calls the GitHub API and needs no self-hosted capacity.
+  report-failure:
+    name: Open an issue for a failure on main
+    needs: e2e
+    if: ${{ failure() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the e2e failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          title="E2E ceremonies fail on main"
+          body="The e2e ceremony workflow failed on main at ${SHA}: ${RUN_URL}
+          The run's summary shows which script failed; its log artifact (7 days) holds the cosigner and Canton logs."
+          open="$(gh issue list --state open --label type:test --search "\"${title}\" in:title" --json number,title \
+            --jq "map(select(.title == \"${title}\")) | .[0].number // empty")"
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --body "$body"
+          else
+            gh issue create --title "$title" --label type:test --label prio:p0 --body "$body"
+          fi
