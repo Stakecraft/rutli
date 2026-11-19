@@ -89,7 +89,8 @@ one. The leader also checks the intent on `Signer.Dkg`/`Refresh` and requires th
 (CN and certificate key) to be the caller on that connection. This gives the client a clear refusal,
 and an intent cannot be replayed through another client's connection.
 
-**Enforcement:** `signing_policy.require_ceremony_intent`. It is **on by default since 0.4.0-rc.6**
+**Enforcement:** `signing_policy.require_ceremony_intent` (since 0.5.0 it also covers hosted-key
+generation, below). It is **on by default since 0.4.0-rc.6**
 on every node with TLS (a plaintext dev node verifies no intents and leaves it off; setting it there
 is a config error). `require_ceremony_intent: false` is the explicit opt-out, for an upgrade while
 the driver is older than 0.4.0-rc.4 or the refresh job's image predates the cosigners' release: the
@@ -117,9 +118,19 @@ What an intent does **not** bind, and why:
   driver refresh uses its `signer_acl`. `refresh_acl` is not introduced (follow-up if a
   multi-tenant cluster needs per-tenant refreshers).
 
-Hosted-key genkey/delkey fences are not intent-gated. A cosigner can block a hosted id's
-generation or deletion anyway, by refusing. An intent on such a fence is a protocol error. What a
-compromised cosigner keeps is listed in the [threat model](security/threat-model.md): the n-of-n
+**Hosted-key generation** (since 0.5.0) takes a **generate intent** the same way: purpose
+`generate-key`, the key, its spec (`hosted_spec`) and the roster identifier of the cosigner the
+client asked to lead (`leader`). The driver signs a fresh one for every endpoint it tries. Every
+node verifies it at the genkey fence, before the guard, with the DKG rules (`signer_allowlist`,
+`signer_acl`, pins), and also checks the spec and that the cosigner fencing it is the leader it
+names. The ceremony id is `genkey-<hex(request_id)>` and the fence marks it, as above. Binding the
+leader matters here because a genkey fence has no part 1: a peer that was shown the intent cannot
+lead the generation anywhere. Same switch (`require_ceremony_intent`), same counters, with the
+reasons `spec` and `leader` added. Details: [hosted-keys.md](hosted-keys.md), "Generate".
+
+Hosted-key delete (`delkey`) fences take no ceremony intent: every node verifies the client's
+delete intent itself when it tombstones the key. An intent on such a fence is a protocol error. What
+a compromised cosigner keeps is listed in the [threat model](security/threat-model.md): the n-of-n
 veto, and the split (DS-CR4) of a ceremony a client **did** ask for.
 
 ### Signing during a ceremony
@@ -400,6 +411,12 @@ from 0.4.0-rc.6. So before cosigners of 0.4.0-rc.6 or later run with the default
 be 0.4.0-rc.4 or later (it signs DKG intents) and the refresh job's image the cosigners' release
 (it signs refresh intents); until then set `require_ceremony_intent: false` on every node, and
 remove it once both sign them. To roll the driver or the refresh job back, set it to `false` first.
+
+Generate intents (0.5.0) work the same way, with one difference: a 0.4.0 node refuses a genkey
+fence that carries an intent, so a 0.5.0 leader refuses a generation with an intent while a
+reachable node is older (`NodeInfo.hosted_protocol` < 2). The driver must be 0.5.0 before cosigners
+run with the default, or they need `require_ceremony_intent: false` while it is older
+([hosted-keys.md](hosted-keys.md), "Upgrading from 0.4.0").
 
 Every key generated or refreshed on a release before ceremony protocol 2 must be treated as
 exposed to that ceremony's leader (audit C1). A post-upgrade refresh re-isolates the shares of a

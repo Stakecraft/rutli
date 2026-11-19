@@ -423,23 +423,38 @@ word; the rules rest on agreement between nodes, not on who may push:
 - **RSA keys** are checked like EC keys: the stored public half must be the one the private key
   derives (`HostedKey::validate`).
 
+Creating a hosted key needs a client-signed generate intent (0.5.0), through the ceremony intent
+machinery DKG and refresh use: purpose `generate-key`, binding the cluster, the signer, the key id,
+the spec, the roster identifier of the cosigner asked to lead, a request id (the ceremony id is
+`genkey-<hex(request_id)>`) and the validity. Every node verifies it at its genkey fence, before
+the guard, and marks the ceremony id fenced durably; a push that would create a copy is accepted
+only under the guard such a fence took, for the spec it declared (an identical copy already held is
+a no-op). Binding the leader makes an intent a cosigner was shown in its
+own fence useless to it: no node accepts a fence under it from any other caller. A reachable 0.4.0
+node makes the leader refuse before fencing (`NodeInfo.hosted_protocol` < 2); an unreachable one
+is skipped, as by the fence. The switch is
+`signing_policy.require_ceremony_intent`; with it off an intent-less generation is accepted and
+counted. The driver then checks the reply: every endpoint's own copy (`KeyInfo` with `local_only`),
+at least two with the reply's commitment, spec and public key, none reporting other material. Short
+only because endpoints were silent, the next endpoint leads the same id under a fresh intent and is
+checked again (each endpoint once); anything else fails the call without retry and Canton gets
+nothing. Rejected: an intent that does not bind the leader (a
+fenced peer could lead the same ceremony id on nodes the honest leader had not reached yet) and a
+new switch (one opt-out for every client intent is simpler to operate, at the cost that opting out
+for a DKG also opts out for hosted keys).
+
 Open, honest nodes only: a replica written by a generation whose leader died is served, so a
 retry that mints while that replica's node is down forks the id. The design for closing it — a
 durable "pending" state on every replica written by a generation, not served and not counted as
 agreement; promotion when the holders of that material (pending or live) reach the write quorum;
 dropping it when `n - write_quorum + 1` nodes answer that they hold no copy of it; resolution when
 the fence is released or lapses, at startup and in each sweep; and a mint only after
-`n - write_quorum + 1` nodes answered "nothing under this id" — is the next step after the client
-intent.
+`n - write_quorum + 1` nodes answered "nothing under this id" — is the next step. The proto keeps
+field numbers free for it (`FetchKeyRequest` 3, `FetchKeyReply` 5–6, `KeyInfoReply` 7–8).
 
-Rejected: a guard-bound push alone (genkey fences carry no client intent, so the attacker can fence
-the id itself), and a two-phase pending/commit record (a record-format change, and the attacker can
-lead its own generation anyway). Still open, and the next step: a client-signed intent for creating
-a hosted key, through the ceremony intent machinery DKG and refresh use, so that a genkey fence
-without one is refused; and the driver's check, after `GenerateKey`, that every node holds the same
-commitment and public key (`GenerateKeyReply.commitment`, `KeyInfo` with `local_only`, both served
-since 0.5.0). Until then a compromised node can create a key under an id nobody has created yet, and
-a plant lands when every other holder is unreachable from the receiving node
+Rejected earlier: a guard-bound push alone (before generate intents the attacker could fence the
+id itself), and a two-phase pending/commit record (a record-format change). Still open: a plant
+lands when every other holder is unreachable from the receiving node
 (`docs/security/threat-model.md`).
 
 ### Storage
