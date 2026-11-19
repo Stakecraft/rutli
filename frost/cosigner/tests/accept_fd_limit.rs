@@ -4,7 +4,7 @@
 //! The daemon under a low open-file limit: more connections than it has descriptors for do not
 //! stop it. Runs the real binary with `ulimit -n 128` (soft and hard, so the start-up raise cannot
 //! lift it), holds 300 connections open, and checks that the daemon is still serving afterwards
-//! and still exits cleanly on SIGINT.
+//! and still exits cleanly on SIGTERM.
 
 #![cfg(unix)]
 
@@ -134,7 +134,7 @@ fn more_connections_than_descriptors_do_not_stop_the_daemon() {
 
     // A requested stop is still a clean one.
     assert!(Command::new("kill")
-        .args(["-INT", &child.id().to_string()])
+        .args(["-TERM", &child.id().to_string()])
         .status()
         .unwrap()
         .success());
@@ -145,14 +145,14 @@ fn more_connections_than_descriptors_do_not_stop_the_daemon() {
         }
         assert!(
             start.elapsed() < Duration::from_secs(30),
-            "no exit after SIGINT:\n{}",
+            "no exit after SIGTERM:\n{}",
             read_log()
         );
         std::thread::sleep(Duration::from_millis(50));
     };
     assert!(
         status.success(),
-        "SIGINT must end the daemon with exit 0, got {status}:\n{}",
+        "SIGTERM must end the daemon with exit 0, got {status}:\n{}",
         read_log()
     );
 }
