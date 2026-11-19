@@ -376,7 +376,7 @@ footer .status-line { font-family: var(--mono); font-size: 12.5px; flex-basis: 1
     </div>
     <ul class="simplify">
       <li><b>Breached</b> here means the attacker controls the host and its seal secret. A stolen disk alone gives only a sealed share.</li>
-      <li><b>The encryption key isn't threshold-shared yet.</b> It is sealed and replicated on every cosigner. Threshold encryption is planned for 2.0.</li>
+      <li><b>The encryption key isn't threshold-shared yet.</b> It is sealed and replicated on every cosigner. Threshold encryption is planned for 1.0.</li>
       <li><b>A breached cosigner can refuse to sign.</b> The driver fails over around it, as it does for an offline one.</li>
       <li><b>Evidence so far is DevNet.</b> Rütli is at v0.4.0-rc.6 and not yet externally audited; the independent audit is the next step.</li>
     </ul>
@@ -514,7 +514,7 @@ footer .status-line { font-family: var(--mono); font-size: 12.5px; flex-basis: 1
     }
     // encryption key
     if (comp > 0) {
-      setRow("enc", "warn", "Exposed", "The encryption key is replicated whole, sealed, on every cosigner, so one breached host exposes it. Rotate it in Canton; that protects future traffic only. Threshold encryption is planned for 2.0.");
+      setRow("enc", "warn", "Exposed", "The encryption key is replicated whole, sealed, on every cosigner, so one breached host exposes it. Rotate it in Canton; that protects future traffic only. Threshold encryption is planned for 1.0.");
     } else if (lost === n) {
       if (S.backups) setRow("enc", "warn", "Backups only", "Every copy is gone from the cluster. Restore one node's backup and the cluster replicates it again.");
       else setRow("enc", "crit", "Lost", "Every copy is gone and there is no backup.");

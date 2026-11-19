@@ -122,6 +122,14 @@ All notable changes to Rütli are documented here. Format loosely follows
   `RutliHostedReplicationRefused`) until the upgraded node has pulled the key itself. Before you start, run `verify-hosted` for every hosted key and check
   `rutli_anti_entropy_conflicts_total`: a replica that diverged earlier is not repaired by the
   upgrade (`docs/hosted-keys.md` §4).
+- **heapless 0.7.17: nine `unsound` RustSec advisories (RUSTSEC-2026-0574 to -0582) are ignored in
+  `frost/deny.toml`, with the reason recorded per advisory.** heapless comes in only through
+  frost-core 2.2.0 → postcard 1.1.3, and no release of either moves it to the fixed heapless 0.9.4.
+  frost-core calls only postcard's `to_allocvec` and `from_bytes`, which do not touch heapless;
+  postcard itself uses only heapless' `Vec` and `String`, in functions frost-core does not call;
+  and the cosigner and dealer binaries contain no heapless code (checked on their symbol tables).
+  No code change; the same holds for 0.4.0 as released. In the lockfile, spin moves from 0.9.8 to
+  0.9.9, because 0.9.8 was yanked.
 
 - **Creating a hosted key needs a client-signed generate intent.** Up to here a genkey fence needed
   no client authorization, so one compromised cosigner could fence an id nobody had created, store
@@ -279,6 +287,9 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Documentation
 
+- **Threshold ECIES is planned for 1.0, not 2.0** (decided 2026-11-19). `docs/roadmap.md`, the
+  README, `docs/hosted-keys.md` and the explorer page say so, and the second audit phase in
+  `docs/audit-rfq.md` (section 2.2) now lists four features. No code changes.
 - **Splice 0.10 / Canton 3.7** (`docs/splice-0.10.md`): the driver needs no change, because the KMS driver SPI and the
   conformance suite are byte-identical from v3.6.1 to v3.7.3. Operators get a new page covering the upgrade order for a
   Rütli validator: back up first, then the participant, then the validator, with no `--atomic`, and before the network's
@@ -287,7 +298,13 @@ All notable changes to Rütli are documented here. Format loosely follows
   (`enableRepairCommands`), which Splice's party migrator needs after the point of no return. The page also covers the
   `synchronizerId` argument of the rotation commands, the PV 37 limit of 20 signing keys, and the HTTP health probes.
   The rehearsal records that pin `--version 0.9.0` carry a warning, and the README compatibility table lists Canton
-  3.7.x and Splice 0.10.x as supported, with the live run still pending.
+  3.7.x and Splice 0.10.x as tested: two DevNet validators on Rütli run Splice 0.10.1 since 2026-11-15.
+- **The external audit will review v0.5.0, not v0.4.0.** v0.5.0 is v0.4.0 plus hardening from a pre-audit review
+  and the fixes made since; its code freeze is planned for mid-December 2026, and v0.4.0 is the auditors' pre-read
+  (`docs/audit-rfq.md`, `docs/roadmap.md`, `SECURITY.md`).
+- **The sealed software delegate is a test and migration aid, not a production option.** `docs/hosted-keys.md` and
+  `docs/disaster-recovery.md` said it stays supported for production keys; `SECURITY.md` said never. The two now agree
+  with `SECURITY.md`: it keeps every encryption key on the participant host; use cluster hosting or the HSM delegate.
 
 ## [0.4.0] — 2026-11-14
 

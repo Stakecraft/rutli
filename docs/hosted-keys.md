@@ -40,11 +40,12 @@ Choosing between them:
   the busy, internet-adjacent Canton participant host and lives on three hardened, single-purpose,
   allowlisted nodes that do nothing but hold keys. Durability improves as a side effect — n sealed
   replicas plus the existing backup tooling, instead of one directory on one host.
-- **The sealed software delegate stays supported** and is still the right answer for a delegate that
-  must serve key types the cluster does not (see section 6). It is not a downgrade — it is what
-  closed the 2026-08-12 DevNet incident, in which a heap-only software delegate lost an RSA
-  encryption key across a Splice upgrade restart and the participant took a fatal
-  `KmsDecryptError` → synchronizer disconnect. That incident and its recovery are
+- **The sealed software delegate is for tests and for moving off it.** It keeps every encryption
+  key on the participant host, so a compromise of that host yields them all. Do not plan production
+  keys behind it; use cluster hosting or the HSM delegate. A node that still runs it must run the
+  sealed form: on 2026-08-12 a heap-only software delegate lost an RSA encryption key across a
+  Splice upgrade restart and the participant took a fatal `KmsDecryptError` → synchronizer
+  disconnect. That incident and its recovery are
   [`disaster-recovery.md` §3b](disaster-recovery.md); cluster hosting removes the key from that host
   altogether.
 
@@ -183,7 +184,7 @@ Two deliberate absences:
 - **No hardcoded spec list.** The driver asks the cluster via `Capabilities` at startup, so adding a
   key type later (section 6) needs no driver release.
 
-Keep `delegate = "hsm"` (or `"software"`) if you still need key types the cluster does not serve.
+Keep `delegate = "hsm"` if you still need key types the cluster does not serve.
 
 **Which encryption key type Canton mints is Canton's choice**, not the driver's: a KMS participant
 defaults to RSA-2048 (`CryptoProvider.Kms`). To use an ECIES key — the type every JCE participant
@@ -948,7 +949,7 @@ delegate.
 |---|---|---|
 | **v1** (shipped) | hosted RSA-2048 + AES-256-GCM; `delegate = "none"` becomes possible | no — replicated |
 | **v1.5** (shipped) | `EcdhDerive` + hosted EC-P256 keys; the driver completes ECIES with BouncyCastle | no — replicated |
-| **v2** (planned for release 2.0, [roadmap.md](roadmap.md)) | threshold ECIES via `frost-p256` — one stateless round, no nonce hazard | **yes** |
+| **v2** (planned for release 1.0, [roadmap.md](roadmap.md)) | threshold ECIES via `frost-p256` — one stateless round, no nonce hazard | **yes** |
 | **never** | threshold RSA | — |
 
 The load-bearing property of that table is that **v1.5 and v2 share a wire contract**: the cluster

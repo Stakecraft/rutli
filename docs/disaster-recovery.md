@@ -191,8 +191,8 @@ key was never persisted — no backup contains it.
    holds — node identity is untouched). New traffic becomes decryptable.
 4. **Before the next restart**, make the replacement key durable — see prevention below.
 
-**Prevention:** never run a real node with a heap-only software delegate. Three durable options,
-best first for a deployment without an HSM.
+**Prevention:** never run a real node with a heap-only software delegate. Two durable options, (a)
+and (c), and a stopgap, (b).
 
 **(a) Host the encryption key in the cluster.** The cosigners hold the encryption keypair (RSA-2048
 or EC P-256 ECIES) and the AES-256-GCM symmetric key themselves, so no key material sits on the
@@ -227,8 +227,9 @@ Note for this failure mode specifically: the driver does **not** fall back to th
 `NOT_FOUND`. That is deliberate — a silent fallback would split custody between cluster and delegate
 and could reproduce exactly this incident. A missing key is reported, not worked around.
 
-**(b) Sealed disk persistence for the software delegate** — when the keys must stay on the
-participant:
+**(b) Sealed disk persistence for the software delegate**, only until the keys move to (a) or (c).
+It keeps every key on the participant host, so do not plan production on it
+([SECURITY.md](../SECURITY.md)):
 
 ```hocon
 config {
