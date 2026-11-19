@@ -1,0 +1,140 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+name: Load test
+
+# The load scenarios of scripts/perf/run.py against a three-cosigner cluster under Docker Compose
+# on the runner (scripts/perf-load.sh): sign latency under a steady stream, a burst and several
+# clients, ECIES, a cosigner killed under load, and the limits. No cloud, no secret.
+#
+# Too heavy for every pull request (it builds the image and runs for several minutes), so:
+# - weekly, compared with the last green run on main; a regression above 20 % or a failed scenario
+#   fails the run and opens an issue;
+# - by hand, with a longer steady stream for a release candidate;
+# - on a pull request only when it changes the load test itself, without a comparison.
+on:
+  schedule:
+    - cron: "0 2 * * 1" # Mondays 02:00 UTC
+  workflow_dispatch:
+    inputs:
+      steady_secs:
+        description: "Length of the steady stream in seconds (60 for a short run; 7200 to 14400 for a release candidate)"
+        default: "60"
+  pull_request:
+    paths:
+      - "frost/loadgen/**"
+      - "frost/Dockerfile.perf"
+      - "deploy/frost/docker-compose.perf.yml"
+      - "scripts/perf/**"
+      - "scripts/perf-load.sh"
+      - ".github/workflows/load.yml"
+
+permissions:
+  contents: read
+
+# A new push replaces a pull request's run; runs on main (weekly, manual) never cancel each other.
+concurrency:
+  group: load-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  load:
+    name: Load scenarios (compose)
+    # As in ci.yml: the repository's own runner when it is configured, and never for a fork.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 330 || 60 }}
+    permissions:
+      contents: read
+      actions: read # the previous run's result
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Tests of the comparison script
+        run: python3 -I scripts/perf/test_compare.py
+
+      - name: Steady stream length
+        id: params
+        env:
+          STEADY_SECS: ${{ github.event.inputs.steady_secs || '60' }}
+        run: |
+          set -euo pipefail
+          case "$STEADY_SECS" in '' | *[!0-9]* | 0) echo "::error::steady_secs must be a positive integer"; exit 1 ;; esac
+          [ "$STEADY_SECS" -le 14400 ] || { echo "::error::steady_secs above 14400 (4 h) does not fit the job's time limit"; exit 1; }
+          echo "steady_secs=$STEADY_SECS" >> "$GITHUB_OUTPUT"
+
+      # The baseline is the last run on main that was green: comparing with a run that itself
+      # regressed would accept the regression a week later.
+      - name: Find the last green run on main
+        id: previous
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          id="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/load.yml/runs?branch=main&status=success&per_page=1" \
+            | jq -r '.workflow_runs[0].id // empty')" || id=""
+          echo "run_id=${id}" >> "$GITHUB_OUTPUT"
+          echo "previous green run: ${id:-none}"
+
+      - name: Download its result
+        if: steps.previous.outputs.run_id != ''
+        # An expired artifact is a first run again, not a failure.
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: load-result
+          path: perf-previous
+          run-id: ${{ steps.previous.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Load test
+        env:
+          STEADY_SECS: ${{ steps.params.outputs.steady_secs }}
+        run: |
+          set -euo pipefail
+          args=(--steady-secs "$STEADY_SECS" --out perf-out)
+          if [ -f perf-previous/load.json ]; then
+            args+=(--previous perf-previous/load.json)
+          fi
+          scripts/perf-load.sh "${args[@]}"
+
+      - name: Summary
+        if: always()
+        run: |
+          if [ -f perf-out/compare.md ]; then cat perf-out/compare.md >> "$GITHUB_STEP_SUMMARY"; fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: load-result
+          path: perf-out/
+          retention-days: 90
+          if-no-files-found: warn
+
+  regression-issue:
+    name: Open an issue on a regression
+    needs: load
+    # Scheduled and manual runs on main only: a pull request shows its own red check.
+    if: failure() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        continue-on-error: true
+        with:
+          name: load-result
+          path: perf-out
+      - name: Open or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          scripts/perf/report-issue.sh "Load test: regression or failed scenario" perf-out/compare.md "$RUN_URL"

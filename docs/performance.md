@@ -16,7 +16,8 @@ Numbers below are **operator evidence**, not a marketing SLA — always re-run o
 Leader-side metrics live on whichever cosigner the driver dialed. Aggregate across pods
 (`sum by (…)`) when scraping all three.
 
-How to scrape: see [`observability.md`](observability.md).
+How to scrape: see [`observability.md`](observability.md). Load tests on one machine (latency
+under load, a cosigner killed under load, the limits): see [`load-testing.md`](load-testing.md).
 
 ## DevNet reference (multi-region k8s)
 

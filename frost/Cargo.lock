@@ -1934,6 +1934,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "rutli-loadgen"
+version = "0.4.0"
+dependencies = [
+ "aws-lc-rs",
+ "clap",
+ "ed25519-dalek",
+ "hex",
+ "rand 0.8.6",
+ "rutli-cosigner",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tonic",
+]
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
