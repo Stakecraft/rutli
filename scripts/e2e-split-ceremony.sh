@@ -20,7 +20,7 @@
 # rolling-upgrade mode, journaled as no-intent), verified independently by OpenSSL; then
 # require_intent on: the same intent-less Sign is refused, and verify-key --sign-test still passes.
 #
-# Requires: cargo, openssl (3.x, for Ed25519 verify), jq, grpcurl.
+# Requires: cargo, openssl (3.x, for Ed25519 verify), jq, grpcurl, xxd.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -91,8 +91,8 @@ start() {
   PIDS[$1]=$!
 }
 stop() { kill "${PIDS[$1]}" 2>/dev/null || true; wait "${PIDS[$1]}" 2>/dev/null || true; PIDS[$1]=0; }
-wait_healthy() {
-  for _ in $(seq 1 120); do
+wait_healthy() { # up to 60 s; a cold debug build on a busy runner can take a while
+  for _ in $(seq 1 240); do
     "$COSIGNER" --config "$WORK/c$1.json" health >/dev/null 2>&1 && return 0
     sleep 0.25
   done
