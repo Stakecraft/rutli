@@ -7,8 +7,9 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [0.4.1]
 
-_0.4.0 with one security fix in the cosigner. No wire, key-file or config change; roll the
-cosigners in any order. The driver is unchanged apart from its version number._
+_0.4.0 with one security fix in the cosigner, and the cosigner now stops on SIGTERM. No wire,
+key-file or config change; roll the cosigners in any order. The driver is unchanged apart from its
+version number._
 
 ### Security
 
@@ -25,7 +26,16 @@ cosigners in any order. The driver is unchanged apart from its version number._
   the server. The server sends HTTP/2 keepalive pings
   (every 60 s, 20 s timeout), so connections to peers that vanished are closed. If the gRPC server
   ever returns without a shutdown request, the daemon logs it and exits non-zero.
-- **Build:** `frost/deny.toml` ignores the nine heapless 0.7.17 `unsound` advisories
+### Fixed
+
+- **The cosigner stops on SIGTERM.** It handled only SIGINT, and in its image it runs as PID 1,
+  where the kernel ignores a signal without a handler: every pod stop waited out the grace period
+  and ended in SIGKILL, with no drain of in-flight requests. It now shuts down gracefully on
+  SIGTERM or SIGINT. (From 0.5.0's changes.)
+
+### Build
+
+- `frost/deny.toml` ignores the nine heapless 0.7.17 `unsound` advisories
   (RUSTSEC-2026-0574 to -0582), with the reason per advisory: heapless comes in only through
   frost-core 2.2.0 → postcard 1.1.3, and none of the affected functions is reachable. No code or
   lockfile change for it.

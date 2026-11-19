@@ -1033,6 +1033,7 @@ async fn main() -> Result<()> {
     }
     let shutdown_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let signal = {
+        // Called here, not inside the block: it installs the SIGTERM handler before serving starts.
         let stop = shutdown();
         let requested = Arc::clone(&shutdown_requested);
         async move {
@@ -2509,9 +2510,50 @@ fn identifier_index(id: Identifier) -> Vec<u8> {
     id.serialize()
 }
 
-async fn shutdown() {
-    let _ = tokio::signal::ctrl_c().await;
-    tracing::info!("shutdown signal received");
+/// Resolves on SIGINT or SIGTERM. SIGTERM matters most: Kubernetes stops a pod with it, and the
+/// cosigner runs as PID 1 in its image, where the kernel ignores a signal that has no handler, so
+/// without this every pod stop waited out the grace period and ended in SIGKILL with no drain.
+/// A signal that cannot be registered is logged and never resolves: it must not stop the server.
+///
+/// The SIGTERM handler is installed when this is called (inside the runtime), not on first poll, so
+/// from that point on a SIGTERM is caught rather than fatal.
+fn shutdown() -> impl std::future::Future<Output = ()> {
+    #[cfg(unix)]
+    let term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(term) => Some(term),
+        Err(e) => {
+            tracing::error!(error = %e, "cannot listen for SIGTERM");
+            None
+        }
+    };
+    async move {
+        let interrupt = async {
+            match tokio::signal::ctrl_c().await {
+                Ok(()) => "SIGINT",
+                Err(e) => {
+                    tracing::error!(error = %e, "cannot listen for SIGINT");
+                    std::future::pending().await
+                }
+            }
+        };
+        #[cfg(unix)]
+        let terminate = async move {
+            match term {
+                Some(mut term) => {
+                    term.recv().await;
+                    "SIGTERM"
+                }
+                None => std::future::pending().await,
+            }
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<&str>();
+        let signal = tokio::select! {
+            s = interrupt => s,
+            s = terminate => s,
+        };
+        tracing::info!(signal, "shutdown signal received, draining in-flight requests");
+    }
 }
 
 #[cfg(test)]
@@ -2558,5 +2600,25 @@ mod tests {
         assert_eq!(copy_journal(&src, &dst).unwrap(), 1);
         assert!(dst.join("frost-k").join("00000000000000000001.jsonl").exists());
         assert!(!dst.join("frost-k").join("not-a-segment.tmp").exists());
+    }
+
+    /// Kubernetes stops a pod with SIGTERM, and the cosigner is PID 1 in its image: without a
+    /// handler the signal is ignored and the pod is SIGKILLed after the grace period.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sigterm_starts_a_graceful_shutdown() {
+        // `shutdown()` installs the SIGTERM handler before it returns, so the signal below is
+        // caught, not fatal to the test process. The signal is process-wide; it is safe here
+        // because no other test in this binary installs or expects a signal handler.
+        let stopped = tokio::spawn(shutdown());
+        let kill = std::process::Command::new("kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .status()
+            .unwrap();
+        assert!(kill.success());
+        tokio::time::timeout(std::time::Duration::from_secs(10), stopped)
+            .await
+            .expect("SIGTERM must resolve the shutdown future")
+            .unwrap();
     }
 }
