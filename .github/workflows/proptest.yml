@@ -34,13 +34,13 @@ jobs:
       PROPTEST_CASES: ${{ inputs.cases || '1000' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # The workspace's one Rust version (frost/rust-toolchain.toml), as in ci.yml.
       - name: Rust version
         id: rust
         run: |
-          v=stable
-          if [ -f frost/rust-toolchain.toml ]; then
-            v="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/rust-toolchain.toml)"
-          fi
+          v="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/rust-toolchain.toml)"
           test -n "$v"
           echo "version=$v" >> "$GITHUB_OUTPUT"
       # dtolnay/rust-toolchain has no releases: pinned to a commit of its master branch.
