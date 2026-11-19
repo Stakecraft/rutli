@@ -25,3 +25,9 @@ tempfile = "3"
 proptest = { workspace = true }
 # B1's real Canton 3.6.1 key vectors, for the dealer tests.
 rutli-canton-key = { path = "../canton-key" }
+criterion = { workspace = true }
+
+# scripts/bench.sh
+[[bench]]
+name = "sign_rounds"
+harness = false
