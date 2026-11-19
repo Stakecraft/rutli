@@ -64,8 +64,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
         with:
           toolchain: ${{ env.FUZZ_TOOLCHAIN }}
-          # llvm-symbolizer, so sanitizer reports (crashes, leaks) name functions, not addresses.
-          components: llvm-tools
 
       # One build cache for all targets (they share every dependency), written by one job only, so
       # the instrumented build does not crowd the CI caches out of the repository's cache quota.
@@ -111,9 +109,11 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          ASAN_SYMBOLIZER_PATH="$(rustc +"$FUZZ_TOOLCHAIN" --print sysroot)/lib/rustlib/$(rustc +"$FUZZ_TOOLCHAIN" -vV | sed -n 's/^host: //p')/bin/llvm-symbolizer"
-          test -x "$ASAN_SYMBOLIZER_PATH"
-          export ASAN_SYMBOLIZER_PATH
+          # A symbolizer, so sanitizer reports (crashes, leaks) name functions, not addresses: LLVM's
+          # if the runner has one, else binutils' addr2line (the sanitizers drive either). Rust's
+          # llvm-tools component does not ship llvm-symbolizer.
+          sym="$(command -v llvm-symbolizer || command -v addr2line || true)"
+          if [ -n "$sym" ]; then export ASAN_SYMBOLIZER_PATH="$sym"; else echo "::warning::no symbolizer on the runner: sanitizer reports will show addresses only"; fi
           leaks=1
           if [ "$TARGET" = grpc ]; then leaks=0; fi
           corpus="$PWD/fuzz/corpus/$TARGET"
