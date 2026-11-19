@@ -129,5 +129,59 @@ class Compare(unittest.TestCase):
             self.assertEqual(compare.main([prev, os.path.join(d, "missing.json")]), 2)
 
 
+def cluster_run(headroom=10, ramp_p99=50.0, keys_p99=30.0, list_ms=4.0, profile="placeholder", keys_ok=True):
+    doc = run()
+    doc["kind"] = "cluster"
+    doc["profile"] = profile
+    doc["headroom_factor"] = headroom
+    steps = [{"factor": f, "passed": f <= headroom, "ops": {"sign": {"p99_ms": ramp_p99}}} for f in (1, 3, 10, 30)]
+    doc["ramp"] = {"steps": [st for st in steps if st["factor"] <= headroom * 3], "headroom_factor": headroom}
+    doc["keys"] = [{"count": 10, "passed": keys_ok, "sign": {"latency": {"p95_ms": keys_p99 * 0.8, "p99_ms": keys_p99}},
+                    "list_keys": {"cosigner1": {"mean_ms": list_ms}, "cosigner2": {"mean_ms": 1.0}}}]
+    doc["skipped"] = [{"name": "partition", "reason": "HOOK_PARTITION is not set"}]
+    if not keys_ok:
+        doc["failed"] = ["keys"]
+        doc["keys"][0]["setup_failed"] = "DKG refused"
+    return doc
+
+
+class Cluster(unittest.TestCase):
+    def verdicts(self, previous, current):
+        rows, problems = compare.compare(previous, current, 0.20, 2.0)
+        return {(r[0], r[1]): r[5] for r in rows}, problems
+
+    def test_equal_runs_pass_and_list_the_skipped(self):
+        v, problems = self.verdicts(cluster_run(), cluster_run())
+        self.assertEqual(problems, [])
+        self.assertEqual(v[("ramp", "headroom factor")], "ok")
+        self.assertEqual(v[("ramp x10", "sign p99")], "ok")
+        self.assertEqual(v[("keys 10", "list-keys mean (slowest)")], "ok")
+        self.assertEqual(v[("partition", "skipped")], "HOOK_PARTITION is not set")
+
+    def test_a_lower_headroom_factor_is_a_regression(self):
+        _, problems = self.verdicts(cluster_run(headroom=30), cluster_run(headroom=10))
+        self.assertEqual(problems, ["ramp: headroom factor 30 -> 10"])
+        _, problems = self.verdicts(cluster_run(headroom=10), cluster_run(headroom=30))
+        self.assertEqual(problems, [])
+
+    def test_a_slower_step_or_key_count_is_a_regression(self):
+        _, problems = self.verdicts(cluster_run(ramp_p99=50), cluster_run(ramp_p99=70))
+        self.assertEqual(len(problems), 3, problems)  # x1, x3, x10
+        _, problems = self.verdicts(cluster_run(list_ms=4.0), cluster_run(list_ms=9.0))
+        self.assertEqual(len(problems), 1, problems)
+        _, problems = self.verdicts(cluster_run(keys_p99=30), cluster_run(keys_p99=40))
+        self.assertEqual(len(problems), 2, problems)  # p95 and p99, both +33 % and above the floor
+        self.assertTrue(all(p.startswith("keys 10:") for p in problems))
+
+    def test_another_profile_is_not_compared(self):
+        _, problems = self.verdicts(cluster_run(headroom=100, profile="soak-2026-11"), cluster_run(headroom=1))
+        self.assertEqual(problems, [])
+
+    def test_a_failed_key_count_fails_on_its_own(self):
+        _, problems = self.verdicts(None, cluster_run(keys_ok=False))
+        self.assertEqual(len(problems), 1)
+        self.assertIn("DKG refused", problems[0])
+
+
 if __name__ == "__main__":
     unittest.main()

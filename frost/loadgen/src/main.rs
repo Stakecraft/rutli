@@ -128,6 +128,19 @@ enum Command {
         #[command(flatten)]
         load: Load,
     },
+    /// Time the Peer API's ListKeys (the hosted-key inventory anti-entropy reads) on every
+    /// cosigner. Needs a cosigner identity: --peer-cert and --peer-key.
+    ListKeys {
+        /// Calls per cosigner.
+        #[arg(long, default_value_t = 5)]
+        repeat: u32,
+        /// A cosigner certificate (PEM), on the cosigners' peer_allowlist.
+        #[arg(long)]
+        peer_cert: PathBuf,
+        /// Its key (PKCS#8 PEM).
+        #[arg(long)]
+        peer_key: PathBuf,
+    },
 }
 
 /// The shape of a load.
@@ -750,6 +763,7 @@ fn print_json(report: &impl Serialize) -> Result<(), Fail> {
 
 async fn run(cli: Cli) -> Result<(), Fail> {
     let ctx = Arc::new(Ctx::new(&cli)?);
+    let ca = cli.ca.clone();
     match cli.command {
         Command::Wait { within_secs } => wait_healthy(&ctx, Duration::from_secs(within_secs)).await,
         Command::Setup { frost_keys, ecies_keys } => print_json(&setup(&ctx, &frost_keys, &ecies_keys).await?),
@@ -773,6 +787,9 @@ async fn run(cli: Cli) -> Result<(), Fail> {
             let cluster = cluster_id(&ctx).await?;
             print_json(&load_command(ctx, "dkg", Op::Dkg { prefix, same_key, first_key: Mutex::new(None) }, cluster, load).await?)
         }
+        Command::ListKeys { repeat, peer_cert, peer_key } => {
+            print_json(&list_keys(&ctx, &peer_cert, &peer_key, repeat, &ca).await?)
+        }
         Command::Refresh { key, load } => {
             let cluster = cluster_id(&ctx).await?;
             let group = group_key(&ctx, &key)
@@ -781,6 +798,67 @@ async fn run(cli: Cli) -> Result<(), Fail> {
             print_json(&load_command(ctx, "refresh", Op::Refresh { key_id: key, group_key: group }, cluster, load).await?)
         }
     }
+}
+
+#[derive(Serialize)]
+struct ListKeysReport {
+    command: &'static str,
+    /// cosigner -> what it answered and how long it took.
+    targets: BTreeMap<String, ListKeysTarget>,
+}
+
+#[derive(Serialize, Default)]
+struct ListKeysTarget {
+    /// Entries in its inventory (live keys and tombstones), from the last call.
+    keys: usize,
+    calls: u32,
+    errors: u32,
+    /// Of the successful calls.
+    mean_ms: f64,
+    max_ms: f64,
+    error_sample: Option<String>,
+}
+
+/// Peer.ListKeys on every cosigner, `repeat` times each, as a cosigner (`peer_cert`) would call it.
+async fn list_keys(ctx: &Ctx, cert: &PathBuf, key: &PathBuf, repeat: u32, ca: &PathBuf) -> Result<ListKeysReport, Fail> {
+    use rutli_cosigner::pb::peer_client::PeerClient;
+    let read = |p: &PathBuf| std::fs::read(p).map_err(|e| format!("cannot read {}: {e}", p.display()));
+    let tls = ClientTlsConfig::new()
+        .ca_certificate(Certificate::from_pem(read(ca)?))
+        .identity(Identity::from_pem(read(cert)?, read(key)?));
+    let mut out = ListKeysReport { command: "list-keys", targets: BTreeMap::new() };
+    for (name, url) in &ctx.targets {
+        let endpoint = Endpoint::from_shared(url.clone())
+            .map_err(|e| format!("bad endpoint {url}: {e}"))?
+            .connect_timeout(Duration::from_secs(5))
+            .tls_config(tls.clone().domain_name(name.clone()))?;
+        let mut client = PeerClient::new(endpoint.connect_lazy());
+        let mut t = ListKeysTarget::default();
+        let mut total = Duration::ZERO;
+        for _ in 0..repeat.max(1) {
+            t.calls += 1;
+            let begun = Instant::now();
+            match bounded(ctx.timeout, client.list_keys(pb::ListKeysRequest {})).await {
+                Ok(reply) => {
+                    let took = begun.elapsed();
+                    total += took;
+                    t.keys = reply.keys.len();
+                    t.max_ms = t.max_ms.max(took.as_secs_f64() * 1000.0);
+                }
+                Err(status) => {
+                    t.errors += 1;
+                    t.error_sample.get_or_insert_with(|| format!("{}: {}", code_name(status.code()), status.message()));
+                }
+            }
+        }
+        let ok = t.calls - t.errors;
+        if ok > 0 {
+            t.mean_ms = (total.as_secs_f64() * 1000.0 / ok as f64 * 1000.0).round() / 1000.0;
+        }
+        t.max_ms = (t.max_ms * 1000.0).round() / 1000.0;
+        out.targets.insert(name.clone(), t);
+    }
+    Ok(out)
 }
 
 #[tokio::main]

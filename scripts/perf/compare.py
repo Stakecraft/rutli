@@ -50,13 +50,82 @@ def latencies(scenario):
     return {k: v for k, v in out.items() if isinstance(v, (int, float))}
 
 
+def judge(rows, problems, name, metric, was, value, threshold, floor_ms):
+    """One latency against its previous value: a row, and a problem if it regressed."""
+    change = (value - was) / was if was > 0 else 0.0
+    regressed = value > was * (1 + threshold) and value - was > floor_ms
+    rows.append((name, metric, f"{was:.1f}", f"{value:.1f}", f"{change:+.0%}", "REGRESSION" if regressed else "ok"))
+    if regressed:
+        problems.append(f"{name}: {metric} {was:.1f} ms -> {value:.1f} ms ({change:+.0%})")
+
+
+def compare_ramp(previous, current, threshold, floor_ms, rows, problems):
+    """The cluster suite's scale ramp: the headroom factor must not drop, and each factor both
+    runs passed must not be slower (same profile only)."""
+    now, old = current.get("ramp"), (previous or {}).get("ramp")
+    if not now:
+        return
+    if now.get("failed"):
+        return  # reported with the failed scenarios
+    head = now.get("headroom_factor")
+    if not old or previous.get("profile") != current.get("profile"):
+        rows.append(("ramp", "headroom factor", "", f"{head}", "", "no previous value with this profile"))
+        return
+    was_head = old.get("headroom_factor")
+    dropped = isinstance(head, (int, float)) and isinstance(was_head, (int, float)) and head < was_head
+    rows.append(("ramp", "headroom factor", f"{was_head}", f"{head}", "", "REGRESSION" if dropped else "ok"))
+    if dropped:
+        problems.append(f"ramp: headroom factor {was_head} -> {head}")
+    before = {st.get("factor"): st for st in old.get("steps", []) if st.get("passed")}
+    for st in now.get("steps", []):
+        prev = before.get(st.get("factor"))
+        if not st.get("passed") or prev is None:
+            continue
+        for op, o in st.get("ops", {}).items():
+            po = prev.get("ops", {}).get(op)
+            if po:
+                judge(rows, problems, f"ramp x{st['factor']:g}", f"{op} p99", po.get("p99_ms", 0), o.get("p99_ms", 0),
+                      threshold, floor_ms)
+
+
+def compare_keys(previous, current, threshold, floor_ms, rows, problems):
+    """The cluster suite's key-count dimension: per key count, sign p95/p99 and the slowest
+    cosigner's mean ListKeys time."""
+    old = {k.get("count"): k for k in (previous or {}).get("keys") or []}
+    for k in current.get("keys") or []:
+        name = f"keys {k.get('count')}"
+        if not k.get("passed"):
+            continue
+        lat = (k.get("sign") or {}).get("latency") or {}
+        lists = [t.get("mean_ms", 0) for t in (k.get("list_keys") or {}).values()]
+        now = {"sign p95": lat.get("p95_ms"), "sign p99": lat.get("p99_ms"), "list-keys mean (slowest)": max(lists) if lists else None}
+        prev = old.get(k.get("count"))
+        if not prev or not prev.get("passed"):
+            for metric, value in now.items():
+                if value is not None:
+                    rows.append((name, metric, "", f"{value:.1f}", "", "no previous value"))
+            continue
+        plat = (prev.get("sign") or {}).get("latency") or {}
+        plists = [t.get("mean_ms", 0) for t in (prev.get("list_keys") or {}).values()]
+        was = {"sign p95": plat.get("p95_ms"), "sign p99": plat.get("p99_ms"), "list-keys mean (slowest)": max(plists) if plists else None}
+        for metric, value in now.items():
+            if value is not None and was.get(metric) is not None:
+                judge(rows, problems, name, metric, was[metric], value, threshold, floor_ms)
+
+
 def compare(previous, current, threshold, floor_ms):
     """(rows, problems): table rows and the reasons to fail."""
     rows, problems = [], []
     for name in current.get("failed", []):
         scenario = next((s for s in current.get("scenarios", []) if s.get("name") == name), None)
         failed = [c for c in (scenario or {}).get("checks", []) if not c.get("ok")]
-        if not failed:
+        if not failed and name == "keys":
+            failed = [{"check": "every key count passed", "detail": "; ".join(
+                f"{k.get('count')} keys: {k.get('setup_failed') or k.get('list_keys_failed') or (k.get('sign') or {}).get('errors') or 'failed'}"
+                for k in current.get("keys") or [] if not k.get("passed"))}]
+        elif not failed and name == "ramp":
+            failed = [{"check": "the ramp ran", "detail": str((current.get("ramp") or {}).get("failed", ""))}]
+        elif not failed:
             failed = [{"check": "the scenario ran", "detail": str(current.get("setup", {}).get("failed", ""))}]
         for c in failed:
             detail = f"{c['check']}: {c.get('detail', '')}".rstrip(": ")
@@ -88,13 +157,13 @@ def compare(previous, current, threshold, floor_ms):
             if metric not in old:
                 rows.append((name, metric, "", f"{value:.1f}", "", "no previous value"))
                 continue
-            was = old[metric]
-            change = (value - was) / was if was > 0 else 0.0
-            regressed = value > was * (1 + threshold) and value - was > floor_ms
-            verdict = "REGRESSION" if regressed else "ok"
-            rows.append((name, metric, f"{was:.1f}", f"{value:.1f}", f"{change:+.0%}", verdict))
-            if regressed:
-                problems.append(f"{name}: {metric} {was:.1f} ms -> {value:.1f} ms ({change:+.0%})")
+            judge(rows, problems, name, metric, old[metric], value, threshold, floor_ms)
+    for skipped in current.get("skipped") or []:
+        rows.append((skipped.get("name"), "skipped", "", "", "", skipped.get("reason", "")))
+    if current.get("kind") == "cluster":
+        prev = previous if comparable else None
+        compare_ramp(prev, current, threshold, floor_ms, rows, problems)
+        compare_keys(prev, current, threshold, floor_ms, rows, problems)
     return rows, problems
 
 
@@ -142,6 +211,8 @@ def main(argv=None):
     ]
     if note:
         lines += [note, ""]
+    if current.get("headroom_factor") is not None:
+        lines += [f"Headroom factor: {current['headroom_factor']} (profile {current.get('profile')})", ""]
     lines += [table(rows) if rows else "Nothing to compare.", ""]
     if problems:
         lines += [f"{len(problems)} problem(s):"] + [f"- {x}" for x in problems]

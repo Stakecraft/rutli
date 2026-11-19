@@ -11,6 +11,8 @@ over. It does not replace the soak ([`testnet-soak.md`](testnet-soak.md)): every
 machine, so there is no network latency between the cosigners, and the disk is the runner's.
 
 The latency measured on DevNet, across data centers, is in [`performance.md`](performance.md).
+The same scenarios on a real Kubernetes cluster, with scale and disruption tests: see
+[`cluster-suite.md`](cluster-suite.md).
 
 ## Running it
 
