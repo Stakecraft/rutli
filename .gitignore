@@ -48,3 +48,6 @@ deploy/frost/config-tls-smoke/
 # Load tests: config copies and results written by scripts/perf-load.sh
 deploy/frost/config-tls-perf/
 perf-out/
+
+# Python bytecode
+__pycache__/
