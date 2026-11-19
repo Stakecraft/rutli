@@ -230,7 +230,7 @@ step_3_split_ceremony() {
 
   step "   the same dealt bundle is refused after the refresh"
   for i in 1 2 3; do
-    refused "node $i: re-import of the dealt bundle after the refresh" "already exists" \
+    refused "node $i: re-import of the dealt bundle after the refresh" "KeyExists" \
       env_cosigner "$i" import-share --in "${BUNDLE[i]}" --expect-fingerprint "$NS_FP"
   done
 
