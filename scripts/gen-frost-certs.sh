@@ -32,15 +32,24 @@
 #                       minting a new CA, a different ca.crt when reusing one, or any leaf key
 #                       about to be issued. Without it the script refuses all of these.
 #   RUTLI_CERT_UID=<u>  chown the generated files to uid <u> (the container user, 10001) — below.
+#   RUTLI_PIN_CONFIGS=<dir>
+#                       Write the TLS key pins of the cosigner certificates in OUT_DIR into every
+#                       cosigner config in <dir> (`peers[].tls_spki_sha256` of each roster entry
+#                       whose cosigner<id>.crt is in OUT_DIR), in place. E.g. deploy/frost/config-tls
+#                       for the compose cluster. Needs python3.
 #
 # ca.key IS THE ROOT OF THE TRUST DOMAIN. Whoever holds it can mint a `driver` cert (and sign with
-# the cluster) or a `cosignerN` cert (and join the mesh). Escrow it offline (encrypted, in two
+# the cluster, unless signing_policy.signer_pins pins the driver's key) or a `cosignerN` cert (and
+# join the mesh, unless the cosigners pin each other's keys: peers[].tls_spki_sha256). One CA per
+# cluster: never issue a second cluster's certificates from it. Escrow it offline (encrypted, in two
 # places, outside the cluster) and delete it from working machines. Losing it is not an outage —
 # the cluster keeps running on the certs it has — but no leaf can be re-issued until the whole
 # cluster is moved to a new CA: docs/ca-rotation.md is the recovery.
 #
 # At the end the script prints the SHA-256 of ca.crt and the cluster id a cosigner derives from it
-# when `cluster_id` is not pinned in its config (the first 16 hex characters).
+# when `cluster_id` is not pinned in its config (the first 16 hex characters), and the TLS key pin
+# of every cosigner certificate in OUT_DIR (peers[].tls_spki_sha256), which it also writes to
+# OUT_DIR/peer-pins.json — a Helm values file (`-f peer-pins.json`, key `peerPins`).
 #
 # Every file is created owner-only (umask 077), so no private key is ever readable by others, not
 # even between openssl writing it and the chmod; the certificates are made world-readable at the
@@ -58,6 +67,7 @@ CA_DIR="${RUTLI_CA_DIR:-}"
 CA_CN="${RUTLI_CA_CN:-rutli-frost-cluster-ca}"
 CA_DAYS="${RUTLI_CA_DAYS:-825}"
 FORCE="${RUTLI_FORCE:-}"
+PIN_CONFIGS="${RUTLI_PIN_CONFIGS:-}"
 
 die() {
   echo "gen-frost-certs: $*" >&2
@@ -79,6 +89,12 @@ for c in $CERTS; do
   esac
 done
 [ -n "$(echo $CERTS)" ] || die "RUTLI_CERTS is empty"
+
+if [ -n "$PIN_CONFIGS" ]; then
+  [ -d "$PIN_CONFIGS" ] || die "RUTLI_PIN_CONFIGS: no directory $PIN_CONFIGS"
+  command -v python3 >/dev/null || die "RUTLI_PIN_CONFIGS needs python3"
+  PIN_CONFIGS="$(cd "$PIN_CONFIGS" && pwd -P)"
+fi
 
 if [ -n "$CA_DIR" ]; then
   [ -f "$CA_DIR/ca.crt" ] || die "RUTLI_CA_DIR: no ca.crt in $CA_DIR"
@@ -191,6 +207,59 @@ rm -f ca.srl
 # Certificates are public; keys stay 0600 (umask 077 above).
 chmod 644 ./*.crt
 
+# TLS key pins: SHA-256 of each cosigner certificate's SubjectPublicKeyInfo, the value of
+# peers[].tls_spki_sha256 (what `rutli-cosigner tls spki <crt>` prints). Every cosigner certificate in
+# OUT_DIR, issued now or before, so the file always matches the directory.
+spki_pin() {
+  openssl x509 -in "$1" -noout -pubkey | openssl pkey -pubin -outform DER | openssl dgst -sha256 -r | cut -c1-64
+}
+PIN_LINES=""
+for crt in cosigner*.crt; do
+  [ -e "$crt" ] || continue
+  id="${crt#cosigner}"
+  id="${id%.crt}"
+  case "$id" in '' | *[!0-9]*) continue ;; esac
+  PIN_LINES="$PIN_LINES$id $(spki_pin "$crt")
+"
+done
+if [ -n "$PIN_LINES" ]; then
+  {
+    printf '{"peerPins": {'
+    printf '%s' "$PIN_LINES" | sort -n | awk 'NF { printf "%s\"%s\": [\"%s\"]", (n++ ? ", " : ""), $1, $2 }'
+    printf '}}\n'
+  } >peer-pins.json
+  chmod 644 peer-pins.json
+  if [ -n "$PIN_CONFIGS" ]; then
+    python3 - "$PIN_CONFIGS" peer-pins.json <<'PY'
+import json, os, sys
+conf_dir, pins = sys.argv[1], json.load(open(sys.argv[2]))["peerPins"]
+for name in sorted(os.listdir(conf_dir)):
+    path = os.path.join(conf_dir, name)
+    if not name.endswith(".json"):
+        continue
+    with open(path) as f:
+        cfg = json.load(f)
+    if "tls" not in cfg or "peers" not in cfg:
+        continue
+    done, skipped = [], []
+    for peer in cfg["peers"]:
+        pin = pins.get(str(peer.get("identifier")))
+        if pin:
+            peer["tls_spki_sha256"] = pin
+            done.append(peer.get("identifier"))
+        else:
+            skipped.append(peer.get("identifier"))
+    with open(path, "w") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    print(f"pinned peers {done} in {path}")
+    if skipped:
+        print(f"gen-frost-certs: WARNING: no cosigner<id>.crt in the output directory for peers {skipped} "
+              f"of {path}: their tls_spki_sha256 is left as it was", file=sys.stderr)
+PY
+  fi
+fi
+
 # The container images run the cosigner as uid 10001. On Linux, a bind-mounted cert directory
 # keeps its host ownership, so these 0600 files — owned by whoever ran this script — are
 # unreadable inside the container. (Docker Desktop on macOS masks host ownership, which is why
@@ -221,3 +290,8 @@ echo "at ca.crt / refresher.{crt,key} (CN refresher, listed in refresh_allowlist
 echo
 echo "ca.crt sha256:              $CA_SHA256"
 echo "cluster_id (if unpinned):   $(printf '%s' "$CA_SHA256" | cut -c1-16)"
+if [ -n "$PIN_LINES" ]; then
+  echo
+  echo "TLS key pins (peers[].tls_spki_sha256; Helm: -f $OUT/peer-pins.json):"
+  printf '%s' "$PIN_LINES" | sort -n | awk 'NF { printf "  cosigner%-3s %s\n", $1, $2 }'
+fi

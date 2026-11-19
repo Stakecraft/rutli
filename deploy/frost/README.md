@@ -23,7 +23,8 @@ docker compose -f deploy/frost/docker-compose.yml up -d          # pulls publish
 ## Run (mTLS + sealed shares)
 
 ```sh
-scripts/gen-frost-certs.sh 3 deploy/frost/certs                   # CA + per-node certs
+RUTLI_PIN_CONFIGS=deploy/frost/config-tls \
+  scripts/gen-frost-certs.sh 3 deploy/frost/certs                 # CA + per-node certs, pinned
 export RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"                # from a secret manager in prod
 RUTLI_SEAL_SECRET=$RUTLI_SEAL_SECRET \
   docker compose -f deploy/frost/docker-compose.tls.yml up -d
@@ -70,6 +71,13 @@ mesh and the driver both authenticate). Generate a dev trust domain:
 ```sh
 scripts/gen-frost-certs.sh 3 deploy/frost/certs   # cluster CA + 3 cosigner certs + a driver cert
 ```
+
+Each node also pins the TLS key of every cosigner (`peers[].tls_spki_sha256`): a certificate with
+the right name under the cluster CA but another key is refused, both ways. A node with TLS refuses
+to start until every roster entry has a pin (or `tls.require_peer_pins` is `false`). The example
+configs ship without pins, because the keys are made per checkout: `RUTLI_PIN_CONFIGS=<dir>` makes
+`gen-frost-certs.sh` write the pins of the certificates it leaves in its output directory into the
+configs in `<dir>` (do not commit them). `rutli-cosigner tls spki certs/cosigner1.crt` prints one pin.
 
 Example TLS configs are in `config-tls/` (mount `certs/` at `/certs`). The driver enables TLS via
 `frost.tls { ca-cert, cert, key }` in its Canton config, pointing at the CA + `driver.{crt,key}`, and

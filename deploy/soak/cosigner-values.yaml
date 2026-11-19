@@ -15,6 +15,12 @@
 # topology: the chart's default is now perNode (one StatefulSet + seal bundle per node). The soak
 # stays on the legacy StatefulSet, rendered byte-for-byte as before, until the user runs
 # docs/runbook-per-node-seal.md, which replaces this pin with the perNode values it lists.
+#
+# peerPins: from 0.5.0 the chart refuses to render without a TLS key pin for every node
+# (tls.requirePeerPins unset = on). They are not in this file: take them from the live certificates
+# (`rutli-cosigner tls spki cosigner<i>.crt`, CHANGELOG, 0.5.0 upgrade note) and add them to the
+# exported values before the upgrade; CI renders this file with placeholder pins
+# (ci/peer-pins-values.yaml).
 topology: legacy
 persistence:
   storageClassName: hcloud-volumes

@@ -34,7 +34,7 @@ Two layouts (`topology`):
 # 1. Certs (each cosigner cert carries only its own names: CN/SAN cosigner<id>)
 scripts/gen-frost-certs.sh 3 ./certs
 
-# 2. Namespace + secrets — one Secret per node, nothing shared but the CA
+# 2. Namespace + secrets — one Secret per node, nothing shared but the CA (one CA per cluster)
 kubectl create namespace rutli
 kubectl -n rutli label namespace rutli \
   pod-security.kubernetes.io/enforce=restricted \
@@ -52,9 +52,14 @@ for i in 1 2 3; do
   shred -u node-$i.json 2>/dev/null || rm -f node-$i.json
 done
 
-# 3. Install (values already pin the image digest)
-helm upgrade --install rutli deploy/helm/rutli-cosigner -n rutli
+# 3. Install (values already pin the image digest). peer-pins.json, written by gen-frost-certs.sh,
+#    is a values file with each cosigner's TLS key pin (peerPins); the chart refuses to render
+#    without them.
+helm upgrade --install rutli deploy/helm/rutli-cosigner -n rutli -f certs/peer-pins.json
 ```
+
+Keep the pins with the release's values: a later `helm upgrade` needs them as much as `clusterId`
+(`-f <saved values>` or `--reuse-values`).
 
 With `hostedKeys.enabled=true` the chart also needs `hostedKeys.commitmentKey` (one random value
 for the cluster: `openssl rand -hex 32`) and every node's `nodes[].distPublicKey` (printed by
@@ -90,6 +95,8 @@ Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org A
 | `fullnameOverride` | `rutli-cosigner` | Workload / headless Service base name |
 | `tls.layout` | `perNode` | legacy topology only: `perNode` (`rutli-cosigner-ca` + `rutli-cosigner-tls-1..N`) or `shared` (one `tlsSecretName`). topology perNode always uses `rutli-cosigner-ca` + the node's own `tlsSecret` |
 | `tls.allowExpiredCa` | `false` | Accept an expired/not-yet-valid CA in `ca.crt` (never a non-CA). Emergency rotation away from an already-expired CA only |
+| `peerPins` | `{}` | TLS key pins: node id → one or two SHA-256 hex values of that cosigner certificate's SubjectPublicKeyInfo (`rutli-cosigner tls spki cosigner<id>.crt`, or `-f certs/peer-pins.json`). Rendered into every node's roster as `tls_spki_sha256`. Required for every node; two only during that node's key roll. See "Peer key pins" |
+| `tls.requirePeerPins` | unset (= on) | `false`: render without pins, and the cosigners accept a peer by certificate name alone (they warn at startup). Opt-out only |
 | `sealSecretName` | `rutli-seal` | legacy topology only: the shared master (deprecated) |
 | `signerAllowlist` | `[driver]` | Required under TLS |
 | `clusterId` | `""` | Cluster id pin (16 lowercase hex). Empty = derived from `ca.crt`'s bytes. Set it to the current derived id before changing `ca.crt` — see "Rotating the cluster CA". Never copy it to another cluster |
@@ -124,6 +131,29 @@ identifies a mesh caller by an exact match on its configured client CN — so on
 certificate can no longer stand in for another (audit M3). Certificates from earlier releases also
 carry a shared `rutli-cosigner` SAN; nothing verifies it any more, and new ones do not have it.
 Certificates are read at startup: restart the pods after rotating a Secret.
+
+### Peer key pins
+
+The name is not enough either: whoever holds the CA key can issue another `cosigner2` certificate,
+and a replaced node's old certificate stays valid until it expires. So each node also checks the key
+in a peer's certificate against `peerPins` (`peers[].tls_spki_sha256` in the config), when the peer
+calls it and when it dials the peer, before any request. A mismatch is refused with the CN and
+the key it saw, counted in `rutli_peer_pin_refusals_total{direction}`. A node refuses to start when
+its own certificate's key is not in its own entry, so a leaf swapped before its pin was rolled out
+stops at that pod. Pins are read at startup, like certificates; a values change alone restarts
+nothing (the pod template does not change), so roll the pods after it.
+
+- **Planned key roll of node N:** pins `[old, new]` for N, roll every pod; swap N's leaf, restart N;
+  pins `[new]`, roll every pod. [`docs/ca-rotation.md`](../../../docs/ca-rotation.md) §10.
+- **CA rotation:** every leaf gets a new key, so the pins change with it (Phase A: old and new;
+  Phase D: new only).
+- `rutli-cosigner --config <client config with pins> tls spki --peers` shows the key each running
+  node presents and whether it is pinned.
+
+One CA per cluster. A CA that also signs another cluster's certificates (staging, a second tenant)
+makes that cluster's driver and operator certificates valid here wherever `signing_policy.signer_pins`
+does not pin them, and gives both the same derived cluster id. Peer pins keep the other cluster's
+cosigners off this mesh; nothing keeps its clients out.
 
 ### Rotating the cluster CA
 
