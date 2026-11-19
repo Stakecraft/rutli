@@ -48,6 +48,19 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Security
 
+- **The cosigner keeps serving when it runs short of file descriptors, and never stops serving
+  without saying so.** At start-up it raises its soft open-file limit to the hard limit and logs
+  both (`rutli_fd_limit`). It accepts gRPC connections in its own loop: an accept error such as
+  running out of descriptors is retried after a short backoff and reported
+  (`rutli_grpc_accept_errors_total`, alert `RutliGrpcAcceptErrors`), where it used to end the
+  server. Open connections are capped below the descriptor limit (the soft limit less 256, or half
+  of it under a limit below 512, at most 4096); past the cap new connections wait in the listen backlog
+  (`rutli_grpc_connections`, `rutli_grpc_connection_limit`, alert `RutliGrpcConnectionsNearLimit`).
+  A new connection gets 5 s to finish its TLS handshake (without TLS: to send its first
+  bytes; `rutli_grpc_handshake_timeouts_total`), and an error during a handshake no longer ends
+  the server. The server sends HTTP/2 keepalive pings
+  (every 60 s, 20 s timeout), so connections to peers that vanished are closed. If the gRPC server
+  ever returns without a shutdown request, the daemon logs it and exits non-zero.
 - **heapless 0.7.17: nine `unsound` RustSec advisories (RUSTSEC-2026-0574 to -0582) are ignored in
   `frost/deny.toml`, with the reason recorded per advisory.** heapless comes in only through
   frost-core 2.2.0 → postcard 1.1.3, and no release of either moves it to the fixed heapless 0.9.4.

@@ -553,6 +553,27 @@ async fn main() -> Result<()> {
     }
     tracing::info!(identifier = cfg.identifier, listen = %cfg.listen, "starting cosigner");
 
+    // Every connection, key file and peer channel holds a descriptor; container runtimes often
+    // start a process with a soft limit far below its hard one. Raise it, and size the gRPC
+    // connection cap from the result.
+    let fd_limit = rutli_cosigner::fdlimit::raise_nofile();
+    match fd_limit {
+        Some(l) if l.short_of_target() => tracing::warn!(
+            soft_before = l.soft_before,
+            soft = l.soft,
+            hard = l.hard,
+            target = l.target,
+            "could not raise the open-file limit to its hard limit"
+        ),
+        Some(l) if l.soft < 1024 => tracing::warn!(
+            soft = l.soft,
+            hard = l.hard,
+            "the open-file limit is low; raise the container's nofile limit (the gRPC connection cap follows it)"
+        ),
+        Some(l) => tracing::info!(soft_before = l.soft_before, soft = l.soft, hard = l.hard, "open-file limit"),
+        None => tracing::warn!("open-file limit unknown on this platform"),
+    }
+
     // One daemon per data directory, for the life of the process (released by the kernel on exit).
     // Taken first, so a second instance fails with this error rather than a port clash. The
     // offline subcommands above deliberately skip it: import-share and import-key are safe to run
@@ -563,6 +584,9 @@ async fn main() -> Result<()> {
     if let Some(metrics_listen) = &cfg.metrics_listen {
         rutli_cosigner::metrics::install(metrics_listen)?;
         tracing::info!(listen = %metrics_listen, "Prometheus metrics endpoint serving /metrics");
+    }
+    if let Some(l) = fd_limit {
+        metrics::gauge!(rutli_cosigner::metrics::FD_LIMIT).set(l.soft as f64);
     }
 
     let identifier = ident(cfg.identifier)?;
@@ -1002,22 +1026,66 @@ async fn main() -> Result<()> {
     };
     let peer = PeerSvc { node, allowed_cns: peer_cns, peer_ids: Some(Arc::new(cfg.peer_identities())) };
 
-    let addr = cfg
+    let addr: std::net::SocketAddr = cfg
         .listen
         .parse()
         .map_err(|e| DaemonError::Config(format!("bad listen addr {}: {e}", cfg.listen)))?;
-    tracing::info!(%addr, "gRPC serving Signer + Peer");
+    // Own accept loop (rutli_cosigner::accept): it never ends on an accept error, caps open
+    // connections below the descriptor limit, and gives a new connection a deadline to finish its
+    // TLS handshake (without TLS: to send its first bytes).
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| DaemonError::Config(format!("cannot listen on {addr}: {e}")))?;
+    let connection_limit =
+        rutli_cosigner::accept::connection_limit(fd_limit.map_or(1024, |l| l.soft));
+    let incoming = rutli_cosigner::accept::incoming(
+        listener,
+        connection_limit,
+        rutli_cosigner::accept::Deadline::new(rutli_cosigner::accept::HANDSHAKE_TIMEOUT, tls.is_some()),
+    );
+    tracing::info!(%addr, connection_limit, "gRPC serving Signer + Peer");
 
-    let mut server = tonic::transport::Server::builder();
+    let mut server = tonic::transport::Server::builder()
+        // A peer that vanished without closing (host down, a dropped NAT entry) is found by the
+        // pings and its connection closed, instead of holding a descriptor and a slot for good.
+        .http2_keepalive_interval(Some(std::time::Duration::from_secs(60)))
+        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(20)));
     if let Some(t) = &tls {
         server = server.tls_config(t.server.clone())?;
     }
-    server
+    let shutdown_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let signal = {
+        // Called here, not inside the block: it installs the SIGTERM handler before serving starts.
+        let stop = shutdown();
+        let requested = Arc::clone(&shutdown_requested);
+        async move {
+            stop.await;
+            requested.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    };
+    let served = server
         .add_service(SignerServer::new(signer))
         .add_service(PeerServer::new(peer))
-        .serve_with_shutdown(addr, shutdown())
-        .await?;
-    Ok(())
+        .serve_with_incoming_shutdown(incoming, signal)
+        .await;
+    serve_outcome(served, shutdown_requested.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// How the gRPC server ended. It returns on its own only after the shutdown signal; returning
+/// without one means it stopped serving, and the process exits non-zero so the orchestrator
+/// restarts it and the stop is visible.
+fn serve_outcome(served: std::result::Result<(), tonic::transport::Error>, shutdown_requested: bool) -> Result<()> {
+    match served {
+        Ok(()) if shutdown_requested => Ok(()),
+        Ok(()) => {
+            tracing::error!("the gRPC server stopped without a shutdown request; exiting non-zero");
+            Err(DaemonError::Io(std::io::Error::other("the gRPC server stopped without a shutdown request")))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "the gRPC server failed");
+            Err(e.into())
+        }
+    }
 }
 
 fn audit_cross_check_command(
@@ -2504,6 +2572,13 @@ fn shutdown() -> impl std::future::Future<Output = ()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_server_that_returns_without_a_shutdown_request_is_an_error() {
+        assert!(serve_outcome(Ok(()), true).is_ok(), "after the signal: a clean stop");
+        let e = serve_outcome(Ok(()), false).expect_err("without the signal: an error, so a non-zero exit");
+        assert!(e.to_string().contains("without a shutdown request"), "{e}");
+    }
 
     #[test]
     fn ansi_only_on_a_terminal_and_without_no_color() {

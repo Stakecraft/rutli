@@ -61,6 +61,11 @@ annotations, NetworkPolicy ingress for pods labelled `rutli.io/scraper: "true"`)
 | `rutli_hosted_tombstones_written_total` | counter | `how`=converted\|recorded | Tombstones this node wrote: a live copy deleted (directly or from a peer's tombstone), or a tombstone recorded for a key it did not hold |
 | `rutli_hosted_tombstones` | gauge | `retained`=true\|false | Deleted hosted keys on this node, split by whether the tombstone still retains the material (grace period) — refreshed by the anti-entropy sweep |
 | `rutli_keyfiles` | gauge | `format`=v1\|v2\|plaintext, `dek`=current\|previous\|unknown\|none | This node's key files at start-up (audit M4): a v2 migration watches `format="v1"` reach 0, a DEK rotation watches `dek="previous"` reach 0 before the previous DEK leaves the seal bundle; `dek="unknown"` files do not open on this node |
+| `rutli_fd_limit` | gauge | — | Soft open-file limit after the start-up raise to the hard limit |
+| `rutli_grpc_connections` | gauge | — | Open gRPC connections, TLS handshake done or under way |
+| `rutli_grpc_connection_limit` | gauge | — | Most gRPC connections served at once (soft open-file limit less 256, or half of it under a limit below 512, at most 4096); past it new connections wait in the listen backlog (`RutliGrpcConnectionsNearLimit`) |
+| `rutli_grpc_accept_errors_total` | counter | — | Failed accepts that needed a backoff, usually the process out of file descriptors; the loop retries (`RutliGrpcAcceptErrors`) |
+| `rutli_grpc_handshake_timeouts_total` | counter | — | Connections cut for not finishing the TLS handshake within 5 s of accept (without TLS: for sending nothing). Clients that open TCP and then send nothing count here; a probe that connects and closes does not |
 | `rutli_lock_poison_recoveries_total` | counter | `lock` | Locks recovered after a panicking request poisoned them (audit L3). The node kept serving; the panic is a bug (`RutliLockPoisonRecovered`) |
 
 Leader-side metrics (`sign_*`, `ceremony_*`) appear on whichever node served the driver's request —

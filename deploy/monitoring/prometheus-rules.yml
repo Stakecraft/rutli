@@ -30,6 +30,11 @@
 #   rutli_nonce_markers                                              gauge
 #   rutli_nonce_markers_pruned_total                                 counter
 #   rutli_lock_poison_recoveries_total{lock=...}                     counter
+#   rutli_fd_limit                                                   gauge
+#   rutli_grpc_connections                                           gauge
+#   rutli_grpc_connection_limit                                      gauge
+#   rutli_grpc_accept_errors_total                                   counter
+#   rutli_grpc_handshake_timeouts_total                              counter
 #   rutli_pending_sign_sessions                                      gauge
 #   rutli_keystore_unreadable                                        gauge (0|1)
 #   rutli_hosted_keys                                                gauge
@@ -316,6 +321,24 @@ groups:
         annotations:
           summary: "Rütli cosigner {{ $labels.instance }} recovered from a panic holding {{ $labels.lock }}"
           description: "A request panicked on {{ $labels.instance }} while holding the {{ $labels.lock }} lock. The node recovered the lock and keeps serving (in-flight signing sessions or the key cache may have been dropped, ceremony votes reloaded from disk), but a panic is a bug: find it in the cosigner log just before 'recovered a lock poisoned by a panicking request' and report it."
+
+      - alert: RutliGrpcAcceptErrors
+        expr: increase(rutli_grpc_accept_errors_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} failed to accept gRPC connections"
+          description: "{{ $labels.instance }} could not accept new gRPC connections and is retrying with a backoff; meanwhile the driver and the peers cannot reach it. Usually the process is out of file descriptors: compare rutli_fd_limit with rutli_grpc_connections and the node's open descriptors, and look for 'accepting a gRPC connection failed' in its log. Raise the container's nofile limit if rutli_fd_limit is low."
+
+      - alert: RutliGrpcConnectionsNearLimit
+        expr: rutli_grpc_connections / rutli_grpc_connection_limit > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} is near its gRPC connection limit"
+          description: "{{ $labels.instance }} has had more than 90% of its gRPC connection slots in use for 5 minutes. Past the limit, new connections wait in the listen backlog, so the driver or a peer may time out. A cosigner normally needs a handful of connections (the drivers and the peers multiplex calls); many more come from a misbehaving client or something holding connections open. Check the sources of the connections to the gRPC port."
 
       - alert: RutliHostedKeyConflict
         expr: increase(rutli_anti_entropy_conflicts_total[1h]) > 0
