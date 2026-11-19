@@ -65,7 +65,8 @@ enum Command {
         /// The hosted key to export (a `rutli-…` key id).
         #[arg(long)]
         key_id: String,
-        /// File to write the export artifact to.
+        /// File to write the export artifact to. It must not exist yet: the export refuses to
+        /// overwrite a file or follow a symlink.
         #[arg(long)]
         out: std::path::PathBuf,
         /// Env var holding the passphrase that protects the artifact (Argon2id + AES-256-GCM).
@@ -2148,8 +2149,13 @@ fn write_new_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     let mut f = rutli_cosigner::share_delivery::private_create_new(path).map_err(|e| {
         DaemonError::Config(format!("cannot create {} (refusing to overwrite): {e}", path.display()))
     })?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
+    if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
+        // The file is ours (create_new): remove the partial copy, so a retry with the same path is
+        // not refused as an overwrite.
+        drop(f);
+        let _ = std::fs::remove_file(path);
+        return Err(e.into());
+    }
     Ok(())
 }
 
@@ -2325,14 +2331,17 @@ fn export_key_command(
                     .into(),
             )
         })?;
-        let passphrase = std::env::var(env_name).map_err(|_| {
+        // Wiped on drop, like the import path's passphrase.
+        let passphrase = zeroize::Zeroizing::new(std::env::var(env_name).map_err(|_| {
             DaemonError::Config(format!("export passphrase: env var {env_name} is not set"))
-        })?;
+        })?);
         rutli_cosigner::export::export_encrypted(key_id, &key, &passphrase)?
     };
 
-    // 0600 before any bytes land: an export must never be briefly world-readable.
-    write_private_file(out, &serde_json::to_vec_pretty(&envelope)?)?;
+    // A new file, 0600 before any bytes land: an export must never be briefly world-readable. The
+    // mode only applies to a file this call creates, so an existing path (with whatever mode it
+    // has) or a symlink is refused, never written through.
+    write_new_private_file(out, &serde_json::to_vec_pretty(&envelope)?)?;
     // Deliberately audible in the node's log: an export is a privileged, rare event, and the log is
     // often the only record that a portable copy of a key now exists.
     tracing::warn!(
@@ -2429,23 +2438,6 @@ fn import_key_command(
          one interval of a running daemon, or once it starts); then run verify-hosted",
         key.spec.as_str()
     );
-    Ok(())
-}
-
-/// Create `path` with owner-only permissions BEFORE writing, so the contents are never briefly
-/// readable by other users on the host.
-fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let mut f = opts.open(path)?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
     Ok(())
 }
 
