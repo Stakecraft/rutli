@@ -5,6 +5,17 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Security
+
+- **heapless 0.7.17: nine `unsound` RustSec advisories (RUSTSEC-2026-0574 to -0582) are ignored in
+  `frost/deny.toml`, with the reason recorded per advisory.** heapless comes in only through
+  frost-core 2.2.0 → postcard 1.1.3, and no release of either moves it to the fixed heapless 0.9.4.
+  frost-core calls only postcard's `to_allocvec` and `from_bytes`, which do not touch heapless;
+  postcard itself uses only heapless' `Vec` and `String`, in functions frost-core does not call;
+  and the cosigner and dealer binaries contain no heapless code (checked on their symbol tables).
+  No code change; the same holds for 0.4.0 as released. In the lockfile, spin moves from 0.9.8 to
+  0.9.9, because 0.9.8 was yanked.
+
 ### Changed
 
 - **A sign round 2 for a session the node no longer holds answers `ABORTED`, not `INTERNAL`,** and
@@ -83,6 +94,9 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Documentation
 
+- **Threshold ECIES is planned for 1.0, not 2.0** (decided 2026-11-19). `docs/roadmap.md`, the
+  README, `docs/hosted-keys.md` and the explorer page say so, and the second audit phase in
+  `docs/audit-rfq.md` (section 2.2) now lists four features. No code changes.
 - **Splice 0.10 / Canton 3.7** (`docs/splice-0.10.md`): the driver needs no change, because the KMS driver SPI and the
   conformance suite are byte-identical from v3.6.1 to v3.7.3. Operators get a new page covering the upgrade order for a
   Rütli validator: back up first, then the participant, then the validator, with no `--atomic`, and before the network's

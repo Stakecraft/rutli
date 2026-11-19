@@ -213,17 +213,19 @@ v0.4.0.
 | **v0.5.0** | Canton LocalNet quickstart | Rütli next to Splice's LocalNet, all in local containers, so an operator can try it in minutes without touching a real node |
 | **1.0** | Driver published to a Maven repository | Operators consume the driver as a normal dependency instead of a jar from a GitHub release |
 | **1.0** | Signed audit log, exported off the host | The hash chain is periodically signed and shipped to append-only storage (for example S3 Object Lock or syslog), so a host administrator can no longer rewrite it unnoticed |
-| **1.0** | Encryption-key rotation, ready for threshold ECIES | A runbook for rotating the participant's encryption key (planned or after an incident), and a driver that can serve an old hosted ECIES key and a new one side by side during the rotation, with versioned key ids so the two kinds cannot be confused. This is what makes the 2.0 migration below a routine rotation |
+| **1.0** | Encryption-key rotation, ready for threshold ECIES | A runbook for rotating the participant's encryption key (planned or after an incident), and a driver that can serve an old hosted ECIES key and a new one side by side during the rotation, with versioned key ids so the two kinds cannot be confused. This is what makes the move to threshold ECIES below a routine rotation |
+| **1.0** | Threshold ECIES | The encryption key held as shares too: each cosigner computes its part of the ECDH and the driver combines them. Needs a P-256 DKG and proofs that each partial result is correct. Closes the residual "one compromised cosigner reads the hosted keys" for ECIES. **Migration:** existing nodes rotate their encryption key to a new threshold key born by DKG, with the rotation runbook above, without downtime and without changing the node's identity. Traffic encrypted to the old key keeps the protection it had. RSA keys rotate to threshold ECIES the same way. An optional split of the existing ECIES key into shares (same public key) is possible but weaker, because the key once existed whole |
 | **1.0** | Emergency recovery | A designed answer to "every cosigner is lost at once": shares encrypted to offline keys held by several recovery officers. It is a path to the whole key, so the design (who, how many, which ceremony) comes before the code |
-| **2.0** | Threshold ECIES | The encryption key held as shares too: each cosigner computes its part of the ECDH and the driver combines them. Needs a P-256 DKG and proofs that each partial result is correct. Closes the residual "one compromised cosigner reads the hosted keys" for ECIES. **Migration:** existing nodes rotate their encryption key to a new threshold key born by DKG, with the 1.0 runbook, without downtime and without changing the node's identity. Traffic encrypted to the old key keeps the protection it had. RSA keys rotate to threshold ECIES the same way. An optional split of the existing ECIES key into shares (same public key) is possible but weaker, because the key once existed whole |
 | **2.0** | Confidential computing | Cosigners in AWS Nitro Enclaves, AMD SEV-SNP or Intel TDX, so even root on the host or a memory snapshot does not reveal a share (today a documented residual, audit L7) |
 
-**Consequence for the audit.** Threshold ECIES moved to 2.0 (decided 2026-11-02) so that the Cure53
-engagement on v0.4.0 stays as scoped. The other 1.0 features are new security-critical code after the
-freeze: emergency recovery, the signed audit export, and the encryption-key rotation with its mixed-mode
-driver. **Decided 2026-11-02: Cure53 reviews them too**, as a second phase of the same engagement once
-they are code-complete and before 1.0 is tagged. The RFQ asks for that phase as a separate line item
-([audit-rfq.md](audit-rfq.md), section 2.2).
+**Consequence for the audit.** Threshold ECIES was moved to 2.0 on 2026-11-02 and brought back into
+1.0 on 2026-11-19: without it one compromised cosigner can still read the encryption key. Like the
+other 1.0 features (emergency recovery, the signed audit export, and the encryption-key rotation with
+its mixed-mode driver) it is new security-critical code after the audit freeze. **Cure53 reviews all
+four** as a second phase of the same engagement, once they are code-complete and before 1.0 is tagged
+(decided 2026-11-02 for the first three). The RFQ asks for that phase as a separate line item
+([audit-rfq.md](audit-rfq.md), section 2.2). Threshold ECIES needs the share code to work for a second
+curve, which touches code the first phase reviewed; the second phase covers that change as well.
 
 ## Open decisions
 
