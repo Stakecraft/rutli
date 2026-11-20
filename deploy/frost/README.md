@@ -70,7 +70,8 @@ endpoints; the server then **requires** a client cert signed by the cluster CA (
 mesh and the driver both authenticate). Generate a dev trust domain:
 
 ```sh
-scripts/gen-frost-certs.sh 3 deploy/frost/certs   # cluster CA + 3 cosigner certs + a driver cert
+RUTLI_PIN_CONFIGS=deploy/frost/config-tls \
+  scripts/gen-frost-certs.sh 3 deploy/frost/certs # cluster CA + 3 cosigner certs + a driver cert
 ```
 
 Each node also pins the TLS key of every cosigner (`peers[].tls_spki_sha256`): a certificate with

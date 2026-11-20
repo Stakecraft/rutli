@@ -30,6 +30,7 @@ Standard library only. Usage: see scripts/perf-load.sh, or `run.py --help`.
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -47,6 +48,21 @@ LIMITED_PER_MIN = 120
 THRESHOLD, CLUSTER_SIZE = 2, 3
 # hosted_keys.decrypt_rate_limit_per_min of deploy/frost/config-tls: a bucket of one minute's worth.
 DECRYPT_PER_MIN = 6000
+
+
+# What rutli-loadgen prints when the cluster itself refused what a run needed: its error line
+# carries the gRPC code of a cosigner's answer, or says the cosigners did not become healthy or
+# agree on a cluster id. Any other failure (an unreadable file, a usage error, a panic, a lost
+# connection to the pod) is the rig's.
+CLUSTER_ANSWER = re.compile(
+    r"rutli-loadgen: .*(\b(Cancelled|Unknown|InvalidArgument|DeadlineExceeded|NotFound|AlreadyExists|"
+    r"PermissionDenied|ResourceExhausted|FailedPrecondition|Aborted|OutOfRange|Unimplemented|Internal|"
+    r"Unavailable|DataLoss|Unauthenticated)\b|not healthy after|do not agree on a cluster id)")
+
+
+def rig_failure(returncode, stderr):
+    """Whether a failed rutli-loadgen run is the rig's failure rather than the cluster's."""
+    return not (returncode == 2 and CLUSTER_ANSWER.search(stderr or ""))
 
 
 def log(msg):
@@ -114,21 +130,27 @@ class Runner:
         return subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def loadgen_finish(self, proc, wall_timeout):
-        """The JSON report of a started load generator, or {"failed": why}."""
+        """The JSON report of a started load generator, or {"failed": why}. `"rig": True` marks a
+        failure of the test rig (the load generator could not be run or reached, or never
+        finished) rather than an answer of the cluster: rutli-loadgen itself exits 2 when the
+        cluster refused what it needed (a DKG, a key) and says so (`rig_failure`); anything else
+        is the rig's."""
         try:
             out, err = proc.communicate(timeout=wall_timeout)
         except subprocess.TimeoutExpired:
             proc.kill()
             out, err = proc.communicate()
-            return {"failed": f"the load generator did not finish within {wall_timeout} s", "stderr": err[-2000:]}
+            return {"failed": f"the load generator did not finish within {wall_timeout} s", "stderr": err[-2000:],
+                    "rig": True}
         for line in err.splitlines():
             log(f"  {line}")
         if proc.returncode != 0:
-            return {"failed": f"the load generator exited {proc.returncode}", "stderr": err[-2000:]}
+            return {"failed": f"the load generator exited {proc.returncode}", "stderr": err[-2000:],
+                    "rig": rig_failure(proc.returncode, err)}
         try:
             return json.loads(out) if out.strip() else {}
         except json.JSONDecodeError as e:
-            return {"failed": f"the load generator's output is not JSON: {e}", "stdout": out[-2000:]}
+            return {"failed": f"the load generator's output is not JSON: {e}", "stdout": out[-2000:], "rig": True}
 
     def loadgen(self, args, timeout_secs=30, wall_timeout=600):
         return self.loadgen_finish(self.loadgen_start(args, timeout_secs), wall_timeout)
@@ -178,14 +200,15 @@ class Runner:
 
         checks = []
 
-        def check(what, ok, detail=""):
-            checks.append({"check": what, "ok": bool(ok), "detail": detail})
+        def check(what, ok, detail="", rig=False):
+            # rig: a failure of the test rig, not a finding about the cluster.
+            checks.append({"check": what, "ok": bool(ok), "detail": detail, "rig": bool(rig)})
 
         per_load = bool(allowed) and isinstance(allowed[0], (tuple, list))
         errors, samples, bad, total_ok, unexpected = {}, {}, 0, 0, []
         for i, load in enumerate(loads):
             if "failed" in load:
-                check("the load generator ran", False, load["failed"])
+                check("the load generator ran", False, load["failed"], rig=load.get("rig", False))
                 continue
             client = load.get("client", {})
             total_ok += client.get("ok", 0)
@@ -197,7 +220,9 @@ class Runner:
                     sample = client.get("error_samples", {}).get(code, "")[:160]
                     unexpected.append(f"{load.get('name') or name}: {n} x {code} ({sample})")
             samples.update(client.get("error_samples", {}))
-            unhealthy = sorted(n for n, ok in load.get("health", {}).items() if not ok)
+            # A cosigner the scenario restarts is judged by how long it takes to be healthy again
+            # (cluster.py records that), not by its health the moment the load ends.
+            unhealthy = sorted(n for n, ok in load.get("health", {}).items() if not ok and n not in restarted)
             check("every cosigner is healthy afterwards", not unhealthy, ", ".join(unhealthy))
         check("no request ended in a code the scenario does not allow", not unexpected, "; ".join(unexpected))
         check("every answer verifies", bad == 0, f"{bad} answers did not verify: {samples.get('OK', '')[:160]}")
@@ -206,7 +231,7 @@ class Runner:
         for node in NODES:
             b, a = before.get(node, {}), after.get(node, {})
             if "fds" not in a or "peak_rss_kb" not in a:
-                check(f"{node}: process readable", False, "could not read /proc/1 in the container")
+                check(f"{node}: process readable", False, "could not read /proc/1 in the container", rig=True)
                 continue
             if node not in restarted:
                 # A cosigner that died and came back passes every other check here with a fresh
@@ -245,6 +270,9 @@ class Runner:
 
     def close(self, result):
         result["passed"] = all(c["ok"] for c in result["checks"])
+        failing = [c for c in result["checks"] if not c["ok"]]
+        # Who failed: the cluster (a check about its behaviour), or only the rig.
+        result["failed_by"] = None if not failing else ("rutli" if any(not c.get("rig") for c in failing) else "rig")
         for c in result["checks"]:
             if not c["ok"]:
                 log(f"  FAILED: {c['check']}: {c['detail']}")
@@ -459,9 +487,10 @@ def main():
     if "failed" not in setup:
         runner.run()
 
-    failed = [r["name"] for r in runner.results if not r.get("passed")]
+    failed = [r["name"] for r in runner.results if r.get("failed_by") == "rutli"]
+    rig_failed = [r["name"] for r in runner.results if r.get("failed_by") == "rig"]
     if "failed" in setup:
-        failed.insert(0, "setup")
+        (rig_failed if setup.get("rig") else failed).insert(0, "setup")
         log(f"setup FAILED: {setup['failed']}\n{setup.get('stderr', '')}")
     doc = {
         "schema": 1,
@@ -474,15 +503,20 @@ def main():
         "setup": setup,
         "scenarios": runner.results,
         "failed": failed,
+        "rig_failed": rig_failed,
     }
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as f:
         json.dump(doc, f, indent=2)
         f.write("\n")
     log(f"wrote {args.out}")
+    if rig_failed:
+        log(f"RIG FAILED (no verdict on Rütli): {', '.join(rig_failed)}")
     if failed:
         log(f"FAILED scenarios: {', '.join(failed)}")
         return 1
+    if rig_failed:
+        return 3
     log("all scenarios passed")
     return 0
 

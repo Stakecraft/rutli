@@ -63,7 +63,7 @@ live config. It works under any `profile`.
 | `hosted_keys.decrypt_rate_limit_per_min` (hosted keys on) | 6000 | above 0 | Bounds what a stolen driver certificate can decrypt. |
 | `hosted_keys.delete_approval_threshold` (with `delete_allowlist`) | 0 | at least 1 | A delete needs a human approval. |
 | `hosted_keys.commitment_key` (hosted keys on) | derived on the legacy master | set | The per-node seal bundle needs it. |
-| `signing_policy.rules` | empty | **advisory**: a `quorum` rule whose prefix covers a namespace key (`<prefix>frost-namespace`) | Human approval of namespace-key signatures ([approval-quorum.md](approval-quorum.md)). A deployment decision, so it is reported and never refuses. |
+| `signing_policy.rules` | empty | **advisory**: a `quorum` rule whose prefix covers a namespace key (`<prefix>frost-namespace` from a Splice validator, `<prefix>frost-<node>-namespace` from Canton's auto-init) | Human approval of namespace-key signatures ([approval-quorum.md](approval-quorum.md)). A deployment decision, so it is reported and never refuses. |
 
 The intent rows are not listed separately for a node without TLS: the `tls` row covers them.
 
@@ -98,11 +98,11 @@ Its exit codes are those of `check-config` above.
 | `frost.sign-intents` | `on` | `on` | `off` is an emergency switch. |
 | `frost.cluster-id` | learned from the cluster | set | A learned value follows a majority of the cosigners; a set one cannot be steered. |
 | `frost.pin-dir` | unset | set, on the participant's durable volume | Group-key pins that survive a restart. Without them, one cosigner answering another key blocks the first pin after every restart ([disaster-recovery.md](disaster-recovery.md#3i-the-drivers-group-key-pins-frostpin-dir)). |
-| `frost.expected-group-keys` | empty | **advisory**: the namespace key's group key, from the key ceremony record | The operator's anchor: a first pin must equal it. |
+| `frost.expected-group-keys` | empty | **advisory**: an entry for the namespace key, its group key from the key ceremony record | The operator's anchor: a first pin must equal it. |
 | `audit-log-path` | unset | set | The hash-chained audit log `audit-cross-check` compares with the journals. |
 | `signing-journal` | unset | set | The driver's own record of every signature. |
 | `hsm.pin` (with an HSM) | — | not inline; use `hsm.pin-env` | The PIN stays out of the config file. |
-| `approval` | unset | **advisory**: a quorum rule for the namespace key (`<key-prefix>frost-<node>-namespace`, or a rule over every FROST key) | Human approval of namespace-key signatures. A deployment decision, so it is reported and never refuses. |
+| `approval` | unset | **advisory**: a quorum rule for the namespace key (`<key-prefix>frost-namespace` from a Splice validator, `<key-prefix>frost-<node>-namespace` from Canton's auto-init), or a rule over every FROST key | Human approval of namespace-key signatures. A deployment decision, so it is reported and never refuses. |
 
 Placement is not a config setting and the profile cannot check it: each cosigner in its own cluster
 or cloud account is a go-live gate ([audit-prep.md](audit-prep.md#operator-go-live-gates-post-audit)).

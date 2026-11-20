@@ -86,8 +86,9 @@ object ProductionProfile {
         "hsm.pin-env only (the PIN from the environment), no inline hsm.pin",
       )
 
-    // Advisory: the namespace key. Canton names it `<node>-namespace` (older releases: `namespace`),
-    // so its FROST id is `<key-prefix>frost-<node>-namespace`; the driver does not know the node name.
+    // Advisory: the namespace key. A Splice validator names it `namespace`, Canton's own auto-init
+    // `<node>-namespace`, so its FROST id is `<key-prefix>frost-namespace` or
+    // `<key-prefix>frost-<node>-namespace`; the driver does not know the node name.
     val frostPrefix = cfg.frost.map(_.keyPrefix).getOrElse("") + FrostKeyIds.FrostTag
     def isNamespaceId(id: String): Boolean = id.startsWith(frostPrefix) && id.endsWith("namespace")
     val namespaceIds = s"${frostPrefix}<node>-namespace"

@@ -290,6 +290,7 @@ pub async fn resolve_pending(node: &Arc<Node>) -> usize {
         Err(e) => tracing::warn!(error = %e, "quarantine garbage collection failed"),
     }
     metrics::gauge!(crate::metrics::CEREMONIES_SPLIT).set(node.split_count() as f64);
+    node.publish_refresh_gauge();
     for rec in node.unsettled_records() {
         let Ok(reports) = gather(node, &rec, &[]).await else { continue };
         let settled = rec

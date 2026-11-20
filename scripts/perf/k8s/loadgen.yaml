@@ -83,6 +83,7 @@ spec:
     # cluster's throwaway certificate; never do this with a real one.
     - name: peer
       secret: { secretName: rutli-perf-peer, defaultMode: 0440 }
-    # `rutli-cosigner seal new-node` writes the seal bundles here before they become secrets.
+    # The load generator's runs write their reports here (scripts/perf/k8s_loadgen.py), fetched
+    # and removed after each run.
     - name: tmp
-      emptyDir: { medium: Memory, sizeLimit: 16Mi }
+      emptyDir: { medium: Memory, sizeLimit: 128Mi }

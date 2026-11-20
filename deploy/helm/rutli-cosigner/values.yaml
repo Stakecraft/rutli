@@ -164,12 +164,21 @@ refreshAllowlist: []
 # with `require_intent: false`. The cosigners warn at startup while an opt-out is set; remove it once
 # the driver signs. Switch the other enforcement on (signer_acl_required, signer_may_refresh: false)
 # only after every cosigner AND the driver run this release.
+# Refreshes: each node takes part in at most one refresh of a key per
+# `refresh_min_interval_secs` (default 259200 = 72 h; the shipped CronJob is weekly). For an incident
+# refresh that cannot wait, set `refresh_interval_waived_at: "<UTC time of the decision>"` on every
+# node, roll out, refresh, then remove it (docs/ceremonies.md, "Refresh interval").
 # Example:
 #   signingPolicy:
 #     signer_acl_required: true
 #     signer_may_refresh: false
 #     signer_acl: { driver: ["participant1-"] }
 #     signer_pins: { driver: ["<sha256 of the driver cert's SPKI>"] }
+#     # The FROST id is <frost.key-prefix>frost-<Canton's key name>. A Splice validator names its
+#     # namespace key `namespace` (participant1-frost-namespace, as here); Canton's own auto-init
+#     # names it `<node>-namespace` (participant1-frost-participant1-namespace). A rule for the wrong
+#     # form never matches: take the id from the driver log ("initiating distributed key
+#     # generation for …") or `keys.secret.list()`.
 #     rate_limits: [{ key_id_prefix: "participant1-frost-namespace", per_min: 10, per_day: 200 }]
 #     rules: [{ key_id_prefix: "participant1-frost-namespace", mode: quorum, threshold: 2 }]
 #     approvers: [{ id: alice, public_key_spki_b64: "MCowBQYDK2VwAyEA..." }]
@@ -290,6 +299,15 @@ persistence:
   accessModes:
     - ReadWriteOncePod
 
+# topology=perNode only (the legacy StatefulSet always rolls its pods one at a time).
+# OnDelete (default): `helm upgrade` changes the spec and restarts NO pod; run
+# scripts/upgrade-cosigners.sh afterwards, which restarts one cosigner at a time and waits for it.
+# Until then the pods keep the old image: `scripts/upgrade-cosigners.sh --status` shows it, and the
+# RutliCosignerRolloutPending alert fires after 30 minutes. RollingUpdate restarts all three
+# single-replica pods at once, so signing stops until two are back; only for a cluster that may stop.
+updateStrategy:
+  type: OnDelete
+
 resources:
   requests:
     cpu: 50m
@@ -298,9 +316,26 @@ resources:
     cpu: 500m
     memory: 256Mi
 
+# Legacy topology only: the init container that copies this node's TLS files out of the shared
+# source volume. It runs one shell script for a moment.
+tlsSelect:
+  resources:
+    requests:
+      cpu: 5m
+      memory: 16Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
 podDisruptionBudget:
   enabled: true
   minAvailable: 2
+  # What happens to a pod that is running but not ready when a node is drained. AlwaysAllow lets the
+  # drain evict it, so one stuck cosigner cannot block the drain (and the upgrade behind it); the
+  # budget still protects every ready pod, so minAvailable keeps holding for the healthy ones.
+  # IfHealthyBudget is the Kubernetes default (a not-ready pod is evicted only while the budget is
+  # met). "" omits the field.
+  unhealthyPodEvictionPolicy: AlwaysAllow
 
 networkPolicy:
   enabled: true
@@ -352,10 +387,21 @@ extraEnv: []
 # Each run logs one line, `BACKUP_OK node=<id> files=<n> bytes=<n> dest=<…>` or
 # `BACKUP_FAILED node=<id> …`. The sidecar never exits non-zero (a crashing sidecar would flip the
 # pod's readiness and eat the PDB), so alert on the log line or on the destination's newest object.
+#
+# Every refresh moves each node to a new epoch, and a node's backups of an older epoch no longer
+# restore it. So besides the daily run the sidecar checks every `checkEverySecs` whether this
+# node's committed key files changed (a refresh commit, a new or deleted key) and backs up then:
+# a backup follows every refresh within about 5 minutes, with no manual step. It logs
+# `BACKUP_TRIGGER node=<id> reason=key-files-changed` before such a run.
 backup:
   enabled: false
-  # Daily at this UTC time (HH:MM). Keep refresh drills away from it.
+  # Daily at this UTC time (HH:MM).
   dailyAtUtc: "03:17"
+  # How often to check the key files for a change (seconds). The check is a checksum of a few small
+  # files; a failed backup after a change is retried at this pace until it succeeds. 0 turns the
+  # check off (daily run only), for the split ceremony's window, where a new key file holds dealt
+  # shares until the first refresh (docs/split-ceremony.md).
+  checkEverySecs: 300
   # Also take one backup as soon as the pod starts (shows the destination works right away).
   runOnStart: true
   destination:

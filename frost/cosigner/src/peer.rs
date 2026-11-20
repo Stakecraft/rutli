@@ -710,7 +710,8 @@ impl PeerApi for GrpcPeer {
                 protocol: crate::ceremony::CEREMONY_PROTOCOL,
                 intent: intent.cloned(),
             })
-            .await?;
+            .await
+            .map_err(crate::error::from_fence_status)?;
         Ok(())
     }
 

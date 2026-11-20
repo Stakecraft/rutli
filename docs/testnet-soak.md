@@ -50,7 +50,8 @@ and `key-prefix` rules of step 4 apply unchanged, and so does step 5.
 
 1. **KMS stack up:**
    ```sh
-   scripts/gen-frost-certs.sh 3 deploy/frost/certs
+   RUTLI_PIN_CONFIGS=deploy/frost/config-tls \
+     scripts/gen-frost-certs.sh 3 deploy/frost/certs     # certs, and their TLS key pins in the configs
    export RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"     # store in your secret manager
    docker compose -f deploy/soak/docker-compose.yml up -d --build
    PROM=http://localhost:9090 deploy/soak/soak-check.sh   # expect FAIL only on "signatures" (no traffic yet)

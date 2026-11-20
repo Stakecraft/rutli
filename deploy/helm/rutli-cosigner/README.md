@@ -82,6 +82,55 @@ If the GHCR package is private, create a pull secret and set `imagePullSecrets`.
 Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org API may require
 `admin:org` / packages admin to flip public).
 
+## Upgrading: one cosigner at a time
+
+With threshold 2 of 3, signing needs two cosigners up. The per-node topology runs three
+single-replica StatefulSets, and one `helm upgrade` changes all three in one apply, so a
+`RollingUpdate` would restart all three pods at once and nothing could sign until two were back
+(measured on a real cluster: about 11 s without a cosigner, 54 of 750 signatures `UNAVAILABLE`).
+Helm cannot order the resources of a release or wait for one before the next, so the chart does not
+pretend to: the StatefulSets use `updateStrategy.type: OnDelete` (the default), `helm upgrade` changes
+the spec and restarts **no pod**, and a script restarts the cosigners one by one.
+
+```sh
+helm upgrade rutli deploy/helm/rutli-cosigner -n rutli -f values.yaml -f certs/peer-pins.json --set image.tag=…
+scripts/upgrade-cosigners.sh -n rutli --release rutli --dry-run   # the plan
+scripts/upgrade-cosigners.sh -n rutli --release rutli             # roll node 1, 2, 3, one at a time
+scripts/upgrade-cosigners.sh -n rutli --release rutli --status    # running vs target revision and image
+```
+
+Until the script has run, the pods keep the old image and settings; `--status` shows it (exit 3 =
+a roll is pending) and the `RutliCosignerRolloutPending` alert fires after 30 minutes.
+
+What the script does, per node: refuses unless all other cosigners are Ready, deletes the pod, waits
+until the replacement runs the **target** revision and is Ready, waits `--settle` seconds, checks all
+three are Ready again, then moves on. It stops at the first timeout (`--timeout`, 600 s) and touches
+nothing else. It is resumable: a node already on the target revision and Ready is skipped, so run the
+same command again after a stop. `--only 2` rolls one node. `--force` restarts nodes that already run
+the target revision, for a change the pod template does not carry (a changed ConfigMap or pins, a rotated
+certificate): the chart has no config checksum annotation, so such a change never restarted pods, with or
+without OnDelete.
+
+- **What Ready proves.** The probe is `rutli-cosigner health` (see "Probes"): the key store is usable
+  and the gRPC port accepts connections. It does not prove that the peer connections are back, so the
+  script also waits `--settle` (default 120 s). The mesh was measured back within 2 s of a restart, so
+  120 s is a wide margin on 0.5. On 0.4.x, where a freshly restarted cosigner can drop one sign
+  session (fixed in 0.5), use `--settle 300` (the in-place migration runbook, `docs/runbook-migration-inplace.md`, waits five minutes between nodes for the same reason).
+- **A node that is not Ready** (an upgrade is sometimes the repair): the script refuses unless every
+  node is Ready. `--allow-degraded` rolls that one node first and still never takes a second node
+  down. With two nodes not Ready it refuses in every case: one more restart would leave no quorum.
+- **PodDisruptionBudget.** `minAvailable: 2` over all three pods guards voluntary evictions, that is
+  node drains: a drain can take at most one cosigner. It does not gate StatefulSet updates or
+  `kubectl delete pod`; the script's own checks do.
+- **Legacy topology.** The single StatefulSet already rolls its pods one at a time and does not get
+  `updateStrategy` from the chart.
+- **`updateStrategy.type=RollingUpdate`** restores the old behaviour (all three at once, signing stops
+  for the restart). Only for a cluster that may stop signing.
+- **Moving to this chart version** from one with `RollingUpdate`: the same `helm upgrade` switches the
+  StatefulSets to `OnDelete`, so that upgrade itself restarts nothing; run the script after it.
+- `scripts/perf/cluster.py --suites upgrade` (docs/cluster-suite.md) upgrades a real cluster this way
+  under a stream of signatures and requires zero failed signatures.
+
 ## Values (highlights)
 
 | Key | Default | Notes |
@@ -106,7 +155,7 @@ Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org A
 | `clusterIdChangeAllowed` | `false` | Let the cosigners start under a different cluster id than the one each recorded in `data_dir/cluster-id`. Deliberate changes only, for one rollout |
 | `operatorAllowlist` | `[]` | Operator role for `verify-key` and `verify-hosted` (KeyStatus + HostedKeyStatus + CeremonySignTest only), e.g. `[operator]` |
 | `refreshAllowlist` | `[]` | Refresher role for the refresh job (Refresh + KeyStatus only, never Sign), e.g. `[refresher]`; may be `[operator]` until a refresher cert exists |
-| `signingPolicy` | `{}` | Cosigner signing policy (audit C2), rendered verbatim as `signing_policy`: `require_intent`, `require_ceremony_intent`, `signer_acl_required`, `signer_may_refresh`, `signer_acl`, `signer_pins`, rate limits, journal retention, approval `rules`/`approvers` — see `docs/approval-quorum.md`. Empty = defaults: ceremony intents required (since 0.4.0-rc.6; opt out with `require_ceremony_intent: false` while the driver is older than 0.4.0-rc.4 or the refresh job's image predates the cosigners' release), signing intents required (since 0.5.0; opt out with `require_intent: false` while the driver is older than 0.4.0-rc.3 or runs with `frost.sign-intents = off`). An unknown key stops the cosigner at startup |
+| `signingPolicy` | `{}` | Cosigner signing policy (audit C2), rendered verbatim as `signing_policy`: `require_intent`, `require_ceremony_intent`, `signer_acl_required`, `signer_may_refresh`, `signer_acl`, `signer_pins`, rate limits, journal retention, approval `rules`/`approvers` — see `docs/approval-quorum.md`. Empty = defaults: ceremony intents required (since 0.4.0-rc.6; opt out with `require_ceremony_intent: false` while the driver is older than 0.4.0-rc.4 or the refresh job's image predates the cosigners' release), signing intents required (since 0.5.0; opt out with `require_intent: false` while the driver is older than 0.4.0-rc.3 or runs with `frost.sign-intents = off`). Each node takes part in at most one refresh of a key per `refresh_min_interval_secs` (default 72 h; incident path: `refresh_interval_waived_at`, docs/ceremonies.md "Refresh interval"). An unknown key stops the cosigner at startup |
 | `hostedKeys.enabled` | `false` | Cluster-hosted RSA/ECIES/AES keys — replicated whole keys, not threshold shares |
 | `hostedKeys.deleteAllowlist` | `[]` | Delete role (audit M2): client CNs whose signed delete intents tombstone hosted keys. Empty = no deletes; never a cosigner CN. `deleteAcl`, `deleteApprovalThreshold` (≥ 1 in production), `deleteGraceSecs` (604800) — `docs/hosted-keys.md`, Delete |
 | `keyfile` | `{}` | Key-file format (audit M4), rendered verbatim as `keyfile`: `cluster_uuid`, `write_version` (1 or 2), `accept_v1` — `docs/disaster-recovery.md` §3h |
@@ -208,7 +257,7 @@ pin must be ≥ 0.3.1.
 ## Backups
 
 `backup.enabled=true` (topology perNode) adds a `backup` sidecar to each cosigner pod. Once a day
-(`backup.dailyAtUtc`, default 03:17 UTC; plus once at pod start) it tars that node's **sealed**
+(`backup.dailyAtUtc`, default 03:17 UTC; once at pod start; and after a change, below) it tars that node's **sealed**
 `keys/*.json` — never dotfiles, nonce markers or temps — its cleared-delete-intent markers
 (`keys/.cleared/`) and its sign journals (`journal/`), and hands the tar to that node's destination:
 
@@ -227,6 +276,16 @@ one node's destination yields one node's sealed files, below threshold. Each run
 `BACKUP_OK node=<id> files=<n> bytes=<n> …` or `BACKUP_FAILED node=<id> reason=…` line; the sidecar
 never exits non-zero (a crashing sidecar would make the pod unready and eat the PDB), so alert on the
 log line or the destination's newest object.
+
+**A backup follows every refresh.** A refresh moves every node to a new epoch, and from its commit
+a node's older backups no longer restore that node (`restore` refuses an older epoch). Besides the
+daily run, the sidecar checks every `backup.checkEverySecs` (default 300) whether the node's
+committed key files changed — a refresh commit, a new or deleted key — and backs up then, logging
+`BACKUP_TRIGGER node=<id> reason=key-files-changed` first; a failed one is retried at that pace. So
+each node's backup of a new epoch exists within about 5 minutes of the commit, with no manual step.
+Staged shares (`keys/.staged/`) are never copied: a backup taken during a refresh holds the epoch
+that is live on that node at that moment. Each node takes part in at most one refresh of a key per
+`signingPolicy.refresh_min_interval_secs` (72 h by default). See `docs/disaster-recovery.md`.
 
 There is **no backup CronJob and no `pods/exec` RBAC** any more. Earlier releases ran
 `rutli-cosigner backup` inside each cosigner via `kubectl exec` from a ServiceAccount whose Role

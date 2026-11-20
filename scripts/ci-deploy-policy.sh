@@ -59,6 +59,34 @@ for f in pernode-default pernode-values pernode-migrated-soak-values k8s; do
   "$REPO/scripts/check-deploy-policy.sh" "$OUT/$f.yaml"
 done
 
+echo "==> update strategy: perNode StatefulSets are OnDelete (an upgrade must not restart all cosigners at once)"
+for f in pernode-default pernode-values pernode-migrated-soak-values k8s; do
+  n="$(yq -N 'select(.kind == "StatefulSet") | .metadata.name' "$OUT/$f.yaml" | wc -l | tr -d ' ')"
+  bad="$(yq -N 'select(.kind == "StatefulSet") | select(.spec.updateStrategy.type != "OnDelete") | .metadata.name' "$OUT/$f.yaml")"
+  if [ "$n" -lt 3 ] || [ -n "$bad" ]; then
+    echo "$f: $n StatefulSets, without updateStrategy OnDelete: ${bad:-none}" >&2
+    exit 1
+  fi
+done
+echo "perNode renders: OnDelete on every StatefulSet"
+legacy_strategy="$(yq -N 'select(.kind == "StatefulSet") | .spec.updateStrategy' "$OUT/legacy-values.yaml" "$OUT/soak.yaml" | grep -vx -e null -e '---' || true)"
+if [ -n "$legacy_strategy" ]; then
+  echo "the legacy StatefulSet must not get an updateStrategy (it already rolls one pod at a time): $legacy_strategy" >&2
+  exit 1
+fi
+echo "legacy renders: no updateStrategy, unchanged"
+helm template rutli "$C" -n rutli -f "$C/ci/pernode-values.yaml" --set updateStrategy.type=RollingUpdate >"$OUT/rolling.yaml"
+[ "$(yq -N 'select(.kind == "StatefulSet") | .spec.updateStrategy.type' "$OUT/rolling.yaml" | sort -u)" = RollingUpdate ] \
+  || { echo "updateStrategy.type=RollingUpdate was not honoured" >&2; exit 1; }
+if helm template rutli "$C" -n rutli -f "$C/ci/pernode-values.yaml" --set updateStrategy.type=Bogus >/dev/null 2>&1; then
+  echo "an unknown updateStrategy.type was accepted" >&2
+  exit 1
+fi
+echo "updateStrategy.type: RollingUpdate honoured, unknown values refused"
+
+echo "==> scripts/upgrade-cosigners.sh against a fake kubectl"
+"$REPO/scripts/test-upgrade-cosigners.sh" | tail -1
+
 echo "==> policy: the legacy topology must be rejected"
 if "$REPO/scripts/check-deploy-policy.sh" "$OUT/legacy-values.yaml" 2>/dev/null; then
   echo "check-deploy-policy.sh ACCEPTED the legacy topology — the checker is broken" >&2

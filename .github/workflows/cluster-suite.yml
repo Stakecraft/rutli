@@ -17,14 +17,19 @@ on:
       - "deploy/helm/**"
       - "frost/loadgen/**"
       - "frost/Dockerfile.perf"
+  push:
+    # No path filter on a push to main: every commit on main gets the whole set (see main-status.yml).
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# A pull request cancels its own earlier run. A push to main never cancels or replaces another:
+# each commit on main gets its own run.
 concurrency:
-  group: cluster-suite-${{ github.ref }}
-  cancel-in-progress: true
+  group: cluster-suite-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   kind:
@@ -37,7 +42,9 @@ jobs:
           persist-credentials: false
 
       - name: Tests of the scripts
-        run: python3 -I scripts/perf/test_compare.py
+        run: |
+          python3 -I scripts/perf/test_compare.py
+          python3 -I scripts/perf/test_k8s_loadgen.py
 
       - name: Tools (checksum-pinned)
         run: scripts/perf/install-tools.sh kind helm

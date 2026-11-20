@@ -58,14 +58,24 @@ of the same name.
 |---|---|---|
 | `upgrade` | `helm upgrade` from the previous release to `--upgrade-image` under 5 signatures a second | a key is missing or changed afterwards, or does not sign; signatures that fail while the cosigners restart are counted, not forbidden (the chart restarts all three at once) |
 | `scenarios` | the scenarios of [`load-testing.md`](load-testing.md): steady stream, burst, several clients, ECIES, a cosigner pod killed under load, the cold-cache restart, and the limits | as described there |
+| `connect` | N new clients connecting at the same moment (`connect.clients` of the profile: 50, 200, 500), one signature each, with each client's connection time recorded apart from its request (`rutli-loadgen --eager-connect`) and the cosigners' `rutli_grpc_handshake_timeouts_total` | never: a measurement of what many clients connecting together costs, for example every driver reconnecting after a cosigner restart |
 | `disrupt` | under the steady stream: a node lost, a data volume lost, a partition between two cosigners' nodes (`partition`), one cosigner cut off from both others (`partition-isolated`, as when a data centre loses its links), added network delay; afterwards, rounds of signatures until the cluster signs within the SLO again (`recovery_secs`) | a signature fails, a cosigner is not healthy afterwards, or the cluster does not sign normally again within `--settle-secs` (600); a step without its hook is reported as skipped |
 | `keys` | for each key count of the profile (1, 10, 100): that many FROST keys and hosted keys over ten tenant prefixes (`perf-t<n>-…`), sign latency over all of them, and each cosigner's Peer API `ListKeys` time | a setup, signature or listing fails |
 | `ramp` | the profile's baseline load × 1, 3, 10, 30, 100, … for `step_secs` each | never: the ramp stops at the first step over the SLO or with an error, and reports the last step that passed as the **headroom factor** |
 
-They run in the order `upgrade`, `scenarios`, `keys`, `ramp`, `disrupt` (disruption last, so that
+They run in the order `upgrade`, `scenarios`, `connect`, `keys`, `ramp`, `disrupt` (disruption last, so that
 what it leaves behind cannot skew the measurements of the others); `--suites` picks a subset.
 Every scenario also checks that no cosigner restarted unless the scenario did it, and that their
-memory and file descriptors stay within bounds.
+memory and file descriptors stay within bounds. A cosigner a disruption restarts on purpose is not
+judged by its health the moment the load ends but by `time_to_healthy_secs`: the seconds from the
+end of the disruption (a node's reboot included) until every cosigner answers Health ok again. It
+fails when they are not healthy within `--settle-secs` of the end of the recovery step. After a
+rig failure in a disruption (a hook or `kubectl` error), what follows in that scenario is counted
+as the rig's too.
+
+The load generator runs detached in its pod: `scripts/perf/k8s_loadgen.py` starts each run with a
+short `kubectl exec`, polls for its end, and fetches the report afterwards, retrying each call, so
+no stream to the API server is held open for the length of a run.
 
 ## Provider hooks
 
@@ -107,6 +117,7 @@ A JSON file ([`scripts/perf/profiles/placeholder.json`](../scripts/perf/profiles
   "step_secs": 300,
   "factors": [1, 3, 10, 30, 100, 300],
   "keys": { "counts": [1, 10, 100], "sign_per_sec": 5, "secs": 60 },
+  "connect": { "clients": [50, 200, 500] },
   "max_rss_mib": 256
 }
 ```
@@ -162,9 +173,17 @@ the rest of the suite is unchanged. No such command exists yet.
 
 `cluster.json` holds the scenarios (as in `load-testing.md`), `skipped`, `keys` (per key count:
 sign latency, server-side histogram, `ListKeys` per cosigner), `ramp` (per step: rates, p95/p99
-per operation, why it stopped), and two top-level numbers: `headroom_factor`, and
-`recovery_secs`, per disruption the seconds from its end until the cluster signed within the SLO
-again.
+per operation, why it stopped), and these top-level numbers: `headroom_factor`; per
+disruption, `time_to_healthy_secs` (until every cosigner answered Health ok again) and
+`recovery_secs` (until the cluster signed within the SLO again), both from the end of the
+disruption.
+
+`failed` lists what Rütli failed: a check about the cluster's behaviour. `rig_failed` lists what
+only the test rig failed: a load generator that could not be started, reached or read, a hook or
+`kubectl` error; such a scenario says nothing about Rütli and should be run again. `cluster.py`
+exits 1 when Rütli failed something, 3 when only the rig did, 0 otherwise. A rig failure inside
+the ramp stops it without a verdict on that step; its headroom factor is then a lower bound
+(`headroom_is_lower_bound`).
 
 `scripts/perf/compare.py PREVIOUS CURRENT` fails on
 

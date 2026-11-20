@@ -5,6 +5,25 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Changed (operators must act)
+
+- **Helm chart: a `helm upgrade` of a per-node install no longer restarts the cosigners; roll them
+  with `scripts/upgrade-cosigners.sh`.** The three per-node StatefulSets now use
+  `updateStrategy.type: OnDelete` (new value, default). Before, one `helm upgrade` restarted all three
+  single-replica pods at once, and with threshold 2 of 3 nothing could sign until two were back:
+  measured on a real three-node cluster, an outage of about 11 s and 54 of 750 signatures
+  `UNAVAILABLE`. Now Helm changes the spec and restarts nothing; the script deletes one pod, waits
+  until the replacement runs the new revision and is Ready, waits `--settle` seconds (default 120;
+  use 300 on 0.4.x), checks all three are Ready, and takes the next. It is resumable, has `--only`,
+  `--dry-run`, `--force` (restart nodes already on the target revision, for config-only changes),
+  `--status` (running vs target revision and image per node) and `--allow-degraded` (the
+  repair of one node that is not Ready, never a second node down). **Upgrade note:** after every
+  `helm upgrade` that changes the pod template (image, resources, probes), run the script; until then
+  the pods keep the old image, which `--status` and the new `RutliCosignerRolloutPending` alert
+  (30 minutes) show. The `helm upgrade` that installs this chart version restarts no pod itself.
+  `updateStrategy.type=RollingUpdate` restores the old behaviour. The legacy single StatefulSet is
+  unchanged. Chart README, "Upgrading: one cosigner at a time".
+
 ### Changed (breaking default)
 
 - **The production profile: `"profile": "production"` makes a cosigner refuse to start while any
@@ -122,6 +141,42 @@ All notable changes to Rütli are documented here. Format loosely follows
   - Docs: `docs/security/threat-model.md` ("Holder of the cluster CA key"), `docs/ca-rotation.md`
     (pins in Phases A and D, §10 key roll and emergency eviction), chart README ("Peer key pins").
 
+- **A key is refreshed at most once per 72 hours.** Every cosigner takes part in at most one
+  refresh of a key per `signing_policy.refresh_min_interval_secs` (default 259200, at most 30 days,
+  `0` turns it off with a startup warning). Before, nothing limited refreshes: whoever held the
+  refresher certificate, or the driver certificate while `signer_may_refresh` is on, could refresh a
+  key over and over. Every refresh leaves the nodes' older backups unable to restore them, so the
+  backups could end up on no common epoch and a later loss of nodes could lose the key. Each node
+  checks the interval itself at the refresh fence and at part 1, before any guard, fence mark or
+  crypto, and the leader checks it before it contacts a peer, so a compromised cosigner leading a
+  refresh is held to it by the honest nodes. It counts from the last refresh the node staged
+  (committed, or aborted after staging), read from its ceremony records, so a restart does not
+  reset it; refreshes that failed earlier and DKGs do not count. A refused refresh fails with
+  FAILED_PRECONDITION (`refresh of <key> refused: …`, trailer `rutli-error: refresh-too-soon`) and
+  is counted in `rutli_refresh_interval_refusals_total`. It counts from when the last refresh
+  committed (or aborted after staging) on the node, a new `resolved_ms` in the ceremony record;
+  records written by 0.4.0 count from their last write. New: `rutli_refresh_interval_waived_total`,
+  `rutli_refreshes_6d{key}`, alerts `RutliRefreshRefused` and `RutliRefreshOffSchedule`.
+  **Incident path:** `signing_policy.refresh_interval_waived_at: "<UTC time>"` on every node lets one
+  refresh of each key through after that time; it lapses after 24 h, may be at most
+  `clock_skew_secs` ahead of the node's clock, and is logged at warn at every start while present. No client certificate can set it.
+
+  **Upgrade note (from 0.4.0):**
+  - A refresh within 72 h of the last one is now refused. Check scripts, drills and runbooks that
+    refresh twice in a row; give test configs `refresh_min_interval_secs: 0` explicitly.
+  - A 0.4.0 node enforces nothing, but a refresh needs every node, so the limit holds as soon as one
+    node runs 0.5.0. A refresh led by a 0.4.0 node is refused at the 0.5.0 node's fence (the client
+    sees INTERNAL wrapping the refusal) before any share is staged.
+  - The backup sidecar now also backs up within `backup.checkEverySecs` (default 300 s) of any
+    change to the node's committed key files, so a backup of the new epoch follows every refresh by
+    itself (log `BACKUP_TRIGGER … reason=key-files-changed`). Outside the chart, run `backup` after
+    each refresh. Change-triggered runs count toward `backup.destination.keep`.
+  - Turn `signer_may_refresh` off: while it is on, a stolen driver certificate can still refresh once
+    per interval.
+  - Docs: `docs/ceremonies.md` ("Refresh interval"), `docs/disaster-recovery.md` ("Backups and
+    refreshes": restoring a node needs its backup of the current epoch; a cluster rebuild needs `t`
+    nodes' backups of one epoch; a refresh does not retire old shares or rotate the seal key).
+
 ### Security
 
 - **The cosigner keeps serving when it runs short of file descriptors, and never stops serving
@@ -148,6 +203,14 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Changed
 
+- **Helm chart: the PodDisruptionBudget sets `unhealthyPodEvictionPolicy: AlwaysAllow`** (new value
+  `podDisruptionBudget.unhealthyPodEvictionPolicy`; set it to `""` to omit the field). A pod that is
+  running but not ready can now be evicted by a node drain, so one stuck cosigner no longer blocks
+  the drain; ready pods stay protected by `minAvailable`. Needs Kubernetes 1.27+ (the chart already
+  requires 1.29). The legacy topology's `tls-select` init container gets requests and limits (new
+  value `tlsSelect.resources`), and the soak-check CronJob in `deploy/soak` gets requests and limits.
+  Upgrade: `helm upgrade` changes the PodDisruptionBudget, and in the legacy topology (the DevNet
+  soak) it rolls the StatefulSet once because the pod template changes.
 - **A sign round 2 for a session the node no longer holds answers `ABORTED`, not `INTERNAL`,** and
   is counted in the new `rutli_sign_round2_unknown_session_total`. It is what a node answers
   after a restart or a ceremony commit between the two rounds, or past the session TTL; nothing
@@ -174,51 +237,12 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Fixed
 
-- **The driver keeps its group-key pins across restarts (`frost.pin-dir`).** Until now a FROST
-  group key was pinned in memory only. After every driver restart it had to be agreed again, and
-  one cosigner answering a different key blocked the pin and with it signing. Now:
-  - a pin is written once, durably, before the key is used, and never replaced; every new pin is
-    also an audit-log entry (`group-key-pin`);
-  - once pinned, a cosigner that answers another key is logged at ERROR and routed around, for
-    `getPublicKey`, sign leader choice and `keyExistsAndIsActive`, which now checks the answer
-    against the pin;
-  - a first pin needs a roster majority of identical answers. A DKG's new key also needs no
-    disagreeing answer. For an existing key one dissenter is tolerated (reported and demoted) when
-    every endpoint has its own `tls-name`;
-  - `frost.expected-group-keys` lets the operator anchor a first pin to the ceremony record;
-  - a damaged pin file stops the start, naming the file, and so does a pin file that names another
-    key than its audit-log entry; a pin file that is lost while the audit log records it refuses
-    that key. Recovery is in `docs/disaster-recovery.md` §3i;
-  - `StateCheck --pin-dir` checks a copy read-only, and the production profile requires `pin-dir`;
-  - the DKG ceremony ids the driver sends intents for are written to `pin-dir` (`<key-id>.dkg`,
-    fsynced) before each request goes out. A driver killed between a DKG request and its reply (a
-    pod restart during a bootstrap) takes the key as its own on the next start. Without this, the
-    DKG fix below would refuse it.
-
-  Without `pin-dir` the driver warns and behaves as before. **Upgrade:** add `pin-dir` on the
-  participant's state volume, ideally with `expected-group-keys` for the namespace key. The next
-  use pins.
-
-- **A DKG for a key another client created is refused instead of returned** (by a driver that
-  signs its ceremony intents, as the production profile requires). Since 0.4.0-rc.3 a
-  DKG for an id every cosigner already holds returns the existing key, so that Canton's retry after
-  a timeout succeeds. A second participant on the same cluster without `frost.key-prefix` was handed
-  the first participant's keys that way, without a warning. `DkgReply` now carries `existing` and
-  `origin_ceremony_id`, the DKG that created the key. The driver accepts an existing key only as a
-  retry of a ceremony it started itself. Otherwise the DKG fails with a message naming
-  `frost.key-prefix` and the new `frost.adopt-existing-keys`, for deliberately adopting a key after
-  checking it.
-  - **Restart.** With `frost.pin-dir` the driver keeps its ceremony ids durably (above), so a
-    restart in the middle of a bootstrap adopts the key. Without `pin-dir` they live in memory,
-    and such a restart is refused. The message then says what to do: adopt the key with
-    `frost.adopt-existing-keys` once it is clear that no other participant uses the key prefix,
-    and remove the entry once the key is registered.
-  - **Rolling upgrade.** A 0.4.x driver ignores the new fields and behaves as before. A 0.5.0
-    driver with a leader older than 0.5.0 cannot tell and accepts the key with a warning, as before.
-    The DKG request is unchanged. The cosigners talk to each other as before (no peer message
-    changed).
-  - The Java stubs in `driver/src/main/java` were regenerated. They now also carry
-    `KeyEpochReply.stale_by_own_record`, which was missing from them.
+- **The production profile's namespace-key advisory recognises Canton's own key name.** Canton's
+  auto-init names the namespace key `<node>-namespace`, so its FROST id is
+  `<prefix>frost-<node>-namespace`. A Splice validator names it `namespace`. The cosigner's advisory
+  looked for the Splice form only and flagged a correct rule for the other. The docs and the Helm
+  values example now say which form applies and where to read the real id, because a rule written
+  for the wrong form never matches.
 - **`rutli-cosigner audit-cross-check` no longer reports an empty side as consistent.** An empty
   driver audit log passed with exit 0, and every journaled signature was skipped as "older than the
   driver audit log". Empty journal directories passed the same way, their audited signatures skipped as
@@ -457,6 +481,20 @@ All notable changes to Rütli are documented here. Format loosely follows
 - **The sealed software delegate is a test and migration aid, not a production option.** `docs/hosted-keys.md` and
   `docs/disaster-recovery.md` said it stays supported for production keys; `SECURITY.md` said never. The two now agree
   with `SECURITY.md`: it keeps every encryption key on the participant host; use cluster hosting or the HSM delegate.
+
+### Build
+
+- **Every push to main runs the whole set of checks once, unfiltered, and a red main opens an issue.**
+  `e2e.yml`, `image-build-check.yml`, `cluster-suite.yml` and `load.yml` now run on every push to
+  main (before: only when a path filter matched, or only on pull requests; main broke unnoticed
+  when two changes met that no single pull request's checks covered). The new workflow
+  `main-status.yml` watches them and CI: on a failure it opens the issue "main is red" (labels
+  `prio:p0`, `type:test`) with the first failing commit, the failing jobs and links, or comments on
+  the open one; it closes the issue when every check is green on the tip of main. Pushes to main are
+  never cancelled by a later push. The load test on a push runs on a GitHub-hosted runner and
+  compares nothing, so the weekly comparison keeps its baseline on the repository's runner; its
+  baseline lookup now ignores runs from pushes. The e2e workflow's own failure issue is replaced by
+  "main is red". README: status badge for main.
 
 ## [0.4.1] — 2026-11-20
 
