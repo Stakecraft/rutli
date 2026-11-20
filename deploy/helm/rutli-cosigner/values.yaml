@@ -18,6 +18,17 @@
 #   it) until it runs docs/runbook-per-node-seal.md. It fails scripts/check-deploy-policy.sh.
 topology: perNode
 
+# The production profile (docs/production-profile.md), written into every node's config as
+# `profile`. production: a cosigner refuses to start while any enforcement setting is not at its
+# production value, and its log names each one (TLS, per-node sealing, the operator and refresher
+# roles, intents, epoch match, signer ACL and pins, rate limits, key-file v2, the cluster id pin).
+# lab: the same gaps are logged, nothing is refused — never for an authority key. topology=legacy
+# cannot meet the profile (one shared seal secret) and needs `lab` until it migrates.
+# Before upgrading an existing install to this chart, run `rutli-cosigner check-config` against
+# the live config and fix what it lists, or set `lab` for the upgrade (docs/production-profile.md,
+# "Upgrading").
+profile: production
+
 replicaCount: 3
 threshold: 2
 

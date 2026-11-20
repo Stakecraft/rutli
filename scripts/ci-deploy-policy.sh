@@ -34,12 +34,20 @@ echo "no peerPins: refused; tls.requirePeerPins=false: rendered with the opt-out
 echo "==> helm lint"
 helm lint "$C" -f "$PINS" >/dev/null
 for v in "$C"/ci/*.yaml; do helm lint "$C" -f "$v" >/dev/null; done
-helm lint "$C" -f "$REPO/deploy/soak/cosigner-values.yaml" -f "$PINS" >/dev/null
+# The soak still runs the legacy topology, which cannot meet the production profile (the chart's
+# default): its upgrade needs `profile: lab` (docs/production-profile.md, "Upgrading"). Without it
+# the chart refuses to render, so a plain `helm upgrade` cannot move the soak either.
+SOAK_LAB=(--set profile=lab)
+helm lint "$C" -f "$REPO/deploy/soak/cosigner-values.yaml" -f "$PINS" "${SOAK_LAB[@]}" >/dev/null
 
 echo "==> render"
 helm template rutli "$C" -n rutli -f "$PINS" >"$OUT/pernode-default.yaml"
 for v in "$C"/ci/*.yaml; do helm template rutli "$C" -n rutli -f "$v" >"$OUT/$(basename "$v" .yaml).yaml"; done
-helm template rutli "$C" -n rutli -f "$REPO/deploy/soak/cosigner-values.yaml" -f "$PINS" >"$OUT/soak.yaml"
+helm template rutli "$C" -n rutli -f "$REPO/deploy/soak/cosigner-values.yaml" -f "$PINS" "${SOAK_LAB[@]}" >"$OUT/soak.yaml"
+if helm template rutli "$C" -n rutli -f "$REPO/deploy/soak/cosigner-values.yaml" -f "$PINS" >/dev/null 2>&1; then
+  echo "the soak's legacy values render under the production profile — the chart's legacy guard is broken" >&2
+  exit 1
+fi
 kubectl kustomize "$REPO/deploy/k8s" >"$OUT/k8s.yaml"
 
 echo "==> deploy/k8s is the current chart render"

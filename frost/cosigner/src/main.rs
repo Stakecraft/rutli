@@ -111,6 +111,13 @@ enum Command {
     /// store under `data_dir/keys` can be listed, opened and written, and this node's gRPC port
     /// accepts connections. Prints `ready` (exit 0) or the reason (exit 1). Needs no seal secret.
     Health,
+    /// Check a config file against the production profile without starting anything
+    /// (docs/production-profile.md). Parses it (an unknown key is an error), runs the start-up
+    /// validation, and lists every enforcement setting that is not at its production value, as
+    /// `[required]` or `[advisory]` lines. Reads no file the config names, no key store, no secret.
+    /// Exit 0: no required finding; 1: required findings; 2: the config does not load. Works under
+    /// any `profile`, so run it against the live config before an upgrade.
+    CheckConfig,
     /// Restore this node's key files from a backup directory (audit M1). Run with the daemon
     /// STOPPED (the instance lock is taken). Every file is verified first — sealed, bound to this
     /// cluster/node/key (key-file v2), consistent — and one refusal writes nothing. Never rolls a
@@ -480,6 +487,9 @@ async fn main() -> Result<()> {
     let config_path = args.config.ok_or_else(|| {
         DaemonError::Config("--config (or RUTLI_COSIGNER_CONFIG) is required".into())
     })?;
+    if let Some(Command::CheckConfig) = args.command {
+        check_config_command(&config_path);
+    }
     // Printed with Display, not as main's `Error: Config("…")` debug dump: an operator reading a
     // crash loop must see which file and which key in one plain line.
     let cfg = match Config::load(&config_path) {
@@ -583,6 +593,7 @@ async fn main() -> Result<()> {
     // own pins — or every peer would refuse it. Before anything else, so a bad rollout stops here.
     cfg.check_peer_pins_required()?;
     cfg.check_own_peer_pin()?;
+    log_profile(&cfg);
 
     // Every connection, key file and peer channel holds a descriptor; container runtimes often
     // start a process with a soft limit far below its hard one. Raise it, and size the gRPC
@@ -1140,6 +1151,80 @@ fn serve_outcome(served: std::result::Result<(), tonic::transport::Error>, shutd
         Err(e) => {
             tracing::error!(error = %e, "the gRPC server failed");
             Err(e.into())
+        }
+    }
+}
+
+/// `check-config`: the production-profile findings of the config at `path`. Never returns.
+fn check_config_command(path: &std::path::Path) -> ! {
+    use rutli_cosigner::profile::{self, Level, Profile};
+    // Load as a lab node, so the structural checks run and a production config with findings is
+    // listed instead of refused.
+    let loaded = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read config file {}: {e}", path.display()))
+        .and_then(|text| {
+            serde_json::from_str::<Config>(&text).map_err(|e| format!("config file {}: {e}", path.display()))
+        })
+        .and_then(|cfg| {
+            let mut as_lab = cfg.clone();
+            as_lab.profile = Some(Profile::Lab);
+            as_lab.validate().map(|()| cfg).map_err(|e| format!("config file {}: {e}", path.display()))
+        });
+    let cfg = match loaded {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("rutli-cosigner check-config: {e}");
+            std::process::exit(2)
+        }
+    };
+    let findings = profile::findings(&cfg);
+    let required = findings.iter().filter(|f| f.level == Level::Required).count();
+    println!(
+        "{}: profile {}, {} required and {} advisory finding(s) ({})",
+        path.display(),
+        match cfg.profile {
+            Some(Profile::Production) => "production",
+            Some(Profile::Lab) => "lab",
+            None => "unset (lab until 0.6)",
+        },
+        required,
+        findings.len() - required,
+        profile::DOC
+    );
+    for f in &findings {
+        println!("{f}");
+    }
+    if required == 0 {
+        println!("meets the production profile");
+    }
+    std::process::exit(if required == 0 { 0 } else { 1 })
+}
+
+/// Startup: the production-profile findings of a node that is not refusing on them (a production
+/// node with a required finding never gets here).
+fn log_profile(cfg: &Config) {
+    use rutli_cosigner::profile::{self, Level, Profile};
+    let findings = profile::findings(cfg);
+    let required = findings.iter().filter(|f| f.level == Level::Required).count();
+    match cfg.profile {
+        Some(Profile::Production) => tracing::info!("profile production: every required enforcement setting is on"),
+        Some(Profile::Lab) => tracing::info!(
+            required_findings = required,
+            "profile lab: enforcement settings are not checked at startup — never for an authority key ({})",
+            profile::DOC
+        ),
+        None => tracing::warn!(
+            required_findings = required,
+            "profile is not set: running as lab; set \"profile\": \"production\" (or \"lab\" explicitly). \
+             Unset becomes production in 0.6 ({})",
+            profile::DOC
+        ),
+    }
+    for f in &findings {
+        match (f.level, cfg.profile) {
+            (Level::Advisory, _) => tracing::warn!("production profile, advisory: {f}"),
+            (Level::Required, Some(Profile::Lab)) => tracing::info!("production profile, not met: {f}"),
+            (Level::Required, _) => tracing::warn!("production profile, not met: {f}"),
         }
     }
 }

@@ -159,6 +159,10 @@ and `rutli_ceremony_intent_refusals_total{reason}`, and for the refresh interval
 
 ## Switching enforcement on
 
+The production profile ([production-profile.md](production-profile.md)) requires all of the below
+at once, and `rutli-cosigner check-config` lists what a config still lacks. Switch them on in the
+order of this section, then set `"profile": "production"`.
+
 The defaults require both kinds of intent on a node with TLS: ceremony intents since 0.4.0-rc.6,
 signing intents since 0.5.0. Such a cosigner refuses a DKG from a driver older than
 0.4.0-rc.4 and an intent-less refresh, unless it runs with `require_ceremony_intent: false`, and a

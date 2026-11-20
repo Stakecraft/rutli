@@ -7,6 +7,11 @@
 # peerPins (below) are PLACEHOLDERS that must be replaced before the render you apply: a cosigner
 # refuses to start while its own entry does not pin its own certificate.
 topology: perNode
+# The chart's default: the cosigners refuse to start until every enforcement setting is on
+# (docs/production-profile.md). Before the first apply, fill in the per-cluster values a checked-in
+# manifest cannot know — clusterId, keyfile.cluster_uuid (then write_version: 2, accept_v1: false)
+# and signingPolicy.signer_pins — and run `rutli-cosigner check-config` on the rendered config.
+profile: production
 replicaCount: 3
 threshold: 2
 signerAllowlist: [driver]
@@ -31,3 +36,11 @@ peerPins:
 # Per-node backup sidecars into per-node backup PVCs (README, "Backups").
 backup:
   enabled: true
+# Enforcement the production profile requires that needs no per-cluster value. The driver's
+# certificate keeps every key (`""`); give it a prefix when several participants share the cluster.
+signingPolicy:
+  require_epoch_match: true
+  signer_acl_required: true
+  signer_may_refresh: false
+  signer_acl:
+    driver: [""]

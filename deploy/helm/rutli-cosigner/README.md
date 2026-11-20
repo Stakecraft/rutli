@@ -87,6 +87,7 @@ Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org A
 | Key | Default | Notes |
 |---|---|---|
 | `topology` | `perNode` | `perNode` or `legacy` (deprecated; see above) |
+| `profile` | `production` | `production`: each cosigner refuses to start while an enforcement setting is not at its production value, naming each (`docs/production-profile.md`); `lab`: logged only. `legacy` topology needs `lab`. Before upgrading an existing install, run `rutli-cosigner check-config` against the live config |
 | `image.repository` | `ghcr.io/stakecraft/rutli-cosigner` | |
 | `image.tag` | `0.4.1@sha256:16ad19…558326` | Digest-pinned |
 | `replicaCount` / `threshold` | `3` / `2` | Must match cert count (and `nodes`, if set) |

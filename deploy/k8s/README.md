@@ -80,6 +80,10 @@ kubectl -n rutli get pods -l app.kubernetes.io/name=rutli-cosigner   # rutli-cos
 kubectl -n rutli logs rutli-cosigner-n1-0 -c cosigner | grep -E 'mutual TLS enabled|share sealing enabled \(bundle node=1\)|TLS key pins'
 ```
 
+`values.yaml` sets the production profile (`docs/production-profile.md`): the cosigners refuse
+to start until the per-cluster values are filled in (`clusterId`, `keyfile`, `signingPolicy.signer_pins`)
+and re-rendered. Check the rendered config first: `rutli-cosigner --config cosigner-1.json check-config`.
+
 A cosigner that logs `is not in its own peers[id=N].tls_spki_sha256` exits at once, and Kubernetes
 restarts it in a loop (CrashLoopBackOff): the config still holds the placeholder pins, or pins of
 other certificates. Fix `peerPins` (§2), re-render and apply.
