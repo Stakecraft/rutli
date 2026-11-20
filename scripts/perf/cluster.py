@@ -104,9 +104,17 @@ class K8sCluster:
         self.kubectl("delete", "pod", self.pod(node), "--grace-period=0", "--force", "--wait=false")
 
     def start(self, node, within=600):
-        """Wait until the cosigner's StatefulSet has its pod back and ready."""
-        sts = self.pod(node)[: -len("-0")]
-        self.kubectl("rollout", "status", f"statefulset/{sts}", f"--timeout={within}s", timeout=within + 30)
+        """Wait until the cosigner's pod is back and ready. Not `rollout status`: the chart's per-node
+        StatefulSets use updateStrategy OnDelete, which that command refuses."""
+        pod = self.pod(node)
+        deadline = time.time() + within
+        while True:
+            r = self.kubectl("wait", "--for=condition=Ready", f"pod/{pod}", "--timeout=10s", timeout=40, check=False)
+            if r.returncode == 0:
+                return
+            if time.time() > deadline:
+                raise RuntimeError(f"{pod} was not ready within {within}s: {r.stderr.strip()[-300:]}")
+            time.sleep(2)
 
     def restart(self, node):
         self.kubectl("delete", "pod", self.pod(node), timeout=180)
@@ -146,15 +154,16 @@ class Suite(base.Runner):
 
     def upgrade(self):
         """helm upgrade from the previous release with live keys and a light stream of signatures.
-        The chart restarts every cosigner at once, so signatures fail while they restart: counted,
-        not forbidden. Afterwards every key is there with the same public key, and signs."""
+        k8s-deploy.sh upgrade runs helm upgrade, then scripts/upgrade-cosigners.sh, which restarts the
+        cosigners one at a time: with 2 of 3 up there is always a quorum, so NO signature may fail.
+        Afterwards every key is there with the same public key, and signs."""
         a = self.args
         before = self.setup_report
 
         def body():
             proc = self.loadgen_start(
                 ["sign", "--key", base.KEY_STEADY, "--name", "upgrade", "--rate", "5", "--clients", "3",
-                 "--duration-secs", "150"] + [x for n in NODES for x in ("--restarted", n)]
+                 "--duration-secs", "360"] + [x for n in NODES for x in ("--restarted", n)]
             )
             time.sleep(10)
             log(f"  helm upgrade to {a.upgrade_image}")
@@ -172,8 +181,7 @@ class Suite(base.Runner):
             return [report, self.loadgen(["sign", "--key", base.KEY_STEADY, "--key", base.KEY_SECOND,
                                           "--name", "after-upgrade", "--count", "50", "--clients", "5"])]
 
-        down = ("UNAVAILABLE", "DEADLINE_EXCEEDED", "UNKNOWN", "ABORTED", "CANCELLED", "INTERNAL")
-        r, check = self.scenario("upgrade", body, allowed=[down, ()], restarted=tuple(NODES))
+        r, check = self.scenario("upgrade", body, allowed=[()], restarted=tuple(NODES))
         after = getattr(self, "after_upgrade", {"failed": "not reached"})
         if "failed" in after:
             check("the keys can be read after the upgrade", False, after["failed"])

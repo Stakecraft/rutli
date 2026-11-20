@@ -73,9 +73,16 @@ case "$cmd" in install | upgrade | uninstall) ;; *) sed -n '5,41p' "${BASH_SOURC
 [[ "$ns" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] || { echo "ERROR: --namespace is not a valid namespace name" >&2; exit 2; }
 k() { kubectl -n "$ns" "$@"; }
 
+# Not `rollout status`: the per-node StatefulSets use updateStrategy OnDelete, which it refuses.
 wait_cosigners() {
+  local i deadline
   for i in 1 2 3; do
-    k rollout status "statefulset/$RELEASE-n$i" --timeout=600s
+    deadline=$((SECONDS + 600))
+    until k get pod "$RELEASE-n$i-0" >/dev/null 2>&1; do
+      [ "$SECONDS" -lt "$deadline" ] || { echo "ERROR: pod $RELEASE-n$i-0 was not created" >&2; exit 1; }
+      sleep 2
+    done
+    k wait --for=condition=Ready "pod/$RELEASE-n$i-0" --timeout=600s
   done
 }
 
@@ -136,6 +143,8 @@ if [ "$cmd" = upgrade ]; then
   echo "==> helm upgrade to $image"
   # shellcheck disable=SC2046 # image_args prints flags meant to be split
   helm upgrade "$RELEASE" "$CHART" -n "$ns" -f "$work/values.yaml" -f "$work/certs/peer-pins.json" ${extra_values[@]+"${extra_values[@]}"} $(image_args "$image")
+  # OnDelete: helm upgrade restarted nothing. Roll the cosigners one at a time, as an operator does.
+  "$(dirname "${BASH_SOURCE[0]}")/../upgrade-cosigners.sh" -n "$ns" --release "$RELEASE" --settle "${UPGRADE_SETTLE:-15}"
   wait_cosigners
   exit 0
 fi

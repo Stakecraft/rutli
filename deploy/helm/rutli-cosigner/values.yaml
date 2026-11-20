@@ -294,6 +294,15 @@ persistence:
   accessModes:
     - ReadWriteOncePod
 
+# topology=perNode only (the legacy StatefulSet always rolls its pods one at a time).
+# OnDelete (default): `helm upgrade` changes the spec and restarts NO pod; run
+# scripts/upgrade-cosigners.sh afterwards, which restarts one cosigner at a time and waits for it.
+# Until then the pods keep the old image: `scripts/upgrade-cosigners.sh --status` shows it, and the
+# RutliCosignerRolloutPending alert fires after 30 minutes. RollingUpdate restarts all three
+# single-replica pods at once, so signing stops until two are back; only for a cluster that may stop.
+updateStrategy:
+  type: OnDelete
+
 resources:
   requests:
     cpu: 50m
