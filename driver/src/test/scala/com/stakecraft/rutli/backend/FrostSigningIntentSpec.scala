@@ -411,7 +411,7 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
           Await.result(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")), 20.seconds)
         ex.retryable shouldBe false
         val msg = ex.getCause.getMessage
-        msg should (include("frost-ns") and include("already exists") and include("frost.adopt-existing-keys") and include("verify-key"))
+        msg should (include("frost-ns") and include("already exists") and include("frost.adopt-existing-keys") and include("frost.key-prefix"))
         // An unknown origin (the leader's record is gone) is refused the same way.
         rec.origin = _ => ""
         the[KmsDriverException] thrownBy Await.result(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")), 20.seconds)

@@ -832,11 +832,12 @@ class FrostBackend(
         throw KmsDriverException(
           new SecurityException(
             s"FROST key $keyId already exists on the cosigner cluster, created by $originText, which this driver did not " +
-              "start. Either it is another participant's key under the same id (give each participant its own " +
-              "frost.key-prefix and driver certificate), or this driver started that DKG before a restart. Check the key " +
-              "with `rutli-cosigner verify-key` (or `key show`) against the key ceremony record, and only if it is this " +
-              s"participant's own key, set frost.adopt-existing-keys = [\"$keyId\"] (docs/architecture.md, " +
-              "\"One cluster, several participants\")"
+              "start in this process. What to do: (1) if any other participant uses this cluster with the same " +
+              "frost.key-prefix, do NOT adopt it: it is that participant's key; give this participant its own " +
+              "frost.key-prefix (and driver certificate) and start again. (2) Otherwise the key is the one an earlier " +
+              s"DKG of this participant created before the driver restarted: set frost.adopt-existing-keys = [\"$keyId\"], " +
+              "restart the participant, and remove the entry once Canton has registered the key. " +
+              "(docs/architecture.md, \"One cluster, several participants\")"
           ),
           retryable = false,
         )

@@ -231,8 +231,11 @@ which no origin is named. The driver accepts an existing key only when that cere
 asked for itself in this process: Canton's retry after a timeout. Any other existing key is refused, naming `frost.key-prefix` and
 `frost.adopt-existing-keys`. A driver that restarts in the middle of a bootstrap has forgotten its
 own ceremony ids and is refused too (until the driver persists them, a follow-up to the durable
-group-key pins). Check the key (`rutli-cosigner verify-key`) against the ceremony record, list its
-id in `frost.adopt-existing-keys`, and remove the entry once the key is in use. A DKG sent without an intent (no
+group-key pins). The refusal says what to do. If another participant uses this cluster with the
+same `frost.key-prefix`, the key is theirs: do not adopt it, give this participant its own prefix
+and driver certificate. Otherwise it is this participant's own key from before the restart: list its
+id in `frost.adopt-existing-keys`, restart the participant, and remove the entry once Canton has
+registered the key. A DKG sent without an intent (no
 TLS, `frost.sign-intents = off`) cannot be matched and is accepted with a warning, and so is a
 reply from a leader older than 0.5.0, which leaves the field out.
 
