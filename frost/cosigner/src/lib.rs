@@ -39,6 +39,7 @@ pub mod profile;
 pub mod ratelimit;
 pub mod refresh_interval;
 pub mod request_auth;
+pub mod residue;
 pub mod restore;
 pub mod seal;
 pub mod service;

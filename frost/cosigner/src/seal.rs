@@ -485,6 +485,41 @@ impl Sealer {
         }
     }
 
+    /// Open a v1 envelope with the current DEK only (`residue-scan`): `Some` with the plaintext,
+    /// which is wiped when dropped, if the current DEK opens it; `None` otherwise (another DEK, a
+    /// corrupted file, not v1).
+    pub fn trial_open_v1_current(&self, file_bytes: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
+        if file_version(file_bytes) != Some(1) {
+            return None;
+        }
+        let env = serde_json::from_slice::<SealedEnvelope>(file_bytes).ok()?;
+        let nonce = hex::decode(&env.nonce).ok().filter(|n| n.len() == NONCE_LEN)?;
+        let ct = hex::decode(&env.ct).ok()?;
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(self.key.as_ref()));
+        cipher.decrypt(Nonce::from_slice(&nonce), ct.as_slice()).ok().map(Zeroizing::new)
+    }
+
+    /// Which of this sealer's DEKs equals `dek`, compared in constant time over every DEK it
+    /// holds (`residue-scan --legacy-master-env`).
+    pub fn which_dek(&self, dek: &[u8; 32]) -> DekUse {
+        let eq = |k: &Zeroizing<[u8; 32]>| {
+            aws_lc_rs::constant_time::verify_slices_are_equal(k.as_ref(), dek.as_ref()).is_ok()
+        };
+        let mut found = DekUse::Unknown;
+        // No early exit: every DEK is compared whatever matches.
+        let current = eq(&self.key);
+        for (i, k) in self.previous.iter().enumerate() {
+            if eq(k) && found == DekUse::Unknown {
+                found = DekUse::Previous(i);
+            }
+        }
+        if current {
+            DekUse::Current
+        } else {
+            found
+        }
+    }
+
     /// Read the master secret from `env_var` (utf-8; recommended ≥ 32 bytes of entropy, e.g.
     /// `openssl rand -hex 32`).
     pub fn from_env(env_var: &str, node_identifier: u16) -> Result<Self> {
