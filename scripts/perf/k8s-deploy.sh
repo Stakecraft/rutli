@@ -135,7 +135,7 @@ work="$(cd "$work" && pwd)"
 if [ "$cmd" = upgrade ]; then
   echo "==> helm upgrade to $image"
   # shellcheck disable=SC2046 # image_args prints flags meant to be split
-  helm upgrade "$RELEASE" "$CHART" -n "$ns" -f "$work/values.yaml" ${extra_values[@]+"${extra_values[@]}"} $(image_args "$image")
+  helm upgrade "$RELEASE" "$CHART" -n "$ns" -f "$work/values.yaml" -f "$work/certs/peer-pins.json" ${extra_values[@]+"${extra_values[@]}"} $(image_args "$image")
   wait_cosigners
   exit 0
 fi
@@ -160,6 +160,8 @@ kubectl label namespace "$ns" --overwrite rutli.io/client-ns=true pod-security.k
   || echo "WARNING: could not label namespace $ns; it needs rutli.io/client-ns=true for the load generator to reach the cosigners" >&2
 
 echo "==> Certificates (throwaway CA)"
+# gen-frost-certs.sh also writes certs/peer-pins.json, the TLS key pin of each cosigner certificate
+# (Helm value peerPins). The chart refuses to render without them; install and upgrade pass it.
 "$REPO/scripts/gen-frost-certs.sh" 3 "$work/certs"
 label() { k label "$@" rutli-perf/suite=1 --overwrite >/dev/null; }
 k create secret generic rutli-cosigner-ca --from-file=ca.crt="$work/certs/ca.crt"
@@ -243,6 +245,12 @@ fi
 pull_values="[]"
 [ -z "$pull_secret" ] || pull_values="[{ name: \"$pull_secret\" }]"
 cat >"$work/values.yaml" <<EOF
+# A load-test rig, not an authority-key deployment: the sign rate limits are off on purpose (to
+# measure throughput), and the per-cluster production values (signer pins, key-file v2, a pinned
+# cluster id) are not set. So the production profile (the chart's default) is turned off
+# explicitly; the cosigners log what production would refuse (docs/production-profile.md). Not the
+# end state: a second pass of the functional scenarios under the production profile is #172.
+profile: lab
 replicaCount: 3
 threshold: 2
 nodes:
@@ -266,7 +274,7 @@ EOF
 
 echo "==> Chart"
 # shellcheck disable=SC2046 # image_args prints flags meant to be split
-helm install "$RELEASE" "$CHART" -n "$ns" -f "$work/values.yaml" ${extra_values[@]+"${extra_values[@]}"} $(image_args "$cosigner_image")
+helm install "$RELEASE" "$CHART" -n "$ns" -f "$work/values.yaml" -f "$work/certs/peer-pins.json" ${extra_values[@]+"${extra_values[@]}"} $(image_args "$cosigner_image")
 # The chart keeps its volumes on uninstall: label them, so `uninstall` deletes these and no others.
 for i in 1 2 3; do label pvc "data-$RELEASE-n$i"; done
 wait_cosigners
