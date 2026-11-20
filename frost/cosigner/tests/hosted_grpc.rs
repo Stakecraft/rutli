@@ -75,7 +75,7 @@ fn write_tls(dir: &std::path::Path, ca: &(rcgen::Certificate, KeyPair), cn: &str
     std::fs::write(&cert_path, cert.pem()).unwrap();
     std::fs::write(&key_path, key.serialize_pem()).unwrap();
     std::fs::write(&ca_path, ca.0.pem()).unwrap();
-    TlsConfig { ca_cert: ca_path, cert: cert_path, key: key_path, domain: None, allow_expired_ca: false }
+    TlsConfig { ca_cert: ca_path, cert: cert_path, key: key_path, domain: None, allow_expired_ca: false, require_peer_pins: None }
 }
 
 /// How a test node gets its seal keys.
@@ -163,7 +163,7 @@ async fn mesh_with(mode: impl Fn(u16) -> SealMode, pin_override: impl Fn(u16) ->
                 Arc::new(LocalPeer::new(node.clone())) as Arc<dyn PeerApi>
             } else {
                 Arc::new(
-                    GrpcPeer::connect_lazy(id, ep, Some(tls[i].client_for(&format!("cosigner{}", j + 1))))
+                    GrpcPeer::connect_lazy(id, ep, Some(tls[i].dial_as(&format!("cosigner{}", j + 1), None, 0).unwrap()))
                         .unwrap(),
                 )
             });
@@ -190,6 +190,7 @@ async fn mesh_with(mode: impl Fn(u16) -> SealMode, pin_override: impl Fn(u16) ->
             node: nodes[i].clone(),
             allowed_cns: Some(peer_cns.clone()),
             peer_ids: Some(peer_ids.clone()),
+            peer_pins: None,
         };
         let server = tonic::transport::Server::builder()
             .tls_config(tls[i].server.clone())
@@ -367,7 +368,7 @@ async fn a_peer_endpoint_answered_by_another_nodes_certificate_is_refused() {
     let impostor = GrpcPeer::connect_lazy(
         Identifier::try_from(2u16).unwrap(),
         &m.endpoints[2],
-        Some(m.tls[0].client_for("cosigner2")),
+        Some(m.tls[0].dial_as("cosigner2", None, 0).unwrap()),
     )
     .unwrap();
     assert!(impostor.node_info().await.is_err(), "node 3 must not pass as peer 2");
@@ -375,10 +376,34 @@ async fn a_peer_endpoint_answered_by_another_nodes_certificate_is_refused() {
     let honest = GrpcPeer::connect_lazy(
         Identifier::try_from(3u16).unwrap(),
         &m.endpoints[2],
-        Some(m.tls[0].client_for("cosigner3")),
+        Some(m.tls[0].dial_as("cosigner3", None, 0).unwrap()),
     )
     .unwrap();
     assert_eq!(honest.node_info().await.unwrap().0, 3);
+}
+
+#[tokio::test]
+async fn the_production_dial_with_pins_works_over_tcp_and_refuses_a_wrong_pin() {
+    // The memnet tests in peer_pins.rs swap the transport; this one dials real sockets through
+    // PeerDial::connector (HttpConnector + rustls + pin), as the daemon does.
+    let m = mesh().await;
+    let leaf2 = m._tmp.path().join("cosigner2.pem");
+    let pin2 = rutli_cosigner::tls::spki_sha256_of_pem_file(&leaf2).unwrap();
+    let pinned = GrpcPeer::connect_lazy(
+        Identifier::try_from(2u16).unwrap(),
+        &m.endpoints[1],
+        Some(m.tls[0].dial_as("cosigner2", Some(vec![pin2]), 2).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(pinned.node_info().await.unwrap().0, 2);
+    let wrong = GrpcPeer::connect_lazy(
+        Identifier::try_from(2u16).unwrap(),
+        &m.endpoints[1],
+        Some(m.tls[0].dial_as("cosigner2", Some(vec![[9u8; 32]]), 2).unwrap()),
+    )
+    .unwrap();
+    let e = wrong.node_info().await.unwrap_err();
+    assert!(format!("{e:?}").contains("not pinned"), "{e:?}");
 }
 
 #[tokio::test]
@@ -400,6 +425,7 @@ async fn fetch_key_identifies_the_caller_by_an_exact_cn_only() {
         node: m.nodes[0].clone(),
         allowed_cns: Some(allowed),
         peer_ids: Some(Arc::new((1..=N).map(|i| (format!("cosigner{i}"), i)).collect())),
+        peer_pins: None,
     };
     let server = tonic::transport::Server::builder()
         .tls_config(m.tls[0].server.clone())
@@ -413,14 +439,14 @@ async fn fetch_key_identifies_the_caller_by_an_exact_cn_only() {
     let tmp = tempfile::tempdir().unwrap();
     for cn in odd {
         let tls = rutli_cosigner::tls::load(&write_tls(tmp.path(), &m.ca, cn)).unwrap();
-        let caller = GrpcPeer::connect_lazy(Identifier::try_from(1u16).unwrap(), &ep, Some(tls.client_for("cosigner1")))
+        let caller = GrpcPeer::connect_lazy(Identifier::try_from(1u16).unwrap(), &ep, Some(tls.dial_as("cosigner1", None, 0).unwrap()))
             .unwrap();
         let e = caller.fetch_key("rutli-enc-exact").await.err().expect("odd CN must be refused");
         assert!(e.to_string().contains("not the configured client CN"), "{cn}: {e}");
     }
     // The exact CN still works over the same server.
     let tls = rutli_cosigner::tls::load(&write_tls(tmp.path(), &m.ca, "cosigner2")).unwrap();
-    let caller = GrpcPeer::connect_lazy(Identifier::try_from(1u16).unwrap(), &ep, Some(tls.client_for("cosigner1")))
+    let caller = GrpcPeer::connect_lazy(Identifier::try_from(1u16).unwrap(), &ep, Some(tls.dial_as("cosigner1", None, 0).unwrap()))
         .unwrap();
     let (_, _, wrapped) = caller.fetch_key("rutli-enc-exact").await.unwrap();
     assert_eq!(wrapped.recipient, 2);
@@ -459,7 +485,7 @@ async fn a_round2_delivery_under_another_nodes_identity_is_refused_over_mtls() {
     let as3 = GrpcPeer::connect_lazy(
         Identifier::try_from(1u16).unwrap(),
         &m.endpoints[0],
-        Some(m.tls[2].client_for("cosigner1")),
+        Some(m.tls[2].dial_as("cosigner1", None, 0).unwrap()),
     )
     .unwrap();
     let mut b = [0u8; 32];
@@ -557,7 +583,7 @@ async fn a_plaintext_dev_cluster_without_hosted_keys_runs_dkg_and_refresh_over_g
     }
     let mut servers = Vec::new();
     for (i, listener) in listeners.into_iter().enumerate() {
-        let peer = PeerSvc { node: nodes[i].clone(), allowed_cns: None, peer_ids: None };
+        let peer = PeerSvc { node: nodes[i].clone(), allowed_cns: None, peer_ids: None, peer_pins: None };
         let server = tonic::transport::Server::builder()
             .add_service(PeerServer::new(peer))
             .serve_with_incoming(TcpListenerStream::new(listener));
@@ -573,6 +599,45 @@ async fn a_plaintext_dev_cluster_without_hosted_keys_runs_dkg_and_refresh_over_g
     for s in servers {
         s.abort();
     }
+}
+
+/// A sign session belongs to the peer whose certificate opened it. Node 3 is a member and knows
+/// the session id, but its abort and its round 2 for node 1's session on node 2 are refused
+/// (PERMISSION_DENIED, naming both) and take nothing; node 1 then completes the signature, and its
+/// own abort of another session goes through.
+#[tokio::test]
+async fn a_sign_session_belongs_to_the_peer_that_opened_it_over_mtls_grpc() {
+    use rutli_cosigner::node::Round1Ctx;
+    use rutli_cosigner::DaemonError;
+    let m = mesh().await;
+    let key = "frost-grpc-owner";
+    let group = rutli_cosigner::orchestrator::run_dkg(&m.peers[0], key).await.unwrap();
+    let (by1, by3) = (&m.peers[0][1], &m.peers[2][1]); // node 2 as node 1 and as node 3 dial it
+    let msg = rutli_frost_core::dealer::canton_test_message(b"owned over grpc");
+    let ctx = Round1Ctx { message: Some(msg.to_vec()), signers: Some(vec![1, 2]), ..Default::default() };
+    let mut cs = std::collections::BTreeMap::new();
+    cs.insert(m.nodes[0].identifier, m.nodes[0].sign_round1(key, "g-own", &ctx).unwrap());
+    cs.insert(m.nodes[1].identifier, by1.sign_round1(key, "g-own", &ctx).await.unwrap());
+
+    let refused = |e: DaemonError| match e {
+        DaemonError::Status(s) if s.code() == tonic::Code::PermissionDenied => {
+            assert!(s.message().contains("cosigner1") && s.message().contains("cosigner3"), "{s:?}");
+        }
+        other => panic!("expected PERMISSION_DENIED, got {other:?}"),
+    };
+    refused(by3.abort_sign(key, "g-own").await.unwrap_err());
+    refused(by3.sign_round2(key, "g-own", &msg, &cs, None).await.unwrap_err());
+    assert_eq!(m.nodes[1].pending_sign_count(key), 1, "the session keeps its nonces");
+
+    let mut shares = std::collections::BTreeMap::new();
+    shares.insert(m.nodes[1].identifier, by1.sign_round2(key, "g-own", &msg, &cs, None).await.unwrap());
+    shares.insert(m.nodes[0].identifier, m.nodes[0].sign_round2(key, "g-own", &msg, &cs).unwrap());
+    let sig = m.nodes[0].aggregate(key, &msg, &cs, &shares).unwrap();
+    assert!(rutli_cosigner::verify_key::signature_verifies(&group, &msg, &sig));
+
+    by1.sign_round1(key, "g-own-2", &ctx).await.unwrap();
+    by1.abort_sign(key, "g-own-2").await.unwrap();
+    assert_eq!(m.nodes[1].pending_sign_count(key), 0);
 }
 
 #[tokio::test]
@@ -608,7 +673,7 @@ async fn epoch_refusals_and_session_binding_hold_over_mtls_grpc() {
     );
 
     // A stale node refuses over the wire with its own trailer, and the leader signs around it.
-    m.nodes[1].set_stale(key, Some(StaleMark { own_epoch: 1, newer_epoch: 2, reason: "test".into() }));
+    m.nodes[1].set_stale(key, Some(StaleMark { own_epoch: 1, newer_epoch: 2, by_own_record: false, reason: "test".into() }));
     let ok = Round1Ctx { leader_view: Some(view2), ..Default::default() };
     assert!(matches!(node2.sign_round1(key, "g-stale", &ok).await.unwrap_err(), DaemonError::StaleShare { .. }));
     let msg = rutli_frost_core::dealer::canton_test_message(b"around a stale node");

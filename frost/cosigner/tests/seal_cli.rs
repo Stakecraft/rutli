@@ -187,6 +187,39 @@ fn a_node_on_its_split_bundle_opens_keys_sealed_under_the_master_and_refuses_mis
     );
     assert!(out.status.success(), "{}", text(&out));
     assert!(exported.exists());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&exported).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "a plaintext export is the key itself");
+    }
+
+    // An existing --out is refused, not overwritten: the 0600 mode only applies to a file the export
+    // creates, so writing into an existing (possibly world-readable) file would leak the key.
+    let before = std::fs::read(&exported).unwrap();
+    let out = cosigner(
+        &["--config", cfg.to_str().unwrap(), "export-key", "--key-id", "rutli-sym-legacy",
+          "--out", exported.to_str().unwrap(), "--unsafe-plaintext"],
+        None,
+    );
+    assert!(!out.status.success(), "an existing --out must be refused");
+    assert!(text(&out).contains("refusing to overwrite"), "{}", text(&out));
+    assert_eq!(std::fs::read(&exported).unwrap(), before);
+
+    // A symlink at --out is refused too (even a dangling one), never followed.
+    #[cfg(unix)]
+    {
+        let link = tmp.path().join("export-link.json");
+        let target = tmp.path().join("export-target.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let out = cosigner(
+            &["--config", cfg.to_str().unwrap(), "export-key", "--key-id", "rutli-sym-legacy",
+              "--out", link.to_str().unwrap(), "--unsafe-plaintext"],
+            None,
+        );
+        assert!(!out.status.success(), "a symlinked --out must be refused");
+        assert!(!target.exists(), "the export must not write through the symlink");
+    }
 
     // Node 1's bundle mounted into node 2: refused before anything is opened.
     let cfg = bundle_config(tmp.path(), 2, &bundles.join("node-1.json"), &pins, &commitment);

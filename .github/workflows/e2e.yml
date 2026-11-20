@@ -1,0 +1,281 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# The three end-to-end ceremony scripts, each against a local 2-of-3 cosigner cluster on 127.0.0.1:
+#
+#   scripts/e2e-split-ceremony.sh       split ceremony, refresh, signing policy (no Canton)
+#   scripts/e2e-carry-protocol-keys.sh  carried signing, sequencer-auth and ECIES keys on Canton 3.6.1
+#   scripts/e2e-ecies-hosted.sh         hosted ECIES keys on Canton 3.6.1, key-file v2 and deletes
+#   scripts/e2e-migration.sh            the whole migration of docs/migration.md on Canton 3.6.1
+#                                       (export, split, new participant, rollback, party move, verify)
+#
+# One job builds the cosigner and the driver jar once and runs the scripts one after another, so the
+# whole workflow takes one runner. Each script is its own step (its own time in the run summary)
+# and runs even when an earlier one failed, so a run reports all of them. A failure on main opens an
+# issue (or comments on the open one).
+#
+# Schedule (docs/release-process.md): every push to main, every release candidate tag, on demand,
+# and pull requests that touch what the scripts exercise (the three take a few minutes together).
+name: E2E ceremonies
+
+on:
+  pull_request:
+    paths:
+      - "frost/**"
+      - "driver/**"
+      - "build.sbt"
+      - "project/**"
+      - "deploy/frost/config-tls/**"
+      - "scripts/e2e-*.sh"
+      - "scripts/gen-frost-certs.sh"
+      - "scripts/publish-canton-deps.sh"
+      - ".github/workflows/e2e.yml"
+  push:
+    branches: [main]
+    # Release candidates (v0.5.0-rc.1, ...). Path filters do not apply to tag pushes.
+    tags: ["v*-rc*"]
+    paths:
+      - "frost/**"
+      - "driver/**"
+      - "build.sbt"
+      - "project/**"
+      - "deploy/frost/config-tls/**"
+      - "scripts/e2e-*.sh"
+      - "scripts/gen-frost-certs.sh"
+      - "scripts/publish-canton-deps.sh"
+      - ".github/workflows/e2e.yml"
+  workflow_dispatch:
+
+env:
+  CANTON_TAG: v3.6.1
+  # The Canton open-source release the two Canton scripts run, pinned by sha256 (GitHub's digest of
+  # the release asset). To bump: change CANTON_TAG, CANTON_VERSION and CANTON_SHA256 together.
+  CANTON_VERSION: "3.6.1"
+  CANTON_SHA256: 45285086270327cb3a7a095cc501d850f274490032aa2a13ff8811f72ba3bfee
+  SBT_OPTS: "-Xmx4g -Xss8m"
+
+# Least privilege; nothing here writes to the repository.
+permissions:
+  contents: read
+
+# A new push to a pull request cancels its older run. Every other run (main, tag, manual) has
+# a group of its own, so none replaces or cancels another.
+concurrency:
+  group: e2e-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Runner routing as in ci.yml, and stricter: `vars.CI_RUNNER` (the self-hosted runners) for this
+# repository's own branches, `ubuntu-latest` for fork and Dependabot pull requests. The runner's job-started guard
+# (deploy/ci-runner/job-started-guard.sh) enforces the same rule, since a fork PR can edit this file.
+jobs:
+  e2e:
+    name: E2E ceremonies (split, carry, ECIES hosted)
+    runs-on: ${{ github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    # Builds (cold: ~15 min) plus the three step timeouts below, with room to spare.
+    timeout-minutes: 120
+    env:
+      # The scripts keep their work dirs (KEEP=1) under $E2E_TMP, uploaded when a step fails.
+      KEEP: "1"
+      CARGO_FLAGS: --locked
+      # Canton >= 3.6 refuses to pick a protocol version implicitly when CI=true (as in ci.yml's
+      # conformance job); this restores the local behaviour (ProtocolVersion.latest).
+      CANTON_AUTOMATIC_PROTOCOL_VERSION: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # Under the runner's temp dir, which the runner empties after every job.
+      - name: Work dir for the scripts
+        run: |
+          mkdir -p "$RUNNER_TEMP/e2e"
+          echo "E2E_TMP=$RUNNER_TEMP/e2e" >> "$GITHUB_ENV"
+
+      # The version in frost/rust-toolchain.toml, as in ci.yml and the release image.
+      - name: Rust version (frost/rust-toolchain.toml)
+        id: rust
+        run: |
+          v="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/rust-toolchain.toml)"
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      # dtolnay/rust-toolchain has no releases: pinned to a commit of its master branch, with the
+      # version passed explicitly (it also installs rustup where a runner has none).
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: frost
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: sbt
+      - uses: sbt/setup-sbt@7e114eae4f32ec3f93c851c2793376a77f384409 # v1.5.15
+
+      # The same cache as ci.yml's unit-test job (same key), so a warm cache serves both.
+      - name: Cache Canton API artifacts (ivy local)
+        id: canton-api-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.ivy2/local/com.daml
+          key: canton-api-${{ runner.os }}-${{ runner.arch }}-${{ env.CANTON_TAG }}-v1
+      - name: Publish Canton kms-driver-api locally
+        if: steps.canton-api-cache.outputs.cache-hit != 'true'
+        run: scripts/publish-canton-deps.sh "$CANTON_TAG"
+
+      # The Canton release (one JVM: sequencer, mediator, two participants); see CANTON_VERSION.
+      - name: Cache Canton release
+        id: canton-release-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/rutli-e2e/canton-open-source-${{ env.CANTON_VERSION }}
+          key: canton-release-${{ runner.os }}-${{ env.CANTON_VERSION }}-${{ env.CANTON_SHA256 }}
+      - name: Download Canton release
+        if: steps.canton-release-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          tarball="canton-open-source-${CANTON_VERSION}.tar.gz"
+          tmp="$(mktemp -d)"
+          curl -fsSL --retry 3 -o "${tmp}/${tarball}" \
+            "https://github.com/digital-asset/canton/releases/download/v${CANTON_VERSION}/${tarball}"
+          echo "${CANTON_SHA256}  ${tmp}/${tarball}" | sha256sum -c -
+          mkdir -p "$HOME/.cache/rutli-e2e"
+          rm -rf "$HOME/.cache/rutli-e2e/canton-open-source-${CANTON_VERSION}"
+          tar -xzf "${tmp}/${tarball}" -C "$HOME/.cache/rutli-e2e"
+          rm -rf "$tmp"
+          test -x "$HOME/.cache/rutli-e2e/canton-open-source-${CANTON_VERSION}/bin/canton"
+      - name: CANTON_HOME
+        run: echo "CANTON_HOME=$HOME/.cache/rutli-e2e/canton-open-source-${CANTON_VERSION}" >> "$GITHUB_ENV"
+
+      # grpcurl (the split ceremony's raw gRPC calls) is pinned by version and sha256 and installed
+      # without sudo. To bump: set GRPCURL_VERSION, then GRPCURL_SHA256 to the linux_x86_64 line of
+      # that release's grpcurl_<version>_checksums.txt.
+      - name: Install grpcurl
+        env:
+          GRPCURL_VERSION: "1.9.4"
+          GRPCURL_SHA256: 97e13d58d2733a0e62cd2571d1d5f0c02823f0d25282f08bddedf1ad9c5d1736
+        run: |
+          set -euo pipefail
+          tarball="grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz"
+          tmp="$(mktemp -d)"
+          curl -fsSL --retry 3 -o "${tmp}/${tarball}" \
+            "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/${tarball}"
+          echo "${GRPCURL_SHA256}  ${tmp}/${tarball}" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf "${tmp}/${tarball}" -C "${tmp}" grpcurl
+          install -m 0755 "${tmp}/grpcurl" "$HOME/.local/bin/grpcurl"
+          rm -rf "$tmp"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # xxd only matters to the split script: without it that step fails, the other two still run.
+      - name: Tools the scripts need
+        run: |
+          missing=""
+          for t in jq openssl grpcurl java sbt cargo; do
+            command -v "$t" >/dev/null || missing="$missing $t"
+          done
+          [ -z "$missing" ] || { echo "::error::missing on this runner:$missing"; exit 1; }
+          command -v xxd >/dev/null || echo "::warning::xxd is missing: e2e-split-ceremony.sh will fail"
+          openssl version
+          grpcurl -version
+          java -version 2>&1 | head -1
+
+      - name: Build rutli-cosigner and rutli-dealer
+        id: build-rust
+        working-directory: frost
+        run: cargo build --locked -p rutli-cosigner --bins
+
+      - name: Build the driver jar
+        id: build-jar
+        run: sbt -batch driver/assembly
+
+      # Timeouts: each script takes a few minutes when healthy. The limits are several times that, so
+      # a slow runner does not fail a good run, and short enough that a hung Canton or cosigner
+      # (waiting on a peer that never answers) fails the step instead of holding the runner.
+      # `timeout` signals the script's whole process group (the cosigners and the Canton JVM too),
+      # 2 min before the step's own timeout, which only signals the shell and stays as a backstop.
+      - name: e2e-split-ceremony.sh
+        if: ${{ !cancelled() && steps.build-rust.outcome == 'success' }}
+        timeout-minutes: 20
+        env:
+          TMPDIR: ${{ env.E2E_TMP }}
+        run: timeout -k 30s 18m scripts/e2e-split-ceremony.sh
+
+      - name: e2e-carry-protocol-keys.sh
+        if: ${{ !cancelled() && steps.build-rust.outcome == 'success' && steps.build-jar.outcome == 'success' }}
+        timeout-minutes: 30
+        env:
+          TMPDIR: ${{ env.E2E_TMP }}
+          SKIP_BUILD: "1"
+        run: timeout -k 30s 28m scripts/e2e-carry-protocol-keys.sh
+
+      - name: e2e-ecies-hosted.sh (with the key-file v2 and delete variant)
+        if: ${{ !cancelled() && steps.build-rust.outcome == 'success' && steps.build-jar.outcome == 'success' }}
+        timeout-minutes: 30
+        env:
+          TMPDIR: ${{ env.E2E_TMP }}
+          SKIP_BUILD: "1"
+          KEYFILE_V2_DELETES: "1"
+        run: timeout -k 30s 28m scripts/e2e-ecies-hosted.sh
+
+      - name: e2e-migration.sh
+        if: ${{ !cancelled() && steps.build-rust.outcome == 'success' && steps.build-jar.outcome == 'success' }}
+        timeout-minutes: 30
+        env:
+          TMPDIR: ${{ env.E2E_TMP }}
+          SKIP_BUILD: "1"
+        run: timeout -k 30s 28m scripts/e2e-migration.sh
+
+      # Logs, configs, journals and the driver audit of every script, on any failure (and when the job
+      # timeout cancels a run that is not a superseded pull request run). Key material
+      # (certificates and keys, shares, dealer output, key files) stays out: all of it is throwaway
+      # test data, but there is no reason to publish it.
+      - name: Upload e2e logs
+        if: ${{ failure() || (cancelled() && github.event_name != 'pull_request') }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        continue-on-error: true
+        with:
+          name: e2e-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.E2E_TMP }}/rutli-e2e-*/*.log
+            ${{ env.E2E_TMP }}/rutli-e2e-*/*.out
+            ${{ env.E2E_TMP }}/rutli-e2e-*/*.txt
+            ${{ env.E2E_TMP }}/rutli-e2e-*/*.jsonl
+            ${{ env.E2E_TMP }}/rutli-e2e-*/*.conf
+            ${{ env.E2E_TMP }}/rutli-e2e-*/*.canton
+            ${{ env.E2E_TMP }}/rutli-e2e-*/c[0-9].json
+            ${{ env.E2E_TMP }}/rutli-e2e-*/node*/journal/**
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # A failure on main (a push, or a manual run on main) opens an issue, type:test + prio:p0, or adds a
+  # comment to the one still open, so a red main is never only a red badge. Hosted runner: it only
+  # calls the GitHub API and needs no self-hosted capacity.
+  report-failure:
+    name: Open an issue for a failure on main
+    needs: e2e
+    if: ${{ failure() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the e2e failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          title="E2E ceremonies fail on main"
+          body="The e2e ceremony workflow failed on main at ${SHA}: ${RUN_URL}
+          The run's summary shows which script failed; its log artifact (7 days) holds the cosigner and Canton logs."
+          open="$(gh issue list --state open --label type:test --search "\"${title}\" in:title" --json number,title \
+            --jq "map(select(.title == \"${title}\")) | .[0].number // empty")"
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --body "$body"
+          else
+            gh issue create --title "$title" --label type:test --label prio:p0 --body "$body"
+          fi

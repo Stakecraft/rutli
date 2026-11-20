@@ -30,7 +30,7 @@ key, Canton can rotate them.
 | Every copy of a **cluster-hosted** key lost (whole cluster, no backup) | Only from backups | Restore **one** node's own backup onto that node (§3); the cluster re-replicates from it. With no backup the key is gone — rotate in Canton and accept §3b's bounded data gap. |
 | Every **seal bundle** (or the legacy master secret) lost (backups intact but unopenable) | Only from an export | A sealed backup is useless without its node's seal bundle. An `export-key` artifact taken beforehand is the only recovery — see §3d. Without either, the key is gone: rotate in Canton and accept §3b's bounded gap. |
 | A **cluster-hosted** encryption key exposed | Mitigate, not undo | Rotate the key in Canton topology (the namespace key signs it; node identity is untouched). Rotation protects future traffic only — recorded traffic encrypted to the old key stays readable to whoever holds it. |
-| A cosigner restored from an **old backup** / volume snapshot | Yes, detected | `restore` refuses to roll a share back to an older epoch, even with `--force` (§1). A snapshot rollback or a break-glass restore is caught at the node's next start: its share is marked stale and refused for signing until current (`RutliStaleShare`). |
+| A cosigner restored from an **old backup** / volume snapshot | Yes, detected | `restore` refuses to roll a share back to an older epoch, even with `--force` (§1). A snapshot rollback or a break-glass restore is caught at the node's next start: its share is marked stale and refused for signing until current (`RutliStaleShare`). By design, t nodes restored to the same old sharing without their ceremony records (two in 2-of-3) vouch for each other and can still sign with it: t shares of any sharing are the key. |
 | A hosted key **deleted** by mistake | Yes, within the grace period | `hosted-undelete` on every node (§3g) — the tombstone retains the material for `hosted_keys.delete_grace_secs` (7 days). |
 | **Cluster CA private key** lost | Yes, no key material at risk | Nothing breaks until the certificates expire, but no certificate can be issued (operator, replacement, new node, renewal). **Rotate the CA** with a dual-CA overlap (§3f, [ca-rotation.md](ca-rotation.md)). Shares, hosted keys, backups and exports do not depend on the CA. |
 
@@ -230,8 +230,8 @@ key was never persisted — no backup contains it.
    holds — node identity is untouched). New traffic becomes decryptable.
 4. **Before the next restart**, make the replacement key durable — see prevention below.
 
-**Prevention:** never run a real node with a heap-only software delegate. Three durable options,
-best first for a deployment without an HSM.
+**Prevention:** never run a real node with a heap-only software delegate. Two durable options, (a)
+and (c), and a stopgap, (b).
 
 **(a) Host the encryption key in the cluster.** The cosigners hold the encryption keypair (RSA-2048
 or EC P-256 ECIES) and the AES-256-GCM symmetric key themselves, so no key material sits on the
@@ -266,8 +266,9 @@ Note for this failure mode specifically: the driver does **not** fall back to th
 `NOT_FOUND`. That is deliberate — a silent fallback would split custody between cluster and delegate
 and could reproduce exactly this incident. A missing key is reported, not worked around.
 
-**(b) Sealed disk persistence for the software delegate** — when the keys must stay on the
-participant:
+**(b) Sealed disk persistence for the software delegate**, only until the keys move to (a) or (c).
+It keeps every key on the participant host, so do not plan production on it
+([SECURITY.md](../SECURITY.md)):
 
 ```hocon
 config {
@@ -427,7 +428,9 @@ renewals. Losing it (the DevNet soak, found 2026-10-09) does not stop anything t
   rotation away from it. Each cosigner logs `trust anchor … not_after=…` at startup and warns from
   30 days before.
 - **If the key may be exposed rather than lost**, it is a security incident. Whoever holds it can
-  mint a certificate with CN `driver` and use the Signer API: the allowlists match CNs, not issuers.
+  mint a certificate with CN `driver` and use the Signer API: the allowlists match CNs, not issuers,
+  and only `signing_policy.signer_pins` ties a client CN to a key. A minted `cosignerN` is refused
+  by every node that pins node N's key (`peers[].tls_spki_sha256`, required with TLS since 0.5.0).
   Rotate immediately, drop the old CA from cosigners and driver without waiting for a planned
   restart ([ca-rotation.md](ca-rotation.md) §6), and treat `Sign` calls in that window as suspect
   (driver audit log).

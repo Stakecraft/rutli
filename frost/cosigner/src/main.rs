@@ -18,13 +18,13 @@ use rutli_cosigner::pb::signer_client::SignerClient;
 use rutli_cosigner::pb::signer_server::SignerServer;
 use rutli_cosigner::pb::RefreshRequest;
 use rutli_cosigner::peer::{GrpcPeer, LocalPeer, PeerApi};
-use rutli_cosigner::service::{PeerSvc, SignerSvc};
+use rutli_cosigner::service::{PeerPins, PeerSvc, SignerSvc};
 use rutli_cosigner::{DaemonError, Result};
 
 #[derive(Parser)]
 #[command(name = "rutli-cosigner", about = "FROST cosigner daemon for the Rütli Canton KMS")]
 struct Args {
-    /// Path to the JSON cluster config for this node. Required by every command except `seal` and `audit-cross-check`.
+    /// Path to the JSON cluster config for this node. Required by every command except `seal`, `tls spki <CERT>` and `audit-cross-check`.
     #[arg(short, long, env = "RUTLI_COSIGNER_CONFIG")]
     config: Option<std::path::PathBuf>,
     #[command(subcommand)]
@@ -65,7 +65,8 @@ enum Command {
         /// The hosted key to export (a `rutli-…` key id).
         #[arg(long)]
         key_id: String,
-        /// File to write the export artifact to.
+        /// File to write the export artifact to. It must not exist yet: the export refuses to
+        /// overwrite a file or follow a symlink.
         #[arg(long)]
         out: std::path::PathBuf,
         /// Env var holding the passphrase that protects the artifact (Argon2id + AES-256-GCM).
@@ -220,6 +221,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// TLS key pins (`peers[].tls_spki_sha256`): `tls spki <CERT>...` prints a certificate's pin
+    /// (needs no `--config`); `tls spki --peers` checks the running roster nodes against theirs.
+    Tls {
+        #[command(subcommand)]
+        command: TlsCommand,
+    },
     /// Per-node seal bundles (`share_seal.secret_file`). Offline, on an operator workstation —
     /// never in the cluster. Needs no `--config`.
     Seal {
@@ -299,7 +306,8 @@ enum Command {
     /// signatures a cosigner journaled that the driver audit lacks (its tail truncated, or a
     /// signature made outside the driver with its certificate), and audited signatures no journal
     /// holds. Verifies both hash chains. Offline, read-only, needs no `--config`. Exit 0:
-    /// consistent; 1: discrepancies; 2: a file is unreadable or a chain is broken.
+    /// consistent; 1: discrepancies; 2: a file is unreadable or a chain is broken; 3: nothing to
+    /// compare (an empty audit log or journal, or no signature on either side) — not a pass.
     /// docs/audit-cross-check.md.
     AuditCrossCheck {
         /// The driver's audit log (`audit-log-path`), copied AFTER the journals.
@@ -315,6 +323,22 @@ enum Command {
         /// Do not count signatures made without a signing intent (before require_intent is on).
         #[arg(long)]
         allow_no_intent: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TlsCommand {
+    /// Print the pin of a certificate: the SHA-256 of its SubjectPublicKeyInfo, the value
+    /// `peers[].tls_spki_sha256` and `signing_policy.signer_pins` take. One line per file (the
+    /// first certificate in it). With `--peers` instead: dial every roster peer of `--config` and
+    /// print the key its certificate carries and whether that peer's pins list it.
+    Spki {
+        /// PEM certificate files (e.g. cosigner2.crt).
+        #[arg(value_name = "CERT", required_unless_present = "peers")]
+        certs: Vec<std::path::PathBuf>,
+        /// Check the running nodes of the roster in `--config` instead of files.
+        #[arg(long, conflicts_with = "certs")]
+        peers: bool,
     },
 }
 
@@ -447,6 +471,9 @@ async fn main() -> Result<()> {
     if let Some(Command::Seal { command }) = args.command {
         return seal_command(command);
     }
+    if let Some(Command::Tls { command: TlsCommand::Spki { certs, peers: false } }) = &args.command {
+        return tls_spki_files_command(certs);
+    }
     if let Some(Command::AuditCrossCheck { driver_audit, journal, min_journals, allow_no_intent }) = args.command {
         audit_cross_check_command(&driver_audit, &journal, min_journals, allow_no_intent);
     }
@@ -512,6 +539,7 @@ async fn main() -> Result<()> {
             return verify_hosted_command(&cfg, &key_id, &expect_fingerprint, json).await
         }
         Some(Command::Health) => health_command(&cfg),
+        Some(Command::Tls { command: TlsCommand::Spki { .. } }) => return tls_spki_peers_command(&cfg).await,
         Some(Command::Ceremony { command: CeremonyCommand::Resolve { ceremony_id, assume_lost } }) => {
             return ceremony_resolve_command(&cfg, &ceremony_id, &assume_lost).await
         }
@@ -551,6 +579,31 @@ async fn main() -> Result<()> {
         _ => {}
     }
     tracing::info!(identifier = cfg.identifier, listen = %cfg.listen, "starting cosigner");
+    // Peer key pins: required with TLS unless opted out, and this node's own key must be among its
+    // own pins — or every peer would refuse it. Before anything else, so a bad rollout stops here.
+    cfg.check_peer_pins_required()?;
+    cfg.check_own_peer_pin()?;
+
+    // Every connection, key file and peer channel holds a descriptor; container runtimes often
+    // start a process with a soft limit far below its hard one. Raise it, and size the gRPC
+    // connection cap from the result.
+    let fd_limit = rutli_cosigner::fdlimit::raise_nofile();
+    match fd_limit {
+        Some(l) if l.short_of_target() => tracing::warn!(
+            soft_before = l.soft_before,
+            soft = l.soft,
+            hard = l.hard,
+            target = l.target,
+            "could not raise the open-file limit to its hard limit"
+        ),
+        Some(l) if l.soft < 1024 => tracing::warn!(
+            soft = l.soft,
+            hard = l.hard,
+            "the open-file limit is low; raise the container's nofile limit (the gRPC connection cap follows it)"
+        ),
+        Some(l) => tracing::info!(soft_before = l.soft_before, soft = l.soft, hard = l.hard, "open-file limit"),
+        None => tracing::warn!("open-file limit unknown on this platform"),
+    }
 
     // One daemon per data directory, for the life of the process (released by the kernel on exit).
     // Taken first, so a second instance fails with this error rather than a port clash. The
@@ -562,6 +615,9 @@ async fn main() -> Result<()> {
     if let Some(metrics_listen) = &cfg.metrics_listen {
         rutli_cosigner::metrics::install(metrics_listen)?;
         tracing::info!(listen = %metrics_listen, "Prometheus metrics endpoint serving /metrics");
+    }
+    if let Some(l) = fd_limit {
+        metrics::gauge!(rutli_cosigner::metrics::FD_LIMIT).set(l.soft as f64);
     }
 
     let identifier = ident(cfg.identifier)?;
@@ -689,6 +745,7 @@ async fn main() -> Result<()> {
                 );
             }
         }
+        log_peer_pins(&cfg);
     } else {
         tracing::warn!("running WITHOUT TLS — plaintext gRPC, do not use in production");
     }
@@ -906,9 +963,10 @@ async fn main() -> Result<()> {
             peers.push(Arc::new(LocalPeer::new(node.clone())));
         } else {
             // Per-peer server name (M3): peer 2 must present cosigner2's certificate, so another
-            // node's certificate cannot answer at peer 2's endpoint.
-            let client_tls = tls.as_ref().map(|t| t.client_for(&p.server_name()));
-            peers.push(Arc::new(GrpcPeer::connect_lazy(ident(p.identifier)?, &p.endpoint, client_tls)?));
+            // node's certificate cannot answer at peer 2's endpoint; and, pinned, cosigner2's key,
+            // so a certificate minted under the CA or kept from a replaced node cannot either.
+            let dial = tls.as_ref().map(|t| t.peer_dial(p)).transpose()?;
+            peers.push(Arc::new(GrpcPeer::connect_lazy(ident(p.identifier)?, &p.endpoint, dial)?));
         }
     }
     peers.sort_by_key(|p| identifier_index(p.identifier()));
@@ -959,11 +1017,11 @@ async fn main() -> Result<()> {
 
     // Anti-entropy: pull hosted keys this node lacks and push ones a peer lacks. This is what
     // heals an under-quorum write and a node restored from a stale backup, so the 2-of-3 write
-    // quorum is only safe with it running.
+    // quorum is only safe with it running, so a panic in a sweep restarts the loop.
     if let Some(h) = cfg.hosted_keys.as_ref().filter(|h| h.enabled) {
-        let (sweep_node, sweep_peers) = (node.clone(), peers.clone());
+        let sweep = (node.clone(), peers.clone());
         let interval = std::time::Duration::from_secs(h.anti_entropy_interval_secs.max(10));
-        tokio::spawn(async move {
+        rutli_cosigner::supervise::spawn_supervised("anti_entropy", sweep, move |(sweep_node, sweep_peers)| async move {
             loop {
                 tokio::time::sleep(interval).await;
                 match rutli_cosigner::orchestrator::anti_entropy_sweep(&sweep_node, &sweep_peers).await {
@@ -1021,24 +1079,69 @@ async fn main() -> Result<()> {
         sign_guard: Some(sign_guard),
         refresh_cns,
     };
-    let peer = PeerSvc { node, allowed_cns: peer_cns, peer_ids: Some(Arc::new(cfg.peer_identities())) };
+    let peer_pins = tls.as_ref().map(|_| PeerPins::from_config(&cfg)).transpose()?.map(Arc::new);
+    let peer = PeerSvc { node, allowed_cns: peer_cns, peer_ids: Some(Arc::new(cfg.peer_identities())), peer_pins };
 
-    let addr = cfg
+    let addr: std::net::SocketAddr = cfg
         .listen
         .parse()
         .map_err(|e| DaemonError::Config(format!("bad listen addr {}: {e}", cfg.listen)))?;
-    tracing::info!(%addr, "gRPC serving Signer + Peer");
+    // Own accept loop (rutli_cosigner::accept): it never ends on an accept error, caps open
+    // connections below the descriptor limit, and gives a new connection a deadline to finish its
+    // TLS handshake (without TLS: to send its first bytes).
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| DaemonError::Config(format!("cannot listen on {addr}: {e}")))?;
+    let connection_limit =
+        rutli_cosigner::accept::connection_limit(fd_limit.map_or(1024, |l| l.soft));
+    let incoming = rutli_cosigner::accept::incoming(
+        listener,
+        connection_limit,
+        rutli_cosigner::accept::Deadline::new(rutli_cosigner::accept::HANDSHAKE_TIMEOUT, tls.is_some()),
+    );
+    tracing::info!(%addr, connection_limit, "gRPC serving Signer + Peer");
 
-    let mut server = tonic::transport::Server::builder();
+    let mut server = tonic::transport::Server::builder()
+        // A peer that vanished without closing (host down, a dropped NAT entry) is found by the
+        // pings and its connection closed, instead of holding a descriptor and a slot for good.
+        .http2_keepalive_interval(Some(std::time::Duration::from_secs(60)))
+        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(20)));
     if let Some(t) = &tls {
         server = server.tls_config(t.server.clone())?;
     }
-    server
+    let shutdown_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let signal = {
+        // Called here, not inside the block: it installs the SIGTERM handler before serving starts.
+        let stop = shutdown();
+        let requested = Arc::clone(&shutdown_requested);
+        async move {
+            stop.await;
+            requested.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    };
+    let served = server
         .add_service(SignerServer::new(signer))
         .add_service(PeerServer::new(peer))
-        .serve_with_shutdown(addr, shutdown())
-        .await?;
-    Ok(())
+        .serve_with_incoming_shutdown(incoming, signal)
+        .await;
+    serve_outcome(served, shutdown_requested.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// How the gRPC server ended. It returns on its own only after the shutdown signal; returning
+/// without one means it stopped serving, and the process exits non-zero so the orchestrator
+/// restarts it and the stop is visible.
+fn serve_outcome(served: std::result::Result<(), tonic::transport::Error>, shutdown_requested: bool) -> Result<()> {
+    match served {
+        Ok(()) if shutdown_requested => Ok(()),
+        Ok(()) => {
+            tracing::error!("the gRPC server stopped without a shutdown request; exiting non-zero");
+            Err(DaemonError::Io(std::io::Error::other("the gRPC server stopped without a shutdown request")))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "the gRPC server failed");
+            Err(e.into())
+        }
+    }
 }
 
 fn audit_cross_check_command(
@@ -1061,7 +1164,7 @@ fn audit_cross_check_command(
             for line in &report.lines {
                 println!("{line}");
             }
-            std::process::exit(if report.discrepancies == 0 { 0 } else { 1 })
+            std::process::exit(report.verdict().exit_code())
         }
         Err(e) => {
             eprintln!("audit-cross-check: {e}");
@@ -1074,14 +1177,17 @@ fn audit_cross_check_command(
 /// ceremony records (loaded and crash-repaired by `Node::new`), and the mesh, dialled with this
 /// node's certificate under each peer's TLS name. The caller holds the instance lock.
 fn offline_ceremony_node(cfg: &Config) -> Result<Arc<Node>> {
+    // It joins the mesh as this node, with this node's certificate: the daemon's pin rules apply.
+    cfg.check_peer_pins_required()?;
+    cfg.check_own_peer_pin()?;
     let sealer = cfg.share_seal.as_ref().map(|_| offline_sealer(cfg)).transpose()?;
     let keystore = KeyStore::open_with_sealer(cfg.data_dir.join("keys"), sealer)?;
     let node = Arc::new(Node::new(ident(cfg.identifier)?, cfg.max_signers(), cfg.threshold, keystore));
     let tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose()?;
     let mut mesh: Vec<Arc<dyn PeerApi>> = Vec::new();
     for p in cfg.peers.iter().filter(|p| p.identifier != cfg.identifier) {
-        let client_tls = tls.as_ref().map(|t| t.client_for(&p.server_name()));
-        mesh.push(Arc::new(GrpcPeer::connect_lazy(ident(p.identifier)?, &p.endpoint, client_tls)?));
+        let dial = tls.as_ref().map(|t| t.peer_dial(p)).transpose()?;
+        mesh.push(Arc::new(GrpcPeer::connect_lazy(ident(p.identifier)?, &p.endpoint, dial)?));
     }
     node.set_mesh(mesh)?;
     Ok(node)
@@ -1171,8 +1277,7 @@ async fn refresh_cluster_id(cfg: &Config) -> Option<String> {
     let tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose().ok()?;
     let mut answers: Vec<String> = Vec::new();
     for p in &cfg.peers {
-        let tls = tls.as_ref().map(|t| t.client_for(&p.server_name()));
-        let Ok(mut c) = signer_client(&p.endpoint, tls).await else { continue };
+        let Ok(mut c) = roster_signer_client(tls.as_ref(), p).await else { continue };
         if let Ok(reply) = c.capabilities(rutli_cosigner::pb::CapabilitiesRequest {}).await {
             answers.push(reply.into_inner().cluster_id);
         }
@@ -1196,23 +1301,29 @@ async fn refresh_command(
         .or_else(|| cfg.peers.first().map(|p| p.endpoint.clone()))
         .ok_or_else(|| DaemonError::Config("no target endpoint for refresh".into()))?;
 
-    let mut ep = tonic::transport::Endpoint::from_shared(endpoint.clone())
-        .map_err(|e| DaemonError::Config(format!("bad endpoint {endpoint}: {e}")))?;
-    if let Some(tls_cfg) = &cfg.tls {
-        let tls = rutli_cosigner::tls::load(tls_cfg)?;
-        let same = |a: &str, b: &str| {
-            a.trim().trim_end_matches('/').eq_ignore_ascii_case(b.trim().trim_end_matches('/'))
-        };
-        let name = tls_server_name
-            .or_else(|| cfg.peers.iter().find(|p| same(&p.endpoint, &endpoint)).map(|p| p.server_name()))
-            .or_else(|| tls_cfg.domain.clone())
-            .ok_or_else(|| {
-                DaemonError::Config(format!(
-                    "{endpoint} is not a roster endpoint: pass --tls-server-name (e.g. cosigner1)"
-                ))
-            })?;
-        ep = ep.tls_config(tls.client_for(&name))?;
-    }
+    let channel = match &cfg.tls {
+        Some(tls_cfg) => {
+            let tls = rutli_cosigner::tls::load(tls_cfg)?;
+            let same = |a: &str, b: &str| {
+                a.trim().trim_end_matches('/').eq_ignore_ascii_case(b.trim().trim_end_matches('/'))
+            };
+            let roster = cfg.peers.iter().find(|p| same(&p.endpoint, &endpoint));
+            let name = tls_server_name
+                .or_else(|| roster.map(|p| p.server_name()))
+                .or_else(|| tls_cfg.domain.clone())
+                .ok_or_else(|| {
+                    DaemonError::Config(format!(
+                        "{endpoint} is not a roster endpoint: pass --tls-server-name (e.g. cosigner1)"
+                    ))
+                })?;
+            // No call deadline: a refresh runs a whole ceremony across the mesh.
+            operator_channel(&endpoint, &tls, &name, roster, None).await?
+        }
+        None => tonic::transport::Endpoint::from_shared(endpoint.clone())
+            .map_err(|e| DaemonError::Config(format!("bad endpoint {endpoint}: {e}")))?
+            .connect()
+            .await?,
+    };
     // The ceremony intent (refresh-fence remediation, L2): signed with the very certificate this
     // client presents, so every cosigner can check that a refresher (or, while signer_may_refresh,
     // the driver) asked for exactly this refresh — and the leader that it is this connection's.
@@ -1248,7 +1359,7 @@ async fn refresh_command(
         None => None,
     };
     tracing::info!(%endpoint, %key_id, intent = intent.is_some(), "triggering proactive share refresh");
-    let mut client = SignerClient::new(ep.connect().await?);
+    let mut client = SignerClient::new(channel);
     let reply = client.refresh(RefreshRequest { key_id: key_id.to_string(), intent }).await?.into_inner();
     println!(
         "refresh complete — group key unchanged: {}",
@@ -1280,7 +1391,7 @@ async fn verify_key_command(
     for p in &peers {
         // Each node verified under its own name, so one node's certificate cannot answer for
         // another and make an inconsistent cluster look consistent.
-        let client = signer_client(&p.endpoint, tls.as_ref().map(|t| t.client_for(&p.server_name()))).await;
+        let client = roster_signer_client(tls.as_ref(), p).await;
         let status = match &client {
             Ok(c) => match c.clone().key_status(KeyStatusRequest { key_id: key_id.to_string() }).await {
                 Ok(r) => Ok(r.into_inner()),
@@ -1389,8 +1500,7 @@ async fn verify_hosted_command(cfg: &Config, key_id: &str, expect_fingerprint: &
     for p in &peers {
         // Each node verified under its own name (M3), so one node's certificate cannot answer for
         // another and make a key missing on one node look present everywhere.
-        let client_tls = tls.as_ref().map(|t| t.client_for(&p.server_name()));
-        let status = match signer_client(&p.endpoint, client_tls).await {
+        let status = match roster_signer_client(tls.as_ref(), p).await {
             Ok(mut c) => c
                 .hosted_key_status(HostedKeyStatusRequest { key_id: key_id.to_string() })
                 .await
@@ -1430,19 +1540,135 @@ async fn verify_hosted_command(cfg: &Config, key_id: &str, expect_fingerprint: &
     }
 }
 
-/// A Signer client for an operator command, with bounded connect and call times.
+/// Connect and call deadlines of the operator commands' Signer clients.
+const OPERATOR_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const OPERATOR_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A Signer client for an operator command, with bounded connect and call times. Plaintext without
+/// `tls` (dev); with it, see [`roster_signer_client`].
 async fn signer_client(
     endpoint: &str,
     tls: Option<tonic::transport::ClientTlsConfig>,
 ) -> Result<SignerClient<tonic::transport::Channel>> {
     let mut ep = tonic::transport::Endpoint::from_shared(endpoint.to_string())
         .map_err(|e| DaemonError::Config(format!("bad endpoint {endpoint}: {e}")))?
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(30));
+        .connect_timeout(OPERATOR_CONNECT_TIMEOUT)
+        .timeout(OPERATOR_CALL_TIMEOUT);
     if let Some(tls) = tls {
         ep = ep.tls_config(tls)?;
     }
     Ok(SignerClient::new(ep.connect().await?))
+}
+
+/// A Signer client for roster node `p` (operator commands are Signer API clients, not mesh peers):
+/// verified under the node's own server name and — when this config lists `tls_spki_sha256` for
+/// it — its key, through the same dial as the mesh. A client config need not pin.
+async fn roster_signer_client(
+    tls: Option<&rutli_cosigner::tls::Tls>,
+    p: &rutli_cosigner::config::PeerConfig,
+) -> Result<SignerClient<tonic::transport::Channel>> {
+    match tls {
+        Some(t) => Ok(SignerClient::new(
+            operator_channel(&p.endpoint, t, &p.server_name(), Some(p), Some(OPERATOR_CALL_TIMEOUT)).await?,
+        )),
+        None => signer_client(&p.endpoint, None).await,
+    }
+}
+
+/// An operator command's TLS channel to `endpoint`, verified under `server_name`: through the
+/// pinned dial when `roster` (the roster entry of that endpoint) lists pins, else tonic's own TLS.
+/// `call_timeout` bounds each call (`None`: no deadline).
+async fn operator_channel(
+    endpoint: &str,
+    tls: &rutli_cosigner::tls::Tls,
+    server_name: &str,
+    roster: Option<&rutli_cosigner::config::PeerConfig>,
+    call_timeout: Option<std::time::Duration>,
+) -> Result<tonic::transport::Channel> {
+    let deadline = |ep: tonic::transport::Endpoint| {
+        let ep = ep.connect_timeout(OPERATOR_CONNECT_TIMEOUT);
+        match call_timeout {
+            Some(t) => ep.timeout(t),
+            None => ep,
+        }
+    };
+    let pins = roster.map(|p| p.tls_spki_pins()).transpose()?.flatten();
+    match pins {
+        Some(pins) => {
+            let dial = tls.dial_as(server_name, Some(pins), roster.map(|p| p.identifier).unwrap_or(0))?;
+            Ok(deadline(dial.endpoint(endpoint)?).connect_with_connector(dial.connector()).await?)
+        }
+        None => {
+            let ep = tonic::transport::Endpoint::from_shared(endpoint.to_string())
+                .map_err(|e| DaemonError::Config(format!("bad endpoint {endpoint}: {e}")))?;
+            Ok(deadline(ep).tls_config(tls.client_for(server_name))?.connect().await?)
+        }
+    }
+}
+
+/// Startup log of the peer pins: one line per roster peer, and a warning (with
+/// `rutli_peer_pins_unpinned`) for every peer accepted by name alone.
+fn log_peer_pins(cfg: &Config) {
+    let mut unpinned = Vec::new();
+    for p in &cfg.peers {
+        match &p.tls_spki_sha256 {
+            Some(pins) => tracing::info!(peer = p.identifier, cn = %p.client_cn(), ?pins, "peer {} TLS key pins", p.identifier),
+            None => unpinned.push(p.identifier),
+        }
+    }
+    metrics::gauge!(rutli_cosigner::metrics::PEER_PINS_UNPINNED).set(unpinned.len() as f64);
+    if !unpinned.is_empty() {
+        tracing::warn!(
+            ?unpinned,
+            "tls.require_peer_pins is off (set to false) and these peers have no tls_spki_sha256: any \
+             certificate with their name under the cluster CA is accepted as them — a replaced node's \
+             old certificate, or one minted by whoever holds the CA key; pin them (`rutli-cosigner tls \
+             spki <cert>`) and remove the opt-out"
+        );
+    }
+}
+
+/// `tls spki <CERT>...`: the pin of each certificate file.
+fn tls_spki_files_command(certs: &[std::path::PathBuf]) -> Result<()> {
+    for c in certs {
+        let pin = rutli_cosigner::tls::spki_sha256_of_pem_file(c)?;
+        println!("{}  {}", hex::encode(pin), c.display());
+    }
+    Ok(())
+}
+
+/// `tls spki --peers`: the key each roster node presents now, against its pins in this config.
+/// Exits non-zero when a node presents a key its pins do not list, or cannot be reached.
+async fn tls_spki_peers_command(cfg: &Config) -> Result<()> {
+    let tls_cfg = cfg.tls.as_ref().ok_or_else(|| DaemonError::Config("tls spki --peers needs tls in the config".into()))?;
+    let tls = rutli_cosigner::tls::load(tls_cfg)?;
+    let mut bad = 0;
+    for p in &cfg.peers {
+        let dial = tls.dial_as(&p.server_name(), None, p.identifier)?;
+        let pins = p.tls_spki_pins()?;
+        match dial.presented_key(&p.endpoint).await {
+            Ok((cn, key)) => {
+                let verdict = match &pins {
+                    Some(list) if list.contains(&key) => "pinned",
+                    Some(_) => {
+                        bad += 1;
+                        "NOT PINNED"
+                    }
+                    None => "no pins configured",
+                };
+                println!("peer {} {} ({cn}): {}  {verdict}", p.identifier, p.endpoint, hex::encode(key));
+            }
+            Err(e) => {
+                bad += 1;
+                println!("peer {} {}: unreachable: {e}", p.identifier, p.endpoint);
+            }
+        }
+    }
+    if bad == 0 {
+        Ok(())
+    } else {
+        Err(DaemonError::Config(format!("tls spki --peers: {bad} node(s) not pinned or unreachable")))
+    }
 }
 
 /// A gRPC status for the operator: code, message, and the transport error behind it — a refused
@@ -1827,7 +2053,7 @@ async fn delete_hosted_key_command(
         || DaemonError::Config(format!("{endpoint} is not a roster endpoint: pass --tls-server-name")),
     )?;
     let tls = rutli_cosigner::tls::load(tls_cfg)?;
-    let mut client = signer_client(&endpoint, Some(tls.client_for(&name))).await?;
+    let mut client = SignerClient::new(operator_channel(&endpoint, &tls, &name, peer, Some(OPERATOR_CALL_TIMEOUT)).await?);
     let cluster_id = client.capabilities(pb::CapabilitiesRequest {}).await?.into_inner().cluster_id;
     if cluster_id.is_empty() {
         return Err(DaemonError::Config(format!("{endpoint} reports no cluster id — a cosigner older than intents")));
@@ -2123,8 +2349,13 @@ fn write_new_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     let mut f = rutli_cosigner::share_delivery::private_create_new(path).map_err(|e| {
         DaemonError::Config(format!("cannot create {} (refusing to overwrite): {e}", path.display()))
     })?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
+    if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
+        // The file is ours (create_new): remove the partial copy, so a retry with the same path is
+        // not refused as an overwrite.
+        drop(f);
+        let _ = std::fs::remove_file(path);
+        return Err(e.into());
+    }
     Ok(())
 }
 
@@ -2300,14 +2531,17 @@ fn export_key_command(
                     .into(),
             )
         })?;
-        let passphrase = std::env::var(env_name).map_err(|_| {
+        // Wiped on drop, like the import path's passphrase.
+        let passphrase = zeroize::Zeroizing::new(std::env::var(env_name).map_err(|_| {
             DaemonError::Config(format!("export passphrase: env var {env_name} is not set"))
-        })?;
+        })?);
         rutli_cosigner::export::export_encrypted(key_id, &key, &passphrase)?
     };
 
-    // 0600 before any bytes land: an export must never be briefly world-readable.
-    write_private_file(out, &serde_json::to_vec_pretty(&envelope)?)?;
+    // A new file, 0600 before any bytes land: an export must never be briefly world-readable. The
+    // mode only applies to a file this call creates, so an existing path (with whatever mode it
+    // has) or a symlink is refused, never written through.
+    write_new_private_file(out, &serde_json::to_vec_pretty(&envelope)?)?;
     // Deliberately audible in the node's log: an export is a privileged, rare event, and the log is
     // often the only record that a portable copy of a key now exists.
     tracing::warn!(
@@ -2407,23 +2641,6 @@ fn import_key_command(
     Ok(())
 }
 
-/// Create `path` with owner-only permissions BEFORE writing, so the contents are never briefly
-/// readable by other users on the host.
-fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let mut f = opts.open(path)?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
-    Ok(())
-}
-
 /// Copy regular files from `src` to `dst`. When `!overwrite`, existing destination files are an
 /// error (so a restore never clobbers a live share by accident).
 ///
@@ -2485,14 +2702,62 @@ fn identifier_index(id: Identifier) -> Vec<u8> {
     id.serialize()
 }
 
-async fn shutdown() {
-    let _ = tokio::signal::ctrl_c().await;
-    tracing::info!("shutdown signal received");
+/// Resolves on SIGINT or SIGTERM. SIGTERM matters most: Kubernetes stops a pod with it, and the
+/// cosigner runs as PID 1 in its image, where the kernel ignores a signal that has no handler, so
+/// without this every pod stop waited out the grace period and ended in SIGKILL with no drain.
+/// A signal that cannot be registered is logged and never resolves: it must not stop the server.
+///
+/// The SIGTERM handler is installed when this is called (inside the runtime), not on first poll, so
+/// from that point on a SIGTERM is caught rather than fatal.
+fn shutdown() -> impl std::future::Future<Output = ()> {
+    #[cfg(unix)]
+    let term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(term) => Some(term),
+        Err(e) => {
+            tracing::error!(error = %e, "cannot listen for SIGTERM");
+            None
+        }
+    };
+    async move {
+        let interrupt = async {
+            match tokio::signal::ctrl_c().await {
+                Ok(()) => "SIGINT",
+                Err(e) => {
+                    tracing::error!(error = %e, "cannot listen for SIGINT");
+                    std::future::pending().await
+                }
+            }
+        };
+        #[cfg(unix)]
+        let terminate = async move {
+            match term {
+                Some(mut term) => {
+                    term.recv().await;
+                    "SIGTERM"
+                }
+                None => std::future::pending().await,
+            }
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<&str>();
+        let signal = tokio::select! {
+            s = interrupt => s,
+            s = terminate => s,
+        };
+        tracing::info!(signal, "shutdown signal received, draining in-flight requests");
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_server_that_returns_without_a_shutdown_request_is_an_error() {
+        assert!(serve_outcome(Ok(()), true).is_ok(), "after the signal: a clean stop");
+        let e = serve_outcome(Ok(()), false).expect_err("without the signal: an error, so a non-zero exit");
+        assert!(e.to_string().contains("without a shutdown request"), "{e}");
+    }
 
     #[test]
     fn ansi_only_on_a_terminal_and_without_no_color() {
@@ -2527,5 +2792,25 @@ mod tests {
         assert_eq!(copy_journal(&src, &dst).unwrap(), 1);
         assert!(dst.join("frost-k").join("00000000000000000001.jsonl").exists());
         assert!(!dst.join("frost-k").join("not-a-segment.tmp").exists());
+    }
+
+    /// Kubernetes stops a pod with SIGTERM, and the cosigner is PID 1 in its image: without a
+    /// handler the signal is ignored and the pod is SIGKILLed after the grace period.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sigterm_starts_a_graceful_shutdown() {
+        // `shutdown()` installs the SIGTERM handler before it returns, so the signal below is
+        // caught, not fatal to the test process. The signal is process-wide; it is safe here
+        // because no other test in this binary installs or expects a signal handler.
+        let stopped = tokio::spawn(shutdown());
+        let kill = std::process::Command::new("kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .status()
+            .unwrap();
+        assert!(kill.success());
+        tokio::time::timeout(std::time::Duration::from_secs(10), stopped)
+            .await
+            .expect("SIGTERM must resolve the shutdown future")
+            .unwrap();
     }
 }

@@ -26,7 +26,7 @@ namespace or any party ID.
   participant; Splice says participant ids cannot be reused. The working shape is: **new participant
   UID under the same namespace, then move the parties** (Splice `newParticipantIdentifier` +
   `migrateValidatorParty`). Party IDs survive because they live under the namespace. Found
-  2026-10-08 while writing the B0 runbook; deep-reasoner and Codex agree independently.
+  2026-10-08 while writing the B0 runbook; two independent analyses agree.
 - `RegisterKmsSigningKey` only fetches the public key through the driver and checks its spec; there
   is no namespace or existing-identity check (`KmsPrivateCrypto.scala:78-104`).
 - Rütli today: Ed25519 keys are born by DKG only. No import of an existing key as shares, no
@@ -113,7 +113,8 @@ engineering work is not the long pole; the audit's external lead time is. So:
    Candidates with threshold-signature track record: Least Authority,
    Trail of Bits, NCC Group, Kudelski. Ask for a 2–3 week engagement with a fixed start date.
 2. **Track B to v0.4.0** is the pre-audit code freeze target. Nothing else lands in the audited
-   surface after it except audit fixes.
+   surface after it except audit fixes. (As of 2026-11-18: the audit reviews v0.5.0, which is v0.4.0 plus
+   hardening; see [roadmap.md](roadmap.md).)
 3. **Track C (ECIES) runs while the auditors work.** The engineer is otherwise idle in that window.
    It ships as v0.5.0 either inside the audit as an addendum or, if the auditor refuses scope
    creep, as the first post-1.0 release. Decide with the auditor at booking time. (As of 2026-11-13: C shipped in
@@ -196,8 +197,8 @@ Soak (Track A) continues in the background and may preempt a day here and there.
   `<backup-bucket>`. After a migration, every one of them still holds the whole
   namespace key: purge, and say so in the runbook.
 
-**Reports behind the estimates:** deep-reasoner (read Canton source; A 7–11 d, B 7–10 d, spike
-2–3 d) and Codex (A 19–31 d, B 16–28 d, blind to Canton source). The table above takes the
+**Reports behind the estimates:** two independent estimates, one from the Canton source (A 7–11 d,
+B 7–10 d, spike 2–3 d) and one without it (A 19–31 d, B 16–28 d). The table above takes the
 former's decomposition with part of the latter's buffer.
 
 ## Risks, by severity

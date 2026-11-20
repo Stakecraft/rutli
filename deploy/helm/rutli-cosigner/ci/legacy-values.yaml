@@ -3,3 +3,8 @@
 # CI render: the deprecated legacy topology. scripts/check-deploy-policy.sh must REJECT it (shared
 # seal env var, every node's TLS Secret in one pod spec) — CI asserts that it does.
 topology: legacy
+# Placeholder TLS key pins: every render needs them (tls.requirePeerPins unset = on).
+peerPins:
+  "1": ["1111111111111111111111111111111111111111111111111111111111111111"]
+  "2": ["2222222222222222222222222222222222222222222222222222222222222222"]
+  "3": ["3333333333333333333333333333333333333333333333333333333333333333"]

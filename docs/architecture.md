@@ -123,7 +123,9 @@ whole on a server and in that node's backups, and splitting it cannot undo that 
 signing among themselves and the validator-facing side is a dumb client. We adopt the same shape,
 but deliberately **without** a Raft/consensus layer: the node the driver contacts leads that request
 (static leader), the driver fails over to another cosigner if it's unreachable or cannot serve the
-request (`INTERNAL` / `UNKNOWN` — never for a DKG ceremony), and the share nodes
+request (`INTERNAL` / `UNKNOWN` — never for a DKG ceremony; a sign fails over on every status except
+`PERMISSION_DENIED`, `UNAUTHENTICATED`, `RESOURCE_EXHAUSTED` and `INVALID_ARGUMENT`, and on a signature
+that does not verify against the pinned group key), and the share nodes
 coordinate the FROST rounds internally. FROST sessions are independent, so no replicated log is
 needed (see phase-2-frost.md). The `FrostBackend` just submits `sign(hash, keyId)` and awaits the
 aggregated signature. This keeps round orchestration and nonce-session state out of the

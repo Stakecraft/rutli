@@ -99,6 +99,17 @@ approval {
 }
 ```
 
+Rules are checked in order and the first one whose `key-id-prefix` matches the key id decides. A
+key that matches no rule is signed without approvals. `mode` is `quorum` (the default: wait for
+`threshold` approvals, default 2) or `auto` (no approvals, to carve an exception out of a wider
+quorum rule). Write both in lowercase. Since 0.5.0 the driver refuses to start on anything else,
+for example `quorom` or `Quorum`, with a config error at the rule, such as `approval.rules.0.mode`.
+Up to 0.4.0 such a rule silently meant `auto`. The cosigners already refused it. The driver also
+refuses a quorum rule whose `threshold` is not between 1 and the number of approvers, and a quorum
+rule that an earlier `auto` rule fully covers (an earlier prefix that is a prefix of it, `""`
+included), because that rule could never apply. Put the specific `auto` rule first, then the
+quorum rule.
+
 A driver up to 0.4.0 reads the approver's key only as `public-key-base-64` and stops with
 `Key not found` on the name above. Later releases read both names.
 
