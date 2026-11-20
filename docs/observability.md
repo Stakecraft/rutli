@@ -31,7 +31,7 @@ annotations, NetworkPolicy ingress for pods labelled `rutli.io/scraper: "true"`)
 | `rutli_ceremony_unknown_no_votes` | gauge | — | No-votes held for ceremony ids peers asked about that this node never knew (capped, garbage-collected after 30 days) |
 | `rutli_epoch_mismatch_total` | counter | — | Sign round-1 refusals because the leader signs with another sharing (epoch, PKP digest) of the key than this node committed (audit H1/M1): two nodes hold different epochs of one key |
 | `rutli_epoch_check_skipped_total` | counter | — | Sign round-1 requests from a leader that sent no sharing (a release before epochs), so the epoch check was skipped. Expected only during a rolling upgrade |
-| `rutli_stale_share` | gauge | `key` | `1` while this node's share of `key` is older than a committed sharing a peer holds (typically a restore from an old backup); the node refuses to sign or lead for that key. Else `0` |
+| `rutli_stale_share` | gauge | `key` | `1` while this node's share of `key` is older than a committed sharing a peer holds (typically a restore from an old backup); the node refuses to sign or lead for that key. One cosigner's claim alone can set it while no peer holding this node's sharing answers; the log's stale reason then says "unconfirmed" and the mark clears on the next pass that reaches such a peer, at most 30 s later. Else `0` |
 | `rutli_nonce_markers` | gauge | — | Burned-session nonce markers on this node after the last prune pass (audit L4); each costs an inode on the key volume, bounded by the sign rate over the retention window |
 | `rutli_nonce_markers_pruned_total` | counter | — | Burned-session nonce markers removed past their retention |
 | `rutli_sign_round1_skips_total` | counter | — | Peers skipped in sign round 1 — the quorum-margin canary: skips mean you are signing with less headroom than you deployed |
@@ -61,7 +61,13 @@ annotations, NetworkPolicy ingress for pods labelled `rutli.io/scraper: "true"`)
 | `rutli_hosted_tombstones_written_total` | counter | `how`=converted\|recorded | Tombstones this node wrote: a live copy deleted (directly or from a peer's tombstone), or a tombstone recorded for a key it did not hold |
 | `rutli_hosted_tombstones` | gauge | `retained`=true\|false | Deleted hosted keys on this node, split by whether the tombstone still retains the material (grace period) — refreshed by the anti-entropy sweep |
 | `rutli_keyfiles` | gauge | `format`=v1\|v2\|plaintext, `dek`=current\|previous\|unknown\|none | This node's key files at start-up (audit M4): a v2 migration watches `format="v1"` reach 0, a DEK rotation watches `dek="previous"` reach 0 before the previous DEK leaves the seal bundle; `dek="unknown"` files do not open on this node |
+| `rutli_fd_limit` | gauge | — | Soft open-file limit after the start-up raise to the hard limit |
+| `rutli_grpc_connections` | gauge | — | Open gRPC connections, TLS handshake done or under way |
+| `rutli_grpc_connection_limit` | gauge | — | Most gRPC connections served at once (soft open-file limit less 256, or half of it under a limit below 512, at most 4096); past it new connections wait in the listen backlog (`RutliGrpcConnectionsNearLimit`) |
+| `rutli_grpc_accept_errors_total` | counter | — | Failed accepts that needed a backoff, usually the process out of file descriptors; the loop retries (`RutliGrpcAcceptErrors`) |
+| `rutli_grpc_handshake_timeouts_total` | counter | — | Connections cut for not finishing the TLS handshake within 5 s of accept (without TLS: for sending nothing). Clients that open TCP and then send nothing count here; a probe that connects and closes does not |
 | `rutli_lock_poison_recoveries_total` | counter | `lock` | Locks recovered after a panicking request poisoned them (audit L3). The node kept serving; the panic is a bug (`RutliLockPoisonRecovered`) |
+| `rutli_background_loop_restarts_total` | counter | `loop` (`anti_entropy`, `ceremony_resolver`, `epoch_check`, `nonce_pruner`) | Background loops restarted 30 s after a panic in a pass (`anti_entropy` then also waits its own interval before the next sweep). The loop runs again; the panic is a bug (`RutliBackgroundLoopRestarted`) |
 
 Leader-side metrics (`sign_*`, `ceremony_*`) appear on whichever node served the driver's request —
 with driver failover that can be any of them, so always aggregate across instances (`sum(...)`).
@@ -95,7 +101,8 @@ for every label value they can carry, so the first event moves a series from 0 t
 that alert on increases see it (`deploy/monitoring/prometheus-rules.yml`:
 `RutliSignPolicyRefusals`, `RutliSignIntentAbsent`, `RutliSignRateLimited`, `RutliSignerAclAbsent`,
 `RutliSignJournalErrors`, `RutliDeleteIntentRefused`, `RutliHostedKeyDeleted`,
-`RutliCeremonyIntentRefused`, `RutliCeremonyIntentAbsent`, `RutliLockPoisonRecovered`).
+`RutliCeremonyIntentRefused`, `RutliCeremonyIntentAbsent`, `RutliLockPoisonRecovered`,
+`RutliBackgroundLoopRestarted`).
 `rutli_sign_round2_unknown_session_total` is primed too (`RutliSignUnknownSessions`).
 `rutli_stale_share` carries a key id and cannot be primed. `rutli_keyfiles` is set
 once per start (`RutliKeyFilesUnopenable`, `RutliKeyFileMigrationPending`).

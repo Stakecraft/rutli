@@ -48,6 +48,19 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Security
 
+- **The cosigner keeps serving when it runs short of file descriptors, and never stops serving
+  without saying so.** At start-up it raises its soft open-file limit to the hard limit and logs
+  both (`rutli_fd_limit`). It accepts gRPC connections in its own loop: an accept error such as
+  running out of descriptors is retried after a short backoff and reported
+  (`rutli_grpc_accept_errors_total`, alert `RutliGrpcAcceptErrors`), where it used to end the
+  server. Open connections are capped below the descriptor limit (the soft limit less 256, or half
+  of it under a limit below 512, at most 4096); past the cap new connections wait in the listen backlog
+  (`rutli_grpc_connections`, `rutli_grpc_connection_limit`, alert `RutliGrpcConnectionsNearLimit`).
+  A new connection gets 5 s to finish its TLS handshake (without TLS: to send its first
+  bytes; `rutli_grpc_handshake_timeouts_total`), and an error during a handshake no longer ends
+  the server. The server sends HTTP/2 keepalive pings
+  (every 60 s, 20 s timeout), so connections to peers that vanished are closed. If the gRPC server
+  ever returns without a shutdown request, the daemon logs it and exits non-zero.
 - **heapless 0.7.17: nine `unsound` RustSec advisories (RUSTSEC-2026-0574 to -0582) are ignored in
   `frost/deny.toml`, with the reason recorded per advisory.** heapless comes in only through
   frost-core 2.2.0 → postcard 1.1.3, and no release of either moves it to the fixed heapless 0.9.4.
@@ -85,6 +98,47 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Fixed
 
+- **A cosigner that answers a sign wrongly no longer stays the driver's leader.** Up to 0.4.0 the
+  driver made any node that answered its preferred leader before it checked the signature. One
+  compromised cosigner that returned a signature that does not verify, or `NOT_FOUND`,
+  `FAILED_PRECONDITION` or `PERMISSION_DENIED`, failed that sign and got every later one, so every
+  FROST sign failed until the roster was changed. If it was the first endpoint, this held from
+  startup. The bad signature was never released. Now:
+  - A signature that does not verify against the pinned group key is withheld and the sign goes to
+    the next cosigner in the same call, with the same signing intent. The audit entry shows
+    `sig-verify=failed failover=<from>→<to> reason=BAD_SIGNATURE`.
+  - A sign also fails over on every status except `PERMISSION_DENIED`, `UNAUTHENTICATED`,
+    `RESOURCE_EXHAUSTED` and `INVALID_ARGUMENT`. Those still go back to Canton at once: a policy
+    refusal by one cosigner is not retried on another.
+  - Only a verified signature makes a cosigner the preferred leader for signs. A leader that fails
+    loses that place, and so does one that refuses a sign carrying an intent, since every cosigner
+    checks the intent itself. A refusal for a stale cluster id, or of a sign without an intent,
+    keeps the lead.
+  - Each cosigner charges its rate limit once per intent request id. Each leader tried can make a
+    node release one more signature share for that id, up to `max_shares_per_request`. In 3-of-5,
+    a call that fails over more than once can reach that bound and is then refused.
+  - Other operations (decrypt, symmetric crypto, hosted keys, key reads) cannot be checked by the
+    driver. They keep the lead on a refusal such as `RESOURCE_EXHAUSTED`, as before, and lose it
+    only when the node is unreachable or failing. A DKG loses the lead only on `UNAVAILABLE`.
+  - The non-retryable "does not verify" error now means that every cosigner was asked and none
+    gave a valid signature. Nothing to configure.
+- **A misspelt approval rule mode no longer means auto-approve.** `mode = "quorom"` or
+  `mode = "Quorum"` made that rule auto-approve without a word, so the key signed with no
+  approvals. The driver now stops at startup with a config error at the rule, for example
+  `approval.rules.0.mode`, that names the rule and the value. The modes are `quorum` and `auto`, in
+  lowercase, as on the cosigners. The driver also refuses a quorum rule that an earlier `auto` rule
+  fully covers (for example `key-id-prefix = ""`), because it could never apply. A quorum
+  `threshold` outside 1 to the number of approvers, refused before with a stack trace, is now a
+  config error at `approval.rules`. Check your `approval` block before you upgrade:
+  `docs/approval-quorum.md`.
+- **A panic in a background pass no longer stops that loop for good.** The ceremony resolver, the
+  epoch check, the nonce-marker pruner and hosted-key anti-entropy each run as a loop in its own
+  task. A panic in one pass ended the task, and nothing showed it after the one panic line in the
+  log: STAGED ceremonies stayed unresolved, or nonce markers piled up, or hosted keys stopped
+  healing. The loop is now restarted 30 s after a panic (anti-entropy then also waits its usual
+  interval before the next sweep). The new counter
+  `rutli_background_loop_restarts_total{loop}` and the alert `RutliBackgroundLoopRestarted` report
+  it. The panic is still a bug to report; its message is in the log line. Closes #127.
 - **The driver reads an approver's key as `public-key-base64`,** the name the docs and
   `approve keygen` print. Up to 0.4.0 it only read `public-key-base-64`, so an `approval` block
   copied from the docs stopped the participant at startup with `Key not found`. Both names are read
@@ -125,6 +179,43 @@ All notable changes to Rütli are documented here. Format loosely follows
   for the fix above, not seen in operation: it needs an empty cache (a restart) at the moment of a
   commit. A load that an eviction overtook now reads the share again. The same guard covers
   `discard-partial-key`.
+- **One lying cosigner and one restart could bench both honest cosigners for good.** The
+  stale-share check ignored every peer that reported itself stale, also when that peer held this
+  node's exact sharing. With A and B honest and C claiming a newer epoch: while B restarted, A
+  heard only C and marked itself stale; B came back, ignored A, believed C and marked itself stale
+  too; from then on each ignored the other, signing for the key stopped, and the alerts said both
+  had been rolled back. A peer that holds this node's sharing now vouches for it even when it is
+  marked stale on peers' answers. Two honest nodes on the same sharing that can reach each other
+  recover on their next pass, also when one of them still runs 0.4.0. A peer marked stale by its
+  own ceremony record does not vouch: `KeyEpoch` gains `stale_by_own_record` (field 12) to say so.
+  A 0.4.0 peer leaves it unset and still vouches; 0.4.0 and 0.5.0 nodes keep working together. A
+  stale peer's claim of a newer epoch never marks a node stale, but with no voucher it keeps the
+  previous verdict instead of clearing a mark.
+- **A staged node went stale when a peer claimed an epoch beyond the one it voted for.** The check
+  compared its staged vote only with the newest epoch a peer claimed. Now any live peer on the
+  staged sharing makes it wait for its resolver, as intended.
+- **Stale keys are re-checked every 25–30 s** (random, so nodes do not poll in step) instead of
+  every 5 minutes, and a stale mark is logged again only when the state or the epochs change, not
+  when the wording of the reason does. One cosigner alone can still bench a node while no peer that
+  holds this node's sharing answers (a restart, or a refresh still committing); the stale reason
+  then says the claim is unconfirmed, the mark clears on the next pass that reaches such a peer,
+  and `RutliStaleShare` now leads with what to check before restoring anything.
+- **`scripts/e2e-split-ceremony.sh` passes again, and CI now runs it.** It had failed since
+  0.4.0-rc.6: `require_ceremony_intent` became the default with TLS, so its raw Dkg probe on the
+  import id was refused for the missing intent before reaching the reserved-id check. The script
+  now starts with the setting off and turns it on at step 6, as it was written. The new workflow
+  `.github/workflows/e2e.yml` runs it, `e2e-carry-protocol-keys.sh` and `e2e-ecies-hosted.sh`
+  (`KEYFILE_V2_DELETES=1`). It runs on pushes to main, on pull requests that touch the code these
+  scripts test, and on release-candidate tags; a failure on main opens an issue. The two Canton
+  scripts now take `JAVA_HOME` when `CANTON_JAVA_HOME` is unset, and allow more time for console
+  waits and polling on a slow host.
+- **The migration procedure of `docs/migration.md` is under test.** `scripts/e2e-migration.sh`, a new step of the e2e
+  workflow, walks it on Canton 3.6.1: a JCE participant with a party and contracts, the namespace key exported with a
+  password, the split ceremony into a local 2-of-3 cluster with the full signing policy, a new participant under the same
+  namespace on a fresh database, a rollback before the point of no return and a second cutover, the party moved with its
+  contracts, and the checks of Step 7 and Step 8 that a script can make. Wrong passwords, wrong fingerprints and a
+  dealt bundle after the refresh are refused on the way. Step 6 is the Splice re-onboard and needs a Splice network: the
+  script makes the same topology changes from the new participant instead, and the Splice step is left to a LocalNet job.
 
 ### Security
 
@@ -161,6 +252,14 @@ All notable changes to Rütli are documented here. Format loosely follows
   audit's funding is confirmed, not in the first quarter of 2027, and the four clean TestNet weeks
   are counted on the audited release. The README's status line names the Splice and Canton
   versions the DevNet validator runs today.
+- **`docs/migration.md`, corrections found by the migration e2e test.** Step 4.3: the new participant must start
+  without an identity; a participant configured by hand needs `init.identity.type = manual` and
+  `init.generate-topology-transactions-and-keys = false`. Step 5.1 and 5.3 are written as console code that compiles
+  (`Set(SigningKeyUsage.Namespace)`, `UniqueIdentifier.tryCreate`, `ParticipantId(NEW_UID)`). §6: a retry after a rollback
+  must give its signing key a new name, because since 0.4.0-rc.3 a DKG for an id the cluster holds returns that key, so
+  the retry would silently get the burned member's signing key; the offboarding command is written out. Step 8: the
+  command that removes the offboarded member's owner-to-key mapping, with the `AlienMember` force flag and an exact
+  member filter (`filterKeyOwnerUid` matches by prefix).
 - **Threshold ECIES is planned for 1.0, not 2.0** (decided 2026-11-19). `docs/roadmap.md`, the
   README, `docs/hosted-keys.md` and the explorer page say so, and the second audit phase in
   `docs/audit-rfq.md` (section 2.2) now lists four features. No code changes.
