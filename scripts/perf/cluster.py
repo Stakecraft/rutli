@@ -567,12 +567,14 @@ class Diagnosis:
         return cos, gen
 
     def fsync_probe(self):
-        """O_DSYNC writes on each cosigner's own data volume, before any load."""
+        """On each cosigner's own data volume, before any load: O_DSYNC writes, and the flush
+        sequence of one released share (diagnose.FSYNC_PROBE_SCRIPT)."""
         out = {}
         for n in NODES:
             text = self.c.exec(n, diagnose.FSYNC_PROBE_SCRIPT) or ""
-            out[n] = {"ms_per_dsync_write": diagnose.parse_dd(text), "dd": text.strip().splitlines()[-1:] or None}
-            log(f"  flush probe {n}: {out[n]['ms_per_dsync_write']} ms per O_DSYNC write")
+            out[n] = {"ms_per_dsync_write": diagnose.parse_dd(text), "ms_per_share": diagnose.parse_share_probe(text)}
+            log(f"  flush probe {n}: {out[n]['ms_per_dsync_write']} ms per O_DSYNC write, "
+                f"{out[n]['ms_per_share']} ms per share's flushes")
         return out
 
     def step(self, gens, name, secs, sign_rate, sign_keys, ecdh_rate=0.0, ecdh_keys=()):
@@ -580,8 +582,6 @@ class Diagnosis:
         what every container did meanwhile."""
         clients = lambda r: str(max(3, min(256, math.ceil(r))))  # noqa: E731
         g = len(gens)
-        before = self.cgroups(gens)
-        t0 = time.time()
         procs = []
         for pod in gens:
             if sign_rate > 0:
@@ -592,6 +592,13 @@ class Diagnosis:
                 r = ecdh_rate / g / len(ecdh_keys)
                 procs.append(("ecdh", self.start_on(pod, ["ecdh", "--key", k, "--name", name, "--rate", f"{r:g}",
                                                           "--clients", clients(r), "--duration-secs", str(secs)])))
+        # The readings bracket the middle of the load, not the generators' start-up and shutdown:
+        # every rate below is over the same window.
+        settle = min(10.0, secs / 6)
+        time.sleep(settle)
+        before, t0 = self.cgroups(gens), time.time()
+        time.sleep(max(1.0, secs - 2 * settle))
+        after, elapsed = self.cgroups(gens), time.time() - t0
         ops, rig = {}, []
         for op, proc in procs:
             rep = self.s.loadgen_finish(proc, secs + 900)
@@ -610,10 +617,10 @@ class Diagnosis:
                 o["error_messages"][msg] = o["error_messages"].get(msg, 0) + n
             # Percentiles do not add up across generators: the worst one is kept.
             o["p99_ms"] = max(o["p99_ms"], c.get("latency", {}).get("p99_ms", 0.0))
-            if op == "sign" and "server" not in o:
-                o["server"] = rep.get("server", {}).get("sign_duration")
-        elapsed = time.time() - t0
-        after = self.cgroups(gens)
+            # Each generator scraped the cosigners around its own run; the worst view is kept.
+            srv = rep.get("server", {}).get("sign_duration") if op == "sign" else None
+            if srv and (not o.get("server") or (srv.get("p99_ms") or 0) > (o["server"].get("p99_ms") or 0)):
+                o["server"] = srv
         cos = {n: diagnose.derive(before[0].get(n, {}), after[0].get(n, {}), elapsed) for n in NODES}
         gen = {p: diagnose.derive(before[1].get(p, {}), after[1].get(p, {}), elapsed) for p in gens}
         sign = ops.get("sign", {})
@@ -641,12 +648,12 @@ class Diagnosis:
         log(f"diagnose: {len(gens)} load generator(s): {', '.join(gens)}")
         out = {"generators": gens, "step_secs": secs, "slo_p99_ms": slo}
         out["fsync_probe"] = self.fsync_probe()
-        probes = sorted(v["ms_per_dsync_write"] for v in out["fsync_probe"].values() if v["ms_per_dsync_write"])
-        ms = probes[len(probes) // 2] if probes else None
-        out["ms_per_flush"] = ms
-        # What the flushes alone would allow (diagnose.predicted_ceiling), to hold against the
-        # measured plateau.
-        out["predicted_ceiling_signs_per_sec"] = diagnose.predicted_ceiling(ms)
+        per_node = {NODES.index(n) + 1: v["ms_per_share"] for n, v in out["fsync_probe"].items()}
+        # What the flushes alone would allow (diagnose.predicted_ceiling), from each node's own
+        # probe and the leaders' subset order, to hold against the measured plateau.
+        out["predicted_ceiling_signs_per_sec"] = diagnose.predicted_ceiling(per_node)
+        out["ceiling_model"] = ("each node flushes its shares one after another; leaders spread evenly; "
+                                "subsets leader first, then by identifier (node 1 serves every signature)")
 
         sign_keys = [f"perf-ramp-{i}" for i in range(max(1, int(mix.get("sign_keys", 2))))]
         ecdh_keys = [f"rutli-perf-ramp-{i}" for i in range(max(1, int(mix.get("ecdh_keys", 1))))]
@@ -659,8 +666,10 @@ class Diagnosis:
         for f in d.get("factors", [30, 50, 70, 100, 130, 160, 200, 250, 300]):
             sign_rate = float(mix.get("sign_per_sec", 0)) * f
             log(f"diagnose x{f:g}: {sign_rate:g} signatures/s for {secs} s")
-            st = self.step(gens, f"diag-x{f:g}", secs, sign_rate, sign_keys,
-                           float(mix.get("ecdh_per_sec", 0)) * f, ecdh_keys)
+            # Signing only, unless the profile asks for the mix: CPU per signature and the knee are
+            # about signing.
+            ecdh_rate = float(mix.get("ecdh_per_sec", 0)) * f if d.get("with_ecdh") else 0.0
+            st = self.step(gens, f"diag-x{f:g}", secs, sign_rate, sign_keys, ecdh_rate, ecdh_keys)
             st["factor"] = f
             steps.append(st)
             cpu = {n: c.get("cpu_cores") for n, c in st["cosigners"].items()}
@@ -677,8 +686,10 @@ class Diagnosis:
         out["steps"] = steps
         out["knee_factor"] = diagnose.knee(steps, slo)
         out["max_ok_per_sec"] = max((st["ok_per_sec"] for st in steps), default=None)
+        out["generator_bound_steps"] = [st["factor"] for st in steps if st.get("generator_bound") is not False]
         log(f"diagnose: knee at x{out['knee_factor']}, at most {out['max_ok_per_sec']} signatures/s; "
-            f"the flushes alone would allow about {out['predicted_ceiling_signs_per_sec']}/s")
+            f"the flushes alone would allow about {out['predicted_ceiling_signs_per_sec']}/s; "
+            f"steps without a verdict (generator-bound or no readings): {out['generator_bound_steps']}")
 
         k = out["knee_factor"]
         if k and not out.get("rig_failed"):

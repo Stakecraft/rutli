@@ -143,7 +143,8 @@ impl Recorder {
     pub fn record(&mut self, outcome: Outcome, message: Option<String>) {
         if let Some(m) = message {
             let key = message_key(outcome.code, &m);
-            let key = if self.messages.contains_key(&key) || self.messages.len() < 32 { key } else { "(other)".into() };
+            // 31 messages and `(other)`: at most 32 entries.
+            let key = if self.messages.contains_key(&key) || self.messages.len() < 31 { key } else { "(other)".into() };
             *self.messages.entry(key).or_default() += 1;
             self.samples.entry(outcome.code.to_string()).or_insert(m);
         }

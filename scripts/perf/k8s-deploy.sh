@@ -154,6 +154,10 @@ fi
 
 # -- install ------------------------------------------------------------------------------------
 
+if [ "$tmpfs" -eq 1 ] && kubectl get namespace "$ns" >/dev/null 2>&1; then
+  echo "ERROR: --diagnostic-tmpfs installs only into a namespace it creates itself; $ns exists" >&2
+  exit 1
+fi
 if kubectl get namespace "$ns" >/dev/null 2>&1; then
   if helm status "$RELEASE" -n "$ns" >/dev/null 2>&1; then
     echo "ERROR: namespace $ns already holds a release $RELEASE" >&2
@@ -292,7 +296,10 @@ if [ "$tmpfs" -eq 1 ]; then
   kubectl annotate namespace "$ns" --overwrite rutli-perf/diagnostic=tmpfs
   for i in 1 2 3; do
     k patch statefulset "$RELEASE-n$i" --type strategic -p \
-      '{"spec":{"template":{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":null,"emptyDir":{"medium":"Memory","sizeLimit":"64Mi"}}]}}}}'
+      '{"spec":{"template":{"spec":{"volumes":[{"name":"data","persistentVolumeClaim":null,"emptyDir":{"medium":"Memory","sizeLimit":"128Mi"}}]}}}}'
+    # The in-memory volume counts against the container's memory: give it room, so the
+    # diagnostic measures flushing and not memory pressure.
+    k set resources statefulset "$RELEASE-n$i" -c cosigner --limits=memory=512Mi
   done
 fi
 wait_cosigners

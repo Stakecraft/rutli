@@ -10,7 +10,9 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import diagnose  # noqa: E402
 
-CGROUP = """== cpu.stat
+CGROUP = """== path
+/
+== cpu.stat
 usage_usec 1000000
 user_usec 700000
 system_usec 300000
@@ -53,6 +55,7 @@ class Cgroup(unittest.TestCase):
         self.assertEqual((c["io_wios"], c["io_wbytes"]), (101, 1_052_672))
         self.assertEqual(c["memory_bytes"], 26_214_400)
         self.assertEqual(c["cpu_quota_cores"], 2.0)
+        self.assertEqual(c["cgroup_path"], "/")
 
     def test_missing_files_and_no_limit(self):
         c = diagnose.parse_cgroup("== cpu.stat\nusage_usec 5\n== cpu.max\nmax 100000\n== io.stat\n")
@@ -81,14 +84,26 @@ class Flush(unittest.TestCase):
         dd = "100+0 records in\n100+0 records out\n409600 bytes (410 kB, 400 KiB) copied, 0.5 s, 819 kB/s\n"
         self.assertEqual(diagnose.parse_dd(dd), 5.0)
         self.assertIsNone(diagnose.parse_dd("dd: failed to open"))
-        # 5 ms per flush, 3 per share: 66.7 shares/s per node; 3 nodes, 2 shares per signature.
-        self.assertEqual(diagnose.predicted_ceiling(5.0), 100.0)
-        self.assertIsNone(diagnose.predicted_ceiling(None))
+        share = "== share\nbase_ns=50000000 flush_ns=550000000\n"
+        self.assertEqual(diagnose.parse_share_probe(share), 10.0)   # (550-50) ms over 50 rounds
+        self.assertIsNone(diagnose.parse_share_probe("nothing"))
+        # Node 1 serves every signature (leaders 2 and 3 sign with it): it alone caps the rate.
+        self.assertEqual(diagnose.predicted_ceiling({1: 10.0, 2: 10.0, 3: 10.0}), 100.0)
+        # Node 2 serves two thirds (leaders 1 and 2), node 3 a third (leader 3 only).
+        self.assertEqual(diagnose.predicted_ceiling({1: 10.0, 2: 20.0, 3: 10.0}), 75.0)
+        self.assertEqual(diagnose.predicted_ceiling({1: 10.0, 2: 10.0, 3: 20.0}), 100.0)
+        self.assertEqual(diagnose.predicted_ceiling({1: 10.0, 2: 10.0, 3: 40.0}), 75.0)
+        # Balanced subsets: each node serves two thirds.
+        balanced = {1: (1, 2), 2: (2, 3), 3: (3, 1)}
+        self.assertEqual(diagnose.predicted_ceiling({1: 10.0, 2: 10.0, 3: 10.0}, balanced), 150.0)
+        self.assertIsNone(diagnose.predicted_ceiling({1: None, 2: 1.0, 3: 1.0}))
+        self.assertIsNone(diagnose.predicted_ceiling({}))
 
 
 class Verdicts(unittest.TestCase):
-    def step(self, factor, offered, ok, p99=100, errors=0):
-        return {"factor": factor, "offered_per_sec": offered, "ok_per_sec": ok, "server_p99_ms": p99, "errors_sent": errors}
+    def step(self, factor, offered, ok, p99=100, errors=0, gen_bound=False):
+        return {"factor": factor, "offered_per_sec": offered, "ok_per_sec": ok, "server_p99_ms": p99,
+                "errors_sent": errors, "generator_bound": gen_bound}
 
     def test_knee(self):
         steps = [self.step(30, 30, 30), self.step(50, 50, 49.9), self.step(70, 70, 60)]
@@ -96,6 +111,9 @@ class Verdicts(unittest.TestCase):
         self.assertEqual(diagnose.knee([self.step(30, 30, 30, p99=1500)], 1000), 30)
         self.assertEqual(diagnose.knee([self.step(30, 30, 30, errors=1)], 1000), 30)
         self.assertIsNone(diagnose.knee(steps[:2], 1000))
+        # A generator-bound or unknown step is no knee.
+        self.assertIsNone(diagnose.knee([self.step(30, 30, 10, gen_bound=True)], 1000))
+        self.assertIsNone(diagnose.knee([self.step(30, 30, 10, gen_bound=None)], 1000))
 
     def test_generator_bound(self):
         calm = {"cosigner1": {"cpu_pressure_share": 0.01, "io_pressure_share": 0.0}}
@@ -107,6 +125,9 @@ class Verdicts(unittest.TestCase):
         self.assertFalse(diagnose.generator_bound({"generators": {}, "cosigners": stressed, "not_sent": 10}))
         self.assertFalse(diagnose.generator_bound({"generators": {"g1": {"cpu_cores": 1, "cpu_quota_cores": 4}},
                                                     "cosigners": calm}))
+        # Missing cosigner readings: unknown, not a verdict.
+        self.assertIsNone(diagnose.generator_bound({"generators": busy_gen, "cosigners": {"cosigner1": {}}}))
+        self.assertIsNone(diagnose.generator_bound({"generators": busy_gen, "cosigners": {}}))
 
     def test_keys_verdict(self):
         self.assertIn("per-key lock", diagnose.keys_verdict([{"keys": 2, "ok_per_sec": 100}, {"keys": 200, "ok_per_sec": 300}]))

@@ -227,7 +227,7 @@ def main(argv=None):
     dx = current.get("diagnosis") or {}
     if dx.get("steps"):
         lines += [f"Diagnosis: knee at x{dx.get('knee_factor')}, at most {dx.get('max_ok_per_sec')} signatures/s; "
-                  f"{dx.get('ms_per_flush')} ms per flush, which alone would allow about "
+                  f"the volume's flushes alone would allow about "
                   f"{dx.get('predicted_ceiling_signs_per_sec')}/s; keys: {dx.get('keys_verdict', 'not run')}", ""]
     if current.get("headroom_factor") is not None:
         lines += [f"Headroom factor: {current['headroom_factor']} (profile {current.get('profile')})", ""]

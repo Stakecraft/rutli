@@ -82,19 +82,26 @@ no stream to the API server is held open for the length of a run.
 `cluster.py --diagnose` answers what limits the throughput, instead of running the suites. In order
 of what each step tells for its cost:
 
-1. **Flush cost.** On each cosigner's own data volume, before any load: 100 writes with `O_DSYNC`
-   (`dd … oflag=dsync`, a dot-file removed afterwards), reported as milliseconds per flush. With 3
-   flushes per released share and 2 shares per signature, the flushes alone allow about
-   `1000 / (3 × ms) × 3 / 2` signatures a second (`predicted_ceiling_signs_per_sec`), to hold
+1. **Flush cost.** On each cosigner's own data volume, before any load, in a dot-directory removed
+   afterwards: 100 writes with `O_DSYNC` (the device), and 50 rounds of what one released share
+   does (append a line and `fdatasync`, create a file and `fsync` it, `fsync` its directory), with
+   the shell's own cost subtracted: milliseconds per share on each node. A leader signs with itself
+   and the lowest other identifier ("leader first, then by identifier"), so with requests spread
+   evenly over the leaders, cosigner 1 releases a share for every signature, cosigner 2 for two
+   thirds and cosigner 3 for one third. The lowest of `1000 / (ms × fraction)` over the nodes is
+   what the flushes alone would allow (`predicted_ceiling_signs_per_sec`), an upper bound to hold
    against the measured plateau.
-2. **Fine ramp around the knee** (`diagnose.factors` of the profile, `step_secs` each), spread over
-   every load generator pod. Per step and per container, from cgroup v2: CPU cores used, the share
+2. **Fine ramp around the knee** (`diagnose.factors` of the profile, `step_secs` each), signing only
+   unless `diagnose.with_ecdh` is set, spread over every load generator pod. Readings bracket the
+   middle of each step (not the generators' start and end). Per step and per container, from
+   cgroup v2 (the container's own cgroup, from `/proc/self/cgroup`): CPU cores used, the share
    of time throttled by the CPU limit, CPU and IO pressure (the share of time tasks waited), writes
    per second, memory; the achieved rate against the offered one, requests never sent, the
    cosigners' p99, errors by code and message (so a session-cap refusal is told from another
    `UNAVAILABLE`), and CPU milliseconds per signature. A step where a generator used most of its
    CPU limit, or requests were not sent while no cosigner waited for CPU or IO, is marked
-   `generator_bound`. The ramp stops one step past the knee.
+   `generator_bound`; such a step, or one without every cosigner's readings, gives no verdict and
+   cannot be the knee. The ramp stops one step past the knee.
 3. **Keys.** The knee's (overloaded) rate over 2, 20 and 200 keys (`diagnose.key_counts`; without
    a knee, the highest step's rate, `keys_rate_from`):
    throughput rising with the key count means a per-key lock; flat means a limit shared by all
@@ -102,8 +109,9 @@ of what each step tells for its cost:
 
 Install with `k8s-deploy.sh --generators 2` (or more) so that no step is generator-bound. To size
 the flush cost directly, install a second time with `--diagnostic-tmpfs` and run `--diagnose`
-again: the cosigners then keep their data on an in-memory volume. **That is a diagnostic only,
-never a configuration**: everything is lost on any restart, the namespace and every result are
+again, into a namespace that does not exist yet: the cosigners then keep their data on an
+in-memory volume, with a 512 Mi memory limit to hold it. **That is a diagnostic only, never a
+configuration**: everything is lost on any restart, the namespace and every result are
 labelled `diagnostic: tmpfs`, `compare.py` never uses such a run as a baseline, and the upgrade
 and disrupt suites refuse to run there. The chart has no value for it: the suite patches the
 StatefulSets of that test installation.
