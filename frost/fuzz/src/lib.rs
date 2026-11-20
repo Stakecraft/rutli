@@ -562,7 +562,7 @@ fn mesh_in(
         sign_guard: None,
         refresh_cns: None,
     };
-    let peer = rutli_cosigner::service::PeerSvc { node: nodes[0].clone(), allowed_cns: None, peer_ids: None };
+    let peer = rutli_cosigner::service::PeerSvc { node: nodes[0].clone(), allowed_cns: None, peer_ids: None, peer_pins: None };
     (nodes, signer, peer)
 }
 

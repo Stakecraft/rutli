@@ -56,7 +56,7 @@ RUTLI_FUZZ_SEED_DIR="$PWD/fuzz/seeds/intent" cargo +nightly-2026-11-15 fuzz run 
 cargo +nightly-2026-11-15 fuzz run intent fuzz/corpus/intent fuzz/seeds/intent -- -max_total_time=300
 ```
 
-For `grpc`, add `-detect_leaks=0` to both commands: each input runs on a fresh in-process mesh
+For `grpc`, add `-detect_leaks=0` to both commands and set `ASAN_OPTIONS=detect_leaks=0` (issue #151): each input runs on a fresh in-process mesh
 whose nodes reference each other and cannot be unwired, so every input leaks one cycle (the harness,
 not the code under test; see `.github/workflows/fuzz.yml`). A crash is written to `fuzz/artifacts/<target>/`. Minimize it (`cargo fuzz tmin <target> <file>`),
 then commit it under `regressions/<target>/` with the fix.

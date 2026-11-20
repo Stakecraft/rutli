@@ -35,15 +35,13 @@ env:
 jobs:
   fuzz:
     name: Fuzz ${{ matrix.target }}
-    # The same runner rule as ci.yml: this repository's own events on vars.CI_RUNNER, fork pull
-    # requests on GitHub's ubuntu-latest.
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    # The same runner rule as ci.yml (GitHub-hosted ubuntu-latest unless vars.CI_RUNNER is set;
+    # fork and Dependabot pull requests always hosted). Fuzzing needs no stable hardware.
+    runs-on: ${{ github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) && vars.CI_RUNNER || 'ubuntu-latest' }}
     # An hour of fuzzing (manual run) plus the build.
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      # Two self-hosted runners: never more than both.
-      max-parallel: 2
       matrix:
         target: [key_file, seal_bundle, share_bundle, canton_key, export_file, intent, grpc]
     env:
@@ -97,13 +95,17 @@ jobs:
       # hold key material, which the repository does not carry. canton_key also reads the Canton
       # test vectors.
       #
-      # Leak detection is on, except for grpc: each grpc input runs on a fresh three-node mesh wired
-      # by cosigner::peer::wire_local_mesh, whose nodes hold Arcs to each other (node -> mesh ->
-      # LocalPeer -> node) and cannot be unwired (the mesh is set once). Every input therefore
-      # leaks one cycle of three nodes (LeakSanitizer: indirect leaks only, three objects each,
-      # allocated in rutli_fuzz::mesh_in and on the runtime's threads). That is the harness, not the
-      # code under test: the daemon's mesh is gRPC peers, with no cycle. grpc's per-input growth is
-      # still bounded by -rss_limit_mb, and AddressSanitizer's other checks stay on.
+      # Leak detection is on, except for grpc (issue #151): each grpc input runs on a fresh
+      # three-node mesh wired by cosigner::peer::wire_local_mesh, whose nodes hold Arcs to each other
+      # (node -> mesh -> LocalPeer -> node) and cannot be unwired (the mesh is set once), so every
+      # input leaks one cycle of three nodes. LeakSanitizer on the runner: indirect leaks only, each
+      # allocated in Node::new_with_ceremony_timeout (cosigner/src/node.rs) called from
+      # rutli_fuzz::mesh_in <- rutli_fuzz::grpc. That is the harness, not the code under test: the
+      # daemon's mesh is gRPC peers, with no cycle. A suppression naming rutli_fuzz::mesh_in would
+      # not cover what the leaked nodes allocate later on the runtime's worker threads (no harness
+      # frame), so both leak checks are off for grpc: libFuzzer's per input (-detect_leaks) and
+      # LeakSanitizer's at exit (ASAN_OPTIONS). Per-input growth is still bounded by -rss_limit_mb,
+      # and AddressSanitizer's other checks stay on. Turn it back on when #151 is fixed.
       - name: Fuzz
         working-directory: frost
         env:
@@ -115,7 +117,7 @@ jobs:
           sym="$(command -v llvm-symbolizer || command -v addr2line || true)"
           if [ -n "$sym" ]; then export ASAN_SYMBOLIZER_PATH="$sym"; else echo "::warning::no symbolizer on the runner: sanitizer reports will show addresses only"; fi
           leaks=1
-          if [ "$TARGET" = grpc ]; then leaks=0; fi
+          if [ "$TARGET" = grpc ]; then leaks=0; export ASAN_OPTIONS=detect_leaks=0; fi
           corpus="$PWD/fuzz/corpus/$TARGET"
           seeds="$PWD/fuzz/seeds/$TARGET"
           empty="$(mktemp -d)"
