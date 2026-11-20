@@ -124,6 +124,7 @@ canton.participants.participant1.crypto {
         # Defaults shown: per-attempt deadlines, the call budget and channel keepalive
         # (docs/architecture.md, "Deadlines, keepalive and what Canton waits for").
         # sign-attempt-timeout = 5s, attempt-timeout = 10s, request-timeout = 30s
+        # sign-leader = rotate      # or sticky: every sign on one leader, as before 0.5.0
         # keepalive-time = 10s, keepalive-timeout = 5s
         cluster-id = "<the cosigners' cluster_id>"
         pin-dir = "/var/rutli/pins"   # durable group-key pins (docs/disaster-recovery.md §3i)

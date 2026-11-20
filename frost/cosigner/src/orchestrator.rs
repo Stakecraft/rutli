@@ -269,7 +269,10 @@ async fn dkg_preflight(
              share"
         )));
     }
-    let first = &views[0].1;
+    // `holders` is not empty, so neither is `views`; checked anyway, no panic in a preflight.
+    let Some((_, first)) = views.first() else {
+        return Err(DaemonError::CeremonyRefused(format!("no cosigner answered for {key_id}")));
+    };
     let same = views.iter().all(|(_, v)| {
         v.epoch == first.epoch && v.pkp_digest == first.pkp_digest && v.group_verifying_key == first.group_verifying_key
     });
@@ -307,12 +310,14 @@ async fn refresh_preflight(
             v.origin
         )));
     }
-    let first = &views[0].1;
+    let Some((first_id, first)) = views.first() else {
+        return Err(DaemonError::CeremonyRefused(format!("no cosigner answered for {key_id}")));
+    };
     if let Some((id, v)) = views.iter().find(|(_, v)| v.epoch != first.epoch || v.pkp_digest != first.pkp_digest) {
         return Err(DaemonError::CeremonyRefused(format!(
             "refusing to refresh {key_id}: cosigner {id} is on epoch {} but cosigner {} is on epoch {} \
              (or their sharings differ) — the nodes must hold one sharing (verify-key shows which)",
-            v.epoch, views[0].0, first.epoch
+            v.epoch, first_id, first.epoch
         )));
     }
     let digest: [u8; 32] = first
@@ -467,6 +472,8 @@ pub async fn sign_with_intent(
     let mut busy_retried = false;
     'passes: loop {
         for subset in combinations(ordered.len(), threshold) {
+            // `combinations(ordered.len(), threshold)` yields only indices below `ordered.len()`.
+            #[allow(clippy::indexing_slicing)]
             let members: Vec<&Arc<dyn PeerApi>> = subset.iter().map(|&i| ordered[i]).collect();
             if members.iter().any(|p| excluded.contains_key(&p.identifier()) || busy.contains(&p.identifier())) {
                 continue;
@@ -614,11 +621,12 @@ async fn attempt(
     }
     let ctx = &crate::node::Round1Ctx { message: Some(message.to_vec()), signers: Some(signers), ..base.clone() };
     let mut commitments: BTreeMap<Identifier, SigningCommitments> = BTreeMap::new();
-    for (i, p) in members.iter().enumerate() {
+    // `sessions` has one id per member (built from `members` above), so the zip drops nothing.
+    for (p, session) in members.iter().zip(&sessions) {
         // Noted before asking: a round 1 that times out or errors may still have opened the
         // session on the member, so a failure aborts it there too.
-        open.opened.push(((*p).clone(), sessions[i].clone()));
-        match p.sign_round1(key_id, &sessions[i], ctx).await {
+        open.opened.push(((*p).clone(), session.clone()));
+        match p.sign_round1(key_id, session, ctx).await {
             Ok(c) => {
                 commitments.insert(p.identifier(), c);
             }
@@ -632,8 +640,8 @@ async fn attempt(
     }
     let intent_digest = ctx.intent.as_ref().map(crate::intent::intent_digest);
     let mut shares: BTreeMap<Identifier, SignatureShare> = BTreeMap::new();
-    for (i, p) in members.iter().enumerate() {
-        match p.sign_round2(key_id, &sessions[i], message, &commitments, intent_digest.as_ref()).await {
+    for (p, session) in members.iter().zip(&sessions) {
+        match p.sign_round2(key_id, session, message, &commitments, intent_digest.as_ref()).await {
             Ok(share) => {
                 shares.insert(p.identifier(), share);
             }
@@ -2190,6 +2198,13 @@ pub(crate) async fn hosted_exists(node: &Arc<Node>, key_id: &str) -> Result<bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_preflight_with_no_answers_is_refused_not_a_panic() {
+        // refresh_preflight used to index views[0]; no answers is an error, never a panic.
+        let peers: Peers = Vec::new();
+        assert!(matches!(refresh_preflight(&peers, "k", &[]).await, Err(DaemonError::CeremonyRefused(_))));
+    }
 
     #[test]
     fn a_peer_rpc_timeout_counts_as_unreachable_but_a_refusal_does_not() {

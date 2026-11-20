@@ -148,6 +148,9 @@ class FrostBackend(
     // After this long, a configured-first cosigner that lost the lead gets it back (it is asked
     // first again; if it still fails it loses the lead again at the cost of one attempt).
     leaderRecovery: FiniteDuration = 60.seconds,
+    // `frost.sign-leader`: true = rotate (each sign starts at the next healthy endpoint in turn),
+    // false = sticky (every sign starts at the preferred leader, as every other call does).
+    rotateSigns: Boolean = FrostBackend.DefaultRotateSigns,
     // `frost.pin-dir`: the durable group-key pins; None keeps them in memory only (a WARN).
     pinStore: Option[GroupKeyPinStore] = None,
     // `frost.expected-group-keys`: key id -> 64 hex, the operator's anchor for a key's first pin.
@@ -378,6 +381,31 @@ class FrostBackend(
       demote(i)
     }
   }
+
+  /** Where the next sign for `keyId` starts.
+    *
+    * Sticky: the preferred leader, past this key's group-key dissenters ([[leaderFor]]).
+    * Rotate: the next endpoint in turn (one shared counter, so concurrent signs spread too) that is
+    * healthy: not demoted within [[leaderRecovery]] and not a dissenter for this key. Only when no
+    * endpoint is healthy does it fall back to the sticky choice (a call has to start somewhere).
+    * This picks the start only: failover then walks the ring from it, as in sticky mode.
+    * Ceremonies and hosted-key calls never come here: they stay on the preferred leader. */
+  private[backend] def signStart(keyId: String): Int =
+    if (!rotateSigns) leaderFor(keyId, startIndex())
+    else {
+      val n = channels.size
+      val now = System.nanoTime()
+      val bad = Option(dissenters.get(keyId))
+      def healthy(i: Int): Boolean = {
+        val d = demotedAt.get(i)
+        !(d != 0L && now - d <= leaderRecovery.toNanos) && !bad.exists(_.contains(Integer.valueOf(i)))
+      }
+      val first = Math.floorMod(signCursor.getAndIncrement(), n)
+      (0 until n).map(k => (first + k) % n).find(healthy).getOrElse(leaderFor(keyId, startIndex()))
+    }
+
+  /** The rotation counter of [[signStart]]. */
+  private val signCursor = new AtomicInteger(0)
 
   /** Where a sign for `keyId` starts: `start`, or the first endpoint after it in ring order that has
     * not dissented about this key's group key. */
@@ -1483,7 +1511,10 @@ class FrostBackend(
               // leader-sick status: withheld, the node demoted, the next leader tried with the same
               // intent. Only a verified signature makes a node the preferred leader.
               val check = (endpoint: String, reply: SignReply) => unverified(keyId, data, groupKey, notes)(endpoint, reply)
-              val observed = startIndex()
+              // Sticky: a verified answer makes its node the preferred leader (compare-and-set
+              // from the value read here). Rotate: signs leave the preference to the sticky calls
+              // (-1 never matches), and only a failure moves it (demote).
+              val observed = if (rotateSigns) -1 else startIndex()
               try
                 withCheckedFailover[SignReply](
                   "sign",
@@ -1492,7 +1523,7 @@ class FrostBackend(
                   notes,
                   check,
                   observed,
-                  from.getOrElse(leaderFor(keyId, observed)),
+                  from.getOrElse(signStart(keyId)),
                   (i: Int) => lastTried.set(i),
                   signAttemptTimeout,
                   budgetEnd,
@@ -1508,7 +1539,7 @@ class FrostBackend(
                       s"(${e.getStatus.getDescription}); learning the cluster id again"
                   )
                   notes.add("intent-cluster=relearned")
-                  attempt(relearned = true, Some(lastTried.get))
+                  attempt(relearned = true, Some(lastTried.get).filter(_ >= 0))
               }
             }
             attempt(relearned = false, None)
@@ -2057,6 +2088,11 @@ object FrostBackend {
   /** A cosigner's refusal of an intent naming another cluster (`intent.rs` reason "cluster"). */
   private def isClusterRefusal(s: Status): Boolean =
     s.getCode == Status.Code.PERMISSION_DENIED && Option(s.getDescription).exists(_.contains("intent is for cluster"))
+
+  /** `frost.sign-leader`'s default, in one place: rotate. Whether it stays the 0.5.0 default
+    * depends on the stands' evidence before the freeze (docs/architecture.md); `sticky` is the
+    * alternative. */
+  val DefaultRotateSigns: Boolean = true
 
   /** No attempt starts with less of the call's budget left than this: it could not succeed. */
   private val MinAttempt: FiniteDuration = 50.millis

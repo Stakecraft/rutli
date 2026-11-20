@@ -132,6 +132,9 @@ final case class SigningJournalConfig(
   *                   torn down and the next call fails over (5 s).
   * @param leaderRecovery     After this long the first endpoint gets the lead back, after it lost it
   *                   (60 s).
+  * @param signLeader  `rotate` (default) | `sticky`: where each sign starts. Rotate spreads signs
+  *                   over the healthy endpoints in turn; sticky keeps them on the preferred leader,
+  *                   as before 0.5.0. Ceremonies and hosted-key calls are sticky either way.
   */
 final case class FrostConfig(
     endpoint: Option[String] = None,
@@ -151,7 +154,15 @@ final case class FrostConfig(
     keepaliveTime: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.FiniteDuration(10, "s"),
     keepaliveTimeout: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.FiniteDuration(5, "s"),
     leaderRecovery: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.FiniteDuration(60, "s"),
+    signLeader: String = if (com.stakecraft.rutli.backend.FrostBackend.DefaultRotateSigns) "rotate" else "sticky",
 ) {
+
+  /** `sign-leader` as a switch; anything but rotate or sticky is a config error. */
+  def rotateSigns: Boolean = signLeader.trim.toLowerCase match {
+    case "rotate" => true
+    case "sticky" => false
+    case other    => throw new IllegalArgumentException(s"frost.sign-leader must be rotate or sticky, got '$other'")
+  }
 
   /** `sign-intents` as a switch; anything but on/off (or true/false) is a config error. */
   def signIntentsEnabled: Boolean = signIntents.trim.toLowerCase match {
