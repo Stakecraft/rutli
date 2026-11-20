@@ -108,9 +108,12 @@ How to read them:
 
 ## Cluster suite on three locations, 2026-11-20
 
-The first run of the [cluster suite](cluster-suite.md) on a real Kubernetes cluster. It is **one
-short run, not a baseline**, and the load profile is a placeholder: read the numbers as what this
-cluster did once, and see "Not measured" below before you quote any of them.
+The first run of the [cluster suite](cluster-suite.md) on a real Kubernetes cluster: three
+cosigners on separate nodes in three locations, 2 dedicated vCPU each. **The load profile was a
+placeholder and the cosigners ran the `lab` profile.** It is one short run, not a baseline and not a
+guarantee: read the numbers as what this cluster did once, and see "Not measured" below before you
+quote any of them. The next run is planned from `main`, with a diagnostic pass for the checks that
+failed.
 
 | | |
 |---|---|

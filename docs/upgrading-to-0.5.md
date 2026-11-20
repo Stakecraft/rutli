@@ -25,8 +25,10 @@ this order. Nothing here changes the key files or the wire format; a cluster wit
 
 With TLS, a 0.5.0 cosigner refuses to start unless every entry of its peer roster carries the
 SHA-256 of that node's certificate key (`peers[].tls_spki_sha256`), and its own certificate's key is
-in its own entry. 0.4.0 and 0.4.1 ignore these keys, so you can add them first and nothing restarts
-that does not have to.
+in its own entry. 0.4.0 and 0.4.1 ignore these keys (they reject unknown keys only in `keyfile`), so you can add them
+first and nothing restarts that does not have to. For the same reason a config written for 0.5.0
+gives none of these guarantees on a 0.4.x binary: check the running version (`--version`, or the
+image digest) before relying on them.
 
 1. Get each cosigner's pin: `rutli-cosigner tls spki cosigner1.crt cosigner2.crt cosigner3.crt`.
    `scripts/gen-frost-certs.sh` prints the pins of the certificates it makes and writes
@@ -123,10 +125,15 @@ Moving the image is the step that needs care. Per node, wait for the gate before
 in one apply and restart together, and the PodDisruptionBudget does not apply to a StatefulSet's own
 update. Measured on a real three-node cluster on 2026-11-20, upgrading from 0.4.1 to a build of
 `main` under 5 signatures a second: about 11 s with no cosigner up, 54 of 750 signatures failed
-with `UNAVAILABLE`, and the keys were unchanged afterwards. Until the chart can roll one node at a
-time ([issue #173](https://github.com/Stakecraft/rutli/issues/173)), plan the image upgrade as an
-outage of about that length, not as a rolling upgrade. The config-only steps above (pins) do not
-restart anything.
+with `UNAVAILABLE`, and the keys were unchanged afterwards
+([issue #173](https://github.com/Stakecraft/rutli/issues/173)). Until a change that makes the chart
+roll one node at a time is released, move the image one node at a time with the sequence in
+[runbook-migration-inplace.md](runbook-migration-inplace.md) (render, diff, `helm upgrade` for the
+ConfigMap, then restart node 2, node 3, node 1 with 5 minutes between and sign errors flat; its
+Phase 3 reference is [runbook-rc4-soak-rollout.md](runbook-rc4-soak-rollout.md)). That sequence was
+written for a config change; for an image change, check first that it keeps two nodes up in your
+install. If you cannot, plan the image upgrade as an outage of about 11 s. The config-only steps
+above (pins) do not restart anything.
 
 Rollback of one node to 0.4.x works with the same config: 0.4.x ignores the new keys, and the other
 nodes still pin its unchanged key. With the Helm chart, roll back the chart and the image together.
