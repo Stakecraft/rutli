@@ -283,8 +283,9 @@ ceremony's record: settled records are kept 30 days, and a refresh starts a new 
 which no origin is named. The driver accepts an existing key only when that ceremony is one it
 asked for itself in this process: Canton's retry after a timeout. Any other existing key is refused, naming `frost.key-prefix` and
 `frost.adopt-existing-keys`. A driver that restarts in the middle of a bootstrap has forgotten its
-own ceremony ids and is refused too (until the driver persists them, a follow-up to the durable
-group-key pins). The refusal says what to do. If another participant uses this cluster with the
+own ceremony ids and is refused too, unless `frost.pin-dir` is set. With it, the driver writes
+each ceremony id to the pin directory (`<key-id>.dkg`, fsynced) before the request goes out, and a
+restart between request and reply adopts the key. The refusal says what to do. If another participant uses this cluster with the
 same `frost.key-prefix`, the key is theirs: do not adopt it, give this participant its own prefix
 and driver certificate. Otherwise it is this participant's own key from before the restart: list its
 id in `frost.adopt-existing-keys`, restart the participant, and remove the entry once Canton has

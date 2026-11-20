@@ -138,9 +138,11 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
       clusterId: Option[String] = None,
       signIntents: Boolean = true,
       adopt: Set[String] = Set.empty,
+      pinDir: Option[java.nio.file.Path] = None,
   ) =
     new FrostBackend(eps.map(_._1), new NoDelegateBackend, logger, Some(tls), 10.seconds,
-      endpointTlsNames = eps.toMap, clusterId = clusterId, signIntents = signIntents, adoptExistingKeys = adopt)
+      endpointTlsNames = eps.toMap, clusterId = clusterId, signIntents = signIntents, adoptExistingKeys = adopt,
+      pinStore = pinDir.map(d => new GroupKeyPinStore(d, logger)))
 
   /** The DKG ceremony id a request's intent names, as the cosigners derive it. */
   private def ceremonyOf(req: DkgRequest): String =
@@ -435,6 +437,28 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
       val b = backend(Seq(serve("cosigner1", rec) -> "cosigner1"), signIntents = false)
       try Await.result(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")), 20.seconds) shouldBe "frost-ns"
       finally b.close()
+    }
+
+    "after a restart, adopt the key of a ceremony it recorded before the request (frost.pin-dir)" in {
+      val dir = java.nio.file.Files.createTempDirectory("rutli-dkg-restart")
+      val rec = new Recorder(Cluster)
+      // The first process: the request goes out and the call fails (the driver dies, say).
+      rec.failDkgs = 1
+      val first = backend(Seq(serve("cosigner1", rec) -> "cosigner1"), pinDir = Some(dir))
+      try an[Exception] should be thrownBy Await.result(first.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")), 20.seconds)
+      finally first.close()
+      val sent = ceremonyOf(rec.dkgs.asScala.head)
+      new GroupKeyPinStore(dir, logger).ceremonies("frost-ns") shouldBe Set(sent)
+      // The restarted process: the cluster committed that ceremony; its key is this driver's own.
+      rec.reportExisting = Some(true)
+      rec.origin = _ => sent
+      val second = backend(Seq(serve("cosigner1r", rec) -> "cosigner1r"), pinDir = Some(dir))
+      try Await.result(second.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")), 20.seconds) shouldBe "frost-ns"
+      finally second.close()
+      // Without the pin store the same restart is refused.
+      val forgetful = backend(Seq(serve("cosigner1f", rec) -> "cosigner1f"))
+      try the[KmsDriverException] thrownBy Await.result(forgetful.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")), 20.seconds)
+      finally forgetful.close()
     }
 
     "refuse a new key whose origin is not one of this driver's ceremonies (a leader bug)" in {

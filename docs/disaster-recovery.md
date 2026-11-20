@@ -524,6 +524,44 @@ distribution seeds and the commitment key, which the bundles carry from then on;
 separate, optional step (new bundles with `seal new-node` and new peer pins), not needed to retire
 the master.
 
+## §3i The driver's group-key pins (`frost.pin-dir`)
+
+The driver believes a FROST key's group key once a roster majority agrees on it, and pins it in
+`frost.pin-dir`: one file per key id, `<key-id>.pin`, written once and never replaced. Every pin is
+also an audit-log entry (`group-key-pin keyId=… groupKey=… source=…`). From then on the pin is the
+key: a cosigner that answers another one is logged at ERROR, noted (`groupkey-dissent=<endpoint>`)
+and routed around. A call fails only when every answering cosigner differs from the pin.
+
+- **The pin directory belongs to one participant.** Never share it between participants or copy it
+  to another one: its pins and recorded ceremony ids are what this driver trusts as its own.
+- **Back up the pin directory with the participant's state** (audit log and signing journal).
+  `java -cp rutli-driver.jar com.stakecraft.rutli.tools.StateCheck --pin-dir <dir>` checks a copy
+  read-only and lists every pin.
+- **A damaged pin file** (torn, checksum, wrong key id) refuses the driver's start and names the
+  file. Restore it from the backup. Otherwise move it aside, set
+  `frost.expected-group-keys { <key-id> = "<64 hex>" }` from the key ceremony record (or the
+  namespace fingerprint Canton shows), and start: the key is pinned again only if a roster majority
+  agrees with that value.
+- **A lost pin file** (the file is gone but the audit log records the pin) refuses that key with
+  the same message, and is resolved the same way. A pin directory that is lost together with the
+  audit log looks like a first use: the key is adopted again by a roster majority. Set
+  `frost.expected-group-keys` before that start to check it.
+- **Re-using a key id on purpose** (after a key was destroyed and its id is to be minted again)
+  is refused while its pin exists. Stop the participant, move `<key-id>.pin` to
+  `<pin-dir>/retired/` (keep the name; a suffix such as `.2026-11-20` is fine), record why in the
+  ceremony record, and start it again. A key id with a file under `retired/` is not treated as a
+  lost pin, so the new DKG can run and pin the new key. Moving a file there is the operator's
+  statement that the id is retired; the driver does not check the moved file. The driver never deletes a pin.
+- **A pin file that names another key than its audit-log entry** refuses the start: the file was
+  rewritten (its checksum catches damage only, the audit log's hash chain catches a rewrite). Keep
+  the evidence, restore the file from a backup, and find out who could write the state volume.
+- **A pin with no audit entry** (the driver stopped between writing the pin and its entry) is
+  recorded at the next start, with `recovered=startup`.
+- A refresh keeps the group key, so it never touches a pin. A new key id gets a new pin.
+- `<key-id>.dkg` beside the pins lists the DKG ceremony ids the driver sent intents for, each
+  written before its request. It is what lets a driver that died during a bootstrap take its own
+  key after the restart. An id for a ceremony that never committed is harmless; do not edit it.
+
 ## §4 What you MUST have in place before go-live
 
 - **Every cosigner's share backup, taken after the latest refresh**, encrypted (sealed) and stored
