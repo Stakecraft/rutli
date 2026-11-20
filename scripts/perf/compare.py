@@ -140,7 +140,13 @@ def compare(previous, current, threshold, floor_ms):
     comparable = previous is not None and all(
         previous.get(k) == current.get(k) for k in ("schema", "kind", "environment")
     )
-    if previous is not None and not comparable:
+    # A diagnostic run (data on tmpfs) is never a baseline, nor compared with one.
+    diagnostic = previous is not None and (previous.get("diagnostic") or current.get("diagnostic"))
+    if diagnostic:
+        comparable = False
+        rows.append(("(all)", "latency", "", "", "",
+                     f"not compared: a diagnostic run ({previous.get('diagnostic') or current.get('diagnostic')}) is never a baseline"))
+    elif previous is not None and not comparable:
         rows.append(("(all)", "latency", "", "", "", "not compared: the previous run is of another kind or environment"))
     before = {s.get("name"): s for s in (previous or {}).get("scenarios", [])} if comparable else {}
     for scenario in current.get("scenarios", []):
@@ -216,6 +222,13 @@ def main(argv=None):
     ]
     if note:
         lines += [note, ""]
+    if current.get("diagnostic"):
+        lines += [f"DIAGNOSTIC RUN ({current['diagnostic']}): not a configuration, never a baseline.", ""]
+    dx = current.get("diagnosis") or {}
+    if dx.get("steps"):
+        lines += [f"Diagnosis: knee at x{dx.get('knee_factor')}, at most {dx.get('max_ok_per_sec')} signatures/s; "
+                  f"{dx.get('ms_per_flush')} ms per flush, which alone would allow about "
+                  f"{dx.get('predicted_ceiling_signs_per_sec')}/s; keys: {dx.get('keys_verdict', 'not run')}", ""]
     if current.get("headroom_factor") is not None:
         lines += [f"Headroom factor: {current['headroom_factor']} (profile {current.get('profile')})", ""]
     for name, secs in (current.get("recovery_secs") or {}).items():

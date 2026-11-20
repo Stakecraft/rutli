@@ -60,6 +60,7 @@ import sys
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import diagnose  # noqa: E402  (the diagnostic pass's parsers and verdicts)
 import run as base  # noqa: E402  (the compose suite: Runner, scenarios, key names)
 
 NODES = base.NODES
@@ -85,13 +86,13 @@ class K8sCluster:
         argv = ["kubectl"] + (["-n", self.ns] if namespaced else []) + list(args)
         return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=check)
 
-    def loadgen_argv(self, args, timeout_secs):
+    def loadgen_argv(self, args, timeout_secs, pod="rutli-perf-loadgen"):
         if self.load_path == "canton" and args and args[0] == "sign":
             # The entry point for load through a participant (see the module docs).
             return shlex.split(os.environ["CANTON_LOAD_CMD"]) + args
         # Run detached in the pod and fetched afterwards (k8s_loadgen.py): a stream held open
         # through the API server for a whole run was reset on a real cluster.
-        argv = [sys.executable, "-I", os.path.join(HERE, "k8s_loadgen.py"), "--namespace", self.ns, "--",
+        argv = [sys.executable, "-I", os.path.join(HERE, "k8s_loadgen.py"), "--namespace", self.ns, "--pod", pod, "--",
                 "--ca", "/certs/ca.crt", "--cert", "/certs/driver.crt", "--key", "/certs/driver.key",
                 "--timeout-secs", str(timeout_secs)]
         for i, node in enumerate(NODES, start=1):
@@ -536,6 +537,171 @@ class Suite(base.Runner):
             self.ramp.update({"failed": f"the rig failed: {rig_stop}", "rig": True, "headroom_is_lower_bound": True})
 
 
+class Diagnosis:
+    """The diagnostic pass (`--diagnose`): what limits the cluster's throughput. In order of what
+    each step tells for its cost: the flush cost of the cosigners' volume; a fine ramp around the
+    knee with every cosigner's and generator's CPU, CPU and IO pressure and writes per step; then
+    the same overloaded rate over 2, 20 and 200 keys. The load is spread over every load generator
+    pod (k8s-deploy.sh --generators), so that no step is generator-bound unnoticed."""
+
+    def __init__(self, suite):
+        self.s = suite
+        self.c = suite.cluster
+        self.p = suite.profile
+
+    def generators(self):
+        names = self.c.kubectl("get", "pods", "-l", "app.kubernetes.io/name=rutli-perf-loadgen",
+                               "-o", "jsonpath={.items[*].metadata.name}", check=False).stdout.split()
+        return sorted(names) or ["rutli-perf-loadgen"]
+
+    def start_on(self, pod, args, timeout_secs=30):
+        return subprocess.Popen(self.c.loadgen_argv(args, timeout_secs, pod=pod), stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+
+    def cgroups(self, gens):
+        cos = {n: diagnose.parse_cgroup(self.c.exec(n, diagnose.CGROUP_SCRIPT) or "") for n in NODES}
+        gen = {}
+        for pod in gens:
+            out = self.c.kubectl("exec", pod, "--", "sh", "-c", diagnose.CGROUP_SCRIPT, check=False, timeout=30)
+            gen[pod] = diagnose.parse_cgroup(out.stdout if out.returncode == 0 else "")
+        return cos, gen
+
+    def fsync_probe(self):
+        """O_DSYNC writes on each cosigner's own data volume, before any load."""
+        out = {}
+        for n in NODES:
+            text = self.c.exec(n, diagnose.FSYNC_PROBE_SCRIPT) or ""
+            out[n] = {"ms_per_dsync_write": diagnose.parse_dd(text), "dd": text.strip().splitlines()[-1:] or None}
+            log(f"  flush probe {n}: {out[n]['ms_per_dsync_write']} ms per O_DSYNC write")
+        return out
+
+    def step(self, gens, name, secs, sign_rate, sign_keys, ecdh_rate=0.0, ecdh_keys=()):
+        """One step at these rates, spread over the generators; what the cluster achieved and
+        what every container did meanwhile."""
+        clients = lambda r: str(max(3, min(256, math.ceil(r))))  # noqa: E731
+        g = len(gens)
+        before = self.cgroups(gens)
+        t0 = time.time()
+        procs = []
+        for pod in gens:
+            if sign_rate > 0:
+                r = sign_rate / g
+                procs.append(("sign", self.start_on(pod, ["sign", "--name", name, "--rate", f"{r:g}", "--clients", clients(r),
+                                                          "--duration-secs", str(secs)] + [x for k in sign_keys for x in ("--key", k)])))
+            for k in ecdh_keys if ecdh_rate > 0 else ():
+                r = ecdh_rate / g / len(ecdh_keys)
+                procs.append(("ecdh", self.start_on(pod, ["ecdh", "--key", k, "--name", name, "--rate", f"{r:g}",
+                                                          "--clients", clients(r), "--duration-secs", str(secs)])))
+        ops, rig = {}, []
+        for op, proc in procs:
+            rep = self.s.loadgen_finish(proc, secs + 900)
+            if "failed" in rep:
+                if rep.get("rig"):
+                    rig.append(f"{op}: {rep['failed']}")
+                o = ops.setdefault(op, {"ok": 0, "errors": {}, "error_messages": {}, "p99_ms": 0.0})
+                o["errors"]["(run failed)"] = o["errors"].get("(run failed)", 0) + 1
+                continue
+            c = rep.get("client", {})
+            o = ops.setdefault(op, {"ok": 0, "errors": {}, "error_messages": {}, "p99_ms": 0.0})
+            o["ok"] += c.get("ok", 0)
+            for code, n in c.get("errors", {}).items():
+                o["errors"][code] = o["errors"].get(code, 0) + n
+            for msg, n in c.get("error_messages", {}).items():
+                o["error_messages"][msg] = o["error_messages"].get(msg, 0) + n
+            # Percentiles do not add up across generators: the worst one is kept.
+            o["p99_ms"] = max(o["p99_ms"], c.get("latency", {}).get("p99_ms", 0.0))
+            if op == "sign" and "server" not in o:
+                o["server"] = rep.get("server", {}).get("sign_duration")
+        elapsed = time.time() - t0
+        after = self.cgroups(gens)
+        cos = {n: diagnose.derive(before[0].get(n, {}), after[0].get(n, {}), elapsed) for n in NODES}
+        gen = {p: diagnose.derive(before[1].get(p, {}), after[1].get(p, {}), elapsed) for p in gens}
+        sign = ops.get("sign", {})
+        errors = sign.get("errors", {})
+        ok_per_sec = round(sign.get("ok", 0) / secs, 2)
+        out = {
+            "offered_per_sec": sign_rate, "ok_per_sec": ok_per_sec,
+            "not_sent": errors.get("CLIENT_SATURATED", 0),
+            "errors_sent": sum(n for code, n in errors.items() if code != "CLIENT_SATURATED"),
+            "server_p99_ms": (sign.get("server") or {}).get("p99_ms"),
+            "ops": ops, "cosigners": cos, "generators": gen,
+            "cpu_ms_per_signature": diagnose.cpu_per_signature_ms(cos, ok_per_sec),
+        }
+        out["generator_bound"] = diagnose.generator_bound(out)
+        if rig:
+            out["rig_failed"] = rig
+        return out
+
+    def run(self):
+        d = self.p.get("diagnose", {})
+        mix = self.p["baseline"]
+        slo = float(self.p["slo"]["p99_ms"])
+        secs = int(d.get("step_secs", 120))
+        gens = self.generators()
+        log(f"diagnose: {len(gens)} load generator(s): {', '.join(gens)}")
+        out = {"generators": gens, "step_secs": secs, "slo_p99_ms": slo}
+        out["fsync_probe"] = self.fsync_probe()
+        probes = sorted(v["ms_per_dsync_write"] for v in out["fsync_probe"].values() if v["ms_per_dsync_write"])
+        ms = probes[len(probes) // 2] if probes else None
+        out["ms_per_flush"] = ms
+        # What the flushes alone would allow (diagnose.predicted_ceiling), to hold against the
+        # measured plateau.
+        out["predicted_ceiling_signs_per_sec"] = diagnose.predicted_ceiling(ms)
+
+        sign_keys = [f"perf-ramp-{i}" for i in range(max(1, int(mix.get("sign_keys", 2))))]
+        ecdh_keys = [f"rutli-perf-ramp-{i}" for i in range(max(1, int(mix.get("ecdh_keys", 1))))]
+        setup = self.s.setup_keys(["setup"] + [x for k in sign_keys for x in ("--frost-key", k)]
+                                  + [x for k in ecdh_keys for x in ("--ecies-key", k)], wall_timeout=1800)
+        if "failed" in setup:
+            out.update({"failed": f"setup: {setup['failed']}", "rig": bool(setup.get("rig"))})
+            return out
+        steps, past = [], 0
+        for f in d.get("factors", [30, 50, 70, 100, 130, 160, 200, 250, 300]):
+            sign_rate = float(mix.get("sign_per_sec", 0)) * f
+            log(f"diagnose x{f:g}: {sign_rate:g} signatures/s for {secs} s")
+            st = self.step(gens, f"diag-x{f:g}", secs, sign_rate, sign_keys,
+                           float(mix.get("ecdh_per_sec", 0)) * f, ecdh_keys)
+            st["factor"] = f
+            steps.append(st)
+            cpu = {n: c.get("cpu_cores") for n, c in st["cosigners"].items()}
+            log(f"  x{f:g}: {st['ok_per_sec']}/s of {sign_rate:g}/s, server p99 {st['server_p99_ms']} ms, "
+                f"not sent {st['not_sent']}, cosigner cores {cpu}, generator-bound {st['generator_bound']}")
+            if st.get("rig_failed"):
+                out["rig_failed"] = st["rig_failed"]
+                break
+            # One step past the knee shows the plateau; a second one adds nothing.
+            if diagnose.knee([st], slo) is not None:
+                past += 1
+                if past >= 2:
+                    break
+        out["steps"] = steps
+        out["knee_factor"] = diagnose.knee(steps, slo)
+        out["max_ok_per_sec"] = max((st["ok_per_sec"] for st in steps), default=None)
+        log(f"diagnose: knee at x{out['knee_factor']}, at most {out['max_ok_per_sec']} signatures/s; "
+            f"the flushes alone would allow about {out['predicted_ceiling_signs_per_sec']}/s")
+
+        k = out["knee_factor"]
+        if k and not out.get("rig_failed"):
+            # The knee's (overloaded) rate over more keys: does the throughput follow the key count?
+            rate = float(mix.get("sign_per_sec", 0)) * k
+            results = []
+            for n in d.get("key_counts", [2, 20, 200]):
+                keys = [f"perf-dk-{i}" for i in range(int(n))]
+                r = self.s.setup_keys(["setup"] + [x for key in keys for x in ("--frost-key", key)], wall_timeout=3600)
+                if "failed" in r:
+                    results.append({"keys": n, "failed": r["failed"], "rig": bool(r.get("rig"))})
+                    break
+                st = self.step(gens, f"diag-keys-{n}", secs, rate, keys)
+                results.append({"keys": n, "offered_per_sec": rate, "ok_per_sec": st["ok_per_sec"],
+                                "server_p99_ms": st["server_p99_ms"], "errors_sent": st["errors_sent"],
+                                "cosigners": st["cosigners"], "generator_bound": st["generator_bound"]})
+                log(f"  {n} keys: {st['ok_per_sec']}/s of {rate:g}/s, server p99 {st['server_p99_ms']} ms")
+            out["keys"] = results
+            out["keys_verdict"] = diagnose.keys_verdict(results)
+            log(f"diagnose: {out['keys_verdict']}")
+        return out
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--namespace", default="rutli-perf")
@@ -543,6 +709,8 @@ def main():
     p.add_argument("--out", required=True)
     # Disruption last: whatever it leaves behind cannot skew the measurements of the others.
     p.add_argument("--suites", default="upgrade,scenarios,connect,keys,ramp,disrupt")
+    p.add_argument("--diagnose", action="store_true",
+                   help="run the diagnostic pass instead of the suites (what limits the throughput; profile 'diagnose')")
     p.add_argument("--env-name", default="k8s",
                    help="what the result calls its environment; runs are compared within one only")
     p.add_argument("--upgrade-image", default="", help="upgrade suite: the image to upgrade to")
@@ -566,8 +734,8 @@ def main():
     args.steady_secs = args.steady_secs or int(steady.get("secs", 60))
     args.rate = args.rate or int(steady.get("sign_per_sec", 20))
     args.max_rss_mib = args.max_rss_mib or int(profile.get("max_rss_mib", 256))
-    suites = [s.strip() for s in args.suites.split(",") if s.strip()]
-    unknown = set(suites) - {"upgrade", "scenarios", "connect", "disrupt", "keys", "ramp"}
+    suites = ["diagnose"] if args.diagnose else [s.strip() for s in args.suites.split(",") if s.strip()]
+    unknown = set(suites) - {"upgrade", "scenarios", "connect", "disrupt", "keys", "ramp", "diagnose"}
     if unknown:
         p.error(f"unknown suites: {sorted(unknown)}")
     if "upgrade" in suites and not (args.upgrade_image and args.work):
@@ -579,6 +747,14 @@ def main():
             p.error(f"{name}={os.environ[name]!r}: not an executable")
 
     cluster = K8sCluster(args.namespace, args.env_name, args.load_path)
+    # A diagnostic installation (k8s-deploy.sh --diagnostic-tmpfs) says so on its namespace; its
+    # results are labelled and never a baseline.
+    diagnostic = subprocess.run(["kubectl", "get", "namespace", args.namespace, "-o",
+                                 "jsonpath={.metadata.annotations.rutli-perf/diagnostic}"],
+                                capture_output=True, text=True, check=False).stdout.strip() or None
+    if diagnostic and set(suites) & {"upgrade", "disrupt"}:
+        p.error(f"namespace {args.namespace} is a diagnostic installation ({diagnostic}): its data is lost on any "
+                "restart, so the upgrade and disrupt suites cannot run there")
     suite = Suite(cluster, args, profile)
     started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     suite.setup_args = ["setup", "--frost-key", base.KEY_STEADY, "--frost-key", base.KEY_SECOND,
@@ -588,8 +764,12 @@ def main():
     if suite.wait_healthy(600):
         setup = suite.loadgen(suite.setup_args, wall_timeout=900)
     suite.setup_report = setup
+    diagnosis = None
     if "failed" not in setup:
         for name in suites:
+            if name == "diagnose":
+                diagnosis = Diagnosis(suite).run()
+                continue
             {"upgrade": suite.upgrade, "scenarios": suite.run, "connect": suite.connect_burst,
              "disrupt": suite.disrupt, "keys": suite.key_count, "ramp": suite.scale_ramp}[name]()
 
@@ -605,11 +785,15 @@ def main():
         (rig_failed if all(k.get("rig") for k in bad_keys) else failed).append("keys")
     if suite.ramp and suite.ramp.get("failed"):
         (rig_failed if suite.ramp.get("rig") else failed).append("ramp")
+    if diagnosis and (diagnosis.get("failed") or diagnosis.get("rig_failed")):
+        (rig_failed if diagnosis.get("rig") or diagnosis.get("rig_failed") else failed).append("diagnose")
     doc = {
         "schema": 1,
         "kind": "cluster",
         "environment": args.env_name,
         "load_path": args.load_path,
+        # "tmpfs": a diagnostic installation, never a configuration and never a baseline.
+        "diagnostic": diagnostic,
         "commit": args.commit,
         "started_at": started,
         "profile": profile.get("name"),
@@ -632,6 +816,7 @@ def main():
         "skipped": suite.skipped,
         "keys": suite.keys,
         "ramp": suite.ramp,
+        "diagnosis": diagnosis,
         "failed": failed,
         "rig_failed": rig_failed,
     }

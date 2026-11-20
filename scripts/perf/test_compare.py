@@ -189,6 +189,17 @@ class Cluster(unittest.TestCase):
         self.assertEqual(problems, ["rig: ecies: the load generator ran: the load generator exited 3"])
         self.assertTrue(v[("ecies", "check")].startswith("RIG FAILED"))
 
+    def test_a_diagnostic_run_is_never_a_baseline(self):
+        previous = cluster_run(headroom=300, ramp_p99=5)
+        previous["diagnostic"] = "tmpfs"
+        v, problems = self.verdicts(previous, cluster_run(headroom=10, ramp_p99=500))
+        self.assertEqual(problems, [])
+        self.assertIn("never a baseline", v[("(all)", "latency")])
+        current = cluster_run(headroom=1)
+        current["diagnostic"] = "tmpfs"
+        _, problems = self.verdicts(cluster_run(headroom=300), current)
+        self.assertEqual(problems, [])
+
     def test_a_failed_key_count_fails_on_its_own(self):
         _, problems = self.verdicts(None, cluster_run(keys_ok=False))
         self.assertEqual(len(problems), 1)

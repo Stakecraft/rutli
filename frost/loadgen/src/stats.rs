@@ -85,6 +85,10 @@ pub struct ClientReport {
     pub failovers: BTreeMap<String, u64>,
     /// One example message per error code, to make a report readable without the logs.
     pub error_samples: BTreeMap<String, String>,
+    /// Errors counted by code and message, with digits masked so that ids and numbers do not
+    /// split one cause into many (`UNAVAILABLE: … have no room for more of this leader's sign
+    /// sessions`). At most 32 distinct messages; the rest under `(other)`.
+    pub error_messages: BTreeMap<String, u64>,
     /// Of the successful requests.
     pub latency: Latency,
     pub wall_seconds: f64,
@@ -125,12 +129,22 @@ pub struct LeaderReport {
 pub struct Recorder {
     outcomes: Vec<Outcome>,
     samples: BTreeMap<String, String>,
+    messages: BTreeMap<String, u64>,
     saturated: u64,
+}
+
+/// `CODE: message`, digits masked, cut to 160 characters.
+fn message_key(code: &str, message: &str) -> String {
+    let masked: String = message.chars().map(|c| if c.is_ascii_digit() { '#' } else { c }).take(160).collect();
+    format!("{code}: {masked}")
 }
 
 impl Recorder {
     pub fn record(&mut self, outcome: Outcome, message: Option<String>) {
         if let Some(m) = message {
+            let key = message_key(outcome.code, &m);
+            let key = if self.messages.contains_key(&key) || self.messages.len() < 32 { key } else { "(other)".into() };
+            *self.messages.entry(key).or_default() += 1;
             self.samples.entry(outcome.code.to_string()).or_insert(m);
         }
         self.outcomes.push(outcome);
@@ -187,6 +201,7 @@ impl Recorder {
             bad_answers,
             failovers,
             error_samples: std::mem::take(&mut self.samples),
+            error_messages: std::mem::take(&mut self.messages),
             latency: latency(&mut ok_micros),
             wall_seconds: round3(wall_seconds),
             ok_per_second: if wall_seconds > 0.0 { round3(ok as f64 / wall_seconds) } else { 0.0 },
@@ -284,6 +299,10 @@ mod tests {
         assert_eq!(rep.errors["CLIENT_SATURATED"], 1);
         assert_eq!(rep.failovers["UNAVAILABLE"], 1);
         assert_eq!(rep.error_samples["RESOURCE_EXHAUSTED"], "first");
+        // Counted by message: the two rate-limit refusals have different texts.
+        assert_eq!(rep.error_messages["RESOURCE_EXHAUSTED: first"], 1);
+        assert_eq!(rep.error_messages["UNAVAILABLE: could not reach signing threshold"], 1);
+        assert_eq!(message_key("UNAVAILABLE", "sign for k-12: 256 sessions"), "UNAVAILABLE: sign for k-##: ### sessions");
         assert_eq!(rep.latency.count, 3);
         assert_eq!(rep.latency.max_ms, 40.0);
         assert_eq!(rep.ok_per_second, 1.5);

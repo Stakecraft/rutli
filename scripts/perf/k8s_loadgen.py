@@ -23,7 +23,7 @@ import sys
 import time
 import uuid
 
-POD = "rutli-perf-loadgen"
+POD = "rutli-perf-loadgen"  # the first generator; --pod names another
 RIG_FAILED = 3
 
 
@@ -32,7 +32,8 @@ def log(msg):
 
 
 def kexec(ns, script, attempts=5, timeout=60):
-    """`sh -c script` in the pod, retried; (returncode, stdout, stderr) of the last attempt."""
+    """`sh -c script` in the pod (`POD`, set from --pod), retried; (returncode, stdout, stderr) of
+    the last attempt."""
     last = (255, "", "")
     for attempt in range(attempts):
         try:
@@ -56,8 +57,11 @@ def main(argv=None):
                    help="longest pause between two polls; the first polls come sooner (0.5 s, doubling)")
     p.add_argument("--max-secs", type=float, default=6 * 3600, help="give up waiting after this long")
     p.add_argument("--dir", default="/tmp/lg", help="where in the pod the run's files go (an emptyDir)")
+    p.add_argument("--pod", default=POD, help="the load generator pod (default: the first)")
     p.add_argument("args", nargs=argparse.REMAINDER)
     a = p.parse_args(argv)
+    global POD
+    POD = a.pod
     args = a.args[1:] if a.args[:1] == ["--"] else a.args
     ns, run = a.namespace, uuid.uuid4().hex[:12]
     q = shlex.quote
