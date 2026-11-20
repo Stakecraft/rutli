@@ -312,12 +312,31 @@ impl Signer for SignerSvc {
         // A node whose key store failed its readiness probe declines to lead (UNAVAILABLE, so the
         // driver picks another leader) rather than start a ceremony it cannot persist.
         let result = match self.node.refuse_if_keystore_down() {
-            Ok(()) => orchestrator::run_dkg_with_intent(&self.peers, &r.key_id, r.intent).await,
+            Ok(()) => orchestrator::run_dkg_outcome(&self.peers, &r.key_id, r.intent).await,
             Err(e) => Err(e),
         };
         record_ceremony("dkg", result.is_ok());
-        let key = result.map_err(Status::from)?;
-        Ok(Response::new(pb::DkgReply { group_verifying_key: key.to_vec() }))
+        let outcome = result.map_err(Status::from)?;
+        // For a key that already existed, name the DKG this node committed it under, so the client
+        // can tell a retry of its own ceremony from a key someone else created under the same id.
+        let origin = match outcome.ceremony_id {
+            Some(id) => id,
+            // Not found, or unreadable: an empty origin, which the client refuses with its own
+            // clear message, rather than failing a DKG that found the key.
+            None => self.node.committed_dkg_ceremony(&r.key_id, &outcome.group_key).unwrap_or_else(|e| {
+                tracing::warn!(key_id = %r.key_id, error = %e, "DKG for an existing key: cannot read its ceremony record");
+                None
+            })
+            .unwrap_or_default(),
+        };
+        if outcome.existing {
+            tracing::info!(key_id = %r.key_id, origin = %origin, "DKG for an existing key: returned it (existing = true)");
+        }
+        Ok(Response::new(pb::DkgReply {
+            group_verifying_key: outcome.group_key.to_vec(),
+            existing: Some(outcome.existing),
+            origin_ceremony_id: origin,
+        }))
     }
 
     async fn sign(&self, req: Request<pb::SignRequest>) -> Result<Response<pb::SignReply>, Status> {

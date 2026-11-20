@@ -241,6 +241,7 @@ final class RutliDriverFactory extends KmsDriverFactory {
           endpointTlsNames = eps.flatMap(e => e.tlsName.map(e.url -> _)).toMap,
           clusterId = frost.clusterId,
           signIntents = frost.signIntentsEnabled,
+          adoptExistingKeys = frost.adoptExistingKeys.toSet,
           attemptTimeout = frost.attemptTimeout,
           signAttemptTimeout = frost.signAttemptTimeout,
           keepaliveTime = frost.keepaliveTime,

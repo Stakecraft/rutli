@@ -569,6 +569,33 @@ impl Node {
         Ok(self.book()?.records.values().filter(|r| r.state == RecordState::Staged).cloned().collect())
     }
 
+    /// The DKG ceremony this node committed `key_id` under, while it still holds that sharing: the
+    /// COMMITTED "dkg" record for the key whose group key is `group_key` and whose epoch is the
+    /// share's current one. `None` when the record is gone, the key was refreshed since, or it did
+    /// not come from a DKG (`DkgReply.origin_ceremony_id`).
+    pub fn committed_dkg_ceremony(&self, key_id: &str, group_key: &[u8; 32]) -> Result<Option<String>> {
+        let epoch = match self.keystore.load_record(key_id) {
+            Ok(crate::keystore::Record::Frost(share)) => share.epoch,
+            Ok(_) | Err(DaemonError::UnknownKey(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let gk = hex::encode(group_key);
+        // One DKG commits a key id once; should two records ever match, name the same one every time.
+        Ok(self
+            .book()?
+            .records
+            .values()
+            .filter(|r| {
+                r.state == RecordState::Committed
+                    && r.kind == CeremonyKind::Dkg.as_str()
+                    && r.key_id == key_id
+                    && r.new_epoch == epoch
+                    && r.group_key.eq_ignore_ascii_case(&gk)
+            })
+            .map(|r| r.ceremony_id.clone())
+            .min())
+    }
+
     /// This node's view of key `key_id` for ceremony decisions: its committed share's epoch, PKP
     /// digest and group key (public values only), and whether a ceremony for it is staged here.
     /// Absent key: `present = false`. A hosted key under the id: `present`, origin "hosted".
@@ -5056,5 +5083,44 @@ mod hosted_id_tests {
             assert_eq!(routing_tag(id), None, "{id}");
             assert!(matches!(refuse_unless_hosted_id(id), Err(DaemonError::NotHostedKeyId(_))), "{id}");
         }
+    }
+}
+
+#[cfg(test)]
+mod dkg_existing_tests {
+    use super::*;
+    use crate::peer::{LocalPeer, PeerApi};
+
+    /// `DkgReply.existing` / `origin_ceremony_id`: a new key names its own ceremony; a second DKG
+    /// for the id returns the key with `existing`, and the leader can name the DKG that created it.
+    #[tokio::test]
+    async fn a_repeated_dkg_says_the_key_existed_and_which_ceremony_made_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nodes: Vec<Arc<Node>> = (1..=3u16)
+            .map(|i| {
+                let ks = KeyStore::open(tmp.path().join(format!("n{i}"))).unwrap();
+                Arc::new(Node::new(Identifier::try_from(i).unwrap(), 3, 2, ks))
+            })
+            .collect();
+        crate::peer::wire_local_mesh(&nodes).unwrap();
+        let peers: Vec<Arc<dyn PeerApi>> =
+            nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+
+        let first = crate::orchestrator::run_dkg_outcome(&peers, "k", None).await.unwrap();
+        assert!(!first.existing);
+        let made_by = first.ceremony_id.clone().expect("a new key names its ceremony");
+        assert!(made_by.starts_with("dkg"), "{made_by}");
+
+        let again = crate::orchestrator::run_dkg_outcome(&peers, "k", None).await.unwrap();
+        assert_eq!((again.group_key, again.existing, again.ceremony_id.clone()), (first.group_key, true, None));
+        for n in &nodes {
+            assert_eq!(n.committed_dkg_ceremony("k", &first.group_key).unwrap(), Some(made_by.clone()));
+            assert_eq!(n.committed_dkg_ceremony("k", &[7u8; 32]).unwrap(), None, "another group key");
+            assert_eq!(n.committed_dkg_ceremony("other", &first.group_key).unwrap(), None, "no such key");
+        }
+
+        // After a refresh the sharing is no longer the DKG's: no origin to name.
+        crate::orchestrator::run_refresh(&peers, "k").await.unwrap();
+        assert_eq!(nodes[0].committed_dkg_ceremony("k", &first.group_key).unwrap(), None);
     }
 }

@@ -47,6 +47,22 @@ pub async fn run_dkg(peers: &Peers, key_id: &str) -> Result<[u8; 32]> {
 /// an intent (an older client) the id is random and every node decides whether it accepts that
 /// (`signing_policy.require_ceremony_intent`).
 pub async fn run_dkg_with_intent(peers: &Peers, key_id: &str, intent: Option<pb::SignedIntent>) -> Result<[u8; 32]> {
+    Ok(run_dkg_outcome(peers, key_id, intent).await?.group_key)
+}
+
+/// What a DKG request came to: the group key, whether the key already existed (the request
+/// returned it without a ceremony), and the id of the ceremony that made a new key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DkgOutcome {
+    pub group_key: [u8; 32],
+    pub existing: bool,
+    /// The ceremony that created a new key; `None` for an existing one (the leader looks up the DKG
+    /// it committed it under, [`crate::node::Node::committed_dkg_ceremony`]).
+    pub ceremony_id: Option<String>,
+}
+
+/// [`run_dkg_with_intent`], saying whether the key already existed (`DkgReply.existing`).
+pub async fn run_dkg_outcome(peers: &Peers, key_id: &str, intent: Option<pb::SignedIntent>) -> Result<DkgOutcome> {
     let (peers, key_id) = (peers.clone(), key_id.to_owned());
     crate::ceremony::detach(async move { run_dkg_attached(&peers, &key_id, intent.as_ref()).await }).await
 }
@@ -59,7 +75,7 @@ fn ceremony_id(kind: CeremonyKind, intent: Option<&pb::SignedIntent>) -> Result<
     }
 }
 
-async fn run_dkg_attached(peers: &Peers, key_id: &str, intent: Option<&pb::SignedIntent>) -> Result<[u8; 32]> {
+async fn run_dkg_attached(peers: &Peers, key_id: &str, intent: Option<&pb::SignedIntent>) -> Result<DkgOutcome> {
     // Every peer refuses too (fence and part 1); this just answers before touching the mesh.
     if crate::share_delivery::is_reserved_for_import(key_id) {
         return Err(DaemonError::ReservedKeyId(key_id.to_string()));
@@ -67,12 +83,13 @@ async fn run_dkg_attached(peers: &Peers, key_id: &str, intent: Option<&pb::Signe
     require_ceremony_protocol(peers).await?;
     let views = key_views(peers, key_id).await?;
     if let Some(existing) = dkg_preflight(peers, key_id, &views).await? {
-        return Ok(existing);
+        return Ok(DkgOutcome { group_key: existing, existing: true, ceremony_id: None });
     }
     let dkg_id = ceremony_id(CeremonyKind::Dkg, intent)?;
     fence_all(peers, &dkg_id, key_id, CeremonyKind::Dkg, None, intent).await?;
     let staged = ceremony_stage(peers, &dkg_id, key_id, CeremonyKind::Dkg, intent).await;
-    finish_ceremony(peers, &dkg_id, key_id, staged).await
+    let group_key = finish_ceremony(peers, &dkg_id, key_id, staged).await?;
+    Ok(DkgOutcome { group_key, existing: false, ceremony_id: Some(dkg_id) })
 }
 
 /// Parts 1–3 of a DKG or refresh (ceremony protocol 2): every node ends with a staged share and a
