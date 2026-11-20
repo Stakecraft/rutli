@@ -117,7 +117,11 @@ def compare_keys(previous, current, threshold, floor_ms, rows, problems):
 def compare(previous, current, threshold, floor_ms):
     """(rows, problems): table rows and the reasons to fail."""
     rows, problems = [], []
-    for name in current.get("failed", []):
+    # Rütli's failures, then the rig's (a load generator that could not run or be reached): both
+    # fail the comparison, but a rig failure says nothing about Rütli and is labelled so.
+    marked = [(n, "FAILED", "") for n in current.get("failed", [])] + \
+             [(n, "RIG FAILED", "rig: ") for n in current.get("rig_failed", [])]
+    for name, verdict, prefix in marked:
         scenario = next((s for s in current.get("scenarios", []) if s.get("name") == name), None)
         failed = [c for c in (scenario or {}).get("checks", []) if not c.get("ok")]
         if not failed and name == "keys":
@@ -130,8 +134,8 @@ def compare(previous, current, threshold, floor_ms):
             failed = [{"check": "the scenario ran", "detail": str(current.get("setup", {}).get("failed", ""))}]
         for c in failed:
             detail = f"{c['check']}: {c.get('detail', '')}".rstrip(": ")
-            rows.append((name, "check", "", "", "", f"FAILED: {detail}"))
-            problems.append(f"{name}: {detail}")
+            rows.append((name, "check", "", "", "", f"{verdict}: {detail}"))
+            problems.append(f"{prefix}{name}: {detail}")
 
     comparable = previous is not None and all(
         previous.get(k) == current.get(k) for k in ("schema", "kind", "environment")
@@ -215,7 +219,9 @@ def main(argv=None):
     if current.get("headroom_factor") is not None:
         lines += [f"Headroom factor: {current['headroom_factor']} (profile {current.get('profile')})", ""]
     for name, secs in (current.get("recovery_secs") or {}).items():
-        lines += [f"Recovery after {name}: {'not within the limit' if secs is None else f'{secs:g} s'}"]
+        healthy = (current.get("time_to_healthy_secs") or {}).get(name)
+        lines += [f"After {name}: healthy again in {'(not within the limit)' if healthy is None else f'{healthy:g} s'}, "
+                  f"signing within the SLO in {'(not within the limit)' if secs is None else f'{secs:g} s'}"]
     if current.get("recovery_secs"):
         lines += [""]
     lines += [table(rows) if rows else "Nothing to compare.", ""]

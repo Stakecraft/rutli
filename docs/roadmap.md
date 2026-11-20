@@ -197,15 +197,15 @@ Track A (soak and hardening) continues on `stakecraft-devnet-rutli-01`; exit cri
   | Area | PRs |
   |---|---|
   | Config and defaults | #101: a cosigner and the driver refuse an unknown config key; `require_intent` on by default with TLS |
-  | Production profile | #166: `profile` and `rutli-cosigner check-config` on the cosigner (the driver side is #167, open) |
+  | Production profile | #166: `profile` and `rutli-cosigner check-config` on the cosigner; #167: the same for the driver (`ConfigCheck`) |
   | Peer and session hardening | #109: peer TLS key pins, required with TLS; #105: one lying peer cannot bench both honest nodes; #106: a sign session belongs to the peer that opened it, per-opener caps; #115: a minimum interval between refreshes, backups follow refreshes |
   | Driver | #103: failover past a bad signature, a misspelt approval mode is refused |
   | Cosigner robustness | #148: a background loop restarts after a panic; #112, #114: smaller fixes (see the changelog) |
   | Release pipeline | #107: images built on hosted runners, signed and attested, every action pinned |
   | Tests | #135 property tests; #137 the three e2e ceremony scripts in CI; #142 micro-benchmarks; #145 load generator; #149 the whole migration procedure; #150 the cluster suite; #171 the suite installs the chart with peer pins |
-  | Process | #118, #119: work tracking, quality gates, release process |
+  | Chart and process | #185: the chart rolls cosigners one at a time (`scripts/upgrade-cosigners.sh`); #118, #119, #189: work tracking, quality gates, release process, changelog fragments |
 
-  Still open for v0.5.0 (not merged): the shared-cluster guard (#169), group-key pins across restarts (#168), the driver's production profile (#167), the admin CLI's read-only `key show` (issue #117), hosted-key generation intents (#113, #136). A one-node-at-a-time upgrade with the Helm chart is open as issue #173.
+  Still open for v0.5.0 (not merged): the shared-cluster guard (#169), group-key pins across restarts (#168), the admin CLI's read-only `key show` (issue #117), hosted-key generation intents (#113, #136). The Helm chart rolls the cosigners one at a time since #185 (issue #173, closed).
 
 - **The audit is the critical path.** Auditor: **Cure53** (chosen 2026-10-27). The RFQ
   ([audit-rfq.md](audit-rfq.md), brief [audit-prep.md](audit-prep.md)) covers ECIES and B6, excludes `HsmBackend`, and

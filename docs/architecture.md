@@ -212,7 +212,11 @@ The honest framing, to be used wherever this tradeoff comes up:
 ## One cluster, several participants — `frost.key-prefix`
 
 The driver derives FROST key ids **deterministically from Canton's key name** (`namespace` →
-`frost-namespace`, `signing` → `frost-signing`), and hosted ids as `rutli-<kind>-<name>-<uuid>`. The
+`frost-namespace`, `signing` → `frost-signing`), and hosted ids as `rutli-<kind>-<name>-<uuid>`.
+Who names the key matters: a Splice validator calls it `namespace`, Canton's own auto-init calls
+it `<node>-namespace` (so `frost-participant1-namespace`). Rules, ACLs and rate limits match ids by
+prefix, so a rule written for one form never matches the other. Take the real id from the driver
+log ("initiating distributed key generation for …") or `keys.secret.list()`. The
 determinism is deliberate — a retry or a failover must ask for the *same* namespace key, never mint
 a second one — but it means two participants pointed at the same cosigner cluster both ask for
 `frost-namespace`. Before 0.4.0-rc.3 the cluster's create-once guard refused the second

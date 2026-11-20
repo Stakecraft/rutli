@@ -7,6 +7,25 @@ Upgrading a 0.4.x cluster to 0.5.0: [docs/upgrading-to-0.5.md](docs/upgrading-to
 
 ## [Unreleased]
 
+### Changed (operators must act)
+
+- **Helm chart: a `helm upgrade` of a per-node install no longer restarts the cosigners; roll them
+  with `scripts/upgrade-cosigners.sh`.** The three per-node StatefulSets now use
+  `updateStrategy.type: OnDelete` (new value, default). Before, one `helm upgrade` restarted all three
+  single-replica pods at once, and with threshold 2 of 3 nothing could sign until two were back:
+  measured on a real three-node cluster, an outage of about 11 s and 54 of 750 signatures
+  `UNAVAILABLE`. Now Helm changes the spec and restarts nothing; the script deletes one pod, waits
+  until the replacement runs the new revision and is Ready, waits `--settle` seconds (default 120;
+  use 300 on 0.4.x), checks all three are Ready, and takes the next. It is resumable, has `--only`,
+  `--dry-run`, `--force` (restart nodes already on the target revision, for config-only changes),
+  `--status` (running vs target revision and image per node) and `--allow-degraded` (the
+  repair of one node that is not Ready, never a second node down). **Upgrade note:** after every
+  `helm upgrade` that changes the pod template (image, resources, probes), run the script; until then
+  the pods keep the old image, which `--status` and the new `RutliCosignerRolloutPending` alert
+  (30 minutes) show. The `helm upgrade` that installs this chart version restarts no pod itself.
+  `updateStrategy.type=RollingUpdate` restores the old behaviour. The legacy single StatefulSet is
+  unchanged. Chart README, "Upgrading: one cosigner at a time".
+
 ### Changed (breaking default)
 
 - **The production profile: `"profile": "production"` makes a cosigner refuse to start while any
@@ -29,6 +48,15 @@ Upgrading a 0.4.x cluster to 0.5.0: [docs/upgrading-to-0.5.md](docs/upgrading-to
     keys only in `keyfile`), so a config written for this release gives none of those guarantees
     on such a binary: check the running version (`--version`, or the image digest) before relying
     on them.
+- **The driver has the same profile: `profile = production` in `crypto.kms.config`.** It stops the
+  participant at startup while any enforcement setting is off, and names each one. The settings
+  are: backend `frost`; a delegate other than `software`; mTLS without `allow-expired-ca`; at least
+  two endpoints, each with its own `tls-name`; `sign-intents` on; `cluster-id` set; the audit log
+  and the signing journal; an HSM PIN from `pin-env`. A missing approval rule for the namespace key
+  is advisory. `lab` logs the same list. Unset behaves as `lab` with a warning and becomes
+  `production` in 0.6, so an existing driver config starts unchanged until then.
+  `com.stakecraft.rutli.tools.ConfigCheck` lists the findings offline. A driver on 0.4.x ignores `profile`
+  (it ignored every unknown key), so check the running version before relying on it.
 
 - **A cosigner refuses to start on a config key it does not know.** Until now only the `keyfile`
   block was parsed strictly. A misspelt key such as `require_intnet`, or `requireIntent` in
@@ -179,6 +207,14 @@ Upgrading a 0.4.x cluster to 0.5.0: [docs/upgrading-to-0.5.md](docs/upgrading-to
 
 ### Changed
 
+- **Helm chart: the PodDisruptionBudget sets `unhealthyPodEvictionPolicy: AlwaysAllow`** (new value
+  `podDisruptionBudget.unhealthyPodEvictionPolicy`; set it to `""` to omit the field). A pod that is
+  running but not ready can now be evicted by a node drain, so one stuck cosigner no longer blocks
+  the drain; ready pods stay protected by `minAvailable`. Needs Kubernetes 1.27+ (the chart already
+  requires 1.29). The legacy topology's `tls-select` init container gets requests and limits (new
+  value `tlsSelect.resources`), and the soak-check CronJob in `deploy/soak` gets requests and limits.
+  Upgrade: `helm upgrade` changes the PodDisruptionBudget, and in the legacy topology (the DevNet
+  soak) it rolls the StatefulSet once because the pod template changes.
 - **A sign round 2 for a session the node no longer holds answers `ABORTED`, not `INTERNAL`,** and
   is counted in the new `rutli_sign_round2_unknown_session_total`. It is what a node answers
   after a restart or a ceremony commit between the two rounds, or past the session TTL; nothing
@@ -205,6 +241,12 @@ Upgrading a 0.4.x cluster to 0.5.0: [docs/upgrading-to-0.5.md](docs/upgrading-to
 
 ### Fixed
 
+- **The production profile's namespace-key advisory recognises Canton's own key name.** Canton's
+  auto-init names the namespace key `<node>-namespace`, so its FROST id is
+  `<prefix>frost-<node>-namespace`. A Splice validator names it `namespace`. The cosigner's advisory
+  looked for the Splice form only and flagged a correct rule for the other. The docs and the Helm
+  values example now say which form applies and where to read the real id, because a rule written
+  for the wrong form never matches.
 - **`rutli-cosigner audit-cross-check` no longer reports an empty side as consistent.** An empty
   driver audit log passed with exit 0, and every journaled signature was skipped as "older than the
   driver audit log". Empty journal directories passed the same way, their audited signatures skipped as
@@ -443,6 +485,20 @@ Upgrading a 0.4.x cluster to 0.5.0: [docs/upgrading-to-0.5.md](docs/upgrading-to
 - **The sealed software delegate is a test and migration aid, not a production option.** `docs/hosted-keys.md` and
   `docs/disaster-recovery.md` said it stays supported for production keys; `SECURITY.md` said never. The two now agree
   with `SECURITY.md`: it keeps every encryption key on the participant host; use cluster hosting or the HSM delegate.
+
+### Build
+
+- **Every push to main runs the whole set of checks once, unfiltered, and a red main opens an issue.**
+  `e2e.yml`, `image-build-check.yml`, `cluster-suite.yml` and `load.yml` now run on every push to
+  main (before: only when a path filter matched, or only on pull requests; main broke unnoticed
+  when two changes met that no single pull request's checks covered). The new workflow
+  `main-status.yml` watches them and CI: on a failure it opens the issue "main is red" (labels
+  `prio:p0`, `type:test`) with the first failing commit, the failing jobs and links, or comments on
+  the open one; it closes the issue when every check is green on the tip of main. Pushes to main are
+  never cancelled by a later push. The load test on a push runs on a GitHub-hosted runner and
+  compares nothing, so the weekly comparison keeps its baseline on the repository's runner; its
+  baseline lookup now ignores runs from pushes. The e2e workflow's own failure issue is replaced by
+  "main is red". README: status badge for main.
 
 ## [0.4.1] — 2026-11-20
 

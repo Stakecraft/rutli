@@ -184,20 +184,29 @@ pub fn findings(cfg: &Config) -> Vec<Finding> {
         out.push(Finding {
             level: Level::Advisory,
             setting: "signing_policy.rules",
-            found: "no quorum rule for a namespace key (`<prefix>frost-namespace`)".into(),
+            found: "no quorum rule for a namespace key (`<prefix>frost-namespace` or `<prefix>frost-<node>-namespace`)".into(),
             required: "a quorum approval rule for the namespace key (docs/approval-quorum.md)",
         });
     }
     out
 }
 
-/// Whether a rule's key-id prefix covers a namespace key: the driver names it
-/// `<frost.key-prefix>frost-namespace`, and this node does not know the participant's prefix. So a
-/// prefix of `frost-namespace` itself (`""`, `frost-`, …) counts, and so does one that ends in a
-/// prefix of it after a participant prefix (`participant1-frost-namespace`, `participant1-frost-`).
+/// Whether a rule's key-id prefix covers a namespace key. The driver names a FROST key
+/// `<frost.key-prefix>frost-<Canton's key name>`, and the key name depends on who created it: a
+/// Splice validator calls it `namespace`, Canton's own auto-init `<node>-namespace` (for example
+/// `participant1-namespace`). This node knows neither the participant's prefix nor the node name.
+/// So a rule counts when, from its `frost-` on (or as a whole), it is a prefix of `frost-namespace`
+/// (`""`, `frost-`, `p1-frost-namespace`), or names a `frost-<node>-namespace` key
+/// (`p1-frost-participant1-namespace`).
 fn covers_namespace_key(prefix: &str) -> bool {
     const NS: &str = "frost-namespace";
-    NS.starts_with(prefix) || prefix.find("frost-").is_some_and(|i| NS.starts_with(&prefix[i..]))
+    if NS.starts_with(prefix) {
+        return true;
+    }
+    prefix.find("frost-").is_some_and(|i| {
+        let rest = &prefix[i..];
+        NS.starts_with(rest) || rest.ends_with("-namespace")
+    })
 }
 
 fn effective(set: Option<bool>, _tls: bool) -> String {
@@ -340,10 +349,20 @@ mod tests {
 
     #[test]
     fn which_rule_prefixes_cover_the_namespace_key() {
-        for yes in ["", "frost-", "frost-namespace", "p1-frost-namespace", "p1-frost-", "participant1-frost-n"] {
+        for yes in [
+            "",
+            "frost-",
+            "frost-namespace",
+            "p1-frost-namespace",
+            "p1-frost-",
+            "participant1-frost-n",
+            // Canton's auto-init names the key `<node>-namespace`.
+            "frost-participant1-namespace",
+            "p1-frost-participant1-namespace",
+        ] {
             assert!(covers_namespace_key(yes), "{yes}");
         }
-        for no in ["p1-", "rutli-", "frost-signing", "p1-frost-signing", "p1-rutli-enc-"] {
+        for no in ["p1-", "rutli-", "frost-signing", "p1-frost-signing", "p1-rutli-enc-", "frost-participant1-signing"] {
             assert!(!covers_namespace_key(no), "{no}");
         }
     }

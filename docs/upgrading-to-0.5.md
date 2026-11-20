@@ -59,7 +59,7 @@ which 0.4.x did not (a misspelt `require_intnet` used to be dropped).
 3. Fix what it lists, in the order [production-profile.md](production-profile.md) ("Upgrading") gives. If you cannot meet
    the list yet, set `profile: lab` for the upgrade and remove it once `check-config` exits 0.
    The chart refuses `production` with `topology: legacy`.
-4. Do the same for the driver: start the participant with your current `crypto.kms.config`. The driver
+4. Do the same for the driver. It has the same `profile` in `crypto.kms.config` (unset = `lab`, `production` in 0.6), and `com.stakecraft.rutli.tools.ConfigCheck` lists its findings offline ([production-profile.md](production-profile.md)). Start the participant with your current `crypto.kms.config`. The driver
    now also stops on a key it does not know and on a misspelt approval `mode` (the modes are
    `quorum` and `auto`, in lowercase). It reads an approver's key as `public-key-base64`; the old
    `public-key-base-64` still works.
@@ -122,19 +122,26 @@ Moving the image is the step that needs care. Per node, wait for the gate before
    `check-config` is as you expect.
 3. Repeat for the other nodes. The pin protection holds once every node runs 0.5.0.
 
-**One `helm upgrade` restarts all three cosigners.** The chart's three per-node StatefulSets change
-in one apply and restart together, and the PodDisruptionBudget does not apply to a StatefulSet's own
-update. Measured on a real three-node cluster on 2026-11-20, upgrading from 0.4.1 to a build of
-`main` under 5 signatures a second: about 11 s with no cosigner up, 54 of 750 signatures failed
-with `UNAVAILABLE`, and the keys were unchanged afterwards
-([issue #173](https://github.com/Stakecraft/rutli/issues/173)). Until a change that makes the chart
-roll one node at a time is released, move the image one node at a time with the sequence in
-[runbook-migration-inplace.md](runbook-migration-inplace.md) (render, diff, `helm upgrade` for the
-ConfigMap, then restart node 2, node 3, node 1 with 5 minutes between and sign errors flat; its
-Phase 3 reference is [runbook-rc4-soak-rollout.md](runbook-rc4-soak-rollout.md)). That sequence was
-written for a config change; for an image change, check first that it keeps two nodes up in your
-install. If you cannot, plan the image upgrade as an outage of about 11 s. The config-only steps
-above (pins) do not restart anything.
+**The chart now rolls one cosigner at a time.** Before this change, one `helm upgrade` restarted
+all three cosigners together: measured on a real three-node cluster on 2026-11-20, upgrading from
+0.4.1 to a build of `main` under 5 signatures a second, about 11 s with no cosigner up, 54 of 750
+signatures `UNAVAILABLE` ([issue #173](https://github.com/Stakecraft/rutli/issues/173)). The per-node
+StatefulSets now use `updateStrategy.type: OnDelete`: `helm upgrade` changes the spec and restarts no
+pod, and `scripts/upgrade-cosigners.sh` restarts the cosigners one by one, waiting for each to be
+Ready and the other two to stay Ready:
+
+```sh
+helm upgrade rutli deploy/helm/rutli-cosigner -n rutli -f values.yaml -f certs/peer-pins.json --set image.tag=…
+scripts/upgrade-cosigners.sh -n rutli --release rutli --dry-run   # the plan
+scripts/upgrade-cosigners.sh -n rutli --release rutli             # one node at a time
+scripts/upgrade-cosigners.sh -n rutli --release rutli --status    # running vs target revision
+```
+
+Use `--settle 300` while the nodes still run 0.4.x. A change that is not in the pod template (pins in
+the ConfigMap, a rotated certificate) restarts nothing by itself, with or without `OnDelete`: run the
+script with `--force` to restart every node one at a time. Detail: chart README, "Upgrading: one
+cosigner at a time". The legacy topology (one three-replica StatefulSet) rolls one pod at a time by
+itself, and cannot run the production profile.
 
 Rollback of one node to 0.4.x works with the same config: 0.4.x ignores the new keys, and the other
 nodes still pin its unchanged key. With the Helm chart, roll back the chart and the image together.

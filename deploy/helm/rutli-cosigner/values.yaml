@@ -174,6 +174,11 @@ refreshAllowlist: []
 #     signer_may_refresh: false
 #     signer_acl: { driver: ["participant1-"] }
 #     signer_pins: { driver: ["<sha256 of the driver cert's SPKI>"] }
+#     # The FROST id is <frost.key-prefix>frost-<Canton's key name>. A Splice validator names its
+#     # namespace key `namespace` (participant1-frost-namespace, as here); Canton's own auto-init
+#     # names it `<node>-namespace` (participant1-frost-participant1-namespace). A rule for the wrong
+#     # form never matches: take the id from the driver log ("initiating distributed key
+#     # generation for …") or `keys.secret.list()`.
 #     rate_limits: [{ key_id_prefix: "participant1-frost-namespace", per_min: 10, per_day: 200 }]
 #     rules: [{ key_id_prefix: "participant1-frost-namespace", mode: quorum, threshold: 2 }]
 #     approvers: [{ id: alice, public_key_spki_b64: "MCowBQYDK2VwAyEA..." }]
@@ -294,6 +299,15 @@ persistence:
   accessModes:
     - ReadWriteOncePod
 
+# topology=perNode only (the legacy StatefulSet always rolls its pods one at a time).
+# OnDelete (default): `helm upgrade` changes the spec and restarts NO pod; run
+# scripts/upgrade-cosigners.sh afterwards, which restarts one cosigner at a time and waits for it.
+# Until then the pods keep the old image: `scripts/upgrade-cosigners.sh --status` shows it, and the
+# RutliCosignerRolloutPending alert fires after 30 minutes. RollingUpdate restarts all three
+# single-replica pods at once, so signing stops until two are back; only for a cluster that may stop.
+updateStrategy:
+  type: OnDelete
+
 resources:
   requests:
     cpu: 50m
@@ -302,9 +316,26 @@ resources:
     cpu: 500m
     memory: 256Mi
 
+# Legacy topology only: the init container that copies this node's TLS files out of the shared
+# source volume. It runs one shell script for a moment.
+tlsSelect:
+  resources:
+    requests:
+      cpu: 5m
+      memory: 16Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
 podDisruptionBudget:
   enabled: true
   minAvailable: 2
+  # What happens to a pod that is running but not ready when a node is drained. AlwaysAllow lets the
+  # drain evict it, so one stuck cosigner cannot block the drain (and the upgrade behind it); the
+  # budget still protects every ready pod, so minAvailable keeps holding for the healthy ones.
+  # IfHealthyBudget is the Kubernetes default (a not-ready pod is evicted only while the budget is
+  # met). "" omits the field.
+  unhealthyPodEvictionPolicy: AlwaysAllow
 
 networkPolicy:
   enabled: true

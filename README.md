@@ -3,6 +3,7 @@
 **Open-source threshold key management for Canton Network & Splice node authority keys.**
 
 [![CI](https://github.com/Stakecraft/rutli/actions/workflows/ci.yml/badge.svg)](https://github.com/Stakecraft/rutli/actions/workflows/ci.yml)
+[![main](https://github.com/Stakecraft/rutli/actions/workflows/main-status.yml/badge.svg?branch=main&event=workflow_run)](https://github.com/Stakecraft/rutli/actions/workflows/main-status.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 Rütli keeps a Canton node's most dangerous secret — its **namespace / identity key** — safe by never
