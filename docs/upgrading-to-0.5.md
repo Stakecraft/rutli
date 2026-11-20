@@ -15,7 +15,7 @@ this order. Nothing here changes the key files or the wire format; a cluster wit
 - Run 0.4.1 or 0.4.0 on every node, and the driver on 0.4.0-rc.4 or later. A driver older than
   `0.4.0-rc.3`, or one with `frost.sign-intents = off`, does not sign intents: see step 4.
 - Take a backup of every node (`backup`, or the chart's backup sidecar) and check that it restores.
-  A refresh in the next days would make backups of the older epoch useless for that node
+  A refresh in the next days would make backups of the older epoch unable to restore that node (they stay sensitive)
   ([disaster-recovery.md](disaster-recovery.md), "Backups and refreshes").
 - Check that no ceremony is running (`rutli_ceremonies_staged` is 0 on every node).
 - Read [CHANGELOG.md](../CHANGELOG.md), `## [Unreleased]`. This page lists what you must do, not what

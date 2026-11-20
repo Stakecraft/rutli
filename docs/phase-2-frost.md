@@ -60,13 +60,14 @@
 >   that node's DEK and hosted-key distribution seed only; `rutli-cosigner seal new-node` /
 >   `seal split-legacy`), with peers' distribution keys pinned in config. The legacy shared master
 >   (`share_seal.secret_env`, per-node keys via HKDF) still works but lets whoever reads it derive
->   every node's key (audit C3; docs/runbook-per-node-seal.md). Closes the at-rest exposure;
+>   every node's key (audit C3; docs/runbook-per-node-seal.md). Closes the at-rest exposure while the node's seal bundle is not also obtained;
 >   enclave/HSM sealing (which also protects share memory during signing) plugs into the same seam.
 >
 > - **Proactive share refresh (done):** `Signer.Refresh` RPC / `rutli-cosigner refresh` — dealer-free
 >   DKG-style re-randomization of all shares, group key (and node identity) unchanged, verified by
->   every node before persisting. Limits an attacker to one refresh epoch; pre-refresh shares are
->   dead afterwards (old+new shares cannot combine — tested).
+>   every node before persisting. Shares of different epochs do not combine (tested), so a share stolen before a refresh
+>   no longer adds to one stolen after it. It erases nothing: old copies, and the sealing keys that
+>   open them, stay usable by t shares of one epoch (key-material-handling.md).
 >
 > - **Cluster-hosted keys, v1 (done, both sides):** the cluster also holds the **non-FROST**
 >   material Canton needs — RSA-2048-OAEP-SHA256 encryption keypairs and AES-256-GCM symmetric
@@ -351,8 +352,9 @@ wear-levelled SSDs and snapshotted volumes, removing a file does not destroy the
 replaces the key with a tombstone that keeps the material sealed for
 `hosted_keys.delete_grace_secs` (default 7 days, for `hosted-undelete`), then drops it; real
 destruction means rotating the seal key (`seal rotate-dek`, `keyfile migrate`, `seal
-drop-previous`) and destroying the old one, so every old sealed blob — including the ones sitting in
-backups — becomes undecryptable.
+drop-previous`) and destroying the old one, so that every old sealed blob — including the ones sitting in
+backups — becomes undecryptable once every copy of the old DEK is destroyed (and, after a delete,
+once the grace period is over: rotate after it, not during it).
 
 ### Replication wrapping, and why mTLS alone was judged insufficient
 
@@ -510,8 +512,9 @@ from replicated to threshold is a server-side change plus a config flag, not an 
   differently is an error. Every threshold signature is verified (Ed25519, strict) against the pinned
   key before the driver returns it, so a wrong-key or garbage signature is withheld, not handed to
   Canton.
-- **Proactive refresh:** periodically re-randomize shares, same public key — an attacker must breach
-  `t` cosigners within one epoch; old stolen shares become useless.
+- **Proactive refresh:** periodically re-randomize shares, same public key — shares of different epochs
+  do not combine, so an attacker needs `t` shares of one epoch. Old copies of old shares (backups,
+  snapshots, free blocks) stay usable while the sealing keys that open them exist.
 - **DR:** encrypted per-share backups (fast node replacement) + a cold Shamir backup held by
   custodians (last resort). Recovery = re-share from surviving shares; the full key is never
   reconstructed on a live host. This matters because the namespace key is non-rotatable and its

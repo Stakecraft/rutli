@@ -621,8 +621,9 @@ async fn a_push_racing_an_honest_generation_is_refused() {
     assert_eq!(c.commitment(1, id), c.commitment(0, id));
 }
 
-/// A peer that takes the generation fence itself (genkey fences carry no client intent) still
-/// cannot plant over material another reachable peer holds.
+/// A peer that takes the generation fence itself (these nodes run without a signing policy, so a
+/// genkey fence needs no client intent here) still cannot plant over material another reachable
+/// peer holds.
 #[tokio::test]
 async fn a_peer_that_fences_a_generation_itself_cannot_plant_over_another_copy() {
     let c = Cluster::new();
@@ -635,10 +636,11 @@ async fn a_peer_that_fences_a_generation_itself_cannot_plant_over_another_copy()
     assert!(!c.nodes[2].hosted_exists(id));
 }
 
-/// What stays open until generation needs a client intent: for an id nobody holds yet, the node
-/// that fenced it can create it on an honest node — and when it keeps a copy itself, it is the
-/// second agreeing peer, so the material spreads by pull and a later generation adopts it.
-/// Documented in docs/security/threat-model.md.
+/// On nodes that do not require a generate intent (no signing policy here; with one, only
+/// `require_ceremony_intent: false`): for an id nobody holds yet, the node that fenced it can create
+/// it on an honest node — and when it keeps a copy itself, it is the second agreeing peer, so the
+/// material spreads by pull and a later generation adopts it. With the default switch the fence is
+/// refused (tests/generate_intent.rs). Documented in docs/security/threat-model.md.
 #[tokio::test]
 async fn a_fenced_push_into_an_id_nobody_holds_spreads_when_the_attacker_keeps_a_copy() {
     let c = Cluster::new();
@@ -1072,7 +1074,7 @@ async fn generate_reports_the_commitment_and_key_info_local_only_does_not_repair
     let c = Cluster::new();
     let svc = c.signer(0);
     let reply = svc
-        .generate_key(Request::new(pb::GenerateKeyRequest { key_id: "rutli-enc-cmp".into(), spec: "rsa-2048-oaep-sha256".into() }))
+        .generate_key(Request::new(pb::GenerateKeyRequest { key_id: "rutli-enc-cmp".into(), spec: "rsa-2048-oaep-sha256".into(), intent: None }))
         .await
         .unwrap()
         .into_inner();

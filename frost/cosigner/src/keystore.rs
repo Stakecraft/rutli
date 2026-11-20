@@ -866,7 +866,7 @@ impl KeyStore {
 
     /// Remove a key file. Physical erasure is best-effort: on copy-on-write filesystems, SSDs with
     /// wear levelling, and snapshotted volumes the sealed bytes may survive. Real destruction means
-    /// rotating the seal master secret.
+    /// rotating this node's DEK (`seal rotate-dek`) and destroying every copy of the old one.
     pub fn delete(&self, key_id: &str) -> Result<()> {
         let path = self.path(key_id)?;
         self.touch(&path);

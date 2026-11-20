@@ -35,32 +35,42 @@ data:
         return
       fi
       rm -rf "$stage" && mkdir -p "$stage" || { echo "BACKUP_FAILED node=${NODE_ID} reason=stage"; return; }
-      # Key ids are [A-Za-z0-9_-], so word splitting of $files is safe.
+      # The stage holds symbolic links, not copies: /work is memory-backed and only the tar needs
+      # to be in it (tar -h stores the files the links point to). Key ids are [A-Za-z0-9_-], so word
+      # splitting of $files is safe.
       for f in $files; do
-        cp -p "/data/keys/$f" "$stage/$f" || { echo "BACKUP_FAILED node=${NODE_ID} reason=copy"; rm -rf "$stage"; return; }
+        ln -s "/data/keys/$f" "$stage/$f" || { echo "BACKUP_FAILED node=${NODE_ID} reason=copy"; rm -rf "$stage"; return; }
       done
       journals=0
       if [ -d /data/journal ]; then
         # A segment copied mid-append may end in a partial line: the journal reader treats a torn
         # final line of the newest segment as an interrupted append.
         if ! (cd /data/journal && find . -type f -name '*.jsonl' | while read -r j; do
-                mkdir -p "$stage/journal/$(dirname "$j")" && cp -p "$j" "$stage/journal/$j" || exit 1
+                mkdir -p "$stage/journal/$(dirname "$j")" && ln -s "/data/journal/$j" "$stage/journal/$j" || exit 1
               done); then
           echo "BACKUP_FAILED node=${NODE_ID} reason=journal-copy"; rm -rf "$stage"; return
         fi
-        journals=$(find "$stage/journal" -type f -name '*.jsonl' 2>/dev/null | wc -l | tr -d ' ')
+        journals=$(find "$stage/journal" -type l -name '*.jsonl' 2>/dev/null | wc -l | tr -d ' ')
       fi
       cleared=0
       if [ -d /data/keys/.cleared ]; then
         # Marker names are <key id>.<hex digest>, so word splitting is safe.
         mkdir -p "$stage/.cleared" || { echo "BACKUP_FAILED node=${NODE_ID} reason=stage"; rm -rf "$stage"; return; }
         for m in $(cd /data/keys/.cleared && find . -maxdepth 1 -type f ! -name '.*' | sed 's|^\./||'); do
-          cp -p "/data/keys/.cleared/$m" "$stage/.cleared/$m" || { echo "BACKUP_FAILED node=${NODE_ID} reason=cleared-copy"; rm -rf "$stage"; return; }
+          ln -s "/data/keys/.cleared/$m" "$stage/.cleared/$m" || { echo "BACKUP_FAILED node=${NODE_ID} reason=cleared-copy"; rm -rf "$stage"; return; }
         done
-        cleared=$(find "$stage/.cleared" -type f | wc -l | tr -d ' ')
+        cleared=$(find "$stage/.cleared" -type l | wc -l | tr -d ' ')
       fi
-      if ! tar -C "$stage" -cf "$tar" .; then
-        echo "BACKUP_FAILED node=${NODE_ID} reason=tar"; rm -rf "$stage" "$tar"; return
+      # tar exits 1 with "file changed as we read it" when a journal segment grew while it was read:
+      # the archive then holds the segment as it was when tar began it, which is what a torn final
+      # line already tolerates (see above). Anything else it says is a failure.
+      err=$(tar -h -C "$stage" -cf "$tar" . 2>&1); rc=$?
+      if [ "$rc" = 1 ] && [ -z "$(printf '%s\n' "$err" | grep -v 'file changed as we read it')" ]; then rc=0; fi
+      if [ "$rc" != 0 ]; then
+        reason=tar
+        case "$err" in *[Nn]o\ space*) reason=work-dir-full ;; esac
+        echo "$err" >&2
+        echo "BACKUP_FAILED node=${NODE_ID} reason=${reason}"; rm -rf "$stage" "$tar"; return
       fi
       rm -rf "$stage"
       n=$(echo "$files" | wc -l | tr -d ' ')

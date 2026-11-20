@@ -308,13 +308,23 @@ persistence:
 updateStrategy:
   type: OnDelete
 
+# The cosigner's /tmp: a memory-backed emptyDir, so what a ceremony copies in (share bundles, request
+# files, a Canton key export, an extracted backup for `restore`) never reaches the Kubernetes node's
+# disk. It counts against the cosigner container's memory limit (`resources.limits.memory`), so keep
+# the two in step: the default limit covers this size on top of the working set. Sized for ceremony
+# files (kilobytes) and the key files of one node's backup when restoring (extract it with
+# --exclude=./journal, docs/disaster-recovery.md); a write beyond it fails with "no space left on
+# device".
+tmp:
+  sizeLimit: 64Mi
+
 resources:
   requests:
     cpu: 50m
     memory: 64Mi
   limits:
     cpu: 500m
-    memory: 256Mi
+    memory: 320Mi # 256Mi working set (167Mi seen at 300 signatures/s) plus the 64Mi memory-backed /tmp
 
 # Legacy topology only: the init container that copies this node's TLS files out of the shared
 # source volume. It runs one shell script for a moment.
@@ -404,6 +414,12 @@ backup:
   checkEverySecs: 300
   # Also take one backup as soon as the pod starts (shows the destination works right away).
   runOnStart: true
+  # The sidecar's work directory: a memory-backed emptyDir, so the tar of the sealed key files and
+  # journals never reaches the Kubernetes node's disk. The tar is all it holds (the run links the
+  # files, it does not copy them first), so size it for the key files plus the journals (a few kB per
+  # key file; journals up to signing_policy.journal_max_mib_per_key, 64 MiB, per key). A run that does
+  # not fit logs BACKUP_FAILED reason=work-dir-full. Counted in `resources.limits.memory` below.
+  workSizeLimit: 128Mi
   destination:
     # pvc (default): a per-node backup PVC (<fullname>-backup-n<id>, or nodes[].backupClaim), mounted
     #   in that node's sidecar only, at /backup. Keeps the newest `keep` tars. Protects against a
@@ -434,4 +450,4 @@ backup:
       memory: 16Mi
     limits:
       cpu: 100m
-      memory: 64Mi
+      memory: 192Mi # the 128Mi work directory is memory-backed, plus the shell and tar

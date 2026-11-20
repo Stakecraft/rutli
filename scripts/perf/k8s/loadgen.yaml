@@ -7,8 +7,9 @@
 # (deploy/helm/rutli-cosigner/templates/networkpolicy.yaml); they admit this pod because it carries
 # the client and scraper labels and the namespace carries rutli.io/client-ns=true.
 #
-# Placeholders: __IMAGE__, __PULL_SECRETS__ (a YAML list, [] for none), __NODE_SELECTOR__ (a YAML
-# map, {} for none).
+# Placeholders: __NAME__ (the pod: rutli-perf-loadgen, then -2, -3 with --generators),
+# __IMAGE__, __PULL_SECRETS__ (a YAML list, [] for none), __NODE_SELECTOR__ (a YAML map, {} for
+# none). The NetworkPolicy covers every generator pod (it selects by label).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -39,7 +40,7 @@ spec:
 apiVersion: v1
 kind: Pod
 metadata:
-  name: rutli-perf-loadgen
+  name: __NAME__
   labels:
     rutli-perf/suite: "1"
     app.kubernetes.io/name: rutli-perf-loadgen
@@ -52,6 +53,15 @@ spec:
   restartPolicy: Always
   imagePullSecrets: __PULL_SECRETS__
   nodeSelector: __NODE_SELECTOR__
+  # Several generators go to different nodes where they can, so that none is starved by another.
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels: { app.kubernetes.io/name: rutli-perf-loadgen }
   # Pod Security "restricted".
   securityContext:
     runAsNonRoot: true

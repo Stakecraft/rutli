@@ -41,7 +41,7 @@ public interface SignIntentOrBuilder extends
 
   /**
    * <pre>
-   * "sign" | "delete-key" | "dkg" | "refresh"
+   * "sign" | "delete-key" | "dkg" | "refresh" | "generate-key"
    * </pre>
    *
    * <code>string purpose = 3;</code>
@@ -50,7 +50,7 @@ public interface SignIntentOrBuilder extends
   java.lang.String getPurpose();
   /**
    * <pre>
-   * "sign" | "delete-key" | "dkg" | "refresh"
+   * "sign" | "delete-key" | "dkg" | "refresh" | "generate-key"
    * </pre>
    *
    * <code>string purpose = 3;</code>
@@ -144,4 +144,38 @@ public interface SignIntentOrBuilder extends
    */
   com.stakecraft.rutli.grpc.IntentApprovalOrBuilder getApprovalsOrBuilder(
       int index);
+
+  /**
+   * <pre>
+   * "generate-key" only (empty for every other purpose): the spec of the key to create
+   * ("rsa-2048-oaep-sha256", "aes-256-gcm", "ec-p256-ecies") and the roster identifier of the
+   * cosigner the client asked to lead it (CapabilitiesReply.node_identifier of the endpoint it
+   * called). A node accepts the generation's fence only from that cosigner, so a cosigner shown the
+   * intent in a fence cannot lead the generation itself.
+   * </pre>
+   *
+   * <code>string hosted_spec = 11;</code>
+   * @return The hostedSpec.
+   */
+  java.lang.String getHostedSpec();
+  /**
+   * <pre>
+   * "generate-key" only (empty for every other purpose): the spec of the key to create
+   * ("rsa-2048-oaep-sha256", "aes-256-gcm", "ec-p256-ecies") and the roster identifier of the
+   * cosigner the client asked to lead it (CapabilitiesReply.node_identifier of the endpoint it
+   * called). A node accepts the generation's fence only from that cosigner, so a cosigner shown the
+   * intent in a fence cannot lead the generation itself.
+   * </pre>
+   *
+   * <code>string hosted_spec = 11;</code>
+   * @return The bytes for hostedSpec.
+   */
+  com.google.protobuf.ByteString
+      getHostedSpecBytes();
+
+  /**
+   * <code>uint32 leader = 12;</code>
+   * @return The leader.
+   */
+  int getLeader();
 }

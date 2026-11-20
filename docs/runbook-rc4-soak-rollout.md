@@ -96,7 +96,7 @@ Shell setup (every shell you use):
 
 ```bash
 umask 077
-D=$(mktemp -d /dev/shm/rutli-rc4.XXXXXX 2>/dev/null || mktemp -d); echo "D=$D"
+D=$(mktemp -d "${RUTLI_WORK:?mount the memory disk first, docs/key-material-handling.md}/rutli-rc4.XXXXXX"); echo "D=$D"
 PNS=stakecraft-devnet-rutli-01
 cd <repo>                                     # main, with PR #54 merged
 RC=~/rc4-rollout/bin/rutli-cosigner
@@ -130,8 +130,8 @@ jq -n --arg d "$D" '{
 ```
 
 `$D/tls/driver.key` is the **live driver private key**. Keep it in `$D` only for this session.
-Delete it when done and before leaving the workstation (`rm -P` on macOS, `shred -u` on Linux),
-then `rm -rf "$D"`.
+Destroy it when done and before leaving the workstation: unmount and delete the memory disk or image
+that holds `$D` (`docs/key-material-handling.md`).
 
 Helpers (port-forwards die with their pod: run `pf_start` again after every restart):
 
@@ -614,7 +614,7 @@ unchanged.
 - [ ] `verify-key` ok for both FROST keys; sign errors, policy refusals and `rate_limited` flat; `rutli_ceremony_intent_absent_total` 0.
 - [ ] `audit-cross-check`: only the pre-T2 rollout-window lines.
 - [ ] `deploy/soak/cosigner-values-batch-c.yaml` (`require_ceremony_intent: true`) committed with the soak-log entry.
-- [ ] soak-check PASS on the next scheduled run; `$D` cleaned up (`driver.key` securely deleted).
+- [ ] soak-check PASS on the next scheduled run; `$D` workspace destroyed.
 
 ## Next: B8 under ceremony intents
 
