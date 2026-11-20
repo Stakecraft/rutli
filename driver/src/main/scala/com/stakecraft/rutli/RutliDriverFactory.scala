@@ -287,6 +287,7 @@ final class RutliDriverFactory extends KmsDriverFactory {
           keepaliveTime = frost.keepaliveTime,
           keepaliveTimeout = frost.keepaliveTimeout,
           leaderRecovery = frost.leaderRecovery,
+          rotateSigns = frost.rotateSigns,
         )(blockingEc)
       case other =>
         throw new IllegalArgumentException(
