@@ -84,8 +84,10 @@ enum Command {
     /// encryption key — `ExportKeyPair` / `keys.secret.download` output, plain or
     /// password-protected — which migrates the node without rotating its encryption key. A Canton
     /// key needs --key-id and --expect-fingerprint. The key is written to this node only (create-
-    /// once, never an overwrite); anti-entropy replicates it to the rest of the cluster within one
-    /// `hosted_keys.anti_entropy_interval_secs` of a running daemon. Check with `verify-hosted`.
+    /// once, never an overwrite). Run it on every cosigner: a node that lacks a hosted key pulls it
+    /// only once two peers hold the same copy, so a key imported on one node stays there (on two,
+    /// the third pulls it within one `hosted_keys.anti_entropy_interval_secs`). Check with
+    /// `verify-hosted`.
     ImportKey {
         /// The export artifact to read.
         #[arg(long, value_name = "FILE")]
@@ -951,7 +953,9 @@ async fn main() -> Result<()> {
         // master held here.
         node = node.with_hosted_keyring(keys.hosted_keyring(&cfg)?, cluster_id.clone())?;
         if let Some(h) = &cfg.hosted_keys {
-            node = node.with_delete_grace(std::time::Duration::from_secs(h.delete_grace_secs));
+            node = node
+                .with_delete_grace(std::time::Duration::from_secs(h.delete_grace_secs))
+                .with_hosted_write_quorum(h.write_quorum);
         }
         tracing::info!(
             "cluster-hosted keys enabled (RSA-2048 and EC P-256 encryption, AES-256-GCM symmetric)"
@@ -1026,20 +1030,34 @@ async fn main() -> Result<()> {
         tracing::info!(?cns, "refresher role: Refresh and KeyStatus only");
     }
 
-    // Anti-entropy: pull hosted keys this node lacks and push ones a peer lacks. This is what
-    // heals an under-quorum write and a node restored from a stale backup, so the 2-of-3 write
-    // quorum is only safe with it running, so a panic in a sweep restarts the loop.
+    // Anti-entropy: pull hosted keys this node lacks, each confirmed by two agreeing peers. This
+    // is what heals an under-quorum write and a node restored from a stale backup, so the 2-of-3
+    // write quorum is only safe with it running, so a panic in a sweep restarts the loop. Nothing
+    // is pushed: every node pulls for itself.
     if let Some(h) = cfg.hosted_keys.as_ref().filter(|h| h.enabled) {
+        // Hosted keys held here with a time in the future (they refuse deletes): logged and
+        // published now, and by every sweep.
+        rutli_cosigner::orchestrator::report_future_timestamps(&node).await;
+        if h.write_quorum < rutli_cosigner::orchestrator::PULL_AGREEMENT
+            || cfg.peers.len() <= rutli_cosigner::orchestrator::PULL_AGREEMENT
+        {
+            tracing::warn!(
+                write_quorum = h.write_quorum,
+                cosigners = cfg.peers.len(),
+                "a node that lacks a hosted key pulls it only when two peers hold the same copy: \
+                 with hosted_keys.write_quorum below 2, or fewer than 3 cosigners, a key can stay \
+                 on fewer nodes than the cluster has until an operator copies it \
+                 (docs/hosted-keys.md)"
+            );
+        }
         let sweep = (node.clone(), peers.clone());
         let interval = std::time::Duration::from_secs(h.anti_entropy_interval_secs.max(10));
         rutli_cosigner::supervise::spawn_supervised("anti_entropy", sweep, move |(sweep_node, sweep_peers)| async move {
             loop {
                 tokio::time::sleep(interval).await;
                 match rutli_cosigner::orchestrator::anti_entropy_sweep(&sweep_node, &sweep_peers).await {
-                    Ok((0, 0)) => {}
-                    Ok((pulled, pushed)) => {
-                        tracing::info!(pulled, pushed, "anti-entropy reconciled hosted keys")
-                    }
+                    Ok(0) => {}
+                    Ok(pulled) => tracing::info!(pulled, "anti-entropy pulled missing hosted keys"),
                     Err(e) => tracing::warn!(error = %e, "anti-entropy sweep failed"),
                 }
             }

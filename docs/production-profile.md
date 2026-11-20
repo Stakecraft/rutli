@@ -67,8 +67,9 @@ live config. It works under any `profile`.
 
 The intent rows are not listed separately for a node without TLS: the `tls` row covers them.
 
-Coming with a pending change (it adds its own row when it lands): `signing_policy.refresh_min_interval_secs`
-(a minimum interval between refreshes).
+Not checked by the profile yet: `signing_policy.refresh_min_interval_secs` (the minimum interval between
+refreshes, 72 h by default; `0` turns it off). A required finding for `0` is tracked in
+[issue #184](https://github.com/Stakecraft/rutli/issues/184).
 
 ## Driver: what the profile requires
 
@@ -130,5 +131,6 @@ If you cannot meet the list yet (a key-file migration in progress, or the legacy
 
 The other commands (`restore`, `keyfile migrate`, and so on) load the config the way the node does.
 Under `production` with required findings they refuse too. Run them with the config as it will be,
-or under `lab`. An older cosigner binary does not know the `profile` key and refuses the file, so
-roll back the chart and the image together.
+or under `lab`. A cosigner on 0.4.0 or 0.4.1 ignores the `profile` key (and the peer pin keys): it rejects unknown
+keys only in `keyfile`. A config written for 0.5.0 therefore gives none of these guarantees on such
+a binary. Check the running version (`--version`, or the image digest) before relying on them.

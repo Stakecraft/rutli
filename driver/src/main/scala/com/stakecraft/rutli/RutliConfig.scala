@@ -119,6 +119,19 @@ final case class SigningJournalConfig(
   *                   from a ceremony this driver did not start. Since 0.5.0 such a key is refused
   *                   (another participant's key, or a DKG started before a driver restart); list an
   *                   id here only after checking that the key is this participant's own.
+  * @param requestTimeout     The budget of one driver call across every cosigner it tries (30 s).
+  *                   A DKG gets all of it in one attempt.
+  * @param attemptTimeout     The deadline of one attempt at one cosigner, for everything but signs
+  *                   and ceremonies (10 s).
+  * @param signAttemptTimeout The deadline of one sign attempt at one cosigner (5 s): a confirmation
+  *                   response must be signed within the synchronizer's confirmation response
+  *                   timeout (30 s by Canton's default), so two failovers must fit.
+  * @param keepaliveTime      HTTP/2 keepalive on every cosigner channel, also while idle (10 s; gRPC
+  *                   refuses less than 10 s).
+  * @param keepaliveTimeout   How long a keepalive ping may go unanswered before the connection is
+  *                   torn down and the next call fails over (5 s).
+  * @param leaderRecovery     After this long the first endpoint gets the lead back, after it lost it
+  *                   (60 s).
   */
 final case class FrostConfig(
     endpoint: Option[String] = None,
@@ -132,6 +145,12 @@ final case class FrostConfig(
     pinDir: Option[String] = None,
     expectedGroupKeys: Map[String, String] = Map.empty,
     adoptExistingKeys: List[String] = Nil,
+    requestTimeout: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.FiniteDuration(30, "s"),
+    attemptTimeout: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.FiniteDuration(10, "s"),
+    signAttemptTimeout: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.FiniteDuration(5, "s"),
+    keepaliveTime: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.FiniteDuration(10, "s"),
+    keepaliveTimeout: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.FiniteDuration(5, "s"),
+    leaderRecovery: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.FiniteDuration(60, "s"),
 ) {
 
   /** `sign-intents` as a switch; anything but on/off (or true/false) is a config error. */

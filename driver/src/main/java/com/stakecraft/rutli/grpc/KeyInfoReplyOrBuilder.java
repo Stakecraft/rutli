@@ -38,4 +38,21 @@ public interface KeyInfoReplyOrBuilder extends
    * @return The replicas.
    */
   int getReplicas();
+
+  /**
+   * <pre>
+   * This node's keyed commitment to the key material, and the public key its private key derives
+   * (X.509 SPKI; empty for symmetric keys). Empty from a cosigner older than 0.5.0.
+   * </pre>
+   *
+   * <code>bytes commitment = 5;</code>
+   * @return The commitment.
+   */
+  com.google.protobuf.ByteString getCommitment();
+
+  /**
+   * <code>bytes public_key_der = 6;</code>
+   * @return The publicKeyDer.
+   */
+  com.google.protobuf.ByteString getPublicKeyDer();
 }

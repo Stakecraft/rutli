@@ -395,6 +395,9 @@ message GenerateKeyReply {
   bytes public_key_der = 3;  // X.509 SPKI; empty for symmetric keys
   bool created = 4;          // false = already existed (idempotent retry)
   uint32 replicas = 5;       // how many cosigners hold it, including this one
+  // The leader's keyed commitment to the key material (as in KeyManifest.commitment). Empty from a
+  // cosigner older than 0.5.0. A client compares it with every node's KeyInfo(local_only).
+  bytes commitment = 6;
 }
 
 message PublicKeyRequest { string key_id = 1; }
@@ -403,12 +406,21 @@ message PublicKeyReply {
   bytes public_key_der = 2;
 }
 
-message KeyInfoRequest { string key_id = 1; }
+message KeyInfoRequest {
+  string key_id = 1;
+  // This node's own copy only: no read-repair and no replica count (replicas = 0). Ignored by a
+  // cosigner older than 0.5.0, which answers as without it and sends no commitment.
+  bool local_only = 2;
+}
 message KeyInfoReply {
   bool exists = 1;
   string spec = 2;
   uint64 created_at = 3;
   uint32 replicas = 4;
+  // This node's keyed commitment to the key material, and the public key its private key derives
+  // (X.509 SPKI; empty for symmetric keys). Empty from a cosigner older than 0.5.0.
+  bytes commitment = 5;
+  bytes public_key_der = 6;
 }
 
 message DeleteKeyRequest {
@@ -477,11 +489,20 @@ message ReplicateKeyRequest {
 }
 message ReplicateKeyReply { bytes commitment = 1; }
 
-message FetchKeyRequest { string key_id = 1; }
+message FetchKeyRequest {
+  string key_id = 1;
+  // Set by a 0.5.0 caller: for an id this node holds a tombstone for, answer with `tombstone`
+  // instead of NOT_FOUND, so the caller never pulls a deleted key back. Without it (a 0.4.0
+  // caller) a tombstone reads as NOT_FOUND, as before.
+  bool include_tombstone = 2;
+}
 message FetchKeyReply {
   string spec = 1;
   bytes public_key_der = 2;
   WrappedKey wrapped = 3;
+  // The tombstone (as in ListKeys) when the caller set include_tombstone and the key is deleted
+  // here; spec, public_key_der and wrapped are then empty.
+  KeyManifest tombstone = 4;
 }
 
 message ListKeysRequest {}

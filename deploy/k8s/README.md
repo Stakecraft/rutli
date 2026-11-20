@@ -121,6 +121,10 @@ canton.participants.participant1.crypto {
         ]
         delegate = "hsm"            # non-namespace keys; "software" only for testing
         tls = { ca-cert = "/certs/ca.crt", cert = "/certs/driver.crt", key = "/certs/driver.key" }
+        # Defaults shown: per-attempt deadlines, the call budget and channel keepalive
+        # (docs/architecture.md, "Deadlines, keepalive and what Canton waits for").
+        # sign-attempt-timeout = 5s, attempt-timeout = 10s, request-timeout = 30s
+        # keepalive-time = 10s, keepalive-timeout = 5s
         cluster-id = "<the cosigners' cluster_id>"
         pin-dir = "/var/rutli/pins"   # durable group-key pins (docs/disaster-recovery.md §3i)
       }

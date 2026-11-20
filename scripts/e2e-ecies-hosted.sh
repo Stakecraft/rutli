@@ -21,7 +21,8 @@
 #      participant2 encrypts views to that key with Canton's own JcePureCrypto and participant1
 #      decrypts them through the driver (EcdhDerive + IESEngine);
 #   B. "migrate without touching the encryption key": B1's throwaway Canton 3.6.1 ECIES key is
-#      imported into the cluster with `import-key` (before the cluster starts), registered on
+#      imported into the cluster with `import-key` on two nodes (before the cluster starts; the
+#      third pulls it from them), registered on
 #      participant1 by KMS id (RegisterKmsEncryptionKey) — its Canton fingerprint must come out
 #      identical to the one on the old node — and rotated in as participant1's encryption key;
 #      pings again, now decrypting with the imported key;
@@ -140,11 +141,15 @@ for i in 1 2 3; do
     | del(.metrics_listen)' "$REPO/deploy/frost/config-tls/cosigner$i.json" >"$WORK/c$i.json"
 done
 
-step "B (setup). import-key: B1's Canton ECIES encryption key into node 1, before the cluster starts"
-RUST_LOG=off "$COSIGNER" --config "$WORK/c1.json" import-key --in "$VEC/encryption.export-pw.bin" \
-  --passphrase-env E2E_EXPORT_PASSWORD --key-id "$IMPORTED_ID" --key-prefix "$PREFIX" --expect-fingerprint "$FP" \
-  | tee "$WORK/import.out"
-grep -q "ec-p256-ecies" "$WORK/import.out" || fail "import-key did not report an ec-p256-ecies key"
+step "B (setup). import-key: B1's Canton ECIES encryption key into nodes 1 and 2, before the cluster starts"
+# A node pulls a hosted key it lacks only from two peers that hold the same copy, so the key goes
+# onto two nodes (docs/hosted-keys.md, "Importing a Canton node's ECIES key"); node 3 pulls it.
+for i in 1 2; do
+  RUST_LOG=off "$COSIGNER" --config "$WORK/c$i.json" import-key --in "$VEC/encryption.export-pw.bin" \
+    --passphrase-env E2E_EXPORT_PASSWORD --key-id "$IMPORTED_ID" --key-prefix "$PREFIX" --expect-fingerprint "$FP" \
+    | tee "$WORK/import$i.out"
+  grep -q "ec-p256-ecies" "$WORK/import$i.out" || fail "import-key on node $i did not report an ec-p256-ecies key"
+done
 
 step "Start three cosigners"
 for i in 1 2 3; do

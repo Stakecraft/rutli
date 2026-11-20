@@ -20,7 +20,7 @@ use std::sync::Arc;
 use frost_ed25519::Identifier;
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use rutli_cosigner::config::TlsConfig;
-use rutli_cosigner::hosted::HostedSpec;
+use rutli_cosigner::hosted::{HostedKey, HostedSpec};
 use rutli_cosigner::keystore::KeyStore;
 use rutli_cosigner::node::Node;
 use rutli_cosigner::orchestrator::{
@@ -34,6 +34,7 @@ use rutli_cosigner::node::HostedKeyring;
 use rutli_cosigner::seal::{NodeSealBundle, Sealer};
 use rutli_cosigner::wrap::{legacy_commitment_key, DistKey};
 use rutli_cosigner::service::{PeerSvc, SignerSvc};
+use rutli_cosigner::DaemonError;
 use tokio::net::TcpListener;
 use tokio_stream::wrappers::TcpListenerStream;
 
@@ -226,22 +227,25 @@ async fn nodes_report_their_own_identifier_and_distribution_key_over_grpc() {
 async fn a_node_pulls_a_missing_hosted_key_over_grpc_fetchkey() {
     let m = mesh().await;
 
-    // The key exists on node 1 only (the others were down for the write).
+    // The key exists on node 1 only (the others were down for the write): one peer's copy is not
+    // enough, node 2 refuses to pull it (UNAVAILABLE, never NOT_FOUND).
     let (key, created) = m.nodes[0].hosted_generate("rutli-enc-1", HostedSpec::Rsa2048).unwrap();
     assert!(created);
+    assert!(matches!(
+        repair_hosted_key(&m.nodes[1], &m.peers[1], "rutli-enc-1").await,
+        Err(DaemonError::HostedUnconfirmed { .. })
+    ));
     assert!(!m.nodes[1].hosted_exists("rutli-enc-1"));
 
-    // Read-repair on node 2 and node 3: FetchKey on node 1 wraps to the caller's cert-derived
-    // number, and the caller must recognise itself as that node.
-    for i in [1usize, 2] {
-        assert!(
-            repair_hosted_key(&m.nodes[i], &m.peers[i], "rutli-enc-1").await.unwrap(),
-            "node {} could not pull the key from node 1 over gRPC",
-            i + 1
-        );
-        let ct = key.encrypt_oaep(b"after repair").unwrap();
-        assert_eq!(m.nodes[i].hosted_decrypt("rutli-enc-1", &ct).unwrap(), b"after repair");
-    }
+    // Node 3 holds it too. Read-repair on node 2: FetchKey on nodes 1 and 3 wraps to the caller's
+    // cert-derived number, and the caller must recognise itself as that node.
+    m.nodes[2].hosted_store("rutli-enc-1", &key).unwrap();
+    assert!(
+        repair_hosted_key(&m.nodes[1], &m.peers[1], "rutli-enc-1").await.unwrap(),
+        "node 2 could not pull the key from nodes 1 and 3 over gRPC"
+    );
+    let ct = key.encrypt_oaep(b"after repair").unwrap();
+    assert_eq!(m.nodes[1].hosted_decrypt("rutli-enc-1", &ct).unwrap(), b"after repair");
 }
 
 #[tokio::test]
@@ -264,8 +268,9 @@ async fn an_ec_p256_key_replicates_and_repairs_over_grpc() {
         assert_eq!(n.hosted_ecdh("rutli-enc-ec", &peer).unwrap().as_ref(), z.as_ref());
     }
 
-    // Pull path (FetchKey) for a key only node 1 holds.
+    // Pull path (FetchKey) for a key nodes 1 and 2 hold.
     let (only, _) = m.nodes[0].hosted_generate("rutli-enc-ec-2", HostedSpec::EcP256).unwrap();
+    m.nodes[1].hosted_store("rutli-enc-ec-2", &only).unwrap();
     assert!(repair_hosted_key(&m.nodes[2], &m.peers[2], "rutli-enc-ec-2").await.unwrap());
     assert_eq!(
         m.nodes[2].hosted_ecdh("rutli-enc-ec-2", &peer).unwrap().as_ref(),
@@ -298,9 +303,10 @@ async fn a_hosted_key_replicates_over_grpc_and_the_sweep_pulls_and_converges() {
         );
     }
 
-    // Pull path: a key only node 3 holds is pulled by node 2's anti-entropy sweep.
-    m.nodes[2].hosted_generate("rutli-enc-9", HostedSpec::Rsa2048).unwrap();
-    let (pulled, _pushed) = anti_entropy_sweep(&m.nodes[1], &m.peers[1]).await.unwrap();
+    // Pull path: a key nodes 1 and 3 hold is pulled by node 2's anti-entropy sweep.
+    let (k9, _) = m.nodes[2].hosted_generate("rutli-enc-9", HostedSpec::Rsa2048).unwrap();
+    m.nodes[0].hosted_store("rutli-enc-9", &k9).unwrap();
+    let pulled = anti_entropy_sweep(&m.nodes[1], &m.peers[1]).await.unwrap();
     assert!(pulled >= 1, "sweep should pull the key node 2 lacked");
     assert!(m.nodes[1].hosted_exists("rutli-enc-9"));
 }
@@ -329,12 +335,15 @@ async fn a_mixed_legacy_and_bundle_cluster_replicates_and_repairs_over_grpc() {
         }
     }
 
-    // FetchKey both ways: the legacy node pulls from a bundle node, and a bundle node from it.
+    // FetchKey both ways: the legacy node pulls from the bundle nodes, and a bundle node from the
+    // legacy node and the other bundle node.
     let (k3, _) = m.nodes[2].hosted_generate("rutli-enc-only-3", HostedSpec::Rsa2048).unwrap();
+    m.nodes[1].hosted_store("rutli-enc-only-3", &k3).unwrap();
     assert!(repair_hosted_key(&m.nodes[0], &m.peers[0], "rutli-enc-only-3").await.unwrap());
     let ct = k3.encrypt_oaep(b"mixed").unwrap();
     assert_eq!(m.nodes[0].hosted_decrypt("rutli-enc-only-3", &ct).unwrap(), b"mixed");
     let (k1, _) = m.nodes[0].hosted_generate("rutli-enc-only-1", HostedSpec::Rsa2048).unwrap();
+    m.nodes[2].hosted_store("rutli-enc-only-1", &k1).unwrap();
     assert!(repair_hosted_key(&m.nodes[1], &m.peers[1], "rutli-enc-only-1").await.unwrap());
     let ct = k1.encrypt_oaep(b"mixed").unwrap();
     assert_eq!(m.nodes[1].hosted_decrypt("rutli-enc-only-1", &ct).unwrap(), b"mixed");
@@ -679,4 +688,28 @@ async fn epoch_refusals_and_session_binding_hold_over_mtls_grpc() {
     let msg = rutli_frost_core::dealer::canton_test_message(b"around a stale node");
     let sig = rutli_cosigner::orchestrator::sign(&m.nodes[0], &m.peers[0], key, &msg).await.unwrap();
     assert!(rutli_cosigner::verify_key::signature_verifies(&group, &msg, &sig));
+}
+
+/// Over the wire: a push into an id the receiver lacks is refused unless the caller holds the
+/// receiver's generation fence for it, and a fenced push is still refused (as a typed conflict the
+/// caller can tell apart) while another cosigner holds different material under the id.
+#[tokio::test]
+async fn an_unfenced_or_contradicted_push_is_refused_over_mtls() {
+    let m = mesh().await;
+    let id = "rutli-sym-grpc-plant";
+    let planted = HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
+    let wrapped = m.nodes[1].hosted_wrap_for(id, &planted, 3, &m.nodes[2].dist_public_key().unwrap()).unwrap();
+    // Node 2 calls node 3's Peer API under its own certificate.
+    let to3 = &m.peers[1][2];
+    let e = to3.replicate_key("genkey-plant", id, "aes-256-gcm", &[], &wrapped).await.unwrap_err();
+    assert!(matches!(&e, DaemonError::Status(s) if s.code() == tonic::Code::FailedPrecondition), "{e:?}");
+    assert!(!m.nodes[2].hosted_exists(id));
+
+    // Node 2 fences node 3 itself; node 1 holds the real key: node 3 asks node 1 and refuses.
+    let real = HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
+    m.nodes[0].hosted_store(id, &real).unwrap();
+    to3.ceremony_fence("genkey-plant", id, "genkey").await.unwrap();
+    let e = to3.replicate_key("genkey-plant", id, "aes-256-gcm", &[], &wrapped).await.unwrap_err();
+    assert!(matches!(e, DaemonError::HostedConflict { .. }), "{e:?}");
+    assert!(!m.nodes[2].hosted_exists(id));
 }

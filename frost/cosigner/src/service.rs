@@ -448,12 +448,14 @@ impl Signer for SignerSvc {
         } else {
             Vec::new()
         };
+        let commitment = self.node.hosted_commitment(&key).map_err(Status::from)?;
         Ok(Response::new(pb::GenerateKeyReply {
             key_id: r.key_id,
             spec: r.spec,
             public_key_der,
             created,
             replicas: replicas as u32,
+            commitment,
         }))
     }
 
@@ -478,15 +480,34 @@ impl Signer for SignerSvc {
         self.authorize_key(&req, |r| &r.key_id)?;
         // Above all here: a sick node must not answer `exists: false` for a key it simply cannot read.
         self.refuse_if_keystore_down()?;
-        let key_id = req.into_inner().key_id;
-        match self.load_hosted_repairing(&key_id).await {
+        let r = req.into_inner();
+        let key_id = r.key_id;
+        // local_only: this node's own copy as it is — no read-repair, no replica count — so a
+        // client can compare every node's commitment and public key after a generation.
+        let loaded = if r.local_only {
+            let id = key_id.clone();
+            self.node.blocking(move |n| n.hosted_load(&id)).await.map_err(|e| match e {
+                crate::DaemonError::UnknownKey(k) => Status::not_found(format!("no such key: {k}")),
+                other => Status::from(other),
+            })
+        } else {
+            self.load_hosted_repairing(&key_id).await
+        };
+        match loaded {
             Ok(key) => {
-                let replicas = orchestrator::hosted_replica_count(&self.peers, &key_id).await;
+                let replicas =
+                    if r.local_only { 0 } else { orchestrator::hosted_replica_count(&self.peers, &key_id).await };
                 Ok(Response::new(pb::KeyInfoReply {
                     exists: true,
                     spec: key.spec.as_str().to_string(),
                     created_at: key.created_at,
                     replicas: replicas as u32,
+                    commitment: self.node.hosted_commitment(&key).map_err(Status::from)?,
+                    public_key_der: if key.spec.is_asymmetric() {
+                        key.derived_public_key_der().map_err(Status::from)?
+                    } else {
+                        Vec::new()
+                    },
                 }))
             }
             Err(e) if e.code() == tonic::Code::NotFound => {
@@ -538,13 +559,14 @@ impl Signer for SignerSvc {
         req: Request<pb::DecryptRequest>,
     ) -> Result<Response<pb::DecryptReply>, Status> {
         self.authorize_key(&req, |r| &r.key_id)?;
-        // Before charging the budget: a refused call does no work, so it must not spend any.
+        // A refused call does no work, so it must not spend any budget.
         self.refuse_if_keystore_down()?;
         let r = req.into_inner();
-        // Charge the budget BEFORE any work, including the read-repair fetch: an attacker must not
-        // be able to drive cluster traffic at line rate just because the key is not local yet.
-        self.charge_decrypt(&r.key_id)?;
+        // The budget is charged once the key is loaded here: a request that lands on a node lacking
+        // the key, which then answers UNAVAILABLE, decrypts nothing and spends nothing. The
+        // read-repair it triggers is bounded by the node's own fan-out ceiling instead.
         self.load_hosted_repairing(&r.key_id).await?;
+        self.charge_decrypt(&r.key_id)?;
         let result = self.node.blocking(move |n| n.hosted_decrypt(&r.key_id, &r.ciphertext)).await;
         record_hosted_op("decrypt", result.is_ok());
         Ok(Response::new(pb::DecryptReply { plaintext: result.map_err(Status::from)? }))
@@ -568,9 +590,9 @@ impl Signer for SignerSvc {
             record_hosted_op("ecdh_derive", false);
             Status::from(e)
         })?;
-        // Then the budget, before the read-repair fetch — as for Decrypt.
-        self.charge_decrypt(&r.key_id)?;
+        // Then the key, then the budget — as for Decrypt.
         self.load_hosted_repairing(&r.key_id).await?;
+        self.charge_decrypt(&r.key_id)?;
         // Z stays in its Zeroizing array until the reply is built. The one copy that is not wiped is
         // the reply's own `Vec` (and tonic's encode buffer after it): prost owns those, and the
         // bytes must leave the process anyway. The driver side has the JVM equivalent of this limit.
@@ -611,8 +633,9 @@ impl Signer for SignerSvc {
         self.authorize_key(&req, |r| &r.key_id)?;
         self.refuse_if_keystore_down()?;
         let r = req.into_inner();
-        self.charge_decrypt(&r.key_id)?;
+        // As for Decrypt: the key first, then the budget.
         self.load_hosted_repairing(&r.key_id).await?;
+        self.charge_decrypt(&r.key_id)?;
         let result = self.node.blocking(move |n| n.hosted_decrypt_symmetric(&r.key_id, &r.data)).await;
         record_hosted_op("symmetric_decrypt", result.is_ok());
         Ok(Response::new(pb::SymmetricReply { data: result.map_err(Status::from)? }))
@@ -620,17 +643,21 @@ impl Signer for SignerSvc {
 }
 
 impl SignerSvc {
-    /// Load a hosted key, pulling it from a peer first if this node is missing it (read-repair).
+    /// Load a hosted key, pulling it first if this node is missing it (read-repair).
     ///
     /// Without this, a request that lands on a lagging replica returns NOT_FOUND — and the driver
     /// deliberately does not fail over on NOT_FOUND, because it is normally authoritative.
-    /// Repairing on demand is what makes that assumption safe.
+    /// Repairing on demand is what makes that assumption safe. A key this node lacks is served only
+    /// once its peers confirmed it ([`orchestrator::read_repair`]); short of that the request
+    /// fails with UNAVAILABLE (`hosted-unconfirmed`), never NOT_FOUND, and the driver fails over.
+    /// Every read and encrypt path (PublicKey, KeyInfo, Decrypt, EcdhDerive, SymmetricEncrypt,
+    /// SymmetricDecrypt) loads through here.
     async fn load_hosted_repairing(
         &self,
         key_id: &str,
     ) -> Result<crate::hosted::HostedKey, Status> {
         if !orchestrator::hosted_exists(&self.node, key_id).await.map_err(Status::from)? {
-            orchestrator::repair_hosted_key(&self.node, &self.peers, key_id)
+            orchestrator::read_repair(&self.node, &self.peers, key_id)
                 .await
                 .map_err(Status::from)?;
         }
@@ -1236,20 +1263,30 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::ReplicateKeyRequest>,
     ) -> Result<Response<pb::ReplicateKeyReply>, Status> {
-        self.authorize(&req)?;
+        let asker = self.authorize(&req)?;
+        // Under TLS the caller's roster identifier, from its certificate: the peer it is not asked
+        // about again when this node checks the others. A plaintext dev mesh identifies nobody.
+        let sender = match self.allowed_cns {
+            Some(_) => Some(self.authenticated_peer(&req)?),
+            None => None,
+        };
         let r = req.into_inner();
         self.node.refuse_if_keystore_down().map_err(Status::from)?;
-        let spec = crate::hosted::HostedSpec::parse(&r.spec).map_err(Status::from)?;
         let wrapped = crate::peer::from_pb_wrapped(r.wrapped).map_err(Status::from)?;
-        let key = self.node.hosted_unwrap(&r.key_id, spec, &wrapped).map_err(Status::from)?;
-        let commitment = self
-            .node
-            .blocking(move |n| {
-                n.hosted_store_for(&r.key_id, &key, Some(&r.ceremony_id))?;
-                n.hosted_commitment(&key)
-            })
-            .await
-            .map_err(Status::from)?;
+        // A push into an id this node lacks is accepted only from the caller holding this node's
+        // generation fence for it under the ceremony id, and only if no other reachable peer holds
+        // different material (orchestrator::accept_replica).
+        let commitment = orchestrator::accept_replica(
+            &self.node,
+            &r.ceremony_id,
+            &r.key_id,
+            &r.spec,
+            &wrapped,
+            asker.as_deref(),
+            sender,
+        )
+        .await
+        .map_err(Status::from)?;
         Ok(Response::new(pb::ReplicateKeyReply { commitment }))
     }
 
@@ -1262,6 +1299,12 @@ impl Peer for PeerSvc {
         let recipient = self.authenticated_peer(&req)?;
         self.node.refuse_if_keystore_down().map_err(Status::from)?;
         let r = req.into_inner();
+        if r.include_tombstone {
+            let id = r.key_id.clone();
+            if let Some(t) = self.node.blocking(move |n| n.hosted_tombstone_manifest(&id)).await.map_err(Status::from)? {
+                return Ok(Response::new(pb::FetchKeyReply { tombstone: Some(t), ..Default::default() }));
+            }
+        }
         let key_id = r.key_id.clone();
         let key = self.node.blocking(move |n| n.hosted_load(&key_id)).await.map_err(|e| match e {
             crate::DaemonError::UnknownKey(k) => Status::not_found(format!("no such key: {k}")),
@@ -1281,6 +1324,7 @@ impl Peer for PeerSvc {
             spec: key.spec.as_str().to_string(),
             public_key_der,
             wrapped: Some(crate::peer::to_pb_wrapped(&wrapped)),
+            tombstone: None,
         }))
     }
 

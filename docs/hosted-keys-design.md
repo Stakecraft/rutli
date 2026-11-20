@@ -351,9 +351,10 @@ anti-entropy sweep that pushes *and* pulls, (b) on-demand read-repair before ret
 and (c) a `rutli_key_replicas < 3` alert. If any of those three is not shipped, default to 3/3.
 
 > **Shipped at 2-of-3, with all three preconditions now met.** (a) the sweep runs every
-> `anti_entropy_interval_secs` (default 300), pulling what this node lacks and pushing what a peer
-> lacks; (b) every serving path (`Decrypt`, `PublicKey`, `KeyInfo`, both symmetric ops) read-repairs
-> before it can return `NOT_FOUND`. A write that lands below quorum is purged cluster-wide and the
+> `anti_entropy_interval_secs` (default 300), pulling what this node lacks (up to 0.4.0 it also
+> pushed what a peer lacked; see "Replication integrity" below); (b) every serving path (`Decrypt`,
+> `PublicKey`, `KeyInfo`, `EcdhDerive`, both symmetric ops) read-repairs before it can return
+> `NOT_FOUND`. A write that lands below quorum is purged cluster-wide and the
 > id left free for a clean retry, rather than leaving one lonely copy.
 >
 > (c) shipped after the fact: the sweep publishes `rutli_key_replicas` — the fewest cosigners
@@ -385,6 +386,62 @@ anti-entropy — a key either exists or does not, and divergence is a hard error
 > `rutli_anti_entropy_conflicts_total` rather than reconciling. Nodes compare a keyed commitment
 > (scoped to the cluster master, so it means nothing off-cluster) rather than the material itself.
 
+**Replication integrity (0.5.0).** Immutability alone did not stop a planted key: up to 0.4.0 a node
+stored any key it did not yet hold — a peer's `ReplicateKey` with no check of who fenced the id, the
+first peer whose `FetchKey` envelope opened, the sweep's push — and a leader counted a replica that
+held other material as a mere failed replica. One compromised cosigner could make an honest node
+serve its material for a new id. A node now never makes hosted material servable on one peer's
+word; the rules rest on agreement between nodes, not on who may push:
+
+- **Pull** (read-repair, the sweep, a leader that finds the key on its peers,
+  `orchestrator::repair_hosted_key` / `adopt_existing`): every peer is asked concurrently (3 s
+  each, each roster node once); each copy is unwrapped, validated and committed to *on the pulling
+  node*. Only an answer counts: silence is unknown, an unusable answer is unknown. Store only when
+  `PULL_AGREEMENT` = 2 peers yield the same commitment and every other peer answers with nothing
+  else — a constant, also for five nodes, matching the one-compromised-node model. A peer's
+  tombstone (`FetchKey` with `include_tombstone`) is applied first and stops the pull. Take the
+  latest `created_at` and `undeleted_at_ms` of the supporters. `NOT_FOUND` only when
+  `n - write_quorum + 1` nodes said "not held". Anything else: `HostedUnconfirmed` (`UNAVAILABLE`,
+  trailer `hosted-unconfirmed`), so the driver fails over. Read-repair fan-outs are capped per node.
+- **The sweep never pushes.** It pulls each missing id once per pass.
+- **Push** (`orchestrator::accept_replica`, the same for `Peer.ReplicateKey` and the in-process
+  peer): identical material over a held id is a no-op, different material `HostedConflict`
+  (`ABORTED`, trailer `hosted-conflict`). An absent id is accepted only while the caller holds this
+  node's guard for it with kind `genkey`, owner = the request's ceremony id and leader = the caller
+  (the rollback purge's own test), and only after this node asked its other mesh peers (the sender
+  excluded) and none that answers holds different material, a copy it cannot check, or a valid
+  tombstone. A silent peer is no contradiction, or one node down would stop every generation.
+- **Leader** (`generate_hosted_fenced`): writes a new key locally only after the write quorum holds
+  it, and logs and counts every node its rollback misses. Any conflict — a 0.5.0 `hosted-conflict`, a 0.4.0
+  `ALREADY_EXISTS … different material`, an acknowledgement with another commitment — rolls the
+  generation back and answers `HostedConflict`; it is never outvoted by the replicas that agree.
+- **Timestamps** are bounded where peer material is unwrapped (`Node::hosted_unwrap`):
+  `created_at` and `undeleted_at_ms` may not exceed now + `clock_skew_secs`. They stay out of the
+  commitment: binding them would make every 0.4.0/0.5.0 comparison mismatch during the roll, and
+  `hosted-undelete` writes `undeleted_at_ms` on each node separately. A lower bound on
+  `undeleted_at_ms` buys nothing, since the delete check takes the later of the two times.
+- **RSA keys** are checked like EC keys: the stored public half must be the one the private key
+  derives (`HostedKey::validate`).
+
+Open, honest nodes only: a replica written by a generation whose leader died is served, so a
+retry that mints while that replica's node is down forks the id. The design for closing it — a
+durable "pending" state on every replica written by a generation, not served and not counted as
+agreement; promotion when the holders of that material (pending or live) reach the write quorum;
+dropping it when `n - write_quorum + 1` nodes answer that they hold no copy of it; resolution when
+the fence is released or lapses, at startup and in each sweep; and a mint only after
+`n - write_quorum + 1` nodes answered "nothing under this id" — is the next step after the client
+intent.
+
+Rejected: a guard-bound push alone (genkey fences carry no client intent, so the attacker can fence
+the id itself), and a two-phase pending/commit record (a record-format change, and the attacker can
+lead its own generation anyway). Still open, and the next step: a client-signed intent for creating
+a hosted key, through the ceremony intent machinery DKG and refresh use, so that a genkey fence
+without one is refused; and the driver's check, after `GenerateKey`, that every node holds the same
+commitment and public key (`GenerateKeyReply.commitment`, `KeyInfo` with `local_only`, both served
+since 0.5.0). Until then a compromised node can create a key under an id nobody has created yet, and
+a plant lands when every other holder is unreachable from the receiving node
+(`docs/security/threat-model.md`).
+
 ### Storage
 
 One directory, one file per key, reusing the existing sealed envelope and the existing atomic
@@ -412,9 +469,9 @@ key under a new master, rendering old sealed blobs — including in backups — 
 > which cannot be opened must not look like a deleted one to anti-entropy. That is worse, not safer
 > — it stops anti-entropy for every *healthy* key too, so one damaged file halts self-healing
 > cluster-wide. Such a file is now logged, counted by `rutli_unreadable_key_files_total`, and
-> skipped. Skipping is safe because absence from a listing never causes a delete (peers only push
-> keys a listing lacks) and a push onto an unreadable local file still fails closed in
-> `hosted_store` rather than overwriting it. The counter is the thing to alert on: a non-zero value
+> skipped. Skipping is safe because absence from a listing never causes a delete (since 0.5.0 nothing
+> is pushed at all; up to 0.4.0 peers pushed keys a listing lacked) and a write onto an unreadable
+> local file still fails closed in `hosted_store` rather than overwriting it. The counter is the thing to alert on: a non-zero value
 > means some key is not being replicated or repaired, and nothing else will say so.
 >
 > **Not shipped:** the `rewrap` ceremony that would make destruction real. Until it exists, "delete"
