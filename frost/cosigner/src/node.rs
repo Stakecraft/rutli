@@ -1094,7 +1094,12 @@ impl Node {
             let view = (share.epoch, share.pkp_digest()?);
             let nonce_store = NonceStore::open(self.keystore.nonce_dir(key_id))?;
             let cached = CachedKey {
-                cosigner: Arc::new(Cosigner::new(share.key_package, share.public_key_package, nonce_store)),
+                // Cloned: `share` wipes its own copy when it drops here, the cosigner wipes this one.
+                cosigner: Arc::new(Cosigner::new(
+                    share.key_package.clone(),
+                    share.public_key_package.clone(),
+                    nonce_store,
+                )),
                 view,
             };
             #[cfg(test)]
@@ -2735,7 +2740,10 @@ impl Node {
         });
         let others = without_self(round1_map, self.identifier);
         let (key_package, public_key_package) =
-            p.part3(&others, round2_for_me, old.public_key_package, old.key_package)?;
+            // Cloned: `old` wipes its own copy when it drops. frost's refresh_dkg_shares consumes
+            // this clone and drops it without wiping (as it does its intermediate scalars); that
+            // needs an upstream change.
+            p.part3(&others, round2_for_me, old.public_key_package.clone(), old.key_package.clone())?;
         if group_verifying_key_bytes(&public_key_package)? != old_group {
             // Never stage a share whose group key drifted — that would change the node identity.
             return Err(DaemonError::Disagreement(format!(

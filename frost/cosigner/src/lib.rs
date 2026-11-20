@@ -35,6 +35,7 @@ pub mod metrics;
 pub mod node;
 pub mod orchestrator;
 pub mod peer;
+pub mod process_hardening;
 pub mod profile;
 pub mod proof;
 pub mod ratelimit;

@@ -484,6 +484,8 @@ enum SealCommand {
     },
     /// DEK rotation, last step: the same bundle without `previous_share_deks`. Only once `keyfile
     /// status` on that node shows no file under a previous DEK and a backup has been taken since.
+    /// This removes the previous DEK from the bundle only; it is destroyed when every other copy
+    /// is (docs/key-material-handling.md).
     DropPrevious {
         #[arg(long, value_name = "FILE")]
         r#in: std::path::PathBuf,
@@ -630,6 +632,8 @@ async fn main() -> Result<()> {
         _ => {}
     }
     tracing::info!(identifier = cfg.identifier, listen = %cfg.listen, "starting cosigner");
+    // Before any key store is opened: a crash must not write share memory to a core file.
+    log_core_dumps(&rutli_cosigner::process_hardening::disable_core_dumps());
     // Peer key pins: required with TLS unless opted out, and this node's own key must be among its
     // own pins — or every peer would refuse it. Before anything else, so a bad rollout stops here.
     cfg.check_peer_pins_required()?;
@@ -1257,6 +1261,42 @@ fn check_config_command(path: &std::path::Path) -> ! {
         println!("meets the production profile");
     }
     std::process::exit(if required == 0 { 0 } else { 1 })
+}
+
+/// Startup: what [`rutli_cosigner::process_hardening::disable_core_dumps`] achieved, in one line.
+/// INFO only when every setting took effect; otherwise WARN naming what did not.
+fn log_core_dumps(d: &rutli_cosigner::process_hardening::CoreDumps) {
+    let pattern = d.core_pattern.as_deref().unwrap_or("unknown");
+    let suid = d.suid_dumpable.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into());
+    let linux = cfg!(target_os = "linux");
+    if d.all_applied() && !d.may_dump() {
+        tracing::info!(
+            rlimit_core_zero = d.core_limit_zero,
+            not_dumpable = d.not_dumpable,
+            core_pattern = pattern,
+            suid_dumpable = %suid,
+            "core dumps off: RLIMIT_CORE=0{}",
+            if linux { ", not dumpable" } else { " (PR_SET_DUMPABLE is Linux-only)" }
+        );
+        return;
+    }
+    let failed = [
+        (!d.core_limit_zero).then_some("RLIMIT_CORE could not be set to 0"),
+        (linux && !d.not_dumpable).then_some("PR_SET_DUMPABLE could not be cleared"),
+        d.may_dump().then_some(if d.core_pattern.as_deref().is_some_and(|p| p.starts_with('|')) {
+            "a crash can still be dumped: a piped core_pattern ignores RLIMIT_CORE for a dumpable process"
+        } else {
+            "a crash can still be dumped"
+        }),
+    ];
+    tracing::warn!(
+        rlimit_core_zero = d.core_limit_zero,
+        not_dumpable = d.not_dumpable,
+        core_pattern = pattern,
+        suid_dumpable = %suid,
+        "core dumps not fully off: {}",
+        failed.into_iter().flatten().collect::<Vec<_>>().join("; ")
+    );
 }
 
 /// Startup: the production-profile findings of a node that is not refusing on them (a production
@@ -2210,8 +2250,11 @@ fn seal_command(command: SealCommand) -> Result<()> {
             let dropped = bundle.without_previous();
             write_new_private_file(&out, &dropped.to_json()?)?;
             println!(
-                "wrote {} (node {}): share_dek id {}, {} previous DEK(s) dropped. Files sealed under \
-                 a dropped DEK no longer open on this node — including old backups.",
+                "wrote {} (node {}): share_dek id {}, {} previous DEK(s) removed from this bundle. \
+                 With this bundle, files sealed under a removed DEK no longer open on this node \
+                 (including old backups). The DEK is not destroyed until every other copy is: \
+                 earlier values of the seal Secret and their history, escrowed bundles, operator \
+                 machines (docs/key-material-handling.md).",
                 out.display(),
                 dropped.node,
                 dropped.dek_id(),
@@ -2763,8 +2806,10 @@ fn export_key_command(
         tracing::warn!(
             key_id,
             path = %out.display(),
-            "writing an UNENCRYPTED private key — this file IS the key; move it to an HSM or \
-             offline media and shred the copy"
+            "writing an UNENCRYPTED private key — this file IS the key. Write it only to a place \
+             you can destroy (a memory disk or an encrypted image), move it to an HSM or offline \
+             media, then destroy that place: deleting or overwriting the file does not erase it on \
+             flash, copy-on-write, journaling or network storage (docs/key-material-handling.md)"
         );
         rutli_cosigner::export::export_plaintext(key_id, &key)?
     } else {
