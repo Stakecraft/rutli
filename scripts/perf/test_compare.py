@@ -251,8 +251,18 @@ class ConnectionContext(unittest.TestCase):
         self.assertIn("handshake timeouts 12", line)
         self.assertIn("accept errors 1", line)
         self.assertIn("'cosigner1': 768.0", line)
-        self.assertIn("generator descriptor limit 1024", line)
+        self.assertIn("descriptors peak ? of 1024", line)
         self.assertIn("94 x UNKNOWN: transport error", line)
+        self.assertIn("verdict: handshake timeouts 12 > 0", line)
+
+    def test_the_verdict(self):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import run
+        self.assertTrue(run.context_verdict(3, 0.0, 10, 1024).startswith("handshake timeouts 3 > 0"))
+        self.assertIn("rig was strained", run.context_verdict(3, 0.4, 10, 1024))
+        self.assertEqual(run.context_verdict(0, 0.4, 10, 1024), "the rig: generator throttled 40%")
+        self.assertEqual(run.context_verdict(0, 0.0, 1000, "1024"), "the rig: generator descriptors 1000 of 1024")
+        self.assertTrue(run.context_verdict(0, None, None, "?").startswith("undecided"))
 
 
 if __name__ == "__main__":

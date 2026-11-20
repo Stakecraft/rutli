@@ -106,6 +106,11 @@ class K8sCluster:
         out = self.kubectl("exec", self.pod(node), "-c", "cosigner", "--", "sh", "-c", shell, timeout=30, check=False)
         return out.stdout if out.returncode == 0 else None
 
+    def generator_cgroup(self, script):
+        """`script` (diagnose.CGROUP_SCRIPT) in the first load generator pod; its output or None."""
+        out = self.kubectl("exec", "rutli-perf-loadgen", "--", "sh", "-c", script, timeout=30, check=False)
+        return out.stdout if out.returncode == 0 else None
+
     def generator_fd_limit(self):
         """The soft descriptor limit a load generator run gets in its pod, or "?"."""
         out = self.kubectl("exec", "rutli-perf-loadgen", "--", "sh", "-c", "ulimit -n", timeout=30, check=False)

@@ -101,6 +101,12 @@ pub struct ClientReport {
     /// With --eager-connect: how long each client's first connection took, set by the caller.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub connect: Option<ConnectReport>,
+    /// The most file descriptors this process held during the run, and its soft limit (Linux;
+    /// absent elsewhere): a generator near its limit fails connections itself.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fd_peak: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fd_limit: Option<u64>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, PartialEq)]
@@ -214,6 +220,8 @@ impl Recorder {
                 })
                 .collect(),
             connect: None,
+            fd_peak: None,
+            fd_limit: None,
         }
     }
 }

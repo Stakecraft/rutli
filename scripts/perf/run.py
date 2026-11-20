@@ -60,6 +60,27 @@ CLUSTER_ANSWER = re.compile(
     r"Unavailable|DataLoss|Unauthenticated)\b|not healthy after|do not agree on a cluster id)")
 
 
+def context_verdict(handshake_timeouts, generator_throttled, fd_peak, fd_limit):
+    """Whose side gave out when requests ended in transport errors: the cosigners cutting slow
+    handshakes (product behaviour under load), the load generator starved of CPU or descriptors
+    (the rig), or not decided by these readings."""
+    try:
+        limit = int(fd_limit)
+    except (TypeError, ValueError):
+        limit = None
+    rig = []
+    if generator_throttled is not None and generator_throttled > 0.05:
+        rig.append(f"generator throttled {generator_throttled:.0%}")
+    if fd_peak is not None and limit and fd_peak >= 0.9 * limit:
+        rig.append(f"generator descriptors {fd_peak} of {limit}")
+    if handshake_timeouts and handshake_timeouts > 0:
+        cut = f"handshake timeouts {handshake_timeouts:g} > 0: the cosigners cut slow handshakes"
+        return cut + (f" (and the rig was strained: {', '.join(rig)})" if rig else "")
+    if rig:
+        return "the rig: " + ", ".join(rig)
+    return "undecided: no handshake timeouts, generator not throttled or near its descriptor limit"
+
+
 def rig_failure(returncode, stderr):
     """Whether a failed rutli-loadgen run is the rig's failure rather than the cluster's."""
     return not (returncode == 2 and CLUSTER_ANSWER.search(stderr or ""))
@@ -192,6 +213,7 @@ class Runner:
         of the body's loads by its own."""
         log(f"scenario {name}")
         before = self.resources()
+        gen_before = self.generator_cgroup()
         started = time.time()
         try:
             loads = body()
@@ -201,6 +223,11 @@ class Runner:
         # Connections of the run are closed by now; give the cosigners a moment to notice.
         time.sleep(3)
         after = self.resources()
+        generator = {}
+        if gen_before is not None:
+            import diagnose
+            generator = diagnose.derive(gen_before, self.generator_cgroup() or {}, time.time() - started)
+        self.last_generator = generator
 
         checks = []
 
@@ -276,11 +303,21 @@ class Runner:
         self.results.append(result)
         return result, check
 
+    def generator_cgroup(self):
+        """The first load generator pod's cgroup readings (Kubernetes), or None where the
+        generator has no lasting container to read (Compose runs one per load)."""
+        read = getattr(self.cluster, "generator_cgroup", None)
+        if read is None:
+            return None
+        import diagnose
+        return diagnose.parse_cgroup(read(diagnose.CGROUP_SCRIPT) or "")
+
     def connection_context(self, loads):
         """One line: the cosigners' handshake timeouts and accept errors during the loads, their
-        open connections and connection limit at the end, the error messages behind the codes, and
-        the load generator's descriptor limit."""
+        open connections and connection limit at the end, the generator's CPU throttling and
+        descriptors, the error messages behind the codes, and a verdict: whose side gave out."""
         timeouts = accept = 0
+        fd_peak = fd_limit = None
         conns, limits, messages = {}, {}, {}
         for load in loads:
             server = load.get("server", {})
@@ -297,10 +334,20 @@ class Runner:
                         limits[node] = v
             for msg, n in load.get("client", {}).get("error_messages", {}).items():
                 messages[msg] = messages.get(msg, 0) + n
+            client = load.get("client", {})
+            if client.get("fd_peak") is not None:
+                fd_peak = max(fd_peak or 0, client["fd_peak"])
+                fd_limit = client.get("fd_limit") or fd_limit
+        fd_limit = fd_limit or self.cluster.generator_fd_limit()
+        gen = getattr(self, "last_generator", {}) or {}
+        throttled = gen.get("cpu_throttled_share")
         top = sorted(messages.items(), key=lambda kv: -kv[1])[:4]
-        return (f"cosigners: handshake timeouts {timeouts:g}, accept errors {accept:g}, connections at the end "
-                f"{conns or '?'}, connection limit {limits or '?'}; generator descriptor limit "
-                f"{self.cluster.generator_fd_limit()}; messages: " + "; ".join(f"{n} x {m[:120]}" for m, n in top))
+        verdict = context_verdict(timeouts, throttled, fd_peak, fd_limit)
+        return (f"verdict: {verdict}; cosigners: handshake timeouts {timeouts:g}, accept errors {accept:g}, "
+                f"connections at the end {conns or '?'}, connection limit {limits or '?'}; generator: CPU throttled "
+                f"{'?' if throttled is None else f'{throttled:.0%}'}, CPU cores {gen.get('cpu_cores', '?')}, "
+                f"descriptors peak {fd_peak if fd_peak is not None else '?'} of {fd_limit}; messages: "
+                + "; ".join(f"{n} x {m[:120]}" for m, n in top))
 
     def close(self, result):
         result["passed"] = all(c["ok"] for c in result["checks"])
@@ -425,21 +472,25 @@ class Runner:
         self.close(r)
 
         storm = f"perf-storm-{int(time.time())}"
-        # What a busy or refusing node answers. ALREADY_EXISTS only where the key is contested.
-        # INTERNAL too: a leader passes a member's ABORTED ("a dkg ceremony ... is already in
-        # progress") on to the client as INTERNAL (seen on the first run, reported). The scenario
-        # is about the nodes surviving the storm, not about that code.
+        # What a busy or refusing node answers. INTERNAL too: a leader passes a member's ABORTED
+        # ("a dkg ceremony ... is already in progress") on to the client as INTERNAL (#146). The
+        # distinct storm is about the nodes surviving it, not about that code.
         busy = ("UNAVAILABLE", "ABORTED", "FAILED_PRECONDITION", "RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED", "INTERNAL")
-        ceremony_codes = [busy, busy + ("ALREADY_EXISTS",), ("FAILED_PRECONDITION", "ABORTED")]
+        # The contested key: every client retries a contended answer with jittered backoff, as
+        # Canton does, so each ends with the key generated or ALREADY_EXISTS pointing at it.
+        ceremony_codes = [busy, ("ALREADY_EXISTS",), ("FAILED_PRECONDITION", "ABORTED")]
 
         def ceremonies():
             return [
                 # More DKGs at once than a node holds ceremony sessions (64).
                 self.loadgen(["dkg", "--prefix", storm, "--name", "dkg-distinct", "--count", "80", "--clients", "80",
                               "--prefer", "cosigner1"], timeout_secs=120, wall_timeout=900),
-                # One key, ten DKGs at once: whatever is answered OK must be the same key.
-                self.loadgen(["dkg", "--prefix", f"{storm}-same", "--same-key", "--name", "dkg-same-key", "--count", "10",
-                              "--clients", "10"], timeout_secs=120, wall_timeout=900),
+                # One key, ten DKGs at once, each retrying ABORTED up to six times (0.5 s doubling
+                # to 4 s, jittered): every answer OK must be the same key, and every ALREADY_EXISTS
+                # must point at that key (the generator asks GroupKey).
+                self.loadgen(["dkg", "--prefix", f"{storm}-same", "--same-key", "--retry-aborted", "6",
+                              "--name", "dkg-same-key", "--count", "10", "--clients", "10"],
+                             timeout_secs=120, wall_timeout=900),
                 # A refresh right after a refresh: allowed or refused, never a broken key.
                 self.loadgen(["refresh", "--key", KEY_SECOND, "--name", "refresh-twice", "--count", "2", "--clients", "1"],
                              timeout_secs=120, wall_timeout=900),
@@ -447,23 +498,15 @@ class Runner:
 
         r, check = self.scenario("limit-ceremony", ceremonies, allowed=ceremony_codes)
         if len(r["loads"]) == 3 and "failed" not in r["loads"][1]:
-            # Ten DKGs of one key at once may all abort each other (ABORTED: retry later); what the
-            # cosigners promise is that the key id is not left wedged: one DKG afterwards succeeds,
-            # or answers ALREADY_EXISTS if one of the ten won. That no two of them answered
-            # different keys is checked with every answer ("every answer verifies").
-            after = {}
-            for attempt in range(3):
-                after = self.loadgen(["dkg", "--prefix", f"{storm}-same", "--same-key", "--name", "dkg-same-key-after",
-                                      "--count", "1", "--clients", "1"], timeout_secs=120, wall_timeout=600)
-                client = after.get("client", {})
-                if client.get("ok") or client.get("errors", {}).get("ALREADY_EXISTS"):
-                    break
-                time.sleep(5)
-            client = after.get("client", {})
-            r["contested_key_winners"] = r["loads"][1].get("client", {}).get("ok", 0)
-            check("the contested key id can be generated after the storm (it is not wedged)",
-                  bool(client.get("ok") or client.get("errors", {}).get("ALREADY_EXISTS")),
-                  f"three DKGs afterwards: {client.get('errors') or after.get('failed')}")
+            # Retrying clients must converge: one group key exists, and every client ended with it
+            # (OK) or with ALREADY_EXISTS for it. Any other end is refused above as an unexpected
+            # code; two different keys are a wrong answer ("every answer verifies").
+            client = r["loads"][1].get("client", {})
+            winners, exists = client.get("ok", 0), client.get("errors", {}).get("ALREADY_EXISTS", 0)
+            r["contested_key_winners"] = winners
+            check("the ten retrying clients of the contested key converged on one group key",
+                  winners + exists == 10 and not client.get("bad_answers"),
+                  f"OK {winners}, ALREADY_EXISTS {exists}, other ends {client.get('errors')}")
         if r["loads"] and "failed" not in r["loads"][0]:
             check("some of the 80 DKGs succeeded", r["loads"][0].get("client", {}).get("ok", 0) >= 1)
         self.close(r)

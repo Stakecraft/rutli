@@ -61,7 +61,7 @@ builds it, plus the generator.
 | `restart` | the steady stream while one cosigner is killed (`SIGKILL`) and started again | every request still succeeds: clients fail over, leaders sign with the other member |
 | `cold-cache` | one cosigner restarted, then 300 signatures at once through it | every request succeeds and no cosigner loses a session between the two rounds (`rutli_sign_round2_unknown_session_total` does not move) |
 | `limit-rate` | 400 signatures on a key limited to 120 a minute | at least 120 and at most 180 succeed (each is charged on the two nodes that signed it), the rest are `RESOURCE_EXHAUSTED` |
-| `limit-ceremony` | 80 DKGs at once (a node holds 64 ceremony sessions), 10 DKGs of one key at once, two refreshes back to back | refusals only with the codes a busy or refusing node gives; every DKG of the contested key that succeeds answers the same group key, and the key id can still be generated afterwards (all ten may abort each other: `ABORTED` means retry later); a refresh leaves the group key unchanged |
+| `limit-ceremony` | 80 DKGs at once (a node holds 64 ceremony sessions), then 10 DKGs of one key at once, each client retrying `ABORTED` up to six times with jittered backoff (`--retry-aborted 6`), two refreshes back to back | the 80: refusals only with the codes a busy or refusing node gives; the contested key: every client ends with the one group key or `ALREADY_EXISTS` pointing at it (the generator asks `GroupKey`), never two keys; a refresh leaves the group key unchanged |
 | `limit-decrypt` | 12 000 `EcdhDerive` on a key limited to 6 000 a minute | no more than the bucket and its refill succeed, the surplus is `RESOURCE_EXHAUSTED` |
 | `limit-sessions` | 1 500 signatures of one key asked of one leader at the same moment | refusals and timeouts are allowed, wrong answers are not; the nodes stay up |
 | `recovery` | a short stream on both keys after all of the above | every request succeeds |
@@ -70,6 +70,14 @@ Every scenario also fails if a cosigner process died and was started again durin
 the scenario restarts it on purpose), if a cosigner is unhealthy afterwards, if its peak resident memory
 exceeds 512 MiB (`--max-rss-mib`), or if it holds over 64 more file descriptors than before the
 scenario (`--max-fd-growth`). Both are read from `/proc` inside the container.
+
+When a scenario fails on a code it does not allow, the check's detail starts with a verdict on
+whose side gave out: `handshake timeouts N > 0` (the cosigners cut handshakes that took over
+5 s), `the rig` (the load generator was throttled over 5 % of the time, or held over 90 % of its
+descriptor limit), or `undecided`. The readings follow it: the cosigners' accept-path counters
+and connections, the generator's CPU throttling (read from its pod's cgroup on Kubernetes, not
+available under Compose) and its peak descriptors (`fd_peak` of the generator's report), and the
+most frequent error messages.
 
 `limit-rate` and `limit-decrypt` also fail if the limit is never reached, or if more passes than
 the limit allows: a limit test that hit no limit proves nothing. `limit-ceremony` and
