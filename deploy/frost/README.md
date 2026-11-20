@@ -104,7 +104,8 @@ the cosigner cannot read them and exits with `cannot read TLS material … Permi
 the container user:
 
 ```sh
-sudo RUTLI_CERT_UID=10001 scripts/gen-frost-certs.sh 3 deploy/frost/certs
+sudo RUTLI_CERT_UID=10001 RUTLI_PIN_CONFIGS=deploy/frost/config-tls \
+  scripts/gen-frost-certs.sh 3 deploy/frost/certs
 ```
 
 or `sudo chown -R 10001:10001 deploy/frost/certs` after generating. On Kubernetes this is handled
