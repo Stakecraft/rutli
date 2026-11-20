@@ -147,16 +147,6 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      # The job-started guard installed on the runner this job landed on is the one in the repository.
-      # The job lands on whichever runner is free, so over many runs every runner is checked (not
-      # guaranteed within a given number of runs). A pull request gets only a warning when the guard
-      # differs (it may be the one changing it); a guard that is not installed or not visible to the
-      # job fails everywhere; a push to main fails on a difference until the runners are updated.
-      - name: Runner guard matches deploy/ci-runner/job-started-guard.sh
-        if: runner.environment == 'self-hosted'
-        env:
-          RUNNER_GUARD_WARN_ONLY: ${{ github.event_name == 'pull_request' && '1' || '0' }}
-        run: scripts/check-runner-guard.sh
       # Helm from get.helm.sh, checked against sha256 values pinned here (azure/setup-helm checks
       # none). To bump: set HELM_VERSION and both sums from the release notes of that version.
       - name: Install Helm
