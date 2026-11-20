@@ -159,7 +159,19 @@ message DkgRequest {
   // accepted (rutli_ceremony_intent_absent_total) unless signing_policy.require_ceremony_intent.
   SignedIntent intent = 2;
 }
-message DkgReply { bytes group_verifying_key = 1; }
+message DkgReply {
+  bytes group_verifying_key = 1;
+  // Since 0.5.0: true when the key already existed on every node and this DKG returned it instead of
+  // running a ceremony (a retry, or another client asking for the same id), false for a new key.
+  // Absent from a leader older than 0.5.0, which cannot tell: the driver warns and keeps the old
+  // behaviour then.
+  optional bool existing = 2;
+  // The DKG ceremony that created the key ("dkg-<hex(request_id)>" for an intent's ceremony): this
+  // ceremony for a new key; for an existing one, the DKG this leader committed it under, or empty
+  // when its record is gone or the key was refreshed since. A driver accepts an existing key only
+  // when this names a ceremony it asked for itself.
+  string origin_ceremony_id = 3;
+}
 
 // Proactively refresh shares for a key (same group key, re-randomized shares).
 message RefreshRequest {

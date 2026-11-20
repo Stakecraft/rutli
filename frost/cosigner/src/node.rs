@@ -557,6 +557,27 @@ impl Node {
         Ok(self.book()?.records.values().filter(|r| r.state == RecordState::Staged).cloned().collect())
     }
 
+    /// The DKG ceremony this node committed `key_id` under, while it still holds that sharing: the
+    /// COMMITTED "dkg" record for the key whose group key is `group_key` and whose epoch is the
+    /// share's current one. `None` when the record is gone, the key was refreshed since, or it did
+    /// not come from a DKG (`DkgReply.origin_ceremony_id`).
+    pub fn committed_dkg_ceremony(&self, key_id: &str, group_key: &[u8; 32]) -> Result<Option<String>> {
+        let epoch = match self.keystore.load_record(key_id) {
+            Ok(crate::keystore::Record::Frost(share)) => share.epoch,
+            Ok(_) | Err(DaemonError::UnknownKey(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let gk = hex::encode(group_key);
+        Ok(self.book()?.records.values().find_map(|r| {
+            (r.state == RecordState::Committed
+                && r.kind == CeremonyKind::Dkg.as_str()
+                && r.key_id == key_id
+                && r.new_epoch == epoch
+                && r.group_key.eq_ignore_ascii_case(&gk))
+            .then(|| r.ceremony_id.clone())
+        }))
+    }
+
     /// This node's view of key `key_id` for ceremony decisions: its committed share's epoch, PKP
     /// digest and group key (public values only), and whether a ceremony for it is staged here.
     /// Absent key: `present = false`. A hosted key under the id: `present`, origin "hosted".

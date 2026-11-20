@@ -28,6 +28,7 @@ private static final long serialVersionUID = 0L;
   }
   private DkgReply() {
     groupVerifyingKey_ = com.google.protobuf.ByteString.EMPTY;
+    originCeremonyId_ = "";
   }
 
   public static final com.google.protobuf.Descriptors.Descriptor
@@ -43,6 +44,7 @@ private static final long serialVersionUID = 0L;
             com.stakecraft.rutli.grpc.DkgReply.class, com.stakecraft.rutli.grpc.DkgReply.Builder.class);
   }
 
+  private int bitField0_;
   public static final int GROUP_VERIFYING_KEY_FIELD_NUMBER = 1;
   private com.google.protobuf.ByteString groupVerifyingKey_ = com.google.protobuf.ByteString.EMPTY;
   /**
@@ -52,6 +54,92 @@ private static final long serialVersionUID = 0L;
   @java.lang.Override
   public com.google.protobuf.ByteString getGroupVerifyingKey() {
     return groupVerifyingKey_;
+  }
+
+  public static final int EXISTING_FIELD_NUMBER = 2;
+  private boolean existing_ = false;
+  /**
+   * <pre>
+   * Since 0.5.0: true when the key already existed on every node and this DKG returned it instead of
+   * running a ceremony (a retry, or another client asking for the same id), false for a new key.
+   * Absent from a leader older than 0.5.0, which cannot tell: the driver warns and keeps the old
+   * behaviour then.
+   * </pre>
+   *
+   * <code>optional bool existing = 2;</code>
+   * @return Whether the existing field is set.
+   */
+  @java.lang.Override
+  public boolean hasExisting() {
+    return ((bitField0_ & 0x00000001) != 0);
+  }
+  /**
+   * <pre>
+   * Since 0.5.0: true when the key already existed on every node and this DKG returned it instead of
+   * running a ceremony (a retry, or another client asking for the same id), false for a new key.
+   * Absent from a leader older than 0.5.0, which cannot tell: the driver warns and keeps the old
+   * behaviour then.
+   * </pre>
+   *
+   * <code>optional bool existing = 2;</code>
+   * @return The existing.
+   */
+  @java.lang.Override
+  public boolean getExisting() {
+    return existing_;
+  }
+
+  public static final int ORIGIN_CEREMONY_ID_FIELD_NUMBER = 3;
+  @SuppressWarnings("serial")
+  private volatile java.lang.Object originCeremonyId_ = "";
+  /**
+   * <pre>
+   * The DKG ceremony that created the key ("dkg-&lt;hex(request_id)&gt;" for an intent's ceremony): this
+   * ceremony for a new key; for an existing one, the DKG this leader committed it under, or empty
+   * when its record is gone or the key was refreshed since. A driver accepts an existing key only
+   * when this names a ceremony it asked for itself.
+   * </pre>
+   *
+   * <code>string origin_ceremony_id = 3;</code>
+   * @return The originCeremonyId.
+   */
+  @java.lang.Override
+  public java.lang.String getOriginCeremonyId() {
+    java.lang.Object ref = originCeremonyId_;
+    if (ref instanceof java.lang.String) {
+      return (java.lang.String) ref;
+    } else {
+      com.google.protobuf.ByteString bs = 
+          (com.google.protobuf.ByteString) ref;
+      java.lang.String s = bs.toStringUtf8();
+      originCeremonyId_ = s;
+      return s;
+    }
+  }
+  /**
+   * <pre>
+   * The DKG ceremony that created the key ("dkg-&lt;hex(request_id)&gt;" for an intent's ceremony): this
+   * ceremony for a new key; for an existing one, the DKG this leader committed it under, or empty
+   * when its record is gone or the key was refreshed since. A driver accepts an existing key only
+   * when this names a ceremony it asked for itself.
+   * </pre>
+   *
+   * <code>string origin_ceremony_id = 3;</code>
+   * @return The bytes for originCeremonyId.
+   */
+  @java.lang.Override
+  public com.google.protobuf.ByteString
+      getOriginCeremonyIdBytes() {
+    java.lang.Object ref = originCeremonyId_;
+    if (ref instanceof java.lang.String) {
+      com.google.protobuf.ByteString b = 
+          com.google.protobuf.ByteString.copyFromUtf8(
+              (java.lang.String) ref);
+      originCeremonyId_ = b;
+      return b;
+    } else {
+      return (com.google.protobuf.ByteString) ref;
+    }
   }
 
   private byte memoizedIsInitialized = -1;
@@ -71,6 +159,12 @@ private static final long serialVersionUID = 0L;
     if (!groupVerifyingKey_.isEmpty()) {
       output.writeBytes(1, groupVerifyingKey_);
     }
+    if (((bitField0_ & 0x00000001) != 0)) {
+      output.writeBool(2, existing_);
+    }
+    if (!com.google.protobuf.GeneratedMessage.isStringEmpty(originCeremonyId_)) {
+      com.google.protobuf.GeneratedMessage.writeString(output, 3, originCeremonyId_);
+    }
     getUnknownFields().writeTo(output);
   }
 
@@ -83,6 +177,13 @@ private static final long serialVersionUID = 0L;
     if (!groupVerifyingKey_.isEmpty()) {
       size += com.google.protobuf.CodedOutputStream
         .computeBytesSize(1, groupVerifyingKey_);
+    }
+    if (((bitField0_ & 0x00000001) != 0)) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeBoolSize(2, existing_);
+    }
+    if (!com.google.protobuf.GeneratedMessage.isStringEmpty(originCeremonyId_)) {
+      size += com.google.protobuf.GeneratedMessage.computeStringSize(3, originCeremonyId_);
     }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
@@ -101,6 +202,13 @@ private static final long serialVersionUID = 0L;
 
     if (!getGroupVerifyingKey()
         .equals(other.getGroupVerifyingKey())) return false;
+    if (hasExisting() != other.hasExisting()) return false;
+    if (hasExisting()) {
+      if (getExisting()
+          != other.getExisting()) return false;
+    }
+    if (!getOriginCeremonyId()
+        .equals(other.getOriginCeremonyId())) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -114,6 +222,13 @@ private static final long serialVersionUID = 0L;
     hash = (19 * hash) + getDescriptor().hashCode();
     hash = (37 * hash) + GROUP_VERIFYING_KEY_FIELD_NUMBER;
     hash = (53 * hash) + getGroupVerifyingKey().hashCode();
+    if (hasExisting()) {
+      hash = (37 * hash) + EXISTING_FIELD_NUMBER;
+      hash = (53 * hash) + com.google.protobuf.Internal.hashBoolean(
+          getExisting());
+    }
+    hash = (37 * hash) + ORIGIN_CEREMONY_ID_FIELD_NUMBER;
+    hash = (53 * hash) + getOriginCeremonyId().hashCode();
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -246,6 +361,8 @@ private static final long serialVersionUID = 0L;
       super.clear();
       bitField0_ = 0;
       groupVerifyingKey_ = com.google.protobuf.ByteString.EMPTY;
+      existing_ = false;
+      originCeremonyId_ = "";
       return this;
     }
 
@@ -282,6 +399,15 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000001) != 0)) {
         result.groupVerifyingKey_ = groupVerifyingKey_;
       }
+      int to_bitField0_ = 0;
+      if (((from_bitField0_ & 0x00000002) != 0)) {
+        result.existing_ = existing_;
+        to_bitField0_ |= 0x00000001;
+      }
+      if (((from_bitField0_ & 0x00000004) != 0)) {
+        result.originCeremonyId_ = originCeremonyId_;
+      }
+      result.bitField0_ |= to_bitField0_;
     }
 
     @java.lang.Override
@@ -298,6 +424,14 @@ private static final long serialVersionUID = 0L;
       if (other == com.stakecraft.rutli.grpc.DkgReply.getDefaultInstance()) return this;
       if (other.getGroupVerifyingKey() != com.google.protobuf.ByteString.EMPTY) {
         setGroupVerifyingKey(other.getGroupVerifyingKey());
+      }
+      if (other.hasExisting()) {
+        setExisting(other.getExisting());
+      }
+      if (!other.getOriginCeremonyId().isEmpty()) {
+        originCeremonyId_ = other.originCeremonyId_;
+        bitField0_ |= 0x00000004;
+        onChanged();
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -330,6 +464,16 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000001;
               break;
             } // case 10
+            case 16: {
+              existing_ = input.readBool();
+              bitField0_ |= 0x00000002;
+              break;
+            } // case 16
+            case 26: {
+              originCeremonyId_ = input.readStringRequireUtf8();
+              bitField0_ |= 0x00000004;
+              break;
+            } // case 26
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -375,6 +519,181 @@ private static final long serialVersionUID = 0L;
     public Builder clearGroupVerifyingKey() {
       bitField0_ = (bitField0_ & ~0x00000001);
       groupVerifyingKey_ = getDefaultInstance().getGroupVerifyingKey();
+      onChanged();
+      return this;
+    }
+
+    private boolean existing_ ;
+    /**
+     * <pre>
+     * Since 0.5.0: true when the key already existed on every node and this DKG returned it instead of
+     * running a ceremony (a retry, or another client asking for the same id), false for a new key.
+     * Absent from a leader older than 0.5.0, which cannot tell: the driver warns and keeps the old
+     * behaviour then.
+     * </pre>
+     *
+     * <code>optional bool existing = 2;</code>
+     * @return Whether the existing field is set.
+     */
+    @java.lang.Override
+    public boolean hasExisting() {
+      return ((bitField0_ & 0x00000002) != 0);
+    }
+    /**
+     * <pre>
+     * Since 0.5.0: true when the key already existed on every node and this DKG returned it instead of
+     * running a ceremony (a retry, or another client asking for the same id), false for a new key.
+     * Absent from a leader older than 0.5.0, which cannot tell: the driver warns and keeps the old
+     * behaviour then.
+     * </pre>
+     *
+     * <code>optional bool existing = 2;</code>
+     * @return The existing.
+     */
+    @java.lang.Override
+    public boolean getExisting() {
+      return existing_;
+    }
+    /**
+     * <pre>
+     * Since 0.5.0: true when the key already existed on every node and this DKG returned it instead of
+     * running a ceremony (a retry, or another client asking for the same id), false for a new key.
+     * Absent from a leader older than 0.5.0, which cannot tell: the driver warns and keeps the old
+     * behaviour then.
+     * </pre>
+     *
+     * <code>optional bool existing = 2;</code>
+     * @param value The existing to set.
+     * @return This builder for chaining.
+     */
+    public Builder setExisting(boolean value) {
+
+      existing_ = value;
+      bitField0_ |= 0x00000002;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * Since 0.5.0: true when the key already existed on every node and this DKG returned it instead of
+     * running a ceremony (a retry, or another client asking for the same id), false for a new key.
+     * Absent from a leader older than 0.5.0, which cannot tell: the driver warns and keeps the old
+     * behaviour then.
+     * </pre>
+     *
+     * <code>optional bool existing = 2;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearExisting() {
+      bitField0_ = (bitField0_ & ~0x00000002);
+      existing_ = false;
+      onChanged();
+      return this;
+    }
+
+    private java.lang.Object originCeremonyId_ = "";
+    /**
+     * <pre>
+     * The DKG ceremony that created the key ("dkg-&lt;hex(request_id)&gt;" for an intent's ceremony): this
+     * ceremony for a new key; for an existing one, the DKG this leader committed it under, or empty
+     * when its record is gone or the key was refreshed since. A driver accepts an existing key only
+     * when this names a ceremony it asked for itself.
+     * </pre>
+     *
+     * <code>string origin_ceremony_id = 3;</code>
+     * @return The originCeremonyId.
+     */
+    public java.lang.String getOriginCeremonyId() {
+      java.lang.Object ref = originCeremonyId_;
+      if (!(ref instanceof java.lang.String)) {
+        com.google.protobuf.ByteString bs =
+            (com.google.protobuf.ByteString) ref;
+        java.lang.String s = bs.toStringUtf8();
+        originCeremonyId_ = s;
+        return s;
+      } else {
+        return (java.lang.String) ref;
+      }
+    }
+    /**
+     * <pre>
+     * The DKG ceremony that created the key ("dkg-&lt;hex(request_id)&gt;" for an intent's ceremony): this
+     * ceremony for a new key; for an existing one, the DKG this leader committed it under, or empty
+     * when its record is gone or the key was refreshed since. A driver accepts an existing key only
+     * when this names a ceremony it asked for itself.
+     * </pre>
+     *
+     * <code>string origin_ceremony_id = 3;</code>
+     * @return The bytes for originCeremonyId.
+     */
+    public com.google.protobuf.ByteString
+        getOriginCeremonyIdBytes() {
+      java.lang.Object ref = originCeremonyId_;
+      if (ref instanceof String) {
+        com.google.protobuf.ByteString b = 
+            com.google.protobuf.ByteString.copyFromUtf8(
+                (java.lang.String) ref);
+        originCeremonyId_ = b;
+        return b;
+      } else {
+        return (com.google.protobuf.ByteString) ref;
+      }
+    }
+    /**
+     * <pre>
+     * The DKG ceremony that created the key ("dkg-&lt;hex(request_id)&gt;" for an intent's ceremony): this
+     * ceremony for a new key; for an existing one, the DKG this leader committed it under, or empty
+     * when its record is gone or the key was refreshed since. A driver accepts an existing key only
+     * when this names a ceremony it asked for itself.
+     * </pre>
+     *
+     * <code>string origin_ceremony_id = 3;</code>
+     * @param value The originCeremonyId to set.
+     * @return This builder for chaining.
+     */
+    public Builder setOriginCeremonyId(
+        java.lang.String value) {
+      if (value == null) { throw new NullPointerException(); }
+      originCeremonyId_ = value;
+      bitField0_ |= 0x00000004;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * The DKG ceremony that created the key ("dkg-&lt;hex(request_id)&gt;" for an intent's ceremony): this
+     * ceremony for a new key; for an existing one, the DKG this leader committed it under, or empty
+     * when its record is gone or the key was refreshed since. A driver accepts an existing key only
+     * when this names a ceremony it asked for itself.
+     * </pre>
+     *
+     * <code>string origin_ceremony_id = 3;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearOriginCeremonyId() {
+      originCeremonyId_ = getDefaultInstance().getOriginCeremonyId();
+      bitField0_ = (bitField0_ & ~0x00000004);
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * The DKG ceremony that created the key ("dkg-&lt;hex(request_id)&gt;" for an intent's ceremony): this
+     * ceremony for a new key; for an existing one, the DKG this leader committed it under, or empty
+     * when its record is gone or the key was refreshed since. A driver accepts an existing key only
+     * when this names a ceremony it asked for itself.
+     * </pre>
+     *
+     * <code>string origin_ceremony_id = 3;</code>
+     * @param value The bytes for originCeremonyId to set.
+     * @return This builder for chaining.
+     */
+    public Builder setOriginCeremonyIdBytes(
+        com.google.protobuf.ByteString value) {
+      if (value == null) { throw new NullPointerException(); }
+      checkByteStringIsUtf8(value);
+      originCeremonyId_ = value;
+      bitField0_ |= 0x00000004;
       onChanged();
       return this;
     }

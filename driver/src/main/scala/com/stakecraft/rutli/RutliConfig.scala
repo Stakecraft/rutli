@@ -104,6 +104,10 @@ final case class SigningJournalConfig(
   * @param signIntents `on` (default) | `off`: attach a signing intent to every FROST sign. `off` is
   *                   an emergency switch (a cluster-id or intent problem) that only works while
   *                   the cosigners do not set `signing_policy.require_intent`.
+  * @param adoptExistingKeys FROST key ids a DKG may return although the cluster already held them
+  *                   from a ceremony this driver did not start. Since 0.5.0 such a key is refused
+  *                   (another participant's key, or a DKG started before a driver restart); list an
+  *                   id here only after checking that the key is this participant's own.
   */
 final case class FrostConfig(
     endpoint: Option[String] = None,
@@ -114,6 +118,7 @@ final case class FrostConfig(
     keyPrefix: String = "",
     clusterId: Option[String] = None,
     signIntents: String = "on",
+    adoptExistingKeys: List[String] = Nil,
 ) {
 
   /** `sign-intents` as a switch; anything but on/off (or true/false) is a config error. */

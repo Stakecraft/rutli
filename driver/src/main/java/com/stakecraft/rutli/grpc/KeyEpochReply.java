@@ -285,6 +285,23 @@ private static final long serialVersionUID = 0L;
     }
   }
 
+  public static final int STALE_BY_OWN_RECORD_FIELD_NUMBER = 12;
+  private boolean staleByOwnRecord_ = false;
+  /**
+   * <pre>
+   * The stale mark comes from this node's own COMMITTED ceremony record (its share is older than an
+   * epoch it committed), not from peers' answers. Such a node does not vouch for the sharing it
+   * holds. Unset by nodes before 0.5.0.
+   * </pre>
+   *
+   * <code>bool stale_by_own_record = 12;</code>
+   * @return The staleByOwnRecord.
+   */
+  @java.lang.Override
+  public boolean getStaleByOwnRecord() {
+    return staleByOwnRecord_;
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -331,6 +348,9 @@ private static final long serialVersionUID = 0L;
     }
     if (!com.google.protobuf.GeneratedMessage.isStringEmpty(staleReason_)) {
       com.google.protobuf.GeneratedMessage.writeString(output, 11, staleReason_);
+    }
+    if (staleByOwnRecord_ != false) {
+      output.writeBool(12, staleByOwnRecord_);
     }
     getUnknownFields().writeTo(output);
   }
@@ -382,6 +402,10 @@ private static final long serialVersionUID = 0L;
     if (!com.google.protobuf.GeneratedMessage.isStringEmpty(staleReason_)) {
       size += com.google.protobuf.GeneratedMessage.computeStringSize(11, staleReason_);
     }
+    if (staleByOwnRecord_ != false) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeBoolSize(12, staleByOwnRecord_);
+    }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
     return size;
@@ -419,6 +443,8 @@ private static final long serialVersionUID = 0L;
         != other.getStale()) return false;
     if (!getStaleReason()
         .equals(other.getStaleReason())) return false;
+    if (getStaleByOwnRecord()
+        != other.getStaleByOwnRecord()) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -457,6 +483,9 @@ private static final long serialVersionUID = 0L;
         getStale());
     hash = (37 * hash) + STALE_REASON_FIELD_NUMBER;
     hash = (53 * hash) + getStaleReason().hashCode();
+    hash = (37 * hash) + STALE_BY_OWN_RECORD_FIELD_NUMBER;
+    hash = (53 * hash) + com.google.protobuf.Internal.hashBoolean(
+        getStaleByOwnRecord());
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -599,6 +628,7 @@ private static final long serialVersionUID = 0L;
       stagedNewPkpDigest_ = com.google.protobuf.ByteString.EMPTY;
       stale_ = false;
       staleReason_ = "";
+      staleByOwnRecord_ = false;
       return this;
     }
 
@@ -665,6 +695,9 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000400) != 0)) {
         result.staleReason_ = staleReason_;
       }
+      if (((from_bitField0_ & 0x00000800) != 0)) {
+        result.staleByOwnRecord_ = staleByOwnRecord_;
+      }
     }
 
     @java.lang.Override
@@ -717,6 +750,9 @@ private static final long serialVersionUID = 0L;
         staleReason_ = other.staleReason_;
         bitField0_ |= 0x00000400;
         onChanged();
+      }
+      if (other.getStaleByOwnRecord() != false) {
+        setStaleByOwnRecord(other.getStaleByOwnRecord());
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -799,6 +835,11 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000400;
               break;
             } // case 90
+            case 96: {
+              staleByOwnRecord_ = input.readBool();
+              bitField0_ |= 0x00000800;
+              break;
+            } // case 96
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -1376,6 +1417,56 @@ private static final long serialVersionUID = 0L;
       checkByteStringIsUtf8(value);
       staleReason_ = value;
       bitField0_ |= 0x00000400;
+      onChanged();
+      return this;
+    }
+
+    private boolean staleByOwnRecord_ ;
+    /**
+     * <pre>
+     * The stale mark comes from this node's own COMMITTED ceremony record (its share is older than an
+     * epoch it committed), not from peers' answers. Such a node does not vouch for the sharing it
+     * holds. Unset by nodes before 0.5.0.
+     * </pre>
+     *
+     * <code>bool stale_by_own_record = 12;</code>
+     * @return The staleByOwnRecord.
+     */
+    @java.lang.Override
+    public boolean getStaleByOwnRecord() {
+      return staleByOwnRecord_;
+    }
+    /**
+     * <pre>
+     * The stale mark comes from this node's own COMMITTED ceremony record (its share is older than an
+     * epoch it committed), not from peers' answers. Such a node does not vouch for the sharing it
+     * holds. Unset by nodes before 0.5.0.
+     * </pre>
+     *
+     * <code>bool stale_by_own_record = 12;</code>
+     * @param value The staleByOwnRecord to set.
+     * @return This builder for chaining.
+     */
+    public Builder setStaleByOwnRecord(boolean value) {
+
+      staleByOwnRecord_ = value;
+      bitField0_ |= 0x00000800;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * The stale mark comes from this node's own COMMITTED ceremony record (its share is older than an
+     * epoch it committed), not from peers' answers. Such a node does not vouch for the sharing it
+     * holds. Unset by nodes before 0.5.0.
+     * </pre>
+     *
+     * <code>bool stale_by_own_record = 12;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearStaleByOwnRecord() {
+      bitField0_ = (bitField0_ & ~0x00000800);
+      staleByOwnRecord_ = false;
       onChanged();
       return this;
     }
