@@ -100,6 +100,14 @@ class ProductionProfileSpec extends AnyWordSpec with Matchers {
       findings(frost(enforced)(_.copy(delegate = "none", hostedKeys = true))) shouldBe Nil
     }
 
+    "recognise Canton's `<node>-namespace` key ids for the approval rule and the anchor" in {
+      val named = frost(enforced)(_.copy(expectedGroupKeys = Map("frost-participant1-namespace" -> ("ab" * 32))))
+        .copy(approval = enforced.approval.map(_.copy(rules = List(ApprovalRule("frost-participant1-namespace", "quorum", 1)))))
+      findings(named) shouldBe Nil
+      val signingOnly = named.copy(approval = named.approval.map(_.copy(rules = List(ApprovalRule("frost-participant1-signing", "quorum", 1)))))
+      findings(signingOnly).map(_.setting) shouldBe List("approval")
+    }
+
     "follow the key prefix for the namespace-key approval rule" in {
       val prefixed = frost(enforced)(f => f.copy(keyPrefix = "p1-", expectedGroupKeys = Map("p1-frost-namespace" -> ("ab" * 32))))
       findings(prefixed).map(_.setting) shouldBe List("approval")

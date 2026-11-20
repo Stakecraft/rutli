@@ -358,20 +358,20 @@ if [ "${SKIP_RESTART:-0}" != 1 ]; then
   }
   (run_restart restart1) &
   R1=$!
-  committed() { grep -h "ceremony committed" "$WORK"/node[123].log 2>/dev/null | grep -q "e2e3-frost-namespace"; }
+  committed() { grep -h "ceremony committed" "$WORK"/node[123].log 2>/dev/null | grep -q "e2e3-frost-participant1-namespace"; }
   for _ in $(seq 1 600); do committed && break; kill -0 "$R1" 2>/dev/null || break; sleep 0.5; done
   committed || fail "the first run's namespace DKG never committed on a cosigner"
   pkill -KILL -P "$R1" 2>/dev/null || true
   kill -KILL "$R1" 2>/dev/null || true
   wait "$R1" 2>/dev/null || true
-  [ -s "$WORK/pins3/e2e3-frost-namespace.dkg" ] || fail "the driver recorded no DKG ceremony id before its request"
+  [ -s "$WORK/pins3/e2e3-frost-participant1-namespace.dkg" ] || fail "the driver recorded no DKG ceremony id before its request"
   grep -q "^E2E-F-UP" "$WORK/restart1.out" 2>/dev/null && echo "(the first run finished before the kill; the restart still takes the adoption path)"
   (run_restart restart2) || fail "the restarted participant did not initialise: $(tail -n 5 "$WORK/restart2.out")"
   grep -q "^E2E-F-UP" "$WORK/restart2.out" || fail "the restarted participant did not initialise"
   grep -qh "returned the key of this driver's own ceremony" "$WORK"/restart2*.log \
     || fail "after the restart the driver did not take the existing key as its own ceremony's"
   ! grep -qh "the cluster already holds this key" "$WORK"/restart2*.log || fail "after the restart the driver refused its own key"
-  [ -s "$WORK/pins3/e2e3-frost-namespace.pin" ] || fail "no group-key pin for the adopted key"
+  [ -s "$WORK/pins3/e2e3-frost-participant1-namespace.pin" ] || fail "no group-key pin for the adopted key"
   echo "killed during its DKG, the participant adopted its own key on the next start"
 fi
 

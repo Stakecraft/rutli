@@ -102,7 +102,7 @@ Its exit codes are those of `check-config` above.
 | `audit-log-path` | unset | set | The hash-chained audit log `audit-cross-check` compares with the journals. |
 | `signing-journal` | unset | set | The driver's own record of every signature. |
 | `hsm.pin` (with an HSM) | — | not inline; use `hsm.pin-env` | The PIN stays out of the config file. |
-| `approval` | unset | **advisory**: a quorum rule for the namespace key (`<key-prefix>frost-namespace`) | Human approval of namespace-key signatures. A deployment decision, so it is reported and never refuses. |
+| `approval` | unset | **advisory**: a quorum rule for the namespace key (`<key-prefix>frost-<node>-namespace`, or a rule over every FROST key) | Human approval of namespace-key signatures. A deployment decision, so it is reported and never refuses. |
 
 Placement is not a config setting and the profile cannot check it: each cosigner in its own cluster
 or cloud account is a go-live gate ([audit-prep.md](audit-prep.md#operator-go-live-gates-post-audit)).
