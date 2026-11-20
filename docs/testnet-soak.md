@@ -85,8 +85,9 @@ and `key-prefix` rules of step 4 apply unchanged, and so does step 5.
    **A second participant on the same cluster** needs its own `frost.key-prefix` in the overlay
    (e.g. `"soak2-"`), set *before* its first bootstrap. Without it, its DKG asks the cluster for the
    first participant's `frost-namespace`. Before 0.4.0-rc.3 that was refused with `ALREADY_EXISTS`
-   (2026-10-07 bring-up); since then a DKG for a committed key returns it, so the second
-   participant would be handed the first one's keys unless a `signer_acl` refuses its driver. See
+   (2026-10-07 bring-up); since then a DKG for a committed key returns it. A 0.4.x driver took it,
+   handing the second participant the first one's keys unless a `signer_acl` refused its driver.
+   Since 0.5.0 the driver refuses a key its own ceremony did not create. See
    `docs/architecture.md` → *One cluster, several participants*.
 5. **Acceptance:** participant boots, driver health OK in its log, its Ed25519 keys born via cluster DKG: a Splice
    validator has two, `frost-namespace` and `frost-signing`

@@ -220,9 +220,29 @@ participant's DKG with `ALREADY_EXISTS`. (The 2026-10-07 DevNet soak bring-up hi
 a second validator; the only way out at the time was retiring the old shares by hand on every
 cosigner.) Since 0.4.0-rc.3 a DKG for an id that every node already holds from a DKG returns the
 existing key, so that Canton's retry succeeds ([ceremonies.md](ceremonies.md#idempotent-dkg)). The
-cluster cannot tell a retry from a second participant: without a prefix the second participant is
-handed the first one's Ed25519 keys, and the two share one identity root. Nothing is overwritten,
-and nothing warns. Set the prefix before the first bootstrap, and give each participant its own
+cluster cannot tell a retry from a second participant. Before 0.5.0, without a prefix, the second
+participant was handed the first one's Ed25519 keys, and the two shared one identity root, with no
+warning.
+
+Since 0.5.0 the DKG reply says whether the key already existed (`existing`), and which DKG created
+it (`origin_ceremony_id`, the ceremony the client's intent named) when the leader still holds that
+ceremony's record: settled records are kept 30 days, and a refresh starts a new sharing, after
+which no origin is named. The driver accepts an existing key only when that ceremony is one it
+asked for itself in this process: Canton's retry after a timeout. Any other existing key is refused, naming `frost.key-prefix` and
+`frost.adopt-existing-keys`. A driver that restarts in the middle of a bootstrap has forgotten its
+own ceremony ids and is refused too (until the driver persists them, a follow-up to the durable
+group-key pins). The refusal says what to do. If another participant uses this cluster with the
+same `frost.key-prefix`, the key is theirs: do not adopt it, give this participant its own prefix
+and driver certificate. Otherwise it is this participant's own key from before the restart: list its
+id in `frost.adopt-existing-keys`, restart the participant, and remove the entry once Canton has
+registered the key. A DKG sent without an intent (no
+TLS, `frost.sign-intents = off`) cannot be matched and is accepted with a warning, and so is a
+reply from a leader older than 0.5.0, which leaves the field out.
+
+The flag is the leader's word. A compromised leader can say `existing = false` for another
+participant's key. The boundary that holds against it is the per-CN `signing_policy.signer_acl`,
+which every cosigner checks on `Signer.Dkg`, together with the key prefix; the flag catches the
+honest misconfiguration, which was silent before. Set the prefix before the first bootstrap, and give each participant its own
 driver certificate with a `signing_policy.signer_acl` entry: the ACL is checked on `Signer.Dkg`
 too, so a driver that asks for another participant's id is refused
 ([approval-quorum.md](approval-quorum.md)).

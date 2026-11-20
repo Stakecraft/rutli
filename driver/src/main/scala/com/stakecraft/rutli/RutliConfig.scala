@@ -115,6 +115,10 @@ final case class SigningJournalConfig(
   * @param expectedGroupKeys Key id -> its 64-hex group key, from the key ceremony record or
   *                   Canton's namespace fingerprint: the operator's anchor for a key's first pin.
   *                   The cluster must still agree with it; a pin already on disk must match it.
+  * @param adoptExistingKeys FROST key ids a DKG may return although the cluster already held them
+  *                   from a ceremony this driver did not start. Since 0.5.0 such a key is refused
+  *                   (another participant's key, or a DKG started before a driver restart); list an
+  *                   id here only after checking that the key is this participant's own.
   */
 final case class FrostConfig(
     endpoint: Option[String] = None,
@@ -127,6 +131,7 @@ final case class FrostConfig(
     signIntents: String = "on",
     pinDir: Option[String] = None,
     expectedGroupKeys: Map[String, String] = Map.empty,
+    adoptExistingKeys: List[String] = Nil,
 ) {
 
   /** `sign-intents` as a switch; anything but on/off (or true/false) is a config error. */

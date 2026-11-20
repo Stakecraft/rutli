@@ -275,6 +275,7 @@ final class RutliDriverFactory extends KmsDriverFactory {
           lostPins = lostPins,
           onPin = (p: com.stakecraft.rutli.backend.GroupKeyPin) =>
             auditLog.foreach(_.append(com.stakecraft.rutli.backend.PinAudit.Op, com.stakecraft.rutli.backend.PinAudit.detail(p))),
+          adoptExistingKeys = frost.adoptExistingKeys.toSet,
         )(blockingEc)
       case other =>
         throw new IllegalArgumentException(

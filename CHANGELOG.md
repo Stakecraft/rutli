@@ -88,7 +88,7 @@ All notable changes to Rütli are documented here. Format loosely follows
   bytes; `rutli_grpc_handshake_timeouts_total`), and an error during a handshake no longer ends
   the server. The server sends HTTP/2 keepalive pings
   (every 60 s, 20 s timeout), so connections to peers that vanished are closed. If the gRPC server
-  ever returns without a shutdown request, the daemon logs it and exits non-zero.
+  ever returns without a shutdown request, the daemon logs it and exits non-zero. Also in 0.4.1.
 - **heapless 0.7.17: nine `unsound` RustSec advisories (RUSTSEC-2026-0574 to -0582) are ignored in
   `frost/deny.toml`, with the reason recorded per advisory.** heapless comes in only through
   frost-core 2.2.0 → postcard 1.1.3, and no release of either moves it to the fixed heapless 0.9.4.
@@ -96,7 +96,7 @@ All notable changes to Rütli are documented here. Format loosely follows
   postcard itself uses only heapless' `Vec` and `String`, in functions frost-core does not call;
   and the cosigner and dealer binaries contain no heapless code (checked on their symbol tables).
   No code change; the same holds for 0.4.0 as released. In the lockfile, spin moves from 0.9.8 to
-  0.9.9, because 0.9.8 was yanked.
+  0.9.9, because 0.9.8 was yanked. The ignores are also in 0.4.1, which keeps spin 0.9.8.
 
 ### Changed
 
@@ -147,6 +147,25 @@ All notable changes to Rütli are documented here. Format loosely follows
   participant's state volume, ideally with `expected-group-keys` for the namespace key. The next
   use pins.
 
+- **A DKG for a key another client created is refused instead of returned** (by a driver that
+  signs its ceremony intents, as the production profile requires). Since 0.4.0-rc.3 a
+  DKG for an id every cosigner already holds returns the existing key, so that Canton's retry after
+  a timeout succeeds. A second participant on the same cluster without `frost.key-prefix` was handed
+  the first participant's keys that way, without a warning. `DkgReply` now carries `existing` and
+  `origin_ceremony_id`, the DKG that created the key. The driver accepts an existing key only as a
+  retry of a ceremony it started itself. Otherwise the DKG fails with a message naming
+  `frost.key-prefix` and the new `frost.adopt-existing-keys`, for deliberately adopting a key after
+  checking it.
+  - **Restart gap.** The driver remembers its ceremony ids in memory only, until a follow-up keeps
+    them durably. A driver that restarts in the middle of a bootstrap is therefore refused too.
+    Adopt the key with `frost.adopt-existing-keys` after checking it, and remove the entry once
+    the key is in use.
+  - **Rolling upgrade.** A 0.4.x driver ignores the new fields and behaves as before. A 0.5.0
+    driver with a leader older than 0.5.0 cannot tell and accepts the key with a warning, as before.
+    The DKG request is unchanged. The cosigners talk to each other as before (no peer message
+    changed).
+  - The Java stubs in `driver/src/main/java` were regenerated. They now also carry
+    `KeyEpochReply.stale_by_own_record`, which was missing from them.
 - **A cosigner that answers a sign wrongly no longer stays the driver's leader.** Up to 0.4.0 the
   driver made any node that answered its preferred leader before it checked the signature. One
   compromised cosigner that returned a signature that does not verify, or `NOT_FOUND`,
@@ -245,11 +264,11 @@ All notable changes to Rütli are documented here. Format loosely follows
   only applied to a file the export created: an `--out` that already existed (for example 0644)
   kept its mode and received the artifact, with `--unsafe-plaintext` the raw private key, and a
   symlink at `--out` was followed. `export-key` now refuses an existing `--out` or a symlink, like
-  the other commands that write key material.
+  the other commands that write key material. Also in 0.4.1.
 - **The cosigner did not stop on SIGTERM.** It handled only SIGINT, and in its image it runs as
   PID 1, where the kernel ignores a signal without a handler: every pod stop waited out the grace
   period and ended in SIGKILL, with no drain of in-flight requests. It now shuts down gracefully on
-  SIGTERM or SIGINT.
+  SIGTERM or SIGINT. Also in 0.4.1.
 - **`{:?}` on a cluster-hosted key printed its private key.** `HostedKey` derived `Debug`, so a
   test assertion, a log field or a panic message that formatted a key (or a tombstone still
   holding one) would have shown `private_der`. No log line did. Its `Debug` now prints
@@ -376,6 +395,49 @@ All notable changes to Rütli are documented here. Format loosely follows
 - **The sealed software delegate is a test and migration aid, not a production option.** `docs/hosted-keys.md` and
   `docs/disaster-recovery.md` said it stays supported for production keys; `SECURITY.md` said never. The two now agree
   with `SECURITY.md`: it keeps every encryption key on the participant host; use cluster hosting or the HSM delegate.
+
+## [0.4.1] — 2026-11-20
+
+_0.4.0 with two security fixes in the cosigner (serving under a low file-descriptor limit;
+`export-key` and existing files), and the cosigner now stops on SIGTERM. No wire, key-file or
+config change; roll the cosigners in any order. The driver is unchanged apart from its version
+number._
+
+### Security
+
+- **The cosigner keeps serving when it runs short of file descriptors, and never stops serving
+  without saying so.** At start-up it raises its soft open-file limit to the hard limit and logs
+  both (`rutli_fd_limit`). It accepts gRPC connections in its own loop: an accept error such as
+  running out of descriptors is retried after a short backoff and reported
+  (`rutli_grpc_accept_errors_total`, alert `RutliGrpcAcceptErrors`), where it used to end the
+  server. Open connections are capped below the descriptor limit (the soft limit less 256, or half
+  of it under a limit below 512, at most 4096); past the cap new connections wait in the listen backlog
+  (`rutli_grpc_connections`, `rutli_grpc_connection_limit`, alert `RutliGrpcConnectionsNearLimit`).
+  A new connection gets 5 s to finish its TLS handshake (without TLS: to send its first
+  bytes; `rutli_grpc_handshake_timeouts_total`), and an error during a handshake no longer ends
+  the server. The server sends HTTP/2 keepalive pings
+  (every 60 s, 20 s timeout), so connections to peers that vanished are closed. If the gRPC server
+  ever returns without a shutdown request, the daemon logs it and exits non-zero.
+- **`export-key` refuses an existing `--out` or a symlink.** The 0600 mode only applied to a
+  file the export created: an `--out` that already existed (for example 0644) kept its mode and
+  received the artifact, with `--unsafe-plaintext` the raw private key, and a symlink at `--out`
+  was followed. `export-key` now creates a new owner-only file, like the other commands that write
+  key material, and removes it again if the write fails. The export passphrase is wiped from memory
+  after use.
+
+### Fixed
+
+- **The cosigner stops on SIGTERM.** It handled only SIGINT, and in its image it runs as PID 1,
+  where the kernel ignores a signal without a handler: every pod stop waited out the grace period
+  and ended in SIGKILL, with no drain of in-flight requests. It now shuts down gracefully on
+  SIGTERM or SIGINT. (From 0.5.0's changes.)
+
+### Build
+
+- `frost/deny.toml` ignores the nine heapless 0.7.17 `unsound` advisories
+  (RUSTSEC-2026-0574 to -0582), with the reason per advisory: heapless comes in only through
+  frost-core 2.2.0 → postcard 1.1.3, and none of the affected functions is reachable. No code or
+  lockfile change for it.
 
 ## [0.4.0] — 2026-11-14
 

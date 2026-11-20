@@ -1,0 +1,88 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# The cluster suite's own objects in the test namespace (scripts/perf/k8s-deploy.sh applies this
+# with the placeholders filled in): the load generator pod and the NetworkPolicy it needs on a
+# cluster that denies all traffic by default. The cosigners' policies come with the chart
+# (deploy/helm/rutli-cosigner/templates/networkpolicy.yaml); they admit this pod because it carries
+# the client and scraper labels and the namespace carries rutli.io/client-ns=true.
+#
+# Placeholders: __IMAGE__, __PULL_SECRETS__ (a YAML list, [] for none), __NODE_SELECTOR__ (a YAML
+# map, {} for none).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rutli-perf-loadgen
+  labels: { rutli-perf/suite: "1" }
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: rutli-perf-loadgen }
+  policyTypes: ["Ingress", "Egress"]
+  # No ingress: nothing connects to the load generator; it is driven with `kubectl exec`.
+  ingress: []
+  egress:
+    # The cosigners: Signer and Peer API (9101) and metrics (9200).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: rutli-cosigner
+              app.kubernetes.io/instance: rutli-cosigner
+      ports:
+        - { protocol: TCP, port: 9101 }
+        - { protocol: TCP, port: 9200 }
+    # DNS, as the chart allows it for the cosigners.
+    - to: []
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: rutli-perf-loadgen
+  labels:
+    rutli-perf/suite: "1"
+    app.kubernetes.io/name: rutli-perf-loadgen
+    # What the chart's NetworkPolicy admits to the gRPC and metrics ports.
+    rutli.io/client: "true"
+    rutli.io/scraper: "true"
+spec:
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  restartPolicy: Always
+  imagePullSecrets: __PULL_SECRETS__
+  nodeSelector: __NODE_SELECTOR__
+  # Pod Security "restricted".
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    seccompProfile: { type: RuntimeDefault }
+  containers:
+    - name: loadgen
+      image: __IMAGE__
+      imagePullPolicy: IfNotPresent
+      command: ["sleep", "infinity"]
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        capabilities: { drop: ["ALL"] }
+      resources:
+        requests: { cpu: 500m, memory: 256Mi }
+        limits: { cpu: "4", memory: 2Gi }
+      volumeMounts:
+        - { name: driver, mountPath: /certs, readOnly: true }
+        - { name: peer, mountPath: /certs-peer, readOnly: true }
+        - { name: tmp, mountPath: /tmp }
+  volumes:
+    # The driver's client identity: signs the intents.
+    - name: driver
+      secret: { secretName: rutli-perf-driver, defaultMode: 0440 }
+    # A cosigner identity, for the Peer API's ListKeys only (the key-count dimension). A test
+    # cluster's throwaway certificate; never do this with a real one.
+    - name: peer
+      secret: { secretName: rutli-perf-peer, defaultMode: 0440 }
+    # `rutli-cosigner seal new-node` writes the seal bundles here before they become secrets.
+    - name: tmp
+      emptyDir: { medium: Memory, sizeLimit: 16Mi }
