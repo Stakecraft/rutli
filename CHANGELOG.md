@@ -138,8 +138,9 @@ All notable changes to Rütli are documented here. Format loosely follows
     disagreeing answer. For an existing key one dissenter is tolerated (reported and demoted) when
     every endpoint has its own `tls-name`;
   - `frost.expected-group-keys` lets the operator anchor a first pin to the ceremony record;
-  - a damaged pin file stops the start, naming the file; a pin file that is lost while the audit
-    log records it refuses that key. Recovery is in `docs/disaster-recovery.md` §3i;
+  - a damaged pin file stops the start, naming the file, and so does a pin file that names another
+    key than its audit-log entry; a pin file that is lost while the audit log records it refuses
+    that key. Recovery is in `docs/disaster-recovery.md` §3i;
   - `StateCheck --pin-dir` checks a copy read-only, and the production profile requires `pin-dir`.
 
   Without `pin-dir` the driver warns and behaves as before. **Upgrade:** add `pin-dir` on the
