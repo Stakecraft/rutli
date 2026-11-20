@@ -53,6 +53,7 @@ env_init() {
   DRIVER_JAR="$REPO/driver/target/scala-2.13/rutli-driver.jar"
   if [ "${SKIP_BUILD:-0}" != 1 ]; then
     step "Build rutli-cosigner, rutli-dealer and the driver fat jar from the working tree"
+    # shellcheck disable=SC2086  # CARGO_FLAGS is a list of flags, split on purpose
     (cd "$REPO/frost" && cargo build ${CARGO_FLAGS:-} -p rutli-cosigner --bins)
     (cd "$REPO" && sbt -batch driver/assembly >/dev/null)
   fi
@@ -118,6 +119,7 @@ env_fetch() { [ "$2" = "$3" ] || cp "$2" "$3"; }
 env_push() { printf '%s\n' "$2"; }
 env_node_path() { printf '%s\n' "$WORK/node$1/$2"; }
 env_node_exists() { [ -e "$2" ]; }
+# shellcheck disable=SC2086  # the globs in $p are meant to expand here
 env_node_cat() { shift; local p; for p in "$@"; do cat $p 2>/dev/null || true; done; } # globs expand here
 env_node_ls() { ls "$2"; }
 
