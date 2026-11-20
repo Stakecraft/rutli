@@ -77,11 +77,15 @@ struct Cli {
     /// Longest wait for one answer from one cosigner.
     #[arg(long, default_value_t = 30)]
     timeout_secs: u64,
-    /// The driver's policy for calls that fail over (signatures, ECDH): each attempt at one
-    /// cosigner gets this deadline, and on it the call moves to the next cosigner with the same
-    /// intent. Default: --timeout-secs. The driver uses 5 s (frost.sign-attempt-timeout).
+    /// The driver's policy for calls that fail over other than signatures (ECDH): each attempt at
+    /// one cosigner gets this deadline, and on it the call moves to the next cosigner. Default:
+    /// --timeout-secs. The driver uses 10 s (frost.attempt-timeout).
     #[arg(long)]
     attempt_timeout_secs: Option<f64>,
+    /// The same for signatures, which move on with the same intent. Default:
+    /// --attempt-timeout-secs. The driver uses 5 s (frost.sign-attempt-timeout).
+    #[arg(long)]
+    sign_attempt_timeout_secs: Option<f64>,
     /// The driver's budget for one call across all its attempts: each attempt's deadline is cut
     /// to what is left of it, and no attempt starts with less than 50 ms left (the call then ends
     /// with DEADLINE_EXCEEDED). Default: none. The driver uses 30 s (frost.request-timeout).
@@ -210,8 +214,9 @@ struct Ctx {
     signer: NodeSigner,
     metrics: Vec<(String, String)>,
     timeout: Duration,
-    /// The deadline of one attempt of a call that fails over, and the call's budget across its
-    /// attempts (None: no budget).
+    /// The deadline of one attempt of a call that fails over (signatures, and other calls), and
+    /// the call's budget across its attempts (None: no budget).
+    sign_attempt: Duration,
     attempt: Duration,
     budget: Option<Duration>,
 }
@@ -219,6 +224,8 @@ struct Ctx {
 impl Ctx {
     fn new(cli: &Cli) -> Result<Self, Fail> {
         let read = |p: &PathBuf| std::fs::read(p).map_err(|e| format!("cannot read {}: {e}", p.display()));
+        let attempt = positive_secs(cli.attempt_timeout_secs, "--attempt-timeout-secs")?
+            .unwrap_or(Duration::from_secs(cli.timeout_secs.max(1)));
         let tls = ClientTlsConfig::new()
             .ca_certificate(Certificate::from_pem(read(&cli.ca)?))
             .identity(Identity::from_pem(read(&cli.cert)?, read(&cli.key)?));
@@ -229,8 +236,8 @@ impl Ctx {
             signer,
             metrics: cli.metrics.clone(),
             timeout: Duration::from_secs(cli.timeout_secs.max(1)),
-            attempt: positive_secs(cli.attempt_timeout_secs, "--attempt-timeout-secs")?
-                .unwrap_or(Duration::from_secs(cli.timeout_secs.max(1))),
+            attempt,
+            sign_attempt: positive_secs(cli.sign_attempt_timeout_secs, "--sign-attempt-timeout-secs")?.unwrap_or(attempt),
             budget: positive_secs(cli.request_timeout_secs, "--request-timeout-secs")?,
         })
     }
@@ -422,10 +429,10 @@ impl Run {
     async fn request(&self, client: &Client, seq: u64) {
         // Calls that fail over get the driver's per-attempt deadline and budget; a ceremony gets
         // one attempt with the whole timeout, as the driver gives it.
-        let (limit, budget) = if self.op.may_fail_over() {
-            (self.ctx.attempt, self.ctx.budget)
-        } else {
-            (self.ctx.timeout, None)
+        let (limit, budget) = match self.op {
+            Op::Sign { .. } => (self.ctx.sign_attempt, self.ctx.budget),
+            _ if self.op.may_fail_over() => (self.ctx.attempt, self.ctx.budget),
+            _ => (self.ctx.timeout, None),
         };
         let failover = self.failover && self.op.may_fail_over();
         let at = self.started.elapsed();
@@ -748,6 +755,7 @@ struct LoadReport {
     clients: usize,
     failover: bool,
     /// The client's deadline policy for calls that fail over (seconds; budget null: none).
+    sign_attempt_timeout_secs: f64,
     attempt_timeout_secs: f64,
     request_timeout_secs: Option<f64>,
     client: stats::ClientReport,
@@ -793,6 +801,7 @@ async fn load_command(ctx: Arc<Ctx>, command: &'static str, op: Op, cluster: Str
         rate: load.rate,
         clients: load.clients,
         failover,
+        sign_attempt_timeout_secs: ctx.sign_attempt.as_secs_f64(),
         attempt_timeout_secs: ctx.attempt.as_secs_f64(),
         request_timeout_secs: ctx.budget.map(|b| b.as_secs_f64()),
         client,

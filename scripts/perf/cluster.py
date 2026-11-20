@@ -741,14 +741,18 @@ def main():
     p.add_argument("--work", default="", help="upgrade suite: the --work directory of k8s-deploy.sh")
     p.add_argument("--values", action="append", default=[], help="upgrade suite: extra chart values, as for k8s-deploy.sh")
     p.add_argument("--load-path", choices=["grpc", "canton"], default="grpc")
+    p.add_argument("--sign-attempt-timeout-secs", type=float, default=None,
+                   help="the load generator's deadline per attempt of a signature (default: as "
+                        "--attempt-timeout-secs)")
     p.add_argument("--attempt-timeout-secs", type=float, default=None,
-                   help="the load generator's deadline per attempt of a call that fails over (default: one "
-                        "timeout per attempt, 30 s)")
+                   help="the load generator's deadline per attempt of another call that fails over, ECDH "
+                        "(default: one timeout per attempt, 30 s)")
     p.add_argument("--request-timeout-secs", type=float, default=None,
                    help="the load generator's budget per call across its attempts (default: none)")
     p.add_argument("--driver-deadlines", action="store_true",
-                   help="the driver's policy: 5 s per attempt, 30 s per call (frost.sign-attempt-timeout, "
-                        "frost.request-timeout), unless the two flags above say otherwise")
+                   help="the driver's policy: 5 s per sign attempt, 10 s per other attempt, 30 s per call "
+                        "(frost.sign-attempt-timeout, frost.attempt-timeout, frost.request-timeout), unless "
+                        "the flags above say otherwise")
     p.add_argument("--steady-secs", type=int, default=None, help="default: the profile's, else 60")
     p.add_argument("--rate", type=int, default=None, help="steady stream signatures/s; default: the profile's, else 20")
     p.add_argument("--disrupt-secs", type=int, default=120)
@@ -779,12 +783,15 @@ def main():
             p.error(f"{name}={os.environ[name]!r}: not an executable")
 
     if args.driver_deadlines:
-        args.attempt_timeout_secs = args.attempt_timeout_secs or 5.0
+        args.sign_attempt_timeout_secs = args.sign_attempt_timeout_secs or 5.0
+        args.attempt_timeout_secs = args.attempt_timeout_secs or 10.0
         args.request_timeout_secs = args.request_timeout_secs or 30.0
-    for flag in ("attempt_timeout_secs", "request_timeout_secs"):
+    for flag in ("sign_attempt_timeout_secs", "attempt_timeout_secs", "request_timeout_secs"):
         if getattr(args, flag) is not None and getattr(args, flag) <= 0:
             p.error(f"--{flag.replace('_', '-')} must be positive")
-    client_policy = {"attempt_timeout_secs": args.attempt_timeout_secs, "request_timeout_secs": args.request_timeout_secs}
+    client_policy = {"sign_attempt_timeout_secs": args.sign_attempt_timeout_secs,
+                     "attempt_timeout_secs": args.attempt_timeout_secs,
+                     "request_timeout_secs": args.request_timeout_secs}
     cluster = K8sCluster(args.namespace, args.env_name, args.load_path, client_policy)
     # A diagnostic installation (k8s-deploy.sh --diagnostic-tmpfs) says so on its namespace; its
     # results are labelled and never a baseline.
