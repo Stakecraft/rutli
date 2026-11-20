@@ -751,7 +751,9 @@ class FrostBackend(
         b.build()
       }
       clusterCall("dkg", connectionRefused, connectionRefused)(_.dkg(dkgRequest()))
-        .map(reply => acceptDkgReply(keyId, reply, withIntent = cluster.nonEmpty && intentSigner.nonEmpty))
+        .map(reply =>
+          acceptDkgReply(keyId, reply, withIntent = cluster.nonEmpty && intentSigner.nonEmpty, intentExpected = signIntents && intentSigner.nonEmpty)
+        )
         .flatMap { reply =>
           // The leader's reply is one cosigner's word: the new key is believed only once every
           // endpoint that answers agrees on it, and it must be the key the leader reported.
@@ -777,27 +779,52 @@ class FrostBackend(
     * key under the same id (two participants on one cluster without `frost.key-prefix`), or a DKG
     * this driver started before a restart, and is refused, non-retryably. A leader older than
     * 0.5.0 cannot say whether the key existed: accepted with a warning, as before. A DKG sent
-    * without an intent (no TLS, or `frost.sign-intents = off`) cannot be matched either: accepted
-    * with a warning. */
-  private def acceptDkgReply(keyId: String, reply: DkgReply, withIntent: Boolean): DkgReply = {
+    * without an intent by choice (no TLS, or `frost.sign-intents = off`) cannot be matched either:
+    * accepted with a warning; one that lacked an intent only because no cluster id was known is
+    * retried. A new key must come from one of this driver's own ceremonies.
+    *
+    * A ceremony id is remembered when its intent is sent, before the outcome is known: a leader
+    * names it as the origin only when that ceremony committed, so a match still means this driver
+    * started the ceremony that created the key. */
+  private def acceptDkgReply(keyId: String, reply: DkgReply, withIntent: Boolean, intentExpected: Boolean): DkgReply = {
+    val origin = reply.getOriginCeremonyId
+    def ours: Boolean = origin.nonEmpty && Option(ownDkgCeremonies.get(keyId)).exists(_.contains(origin))
     if (!reply.hasExisting)
       logger.warn(
         s"FROST: the DKG leader for $keyId is older than 0.5.0 and cannot say whether the key already existed; " +
           "finish the cosigner upgrade before bootstrapping another participant on this cluster"
       )
-    else if (reply.getExisting) {
-      val origin = reply.getOriginCeremonyId
-      val ours = origin.nonEmpty && Option(ownDkgCeremonies.get(keyId)).exists(_.contains(origin))
+    else if (!reply.getExisting) {
+      // A new key: the leader must name one of this driver's own ceremonies (a leader bug otherwise).
+      if (withIntent && !ours)
+        throw KmsDriverException(
+          new SecurityException(
+            s"DKG for $keyId: the leader reports a new key from ceremony '$origin', which is not one this driver started"
+          ),
+          retryable = false,
+        )
+    } else if (reply.getExisting) {
       if (ours) logger.info(s"FROST: DKG for $keyId returned the key of this driver's own ceremony $origin (a retry)")
       else if (adoptExistingKeys.contains(keyId))
         logger.warn(
           s"FROST: DKG for $keyId returned a key the cluster already held (ceremony ${if (origin.isEmpty) "unknown" else origin}); " +
             "adopted because frost.adopt-existing-keys lists it"
         )
+      else if (!withIntent && intentExpected)
+        // TLS is on and intents are not switched off, but no cluster id was known for this DKG (a slow
+        // or failed probe): the reply cannot be matched now. Retry rather than take the key.
+        throw KmsDriverException(
+          new IllegalStateException(
+            s"DKG for $keyId returned a key the cluster already held, and this DKG went without a ceremony intent " +
+              "because no cluster id was known; retrying (set frost.cluster-id to avoid the probe)"
+          ),
+          retryable = true,
+        )
       else if (!withIntent)
         logger.warn(
-          s"FROST: DKG for $keyId returned a key the cluster already held, and this DKG carried no ceremony intent, so it " +
-            "cannot be matched to this driver; accepted. A production driver signs its intents (docs/production-profile.md)"
+          s"FROST: DKG for $keyId returned a key the cluster already held, and this DKG carried no ceremony intent " +
+            "(no TLS, or frost.sign-intents = off), so it cannot be matched to this driver; accepted. A production driver " +
+            "signs its intents (docs/production-profile.md)"
         )
       else {
         val originText = if (origin.isEmpty) "an unknown ceremony" else s"ceremony $origin"

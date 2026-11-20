@@ -283,14 +283,18 @@ step_4_to_7_cutover() {
 
 step_7_audit() {
   step "Step 7. The driver's audit: threshold signatures with the imported namespace key, nothing failed"
-  local audit ns_ok sig_ok enc_ok bad kid i n journaled nointent
+  local audit ns_ok sig_ok enc_ok bad refused kid i n journaled nointent
   audit="$(env_driver_audit newp2)"
   [ -s "$audit" ] || fail "no driver audit log for the new participant"
   _ok() { grep -F "\"op\":\"$1\",\"detail\":\"keyId=$2 " "$audit" | grep -c "outcome=ok" || true; } # op key-id
   ns_ok="$(_ok sign "$KEY_ID")"
   sig_ok="$(_ok sign "$SIG_KMS_ID")"
   enc_ok="$(_ok decryptAsymmetric "$ENC_KMS_ID")"
-  bad="$(cat "$(env_driver_audit newp1)" "$audit" 2>/dev/null | grep -c "outcome=failed" || true)"
+  # The one expected failure: §6's DKG under the rolled-back attempt's name, refused by newp2's driver.
+  refused="$(grep "outcome=failed" "$audit" | grep -c "generateSigningKeyPair spec=[^ ]* name=signing " || true)"
+  [ "$refused" -eq 1 ] || fail "expected exactly one refused DKG under the name 'signing' in newp2's audit, found $refused"
+  bad="$(cat "$(env_driver_audit newp1)" "$audit" 2>/dev/null | grep "outcome=failed" \
+    | grep -vc "generateSigningKeyPair spec=[^ ]* name=signing " || true)"
   echo "sign ok: $KEY_ID $ns_ok, $SIG_KMS_ID $sig_ok; ECIES decrypt ok: $ENC_KMS_ID $enc_ok; failed: $bad"
   # OTK, trust certificate, package vetting, the old trust certificate's removal, the party's hosting.
   [ "$ns_ok" -ge 4 ] || fail "only $ns_ok signatures with the imported namespace key $KEY_ID"

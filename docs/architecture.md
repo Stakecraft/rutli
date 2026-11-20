@@ -225,12 +225,14 @@ participant was handed the first one's Ed25519 keys, and the two shared one iden
 warning.
 
 Since 0.5.0 the DKG reply says whether the key already existed (`existing`), and which DKG created
-it (`origin_ceremony_id`, the ceremony the client's intent named). The driver accepts an existing
-key only when that ceremony is one it asked for itself in this process: Canton's retry after a
-timeout. Any other existing key is refused, naming `frost.key-prefix` and
+it (`origin_ceremony_id`, the ceremony the client's intent named) when the leader still holds that
+ceremony's record: settled records are kept 30 days, and a refresh starts a new sharing, after
+which no origin is named. The driver accepts an existing key only when that ceremony is one it
+asked for itself in this process: Canton's retry after a timeout. Any other existing key is refused, naming `frost.key-prefix` and
 `frost.adopt-existing-keys`. A driver that restarts in the middle of a bootstrap has forgotten its
-own ceremony ids and is refused too. Check the key (`rutli-cosigner verify-key`) against the
-ceremony record and list its id in `frost.adopt-existing-keys`. A DKG sent without an intent (no
+own ceremony ids and is refused too (until the driver persists them, a follow-up to the durable
+group-key pins). Check the key (`rutli-cosigner verify-key`) against the ceremony record, list its
+id in `frost.adopt-existing-keys`, and remove the entry once the key is in use. A DKG sent without an intent (no
 TLS, `frost.sign-intents = off`) cannot be matched and is accepted with a warning, and so is a
 reply from a leader older than 0.5.0, which leaves the field out.
 

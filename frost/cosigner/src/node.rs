@@ -568,14 +568,20 @@ impl Node {
             Err(e) => return Err(e),
         };
         let gk = hex::encode(group_key);
-        Ok(self.book()?.records.values().find_map(|r| {
-            (r.state == RecordState::Committed
-                && r.kind == CeremonyKind::Dkg.as_str()
-                && r.key_id == key_id
-                && r.new_epoch == epoch
-                && r.group_key.eq_ignore_ascii_case(&gk))
-            .then(|| r.ceremony_id.clone())
-        }))
+        // One DKG commits a key id once; should two records ever match, name the same one every time.
+        Ok(self
+            .book()?
+            .records
+            .values()
+            .filter(|r| {
+                r.state == RecordState::Committed
+                    && r.kind == CeremonyKind::Dkg.as_str()
+                    && r.key_id == key_id
+                    && r.new_epoch == epoch
+                    && r.group_key.eq_ignore_ascii_case(&gk)
+            })
+            .map(|r| r.ceremony_id.clone())
+            .min())
     }
 
     /// This node's view of key `key_id` for ceremony decisions: its committed share's epoch, PKP

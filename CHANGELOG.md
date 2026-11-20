@@ -98,7 +98,8 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Fixed
 
-- **A DKG for a key another client created is refused instead of returned.** Since 0.4.0-rc.3 a
+- **A DKG for a key another client created is refused instead of returned** (by a driver that
+  signs its ceremony intents, as the production profile requires). Since 0.4.0-rc.3 a
   DKG for an id every cosigner already holds returns the existing key, so that Canton's retry after
   a timeout succeeds. A second participant on the same cluster without `frost.key-prefix` was handed
   the first participant's keys that way, without a warning. `DkgReply` now carries `existing` and
@@ -106,9 +107,10 @@ All notable changes to Rütli are documented here. Format loosely follows
   retry of a ceremony it started itself. Otherwise the DKG fails with a message naming
   `frost.key-prefix` and the new `frost.adopt-existing-keys`, for deliberately adopting a key after
   checking it.
-  - **Restart gap.** Until the driver keeps its ceremony ids durably (next to its group-key pins), a
-    driver that restarts in the middle of a bootstrap is refused too. Adopt the key with
-    `frost.adopt-existing-keys` after checking it.
+  - **Restart gap.** The driver remembers its ceremony ids in memory only, until a follow-up keeps
+    them durably. A driver that restarts in the middle of a bootstrap is therefore refused too.
+    Adopt the key with `frost.adopt-existing-keys` after checking it, and remove the entry once
+    the key is in use.
   - **Rolling upgrade.** A 0.4.x driver ignores the new fields and behaves as before. A 0.5.0
     driver with a leader older than 0.5.0 cannot tell and accepts the key with a warning, as before.
     The DKG request is unchanged. The cosigners talk to each other as before (no peer message

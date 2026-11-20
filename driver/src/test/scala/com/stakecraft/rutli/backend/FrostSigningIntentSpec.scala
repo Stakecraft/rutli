@@ -437,6 +437,27 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
       finally b.close()
     }
 
+    "refuse a new key whose origin is not one of this driver's ceremonies (a leader bug)" in {
+      val rec = new Recorder(Cluster)
+      rec.reportExisting = Some(false)
+      rec.origin = _ => "dkg-ffffffffffffffffffffffffffffffff"
+      val b = backend(Seq(serve("cosigner1", rec) -> "cosigner1"))
+      try {
+        val ex = the[KmsDriverException] thrownBy Await.result(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")), 20.seconds)
+        ex.retryable shouldBe false
+      } finally b.close()
+    }
+
+    "retry, not accept, an existing key when the DKG lacked an intent only because no cluster id was known" in {
+      val rec = new Recorder("")
+      rec.reportExisting = Some(true)
+      val b = backend(Seq(serve("cosigner1", rec) -> "cosigner1"))
+      try {
+        val ex = the[KmsDriverException] thrownBy Await.result(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")), 20.seconds)
+        ex.retryable shouldBe true
+      } finally b.close()
+    }
+
     "send no ceremony intent while no cluster id is known" in {
       val rec = new Recorder("")
       val b = backend(Seq(serve("cosigner1", rec) -> "cosigner1"))

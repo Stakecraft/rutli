@@ -321,11 +321,13 @@ impl Signer for SignerSvc {
         // can tell a retry of its own ceremony from a key someone else created under the same id.
         let origin = match outcome.ceremony_id {
             Some(id) => id,
-            None => self
-                .node
-                .committed_dkg_ceremony(&r.key_id, &outcome.group_key)
-                .map_err(Status::from)?
-                .unwrap_or_default(),
+            // Not found, or unreadable: an empty origin, which the client refuses with its own
+            // clear message, rather than failing a DKG that found the key.
+            None => self.node.committed_dkg_ceremony(&r.key_id, &outcome.group_key).unwrap_or_else(|e| {
+                tracing::warn!(key_id = %r.key_id, error = %e, "DKG for an existing key: cannot read its ceremony record");
+                None
+            })
+            .unwrap_or_default(),
         };
         if outcome.existing {
             tracing::info!(key_id = %r.key_id, origin = %origin, "DKG for an existing key: returned it (existing = true)");
