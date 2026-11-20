@@ -199,4 +199,17 @@ fn keyfile_prove_writes_a_marker_only_for_this_nodes_live_epoch_and_sharing() {
     // The key file itself is untouched, and the store still loads (the marker dir is no key file).
     assert_eq!(sealed_store(tmp.path(), 2).load("frost-prove").unwrap().epoch, 4);
     assert_eq!(sealed_store(tmp.path(), 2).list_frost().unwrap(), vec!["frost-prove".to_string()]);
+
+    // A node whose config says another threshold than the key's refuses (no marker for epoch 5).
+    let (share5, report5) = share_and_report("frost-prove5", 5);
+    ks.create("frost-prove5", &share5).unwrap();
+    let p5 = tmp.path().join("report5.json");
+    std::fs::write(&p5, report5.to_string()).unwrap();
+    let cfg3 = tmp.path().join("cosigner-t3.json");
+    let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&cfg).unwrap()).unwrap();
+    c["threshold"] = 3.into();
+    std::fs::write(&cfg3, c.to_string()).unwrap();
+    let t3 = cosigner(&cfg3, &["keyfile", "prove", "--key-id", "frost-prove5", "--epoch", "5", "--report", p5.to_str().unwrap()]);
+    assert!(!t3.status.success() && text(&t3).contains("threshold"), "{}", text(&t3));
+    assert!(!keys(tmp.path()).join(".proven").join("frost-prove5.5.json").exists());
 }

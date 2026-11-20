@@ -195,15 +195,14 @@ groups:
 
       - alert: RutliKeyEpochUnproven
         # `keyfile prove` writes the marker after the operator ran verify-key --sign-test on the new
-        # epoch (docs/ceremonies.md, "Proving an epoch"). Backup retention keeps the older epoch's
-        # archives until then, so an epoch that stays unproven also keeps old archives around.
+        # epoch (docs/ceremonies.md, "Proving an epoch").
         expr: rutli_key_epoch_proven == 0 and rutli_key_epoch_age_seconds > 259200
         for: 1h
         labels:
           severity: warning
         annotations:
           summary: "Rütli key {{ $labels.key }} has run its current epoch on {{ $labels.instance }} for over 3 days without a proof"
-          description: "{{ $labels.instance }} holds the current epoch of {{ $labels.key }} unproven for more than 3 days: nobody has recorded that the shares of this epoch sign together. Run `rutli-cosigner verify-key --sign-test --json` for the key, then `rutli-cosigner keyfile prove --key-id <key> --epoch <epoch> --report <file>` on every node (docs/ceremonies.md, Proving an epoch). Until then the backup retention keeps the archives of the previous epoch, so they accumulate up to the backup count cap. A node whose share is stale (RutliStaleShare) cannot prove the epoch: bring it back first. Not an outage."
+          description: "The key file of {{ $labels.key }} on {{ $labels.instance }} is more than 3 days old and its live epoch has no proof: nobody has recorded that the shares of this epoch sign together. Run `rutli-cosigner verify-key --sign-test --json` for the key, then `rutli-cosigner keyfile prove --key-id <key> --epoch <epoch> --report <file>` on every node (docs/ceremonies.md, Proving an epoch). Expect this alert for every key after upgrading to the release that adds the command. A node whose share is stale (RutliStaleShare) cannot prove the epoch: bring it back first. Not an outage."
 
       - alert: RutliEpochMismatch
         expr: increase(rutli_epoch_mismatch_total[15m]) > 0

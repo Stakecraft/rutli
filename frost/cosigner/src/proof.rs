@@ -67,6 +67,10 @@ pub struct Live {
     pub epoch: u64,
     pub group_key: [u8; 32],
     pub pkp_digest: [u8; 32],
+    /// The key's own threshold (`min_signers` of this node's key package).
+    pub threshold: u16,
+    /// The identifiers the key's public package lists (its verifying shares).
+    pub roster: Vec<u16>,
 }
 
 /// The part of `verify-key --json` that is read here. Unknown fields are fine (the report grows).
@@ -152,8 +156,17 @@ pub fn prove(
         return Err(refuse("the report's sharing digest is not this node's"));
     }
 
-    // Every node of the roster, nothing else, all on this epoch and this sharing, none stale.
+    // The configured roster and threshold must be the key's own: a config that says another `t`
+    // would ask for the wrong set of quorums.
     let want: BTreeSet<u16> = roster.iter().copied().collect();
+    let key_roster: BTreeSet<u16> = live.roster.iter().copied().collect();
+    if want != key_roster || threshold != live.threshold {
+        return Err(refuse(format!(
+            "this node's config (roster {want:?}, threshold {threshold}) is not the key's (roster {key_roster:?}, threshold {})",
+            live.threshold
+        )));
+    }
+    // Every node of the roster, nothing else, all on this epoch and this sharing, none stale.
     let got: BTreeSet<u16> = report.nodes.iter().map(|n| n.identifier).collect();
     if want.len() != roster.len() || got.len() != report.nodes.len() || want != got {
         return Err(refuse(format!("the report covers nodes {got:?}, this node's roster is {want:?}")));
@@ -203,8 +216,9 @@ pub fn prove(
     };
     // An equal marker already there keeps its time: stamping again must not restart the clock that
     // retention measures the epoch's age by.
+    // A marker dated in the future proves nothing (see `proves`), so it is replaced, not kept.
     if let Some(existing) = read_marker(keys_dir, &live.key_id, live.epoch) {
-        if existing.group_key == marker.group_key && existing.pkp_digest == marker.pkp_digest {
+        if existing.group_key == marker.group_key && existing.pkp_digest == marker.pkp_digest && existing.proven_ms <= now_ms {
             return Ok((existing, false));
         }
     }
@@ -218,7 +232,7 @@ fn write_marker(keys_dir: &Path, marker: &Marker) -> Result<()> {
     let dir = keys_dir.join(DIR);
     std::fs::create_dir_all(&dir)?;
     let path = marker_path(keys_dir, &marker.key_id, marker.epoch);
-    let tmp = dir.join(format!(".{}.{}.tmp", marker.key_id, marker.epoch));
+    let tmp = dir.join(format!(".{}.{}.{}.tmp", marker.key_id, marker.epoch, std::process::id()));
     {
         let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(&tmp)?;
         f.write_all(&serde_json::to_vec_pretty(marker)?)?;
@@ -255,8 +269,9 @@ pub fn proof_age_ms(marker: &Marker, pkp_digest_hex: &str, now_ms: u64) -> Optio
 /// `rutli_key_epoch_age_seconds{key}` (seconds since the live key file was written, that is since
 /// the epoch was installed or the file was last re-sealed) for every FROST key file with a v2
 /// header. v1 files carry no clear epoch and are skipped. Reads only; never fails the caller.
-pub fn refresh_gauges(keys_dir: &Path, now_ms: u64) {
-    let Ok(entries) = std::fs::read_dir(keys_dir) else { return };
+pub fn refresh_gauges(keys_dir: &Path, now_ms: u64) -> BTreeSet<String> {
+    let mut seen = BTreeSet::new();
+    let Ok(entries) = std::fs::read_dir(keys_dir) else { return seen };
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -277,17 +292,29 @@ pub fn refresh_gauges(keys_dir: &Path, now_ms: u64) {
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or(0, |t| now_ms.saturating_sub(t.as_millis() as u64) / 1000);
         metrics::gauge!(crate::metrics::KEY_EPOCH_PROVEN, "key" => header.key_id.clone()).set(if proven { 1.0 } else { 0.0 });
-        metrics::gauge!(crate::metrics::KEY_EPOCH_AGE_SECONDS, "key" => header.key_id).set(age_s as f64);
+        metrics::gauge!(crate::metrics::KEY_EPOCH_AGE_SECONDS, "key" => header.key_id.clone()).set(age_s as f64);
+        seen.insert(header.key_id);
     }
+    seen
 }
 
 /// A thread that refreshes the two gauges every `interval`. A hung volume stalls only this thread.
+/// A key that is no longer listed (deleted, replaced by a tombstone) gets age 0, so a frozen old
+/// value cannot keep the alert firing.
 pub fn spawn_gauge_updater(keys_dir: PathBuf, interval: std::time::Duration) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("rutli-epoch-proof-gauges".into())
-        .spawn(move || loop {
-            refresh_gauges(&keys_dir, crate::intent::now_ms());
-            std::thread::sleep(interval);
+        .spawn(move || {
+            let mut before = BTreeSet::new();
+            loop {
+                let seen = refresh_gauges(&keys_dir, crate::intent::now_ms());
+                for gone in before.difference(&seen) {
+                    metrics::gauge!(crate::metrics::KEY_EPOCH_PROVEN, "key" => gone.clone()).set(0.0);
+                    metrics::gauge!(crate::metrics::KEY_EPOCH_AGE_SECONDS, "key" => gone.clone()).set(0.0);
+                }
+                before = seen;
+                std::thread::sleep(interval);
+            }
         })
         .expect("spawn the epoch-proof gauge thread")
 }
@@ -299,7 +326,7 @@ mod tests {
     const KEY: &str = "frost-test";
 
     fn live() -> Live {
-        Live { key_id: KEY.into(), epoch: 3, group_key: [7; 32], pkp_digest: [9; 32] }
+        Live { key_id: KEY.into(), epoch: 3, group_key: [7; 32], pkp_digest: [9; 32], threshold: 2, roster: vec![1, 2, 3] }
     }
 
     /// A clean report for `live()` over roster 1..=3, threshold 2.
@@ -404,6 +431,28 @@ mod tests {
     }
 
     #[test]
+    fn a_config_that_is_not_the_keys_own_roster_and_threshold_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let r = report().to_string();
+        // Config says t = 3 for a 2-of-3 key: it would ask for the single quorum [1,2,3].
+        assert!(prove(d.path(), &live(), &[1, 2, 3], 3, r.as_bytes(), 1).is_err());
+        // Config roster differs from the key's.
+        assert!(prove(d.path(), &live(), &[1, 2], 2, r.as_bytes(), 1).is_err());
+        assert!(prove(d.path(), &live(), &[1, 2, 3, 4], 2, r.as_bytes(), 1).is_err());
+        assert!(!d.path().join(DIR).exists());
+    }
+
+    #[test]
+    fn a_marker_dated_in_the_future_is_replaced_not_kept() {
+        let d = tempfile::tempdir().unwrap();
+        run(d.path(), &report(), &live(), 9_000).unwrap();
+        // The clock was ahead at the first stamp: now is earlier than the marker's time.
+        let (m, wrote) = run(d.path(), &report(), &live(), 4_000).unwrap();
+        assert!(wrote);
+        assert_eq!(m.proven_ms, 4_000);
+    }
+
+    #[test]
     fn a_marker_proves_only_its_sharing_and_never_from_the_future() {
         let d = tempfile::tempdir().unwrap();
         let (m, _) = run(d.path(), &report(), &live(), 5_000).unwrap();
@@ -455,6 +504,8 @@ mod tests {
             epoch: 2,
             group_key: rutli_frost_core::dkg::group_verifying_key_bytes(&share.public_key_package).unwrap(),
             pkp_digest: share.pkp_digest().unwrap(),
+            threshold: 2,
+            roster: vec![1, 2, 3],
         };
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();

@@ -308,10 +308,12 @@ report is not clean, does not cover the whole roster and every quorum, names ano
 or sharing than this node's live ones, or when this node's live epoch is not the one named: a node
 that missed the refresh cannot stamp it. **The report is the operator's statement**: the node cannot
 check who produced it, so the marker records the report's SHA-256 and this node's clock. A marker
-dated in the future is ignored. Stamping again keeps the first time. Backup retention keeps the
-archives of older epochs until the newer epoch is proven and old enough (`docs/disaster-recovery.md`).
-`rutli_key_epoch_proven{key}` is `1` while the live epoch has a marker, and `RutliKeyEpochUnproven`
-fires when it has been `0` for three days.
+dated in the future is ignored (and replaced when stamped again); stamping again otherwise keeps the
+first time. `rutli_key_epoch_proven{key}` is `1` while the live epoch has a marker for the live
+sharing; `RutliKeyEpochUnproven` fires when it is `0` and the live key file is more than three days old
+(the file's age is the time since the epoch was installed, or since the file was last re-sealed).
+After upgrading to a release that has this command, every key whose file is older than three days
+alerts until `keyfile prove` has been run for its live epoch.
 
 ### Signing across epochs
 

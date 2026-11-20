@@ -2437,6 +2437,13 @@ fn keyfile_command(cfg: &Config, command: KeyfileCommand) -> Result<()> {
                 epoch,
                 group_key: rutli_frost_core::dkg::group_verifying_key_bytes(&share.public_key_package)?,
                 pkp_digest: share.pkp_digest()?,
+                threshold: *share.key_package.min_signers(),
+                roster: share
+                    .public_key_package
+                    .verifying_shares()
+                    .keys()
+                    .map(|id| rutli_cosigner::hosted::identifier_index(*id))
+                    .collect::<std::result::Result<Vec<u16>, _>>()?,
             };
             let roster: Vec<u16> = cfg.peers.iter().map(|p| p.identifier).collect();
             let (marker, wrote) = rutli_cosigner::proof::prove(
