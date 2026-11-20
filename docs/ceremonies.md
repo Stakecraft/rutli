@@ -360,7 +360,7 @@ Shares of different sharings never combine, so signing is epoch-aware (audit H1,
 | Cluster state | Reply |
 |---|---|
 | no node holds it | a fresh DKG |
-| every node committed it, same sharing, DKG origin | the existing group key (Canton's retry succeeds) |
+| every node committed it, same sharing, DKG origin | the existing group key with `existing = true` and the DKG that created it (`origin_ceremony_id`); the driver accepts it only as a retry of its own ceremony ([architecture.md](architecture.md), "One cluster, several participants") |
 | a ceremony for it is staged somewhere | every node is asked to resolve; UNAVAILABLE (retry) |
 | some nodes hold it (a legacy partial key) | FAILED_PRECONDITION naming `discard-partial-key` |
 | an imported or hosted key under the id | ALREADY_EXISTS |

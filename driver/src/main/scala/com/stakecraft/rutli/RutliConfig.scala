@@ -109,6 +109,16 @@ final case class SigningJournalConfig(
   * @param signIntents `on` (default) | `off`: attach a signing intent to every FROST sign. `off` is
   *                   an emergency switch (a cluster-id or intent problem) that only works while
   *                   the cosigners do not set `signing_policy.require_intent`.
+  * @param pinDir     Directory for the durable group-key pins (one create-once file per FROST key
+  *                   id), on the participant's state volume next to the signing journal. Unset:
+  *                   pins live in memory and are agreed again after every restart.
+  * @param expectedGroupKeys Key id -> its 64-hex group key, from the key ceremony record or
+  *                   Canton's namespace fingerprint: the operator's anchor for a key's first pin.
+  *                   The cluster must still agree with it; a pin already on disk must match it.
+  * @param adoptExistingKeys FROST key ids a DKG may return although the cluster already held them
+  *                   from a ceremony this driver did not start. Since 0.5.0 such a key is refused
+  *                   (another participant's key, or a DKG started before a driver restart); list an
+  *                   id here only after checking that the key is this participant's own.
   * @param requestTimeout     The budget of one driver call across every cosigner it tries (30 s).
   *                   A DKG gets all of it in one attempt.
   * @param attemptTimeout     The deadline of one attempt at one cosigner, for everything but signs
@@ -132,6 +142,9 @@ final case class FrostConfig(
     keyPrefix: String = "",
     clusterId: Option[String] = None,
     signIntents: String = "on",
+    pinDir: Option[String] = None,
+    expectedGroupKeys: Map[String, String] = Map.empty,
+    adoptExistingKeys: List[String] = Nil,
     requestTimeout: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.FiniteDuration(30, "s"),
     attemptTimeout: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.FiniteDuration(10, "s"),
     signAttemptTimeout: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.FiniteDuration(5, "s"),

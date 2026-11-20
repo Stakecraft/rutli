@@ -67,8 +67,9 @@ live config. It works under any `profile`.
 
 The intent rows are not listed separately for a node without TLS: the `tls` row covers them.
 
-Coming with a pending change (it adds its own row when it lands): `signing_policy.refresh_min_interval_secs`
-(a minimum interval between refreshes).
+Not checked by the profile yet: `signing_policy.refresh_min_interval_secs` (the minimum interval between
+refreshes, 72 h by default; `0` turns it off). A required finding for `0` is tracked in
+[issue #184](https://github.com/Stakecraft/rutli/issues/184).
 
 ## Driver: what the profile requires
 
@@ -94,13 +95,15 @@ Its exit codes are those of `check-config` above.
 | `frost.delegate` | `hsm` | `hsm`, or `none` with `hosted-keys` | `software` keeps keys in the participant's memory or a local file. |
 | `frost.tls` | optional | present | No mTLS, no intents, no roles. |
 | `frost.tls.allow-expired-ca` | `false` | `false` | An emergency setting for a CA rotation. |
-| `frost.endpoints` | a bare url is allowed | at least 2, each with its own, distinct `tls-name` | A group key is believed on two agreeing answers. Without a per-endpoint name, one cosigner certificate can answer for every address. |
+| `frost.endpoints` | a bare url is allowed | at least 2, each with its own, distinct `tls-name` | A group key is believed on a roster majority of agreeing answers. Without a per-endpoint name, one cosigner certificate can answer for every address, and count more than once. |
 | `frost.sign-intents` | `on` | `on` | `off` is an emergency switch. |
 | `frost.cluster-id` | learned from the cluster | set | A learned value follows a majority of the cosigners; a set one cannot be steered. |
+| `frost.pin-dir` | unset | set, on the participant's durable volume | Group-key pins that survive a restart. Without them, one cosigner answering another key blocks the first pin after every restart ([disaster-recovery.md](disaster-recovery.md#3i-the-drivers-group-key-pins-frostpin-dir)). |
+| `frost.expected-group-keys` | empty | **advisory**: an entry for the namespace key, its group key from the key ceremony record | The operator's anchor: a first pin must equal it. |
 | `audit-log-path` | unset | set | The hash-chained audit log `audit-cross-check` compares with the journals. |
 | `signing-journal` | unset | set | The driver's own record of every signature. |
 | `hsm.pin` (with an HSM) | — | not inline; use `hsm.pin-env` | The PIN stays out of the config file. |
-| `approval` | unset | **advisory**: a quorum rule for the namespace key (`<key-prefix>frost-namespace`) | Human approval of namespace-key signatures. A deployment decision, so it is reported and never refuses. |
+| `approval` | unset | **advisory**: a quorum rule for the namespace key (`<key-prefix>frost-namespace` from a Splice validator, `<key-prefix>frost-<node>-namespace` from Canton's auto-init), or a rule over every FROST key | Human approval of namespace-key signatures. A deployment decision, so it is reported and never refuses. |
 
 Placement is not a config setting and the profile cannot check it: each cosigner in its own cluster
 or cloud account is a go-live gate ([audit-prep.md](audit-prep.md#operator-go-live-gates-post-audit)).
@@ -128,5 +131,6 @@ If you cannot meet the list yet (a key-file migration in progress, or the legacy
 
 The other commands (`restore`, `keyfile migrate`, and so on) load the config the way the node does.
 Under `production` with required findings they refuse too. Run them with the config as it will be,
-or under `lab`. An older cosigner binary does not know the `profile` key and refuses the file, so
-roll back the chart and the image together.
+or under `lab`. A cosigner on 0.4.0 or 0.4.1 ignores the `profile` key (and the peer pin keys): it rejects unknown
+keys only in `keyfile`. A config written for 0.5.0 therefore gives none of these guarantees on such
+a binary. Check the running version (`--version`, or the image digest) before relying on them.

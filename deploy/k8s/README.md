@@ -126,6 +126,7 @@ canton.participants.participant1.crypto {
         # sign-attempt-timeout = 5s, attempt-timeout = 10s, request-timeout = 30s
         # keepalive-time = 10s, keepalive-timeout = 5s
         cluster-id = "<the cosigners' cluster_id>"
+        pin-dir = "/var/rutli/pins"   # durable group-key pins (docs/disaster-recovery.md §3i)
       }
       audit-log-path = "/var/rutli/audit.jsonl"
       signing-journal = { dir = "/var/rutli/journal" }
