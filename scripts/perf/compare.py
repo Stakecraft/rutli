@@ -231,6 +231,16 @@ def main(argv=None):
                   f"{dx.get('predicted_ceiling_signs_per_sec')}/s; keys: {dx.get('keys_verdict', 'not run')}", ""]
     if current.get("headroom_factor") is not None:
         lines += [f"Headroom factor: {current['headroom_factor']} (profile {current.get('profile')})", ""]
+    real = (current.get("ramp") or {}).get("real_load_headroom") or []
+    if real:
+        lines += ["Headroom against the real load: " + "; ".join(
+            f"{h['name']} ({h['per_sec']:g}/s) x{h['factor']:g}{' or more' if h.get('lower_bound') else ''}"
+            if h.get("factor") is not None else f"{h['name']} ({h['per_sec']:g}/s) not reached"
+            for h in real), ""]
+    plateau = dx.get("plateau_vs_real") or []
+    if plateau:
+        lines += ["Diagnosis plateau against the real load: "
+                  + "; ".join(f"{h['name']} x{h['factor']:g}" for h in plateau), ""]
     for name, secs in (current.get("recovery_secs") or {}).items():
         healthy = (current.get("time_to_healthy_secs") or {}).get(name)
         lines += [f"After {name}: healthy again in {'(not within the limit)' if healthy is None else f'{healthy:g} s'}, "

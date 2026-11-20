@@ -5,7 +5,7 @@
 
 Bring a kubeconfig and a namespace; install with scripts/perf/k8s-deploy.sh, then
 
-  cluster.py --namespace NS --profile scripts/perf/profiles/placeholder.json --out result.json \\
+  cluster.py --namespace NS --profile scripts/perf/profiles/devnet-validator.json --out result.json \\
              [--suites upgrade,scenarios,connect,keys,ramp,disrupt] [--upgrade-image REF --work DIR]
 
 writes one JSON file. scripts/perf/compare.py compares it with a previous one.
@@ -28,9 +28,11 @@ Suites:
   keys       the key-count dimension: for each count of the profile, that many FROST keys and
              hosted keys (spread over ten tenant prefixes), sign latency over all of them, and how
              long each cosigner takes to list its hosted keys (Peer API ListKeys).
-  ramp       the scale ramp: the profile's baseline load times 1, 3, 10, 30, 100, ... for
-             step_secs each, stopping at the first step whose p99 exceeds the SLO or that has an
-             error. The last step that passed is the headroom factor, a top-level number.
+  ramp       the scale ramp: the profile's baseline load times each factor; a step runs the
+             baseline's phases (average, busiest minute, burst) one after another. A phase over
+             the SLO or with an error drops out of the later steps. The last factor at which every
+             phase passed is the headroom factor, a top-level number; against each measure of the
+             real load (`real` of the profile) the best rate that passed is a headroom of its own.
 
 Provider hooks: executables named by environment variables, called with `start` and later `stop`
 (stop always, even when the scenario failed), with KUBECONFIG and RUTLI_NAMESPACE set:
@@ -141,6 +143,42 @@ class K8sCluster:
 
     def pvc_of(self, node):
         return f"{self.ns}/data-{self.pod(node)[: -len('-0')]}"
+
+
+def ramp_phases(base_mix, step_secs):
+    """The phases of one ramp step at x1: the baseline's `phases` (each a name, its rates and
+    seconds), or one phase of `step_secs` with the baseline's own rates."""
+    if base_mix.get("phases"):
+        return [{"name": ph["name"], "sign_per_sec": float(ph.get("sign_per_sec", 0)),
+                 "ecdh_per_sec": float(ph.get("ecdh_per_sec", 0)), "secs": int(ph["secs"])}
+                for ph in base_mix["phases"]]
+    return [{"name": "step", "sign_per_sec": float(base_mix.get("sign_per_sec", 0)),
+             "ecdh_per_sec": float(base_mix.get("ecdh_per_sec", 0)), "secs": int(step_secs)}]
+
+
+def real_load_headroom(steps, real):
+    """Headroom against each measure of the real load (`real` of the profile: name, per_sec, and
+    min_secs, the shortest phase that may stand for it: a busiest minute needs a phase of a minute
+    or more, a burst does not). The factor is the highest signing rate that passed in such a phase
+    over the measure's rate; `lower_bound` when no such phase ever failed (the ramp ended first)."""
+    out = []
+    for m in real:
+        passed, failed = [], False
+        for st in steps:
+            for r in st.get("phases", {}).values():
+                if r.get("secs", 0) < int(m.get("min_secs", 0)) or r.get("rig_failed"):
+                    continue
+                if r.get("passed"):
+                    passed.append(r.get("sign_per_sec", 0))
+                else:
+                    failed = True
+        best = max(passed, default=None)
+        entry = {"name": m["name"], "per_sec": m["per_sec"], "best_passed_per_sec": best,
+                 "factor": round(best / float(m["per_sec"]), 1) if best else None}
+        if best and not failed:
+            entry["lower_bound"] = True
+        out.append(entry)
+    return out
 
 
 class Suite(base.Runner):
@@ -475,16 +513,24 @@ class Suite(base.Runner):
     # -- scale ramp ----------------------------------------------------------------------------
 
     def scale_ramp(self):
-        """The baseline mix times each factor for step_secs; stop at the first step over the SLO
-        or with an error. Headroom factor: the last step that passed (0: not even the baseline)."""
+        """The baseline times each factor; a step runs the baseline's phases one after another
+        (one phase of step_secs for a profile without phases), each phase's rates times the factor.
+
+        The headroom factor is the last factor at which every phase passed (0: not even x1). A
+        phase that fails (over the SLO, or an error) is dropped from the later steps and the ramp
+        goes on with the others until none is left: so a profile shaped like real traffic (an
+        average, a busiest minute, a burst) learns how far each part of it can grow, not only the
+        first to give out. Against the profile's `real` measures, the best rate that passed is
+        then a headroom of its own (real_load_headroom)."""
         p = self.profile
         base_mix = p["baseline"]
         slo = float(p["slo"]["p99_ms"])
         step_secs = int(p.get("step_secs", 300))
+        phases = ramp_phases(base_mix, step_secs)
         n_keys = max(1, int(base_mix.get("sign_keys", 2)))
         sign_keys = [f"perf-ramp-{i}" for i in range(n_keys)]
         n_hosted = max(1, int(base_mix.get("ecdh_keys", 1)))
-        ecdh_keys = [f"rutli-perf-ramp-{i}" for i in range(n_hosted)]
+        ecdh_keys = [f"rutli-perf-ramp-{i}" for i in range(n_hosted)] if any(ph["ecdh_per_sec"] > 0 for ph in phases) else []
         setup = self.setup_keys(["setup"] + [x for k in sign_keys for x in ("--frost-key", k)]
                                 + [x for k in ecdh_keys for x in ("--ecies-key", k)], wall_timeout=1800)
         steps, headroom = [], 0
@@ -493,67 +539,104 @@ class Suite(base.Runner):
                          "headroom_factor": 0}
             return
         rig_stop = None
+        active = [ph["name"] for ph in phases]
+        shape_whole = True  # every phase still in the step
+        clients = lambda r: str(max(3, min(256, math.ceil(r))))  # noqa: E731
         for factor in p.get("factors", [1, 3, 10, 30, 100]):
-            procs = []
-            sign_rate = float(base_mix.get("sign_per_sec", 0)) * factor
-            ecdh_rate = float(base_mix.get("ecdh_per_sec", 0)) * factor
-            log(f"ramp x{factor:g}: {sign_rate:g} signatures/s, {ecdh_rate:g} ECDH/s for {step_secs} s")
-            clients = lambda r: str(max(3, min(256, math.ceil(r))))  # noqa: E731
-            if sign_rate > 0:
-                procs.append(("sign", self.loadgen_start(
-                    ["sign", "--name", f"ramp-x{factor:g}", "--rate", f"{sign_rate:g}", "--clients", clients(sign_rate),
-                     "--duration-secs", str(step_secs)] + [x for k in sign_keys for x in ("--key", k)])))
-            if ecdh_rate > 0:
-                # One hosted key per stream; each has its own per-minute decryption ceiling.
-                per_key = ecdh_rate / len(ecdh_keys)
-                for k in ecdh_keys:
-                    procs.append(("ecdh", self.loadgen_start(
-                        ["ecdh", "--key", k, "--name", f"ramp-x{factor:g}", "--rate", f"{per_key:g}",
-                         "--clients", clients(per_key), "--duration-secs", str(step_secs)])))
-            step = {"factor": factor, "sign_per_sec": sign_rate, "ecdh_per_sec": ecdh_rate, "ops": {}}
+            step = {"factor": factor, "phases": {}, "ops": {}}
             reasons = []
-            for op, proc in procs:
-                report = self.loadgen_finish(proc, step_secs + 900)
-                if "failed" in report:
-                    if report.get("rig"):
-                        # Not the cluster's limit: the step says nothing about headroom.
-                        rig_stop = f"x{factor:g} {op}: {report['failed']}"
-                    else:
-                        reasons.append(f"{op}: {report['failed']}")
+            for ph in phases:
+                if ph["name"] not in active:
                     continue
-                client = report.get("client", {})
-                o = step["ops"].setdefault(op, {"ok": 0, "errors": {}, "p99_ms": 0.0, "p95_ms": 0.0, "server": None})
-                o["ok"] += client.get("ok", 0)
-                for code, n in client.get("errors", {}).items():
-                    o["errors"][code] = o["errors"].get(code, 0) + n
-                lat = client.get("latency", {})
-                o["p99_ms"] = max(o["p99_ms"], lat.get("p99_ms", 0.0))
-                o["p95_ms"] = max(o["p95_ms"], lat.get("p95_ms", 0.0))
-                if op == "sign":
-                    o["server"] = report.get("server", {}).get("sign_duration")
-            for op, o in step["ops"].items():
-                if o["errors"]:
-                    reasons.append(f"{op}: errors {o['errors']}")
-                if o["p99_ms"] > slo:
-                    reasons.append(f"{op}: p99 {o['p99_ms']:.1f} ms above the SLO of {slo:g} ms")
+                sign_rate, ecdh_rate, secs = ph["sign_per_sec"] * factor, ph["ecdh_per_sec"] * factor, ph["secs"]
+                label = f"ramp-x{factor:g}" + ("" if len(phases) == 1 else f"-{ph['name']}")
+                log(f"ramp x{factor:g} {ph['name']}: {sign_rate:g} signatures/s, {ecdh_rate:g} ECDH/s for {secs} s")
+                procs = []
+                if sign_rate > 0:
+                    procs.append(("sign", self.loadgen_start(
+                        ["sign", "--name", label, "--rate", f"{sign_rate:g}", "--clients", clients(sign_rate),
+                         "--duration-secs", str(secs)] + [x for k in sign_keys for x in ("--key", k)])))
+                if ecdh_rate > 0 and ecdh_keys:
+                    # One hosted key per stream; each has its own per-minute decryption ceiling.
+                    per_key = ecdh_rate / len(ecdh_keys)
+                    for k in ecdh_keys:
+                        procs.append(("ecdh", self.loadgen_start(
+                            ["ecdh", "--key", k, "--name", label, "--rate", f"{per_key:g}",
+                             "--clients", clients(per_key), "--duration-secs", str(secs)])))
+                result = {"sign_per_sec": sign_rate, "ecdh_per_sec": ecdh_rate, "secs": secs}
+                why = []
+                for op, proc in procs:
+                    report = self.loadgen_finish(proc, secs + 900)
+                    if "failed" in report:
+                        if report.get("rig"):
+                            # Not the cluster's limit: the step says nothing about headroom.
+                            rig_stop = f"x{factor:g} {ph['name']} {op}: {report['failed']}"
+                        else:
+                            why.append(f"{op}: {report['failed']}")
+                        continue
+                    client = report.get("client", {})
+                    key = op if len(phases) == 1 else f"{op} {ph['name']}"
+                    o = step["ops"].setdefault(key, {"ok": 0, "errors": {}, "p99_ms": 0.0, "p95_ms": 0.0, "server": None})
+                    o["ok"] += client.get("ok", 0)
+                    for code, n in client.get("errors", {}).items():
+                        o["errors"][code] = o["errors"].get(code, 0) + n
+                    lat = client.get("latency", {})
+                    o["p99_ms"] = max(o["p99_ms"], lat.get("p99_ms", 0.0))
+                    o["p95_ms"] = max(o["p95_ms"], lat.get("p95_ms", 0.0))
+                    if op == "sign":
+                        o["server"] = report.get("server", {}).get("sign_duration")
+                for key in {op if len(phases) == 1 else f"{op} {ph['name']}" for op, _ in procs}:
+                    o = step["ops"].get(key)
+                    if o and o["errors"]:
+                        why.append(f"{key}: errors {o['errors']}")
+                    if o and o["p99_ms"] > slo:
+                        why.append(f"{key}: p99 {o['p99_ms']:.1f} ms above the SLO of {slo:g} ms")
+                if rig_stop:
+                    result["rig_failed"] = rig_stop
+                    step["phases"][ph["name"]] = result
+                    break
+                result["passed"] = not why
+                result["reasons"] = why
+                step["phases"][ph["name"]] = result
+                if why:
+                    reasons += [f"{ph['name']}: {w}" for w in why]
             if rig_stop:
                 step["rig_failed"] = rig_stop
+                if reasons:
+                    # A phase before the rig failure already failed on the cluster: that verdict stands.
+                    step.update({"passed": False, "reasons": reasons})
                 steps.append(step)
-                log(f"  x{factor:g}: the rig failed ({rig_stop}); the ramp stops without a verdict on this step")
+                log(f"  x{factor:g}: the rig failed ({rig_stop}); the ramp stops without a verdict on the rest of this step")
                 break
             step["passed"] = not reasons
             step["reasons"] = reasons
+            step["whole_shape"] = shape_whole
             steps.append(step)
-            log(f"  x{factor:g}: {'ok' if not reasons else 'STOP: ' + '; '.join(reasons)}")
-            if reasons:
-                break
-            headroom = factor
+            log(f"  x{factor:g}: {'ok' if not reasons else 'STOP for ' + '; '.join(reasons)}")
+            if not reasons and shape_whole:
+                headroom = factor
+            failed = [name for name, r in step["phases"].items() if not r.get("passed")]
+            if failed:
+                shape_whole = False
+                active = [name for name in active if name not in failed]
+                if not active:
+                    break
+                # The overload of the failed phase must not count against the next one.
+                if self.settle() is None:
+                    log("  the cluster did not settle after the failed phase; the ramp stops")
+                    break
         self.ramp = {"profile": p.get("name"), "slo_p99_ms": slo, "step_secs": step_secs,
-                     "steps": steps, "headroom_factor": headroom}
+                     "phases": [ph["name"] for ph in phases], "steps": steps, "headroom_factor": headroom}
+        if p.get("real"):
+            self.ramp["real_load_headroom"] = real_load_headroom(steps, p["real"])
+            log("ramp: headroom against the real load: " + "; ".join(
+                f"{h['name']} x{h['factor']:g}{' or more' if h.get('lower_bound') else ''}"
+                for h in self.ramp["real_load_headroom"] if h.get("factor") is not None))
         if rig_stop:
-            # The headroom factor is then a lower bound: the next step was never judged.
-            self.ramp.update({"failed": f"the rig failed: {rig_stop}", "rig": True, "headroom_is_lower_bound": True})
-
+            self.ramp.update({"failed": f"the rig failed: {rig_stop}", "rig": True})
+            if not steps[-1].get("reasons"):
+                # The headroom factor is then a lower bound: the step was never judged.
+                self.ramp["headroom_is_lower_bound"] = True
 
 class Diagnosis:
     """The diagnostic pass (`--diagnose`): what limits the cluster's throughput. In order of what
@@ -674,15 +757,17 @@ class Diagnosis:
                                 "subsets leader first, then by identifier (node 1 serves every signature)")
 
         sign_keys = [f"perf-ramp-{i}" for i in range(max(1, int(mix.get("sign_keys", 2))))]
-        ecdh_keys = [f"rutli-perf-ramp-{i}" for i in range(max(1, int(mix.get("ecdh_keys", 1))))]
+        ecdh_keys = [f"rutli-perf-ramp-{i}" for i in range(int(mix.get("ecdh_keys", 1)))] if d.get("with_ecdh") else []
         setup = self.s.setup_keys(["setup"] + [x for k in sign_keys for x in ("--frost-key", k)]
                                   + [x for k in ecdh_keys for x in ("--ecies-key", k)], wall_timeout=1800)
         if "failed" in setup:
             out.update({"failed": f"setup: {setup['failed']}", "rig": bool(setup.get("rig"))})
             return out
         steps, past = [], 0
+        # Factors of this rate (a profile shaped by phases has no single baseline rate).
+        base_rate = float(d.get("sign_per_sec", mix.get("sign_per_sec", 1)))
         for f in d.get("factors", [30, 50, 70, 100, 130, 160, 200, 250, 300]):
-            sign_rate = float(mix.get("sign_per_sec", 0)) * f
+            sign_rate = base_rate * f
             log(f"diagnose x{f:g}: {sign_rate:g} signatures/s for {secs} s")
             # Signing only, unless the profile asks for the mix: CPU per signature and the knee are
             # about signing.
@@ -705,6 +790,11 @@ class Diagnosis:
         out["knee_factor"] = diagnose.knee(steps, slo)
         out["max_ok_per_sec"] = max((st["ok_per_sec"] for st in steps), default=None)
         out["generator_bound_steps"] = [st["factor"] for st in steps if st.get("generator_bound") is not False]
+        if self.p.get("real") and out["max_ok_per_sec"]:
+            # The plateau against each measure of the real load (a burst is short, so the same rate).
+            out["plateau_vs_real"] = [{"name": m["name"], "per_sec": m["per_sec"],
+                                       "factor": round(out["max_ok_per_sec"] / float(m["per_sec"]), 1)}
+                                      for m in self.p["real"]]
         log(f"diagnose: knee at x{out['knee_factor']}, at most {out['max_ok_per_sec']} signatures/s; "
             f"the flushes alone would allow about {out['predicted_ceiling_signs_per_sec']}/s; "
             f"steps without a verdict (generator-bound or no readings): {out['generator_bound_steps']}")
@@ -712,7 +802,7 @@ class Diagnosis:
         k = out["knee_factor"]
         if k and not out.get("rig_failed"):
             # The knee's (overloaded) rate over more keys: does the throughput follow the key count?
-            rate = float(mix.get("sign_per_sec", 0)) * k
+            rate = base_rate * k
             results = []
             for n in d.get("key_counts", [2, 20, 200]):
                 keys = [f"perf-dk-{i}" for i in range(int(n))]

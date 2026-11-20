@@ -206,6 +206,50 @@ class Cluster(unittest.TestCase):
         self.assertIn("DKG refused", problems[0])
 
 
+class RealLoad(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+    def test_a_profile_without_phases_is_one_phase_of_step_secs(self):
+        import cluster
+        ph = cluster.ramp_phases({"sign_per_sec": 2, "ecdh_per_sec": 0.5}, 300)
+        self.assertEqual(ph, [{"name": "step", "sign_per_sec": 2.0, "ecdh_per_sec": 0.5, "secs": 300}])
+        ph = cluster.ramp_phases({"phases": [{"name": "burst", "sign_per_sec": 2.3, "secs": 10}]}, 300)
+        self.assertEqual(ph, [{"name": "burst", "sign_per_sec": 2.3, "ecdh_per_sec": 0.0, "secs": 10}])
+
+    def test_headroom_against_each_measure(self):
+        import cluster
+        real = [{"name": "average", "per_sec": 0.063, "min_secs": 60},
+                {"name": "busiest minute", "per_sec": 0.87, "min_secs": 60},
+                {"name": "burst", "per_sec": 2.3, "min_secs": 0}]
+        steps = []
+        for f, burst_ok, minute_ok in [(10, True, True), (45, True, True), (70, False, True), (100, None, True),
+                                       (150, None, False)]:
+            phases = {"average": {"sign_per_sec": 0.063 * f, "secs": 120, "passed": True},
+                      "busiest-minute": {"sign_per_sec": 0.87 * f, "secs": 60, "passed": minute_ok}}
+            if burst_ok is not None:
+                phases["burst"] = {"sign_per_sec": 2.3 * f, "secs": 10, "passed": burst_ok}
+            steps.append({"factor": f, "phases": phases})
+        h = {x["name"]: x for x in cluster.real_load_headroom(steps, real)}
+        # The busiest minute passed at x100 (87/s): x1381 of the average, x100 of the minute.
+        self.assertAlmostEqual(h["average"]["factor"], round(87.0 / 0.063, 1))
+        self.assertEqual(h["busiest minute"]["factor"], 100.0)
+        # The burst passed at x45 (103.5/s); a minute at 87/s is shorter in rate.
+        self.assertEqual(h["burst"]["factor"], 45.0)
+        self.assertNotIn("lower_bound", h["burst"])
+        # Every measure saw a failing phase that stands for it (the minute at x150).
+        self.assertNotIn("lower_bound", h["average"])
+
+    def test_a_measure_never_failed_is_a_lower_bound(self):
+        import cluster
+        steps = [{"factor": 1, "phases": {"average": {"sign_per_sec": 0.063, "secs": 120, "passed": True}}}]
+        h = cluster.real_load_headroom(steps, [{"name": "average", "per_sec": 0.063, "min_secs": 60}])
+        self.assertEqual(h[0]["factor"], 1.0)
+        self.assertTrue(h[0]["lower_bound"])
+        h = cluster.real_load_headroom([], [{"name": "average", "per_sec": 0.063}])
+        self.assertIsNone(h[0]["factor"])
+
+
 class RigOrCluster(unittest.TestCase):
     def test_only_a_cluster_answer_is_the_clusters_failure(self):
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
