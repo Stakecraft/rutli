@@ -57,6 +57,10 @@ const MAX_TAR_META: u64 = 64 << 10;
 const MAX_WALK_ENTRIES: usize = 1_000_000;
 const MAX_DEPTH: usize = 32;
 
+/// `keys/.proven/`: public markers that an epoch was proven against the cluster (key, epoch, group
+/// key, digests). Not key material.
+const PROVEN_DIR: &str = ".proven";
+
 /// The JSON schema id.
 pub const SCHEMA: &str = "rutli-residue-scan/1";
 
@@ -209,17 +213,17 @@ impl Report {
                 printable(&f.path),
                 f.key_id.as_deref().map(printable).unwrap_or_else(|| "-".into()),
                 f.epoch.map(|e| e.to_string()).unwrap_or_else(|| "-".into()),
-                f.dek.as_deref().unwrap_or("-"),
+                f.dek.as_deref().map(printable).unwrap_or_else(|| "-".into()),
             ));
             if let Some(n) = f.note {
                 out.push_str(&format!("          {n}\n"));
             }
         }
         for u in &self.unclassified {
-            out.push_str(&format!("[unclassified] {}: {}\n", printable(&u.path), u.reason));
+            out.push_str(&format!("[unclassified] {}: {}\n", printable(&u.path), printable(&u.reason)));
         }
         for e in &self.errors {
-            out.push_str(&format!("[error] {}: {}\n", printable(&e.path), e.error));
+            out.push_str(&format!("[error] {}: {}\n", printable(&e.path), printable(&e.error)));
         }
         for c in &self.changed {
             let what = match c.change {
@@ -404,15 +408,53 @@ enum Got {
     Bytes(Zeroizing<Vec<u8>>),
     TooLarge,
     Vanished,
+    /// A symbolic link or a special file at open time: not read.
+    NotRegular(&'static str),
     Error(String),
 }
 
+/// How an open went.
+enum Opened {
+    File(std::fs::File),
+    Vanished,
+    NotRegular(&'static str),
+    Error(String),
+}
+
+/// Open `path` read-only without following a symbolic link (even one swapped in after the walk
+/// looked), and only if it is a regular file. Non-blocking, so a FIFO never hangs the scan.
+fn open_nofollow(path: &Path) -> Opened {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    match opts.open(path) {
+        Ok(f) => match f.metadata() {
+            Ok(m) if m.is_file() => Opened::File(f),
+            Ok(_) => Opened::NotRegular("not a regular file; not read"),
+            Err(e) => Opened::Error(e.to_string()),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Opened::Vanished,
+        #[cfg(unix)]
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => Opened::NotRegular("a symbolic link; not followed"),
+        Err(e) => Opened::Error(e.to_string()),
+    }
+}
+
 fn read_capped(path: &Path) -> Got {
-    let file = match std::fs::File::open(path) {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Got::Vanished,
-        Err(e) => return Got::Error(e.to_string()),
-    };
+    match open_nofollow(path) {
+        Opened::File(f) => read_open(f),
+        Opened::Vanished => Got::Vanished,
+        Opened::NotRegular(why) => Got::NotRegular(why),
+        Opened::Error(e) => Got::Error(e),
+    }
+}
+
+/// Read an open file from where it stands, capped at [`MAX_FILE`], into a wiped buffer.
+fn read_open(file: std::fs::File) -> Got {
     let mut buf = Zeroizing::new(Vec::new());
     match file.take(MAX_FILE + 1).read_to_end(&mut buf) {
         Ok(_) if buf.len() as u64 > MAX_FILE => Got::TooLarge,
@@ -566,6 +608,9 @@ impl<'a> Scan<'a> {
             }
             Some("hosted-key") | Some("frost-share") => {}
             Some(other) => self.unclassified(path, format!("unknown record kind {other:?}")),
+            None if info.dek_use == Some(DekUse::Current) => {
+                self.unclassified(path, "opens with the current DEK but is not a known record")
+            }
             // A v1 file the current DEK does not open: its kind is unknown, already reported.
             None => {}
         }
@@ -582,6 +627,7 @@ impl<'a> Scan<'a> {
                 }
             }
             Got::Vanished => self.vanished(Self::path_str(path)),
+            Got::NotRegular(why) => self.unclassified(Self::path_str(path), why),
             Got::Error(e) => self.error(Self::path_str(path), e),
         }
     }
@@ -628,8 +674,9 @@ impl<'a> Scan<'a> {
             } else if t.is_dir() {
                 if n == STAGED_DIR {
                     self.staged_dir(&path, keys);
-                } else if n == CEREMONY_DIR || n == CLEARED_DIR || n.ends_with(".nonces") {
-                    // Ceremony votes, cleared-intent markers, nonce markers: no key material.
+                } else if n == CEREMONY_DIR || n == CLEARED_DIR || n == PROVEN_DIR || n.ends_with(".nonces") {
+                    // Ceremony votes, cleared-intent and epoch-proven markers, nonce markers: no
+                    // key material.
                 } else {
                     self.finding(Class::OtherDir, Self::path_str(&path), None, None);
                     self.walk_copies(&path, 1);
@@ -655,18 +702,43 @@ impl<'a> Scan<'a> {
     fn open_ceremonies(&mut self, keys: &Path) -> BTreeSet<String> {
         let dir = keys.join(CEREMONY_DIR);
         let mut open = BTreeSet::new();
-        let Ok(rd) = std::fs::read_dir(&dir) else { return open };
-        for e in rd.flatten() {
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return open,
+            Err(e) => {
+                self.error(Self::path_str(&dir), e.to_string());
+                return open;
+            }
+        };
+        for e in rd {
+            let e = match e {
+                Ok(e) => e,
+                Err(err) => {
+                    self.error(Self::path_str(&dir), err.to_string());
+                    continue;
+                }
+            };
             let n = e.file_name().to_string_lossy().into_owned();
             if n.starts_with('.') || !n.ends_with(".json") {
                 continue;
             }
-            if let Got::Bytes(b) = read_capped(&e.path()) {
-                if let Ok(r) = serde_json::from_slice::<CeremonyRecord>(&b) {
-                    if r.state == RecordState::Staged {
+            match read_capped(&e.path()) {
+                Got::Bytes(b) => match serde_json::from_slice::<CeremonyRecord>(&b) {
+                    Ok(r) if r.state == RecordState::Staged => {
                         open.insert(r.ceremony_id);
                     }
+                    Ok(_) => {}
+                    Err(_) => self.unclassified(
+                        Self::path_str(&e.path()),
+                        "a ceremony record that does not parse; staged shares are judged without it",
+                    ),
+                },
+                // Removed meanwhile: that ceremony is no longer open.
+                Got::Vanished => self.vanished(Self::path_str(&e.path())),
+                Got::TooLarge | Got::NotRegular(_) => {
+                    self.unclassified(Self::path_str(&e.path()), "not a readable ceremony record")
                 }
+                Got::Error(err) => self.error(Self::path_str(&e.path()), err),
             }
         }
         open
@@ -691,8 +763,10 @@ impl<'a> Scan<'a> {
             }
             let ceremony = n.strip_suffix(".json").and_then(|s| s.split_once('.')).map(|(_, c)| c.to_string());
             let before = self.findings.len();
+            let changed_before = self.changed.len();
             self.file(&path, Place::Staged);
-            if !ceremony.as_ref().is_some_and(|c| open.contains(c)) {
+            let gone = self.changed.len() > changed_before;
+            if !gone && !ceremony.as_ref().is_some_and(|c| open.contains(c)) {
                 let epoch = self.findings[before..].iter().find_map(|f| f.epoch);
                 self.findings.push(Finding {
                     class: Class::StagedOrphan,
@@ -726,6 +800,10 @@ impl<'a> Scan<'a> {
                 }
                 Got::Error(e) => {
                     self.error(Self::path_str(&path), e);
+                    continue;
+                }
+                Got::NotRegular(why) => {
+                    self.unclassified(Self::path_str(&path), why);
                     continue;
                 }
                 Got::TooLarge => None,
@@ -772,6 +850,11 @@ impl<'a> Scan<'a> {
     /// `data_dir` itself.
     fn data_dir(&mut self) {
         let dd = self.input.data_dir;
+        if let Err(e) = std::fs::metadata(dd) {
+            // A wrong path must never read as "nothing found".
+            self.error(Self::path_str(dd), format!("data_dir: {e}"));
+            return;
+        }
         let Some(names) = self.list(dd) else { return };
         for name in &names {
             let n = name.to_string_lossy().into_owned();
@@ -786,11 +869,11 @@ impl<'a> Scan<'a> {
                 ("ceremony", true) => self.ceremony_dir(&path),
                 ("journal", true) => {} // sign journals: no key material
                 ("lost+found", true) => match std::fs::read_dir(&path) {
-                    Ok(mut rd) => {
-                        if rd.next().is_some() {
-                            self.finding(Class::LostFound, Self::path_str(&path), None, None);
-                        }
-                    }
+                    Ok(mut rd) => match rd.next() {
+                        Some(Ok(_)) => self.finding(Class::LostFound, Self::path_str(&path), None, None),
+                        Some(Err(e)) => self.error(Self::path_str(&path), e.to_string()),
+                        None => {}
+                    },
                     Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                         self.unclassified(Self::path_str(&path), "not readable by this user; check it as root")
                     }
@@ -821,29 +904,46 @@ impl<'a> Scan<'a> {
 
     /// One `--backup`: a directory, a tar, or a single key file.
     fn backup(&mut self, path: &Path) {
-        let Some(t) = self.file_type(path) else { return };
+        let shown = Self::path_str(path);
+        let t = match std::fs::symlink_metadata(path) {
+            Ok(m) => m.file_type(),
+            // A wrong path must never read as "nothing found".
+            Err(e) => return self.error(shown, format!("--backup: {e}")),
+        };
         if t.is_dir() {
             self.walk_copies(path, 0);
-        } else if t.is_file() {
-            match tar_magic(path) {
-                Ok(true) => self.tar(path),
-                Ok(false) => {
-                    let before = self.findings.len() + self.unclassified.len() + self.errors.len();
-                    self.file(path, Place::Copy);
-                    if self.findings.len() + self.unclassified.len() + self.errors.len() == before
-                        && !self.changed.iter().any(|c| c.path == Self::path_str(path))
-                    {
-                        self.unclassified(
-                            Self::path_str(path),
-                            "neither a directory, a plain tar, nor a key file (compressed archives \
-                             are not read: decompress first)",
-                        );
-                    }
+            return;
+        }
+        let mut f = match open_nofollow(path) {
+            Opened::File(f) => f,
+            Opened::Vanished => return self.vanished(shown),
+            Opened::NotRegular(why) => return self.unclassified(shown, why),
+            Opened::Error(e) => return self.error(shown, e),
+        };
+        match tar_magic(&mut f) {
+            Ok(true) => self.tar_open(f, shown),
+            Ok(false) => {
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let before = self.findings.len() + self.unclassified.len();
+                let got = match f.seek(SeekFrom::Start(0)) {
+                    Ok(_) => read_open(f),
+                    Err(e) => Got::Error(e.to_string()),
+                };
+                match got {
+                    Got::Bytes(b) => self.classify(shown.clone(), &name, &b, Place::Copy),
+                    Got::Error(e) => self.error(shown.clone(), e),
+                    Got::TooLarge => self.unclassified(shown.clone(), format!("larger than {MAX_FILE} bytes; not read")),
+                    Got::Vanished | Got::NotRegular(_) => {}
                 }
-                Err(e) => self.error(Self::path_str(path), e),
+                if self.findings.len() + self.unclassified.len() == before && self.errors.last().is_none_or(|e| e.path != shown) {
+                    self.unclassified(
+                        shown,
+                        "neither a directory, a plain tar, nor a key file (compressed archives \
+                         are not read: decompress first)",
+                    );
+                }
             }
-        } else {
-            self.unclassified(Self::path_str(path), "a symbolic link or special file; not followed");
+            Err(e) => self.error(shown, e),
         }
     }
 
@@ -853,19 +953,22 @@ impl<'a> Scan<'a> {
     /// capped), at most [`MAX_TAR_ENTRIES`]. Entry names are reported, never joined to a path.
     fn tar(&mut self, path: &Path) {
         let shown = Self::path_str(path);
-        match read_tar(path, &shown) {
-            Ok(entries) => {
-                for e in entries {
-                    match e {
-                        TarItem::Entry { shown, base, bytes } => self.classify(shown, &base, &bytes, Place::Copy),
-                        TarItem::TooLarge { shown } => {
-                            self.unclassified(shown, format!("larger than {MAX_FILE} bytes; not read"))
-                        }
-                    }
-                }
-            }
-            Err(TarError::Vanished) => self.vanished(shown),
-            Err(TarError::Read(e)) => self.error(shown, e),
+        match open_nofollow(path) {
+            Opened::File(f) => self.tar_open(f, shown),
+            Opened::Vanished => self.vanished(shown),
+            Opened::NotRegular(why) => self.unclassified(shown, why),
+            Opened::Error(e) => self.error(shown, e),
+        }
+    }
+
+    /// Read an opened tar, classifying each entry as it is read: one entry in memory at a time.
+    fn tar_open(&mut self, f: std::fs::File, shown: String) {
+        let res = read_tar(f, &shown, |item| match item {
+            TarItem::Entry { shown, base, bytes } => self.classify(shown, &base, &bytes, Place::Copy),
+            TarItem::TooLarge { shown } => self.unclassified(shown, format!("larger than {MAX_FILE} bytes; not read")),
+        });
+        if let Err(e) = res {
+            self.error(shown, e);
         }
     }
 }
@@ -875,14 +978,8 @@ enum TarItem {
     TooLarge { shown: String },
 }
 
-enum TarError {
-    Vanished,
-    Read(String),
-}
-
-/// Whether `path` starts like a tar (ustar or GNU magic at offset 257).
-fn tar_magic(path: &Path) -> std::result::Result<bool, String> {
-    let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+/// Whether an open file starts like a tar (ustar or GNU magic at offset 257).
+fn tar_magic(f: &mut std::fs::File) -> std::result::Result<bool, String> {
     let mut hdr = [0u8; 512];
     let mut got = 0;
     while got < 512 {
@@ -936,23 +1033,15 @@ fn pax_path(data: &[u8]) -> Option<String> {
     None
 }
 
-/// Walk a plain tar at `path`, reported as `shown`. Only entries whose base name is a candidate
-/// are read; each is reported as `<shown>!<entry name>`.
-fn read_tar(path: &Path, shown: &str) -> std::result::Result<Vec<TarItem>, TarError> {
-    let io = |e: std::io::Error| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            TarError::Vanished
-        } else {
-            TarError::Read(e.to_string())
-        }
-    };
-    let mut f = std::fs::File::open(path).map_err(io)?;
+/// Walk an open plain tar, reported as `shown`, handing each candidate entry to `on` as soon as it
+/// is read (one entry in memory at a time). Each is reported as `<shown>!<entry name>`.
+fn read_tar(mut f: std::fs::File, shown: &str, mut on: impl FnMut(TarItem)) -> std::result::Result<(), String> {
+    let io = |e: std::io::Error| e.to_string();
     let len = f.metadata().map_err(io)?.len();
-    let mut out = Vec::new();
     let mut pos: u64 = 0;
     let mut next_name: Option<String> = None;
     let mut entries = 0usize;
-    let corrupt = |at: u64, what: &str| TarError::Read(format!("not a readable tar at offset {at}: {what}"));
+    let corrupt = |at: u64, what: &str| format!("not a readable tar at offset {at}: {what}");
     loop {
         if pos + 512 > len {
             return Err(corrupt(pos, "truncated (no end-of-archive marker)"));
@@ -961,13 +1050,11 @@ fn read_tar(path: &Path, shown: &str) -> std::result::Result<Vec<TarItem>, TarEr
         f.seek(SeekFrom::Start(pos)).map_err(io)?;
         f.read_exact(&mut hdr).map_err(io)?;
         if hdr.iter().all(|b| *b == 0) {
-            return Ok(out);
+            return Ok(());
         }
         entries += 1;
         if entries > MAX_TAR_ENTRIES {
-            return Err(TarError::Read(format!(
-                "more than {MAX_TAR_ENTRIES} entries; the rest of the archive was not read"
-            )));
+            return Err(format!("more than {MAX_TAR_ENTRIES} entries; the rest of the archive was not read"));
         }
         let stored = tar_num(&hdr[148..156]).ok_or_else(|| corrupt(pos, "bad header checksum field"))?;
         let sum: u64 = hdr.iter().enumerate().map(|(i, b)| if (148..156).contains(&i) { 32 } else { *b as u64 }).sum();
@@ -981,7 +1068,7 @@ fn read_tar(path: &Path, shown: &str) -> std::result::Result<Vec<TarItem>, TarEr
             return Err(corrupt(pos, "entry runs past the end of the file"));
         }
         let typeflag = hdr[156];
-        let read_meta = |f: &mut std::fs::File| -> std::result::Result<Vec<u8>, TarError> {
+        let read_meta = |f: &mut std::fs::File| -> std::result::Result<Vec<u8>, String> {
             if size > MAX_TAR_META {
                 return Err(corrupt(pos, "extended header too large"));
             }
@@ -1011,12 +1098,12 @@ fn read_tar(path: &Path, shown: &str) -> std::result::Result<Vec<TarItem>, TarEr
                 if candidate(&base) {
                     let shown = format!("{shown}!{name}");
                     if size > MAX_FILE {
-                        out.push(TarItem::TooLarge { shown });
+                        on(TarItem::TooLarge { shown });
                     } else {
                         let mut b = Zeroizing::new(vec![0u8; size as usize]);
                         f.seek(SeekFrom::Start(data_at)).map_err(io)?;
                         f.read_exact(&mut b).map_err(io)?;
-                        out.push(TarItem::Entry { shown, base, bytes: b });
+                        on(TarItem::Entry { shown, base, bytes: b });
                     }
                 }
             }
@@ -1026,6 +1113,27 @@ fn read_tar(path: &Path, shown: &str) -> std::result::Result<Vec<TarItem>, TarEr
         }
         pos = data_at + padded;
     }
+}
+
+/// Read a plain tar's key-file entries (`*.json`, `*.tmp`, `*.recipient`) with the scan's reader
+/// and limits: no symbolic link followed, checksums verified, at most [`MAX_TAR_ENTRIES`] entries,
+/// one entry in memory at a time. `on` gets each entry's name as stored (never a path on this
+/// machine) and its bytes, or `None` when it is larger than [`MAX_FILE`]. For other tools that need
+/// the key headers of a backup archive (`seal::header_of`), so there is one tar reader.
+pub fn visit_tar_key_entries(
+    path: &Path,
+    mut on: impl FnMut(&str, Option<&[u8]>),
+) -> std::result::Result<(), String> {
+    let f = match open_nofollow(path) {
+        Opened::File(f) => f,
+        Opened::Vanished => return Err("no longer exists".into()),
+        Opened::NotRegular(why) => return Err(why.into()),
+        Opened::Error(e) => return Err(e),
+    };
+    read_tar(f, "", |item| match item {
+        TarItem::Entry { shown, bytes, .. } => on(&shown[1..], Some(&bytes)),
+        TarItem::TooLarge { shown } => on(&shown[1..], None),
+    })
 }
 
 /// Control characters escaped, so a crafted file name cannot rewrite the terminal.
@@ -1137,6 +1245,18 @@ mod tests {
     #[test]
     fn control_characters_are_escaped() {
         assert_eq!(printable("a\x1b[2Jb\n"), "a\\u{1b}[2Jb\\n");
+    }
+
+    #[test]
+    fn a_symlink_swapped_in_after_the_walk_is_still_not_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("target.json");
+        std::fs::write(&target, b"{}").unwrap();
+        let link = tmp.path().join("frost-a.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        // read_capped is what every file read goes through, whatever the walk saw before.
+        assert!(matches!(read_capped(&link), Got::NotRegular(why) if why.contains("symbolic link")));
+        assert!(matches!(open_nofollow(tmp.path()), Opened::NotRegular(_)));
     }
 
     #[test]

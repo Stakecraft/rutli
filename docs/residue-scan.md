@@ -21,7 +21,8 @@ given. Every report ends with a fixed **NOT CHECKED** block that says so (see be
 The scan can run inside the cosigner's pod while the daemon serves:
 
 - it takes no lock: not the daemon's instance lock, not any file lock;
-- it opens files read-only, never creates a directory and never follows a symbolic link;
+- it opens files read-only, never creates a directory and never follows a symbolic link, not even
+  one swapped in after the walk looked (files are opened with no-follow and must be regular);
 - a file that disappears or appears while the scan walks its directory (a refresh, a backup run) is
   reported as `[changed]`, not as an error.
 
@@ -69,14 +70,15 @@ Other lines:
 
 - `[unclassified] <path>: <reason>`: something the scan could not place, for example a key file of
   another node, a symbolic link (never followed), a file that is not a key file in the key store, a
-  `lost+found` it may not read, or a copy of a newer epoch than the live file. It counts like a
+  `lost+found` it may not read, a ceremony record that does not parse, a v1 file the current DEK
+  opens that holds no known record, or a copy of a newer epoch than the live file. It counts like a
   finding.
 - `[error] <path>: <reason>`: a path that could not be read, for example an unreadable or truncated
   tar. The scan is incomplete.
 - `[changed] <path>: vanished during the scan` or `appeared during the scan (not read)`.
 
 Not reported: the live files of the live store under the current DEK, sign journals, ceremony vote
-records, cleared-intent markers, and a backup copy that matches the live file (the same epoch and
+records, cleared-intent and epoch-proven markers (`keys/.cleared/`, `keys/.proven/`), and a backup copy that matches the live file (the same epoch and
 the current DEK). Every copy of a hosted key or tombstone outside the live store is reported, because
 one copy is the whole key.
 
@@ -108,15 +110,16 @@ Printed with every report, whatever was found:
 |---|---|
 | 0 | Nothing found on the paths given. |
 | 1 | Findings or unclassified entries. |
-| 2 | A path could not be read (the scan is incomplete), the config or the seal keys do not load, or `--legacy-master-env` was refused. |
+| 2 | A path could not be read (the scan is incomplete), `data_dir` or a `--backup` does not exist, the config or the seal keys do not load, or `--legacy-master-env` was refused. |
 
 A read error wins over findings: a scan that could not read everything exits 2.
 
 ## Limits
 
 The scan reads only files whose name ends in `.json`, `.tmp` or `.recipient` (plus `*.tar` inside a
-backup directory). Each read is capped at 4 MiB. A tar is read in place, header by header, and only
-those entries are read. The scan stops with a read error after 200,000 entries in one tar, or after
+backup directory). Each read is capped at 4 MiB. A tar is read in place, header by header; only
+those entries are read, and each is classified before the next is read, so one entry at a time is in
+memory. The scan stops with a read error after 200,000 entries in one tar, or after
 1,000,000 directory entries in one scan. Directories deeper than 32 levels are reported, not walked.
 
 ## JSON (`--json`)

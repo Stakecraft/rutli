@@ -126,6 +126,7 @@ fn a_clean_store_finds_nothing_and_still_lists_what_was_not_checked() {
     std::fs::create_dir_all(dd.join("keys/.ceremonies")).unwrap();
     std::fs::create_dir_all(dd.join("keys/.cleared")).unwrap();
     std::fs::create_dir_all(dd.join("keys/frost-a.nonces")).unwrap();
+    put(&dd.join("keys/.proven/frost-a.3.json"), br#"{"key_id":"frost-a","epoch":3}"#);
     put(&dd.join("journal/seg-0001.jsonl"), b"{}\n");
     put(&dd.join("cluster-id"), b"abc");
     put(&dd.join(".rutli-cosigner.lock"), b"");
@@ -251,6 +252,26 @@ fn a_mixed_epoch_tar_is_read_in_place_and_its_names_never_touch_the_filesystem()
 }
 
 #[test]
+fn the_shared_tar_reader_gives_entry_names_as_stored_and_their_headers() {
+    let tmp = tempfile::tempdir().unwrap();
+    let s = sealer_of(&NodeSealBundle::random(1));
+    let mut t = Vec::new();
+    tar_add(&mut t, "./frost-a.json", &v2(&s, RecordKind::FrostShare, "frost-a", 7), b'0');
+    tar_add(&mut t, "./.cleared/frost-a.00ff", b"", b'0');
+    tar_add(&mut t, "./journal/frost-a/0001.jsonl", b"{}\n", b'0');
+    tar_end(&mut t);
+    let tar = tmp.path().join("node-1-20261120T031700Z.tar");
+    std::fs::write(&tar, &t).unwrap();
+    let mut seen = Vec::new();
+    rutli_cosigner::residue::visit_tar_key_entries(&tar, |name, bytes| {
+        let h = bytes.and_then(rutli_cosigner::seal::header_of).unwrap();
+        seen.push((name.to_string(), h.key_id, h.epoch));
+    })
+    .unwrap();
+    assert_eq!(seen, vec![("./frost-a.json".to_string(), "frost-a".to_string(), 7)]);
+}
+
+#[test]
 fn an_unreadable_tar_is_a_read_error() {
     let tmp = tempfile::tempdir().unwrap();
     let dd = tmp.path().join("data");
@@ -371,8 +392,9 @@ fn the_output_carries_only_the_allowed_fields_and_no_key_material() {
         assert_eq!(keys(e), names(&["path", "error"]));
     }
     assert!(!json["findings"].as_array().unwrap().is_empty() && !json["unclassified"].as_array().unwrap().is_empty());
-    // A missing --backup path vanished, it is not a read error.
-    assert!(json["changed"].as_array().unwrap().iter().any(|c| c["change"] == "vanished"));
+    // A --backup path that does not exist is a read error: a typo never reads as "nothing found".
+    assert!(json["errors"].as_array().unwrap().iter().any(|e| e["path"].as_str().unwrap().ends_with("missing-backup")));
+    assert_eq!(json["exit"], 2);
 
     // No secret in either form: not the DEK, not the master, not plaintext share content.
     let dek_hex = hex::encode(derive_share_dek(master.as_bytes(), 1).as_ref());
@@ -380,6 +402,37 @@ fn the_output_carries_only_the_allowed_fields_and_no_key_material() {
     for secret in [dek_hex.as_str(), master, MARKER] {
         assert!(!out.contains(secret), "the output carries a secret");
     }
+}
+
+#[test]
+fn a_missing_data_dir_or_an_unknown_v1_record_is_never_nothing_found() {
+    let tmp = tempfile::tempdir().unwrap();
+    let s = sealer_of(&NodeSealBundle::random(1));
+    // A wrong data_dir: a read error, not exit 0.
+    let r = run(&tmp.path().join("no-such-dir"), Some(&s), &[], None);
+    assert_eq!(r.exit_code(), 2, "{}", r.text());
+
+    // A v1 file the current DEK opens but that holds no known record: unclassified.
+    let dd = tmp.path().join("data");
+    put(&dd.join("keys/frost-a.json"), &v2(&s, RecordKind::FrostShare, "frost-a", 1));
+    let bk = tmp.path().join("bk");
+    put(&bk.join("frost-a.json"), &s.seal(br#"{"something":"else"}"#).unwrap());
+    let r = run(&dd, Some(&s), std::slice::from_ref(&bk), None);
+    assert_eq!(r.unclassified.len(), 1, "{}", r.text());
+    assert!(r.unclassified[0].reason.contains("not a known record"));
+    assert_eq!(r.exit_code(), 1);
+}
+
+#[test]
+fn an_unreadable_ceremony_record_is_reported_not_guessed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dd = tmp.path().join("data");
+    let s = sealer_of(&NodeSealBundle::random(1));
+    put(&dd.join("keys/frost-a.json"), &v2(&s, RecordKind::FrostShare, "frost-a", 1));
+    put(&dd.join("keys/.staged/frost-a.cer9.json"), &v2(&s, RecordKind::FrostShare, "frost-a", 2));
+    put(&dd.join("keys/.ceremonies/cer9.json"), b"{ not json");
+    let r = run(&dd, Some(&s), &[], None);
+    assert!(r.unclassified.iter().any(|u| u.path.ends_with("cer9.json") && u.reason.contains("does not parse")), "{}", r.text());
 }
 
 // ── next to a running node ─────────────────────────────────────────────────────────────────────
