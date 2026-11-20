@@ -82,6 +82,22 @@ private static final long serialVersionUID = 0L;
     }
   }
 
+  public static final int LOCAL_ONLY_FIELD_NUMBER = 2;
+  private boolean localOnly_ = false;
+  /**
+   * <pre>
+   * This node's own copy only: no read-repair and no replica count (replicas = 0). Ignored by a
+   * cosigner older than 0.5.0, which answers as without it and sends no commitment.
+   * </pre>
+   *
+   * <code>bool local_only = 2;</code>
+   * @return The localOnly.
+   */
+  @java.lang.Override
+  public boolean getLocalOnly() {
+    return localOnly_;
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -99,6 +115,9 @@ private static final long serialVersionUID = 0L;
     if (!com.google.protobuf.GeneratedMessage.isStringEmpty(keyId_)) {
       com.google.protobuf.GeneratedMessage.writeString(output, 1, keyId_);
     }
+    if (localOnly_ != false) {
+      output.writeBool(2, localOnly_);
+    }
     getUnknownFields().writeTo(output);
   }
 
@@ -110,6 +129,10 @@ private static final long serialVersionUID = 0L;
     size = 0;
     if (!com.google.protobuf.GeneratedMessage.isStringEmpty(keyId_)) {
       size += com.google.protobuf.GeneratedMessage.computeStringSize(1, keyId_);
+    }
+    if (localOnly_ != false) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeBoolSize(2, localOnly_);
     }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
@@ -128,6 +151,8 @@ private static final long serialVersionUID = 0L;
 
     if (!getKeyId()
         .equals(other.getKeyId())) return false;
+    if (getLocalOnly()
+        != other.getLocalOnly()) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -141,6 +166,9 @@ private static final long serialVersionUID = 0L;
     hash = (19 * hash) + getDescriptor().hashCode();
     hash = (37 * hash) + KEY_ID_FIELD_NUMBER;
     hash = (53 * hash) + getKeyId().hashCode();
+    hash = (37 * hash) + LOCAL_ONLY_FIELD_NUMBER;
+    hash = (53 * hash) + com.google.protobuf.Internal.hashBoolean(
+        getLocalOnly());
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -273,6 +301,7 @@ private static final long serialVersionUID = 0L;
       super.clear();
       bitField0_ = 0;
       keyId_ = "";
+      localOnly_ = false;
       return this;
     }
 
@@ -309,6 +338,9 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000001) != 0)) {
         result.keyId_ = keyId_;
       }
+      if (((from_bitField0_ & 0x00000002) != 0)) {
+        result.localOnly_ = localOnly_;
+      }
     }
 
     @java.lang.Override
@@ -327,6 +359,9 @@ private static final long serialVersionUID = 0L;
         keyId_ = other.keyId_;
         bitField0_ |= 0x00000001;
         onChanged();
+      }
+      if (other.getLocalOnly() != false) {
+        setLocalOnly(other.getLocalOnly());
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -359,6 +394,11 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000001;
               break;
             } // case 10
+            case 16: {
+              localOnly_ = input.readBool();
+              bitField0_ |= 0x00000002;
+              break;
+            } // case 16
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -444,6 +484,53 @@ private static final long serialVersionUID = 0L;
       checkByteStringIsUtf8(value);
       keyId_ = value;
       bitField0_ |= 0x00000001;
+      onChanged();
+      return this;
+    }
+
+    private boolean localOnly_ ;
+    /**
+     * <pre>
+     * This node's own copy only: no read-repair and no replica count (replicas = 0). Ignored by a
+     * cosigner older than 0.5.0, which answers as without it and sends no commitment.
+     * </pre>
+     *
+     * <code>bool local_only = 2;</code>
+     * @return The localOnly.
+     */
+    @java.lang.Override
+    public boolean getLocalOnly() {
+      return localOnly_;
+    }
+    /**
+     * <pre>
+     * This node's own copy only: no read-repair and no replica count (replicas = 0). Ignored by a
+     * cosigner older than 0.5.0, which answers as without it and sends no commitment.
+     * </pre>
+     *
+     * <code>bool local_only = 2;</code>
+     * @param value The localOnly to set.
+     * @return This builder for chaining.
+     */
+    public Builder setLocalOnly(boolean value) {
+
+      localOnly_ = value;
+      bitField0_ |= 0x00000002;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * This node's own copy only: no read-repair and no replica count (replicas = 0). Ignored by a
+     * cosigner older than 0.5.0, which answers as without it and sends no commitment.
+     * </pre>
+     *
+     * <code>bool local_only = 2;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearLocalOnly() {
+      bitField0_ = (bitField0_ & ~0x00000002);
+      localOnly_ = false;
       onChanged();
       return this;
     }

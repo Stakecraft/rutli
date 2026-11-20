@@ -82,6 +82,23 @@ private static final long serialVersionUID = 0L;
     }
   }
 
+  public static final int INCLUDE_TOMBSTONE_FIELD_NUMBER = 2;
+  private boolean includeTombstone_ = false;
+  /**
+   * <pre>
+   * Set by a 0.5.0 caller: for an id this node holds a tombstone for, answer with `tombstone`
+   * instead of NOT_FOUND, so the caller never pulls a deleted key back. Without it (a 0.4.0
+   * caller) a tombstone reads as NOT_FOUND, as before.
+   * </pre>
+   *
+   * <code>bool include_tombstone = 2;</code>
+   * @return The includeTombstone.
+   */
+  @java.lang.Override
+  public boolean getIncludeTombstone() {
+    return includeTombstone_;
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -99,6 +116,9 @@ private static final long serialVersionUID = 0L;
     if (!com.google.protobuf.GeneratedMessage.isStringEmpty(keyId_)) {
       com.google.protobuf.GeneratedMessage.writeString(output, 1, keyId_);
     }
+    if (includeTombstone_ != false) {
+      output.writeBool(2, includeTombstone_);
+    }
     getUnknownFields().writeTo(output);
   }
 
@@ -110,6 +130,10 @@ private static final long serialVersionUID = 0L;
     size = 0;
     if (!com.google.protobuf.GeneratedMessage.isStringEmpty(keyId_)) {
       size += com.google.protobuf.GeneratedMessage.computeStringSize(1, keyId_);
+    }
+    if (includeTombstone_ != false) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeBoolSize(2, includeTombstone_);
     }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
@@ -128,6 +152,8 @@ private static final long serialVersionUID = 0L;
 
     if (!getKeyId()
         .equals(other.getKeyId())) return false;
+    if (getIncludeTombstone()
+        != other.getIncludeTombstone()) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -141,6 +167,9 @@ private static final long serialVersionUID = 0L;
     hash = (19 * hash) + getDescriptor().hashCode();
     hash = (37 * hash) + KEY_ID_FIELD_NUMBER;
     hash = (53 * hash) + getKeyId().hashCode();
+    hash = (37 * hash) + INCLUDE_TOMBSTONE_FIELD_NUMBER;
+    hash = (53 * hash) + com.google.protobuf.Internal.hashBoolean(
+        getIncludeTombstone());
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -273,6 +302,7 @@ private static final long serialVersionUID = 0L;
       super.clear();
       bitField0_ = 0;
       keyId_ = "";
+      includeTombstone_ = false;
       return this;
     }
 
@@ -309,6 +339,9 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000001) != 0)) {
         result.keyId_ = keyId_;
       }
+      if (((from_bitField0_ & 0x00000002) != 0)) {
+        result.includeTombstone_ = includeTombstone_;
+      }
     }
 
     @java.lang.Override
@@ -327,6 +360,9 @@ private static final long serialVersionUID = 0L;
         keyId_ = other.keyId_;
         bitField0_ |= 0x00000001;
         onChanged();
+      }
+      if (other.getIncludeTombstone() != false) {
+        setIncludeTombstone(other.getIncludeTombstone());
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -359,6 +395,11 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000001;
               break;
             } // case 10
+            case 16: {
+              includeTombstone_ = input.readBool();
+              bitField0_ |= 0x00000002;
+              break;
+            } // case 16
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -444,6 +485,56 @@ private static final long serialVersionUID = 0L;
       checkByteStringIsUtf8(value);
       keyId_ = value;
       bitField0_ |= 0x00000001;
+      onChanged();
+      return this;
+    }
+
+    private boolean includeTombstone_ ;
+    /**
+     * <pre>
+     * Set by a 0.5.0 caller: for an id this node holds a tombstone for, answer with `tombstone`
+     * instead of NOT_FOUND, so the caller never pulls a deleted key back. Without it (a 0.4.0
+     * caller) a tombstone reads as NOT_FOUND, as before.
+     * </pre>
+     *
+     * <code>bool include_tombstone = 2;</code>
+     * @return The includeTombstone.
+     */
+    @java.lang.Override
+    public boolean getIncludeTombstone() {
+      return includeTombstone_;
+    }
+    /**
+     * <pre>
+     * Set by a 0.5.0 caller: for an id this node holds a tombstone for, answer with `tombstone`
+     * instead of NOT_FOUND, so the caller never pulls a deleted key back. Without it (a 0.4.0
+     * caller) a tombstone reads as NOT_FOUND, as before.
+     * </pre>
+     *
+     * <code>bool include_tombstone = 2;</code>
+     * @param value The includeTombstone to set.
+     * @return This builder for chaining.
+     */
+    public Builder setIncludeTombstone(boolean value) {
+
+      includeTombstone_ = value;
+      bitField0_ |= 0x00000002;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * Set by a 0.5.0 caller: for an id this node holds a tombstone for, answer with `tombstone`
+     * instead of NOT_FOUND, so the caller never pulls a deleted key back. Without it (a 0.4.0
+     * caller) a tombstone reads as NOT_FOUND, as before.
+     * </pre>
+     *
+     * <code>bool include_tombstone = 2;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearIncludeTombstone() {
+      bitField0_ = (bitField0_ & ~0x00000002);
+      includeTombstone_ = false;
       onChanged();
       return this;
     }

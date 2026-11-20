@@ -74,6 +74,13 @@ pub trait PeerApi: Send + Sync {
     ) -> Result<Vec<u8>>;
     /// Pull a hosted key from this peer, wrapped to the caller.
     async fn fetch_key(&self, key_id: &str) -> Result<(String, Vec<u8>, crate::wrap::Wrapped)>;
+    /// [`PeerApi::fetch_key`], telling a tombstone apart from "not held": what a node asks before
+    /// it stores a key it lacks. The default — a peer that cannot say — reports what `fetch_key`
+    /// reports, a tombstone included as NOT_FOUND.
+    async fn fetch_key_state(&self, key_id: &str) -> Result<FetchedCopy> {
+        let (spec, _public_key_der, wrapped) = self.fetch_key(key_id).await?;
+        Ok(FetchedCopy::Key { spec, wrapped })
+    }
     /// This peer's live hosted keys: (key_id, spec, commitment). Tombstones excluded.
     async fn list_keys(&self) -> Result<Vec<(String, String, Vec<u8>)>>;
     /// This peer's full inventory for anti-entropy: live keys and tombstones (audit M2). The
@@ -176,6 +183,14 @@ pub trait PeerApi: Send + Sync {
     async fn ceremony_part3(&self, _ceremony_id: &str, _round1_digest: &[u8; 32]) -> Result<StagedOutcome> {
         Err(unsupported("ceremony protocol 2"))
     }
+}
+
+/// What a peer answers for a hosted key id ([`PeerApi::fetch_key_state`]); NOT_FOUND is an error.
+pub enum FetchedCopy {
+    /// Its live copy, wrapped to the caller.
+    Key { spec: String, wrapped: crate::wrap::Wrapped },
+    /// Its tombstone, with the delete intent for the caller to verify.
+    Tombstone(Box<pb::KeyManifest>),
 }
 
 fn unsupported(what: &str) -> crate::DaemonError {
@@ -290,21 +305,24 @@ impl PeerApi for LocalPeer {
 
     async fn replicate_key(
         &self,
-        _ceremony_id: &str,
+        ceremony_id: &str,
         key_id: &str,
         spec: &str,
         _public_key_der: &[u8],
         wrapped: &crate::wrap::Wrapped,
     ) -> Result<Vec<u8>> {
-        let spec = crate::hosted::HostedSpec::parse(spec)?;
-        let key = self.node.hosted_unwrap(key_id, spec, wrapped)?; // crypto only, no IO
-        let (key_id, ceremony_id) = (key_id.to_owned(), _ceremony_id.to_owned());
-        self.node
-            .blocking(move |n| {
-                n.hosted_store_for(&key_id, &key, Some(&ceremony_id))?;
-                n.hosted_commitment(&key)
-            })
-            .await
+        // The same rules as `Peer.ReplicateKey`: the caller is the node this handle acts for.
+        let sender = self.caller.as_ref().and_then(|c| c.index().ok());
+        crate::orchestrator::accept_replica(
+            &self.node,
+            ceremony_id,
+            key_id,
+            spec,
+            wrapped,
+            self.asker().as_deref(),
+            sender,
+        )
+        .await
     }
 
     async fn fetch_key(&self, key_id: &str) -> Result<(String, Vec<u8>, crate::wrap::Wrapped)> {
@@ -324,6 +342,15 @@ impl PeerApi for LocalPeer {
                 Ok((key.spec.as_str().to_string(), pub_der, w))
             })
             .await
+    }
+
+    async fn fetch_key_state(&self, key_id: &str) -> Result<FetchedCopy> {
+        let id = key_id.to_owned();
+        if let Some(t) = self.node.blocking(move |n| n.hosted_tombstone_manifest(&id)).await? {
+            return Ok(FetchedCopy::Tombstone(Box::new(t)));
+        }
+        let (spec, _public_key_der, wrapped) = self.fetch_key(key_id).await?;
+        Ok(FetchedCopy::Key { spec, wrapped })
     }
 
     async fn list_keys(&self) -> Result<Vec<(String, String, Vec<u8>)>> {
@@ -634,7 +661,9 @@ impl PeerApi for GrpcPeer {
                 public_key_der: public_key_der.to_vec(),
                 wrapped: Some(to_pb_wrapped(wrapped)),
             })
-            .await?
+            .await
+            // A conflict keeps its type across the mesh (the `hosted-conflict` trailer).
+            .map_err(|s| crate::DaemonError::from_peer_status(s, key_id, None))?
             .into_inner();
         Ok(reply.commitment)
     }
@@ -643,11 +672,24 @@ impl PeerApi for GrpcPeer {
         let reply = self
             .client
             .clone()
-            .fetch_key(pb::FetchKeyRequest { key_id: key_id.into() })
+            .fetch_key(pb::FetchKeyRequest { key_id: key_id.into(), include_tombstone: false })
             .await?
             .into_inner();
         let wrapped = from_pb_wrapped(reply.wrapped)?;
         Ok((reply.spec, reply.public_key_der, wrapped))
+    }
+
+    async fn fetch_key_state(&self, key_id: &str) -> Result<FetchedCopy> {
+        let reply = self
+            .client
+            .clone()
+            .fetch_key(pb::FetchKeyRequest { key_id: key_id.into(), include_tombstone: true })
+            .await?
+            .into_inner();
+        if let Some(t) = reply.tombstone.filter(|t| t.tombstone) {
+            return Ok(FetchedCopy::Tombstone(Box::new(t)));
+        }
+        Ok(FetchedCopy::Key { spec: reply.spec, wrapped: from_pb_wrapped(reply.wrapped)? })
     }
 
     async fn list_keys(&self) -> Result<Vec<(String, String, Vec<u8>)>> {

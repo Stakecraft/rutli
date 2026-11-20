@@ -14,4 +14,55 @@ public interface DkgReplyOrBuilder extends
    * @return The groupVerifyingKey.
    */
   com.google.protobuf.ByteString getGroupVerifyingKey();
+
+  /**
+   * <pre>
+   * Since 0.5.0: true when the key already existed on every node and this DKG returned it instead of
+   * running a ceremony (a retry, or another client asking for the same id), false for a new key.
+   * Absent from a leader older than 0.5.0, which cannot tell: the driver warns and keeps the old
+   * behaviour then.
+   * </pre>
+   *
+   * <code>optional bool existing = 2;</code>
+   * @return Whether the existing field is set.
+   */
+  boolean hasExisting();
+  /**
+   * <pre>
+   * Since 0.5.0: true when the key already existed on every node and this DKG returned it instead of
+   * running a ceremony (a retry, or another client asking for the same id), false for a new key.
+   * Absent from a leader older than 0.5.0, which cannot tell: the driver warns and keeps the old
+   * behaviour then.
+   * </pre>
+   *
+   * <code>optional bool existing = 2;</code>
+   * @return The existing.
+   */
+  boolean getExisting();
+
+  /**
+   * <pre>
+   * The DKG ceremony that created the key ("dkg-&lt;hex(request_id)&gt;" for an intent's ceremony): this
+   * ceremony for a new key; for an existing one, the DKG this leader committed it under, or empty
+   * when its record is gone or the key was refreshed since. A driver accepts an existing key only
+   * when this names a ceremony it asked for itself.
+   * </pre>
+   *
+   * <code>string origin_ceremony_id = 3;</code>
+   * @return The originCeremonyId.
+   */
+  java.lang.String getOriginCeremonyId();
+  /**
+   * <pre>
+   * The DKG ceremony that created the key ("dkg-&lt;hex(request_id)&gt;" for an intent's ceremony): this
+   * ceremony for a new key; for an existing one, the DKG this leader committed it under, or empty
+   * when its record is gone or the key was refreshed since. A driver accepts an existing key only
+   * when this names a ceremony it asked for itself.
+   * </pre>
+   *
+   * <code>string origin_ceremony_id = 3;</code>
+   * @return The bytes for originCeremonyId.
+   */
+  com.google.protobuf.ByteString
+      getOriginCeremonyIdBytes();
 }

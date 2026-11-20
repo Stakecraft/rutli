@@ -30,8 +30,9 @@ object StateCheck {
     val opts = args.toList.grouped(2).collect { case List(k, v) if k.startsWith("--") => k -> v }.toList
     val audits = opts.collect { case ("--audit-log", v) => v }
     val journals = opts.collect { case ("--journal-dir", v) => v }
-    if (audits.isEmpty && journals.isEmpty || opts.length * 2 != args.length) {
-      err("usage: StateCheck [--audit-log FILE]... [--journal-dir DIR]...")
+    val pinDirs = opts.collect { case ("--pin-dir", v) => v }
+    if (audits.isEmpty && journals.isEmpty && pinDirs.isEmpty || opts.length * 2 != args.length) {
+      err("usage: StateCheck [--audit-log FILE]... [--journal-dir DIR]... [--pin-dir DIR]...")
       return 2
     }
     var ok = true
@@ -48,6 +49,14 @@ object StateCheck {
           out(s"signing journal $d: OK, ${files.size} file(s), ${files.map(_._2).sum} entries")
           files.filter(_._3 > 0).foreach { case (f, _, torn) => out(s"  $f" + tornNote(torn)) }
         case Left(why) => ok = false; err(s"signing journal FAILED: $why")
+      }
+    }
+    pinDirs.foreach { d =>
+      com.stakecraft.rutli.backend.GroupKeyPinStore.preflight(java.nio.file.Paths.get(d)) match {
+        case Right((pins, tmp)) =>
+          out(s"group-key pins $d: OK, ${pins.size} pin(s)" + (if (tmp > 0) s"; $tmp leftover temp file(s) will be removed at startup" else ""))
+          pins.foreach(p => out(s"  ${p.keyId} = ${p.groupKeyHex} (${p.source}, ${p.pinnedAt})"))
+        case Left(why) => ok = false; err(s"group-key pins FAILED: $why")
       }
     }
     if (ok) 0 else 1
