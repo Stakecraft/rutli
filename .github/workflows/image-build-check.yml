@@ -77,6 +77,14 @@ jobs:
           [ -n "$a" ] && [ "$a" = "$b" ] || { echo "::error::build-amd64 and build-arm64 in $f have drifted apart"; diff <(echo "$a") <(echo "$b") || true; exit 1; }
           echo "OK: build jobs identical"
 
+      - name: The release dry run uses the release workflow's docker action pins
+        run: |
+          set -euo pipefail
+          pins() { grep -hoE 'uses:[[:space:]]*docker/[^@[:space:]]+@[0-9a-f]{40}' "$1" | sort -u; }
+          a="$(pins .github/workflows/publish-image.yml)"; b="$(pins .github/workflows/image-build-check.yml)"
+          [ -n "$a" ] && [ "$a" = "$b" ] || { echo "::error::docker action pins differ between publish-image.yml and image-build-check.yml:"; diff <(echo "$a") <(echo "$b") || true; exit 1; }
+          echo "OK: same docker action pins"
+
   build:
     name: Build ${{ matrix.platform }} (no push)
     # An unpinned action stops the run before any build step executes.
@@ -138,3 +146,102 @@ jobs:
             | any($p[]; startswith("https://spdx.dev/")) and any($p[]; startswith("https://slsa.dev/provenance/"))' \
             "$(blob "$att")" >/dev/null || { echo "::error::the attestation manifest lacks an SPDX SBOM or a SLSA provenance"; exit 1; }
           echo "OK: image ${img}, attestation manifest ${att} with SBOM and provenance"
+
+  # The release path without a tag: the same metadata, login, build-by-digest and index steps as
+  # publish-image.yml, against a registry that runs inside this job (no real registry, no secret, the
+  # login uses dummy credentials). One platform: a service container cannot be shared with the arm64
+  # runner, and the two-platform build is covered by `build` above. cosign and the attestation are not
+  # part of this.
+  publish-dry-run:
+    name: Release path against a local registry
+    needs: pins
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    services:
+      registry:
+        # Pinned by digest (registry:2 on Docker Hub); a service container has no job token.
+        image: registry:2@sha256:a3d8aaa63ed8681a604f1dea0aa03f100d5895b6a58ace528858a7b332415373
+        ports:
+          - 5000:5000
+    env:
+      IMAGE: localhost:5000/rutli-cosigner
+      PLATFORM: linux/amd64
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # The rules of publish-image.yml, applied to a made-up final tag (the ref of a pull request or
+      # of main carries none).
+      - name: Docker metadata (tags and labels)
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5.10.0
+        with:
+          images: ${{ env.IMAGE }}
+          flavor: |
+            latest=false
+          tags: |
+            type=semver,pattern={{version}},value=v9.9.9
+            type=semver,pattern={{major}}.{{minor}},value=v9.9.9
+            type=raw,value=latest
+
+      # network=host: BuildKit reaches the registry on the runner's localhost.
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        with:
+          driver-opts: network=host
+
+      - name: Log in to the local registry (dummy credentials)
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: localhost:5000
+          username: dry-run
+          password: dry-run
+
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: frost
+          file: frost/Dockerfile
+          platforms: ${{ env.PLATFORM }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Create the index, push its tags, prove its contents
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          META_JSON: ${{ steps.meta.outputs.json }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::no digest from the build (got '${DIGEST}')"; exit 1; }
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$ ]] || { echo "::error::bad version '${VERSION}'"; exit 1; }
+          tags=()
+          while read -r t; do tags+=(-t "$t"); done < <(jq -r '.tags[]' <<<"$META_JSON")
+          [ "${#tags[@]}" -ge 3 ] || { echo "::error::expected the version, major.minor and latest tags, got ${#tags[@]}"; exit 1; }
+          printf 'tags:%s\n' "$(printf ' %s' "${tags[@]}")"
+          docker buildx imagetools create "${tags[@]}" "${IMAGE}@${DIGEST}"
+
+          # As the index job of publish-image.yml, for one platform.
+          docker buildx imagetools inspect --raw "${IMAGE}:${VERSION}" > index.json
+          digest="sha256:$(sha256sum index.json | cut -d' ' -f1)"
+          reported="$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" --format '{{json .Manifest}}' | jq -r .digest)"
+          [ "$digest" = "$reported" ] || { echo "::error::index digest ${digest} != buildx's ${reported}"; exit 1; }
+          jq . index.json
+          jq -e --arg a "$DIGEST" '
+            [.manifests[] | select(.platform.os == "linux") | {arch: .platform.architecture, d: .digest}] as $imgs
+            | [.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest")
+                | (.annotations["vnd.docker.reference.digest"] // .annotations["com.docker.reference.digest"])] as $att
+            | ($imgs | map(.arch) | sort) == ["amd64"]
+              and all($imgs[]; .d as $d | any($att[]; . == $d))
+          ' index.json >/dev/null || { echo "::error::the index lacks the image or its attestation manifest"; exit 1; }
+          docker buildx imagetools inspect "${IMAGE}@${digest}" --format '{{json .SBOM}}' > sbom.json
+          docker buildx imagetools inspect "${IMAGE}@${digest}" --format '{{json .Provenance}}' > provenance.json
+          jq -e '(keys | length) == 1 and all(.[]; .SPDX.spdxVersion != null)' sbom.json >/dev/null \
+            || { echo "::error::cannot read an SPDX SBOM"; jq -c 'keys' sbom.json; exit 1; }
+          jq -e '(keys | length) == 1 and all(.[]; .SLSA != null)' provenance.json >/dev/null \
+            || { echo "::error::cannot read provenance"; jq -c 'keys' provenance.json; exit 1; }
+          echo "OK: ${IMAGE}@${digest} holds the platform image with SBOM and provenance, tags: $(jq -r '.tags | join(" ")' <<<"$META_JSON")"
