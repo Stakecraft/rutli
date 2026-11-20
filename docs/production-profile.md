@@ -53,7 +53,7 @@ live config. It works under any `profile`.
 | `signing_policy.signer_pins` | empty | a pin for every `signer_allowlist` CN | Revocation without the CA: a certificate with another key is refused under the same CN. |
 | `signing_policy.sign_rate_limit_per_min`, `_per_day` | 300, 20000 | above 0 | A brake on bulk signing with a stolen credential. |
 | `signing_policy.rate_limits` | empty | `per_min` and `per_day` above 0 in every rule | A rule with 0 turns the brake off for its prefix. |
-| `ceremony_sign_test_rate_limit_per_min` | 6 | above 0 | Every sign test burns a nonce marker on each signer. |
+| `ceremony_sign_test_rate_limit_per_min` | 10 | above 0 | Every sign test burns a nonce marker on each signer. |
 | `keyfile.write_version` | 1 | 2 | Key files bound to the cluster, node and key (M4). |
 | `keyfile.cluster_uuid` | unset | set, the same on every node | Required by v2. |
 | `keyfile.accept_v1` | `true` | `false` | Once every file is v2. |
@@ -62,7 +62,7 @@ live config. It works under any `profile`.
 | `hosted_keys.decrypt_rate_limit_per_min` (hosted keys on) | 6000 | above 0 | Bounds what a stolen driver certificate can decrypt. |
 | `hosted_keys.delete_approval_threshold` (with `delete_allowlist`) | 0 | at least 1 | A delete needs a human approval. |
 | `hosted_keys.commitment_key` (hosted keys on) | derived on the legacy master | set | The per-node seal bundle needs it. |
-| `signing_policy.rules` | empty | **advisory**: a `quorum` rule for the namespace key | Human approval of namespace-key signatures ([approval-quorum.md](approval-quorum.md)). A deployment decision, so it is reported and never refuses. |
+| `signing_policy.rules` | empty | **advisory**: a `quorum` rule whose prefix covers a namespace key (`<prefix>frost-namespace`) | Human approval of namespace-key signatures ([approval-quorum.md](approval-quorum.md)). A deployment decision, so it is reported and never refuses. |
 
 The intent rows are not listed separately for a node without TLS: the `tls` row covers them.
 

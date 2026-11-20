@@ -177,15 +177,24 @@ pub fn findings(cfg: &Config) -> Vec<Finding> {
         }
     }
 
-    if !p.rules.iter().any(|r| r.mode == "quorum") {
+    if !p.rules.iter().any(|r| r.mode == "quorum" && covers_namespace_key(&r.key_id_prefix)) {
         out.push(Finding {
             level: Level::Advisory,
             setting: "signing_policy.rules",
-            found: "no quorum rule".into(),
+            found: "no quorum rule for a namespace key (`<prefix>frost-namespace`)".into(),
             required: "a quorum approval rule for the namespace key (docs/approval-quorum.md)",
         });
     }
     out
+}
+
+/// Whether a rule's key-id prefix covers a namespace key: the driver names it
+/// `<frost.key-prefix>frost-namespace`, and this node does not know the participant's prefix. So a
+/// prefix of `frost-namespace` itself (`""`, `frost-`, …) counts, and so does one that ends in a
+/// prefix of it after a participant prefix (`participant1-frost-namespace`, `participant1-frost-`).
+fn covers_namespace_key(prefix: &str) -> bool {
+    const NS: &str = "frost-namespace";
+    NS.starts_with(prefix) || prefix.find("frost-").is_some_and(|i| NS.starts_with(&prefix[i..]))
 }
 
 fn effective(set: Option<bool>, _tls: bool) -> String {
@@ -309,6 +318,8 @@ mod tests {
             ("signing_policy.rules", Level::Advisory, |c| {
                 c.signing_policy.rules = vec![ApprovalRuleConfig { key_id_prefix: "x".into(), mode: "auto".into(), threshold: 0 }]
             }),
+            // A quorum rule for another key does not cover the namespace key.
+            ("signing_policy.rules", Level::Advisory, |c| c.signing_policy.rules[0].key_id_prefix = "p1-rutli-enc-".into()),
         ];
         // A well-formed hosted-keys block on its own fires nothing.
         let mut ok = enforced();
@@ -320,6 +331,16 @@ mod tests {
             let f = findings(&c);
             assert_eq!(f.len(), 1, "{setting}: {f:#?}");
             assert_eq!((f[0].setting, f[0].level), (setting, level), "{f:#?}");
+        }
+    }
+
+    #[test]
+    fn which_rule_prefixes_cover_the_namespace_key() {
+        for yes in ["", "frost-", "frost-namespace", "p1-frost-namespace", "p1-frost-", "participant1-frost-n"] {
+            assert!(covers_namespace_key(yes), "{yes}");
+        }
+        for no in ["p1-", "rutli-", "frost-signing", "p1-frost-signing", "p1-rutli-enc-"] {
+            assert!(!covers_namespace_key(no), "{no}");
         }
     }
 
