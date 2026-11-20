@@ -272,16 +272,26 @@ fn view((epoch, pkp_digest): (u64, Vec<u8>)) -> KeyEpochReply {
     }
 }
 
-/// A peer answer that is no evidence: no key, another group key, a hosted key, or a stale peer.
+/// A peer answer that is no evidence: no key, another group key, or a hosted key.
 fn junk() -> impl Strategy<Value = KeyEpochReply> {
-    (sharing(), 0u8..4).prop_map(|(s, how)| {
+    (sharing(), 0u8..3).prop_map(|(s, how)| {
         let mut v = view(s);
         match how {
             0 => v.present = false,
             1 => v.group_verifying_key = vec![8; 32],
-            2 => v.origin = "hosted".into(),
-            _ => v.stale = true,
+            _ => v.origin = "hosted".into(),
         }
+        v
+    })
+}
+
+/// A peer that reports itself stale, on peers' answers or by its own ceremony record. It is not
+/// pure noise: it can vouch for the sharing it holds, and its newer claim is doubt.
+fn stale_peer() -> impl Strategy<Value = KeyEpochReply> {
+    (sharing(), any::<bool>()).prop_map(|(s, by_own_record)| {
+        let mut v = view(s);
+        v.stale = true;
+        v.stale_by_own_record = by_own_record;
         v
     })
 }
@@ -315,8 +325,8 @@ proptest! {
         prop_assert!(matches!(evaluate(&mine, Some(committed), &answers), Verdict::Stale(_)));
     }
 
-    /// Answers that are no evidence (no key, another group key, a hosted key, a stale peer) never
-    /// change the verdict, wherever they appear.
+    /// Answers that are no evidence (no key, another group key, a hosted key) never change the
+    /// verdict, wherever they appear.
     #[test]
     fn answers_that_are_no_evidence_change_nothing(
         mine in mine(),
@@ -332,6 +342,28 @@ proptest! {
             noisy.insert(pos, (100 + i as u16, j));
         }
         prop_assert_eq!(evaluate(&mine, committed, &noisy), base);
+    }
+
+    /// Peers that report themselves stale never bench a node: added anywhere, they can keep or
+    /// lift a verdict, or turn it into doubt, but never make it stale.
+    #[test]
+    fn a_stale_peer_never_makes_a_node_stale(
+        mine in mine(),
+        committed in prop::option::of(0u64..5),
+        answers in answers(),
+        stale in prop::collection::vec(stale_peer(), 1..3),
+        at in any::<prop::sample::Index>(),
+    ) {
+        let base = evaluate(&mine, committed, &answers);
+        let mut with_stale = answers.clone();
+        for (i, j) in stale.into_iter().enumerate() {
+            let pos = at.index(with_stale.len() + 1);
+            with_stale.insert(pos, (100 + i as u16, j));
+        }
+        let verdict = evaluate(&mine, committed, &with_stale);
+        if matches!(verdict, Verdict::Stale(_)) {
+            prop_assert!(matches!(base, Verdict::Stale(_)), "{base:?} -> {verdict:?}");
+        }
     }
 
     /// A node is never benched while a peer vouches for its exact sharing, nor while no peer

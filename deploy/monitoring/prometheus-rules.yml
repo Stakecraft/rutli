@@ -30,6 +30,12 @@
 #   rutli_nonce_markers                                              gauge
 #   rutli_nonce_markers_pruned_total                                 counter
 #   rutli_lock_poison_recoveries_total{lock=...}                     counter
+#   rutli_background_loop_restarts_total{loop=...}                   counter
+#   rutli_fd_limit                                                   gauge
+#   rutli_grpc_connections                                           gauge
+#   rutli_grpc_connection_limit                                      gauge
+#   rutli_grpc_accept_errors_total                                   counter
+#   rutli_grpc_handshake_timeouts_total                              counter
 #   rutli_pending_sign_sessions                                      gauge
 #   rutli_keystore_unreadable                                        gauge (0|1)
 #   rutli_hosted_keys                                                gauge
@@ -160,7 +166,7 @@ groups:
           severity: critical
         annotations:
           summary: "Rütli cosigner {{ $labels.instance }} holds a stale share of {{ $labels.key }}"
-          description: "{{ $labels.instance }} found its share of {{ $labels.key }} behind the cluster: a newer committed sharing (epoch) exists that this node never voted for, or its own ceremony record names a newer epoch than its share. Typical cause: a restore from an old backup or a volume snapshot rollback. It refuses to sign or lead for the key, so signing continues on the other cosigners — at 2-of-3 with no margin left. Fix: restore a current backup of this node (daemon stopped) or re-enrol it; the mark clears by itself once the share is current (docs/ceremonies.md, Signing across epochs). Never copy another node's share file."
+          description: "{{ $labels.instance }} marked its share of {{ $labels.key }} stale and refuses to sign or lead for the key, so signing continues on the other cosigners — at 2-of-3 with no margin left. First read the reason in the node's log (`this node's share is STALE`). If it says the claim is unconfirmed, one cosigner claims a newer epoch and none that holds this node's epoch answered: a wrong or compromised cosigner can cause that while the others restart or a refresh is still committing. Do not restore anything yet: compare `rutli-cosigner verify-key` across the nodes; the mark clears by itself on the next pass that reaches a cosigner on this node's epoch, at most 30 s later. Otherwise a newer committed sharing exists that this node never voted for, or its own ceremony record names a newer epoch than its share — typically a restore from an old backup or a volume snapshot rollback. Fix: restore a current backup of this node (daemon stopped) or re-enrol it; the mark clears by itself once the share is current (docs/ceremonies.md, Signing across epochs). Never copy another node's share file."
 
       - alert: RutliEpochMismatch
         expr: increase(rutli_epoch_mismatch_total[15m]) > 0
@@ -316,6 +322,33 @@ groups:
         annotations:
           summary: "Rütli cosigner {{ $labels.instance }} recovered from a panic holding {{ $labels.lock }}"
           description: "A request panicked on {{ $labels.instance }} while holding the {{ $labels.lock }} lock. The node recovered the lock and keeps serving (in-flight signing sessions or the key cache may have been dropped, ceremony votes reloaded from disk), but a panic is a bug: find it in the cosigner log just before 'recovered a lock poisoned by a panicking request' and report it."
+
+      - alert: RutliGrpcAcceptErrors
+        expr: increase(rutli_grpc_accept_errors_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} failed to accept gRPC connections"
+          description: "{{ $labels.instance }} could not accept new gRPC connections and is retrying with a backoff; meanwhile the driver and the peers cannot reach it. Usually the process is out of file descriptors: compare rutli_fd_limit with rutli_grpc_connections and the node's open descriptors, and look for 'accepting a gRPC connection failed' in its log. Raise the container's nofile limit if rutli_fd_limit is low."
+
+      - alert: RutliGrpcConnectionsNearLimit
+        expr: rutli_grpc_connections / rutli_grpc_connection_limit > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} is near its gRPC connection limit"
+          description: "{{ $labels.instance }} has had more than 90% of its gRPC connection slots in use for 5 minutes. Past the limit, new connections wait in the listen backlog, so the driver or a peer may time out. A cosigner normally needs a handful of connections (the drivers and the peers multiplex calls); many more come from a misbehaving client or something holding connections open. Check the sources of the connections to the gRPC port."
+
+      - alert: RutliBackgroundLoopRestarted
+        expr: increase(rutli_background_loop_restarts_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} restarted its {{ $labels.loop }} loop after a panic"
+          description: "A pass of the {{ $labels.loop }} background loop panicked on {{ $labels.instance }}. The loop was restarted after 30 s (anti_entropy then also waits one anti_entropy_interval_secs before its next sweep) and keeps running, but a panic is a bug: find it in the cosigner log at 'background loop panicked; restarting it' (the panic message is in the same line) and report it. A loop that panics on every pass gets no pass done: ceremony_resolver leaves STAGED ceremonies unresolved, epoch_check stops refreshing stale-share marks, nonce_pruner lets burned nonce markers pile up on the key volume, anti_entropy stops healing hosted keys."
 
       - alert: RutliHostedKeyConflict
         expr: increase(rutli_anti_entropy_conflicts_total[1h]) > 0

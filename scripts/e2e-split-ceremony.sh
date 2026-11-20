@@ -21,7 +21,7 @@
 # require_intent at its default (on with TLS): the same intent-less Sign is refused, and verify-key
 # --sign-test still passes.
 #
-# Requires: cargo, openssl (3.x, for Ed25519 verify), jq, grpcurl.
+# Requires: cargo, openssl (3.x, for Ed25519 verify), jq, grpcurl, xxd.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -77,11 +77,14 @@ mkconfig() { # node-config-name  cert-name  out
     | .tls.key = "\($work)/certs/\($cert).key"
     | .refresh_allowlist = ["refresher"]
     | .signing_policy.signer_may_refresh = false
+    | .signing_policy.require_ceremony_intent = false
     | .signing_policy.require_intent = false
     | del(.metrics_listen)' "$REPO/deploy/frost/config-tls/$1.json" >"$3"
 }
-# require_intent false: step 9 signs with grpcurl, which cannot sign an intent (the opt-out is what
-# it tests); step 10 removes it again.
+# Both intent checks are on by default with TLS and start off here. require_ceremony_intent: the raw
+# intent-less Dkg probes must reach the reserved-id check (AlreadyExists); step 6 turns it on.
+# require_intent: step 9 signs with grpcurl, which cannot sign an intent (the opt-out is what it
+# tests); step 10 removes it again.
 for i in 1 2 3; do mkconfig "cosigner$i" "cosigner$i" "$WORK/c$i.json"; done
 # The operator role (operator_allowlist: KeyStatus + CeremonySignTest only) runs verify-key; the
 # refresher role (refresh_allowlist: Refresh + KeyStatus only), like the refresh CronJob, runs
@@ -95,8 +98,8 @@ start() {
   PIDS[$1]=$!
 }
 stop() { kill "${PIDS[$1]}" 2>/dev/null || true; wait "${PIDS[$1]}" 2>/dev/null || true; PIDS[$1]=0; }
-wait_healthy() {
-  for _ in $(seq 1 120); do
+wait_healthy() { # up to 60 s; a cold debug build on a busy runner can take a while
+  for _ in $(seq 1 240); do
     "$COSIGNER" --config "$WORK/c$1.json" health >/dev/null 2>&1 && return 0
     sleep 0.25
   done

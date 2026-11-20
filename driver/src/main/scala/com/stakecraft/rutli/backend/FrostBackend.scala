@@ -66,27 +66,36 @@ import scala.concurrent.{ExecutionContext, Future, blocking}
   * across endpoints — any live cosigner can lead a request (the cluster orchestrates the rest).
   * Which statuses move a request to the next endpoint depends on whether the operation is safe to
   * re-issue through another leader (the predicates on the companion say why):
-  *   - Re-issuable operations — sign, group/public key, key info, decrypt, symmetric crypto,
-  *     capabilities — fail over on transport failures (UNAVAILABLE / DEADLINE_EXCEEDED) AND on a
-  *     leader that answered but could not do its job (INTERNAL / UNKNOWN, e.g. its key store became
+  *   - Sign fails over on every status except PERMISSION_DENIED, UNAUTHENTICATED,
+  *     RESOURCE_EXHAUSTED and INVALID_ARGUMENT (policy, configuration, rate limit, a malformed
+  *     request), and on a signature the pinned group key does not verify (`reason=BAD_SIGNATURE`):
+  *     a leader that answers wrongly is routed around within the call ([[signFailsOver]]).
+  *   - Other re-issuable operations — group/public key, key info, decrypt, symmetric crypto —
+  *     fail over on transport failures (UNAVAILABLE / DEADLINE_EXCEEDED) AND on a leader that
+  *     answered but could not do its job (INTERNAL / UNKNOWN, e.g. its key store became
   *     unreadable). One sick node must not be a signing outage while a quorum is healthy.
   *   - Writes (hosted GenerateKey, DeleteKey) fail over only when the node is down, and a DKG
   *     ceremony only on a refused connection (UNAVAILABLE): a ceremony is never blindly re-run
   *     against another leader.
-  *   - Any other status (NOT_FOUND, RESOURCE_EXHAUSTED, ...) is a real answer from a live node and
-  *     is returned immediately, never masked by trying another node.
+  *   - For the operations other than sign, any other status (NOT_FOUND, RESOURCE_EXHAUSTED, ...) is
+  *     a real answer from a live node and is returned immediately, never masked by trying another
+  *     node. For sign, NOT_FOUND and the other node-state answers do fail over (see above).
   * Every hop is logged at WARN and recorded in the operation's own audit entry
-  * (`failover=<from>→<to> reason=<CODE>`, see [[withAuditNotes]]). The leader is sticky: whichever
-  * endpoint last served a request leads the next one, so once a node is found sick later calls do
-  * not each pay a failed attempt against it. This removes the single-leader availability gap
-  * without any cross-node consensus — FROST sessions are independent, so no Raft log is needed.
+  * (`failover=<from>→<to> reason=<CODE>`, see [[withAuditNotes]]). The leader is sticky: the
+  * endpoint that last served a request successfully leads the next one, so once a node is found
+  * sick later calls do not each pay a failed attempt against it. For sign, success means a verified
+  * signature, and every error takes the lead from the node (see [[signDemotes]] for the
+  * exceptions); for the other operations, only a leader-sick status does (for DKG, only
+  * UNAVAILABLE), and a refusal leaves the lead where it is. This removes the single-leader
+  * availability gap without any cross-node consensus — FROST sessions are independent, so no Raft
+  * log is needed.
   *
   * '''Trust in the group key (audit H2):''' no single cosigner is believed about the namespace key.
   * `getPublicKey` (and the DKG reply) asks EVERY configured endpoint for the group key and needs at
   * least two identical answers and no disagreeing one; the agreed key is then pinned per key id in
   * memory, later `getPublicKey` calls re-ask and fail on any cosigner that now answers differently,
-  * and every signature `sign` returns is verified (Ed25519, strict) against the pinned key before
-  * it leaves the driver. A roster of exactly one endpoint (a dev setup) cannot agree with anyone,
+  * and every signature a leader returns is verified (Ed25519, strict) against the pinned key before
+  * it leaves the driver; one that does not verify is withheld and the next leader is asked. A roster of exactly one endpoint (a dev setup) cannot agree with anyone,
   * so there one answer suffices — production rosters have several cosigners.
   */
 class FrostBackend(
@@ -299,6 +308,14 @@ class FrostBackend(
   /** Index into `endpoints` of the preferred leader: the cosigner that last served a request. */
   private val preferred = new AtomicInteger(0)
 
+  /** Endpoint `i` failed in a way that should cost it the lead: if it is still the preferred leader,
+    * the next endpoint in ring order is, so the next call starts elsewhere. A compare-and-set, so it
+    * never overrides a newer value another call wrote. */
+  private def demote(i: Int): Unit = {
+    preferred.compareAndSet(i, (i + 1) % channels.size)
+    ()
+  }
+
   /** Run `op` against the cosigners in ring order, starting from the preferred leader, moving to
     * the next only when `retryOn` says the contacted node could not serve it (see the predicates on
     * the companion — each call site picks the one its operation is safe under). Any other gRPC
@@ -306,42 +323,99 @@ class FrostBackend(
     * error is thrown. Each hop is logged at WARN and noted in `notes` for the operation's audit
     * entry.
     *
-    * Sticky leader ("last healthy first"): when endpoint i gives a real answer — success, or an
-    * application error such as NOT_FOUND, since the node is serving either way — it becomes the
-    * preferred leader. Once a node is found sick, later calls lead from the healthy one directly
-    * instead of each paying a failed attempt (and a WARN) against the sick node, and a recovered
-    * node is simply reached again when the ring next wraps to it. A leader-sick or transport status
-    * never makes its node preferred, even when this op does not fail over on it (a DKG that hits
-    * INTERNAL), so one ceremony error cannot steer every later sign back to the sick node.
-    * Deterministic: no probing, no randomness; concurrent calls race benignly, since every write is
-    * the index of a node that just served. */
-  private def withFailover[A](what: String, retryOn: Status => Boolean, notes: AuditNotes)(
-      op: SignerGrpc.SignerBlockingStub => A
-  ): A = {
-    val n = channels.size
+    * Sticky leader ("last healthy first"): a successful answer makes its node the preferred leader,
+    * and an error status for which `demoteOn` holds takes the lead from its node ([[demote]]). Each
+    * call site picks `demoteOn`: for the operations one node serves alone and the driver cannot
+    * check (decrypt, symmetric crypto, hosted keys, key reads) it is [[isLeaderSick]], so a refusal
+    * such as RESOURCE_EXHAUSTED or PERMISSION_DENIED leaves the lead where it is (the per-node
+    * decrypt limit must not become n times the budget, and one node's delete allowlist must not be
+    * shopped around); for a DKG it is only the status it also fails over on. Sign uses
+    * [[withCheckedFailover]] with its own rule. Once a node is found sick, later calls lead from the
+    * healthy one directly instead of each paying a failed attempt (and a WARN) against the sick
+    * node, and a recovered node is simply reached again when the ring next wraps to it.
+    *
+    * Concurrent calls: a success writes its node only if the preference is still the value this call
+    * started from (a compare-and-set), so a slow success cannot undo a demotion a newer call made
+    * meanwhile; a demotion only moves the lead off the node that failed. Deterministic: no probing,
+    * no randomness. */
+  private def withFailover[A](
+      what: String,
+      retryOn: Status => Boolean,
+      demoteOn: Status => Boolean,
+      notes: AuditNotes,
+  )(op: SignerGrpc.SignerBlockingStub => A): A = {
     val start = preferred.get
+    withCheckedFailover[A](what, retryOn, demoteOn, notes, (_: String, _: A) => None, start, start, (_: Int) => ())(op)
+  }
+
+  /** [[withFailover]] where the driver also checks each answer: `check(endpoint, answer)` returns
+    * a [[Rejected]] for an answer that must not be used (a signature the pinned group key does not
+    * verify). A rejected answer is that leader failing: it is not returned, its node is demoted, and
+    * the next endpoint is tried within this call, noted as `failover=<from>→<to> reason=<code>`.
+    * When it is the last endpoint's answer, the call fails with the rejection's error.
+    *
+    * `observed` is the preference this call read when it began (a success replaces only that
+    * value), `from` the endpoint it tries first (normally the same), and `tried` is told each
+    * endpoint index just before it is asked. */
+  private def withCheckedFailover[A](
+      what: String,
+      retryOn: Status => Boolean,
+      demoteOn: Status => Boolean,
+      notes: AuditNotes,
+      check: (String, A) => Option[Rejected],
+      observed: Int,
+      from: Int,
+      tried: Int => Unit,
+  )(op: SignerGrpc.SignerBlockingStub => A): A = {
+    val n = channels.size
     @tailrec def attempt(k: Int): A = {
-      val i = (start + k) % n
-      val outcome =
-        try Right(op(stubFor(channels(i))))
-        catch { case e: StatusRuntimeException => Left(e) }
+      val i = (from + k) % n
+      tried(i)
+      val outcome: Either[Either[StatusRuntimeException, Rejected], A] =
+        try {
+          val answer = op(stubFor(channels(i)))
+          check(endpoints(i), answer) match {
+            case Some(rejected) => Left(Right(rejected))
+            case None           => Right(answer)
+          }
+        } catch { case e: StatusRuntimeException => Left(Left(e)) }
       outcome match {
         case Right(answer) =>
-          preferred.set(i)
+          // After this call's own demotions the preference is normally `i` already; if another call
+          // changed it meanwhile, its value stands.
+          preferred.compareAndSet(observed, i)
           answer
-        case Left(e) =>
-          val status = e.getStatus
-          if (!isLeaderSick(status)) preferred.set(i)
-          if (!retryOn(status)) throw e
-          val reason = Option(status.getDescription).fold(status.getCode.toString)(d => s"${status.getCode}: $d")
+        case Left(failure) =>
+          val error: Exception = failure match {
+            case Left(e)  => e
+            case Right(r) => r.error
+          }
+          val retry: Boolean = failure match {
+            case Left(e)  => retryOn(e.getStatus)
+            case Right(_) => true
+          }
+          val loseLead: Boolean = failure match {
+            case Left(e)  => demoteOn(e.getStatus)
+            case Right(_) => true
+          }
+          val code: String = failure match {
+            case Left(e)  => e.getStatus.getCode.toString
+            case Right(r) => r.code
+          }
+          val reason: String = failure match {
+            case Left(e)  => Option(e.getStatus.getDescription).fold(code)(d => s"$code: $d")
+            case Right(r) => s"$code: ${r.error.getMessage}"
+          }
+          if (loseLead) demote(i)
+          if (!retry) throw error
           if (k + 1 < n) {
             val next = endpoints((i + 1) % n)
             logger.warn(s"FROST: $what via ${endpoints(i)} failed ($reason); failing over to $next")
-            notes.add(s"failover=${endpoints(i)}→$next reason=${status.getCode}")
+            notes.add(s"failover=${endpoints(i)}→$next reason=$code")
             attempt(k + 1)
           } else {
             logger.warn(s"FROST: $what via ${endpoints(i)} failed ($reason); no cosigner left to try")
-            throw e
+            throw error
           }
       }
     }
@@ -360,8 +434,9 @@ class FrostBackend(
     * UNIMPLEMENTED for `EcdhDerive`. While the driver no longer refuses ECIES because a silent
     * cosigner might be old, such an answer is treated here as "this node may be old or missing the
     * key": the next cosigner is asked, and the answering node does **not** become the preferred
-    * leader (review M1, 2026-10-09 decision). `stale` recognises such an answer; leader-sick
-    * statuses fail over as usual.
+    * leader (review M1, 2026-10-09 decision; if it was the preferred one it loses that). `stale`
+    * recognises such an answer; leader-sick statuses fail over and demote as usual, and any other
+    * status is returned at once and leaves the lead where it is (see [[withFailover]]).
     *
     * `acceptAfterStale` decides whether an answer found after a stale one is used. For a key the
     * driver has not seen yet it is "only if the answer says the key is EC": for any other key type,
@@ -389,6 +464,7 @@ class FrostBackend(
       val next = if (k + 1 < n) Some(endpoints((i + 1) % n)) else None
       outcome match {
         case Left(e) if isLeaderSick(e.getStatus) =>
+          demote(i)
           next match {
             case Some(to) =>
               logger.warn(s"FROST: $what via ${endpoints(i)} failed (${e.getStatus.getCode}); failing over to $to")
@@ -397,6 +473,7 @@ class FrostBackend(
             case None => settle(firstStale.getOrElse(outcome))
           }
         case o if stale(o) =>
+          demote(i)
           val (reason, meaning) = o.fold(e => (e.getStatus.getCode.toString, MayBeOld), staleAnswer)
           val first = firstStale.orElse(Some(o))
           next match {
@@ -408,9 +485,14 @@ class FrostBackend(
           }
         case Right(answer) if firstStale.nonEmpty && !acceptAfterStale(answer) =>
           settle(firstStale.get) // not an EC key after all: the first answer stands, as before
-        case o =>
-          preferred.set(i)
-          settle(o)
+        case Right(answer) =>
+          preferred.compareAndSet(start, i) // see withCheckedFailover
+          answer
+        case Left(e) =>
+          // A real answer (RESOURCE_EXHAUSTED, INVALID_ARGUMENT, ...), returned at once as before.
+          // It leaves the lead where it is: the per-node decrypt limit must not become n times the
+          // budget by moving the next call to another node.
+          throw e
       }
     }
     attempt(0, None)
@@ -457,11 +539,11 @@ class FrostBackend(
     * silently vanish from the audit entry. So every cluster call goes through this helper from the
     * synchronous part of the public method, and reply post-processing (signature length, SPKI
     * wrapping, existence checks) is chained with `.map`. */
-  private def clusterCall[A](what: String, retryOn: Status => Boolean)(
+  private def clusterCall[A](what: String, retryOn: Status => Boolean, demoteOn: Status => Boolean)(
       op: SignerGrpc.SignerBlockingStub => A
   ): Future[A] = {
     val notes = currentNotes.get
-    Future(blocking(withFailover(what, retryOn, notes)(op)))
+    Future(blocking(withFailover(what, retryOn, demoteOn, notes)(op)))
   }
 
   /** Fail the returned Future — rather than throw — when a caller-side precondition does not hold,
@@ -621,7 +703,9 @@ class FrostBackend(
       // DKG is a one-shot ceremony: only fail over if the endpoint is unreachable at the
       // connection level (no ceremony started). Never retry on DEADLINE_EXCEEDED — a slow but
       // in-flight DKG must not be run a second time against another leader — nor on a leader-side
-      // INTERNAL, which may have failed part-way through the ceremony.
+      // INTERNAL, which may have failed part-way through the ceremony. Only the status it fails
+      // over on (UNAVAILABLE) takes the lead from the node: after a timeout or an INTERNAL the
+      // ceremony may still be running there, and the next call must not start elsewhere because of it.
       // The request carries a ceremony intent (purpose "dkg") signed with the mTLS identity, which
       // every cosigner verifies before it opens the ceremony. A FRESH intent per attempt: the
       // ceremony id is derived from the intent and a ceremony that failed (even at the fence) burns
@@ -654,7 +738,7 @@ class FrostBackend(
         }
         b.build()
       }
-      clusterCall("dkg", connectionRefused)(_.dkg(dkgRequest()))
+      clusterCall("dkg", connectionRefused, connectionRefused)(_.dkg(dkgRequest()))
         .flatMap { reply =>
           // The leader's reply is one cosigner's word: the new key is believed only once every
           // endpoint that answers agrees on it, and it must be the key the leader reported.
@@ -707,7 +791,7 @@ class FrostBackend(
     */
   private def generateHosted(keyId: String, spec: String): Future[String] = {
     val req = GenerateKeyRequest.newBuilder().setKeyId(keyId).setSpec(spec).build()
-    clusterCall("generateKey", isNodeDown)(_.generateKey(req)).map { reply =>
+    clusterCall("generateKey", isNodeDown, isLeaderSick)(_.generateKey(req)).map { reply =>
       learnSpec(keyId, spec)
       logger.info(
         s"FROST: hosted key $keyId ready (created=${reply.getCreated}, replicas=${reply.getReplicas})"
@@ -730,8 +814,13 @@ class FrostBackend(
         // Captured here, synchronously: the binding is thread-local and the flatMap below runs on a
         // pool thread (see clusterCall).
         val notes = currentNotes.get
-        // One request id per driver call: every leader the sign fails over to gets the same intent,
-        // so the cosigners charge their rate limit once and journal one request (audit C2).
+        // One request id per driver call, and one intent per attempt below (not per leader): every
+        // leader the sign fails over to gets the same intent bytes. Each cosigner charges its rate
+        // limit once per intent request id, so trying more leaders charges no more. But each leader
+        // tried can make a node release one more signature share for that id, up to that node's
+        // `max_shares_per_request`; in 3-of-5 a call that fails over more than once can reach that
+        // bound, and the node then refuses (RESOURCE_EXHAUSTED). Learning the cluster id again
+        // builds a new intent with the same request id.
         val requestId = FrostIntentSigner.newRequestId()
         // Pin the group key first (no-op once pinned), so a signature is never produced for a key
         // the cluster has not agreed on.
@@ -740,15 +829,32 @@ class FrostBackend(
           // leader's session is abandoned and its nonces are burnt by the cosigners (AbortSign, or the
           // pending-session TTL), never reused — see isLeaderSick.
           Future(blocking {
-            def attempt(relearned: Boolean): SignReply = {
+            val lastTried = new AtomicInteger(-1)
+            def attempt(relearned: Boolean, from: Option[Int]): SignReply = {
               val req = SignRequest.newBuilder().setKeyId(keyId).setMessage(ByteString.copyFrom(data))
               val intent = signingIntent(keyId, data, requestId, approval, notes)
               intent.foreach(req.setIntent)
               val built = req.build()
-              try withFailover("sign", isLeaderSick, notes)(_.sign(built))
+              // A signature the pinned group key does not verify is that leader failing, like a
+              // leader-sick status: withheld, the node demoted, the next leader tried with the same
+              // intent. Only a verified signature makes a node the preferred leader.
+              val check = (endpoint: String, reply: SignReply) => unverified(keyId, data, groupKey, notes)(endpoint, reply)
+              val observed = preferred.get
+              try
+                withCheckedFailover[SignReply](
+                  "sign",
+                  signFailsOver,
+                  signDemotes(intent.nonEmpty),
+                  notes,
+                  check,
+                  observed,
+                  from.getOrElse(observed),
+                  (i: Int) => lastTried.set(i),
+                )(_.sign(built))
               catch {
                 // A cosigner says the intent names another cluster: the learned id is wrong (one
-                // endpoint lied, or the cluster id changed). Learn it again and retry once.
+                // endpoint lied, or the cluster id changed). Learn it again and retry once, on the
+                // same node first: the stale id was the driver's, so that node keeps the lead.
                 case e: StatusRuntimeException
                     if !relearned && intent.nonEmpty && isClusterRefusal(e.getStatus) && forgetLearnedClusterId() =>
                   logger.warn(
@@ -756,30 +862,45 @@ class FrostBackend(
                       s"(${e.getStatus.getDescription}); learning the cluster id again"
                   )
                   notes.add("intent-cluster=relearned")
-                  attempt(relearned = true)
+                  attempt(relearned = true, Some(lastTried.get))
               }
             }
-            attempt(relearned = false)
-          }).map { reply =>
-            val sig = reply.getSignature.toByteArray
-            require(sig.length == 64, s"expected 64-byte Ed25519 signature, got ${sig.length}")
-            // Never release a signature the pinned group key does not verify — a wrong-key or
-            // garbage signature from a faulty or malicious leader stops here, not at Canton.
-            if (!verifyEd25519(groupKey.toByteArray, data, sig)) {
-              logger.error(s"FROST: signature for $keyId did NOT verify against the pinned group key; withheld")
-              notes.add("sig-verify=failed")
-              throw KmsDriverException(
-                new SecurityException(
-                  s"FROST signature for $keyId does not verify against the pinned group key; withheld"
-                ),
-                retryable = false,
-              )
-            }
-            sig
-          }
+            attempt(relearned = false, None)
+          }).map(_.getSignature.toByteArray) // verified in withCheckedFailover
         }
       }
     else delegate.sign(data, keyId, algo)
+
+  /** The check of a sign reply from `endpoint`: None when its signature verifies (Ed25519, strict)
+    * against the pinned `groupKey` over `data`, else the rejection. Never release a signature the
+    * pinned group key does not verify — a wrong-key, wrong-length or garbage signature from a faulty
+    * or malicious leader stops here, not at Canton. The error, thrown when no leader is left, is
+    * non-retryable: every cosigner was asked and none produced a valid signature. */
+  private def unverified(
+      keyId: String,
+      data: Array[Byte],
+      groupKey: ByteString,
+      notes: AuditNotes,
+  )(endpoint: String, reply: SignReply): Option[Rejected] = {
+    val sig = reply.getSignature.toByteArray
+    if (verifyEd25519(groupKey.toByteArray, data, sig)) None
+    else {
+      logger.error(
+        s"FROST: signature for $keyId from $endpoint (${sig.length} bytes) did NOT verify against the pinned " +
+          "group key; withheld"
+      )
+      notes.add("sig-verify=failed")
+      Some(
+        Rejected(
+          BadSignature,
+          KmsDriverException(
+            new SecurityException(s"FROST signature for $keyId does not verify against the pinned group key; withheld"),
+            retryable = false,
+          ),
+        )
+      )
+    }
+  }
 
   /** The signing intent for one sign (audit C2): signed with the mTLS identity, naming the
     * cluster, the key, the exact digest, `requestId`, a validity of `intentLifetime` and the
@@ -875,10 +996,6 @@ class FrostBackend(
       true
     }
 
-  /** A cosigner's refusal of an intent naming another cluster (`intent.rs` reason "cluster"). */
-  private def isClusterRefusal(s: Status): Boolean =
-    s.getCode == Status.Code.PERMISSION_DENIED && Option(s.getDescription).exists(_.contains("intent is for cluster"))
-
   override def decryptAsymmetric(
       ciphertext: Array[Byte],
       keyId: String,
@@ -891,7 +1008,7 @@ class FrostBackend(
           .setKeyId(keyId)
           .setCiphertext(ByteString.copyFrom(ciphertext))
           .build()
-        clusterCall("decrypt", isLeaderSick)(_.decrypt(req)).map(_.getPlaintext.toByteArray)
+        clusterCall("decrypt", isLeaderSick, isLeaderSick)(_.decrypt(req)).map(_.getPlaintext.toByteArray)
       case EncryptionAlgoSpec.EciesHkdfHmacSha256Aes128Cbc =>
         decryptEcies(ciphertext, keyId)
     }
@@ -979,7 +1096,7 @@ class FrostBackend(
     if (ids.isHosted(keyId)) {
       val req =
         SymmetricRequest.newBuilder().setKeyId(keyId).setData(ByteString.copyFrom(data)).build()
-      clusterCall("symmetricEncrypt", isLeaderSick)(_.symmetricEncrypt(req)).map(_.getData.toByteArray)
+      clusterCall("symmetricEncrypt", isLeaderSick, isLeaderSick)(_.symmetricEncrypt(req)).map(_.getData.toByteArray)
     } else delegate.encryptSymmetric(data, keyId)
 
   override def decryptSymmetric(ciphertext: Array[Byte], keyId: String): Future[Array[Byte]] =
@@ -989,7 +1106,7 @@ class FrostBackend(
         .setKeyId(keyId)
         .setData(ByteString.copyFrom(ciphertext))
         .build()
-      clusterCall("symmetricDecrypt", isLeaderSick)(_.symmetricDecrypt(req)).map(_.getData.toByteArray)
+      clusterCall("symmetricDecrypt", isLeaderSick, isLeaderSick)(_.symmetricDecrypt(req)).map(_.getData.toByteArray)
     } else delegate.decryptSymmetric(ciphertext, keyId)
 
   override def getPublicKey(keyId: String): Future[PublicKey] =
@@ -1012,7 +1129,7 @@ class FrostBackend(
             { case Left(e) => e.getStatus.getCode == Status.Code.NOT_FOUND; case Right(_) => false },
             _.getSpec == EcSpec,
           )(_.publicKey(req))
-        else clusterCall("publicKey", isLeaderSick)(_.publicKey(req))
+        else clusterCall("publicKey", isLeaderSick, isLeaderSick)(_.publicKey(req))
       call.map { reply =>
         learnSpec(keyId, reply.getSpec)
         hostedPublicKey(keyId, reply.getSpec, reply.getPublicKeyDer.toByteArray)
@@ -1022,7 +1139,7 @@ class FrostBackend(
   override def keyExistsAndIsActive(keyId: String): Future[Unit] =
     if (ids.isFrost(keyId))
       // groupKey returns NOT_FOUND if the cluster has no such key.
-      clusterCall("groupKey", isLeaderSick)(_.groupKey(GroupKeyRequest.newBuilder().setKeyId(keyId).build()))
+      clusterCall("groupKey", isLeaderSick, isLeaderSick)(_.groupKey(GroupKeyRequest.newBuilder().setKeyId(keyId).build()))
         .map(_ => ())
     else if (ids.isHosted(keyId)) {
       val req = KeyInfoRequest.newBuilder().setKeyId(keyId).build()
@@ -1038,7 +1155,7 @@ class FrostBackend(
             },
             _.getSpec == EcSpec,
           )(_.keyInfo(req))
-        else clusterCall("keyInfo", isLeaderSick)(_.keyInfo(req))
+        else clusterCall("keyInfo", isLeaderSick, isLeaderSick)(_.keyInfo(req))
       call.map { reply =>
         if (!reply.getExists) throw new NoSuchElementException(s"key not found or inactive: $keyId")
         learnSpec(keyId, reply.getSpec)
@@ -1066,7 +1183,7 @@ class FrostBackend(
         }
       }
       val built = req.build()
-      clusterCall("deleteKey", isNodeDown)(_.deleteKey(built)).map(_ => ())
+      clusterCall("deleteKey", isNodeDown, isLeaderSick)(_.deleteKey(built)).map(_ => ())
     }
     else delegate.deleteKey(keyId)
 
@@ -1155,13 +1272,15 @@ object FrostBackend {
 
   // -- Failover predicates: which statuses move a request to the next cosigner. --
   //
-  // Each call site picks the widest predicate its operation is safe under. Every status none of
-  // them names — NOT_FOUND, INVALID_ARGUMENT, ALREADY_EXISTS, FAILED_PRECONDITION,
-  // RESOURCE_EXHAUSTED, PERMISSION_DENIED, UNAUTHENTICATED, UNIMPLEMENTED, ... — is a real answer
-  // from a live node and is surfaced immediately: trying another node would only mask it.
+  // Each call site picks the widest predicate its operation is safe under. Apart from sign
+  // ([[signFailsOver]], which also fails over on NOT_FOUND, FAILED_PRECONDITION, ABORTED,
+  // UNIMPLEMENTED and the like), every status none of them names — NOT_FOUND, INVALID_ARGUMENT,
+  // ALREADY_EXISTS, FAILED_PRECONDITION, RESOURCE_EXHAUSTED, PERMISSION_DENIED, UNAUTHENTICATED,
+  // UNIMPLEMENTED, ... — is a real answer from a live node and is surfaced immediately: trying
+  // another node would only mask it.
   //
-  // Note in particular that RESOURCE_EXHAUSTED (the cluster's per-key decryption rate limit) is
-  // NOT retried elsewhere. Every cosigner enforces the same ceiling, so failing over would merely
+  // Note in particular that RESOURCE_EXHAUSTED (the cluster's per-key decryption rate limit, or a
+  // sign rate limit) is NOT retried elsewhere, for any operation. Every cosigner enforces the same ceiling, so failing over would merely
   // spread the load an attacker is generating across the cluster. It surfaces to Canton, which
   // backs off.
 
@@ -1182,13 +1301,79 @@ object FrostBackend {
     * first in the roster, one sick node was a total signing outage while a quorum was healthy).
     *
     * Only for operations safe to re-issue through another leader: reads (group/public key, key
-    * info, capabilities), decryption, symmetric crypto — and sign. A sign re-issued elsewhere
+    * info, capabilities), decryption, symmetric crypto — and sign, which fails over on more
+    * ([[signFailsOver]]). A sign re-issued elsewhere
     * opens a FRESH FROST session with fresh nonces; the first leader's session is abandoned and its
     * round-1 nonces are burnt by the cosigners' own abort/TTL logic (AbortSign, the pending-session
     * TTL), never reused. At worst two valid signatures over the same message exist, which leaks
     * nothing. */
   private def isLeaderSick(status: Status): Boolean =
     isNodeDown(status) || status.getCode == Status.Code.INTERNAL || status.getCode == Status.Code.UNKNOWN
+
+  /** Which statuses move a SIGN to the next leader within one call: every status except the four
+    * that are about the request or the signing policy, which are returned to Canton at once.
+    *
+    * A sign is safe to re-issue through another leader (see [[isLeaderSick]]: a fresh session with
+    * fresh nonces), and costs no extra rate-limit charge, because every leader gets the same signed
+    * intent and the cosigners charge once per request id and intent. And for a sign the driver has
+    * already pinned the group key, so the cluster agreed the key exists: NOT_FOUND,
+    * FAILED_PRECONDITION, ABORTED, UNIMPLEMENTED and the like come from that leader's own state (a
+    * missing or stale share, a ceremony holding the key, an old or lying node), not from the
+    * request, and another leader may well sign. One compromised cosigner that answers every sign
+    * with one of them is routed around within the call. The cosigner sends every signing-policy
+    * refusal as PERMISSION_DENIED and a rate limit as RESOURCE_EXHAUSTED (`error.rs`); the retried
+    * codes carry no policy decision.
+    *
+    * Returned at once, never tried on another leader:
+    *   - PERMISSION_DENIED: a signing-policy refusal (an intent this node will not accept, missing
+    *     approvals under its rules, the caller's ACL). Each cosigner enforces its own policy, and
+    *     retrying a strict node's refusal through a lenient one would defeat the strict one. The
+    *     cluster-id refusal is still handled by the caller (learn the id again, retry once);
+    *   - UNAUTHENTICATED: the driver's certificate is not accepted — configuration, not the node;
+    *   - RESOURCE_EXHAUSTED: a rate limit. Every cosigner enforces the same one, so going elsewhere
+    *     would only spread the load; Canton backs off;
+    *   - INVALID_ARGUMENT: the request itself is malformed (the digest length), the same everywhere.
+    * A leader that answers one of these loses the lead when the sign carried an intent (see
+    * [[signDemotes]]), so a lying node costs at most that one call before the next starts
+    * elsewhere. */
+  private def signFailsOver(status: Status): Boolean =
+    status.getCode match {
+      case Status.Code.PERMISSION_DENIED | Status.Code.UNAUTHENTICATED | Status.Code.RESOURCE_EXHAUSTED |
+          Status.Code.INVALID_ARGUMENT =>
+        false
+      case _ => true
+    }
+
+  /** Which error statuses take the lead from a SIGN leader (see [[withCheckedFailover]]): every
+    * status the sign fails over on, and also the refusals returned at once — with an intent.
+    *
+    * Why a refusal demotes: a signature needs a quorum of cosigners, and with an intent each one
+    * checks it on its own share in round 1 and again before release (signer allowlist, SPKI pin,
+    * cluster, key ACL, validity, approvals) and charges its own rate limit. So which node leads does
+    * not change what can be signed. Keeping the lead on a refusing node would let one compromised
+    * cosigner stop every sign by answering with a refusal while it leads, from process start when
+    * it is endpoint 0.
+    *
+    * Not demoted:
+    *   - a cluster-id refusal that makes the driver learn the id again: the stale id was the
+    *     driver's, and the retry goes to the same node first;
+    *   - a refusal of a sign WITHOUT an intent (`frost.sign-intents = off`, no TLS, or no cluster
+    *   id known): the other cosigners then cannot see who asks, so the Signer allowlist, the pin and
+    *     the key ACL are checked by the leader alone, and moving the next call to another node could
+    *     move it past a stricter node's check. */
+  private def signDemotes(withIntent: Boolean): Status => Boolean =
+    (status: Status) => !isClusterRefusal(status) && (signFailsOver(status) || withIntent)
+
+  /** A cosigner's refusal of an intent naming another cluster (`intent.rs` reason "cluster"). */
+  private def isClusterRefusal(s: Status): Boolean =
+    s.getCode == Status.Code.PERMISSION_DENIED && Option(s.getDescription).exists(_.contains("intent is for cluster"))
+
+  /** The failover note's reason for a signature the pinned group key does not verify. */
+  private val BadSignature = "BAD_SIGNATURE"
+
+  /** An answer the driver checked and refused to use (see `withCheckedFailover`): `code` names it
+    * in the `failover=` note, `error` is what the call fails with when no cosigner is left. */
+  private final case class Rejected(code: String, error: Exception)
 
   /** Strictest predicate, for the non-idempotent DKG ceremony: only the endpoint being unreachable
     * at the connection level (no ceremony started) — never a timeout, which may mean the ceremony is
