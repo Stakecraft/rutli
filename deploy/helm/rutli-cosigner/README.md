@@ -51,7 +51,7 @@ done
 for i in 1 2 3; do
   rutli-cosigner seal new-node --node $i --out node-$i.json        # prints its dist_public_key
   kubectl -n rutli create secret generic rutli-seal-node-$i --from-file=node.json=node-$i.json
-  shred -u node-$i.json 2>/dev/null || rm -f node-$i.json
+  rm -f node-$i.json     # run this in a memory disk or encrypted image you destroy afterwards: docs/key-material-handling.md
 done
 
 # 3. Install (values already pin the image digest). peer-pins.json, written by gen-frost-certs.sh,

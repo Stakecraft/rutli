@@ -463,7 +463,7 @@ kubectl cp <rutli>/driver/target/scala-2.13/rutli-driver.jar $NS/rutli-kms-popul
 for f in ca.crt driver.crt driver.key; do kubectl cp $D/tls/$f $NS/rutli-kms-populate:/bundle/certs/$f; done
 kubectl -n $NS exec rutli-kms-populate -- sh -c 'sha256sum /bundle/rutli-driver.jar /bundle/certs/*'    # = JAR_SHA, CA 453bb4ae…
 kubectl -n $NS delete pod rutli-kms-populate
-rm -P $D/tls/driver.key       # APFS/SSD: not provable erasure; the driver key also lives in rutli-cosigner-tls and both bundles
+rm -f $D/tls/driver.key       # $D is on the encrypted memory disk you destroy at the end (docs/key-material-handling.md); not provable erasure; the driver key also lives in rutli-cosigner-tls and both bundles
 ```
 
 ### 4.1 Console inventory on the old participant (read-only, keep this session open until 4.10)

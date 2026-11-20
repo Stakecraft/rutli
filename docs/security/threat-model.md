@@ -410,8 +410,9 @@ make a deleted id reusable (break-glass on every node only).
 The backup runs as a sidecar in the cosigner's own pod with the data volume mounted read-only, no
 seal bundle and no TLS key (enforced by `check-deploy-policy.sh`). A destination holds one node's
 sealed key files and its sign journals — below threshold, unreadable without that node's DEK.
-Destination **plus** that node's DEK = that node's shares for every retained backup epoch (still one
-share per key). Retention of old epochs in backups is an operator decision (P2b); a restore never rolls a
+Destination **plus** that node's DEK = that node's shares for every retained backup epoch. That is
+one share per key and epoch, but one node's retained epoch-e copy and another node's live epoch-e
+share are two shares of one sharing. A hosted key is a whole key in each file. Retention of old epochs in backups is an operator decision (P2b); a restore never rolls a
 live share back (below).
 
 ### Kubernetes cluster-admin / a reader of every Secret in the namespace (P10)
@@ -489,6 +490,55 @@ key but cannot repair a DKG key whose secret was exposed: the secret does not ch
 split keys that matter only on a release with C1, on a uniformly upgraded cluster.** DevNet soak
 keys stay test material.
 
+## Key material at rest and its lifetime
+
+A sealed key file is protected by the sealing key (the node's DEK), not by being deleted. Rütli
+removes files with `unlink` and replaces them with `rename`; it never overwrites, and on flash,
+network, copy-on-write and snapshotted storage an overwrite would not erase either. So old copies
+of a key file exist wherever it was ever stored: the data volume's free blocks, retained backups
+(the chart keeps 14 by default, and an off-cluster destination keeps what its retention keeps),
+volume snapshots, the Kubernetes node's disk (the backup sidecar's staging copies, the pod's `/tmp`),
+quarantined staged files of an aborted refresh (up to 7 days), and any `backup-*` or `retired-*`
+directory left on a volume.
+
+**The precondition for using an old copy is the copy and the sealing key that sealed it.** What
+that gives, per key:
+
+- **A FROST key** (namespace, signing): `t` shares of one sharing, that is the same epoch and the
+  same public-key-package digest, from `t` distinct nodes, each with its node's DEK. The sources
+  can be of different ages and places: a refresh keeps the group secret, so a complete
+  same-sharing set from any point in the key's history is the key. A refresh does not retire
+  older copies, does not change any DEK, and does not turn a stolen share into a harmless one while
+  `t` nodes' old copies and DEKs survive.
+- **A dealt share** (a key brought in by the split ceremony): `t` dealt shares, from the bundles or
+  from any backup taken before the first refresh, each with its node's DEK, are the key, whatever
+  was refreshed since. The bundle, the node's recipient file (unlinked after install, not erased) and
+  the DEK together reopen a dealt share.
+- **A hosted key**: one copy from one node and that node's DEK. A hosted key has no threshold at
+  rest, and a delete keeps the material in the tombstone for the grace period, so backups taken
+  in that time hold it too.
+- **With the legacy shared master**: the master alone replaces every node's DEK, for every file
+  written before the node rotated, and for split-legacy bundles that were never rotated.
+
+What does not give a share: a journal, a nonce marker, a ceremony record or a `.cleared` marker
+(none holds secret material), fewer than `t` shares of one sharing, shares of different epochs, a
+sealed file without a DEK that sealed it.
+
+**What closes it.** Rotate the node's sealing key and destroy the old one: `seal rotate-dek`,
+restart (the node re-seals its key files), `seal drop-previous`, then destroy every other copy of
+the old DEK: earlier values of the seal Secret (etcd, its snapshots, GitOps and secret-manager
+history), the escrowed previous bundle, the legacy master and its escrow, operator files. A dropped
+DEK is not a destroyed DEK. Do it after the first refresh of an imported key, after leaving the
+legacy master, and after any suspected exposure of a bundle. Keep the retention of old-epoch
+backups short and in step with the rotation, and keep material that ever leaves a node off disks
+you cannot destroy. Method and inventory: [../key-material-handling.md](../key-material-handling.md).
+
+**Not covered.** Rotation does not reach files outside the key directories (an old `backup-*` or
+`retired-*` directory), plaintext residue from before sealing, an `export-key` artifact (protected
+by its own passphrase), core dumps and memory (a cosigner does not switch core dumps off), or the
+participant's database where the whole key lived before a split. Rotation tied to the refresh
+schedule, so that it needs no operator step, is planned for 0.6.
+
 ## Residual risks, stated plainly
 
 - Single trust domain under one Kubernetes administration (P10).
@@ -513,7 +563,8 @@ keys stay test material.
   onboarding DKGs included (n-of-n). Not bound into a refresh intent yet: the expected
   `(epoch, PKP digest)` (follow-up).
 - Deletion is not erasure: tombstones retain material for the grace period by design, and old
-  backups keep every key they captured until the DEK that sealed them is dropped.
+  backups keep every key they captured until the DEK that sealed them is destroyed (dropped from
+  the bundle and every other copy gone: "Key material at rest and its lifetime", below).
 - Keys from earlier releases are leader-exposed (P9).
 - One Byzantine cosigner can split a DKG/refresh (n = 3, f = 1): availability, detected and
   operator-recoverable, never the key (F3).

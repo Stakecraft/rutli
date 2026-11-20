@@ -318,7 +318,7 @@ Expect `import exit=0`, then within one anti-entropy interval (default 300 s) `o
 
 **3.8 Founding backup and hygiene.** Take the cosigner key backups now ([disaster-recovery.md](disaster-recovery.md) §1;
 B8: a `tar` of `/data/keys` per pod, counts checked). Without a refresh these hold never-refreshed shares: L10. Delete the
-bundles (`rm -P`). Keep `$D/keep/*.export-pw.bin` until RB2: they are the only re-import path.
+bundles, then rotate every node's sealing key after the first refresh and destroy the old one ([key-material-handling.md](key-material-handling.md)). Keep `$D/keep/*.export-pw.bin` until RB2: they are the only re-import path.
 **ACL probe** (read-only, only after Phase 1): for each node, `grpcurl` `Signer/GroupKey` for `$NS_ID`/`$SIG_ID` and
 `Signer/PublicKey` for `$ENC_ID` with the participant's driver certificate → values, no `PermissionDenied`.
 
@@ -384,7 +384,7 @@ defaults to on; leave it out. The endpoints and `domain` above are the legacy to
 **4.1 Pre-switch check** (read-only): `con pre ids precheck` with the 0.2 key/OTK assertions repeated (keys unchanged, OTK
 serial recorded, connected); `helper; kubectl -n $NS exec rutli-kms-populate -c p -- sh -c 'cd /bundle && sha256sum -c
 SHA256SUMS'` prints `OK` ×4, then `kubectl -n $NS delete pod rutli-kms-populate` (RWO volumes); `rc verify-key` for both
-FROST ids and `rc verify-hosted` for `$ENC_ID` are OK. Then shred the laptop's `driver.key` copy (`/bin/rm -P`).
+FROST ids and `rc verify-hosted` for `$ENC_ID` are OK. Then remove the laptop's `driver.key` copy (it should only be on the memory disk or image you destroy at 5.6).
 
 **4.2 Silence and safety dump** [MUTATES: one more plaintext copy of the keys]. Silence the namespace's Canton and pod alerts
 for 3 h (Alertmanager `POST /api/v2/silences`, matchers `namespace=$NS` and `alertname=~"CantonParticipantDown|CantonValidatorAppDown|CantonParticipantUnhealthy|CantonRoundMissed|KubeDeploymentReplicasMismatch|KubePodNotReady"`).
@@ -605,14 +605,14 @@ job left to resume, so "the next dump is clean" was not exercised.
 | L4 | Object storage | Every version and delete marker ≤ `T_CLEAN`; record object-lock retention |
 | L5 | Volume snapshots, **retired database volumes** | Delete (B8: a pre-CNPG volume deleted unwiped held the keys) |
 | L6 | Splice identities dumps, migration-dump volume | Confirm none were taken |
-| L7 | `$D/keep/*.export-pw.bin` | `/bin/rm -P` (APFS/SSD: not provable) |
+| L7 | `$D/keep/*.export-pw.bin` | on the memory disk or image of [key-material-handling.md](key-material-handling.md); destroy the place (not provable erasure) |
 | L8 | Laptop: `$D`, history, clipboard, console containers, password-manager entry | Statement |
 | L9 | Dealer host and media | Statement ([split-ceremony.md](split-ceremony.md) Step 9) |
-| L10 | Bundles, `r?.json`, pod `/tmp` files, founding backups taken before the refresh | Delete; record which backups hold never-refreshed shares |
+| L10 | Bundles, `r?.json`, pod `/tmp` files (and the Kubernetes node's disk under them), founding backups taken before the refresh, each cosigner's data volume and backup volume with their snapshots | Delete; rotate every node's sealing key and destroy the old one; record which backups hold never-refreshed shares |
 | L11 | Cluster (live): `NS_ID` forever; `SIG_ID`/`ENC_ID` live or, after 5.2, residue (the carried ECIES key stays whole on every cosigner) | Statement |
 | L12 | Driver private-key copies (laptop, helper pods) | Delete; the PVC copy is the live one |
 
-**5.6 Teardown of the migration workspace:** delete helper pods and port-forwards, `rm -P` the remaining files in `$D`,
+**5.6 Teardown of the migration workspace:** delete helper pods and port-forwards, unmount and delete the memory disk or image that holds `$D` ([key-material-handling.md](key-material-handling.md)),
 revoke any temporary refresh permission (D4), keep the evidence. A drill on a scratch validator also offboards it (trust
 certificate removal, signed by the carried namespace key through FROST) and removes its prefix from `signer_acl`.
 

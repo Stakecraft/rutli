@@ -65,8 +65,9 @@
 >
 > - **Proactive share refresh (done):** `Signer.Refresh` RPC / `rutli-cosigner refresh` — dealer-free
 >   DKG-style re-randomization of all shares, group key (and node identity) unchanged, verified by
->   every node before persisting. Limits an attacker to one refresh epoch; pre-refresh shares are
->   dead afterwards (old+new shares cannot combine — tested).
+>   every node before persisting. Shares of different epochs do not combine (tested), so a share stolen before a refresh
+>   no longer adds to one stolen after it. It erases nothing: old copies, and the sealing keys that
+>   open them, stay usable by t shares of one epoch (key-material-handling.md).
 >
 > - **Cluster-hosted keys, v1 (done, both sides):** the cluster also holds the **non-FROST**
 >   material Canton needs — RSA-2048-OAEP-SHA256 encryption keypairs and AES-256-GCM symmetric
@@ -510,8 +511,9 @@ from replicated to threshold is a server-side change plus a config flag, not an 
   differently is an error. Every threshold signature is verified (Ed25519, strict) against the pinned
   key before the driver returns it, so a wrong-key or garbage signature is withheld, not handed to
   Canton.
-- **Proactive refresh:** periodically re-randomize shares, same public key — an attacker must breach
-  `t` cosigners within one epoch; old stolen shares become useless.
+- **Proactive refresh:** periodically re-randomize shares, same public key — shares of different epochs
+  do not combine, so an attacker needs `t` shares of one epoch. Old copies of old shares (backups,
+  snapshots, free blocks) stay usable while the sealing keys that open them exist.
 - **DR:** encrypted per-share backups (fast node replacement) + a cold Shamir backup held by
   custodians (last resort). Recovery = re-share from surviving shares; the full key is never
   reconstructed on a live host. This matters because the namespace key is non-rotatable and its

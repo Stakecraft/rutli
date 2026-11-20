@@ -60,7 +60,7 @@ wallet down ≈ 20 min, operator and end-user balances unchanged, no re-onboard.
 keys were rotated on 2026-11-01** (a cluster-hosted ECIES key and a FROST signing key from a DKG) **and the JCE rows were
 deleted on 2026-11-12** after 11 clean days; the node restarted and reconnected on its own with no JCE private key left in
 its database, and the safety dump and the key exports were destroyed. Still open: the teardown of the scratch
-validator. Runbook: [runbook-migration-inplace.md](runbook-migration-inplace.md). Decided 2026-10-15: 2a
+validator, postponed until after 0.5.0 (decided 2026-11-20): the scratch validator stays, and 0.5.0 is tried there before the soak cluster. Runbook: [runbook-migration-inplace.md](runbook-migration-inplace.md). Decided 2026-10-15: 2a
 ships in v0.4.0, before the audit, so the auditors review it.
 
 *Mechanics.* Checked against the Canton 3.6.1 source by two independent reviewers, who agree:
@@ -170,7 +170,7 @@ namespace and signing keys are threshold keys; the encryption key is not.
 | B5 | Docs fix (stale "unsupported" claims, exposure caveat) | Done |
 | B6 | Optional carry of signing and ECIES keys | Done: PR #23, merged 2026-10-15 (both independent reviews addressed) |
 | B7 | 2b rehearsal with wallet end-users: verify re-onboarding keeps their parties and balances | New, proposed |
-| B8 | In-place rehearsal (2a), carry-first sequence, on a fresh scratch JCE validator on DevNet | Phases 0–4 + 5.1 **passed 2026-10-26**; rotation **passed 2026-11-01** (cosigners on `v0.4.0-rc.6`); observation, SQL cleanup and destruction **passed 2026-11-12**. Open: teardown. Runbook [runbook-migration-inplace.md](runbook-migration-inplace.md) |
+| B8 | In-place rehearsal (2a), carry-first sequence, on a fresh scratch JCE validator on DevNet | Phases 0–4 + 5.1 **passed 2026-10-26**; rotation **passed 2026-11-01** (cosigners on `v0.4.0-rc.6`); observation, SQL cleanup and destruction **passed 2026-11-12**. Open: teardown, postponed until after 0.5.0 (the scratch validator stays; 0.5.0 is tried there before the soak cluster). Runbook [runbook-migration-inplace.md](runbook-migration-inplace.md) |
 | C1 to C3 | ECIES hosted keys | Done; shipped in v0.4.0-rc.1. The two availability fixes from the second review are merged |
 | CA rotation | Pin plus runbook | Done; shipped in v0.4.0-rc.2 |
 
