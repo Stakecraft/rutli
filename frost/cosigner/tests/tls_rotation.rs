@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Zero-downtime cluster CA rotation over real mutual TLS (docs/ca-rotation.md).

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # End-to-end: the split ceremony (docs/split-ceremony.md) on a local 2-of-3 cosigner cluster with
 # mutual TLS and sealed shares — the deploy/frost/config-tls configs, run as native processes on

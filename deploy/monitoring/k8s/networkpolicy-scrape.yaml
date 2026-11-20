@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 #
 # The chart's NetworkPolicy admits the metrics port only from pods labelled rutli.io/scraper=true.

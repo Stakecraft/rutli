@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Cluster-hosted (non-FROST) key material: RSA-2048 encryption keypairs, EC P-256 (ECIES)

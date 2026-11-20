@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Deployment policy gate (audit C3): no principal and no pod spec may collapse the cosigners' trust
 # domains into one. Reads rendered Kubernetes manifests (multi-document YAML) and fails on:

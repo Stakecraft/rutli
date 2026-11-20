@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! PKCS#8 / SEC1 / SPKI handling and public-key derivation for the three key types Canton's JCE

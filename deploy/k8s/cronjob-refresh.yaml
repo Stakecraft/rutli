@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 #
 # Enable only on a cluster where EVERY cosigner runs 0.4.0-rc.3 or later (ceremony protocol 2: the

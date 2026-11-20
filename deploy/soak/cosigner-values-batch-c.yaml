@@ -1,4 +1,4 @@
-# Copyright 2026 StakeCraft
+# Copyright 2026 StakeCraft LLC
 # SPDX-License-Identifier: Apache-2.0
 # Batch C settings for the LIVE DevNet soak (release rutli, namespace rutli), added phase by phase
 # by docs/runbook-rc3-soak-rollout.md. Pass it LAST:

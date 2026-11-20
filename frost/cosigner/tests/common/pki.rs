@@ -1,4 +1,4 @@
-// Copyright 2026 StakeCraft
+// Copyright 2026 StakeCraft LLC
 // SPDX-License-Identifier: Apache-2.0
 
 //! Test PKI: a cluster CA and per-node mTLS certificates, as `scripts/gen-frost-certs.sh` issues
