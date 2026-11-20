@@ -201,6 +201,12 @@ final class RutliDriverFactory extends KmsDriverFactory {
         )
     }
 
+    // Opened before the backend: a new group-key pin is written to it.
+    val auditLog = config.auditLogPath.map { p =>
+      logger.info(s"Hash-chained audit log at $p")
+      com.stakecraft.rutli.audit.HashChainedAuditLog.open(p)
+    }
+
     val backend: KmsBackend = config.backend match {
       case "software" | "hsm" => buildBackend(config.backend)
       case "frost" =>
@@ -225,6 +231,20 @@ final class RutliDriverFactory extends KmsDriverFactory {
                 "endpoints = [{ url = \"…\", tls-name = \"cosigner<id>\" }, …]"
             )
           }
+        val pinStore = frost.pinDir.map { d =>
+          logger.info(s"FROST: group-key pins at $d")
+          new com.stakecraft.rutli.backend.GroupKeyPinStore(java.nio.file.Paths.get(d), logger)
+        }
+        // Key ids the audit log records as pinned (`group-key-pin keyId=<id> ...`) whose pin file is
+        // gone: a lost file must not turn into a silent first pin.
+        val lostPins: Set[String] = (for {
+          store <- pinStore
+          path <- config.auditLogPath
+        } yield com.stakecraft.rutli.audit.HashChainedAuditLog
+          .details(path, RutliDriverFactory.PinAuditOp)
+          .flatMap(_.split(" ").collectFirst { case t if t.startsWith("keyId=") => t.stripPrefix("keyId=") })
+          .toSet
+          .filterNot(store.all.contains)).getOrElse(Set.empty)
         new FrostBackend(
           eps.map(_.url),
           buildBackend(frost.delegate),
@@ -235,16 +255,22 @@ final class RutliDriverFactory extends KmsDriverFactory {
           endpointTlsNames = eps.flatMap(e => e.tlsName.map(e.url -> _)).toMap,
           clusterId = frost.clusterId,
           signIntents = frost.signIntentsEnabled,
+          pinStore = pinStore,
+          expectedGroupKeys = frost.expectedGroupKeys,
+          lostPins = lostPins,
+          onPin = (p: com.stakecraft.rutli.backend.GroupKeyPin) =>
+            auditLog.foreach(
+              _.append(
+                RutliDriverFactory.PinAuditOp,
+                s"keyId=${p.keyId} groupKey=${p.groupKeyHex} source=${p.source} agreedBy=${p.agreedBy.mkString(",")}" +
+                  (if (p.dissent.isEmpty) "" else s" dissent=${p.dissent.mkString(",")}")
+              )
+            ),
         )(blockingEc)
       case other =>
         throw new IllegalArgumentException(
           s"unsupported backend '$other'; supported: software, hsm, frost"
         )
-    }
-
-    val auditLog = config.auditLogPath.map { p =>
-      logger.info(s"Hash-chained audit log at $p")
-      com.stakecraft.rutli.audit.HashChainedAuditLog.open(p)
     }
 
     val approvalGate: com.stakecraft.rutli.policy.ApprovalGate = config.approval match {
@@ -286,6 +312,9 @@ object RutliDriverFactory {
 
   /** The driver name referenced by the Canton node config: `crypto.kms.name = "rutli"`. */
   val driverName: String = "rutli"
+
+  /** The audit-log operation of a new group-key pin. */
+  val PinAuditOp: String = "group-key-pin"
 
   /** An `approval.rules` entry the driver refuses (see [[com.stakecraft.rutli.policy.ApprovalPolicy.ruleProblems]]). */
   final case class InvalidApprovalRule(override val description: String) extends pureconfig.error.FailureReason

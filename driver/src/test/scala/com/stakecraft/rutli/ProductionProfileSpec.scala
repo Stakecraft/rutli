@@ -37,6 +37,8 @@ class ProductionProfileSpec extends AnyWordSpec with Matchers {
         delegate = "hsm",
         tls = Some(FrostTlsConfig("/certs/ca.crt", "/certs/driver.crt", "/certs/driver.key")),
         clusterId = Some("0123456789abcdef"),
+        pinDir = Some("/var/rutli/pins"),
+        expectedGroupKeys = Map("frost-namespace" -> ("ab" * 32)),
       )
     ),
     approval = Some(
@@ -73,6 +75,8 @@ class ProductionProfileSpec extends AnyWordSpec with Matchers {
         ("frost.endpoints", Required, frost(enforced)(_.copy(endpoints = endpoints.updated(1, FrostEndpoint("rutli-node-2:9101", Some("cosigner1")))))),
         ("frost.sign-intents", Required, frost(enforced)(_.copy(signIntents = "off"))),
         ("frost.cluster-id", Required, frost(enforced)(_.copy(clusterId = None))),
+        ("frost.pin-dir", Required, frost(enforced)(_.copy(pinDir = None))),
+        ("frost.expected-group-keys", Advisory, frost(enforced)(_.copy(expectedGroupKeys = Map.empty))),
         ("audit-log-path", Required, enforced.copy(auditLogPath = None)),
         ("signing-journal", Required, enforced.copy(signingJournal = None)),
         ("hsm.pin", Required, enforced.copy(hsm = enforced.hsm.map(_.copy(pin = Some("1234"), pinEnv = None)))),
@@ -97,7 +101,7 @@ class ProductionProfileSpec extends AnyWordSpec with Matchers {
     }
 
     "follow the key prefix for the namespace-key approval rule" in {
-      val prefixed = frost(enforced)(_.copy(keyPrefix = "p1-"))
+      val prefixed = frost(enforced)(f => f.copy(keyPrefix = "p1-", expectedGroupKeys = Map("p1-frost-namespace" -> ("ab" * 32))))
       findings(prefixed).map(_.setting) shouldBe List("approval")
       val covered = prefixed.copy(approval = prefixed.approval.map(_.copy(rules = List(ApprovalRule("p1-frost-", "quorum", 1)))))
       findings(covered) shouldBe Nil
@@ -142,6 +146,8 @@ class ProductionProfileSpec extends AnyWordSpec with Matchers {
         |  ]
         |  tls = { ca-cert = "/certs/ca.crt", cert = "/certs/driver.crt", key = "/certs/driver.key" }
         |  cluster-id = "0123456789abcdef"
+        |  pin-dir = "/var/rutli/pins"
+        |  expected-group-keys { frost-namespace = "abababababababababababababababababababababababababababababababab" }
         |}
         |""".stripMargin
 

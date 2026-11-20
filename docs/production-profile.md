@@ -96,6 +96,8 @@ Its exit codes are those of `check-config` above.
 | `frost.endpoints` | a bare url is allowed | at least 2, each with its own, distinct `tls-name` | A group key is believed on two agreeing answers. Without a per-endpoint name, one cosigner certificate can answer for every address. |
 | `frost.sign-intents` | `on` | `on` | `off` is an emergency switch. |
 | `frost.cluster-id` | learned from the cluster | set | A learned value follows a majority of the cosigners; a set one cannot be steered. |
+| `frost.pin-dir` | unset | set, on the participant's durable volume | Group-key pins that survive a restart. Without them, one cosigner answering another key blocks the first pin after every restart ([disaster-recovery.md](disaster-recovery.md#3i-the-drivers-group-key-pins-frostpin-dir)). |
+| `frost.expected-group-keys` | empty | **advisory**: the namespace key's group key, from the key ceremony record | The operator's anchor: a first pin must equal it. |
 | `audit-log-path` | unset | set | The hash-chained audit log `audit-cross-check` compares with the journals. |
 | `signing-journal` | unset | set | The driver's own record of every signature. |
 | `hsm.pin` (with an HSM) | — | not inline; use `hsm.pin-env` | The PIN stays out of the config file. |

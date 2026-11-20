@@ -57,15 +57,41 @@ class FrostGroupKeyPinningSpec extends AnyWordSpec with Matchers {
     }
   }
 
-  private def withCluster[A](fakes: Seq[Fake])(body: FrostBackend => A): A = {
+  private def withCluster[A](
+      fakes: Seq[Fake],
+      pinDir: Option[java.nio.file.Path] = None,
+      named: Boolean = false,
+      expected: Map[String, String] = Map.empty,
+      lostPins: Set[String] = Set.empty,
+      pinned: GroupKeyPin => Unit = _ => (),
+  )(body: FrostBackend => A): A = {
     val servers = fakes.map(f => InProcessServerBuilder.forName(f.name).directExecutor().addService(f).build().start())
-    val backend = new FrostBackend(fakes.map(_.name), new NoDelegateBackend, logger, None, 10.seconds) {
-      override protected def buildChannel(endpoint: String): io.grpc.ManagedChannel =
-        InProcessChannelBuilder.forName(endpoint).directExecutor().build()
-    }
+    val names: Map[String, String] = if (named) fakes.zipWithIndex.map { case (f, i) => f.name -> s"cosigner${i + 1}" }.toMap else Map.empty
+    val store = pinDir.map(d => new GroupKeyPinStore(d, logger))
+    val backend =
+      try
+        new FrostBackend(
+          fakes.map(_.name),
+          new NoDelegateBackend,
+          logger,
+          None,
+          10.seconds,
+          endpointTlsNames = names,
+          pinStore = store,
+          expectedGroupKeys = expected,
+          lostPins = lostPins,
+          onPin = pinned,
+        ) {
+          override protected def buildChannel(endpoint: String): io.grpc.ManagedChannel =
+            InProcessChannelBuilder.forName(endpoint).directExecutor().build()
+        }
+      catch { case e: Throwable => servers.foreach(_.shutdownNow()); throw e }
     try body(backend)
     finally { backend.close(); servers.foreach(_.shutdownNow()) }
   }
+
+  private def tempDir(): java.nio.file.Path = java.nio.file.Files.createTempDirectory("rutli-pins")
+  private def hex(b: Array[Byte]): String = b.map("%02x".format(_)).mkString
 
   private def honestCluster(n: Int, kp: KeyPair = keyPair()): Seq[Fake] = Seq.fill(n)(new Fake(raw(kp), kp))
 
@@ -119,17 +145,19 @@ class FrostGroupKeyPinningSpec extends AnyWordSpec with Matchers {
       withCluster(honestCluster(1))(b => await(b.getPublicKey("frost-ns")).spec shouldBe SigningKeySpec.EcCurve25519)
     }
 
-    "pin the key, and fail if a cosigner later answers differently" in {
+    "pin the key, serve the pin past one cosigner that later answers differently, and fail when all do" in {
       val fakes = honestCluster(3)
       withCluster(fakes) { b =>
         val first = await(b.getPublicKey("frost-ns"))
-        fakes(1).groupKey = raw(keyPair()) // swapped after the pin
+        fakes(1).groupKey = raw(keyPair()) // swapped after the pin: reported and routed around
+        await(b.getPublicKey("frost-ns")).key shouldBe first.key
+        val other = raw(keyPair())
+        fakes.foreach(_.groupKey = other) // every answer differs from the pin: never re-pinned
         val ex = the[KmsDriverException] thrownBy await(b.getPublicKey("frost-ns"))
         ex.retryable shouldBe false
-        chain(ex) should include(fakes(1).name)
         chain(ex) should include("pinned")
         // ...and a restored cluster is served from the pin again.
-        fakes(1).groupKey = fakes.head.groupKey
+        fakes.foreach(_.groupKey = first.key.takeRight(32))
         await(b.getPublicKey("frost-ns")).key shouldBe first.key
       }
     }
@@ -237,6 +265,116 @@ class FrostGroupKeyPinningSpec extends AnyWordSpec with Matchers {
       fakes(2).groupKey = raw(keyPair())
       withCluster(fakes) { b =>
         the[KmsDriverException] thrownBy await(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")))
+      }
+    }
+  }
+
+  "a durable pin (frost.pin-dir)" should {
+
+    "survive a restart: one cosigner answering another key cannot block the pin or signing" in {
+      val kp = keyPair()
+      val fakes = honestCluster(3, kp)
+      val dir = tempDir()
+      withCluster(fakes, pinDir = Some(dir))(b => await(b.getPublicKey("frost-ns")))
+      java.nio.file.Files.exists(dir.resolve("frost-ns.pin")) shouldBe true
+      fakes.head.groupKey = raw(keyPair()) // a compromised cosigner, after the restart
+      withCluster(fakes, pinDir = Some(dir)) { b =>
+        await(b.getPublicKey("frost-ns")).key.takeRight(32) shouldBe raw(kp)
+        await(b.sign(Msg, "frost-ns", SigningAlgoSpec.Ed25519)) shouldBe signWith(kp, Msg)
+      }
+    }
+
+    "adopt an existing key by a roster majority when every endpoint has its own TLS name, recording the dissenter" in {
+      val kp = keyPair()
+      val fakes = honestCluster(3, kp)
+      fakes(2).groupKey = raw(keyPair())
+      val dir = tempDir()
+      var audited = List.empty[GroupKeyPin]
+      withCluster(fakes, pinDir = Some(dir), named = true, pinned = p => audited ::= p) { b =>
+        await(b.getPublicKey("frost-ns")).key.takeRight(32) shouldBe raw(kp)
+      }
+      val pin = new GroupKeyPinStore(dir, logger).get("frost-ns").get
+      pin.groupKeyHex shouldBe hex(raw(kp))
+      pin.source shouldBe "adopted"
+      pin.dissent.map(_.takeWhile(_ != '=')) shouldBe List(fakes(2).name)
+      audited.map(_.keyId) shouldBe List("frost-ns")
+    }
+
+    "stay strict for a DKG: a dissenter fails it and nothing is written" in {
+      val fakes = honestCluster(3)
+      fakes(2).groupKey = raw(keyPair())
+      val dir = tempDir()
+      withCluster(fakes, pinDir = Some(dir), named = true) { b =>
+        the[KmsDriverException] thrownBy await(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")))
+      }
+      java.nio.file.Files.exists(dir.resolve("frost-ns.pin")) shouldBe false
+    }
+
+    "refuse a first pin that is not the operator's expected key, and record operator-anchored pins as such" in {
+      val kp = keyPair()
+      withCluster(honestCluster(3, kp), pinDir = Some(tempDir()), expected = Map("frost-ns" -> hex(raw(keyPair())))) { b =>
+        val ex = the[KmsDriverException] thrownBy await(b.getPublicKey("frost-ns"))
+        ex.retryable shouldBe false
+        chain(ex) should include("expected-group-keys")
+      }
+      val dir = tempDir()
+      withCluster(honestCluster(3, kp), pinDir = Some(dir), expected = Map("frost-ns" -> hex(raw(kp)))) { b =>
+        await(b.getPublicKey("frost-ns"))
+      }
+      new GroupKeyPinStore(dir, logger).get("frost-ns").map(_.source) shouldBe Some("operator")
+    }
+
+    "refuse to start when the expected key contradicts the pin on disk" in {
+      val kp = keyPair()
+      val dir = tempDir()
+      withCluster(honestCluster(3, kp), pinDir = Some(dir))(b => await(b.getPublicKey("frost-ns")))
+      an[IllegalArgumentException] should be thrownBy
+        withCluster(honestCluster(3, kp), pinDir = Some(dir), expected = Map("frost-ns" -> hex(raw(keyPair())))) { _ => () }
+    }
+
+    "refuse a key whose pin file was lost, until the operator anchors it" in {
+      val kp = keyPair()
+      withCluster(honestCluster(3, kp), pinDir = Some(tempDir()), lostPins = Set("frost-ns")) { b =>
+        val ex = the[KmsDriverException] thrownBy await(b.getPublicKey("frost-ns"))
+        ex.retryable shouldBe false
+        chain(ex) should include("pin file is missing")
+      }
+      withCluster(honestCluster(3, kp), pinDir = Some(tempDir()), lostPins = Set("frost-ns"), expected = Map("frost-ns" -> hex(raw(kp)))) { b =>
+        await(b.getPublicKey("frost-ns")).key.takeRight(32) shouldBe raw(kp)
+      }
+    }
+
+    "fail retryably, pinning nothing, when the pin cannot be written" in {
+      val dir = tempDir()
+      val kp = keyPair()
+      withCluster(honestCluster(3, kp), pinDir = Some(dir)) { b =>
+        dir.toFile.setWritable(false)
+        // A runner with root ignores directory permissions: nothing to show there.
+        assume(!java.nio.file.Files.isWritable(dir), "directory permissions are not enforced for this user")
+        try {
+          val ex = the[KmsDriverException] thrownBy await(b.getPublicKey("frost-ns"))
+          ex.retryable shouldBe true
+        } finally { dir.toFile.setWritable(true); () }
+        // Nothing was pinned in memory: the next call pins (and writes) normally.
+        await(b.getPublicKey("frost-ns")).key.takeRight(32) shouldBe raw(kp)
+      }
+      java.nio.file.Files.exists(dir.resolve("frost-ns.pin")) shouldBe true
+    }
+  }
+
+  "FrostBackend.keyExistsAndIsActive with a pin" should {
+
+    "route around a cosigner that answers another key or NOT_FOUND, and fail when none answers the pin" in {
+      val kp = keyPair()
+      val fakes = honestCluster(3, kp)
+      withCluster(fakes) { b =>
+        await(b.getPublicKey("frost-ns"))
+        fakes.head.groupKey = raw(keyPair())
+        noException should be thrownBy await(b.keyExistsAndIsActive("frost-ns"))
+        val other = raw(keyPair())
+        fakes.foreach(_.groupKey = other)
+        val ex = the[KmsDriverException] thrownBy await(b.keyExistsAndIsActive("frost-ns"))
+        ex.retryable shouldBe false
       }
     }
   }

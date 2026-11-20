@@ -73,6 +73,8 @@ object ProductionProfile {
           req("frost.endpoints", s"a tls-name used twice (${names.diff(names.distinct).distinct.mkString(", ")})", "a distinct tls-name per cosigner")
         if (!f.signIntentsEnabled) req("frost.sign-intents", "off", "on")
         if (f.clusterId.forall(_.trim.isEmpty)) req("frost.cluster-id", "learned from the cluster", "set (the cosigners' cluster_id)")
+        if (f.pinDir.forall(_.trim.isEmpty))
+          req("frost.pin-dir", "missing (group-key pins in memory only)", "a directory on the participant's durable volume")
     }
     if (cfg.auditLogPath.forall(_.trim.isEmpty)) req("audit-log-path", "missing", "a path on the participant's durable volume")
     if (cfg.signingJournal.isEmpty) req("signing-journal", "missing", "signing-journal { dir = ... }")
@@ -92,6 +94,14 @@ object ProductionProfile {
         "approval",
         s"no quorum rule for $namespaceKey",
         "a quorum approval rule for the namespace key (docs/approval-quorum.md)",
+      )
+    // Advisory: an operator anchor for the namespace key's first pin.
+    if (cfg.backend == "frost" && cfg.frost.exists(f => !f.expectedGroupKeys.contains(namespaceKey)))
+      out += Finding(
+        Advisory,
+        "frost.expected-group-keys",
+        s"no entry for $namespaceKey",
+        s"its group key from the key ceremony record, so a first pin is checked against it",
       )
     out.result()
   }

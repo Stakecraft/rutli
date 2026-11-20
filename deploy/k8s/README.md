@@ -98,6 +98,7 @@ canton.participants.participant1.crypto {
         delegate = "hsm"            # non-namespace keys; "software" only for testing
         tls = { ca-cert = "/certs/ca.crt", cert = "/certs/driver.crt", key = "/certs/driver.key" }
         cluster-id = "<the cosigners' cluster_id>"
+        pin-dir = "/var/rutli/pins"   # durable group-key pins (docs/disaster-recovery.md §3i)
       }
       audit-log-path = "/var/rutli/audit.jsonl"
       signing-journal = { dir = "/var/rutli/journal" }

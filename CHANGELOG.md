@@ -126,6 +126,26 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Fixed
 
+- **The driver keeps its group-key pins across restarts (`frost.pin-dir`).** Until now a FROST
+  group key was pinned in memory only. After every driver restart it had to be agreed again, and
+  one cosigner answering a different key blocked the pin and with it signing. Now:
+  - a pin is written once, durably, before the key is used, and never replaced; every new pin is
+    also an audit-log entry (`group-key-pin`);
+  - once pinned, a cosigner that answers another key is logged at ERROR and routed around, for
+    `getPublicKey`, sign leader choice and `keyExistsAndIsActive`, which now checks the answer
+    against the pin;
+  - a first pin needs a roster majority of identical answers. A DKG's new key also needs no
+    disagreeing answer. For an existing key one dissenter is tolerated (reported and demoted) when
+    every endpoint has its own `tls-name`;
+  - `frost.expected-group-keys` lets the operator anchor a first pin to the ceremony record;
+  - a damaged pin file stops the start, naming the file; a pin file that is lost while the audit
+    log records it refuses that key. Recovery is in `docs/disaster-recovery.md` §3i;
+  - `StateCheck --pin-dir` checks a copy read-only, and the production profile requires `pin-dir`.
+
+  Without `pin-dir` the driver warns and behaves as before. **Upgrade:** add `pin-dir` on the
+  participant's state volume, ideally with `expected-group-keys` for the namespace key. The next
+  use pins.
+
 - **A cosigner that answers a sign wrongly no longer stays the driver's leader.** Up to 0.4.0 the
   driver made any node that answered its preferred leader before it checked the signature. One
   compromised cosigner that returned a signature that does not verify, or `NOT_FOUND`,
