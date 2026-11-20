@@ -15,8 +15,10 @@
 //!   a Kubernetes deployment must not use it (audit C3). `seal split-legacy` turns a master into
 //!   per-node bundles with the *same* derivations, so existing sealed files open unchanged.
 //!
-//! Threat model: this closes the *at-rest* exposure — a copied disk, snapshot, or stray backup of
-//! `data_dir` no longer yields a usable key share. It does not protect share memory during signing;
+//! Threat model: this closes the *at-rest* exposure only while the node's seal key (or, with the legacy
+//! shared master, the master) is not also obtained: a copied disk, snapshot or backup of `data_dir`
+//! yields a usable key share to anyone who also holds the DEK that sealed that copy, however old
+//! the copy is. It does not protect share memory during signing;
 //! that requires enclave/HSM sealing ("MPC-of-HSM"), for which this module is the software seam:
 //! swap the [`Sealer`] implementation, keep the file format.
 //!

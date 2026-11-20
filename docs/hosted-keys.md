@@ -418,9 +418,11 @@ deletes disabled refuses peers' tombstones too.
 **Do not claim secure erasure.** The tombstone keeps the material for the grace period by design;
 after it, on copy-on-write filesystems, wear-levelled SSDs and snapshotted volumes, the bytes may
 survive, and any backup taken while the key existed still contains it. The honest statement is:
-delete stops the key being served, cluster-wide and durably. Backups stop opening once the node's DEK
-that sealed them is dropped (`seal rotate-dek`, then `seal drop-previous` — `disaster-recovery.md`
-§3h).
+delete stops the key being served, cluster-wide and durably. Backups stop opening only once the DEK that
+sealed them is destroyed, not merely dropped from the bundle: `seal rotate-dek`, `seal drop-previous`,
+and destroy every other copy of the old DEK (`disaster-recovery.md` §3h,
+[key-material-handling.md](key-material-handling.md)). A hosted key is one whole key in one file:
+a copy of the file from any node and that node's DEK are the key, so it has no threshold at rest.
 
 ## 4. Operations
 
@@ -653,7 +655,8 @@ A node moving into the cluster ([roadmap-migration.md](roadmap-migration.md)) ca
 encryption key instead of rotating it — discouraged, see [migration.md](migration.md), "Carrying
 the signing and encryption keys". Export it on the old node (`keys.secret.download`, preview
 commands enabled, and on Canton 3.7 `canton.parameters.enable-key-download = yes`; preferably with a password), then on every cosigner (on two, the third pulls it). A daemon may be running
-(`kubectl exec` into the pod, the export copied onto a tmpfs and deleted afterwards) or stopped:
+(`kubectl exec -i` into the pod, the export passed in through stdin with `--in /dev/stdin`: the
+chart's `/tmp` is a disk-backed `emptyDir`, so a copy there stays on the Kubernetes node's disk) or stopped:
 
 ```sh
 read -rs CANTON_EXPORT_PASSWORD && export CANTON_EXPORT_PASSWORD
@@ -766,7 +769,7 @@ What hosted keys are, stated without varnish:
   real reduction in exposure. It is not "MPC for all key types", and Rütli should never claim it is.
 - **A single compromised cosigner yields the hosted keys.** All n nodes hold the same material; the
   attacker needs one, plus the seal secret that node's process has. The same attacker does **not**
-  get the namespace key: that still requires breaching `t` cosigners within one refresh epoch.
+  get the namespace key: that still requires `t` shares of one epoch (old copies and their DEKs count, whenever they were taken).
 - **The cost that must not be buried: retrospective decryption.** Canton's encryption keys protect
   per-view session keys. An attacker who extracts one gains *retrospective* read access to any
   recorded traffic encrypted to it. Rotation fixes the future, not the past — there is no forward

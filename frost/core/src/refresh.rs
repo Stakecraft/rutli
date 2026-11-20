@@ -4,8 +4,10 @@
 //! Proactive share refresh (dealer-free).
 //!
 //! Re-randomizes every cosigner's key share while keeping the **same group public key**, so an
-//! attacker must compromise ≥ `t` shares *within a single refresh epoch* — shares stolen before the
-//! refresh become useless. Canton sees no change (the namespace key's public key and the node's
+//! attacker needs `t` shares *of one epoch*: shares of different epochs do not combine. A refresh
+//! erases nothing, though: copies of the old shares (backups, snapshots, freed blocks) and the
+//! sealing keys that open them are untouched, and `t` old shares of one epoch still combine with
+//! each other. Canton sees no change (the namespace key's public key and the node's
 //! identity are unchanged); only the secret sharing is rotated underneath.
 //!
 //! Uses `frost-ed25519`'s DKG-based refresh (`refresh_dkg_part1/part2/refresh_dkg_shares`): a fresh

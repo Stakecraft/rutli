@@ -25,7 +25,7 @@ key, Canton can rotate them.
 | A cosigner's disk lost, its backup of the **current epoch** exists | Yes | **Restore from backup** (§1). A backup taken before the last refresh does not restore the node ("Backups and refreshes", below). |
 | A cosigner's disk lost, no backup of the current epoch | Not in place, today | The other `t` nodes keep signing. Networked repair (§2) is not shipped. The way back to `n` nodes is a cluster rebuild from `t` nodes' backups of one older epoch (§3), which rolls the key back to that epoch; then refresh. |
 | More than `n − t` cosigners lost simultaneously | Only from backups | **Restore `t` nodes from backups of one common epoch** (§3). Without such backups this is unrecoverable — which is why §4 is mandatory. |
-| Suspected key compromise (shares may be exposed) | Mitigate, not undo | The key cannot be rotated. If fewer than `t` shares of one epoch may be exposed, **refresh now** (inside the refresh interval this needs the operator's waiver: [ceremonies.md](ceremonies.md#refresh-interval)): the exposed shares no longer combine with the live ones. Then back up every node, rotate each node's DEK and drop the backups taken before the refresh (§3h): a refresh does not change the seal key that opens a node's old backups, and old shares of `t` nodes from one epoch still combine with each other. If `t` shares of one epoch may be exposed, no refresh helps: treat the key as compromised and escalate to a governance decision on the node's future. See `docs/phase-2-frost.md`. |
+| Suspected key compromise (shares may be exposed) | Mitigate, not undo | The key cannot be rotated. If fewer than `t` shares of one epoch may be exposed, **refresh now** (inside the refresh interval this needs the operator's waiver: [ceremonies.md](ceremonies.md#refresh-interval)): the exposed shares no longer combine with the live ones. Then back up every node, rotate each node's DEK and destroy the old one, and delete the backups taken before the refresh (§3h): a refresh does not change the seal key that opens a node's old backups, and old shares of `t` nodes from one epoch still combine with each other. If `t` shares of one epoch may be exposed, no refresh helps: treat the key as compromised and escalate to a governance decision on the node's future. See `docs/phase-2-frost.md`. |
 | A cosigner rebuilt, its **cluster-hosted** keys gone with it | Yes, automatically | It pulls them back from its peers — read-repair on demand, anti-entropy within one sweep (§3c) — for every key **two** other cosigners hold. A key only one other cosigner holds: copy it by hand (§3c). No backup needed. |
 | Every copy of a **cluster-hosted** key lost (whole cluster, no backup) | Only from backups | Restore **two** nodes' own backups, each onto its own node (§3), or one, then copy the keys to a second node by hand (§3c); the third pulls from them. With no backup the key is gone — rotate in Canton and accept §3b's bounded data gap. |
 | Every **seal bundle** (or the legacy master secret) lost (backups intact but unopenable) | Only from an export | A sealed backup is useless without its node's seal bundle. An `export-key` artifact taken beforehand is the only recovery — see §3d. Without either, the key is gone: rotate in Canton and accept §3b's bounded gap. |
@@ -513,8 +513,12 @@ an older release reads tombstones as unreadable files.
    shows no file under a previous DEK, and `RutliKeyFilesUnopenable` is quiet.
 3. Take a backup. Backups taken **before** this point open only with the previous DEK.
 4. `seal drop-previous --in node-2-rotated.json --out node-2-final.json`, replace the Secret again,
-   restart. Old backups no longer open on this node — keep the previous bundle escrowed for as long
-   as you keep those backups, or accept that they are gone.
+   restart. Old backups no longer open on this node, **if** every other copy of the previous DEK is
+   destroyed: the earlier Secret values (etcd history and snapshots, GitOps or secret-manager
+   history), the escrowed previous bundle, the legacy master and its escrow, workstation files.
+   Dropping removes the DEK from the current bundle only. Keep the previous bundle escrowed for as
+   long as you keep those backups, and destroy it when they are gone
+   ([key-material-handling.md](key-material-handling.md)).
 
 **Retiring the legacy shared master** (clusters migrated with `seal split-legacy`): the master
 derives every node's original DEK, so it opens every backup taken before the rotation. Escrow it
@@ -584,12 +588,14 @@ and routed around. A call fails only when every answering cosigner differs from 
 - The **cluster CA private key escrowed**: encrypted with a strong KDF (`openssl pkcs8 -topk8 -v2
   aes-256-cbc -iter 600000`, or `age`; not `openssl pkey -aes256`), in ≥ 2 independent locations,
   restore tested (`openssl pkey -pubout` of the restored key equals the CA certificate's public
-  key), and the plaintext shredded right after. It is the
+  key), and the plaintext removed right after (on the memory disk or image of [key-material-handling.md](key-material-handling.md)). It is the
   only way to issue operator, replacement, renewal or new-node certificates; losing it forces a CA
   rotation (§3f). Record the CA's sha256 and the leaves' expiry date, and keep the cluster id pinned
   (`cluster_id`) so the CA file can change without touching it.
-- A **proactive-refresh schedule** so a share exposed at any point has a bounded useful lifetime,
-  with a backup of every node right after each refresh.
+- A **proactive-refresh schedule**, with a backup of every node right after each refresh. A refresh
+  does not by itself bound the life of an exposed share: old-epoch copies that survive in backups or
+  snapshots combine with each other while their sealing keys exist. Bound the retention of old
+  epochs, and rotate each node's sealing key (§3h) once the older backups are not needed.
 - A decision, recorded, on whether to take an **`export-key` artifact** for each hosted key. It is
   the only recovery from lost seal bundles (or legacy master), and it cannot be produced retroactively — but it
   is also a portable copy of a private key, so storing one is a deliberate tradeoff, not a default.

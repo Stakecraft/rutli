@@ -113,8 +113,9 @@ not the past. Threshold RSA is permanently out of scope; the reasoning, and the 
   ([docs/production-profile.md](docs/production-profile.md)).
 - **Encryption at rest** — key shares and hosted keys sealed with AES-256-GCM (per-node keys from an
   operator secret); hosted keys are refused outright if sealing is not configured.
-- **Proactive refresh** — rotate all shares on a schedule; same key, so an attacker's stolen share
-  expires. From 0.5.0 a key is refreshed at most once per 72 hours by default, checked by every node.
+- **Proactive refresh** — rotate all shares on a schedule; same key. A share stolen before a refresh no
+  longer combines with the new ones, but a refresh erases no older copy and changes no sealing key:
+  see [docs/key-material-handling.md](docs/key-material-handling.md). From 0.5.0 a key is refreshed at most once per 72 hours by default, checked by every node.
 - **M-of-N human approval** — high-value signing held until a quorum of named approvers
   cryptographically sign off (separation of duties, not a checkbox).
 - **Tamper-evident audit log** — every operation in a hash-chained, offline-verifiable journal.
@@ -223,6 +224,7 @@ Before protecting a real key, run the witnessed **[key ceremony](docs/key-ceremo
 | [docs/splice-0.10.md](docs/splice-0.10.md) | Splice 0.10 / Canton 3.7: what changes for a Rütli validator and its migrations |
 | [docs/approval-quorum.md](docs/approval-quorum.md) | M-of-N signing approval, and switching enforcement on |
 | [docs/disaster-recovery.md](docs/disaster-recovery.md) | Backup, restore, recovery |
+| [docs/key-material-handling.md](docs/key-material-handling.md) | What delete does and does not do, where copies of key material can be, how to destroy them, rotating the sealing key |
 | [docs/audit-cross-check.md](docs/audit-cross-check.md) | Comparing the driver's audit log with the cosigners' journals |
 | [docs/observability.md](docs/observability.md) | Prometheus metrics, Grafana dashboard, alerts |
 | [docs/performance.md](docs/performance.md) | Sign/DKG latency evidence, micro-benchmarks, a three-location cluster run |
