@@ -194,6 +194,22 @@ groups:
           summary: "Rütli cosigner {{ $labels.instance }} holds a stale share of {{ $labels.key }}"
           description: "{{ $labels.instance }} marked its share of {{ $labels.key }} stale and refuses to sign or lead for the key, so signing continues on the other cosigners — at 2-of-3 with no margin left. First read the reason in the node's log (`this node's share is STALE`). If it says the claim is unconfirmed, one cosigner claims a newer epoch and none that holds this node's epoch answered: a wrong or compromised cosigner can cause that while the others restart or a refresh is still committing. Do not restore anything yet: compare `rutli-cosigner verify-key` across the nodes; the mark clears by itself on the next pass that reaches a cosigner on this node's epoch, at most 30 s later. Otherwise a newer committed sharing exists that this node never voted for, or its own ceremony record names a newer epoch than its share — typically a restore from an old backup or a volume snapshot rollback. Fix: restore a current backup of this node (daemon stopped) or re-enrol it; the mark clears by itself once the share is current (docs/ceremonies.md, Signing across epochs). Never copy another node's share file."
 
+      - alert: RutliBackupVolumeFilling
+        # The backup sidecar's PVC (<fullname>-backup-n<id>). Retention deletes nothing when it cannot
+        # read an epoch, when a node is behind, while an epoch is unproven, or when it fails, and the
+        # count cap only takes copies, so the directory can grow past `keep`. The sidecar logs
+        # BACKUP_RETENTION_FAILED / BACKUP_RETENTION_SKIPPED but exports no metric, so the volume's
+        # fill level (kubelet metrics, kube-prometheus-stack) is the signal Prometheus has.
+        expr: |
+          kubelet_volume_stats_used_bytes{persistentvolumeclaim=~".*-backup-n[0-9]+"}
+            / kubelet_volume_stats_capacity_bytes{persistentvolumeclaim=~".*-backup-n[0-9]+"} > 0.8
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli backup volume {{ $labels.persistentvolumeclaim }} is over 80% full"
+          description: "The backup volume {{ $labels.persistentvolumeclaim }} has been over 80% full for an hour. A full volume stops the node's backups, which matters most right after a refresh. Read the backup sidecar's log: `BACKUP_RETENTION_SKIPPED` or `BACKUP_RETENTION_FAILED` says why retention is not deleting (an archive whose epoch cannot be read, a node behind its newest archive, a key epoch that is unproven: RutliKeyEpochUnproven, a missing binary in the backup image), and the `BACKUP_RETENTION archive=… reason=…` lines say why each archive is kept. `rutli-cosigner backup-retain --dry-run` lists the verdicts. Raise backup.pvc.size only after that: more space hides the cause. docs/disaster-recovery.md, Backup retention."
+
       - alert: RutliKeyEpochUnproven
         # `keyfile prove` writes the marker after the operator ran verify-key --sign-test on the new
         # epoch (docs/ceremonies.md, "Proving an epoch").

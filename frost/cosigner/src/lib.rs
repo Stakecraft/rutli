@@ -16,6 +16,7 @@
 
 pub mod accept;
 pub mod audit_check;
+pub mod backup_retain;
 pub mod carry;
 pub mod ceremony;
 pub mod ceremony_record;

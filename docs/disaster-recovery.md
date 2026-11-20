@@ -23,7 +23,7 @@ key, Canton can rotate them.
 |---|---|---|
 | Up to `n − t` cosigners down | Yes, automatically | Signing continues; the driver fails over to live cosigners. Rebuild the lost nodes at leisure (below). |
 | A cosigner's disk lost, its backup of the **current epoch** exists | Yes | **Restore from backup** (§1). A backup taken before the last refresh does not restore the node ("Backups and refreshes", below). |
-| A cosigner's disk lost, no backup of the current epoch | Not in place, today | The other `t` nodes keep signing. Networked repair (§2) is not shipped. The way back to `n` nodes is a cluster rebuild from `t` nodes' backups of one older epoch (§3), which rolls the key back to that epoch; then refresh. |
+| A cosigner's disk lost, no backup of the current epoch | Not in place, today | The other `t` nodes keep signing. Networked repair (§2) is not shipped. The way back to `n` nodes is a cluster rebuild from `t` nodes' backups of one older epoch (§3), which rolls the key back to that epoch; then refresh. Those older archives exist only until the newer epoch is proven and aged ("Backup retention"). |
 | More than `n − t` cosigners lost simultaneously | Only from backups | **Restore `t` nodes from backups of one common epoch** (§3). Without such backups this is unrecoverable — which is why §4 is mandatory. |
 | Suspected key compromise (shares may be exposed) | Mitigate, not undo | The key cannot be rotated. If fewer than `t` shares of one epoch may be exposed, **refresh now** (inside the refresh interval this needs the operator's waiver: [ceremonies.md](ceremonies.md#refresh-interval)): the exposed shares no longer combine with the live ones. Then back up every node, rotate each node's DEK and destroy the old one, and delete the backups taken before the refresh (§3h): a refresh does not change the seal key that opens a node's old backups, and old shares of `t` nodes from one epoch still combine with each other. If `t` shares of one epoch may be exposed, no refresh helps: treat the key as compromised and escalate to a governance decision on the node's future. See `docs/phase-2-frost.md`. |
 | A cosigner rebuilt, its **cluster-hosted** keys gone with it | Yes, automatically | It pulls them back from its peers — read-repair on demand, anti-entropy within one sweep (§3c) — for every key **two** other cosigners hold. A key only one other cosigner holds: copy it by hand (§3c). No backup needed. |
@@ -86,6 +86,54 @@ way is then **behind its peers**: at its next start the node's stale-share check
 it refuses to sign with it until it is current (`RutliStaleShare`; re-enrol it, or refresh once
 every node is back on one epoch). It is a way to keep a copy, not a way to sign with an old sharing.
 
+### Backup retention
+
+On Kubernetes (perNode topology, `type: pvc`) the backup sidecar deletes the archives of older epochs
+by a rule (`backup.retention`, on by default; `rutli-cosigner backup-retain`):
+
+- **An archive of an older epoch is deleted only when the newer epoch is proven and the proof is old
+  enough** (default 7 days, `backup.retention.minProofAgeDays`). "Proven" is the operator's
+  `keyfile prove` marker, written after `verify-key --sign-test` passed for every quorum at that epoch
+  ([ceremonies.md](ceremonies.md#proving-an-epoch)). A well-formed backup of the new epoch is not
+  enough: if the refresh went wrong across the cluster (shares that seal and parse but do not combine),
+  the previous epoch is the only fallback, and it stays until the new epoch has shown that it signs. With
+  no proof, nothing is deleted by epoch.
+- **A complete verified archive of the proven epoch always remains**, and the newest archive is never
+  deleted. Every live FROST key must be proven for any archive to go by this rule (a key that was never
+  refreshed needs its own proof, after its DKG); hosted keys and tombstones have no epoch to prove and
+  only have to be as the proven archive has them. "Verified" means the tar reads to its end and every key file in it has a v2 header for this
+  cluster and node; it does not mean restorable (the sidecar has no sealing key). Run a restore drill
+  (`restore` on a scratch node) as before.
+- **Nothing is deleted** when an archive's epoch cannot be read (v1 key files: run `keyfile migrate`
+  first; a damaged tar), when this node's own live epoch is behind its newest archive's, when the
+  newest archive is not the live key set and epoch (a backup is pending), or on any error. The log says
+  why: `BACKUP_RETENTION archive=… verdict=keep reason=…`, `BACKUP_RETENTION_SKIPPED … reason=…`.
+  `keep` (default 14) still caps the number of archives, oldest first, but only takes an archive whose
+  every key state another kept archive also holds (a copy), never the newest or the proven one and
+  never one it cannot read: the directory can therefore exceed `keep` while older epochs are unproven.
+  If a retention run keeps failing (`BACKUP_RETENTION_FAILED`), nothing bounds the directory (except
+  when the image lacks the binary: then the plain count cap runs): watch the backup volume.
+- **Watching it.** The sidecar exports no metrics; its log is the record (`BACKUP_RETENTION_FAILED`,
+  `BACKUP_RETENTION_SKIPPED`, `BACKUP_RETENTION_DONE archives=N kept=K deleted=D`). Prometheus sees two
+  things: `RutliKeyEpochUnproven` (an epoch unproven for three days keeps the older archives) and
+  `RutliBackupVolumeFilling` (the backup PVC over 80% for an hour, from the kubelet's volume metrics,
+  which catches a retention that keeps failing or skipping). If you collect the sidecar's logs, alert on
+  any `BACKUP_RETENTION_FAILED` line, and on `BACKUP_RETENTION_DONE` with `archives` above
+  `backup.destination.keep` for more than three days (the same window as the proof alert): the
+  directory then holds more than the cap because older epochs are unproven or retention is skipping.
+- **A node that missed a refresh** (stale share, `RutliStaleShare`) holds the old epoch while its peers
+  are on the new one. No node can prove the new epoch while a node disagrees on it, so the old
+  archives stay everywhere, which is the cluster's way back. Recover that node first (§1: restore a
+  current backup with the daemon stopped, or re-enrol it), then prove the epoch.
+- **What this changes in §3:** a cluster rebuild from `t` nodes' backups of one **older** epoch is
+  possible only while those archives exist, that is until the newer epoch is proven and 7 days old
+  (or with `keepOlderEpochs: 1`, which keeps one more epoch and lengthens the window in which old shares
+  exist). After that, the newest proven epoch is the one to rebuild from.
+- Deleting a file frees its blocks; it does not erase them (volume snapshots and the storage layer may
+  keep them). `docs/threat-model.md` and the residue notes say what retention does and does not cover.
+- `type: script` destinations: Rütli cannot delete there. Apply the same rule as a lifecycle rule of the
+  destination; `backup-retain --dir <local mirror> --dry-run` shows what the rule would remove.
+
 ### Backups and refreshes
 
 A node's backup restores that node only if it holds the node's share of the **current epoch** of
@@ -98,7 +146,9 @@ each key: the sharing the other nodes hold. Every refresh moves every node to a 
   holds a newer epoch of the key and no peer holds this node's sharing. `t` nodes restored to one
   epoch together (§3) sign normally.
 - An old-epoch backup is still useful in one case: backups of `t` nodes **from the same epoch**
-  combine and can rebuild the cluster (§3). Old shares of different epochs never combine.
+  combine and can rebuild the cluster (§3). Old shares of different epochs never combine. An old
+  epoch's backups are also copies of old shares, so they do not stay for ever: see "Backup
+  retention" below.
 - So **a backup must follow every refresh, on every node.** On Kubernetes the backup sidecar does
   this by itself: besides its daily run it checks every `backup.checkEverySecs` (default 300 s)
   whether the node's committed key files changed, and backs up then (log line
@@ -569,9 +619,9 @@ and routed around. A call fails only when every answering cosigner differs from 
 ## §4 What you MUST have in place before go-live
 
 - **Every cosigner's share backup, taken after the latest refresh**, encrypted (sealed) and stored
-  in ≥ 2 separated locations, with older epochs kept too ("Backups and refreshes"). `t` nodes'
-  backups of one epoch are the difference between "recoverable" and "irrecoverable" for the
-  catastrophic case.
+  in ≥ 2 separated locations; older epochs are kept until the newer one is proven and aged ("Backup
+  retention"). `t` nodes' backups of one epoch are the difference between "recoverable" and
+  "irrecoverable" for the catastrophic case.
 - **Seal secrets** for those shares in a secret manager, in a different trust domain from the backups.
 - On Kubernetes, backups run as the per-pod **backup sidecar** (perNode topology): the data volume
   read-only, no seal bundle, no TLS key, one destination per node. **Never mount a cosigner volume

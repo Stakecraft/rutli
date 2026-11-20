@@ -53,6 +53,31 @@ enum Command {
         #[arg(long)]
         out: std::path::PathBuf,
     },
+    /// Delete the backup archives (`node-<N>-<stamp>.tar`) of older key epochs from a directory, by
+    /// the retention rule: an archive of an older epoch goes only once the newer epoch is PROVEN
+    /// (`keyfile prove`) and the proof is old enough, and a complete verified archive of the proven
+    /// epoch remains. Runs beside the daemon; reads the key files' clear headers only (no sealing
+    /// key). Nothing is deleted when it cannot read an epoch, when this node's live epoch is behind
+    /// an archive's, or on any error. `--dry-run` lists what it would do. The backup sidecar runs it
+    /// after each backup (docs/disaster-recovery.md, "Backup retention").
+    BackupRetain {
+        /// The directory of this node's archives (the backup PVC's mount).
+        #[arg(long)]
+        dir: std::path::PathBuf,
+        /// List the verdicts, delete nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// How old a `keyfile prove` marker must be before the epoch before it may go.
+        #[arg(long, default_value_t = 7)]
+        min_proof_age_days: u64,
+        /// Keep this many extra epochs below the proven one.
+        #[arg(long, default_value_t = 0)]
+        keep_older_epochs: usize,
+        /// Hard cap on the number of archives (0 = none): the oldest go first, never the newest and
+        /// never the proven one.
+        #[arg(long, default_value_t = 0)]
+        keep_count: usize,
+    },
     /// Export ONE cluster-hosted key as a portable artifact. Run with the node stopped.
     ///
     /// Unlike `backup` (sealed with this cluster's master secret, restorable only onto this node),
@@ -548,6 +573,9 @@ async fn main() -> Result<()> {
             return refresh_command(&cfg, &key_id, target, tls_server_name).await
         }
         Some(Command::Backup { out }) => return backup_command(&cfg, &out),
+        Some(Command::BackupRetain { dir, dry_run, min_proof_age_days, keep_older_epochs, keep_count }) => {
+            return backup_retain_command(&cfg, &dir, dry_run, min_proof_age_days, keep_older_epochs, keep_count)
+        }
         Some(Command::ExportKey { key_id, out, passphrase_env, unsafe_plaintext }) => {
             return export_key_command(&cfg, &key_id, &out, passphrase_env.as_deref(), unsafe_plaintext)
         }
@@ -1935,6 +1963,60 @@ fn append_sources(out: &mut String, mut source: Option<&(dyn std::error::Error +
         }
         source = e.source();
     }
+}
+
+/// `backup-retain`: see [`Command::BackupRetain`].
+fn backup_retain_command(
+    cfg: &Config,
+    dir: &std::path::Path,
+    dry_run: bool,
+    min_proof_age_days: u64,
+    keep_older_epochs: usize,
+    keep_count: usize,
+) -> Result<()> {
+    use rutli_cosigner::backup_retain::{self as r, Skip, Verdict};
+    let settings = r::Settings {
+        node: cfg.identifier,
+        cluster_uuid: cfg.keyfile.cluster_uuid.clone(),
+        min_proof_age_ms: min_proof_age_days.saturating_mul(86_400_000),
+        keep_older_epochs,
+        keep_count,
+    };
+    let node = cfg.identifier;
+    let plan = r::run(dir, &cfg.data_dir.join("keys"), &settings, rutli_cosigner::intent::now_ms(), dry_run)
+        .map_err(|e| DaemonError::Config(format!("backup-retain: {e}")))?;
+    let (mut deleted, mut kept) = (0, 0);
+    for (name, verdict) in &plan.verdicts {
+        match verdict {
+            Verdict::Keep(why) => {
+                kept += 1;
+                println!("BACKUP_RETENTION node={node} archive={name} verdict=keep reason={}", why.code());
+            }
+            Verdict::DeleteOlderEpoch { covered_by } => {
+                deleted += 1;
+                println!(
+                    "BACKUP_RETENTION node={node} archive={name} verdict={} reason=older-epoch covered-by={covered_by}",
+                    if dry_run { "would-delete" } else { "deleted" }
+                );
+            }
+            Verdict::DeleteCountCap => {
+                deleted += 1;
+                println!(
+                    "BACKUP_RETENTION node={node} archive={name} verdict={} reason=count-cap",
+                    if dry_run { "would-delete" } else { "deleted" }
+                );
+            }
+        }
+    }
+    match &plan.skip {
+        Some(Skip::Closed(why)) => println!("BACKUP_RETENTION_SKIPPED node={node} mode=nothing-deleted reason=\"{why}\""),
+        Some(Skip::CapOnly(why)) => {
+            println!("BACKUP_RETENTION_SKIPPED node={node} mode=count-cap-only reason=\"{why}\"")
+        }
+        None => {}
+    }
+    println!("BACKUP_RETENTION_DONE node={node} archives={} kept={kept} deleted={deleted} dry_run={dry_run}", plan.verdicts.len());
+    Ok(())
 }
 
 /// `residue-scan`: see [`Command::ResidueScan`] and [`rutli_cosigner::residue`]. Exits the process.
