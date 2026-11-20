@@ -103,7 +103,9 @@ class FrostBackend(
     delegate: KmsBackend,
     logger: Logger,
     tls: Option[FrostTlsConfig] = None,
-    requestTimeout: FiniteDuration = 60.seconds,
+    // The budget of one driver call across every cosigner it tries (`frost.request-timeout`). A
+    // DKG gets all of it in one attempt; every other call one attempt deadline per cosigner.
+    requestTimeout: FiniteDuration = 30.seconds,
     hostedKeys: Boolean = false,
     keyPrefix: String = "",
     // How long the first Capabilities probe keeps retrying endpoints that do not answer before it
@@ -125,6 +127,19 @@ class FrostBackend(
     // `frost.sign-intents`: false stops attaching signing intents to signs — an emergency switch
     // for a cluster-id or intent problem while the cosigners do not require intents (audit F5).
     signIntents: Boolean = true,
+    // The deadline of one attempt at one cosigner: signs (`frost.sign-attempt-timeout`), and every
+    // other call that fails over (`frost.attempt-timeout`). Shorter than `requestTimeout`, so a
+    // cosigner that stops answering costs one attempt deadline, not the whole budget.
+    attemptTimeout: FiniteDuration = 10.seconds,
+    signAttemptTimeout: FiniteDuration = 5.seconds,
+    // HTTP/2 keepalive on every channel (`frost.keepalive-time` / `-timeout`), also while idle: a
+    // connection to a cosigner that vanished (powered off, cut off) is torn down within about
+    // keepaliveTime + keepaliveTimeout, and the next call fails over at once.
+    keepaliveTime: FiniteDuration = 10.seconds,
+    keepaliveTimeout: FiniteDuration = 5.seconds,
+    // After this long, a configured-first cosigner that lost the lead gets it back (it is asked
+    // first again; if it still fails it loses the lead again at the cost of one attempt).
+    leaderRecovery: FiniteDuration = 60.seconds,
 )(implicit ec: ExecutionContext)
     extends KmsBackend {
 
@@ -290,7 +305,12 @@ class FrostBackend(
         .trustManager(anchors: _*)
         .keyManager(new File(t.cert), new File(t.key))
         .build()
-      val b = NettyChannelBuilder.forTarget(endpoint).sslContext(ssl)
+      val b = NettyChannelBuilder
+        .forTarget(endpoint)
+        .sslContext(ssl)
+        .keepAliveTime(keepaliveTime.toMillis, TimeUnit.MILLISECONDS)
+        .keepAliveTimeout(keepaliveTimeout.toMillis, TimeUnit.MILLISECONDS)
+        .keepAliveWithoutCalls(true)
       // Per endpoint (audit M3): with one shared name for every endpoint, a certificate issued to
       // any cosigner would verify at every address.
       val serverName = tlsServerName(endpoint)
@@ -299,11 +319,19 @@ class FrostBackend(
       b.build()
     case None =>
       logger.warn(s"FROST: plaintext channel to $endpoint (no TLS) — do not use in production")
-      ManagedChannelBuilder.forTarget(endpoint).usePlaintext().build()
+      ManagedChannelBuilder
+        .forTarget(endpoint)
+        .usePlaintext()
+        .keepAliveTime(keepaliveTime.toMillis, TimeUnit.MILLISECONDS)
+        .keepAliveTimeout(keepaliveTimeout.toMillis, TimeUnit.MILLISECONDS)
+        .keepAliveWithoutCalls(true)
+        .build()
   }
 
-  private def stubFor(ch: ManagedChannel): SignerGrpc.SignerBlockingStub =
-    SignerGrpc.newBlockingStub(ch).withDeadlineAfter(requestTimeout.toMillis, TimeUnit.MILLISECONDS)
+  /** A stub for one attempt at one cosigner, with its own deadline: [[attemptTimeout]] unless the
+    * caller says otherwise (a sign, a ceremony, the time left of a call's budget). */
+  private def stubFor(ch: ManagedChannel, deadline: FiniteDuration = attemptTimeout): SignerGrpc.SignerBlockingStub =
+    SignerGrpc.newBlockingStub(ch).withDeadlineAfter(math.max(deadline.toMillis, 1L), TimeUnit.MILLISECONDS)
 
   /** Index into `endpoints` of the preferred leader: the cosigner that last served a request. */
   private val preferred = new AtomicInteger(0)
@@ -312,8 +340,35 @@ class FrostBackend(
     * the next endpoint in ring order is, so the next call starts elsewhere. A compare-and-set, so it
     * never overrides a newer value another call wrote. */
   private def demote(i: Int): Unit = {
-    preferred.compareAndSet(i, (i + 1) % channels.size)
-    ()
+    // Recorded even when another call already moved the lead: it is still evidence that this node
+    // failed just now, and it only delays the first endpoint's recovery.
+    demotedAt.set(i, System.nanoTime())
+    val next = (i + 1) % channels.size
+    if (preferred.compareAndSet(i, next) && next != i)
+      logger.info(s"FROST: leader is now ${endpoints(next)} (was ${endpoints(i)}); leader order ${leaderOrder(next)}")
+  }
+
+  /** When each endpoint last lost the lead (System.nanoTime; 0 = never). */
+  private val demotedAt = new java.util.concurrent.atomic.AtomicLongArray(channels.size)
+
+  /** The order in which a call starting at `start` asks the endpoints, as logged on every change of
+    * leader (the driver has no metrics endpoint: this log line and the `failover=` notes in the
+    * audit log are where the leader order shows). */
+  private def leaderOrder(start: Int): String =
+    (0 until channels.size).map(k => endpoints((start + k) % channels.size)).mkString(" > ")
+
+  /** The endpoint a call starts at: the preferred leader, except that the configured-first endpoint
+    * gets the lead back once [[leaderRecovery]] has passed since it lost it (at once if it never
+    * failed: the lead then moved for another reason, such as another node answering first). A transient blip (one
+    * missed deadline, a restart) therefore does not keep the lead elsewhere for good. */
+  private def startIndex(): Int = {
+    val p = preferred.get
+    if (p != 0 && System.nanoTime() - demotedAt.get(0) > leaderRecovery.toNanos && preferred.compareAndSet(p, 0)) {
+      logger.info(
+        s"FROST: leader back to ${endpoints(0)} (lost the lead more than $leaderRecovery ago); leader order ${leaderOrder(0)}"
+      )
+      0
+    } else preferred.get
   }
 
   /** Run `op` against the cosigners in ring order, starting from the preferred leader, moving to
@@ -343,9 +398,11 @@ class FrostBackend(
       retryOn: Status => Boolean,
       demoteOn: Status => Boolean,
       notes: AuditNotes,
+      attempt: FiniteDuration = attemptTimeout,
   )(op: SignerGrpc.SignerBlockingStub => A): A = {
-    val start = preferred.get
-    withCheckedFailover[A](what, retryOn, demoteOn, notes, (_: String, _: A) => None, start, start, (_: Int) => ())(op)
+    val start = startIndex()
+    val budgetEnd = System.nanoTime() + requestTimeout.toNanos
+    withCheckedFailover[A](what, retryOn, demoteOn, notes, (_: String, _: A) => None, start, start, (_: Int) => (), attempt, budgetEnd)(op)
   }
 
   /** [[withFailover]] where the driver also checks each answer: `check(endpoint, answer)` returns
@@ -366,14 +423,30 @@ class FrostBackend(
       observed: Int,
       from: Int,
       tried: Int => Unit,
+      attemptDeadline: FiniteDuration,
+      // When the whole call's budget ends (System.nanoTime). A caller that runs this loop more
+      // than once for one call (a sign that learns the cluster id again) passes the same value.
+      budgetEnd: Long,
   )(op: SignerGrpc.SignerBlockingStub => A): A = {
     val n = channels.size
-    @tailrec def attempt(k: Int): A = {
+    // One attempt in flight at a time: the next cosigner is asked only once this attempt has failed
+    // or hit its deadline, which cancels it (the RPC is reset). Each attempt's deadline is capped
+    // by what is left of the budget, and no attempt starts once less than MinAttempt is left.
+    def left: Long = budgetEnd - System.nanoTime()
+    @tailrec def attempt(k: Int, lastReason: String): A = {
+      if (k > 0 && left < MinAttempt.toNanos) {
+        logger.warn(s"FROST: $what: request-timeout $requestTimeout spent after $k cosigner(s); last: $lastReason")
+        notes.add("request-timeout=spent")
+        throw Status.DEADLINE_EXCEEDED
+          .withDescription(s"$what: request-timeout $requestTimeout spent after $k cosigner(s); last: $lastReason")
+          .asRuntimeException()
+      }
       val i = (from + k) % n
       tried(i)
+      val deadline: FiniteDuration = FiniteDuration(math.min(attemptDeadline.toNanos, math.max(left, 0L)), NANOSECONDS)
       val outcome: Either[Either[StatusRuntimeException, Rejected], A] =
         try {
-          val answer = op(stubFor(channels(i)))
+          val answer = op(stubFor(channels(i), deadline))
           check(endpoints(i), answer) match {
             case Some(rejected) => Left(Right(rejected))
             case None           => Right(answer)
@@ -412,14 +485,14 @@ class FrostBackend(
             val next = endpoints((i + 1) % n)
             logger.warn(s"FROST: $what via ${endpoints(i)} failed ($reason); failing over to $next")
             notes.add(s"failover=${endpoints(i)}→$next reason=$code")
-            attempt(k + 1)
+            attempt(k + 1, reason)
           } else {
             logger.warn(s"FROST: $what via ${endpoints(i)} failed ($reason); no cosigner left to try")
             throw error
           }
       }
     }
-    attempt(0)
+    attempt(0, "")
   }
 
   /** Hosted-key specs learned in this process (`GenerateKey`, `PublicKey`, `KeyInfo` replies), so
@@ -454,7 +527,7 @@ class FrostBackend(
       staleAnswer: A => (String, String),
   )(op: SignerGrpc.SignerBlockingStub => A): A = {
     val n = channels.size
-    val start = preferred.get
+    val start = startIndex()
     @tailrec def attempt(k: Int, firstStale: Option[Either[StatusRuntimeException, A]]): A = {
       val i = (start + k) % n
       val outcome =
@@ -539,11 +612,16 @@ class FrostBackend(
     * silently vanish from the audit entry. So every cluster call goes through this helper from the
     * synchronous part of the public method, and reply post-processing (signature length, SPKI
     * wrapping, existence checks) is chained with `.map`. */
-  private def clusterCall[A](what: String, retryOn: Status => Boolean, demoteOn: Status => Boolean)(
+  private def clusterCall[A](
+      what: String,
+      retryOn: Status => Boolean,
+      demoteOn: Status => Boolean,
+      attempt: FiniteDuration = attemptTimeout,
+  )(
       op: SignerGrpc.SignerBlockingStub => A
   ): Future[A] = {
     val notes = currentNotes.get
-    Future(blocking(withFailover(what, retryOn, demoteOn, notes)(op)))
+    Future(blocking(withFailover(what, retryOn, demoteOn, notes, attempt)(op)))
   }
 
   /** Fail the returned Future — rather than throw — when a caller-side precondition does not hold,
@@ -738,7 +816,9 @@ class FrostBackend(
         }
         b.build()
       }
-      clusterCall("dkg", connectionRefused, connectionRefused)(_.dkg(dkgRequest()))
+      // A ceremony's attempt gets the whole budget (what is left of it) and is never re-run on a
+      // deadline; it fails over only on a refused connection, where no ceremony started.
+      clusterCall("dkg", connectionRefused, connectionRefused, attempt = requestTimeout)(_.dkg(dkgRequest()))
         .flatMap { reply =>
           // The leader's reply is one cosigner's word: the new key is believed only once every
           // endpoint that answers agrees on it, and it must be the key the leader reported.
@@ -830,6 +910,8 @@ class FrostBackend(
           // pending-session TTL), never reused — see isLeaderSick.
           Future(blocking {
             val lastTried = new AtomicInteger(-1)
+            // One budget for the whole driver call, the cluster-id relearn included.
+            val budgetEnd = System.nanoTime() + requestTimeout.toNanos
             def attempt(relearned: Boolean, from: Option[Int]): SignReply = {
               val req = SignRequest.newBuilder().setKeyId(keyId).setMessage(ByteString.copyFrom(data))
               val intent = signingIntent(keyId, data, requestId, approval, notes)
@@ -839,7 +921,7 @@ class FrostBackend(
               // leader-sick status: withheld, the node demoted, the next leader tried with the same
               // intent. Only a verified signature makes a node the preferred leader.
               val check = (endpoint: String, reply: SignReply) => unverified(keyId, data, groupKey, notes)(endpoint, reply)
-              val observed = preferred.get
+              val observed = startIndex()
               try
                 withCheckedFailover[SignReply](
                   "sign",
@@ -850,6 +932,8 @@ class FrostBackend(
                   observed,
                   from.getOrElse(observed),
                   (i: Int) => lastTried.set(i),
+                  signAttemptTimeout,
+                  budgetEnd,
                 )(_.sign(built))
               catch {
                 // A cosigner says the intent names another cluster: the learned id is wrong (one
@@ -1367,6 +1451,9 @@ object FrostBackend {
   /** A cosigner's refusal of an intent naming another cluster (`intent.rs` reason "cluster"). */
   private def isClusterRefusal(s: Status): Boolean =
     s.getCode == Status.Code.PERMISSION_DENIED && Option(s.getDescription).exists(_.contains("intent is for cluster"))
+
+  /** No attempt starts with less of the call's budget left than this: it could not succeed. */
+  private val MinAttempt: FiniteDuration = 50.millis
 
   /** The failover note's reason for a signature the pinned group key does not verify. */
   private val BadSignature = "BAD_SIGNATURE"
