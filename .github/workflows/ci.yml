@@ -19,29 +19,40 @@ env:
 permissions:
   contents: read
 
+# A new push to a pull request cancels that pull request's earlier, still queued or running CI: the
+# self-hosted runners are the bottleneck and a superseded run only delays the others. Never on a
+# push to main, a schedule or a manual run: those get their own group (the run id), so none is
+# cancelled or replaced by a later one.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 # Every job runs on `vars.CI_RUNNER` when that repository variable is set (e.g. `rutli-ci-kvm`, the
 # self-hosted runner in deploy/ci-runner), otherwise on GitHub's `ubuntu-latest`. Pull requests
 # from forks always go to `ubuntu-latest`: the self-hosted runner only takes this repository's own
-# branches. A fork PR can rewrite this expression, so the runner enforces the same rule itself
+# branches. So do Dependabot's pull requests (opened by `dependabot[bot]`, even after a maintainer
+# pushes to the branch or re-runs a job): they bring action versions nobody has reviewed yet. A fork PR can rewrite this expression, so the runner enforces the same rule itself
 # (deploy/ci-runner/job-started-guard.sh) and fork PR workflows need a maintainer's approval.
 jobs:
   test:
     name: Unit tests + assembly
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) && vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
         with:
           distribution: temurin
           java-version: "17"
           cache: sbt
 
-      - uses: sbt/setup-sbt@v1
+      - uses: sbt/setup-sbt@7e114eae4f32ec3f93c851c2793376a77f384409 # v1.5.15
 
       - name: Cache Canton API artifacts (ivy local)
         id: canton-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.ivy2/local/com.daml
           key: canton-api-${{ runner.os }}-${{ runner.arch }}-${{ env.CANTON_TAG }}-v1
@@ -59,7 +70,7 @@ jobs:
       - name: Third-party notices up to date (driver)
         run: scripts/third-party-licenses.sh --check jvm
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         # Convenience only — the tests above are the gate. An upload failure (e.g. the org's
         # artifact storage quota) must not turn a green test run red.
         continue-on-error: true
@@ -70,16 +81,32 @@ jobs:
 
   frost:
     name: FROST core (Rust)
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) && vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          # Explicit: GitHub's image happens to ship clippy, a self-hosted runner's rustup does not.
+          persist-credentials: false
+      # The version in frost/rust-toolchain.toml, which the release image (frost/Dockerfile) also
+      # builds with. clippy is explicit: GitHub's image happens to ship it, a self-hosted runner's
+      # rustup does not.
+      - name: Rust version (frost/rust-toolchain.toml)
+        id: rust
+        run: |
+          v="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/rust-toolchain.toml)"
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      # dtolnay/rust-toolchain has no releases: pinned to a commit of its master branch, with the
+      # version passed explicitly (it also installs rustup where a runner has none).
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: frost
+          # Only main saves: a pull request saves its own 440 MB copy per dependency change and
+          # fills the repository's 10 GB cache (docs/ci-cache.md). Pull requests still restore main's.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Test
         working-directory: frost
         run: cargo test --locked
@@ -89,12 +116,22 @@ jobs:
 
   licenses:
     name: Dependency licenses (cargo-deny, notices)
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) && vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Rust version (frost/rust-toolchain.toml)
+        id: rust
+        run: |
+          v="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/rust-toolchain.toml)"
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}
       # Pinned: frost/THIRD-PARTY-LICENSES.txt is compared byte for byte with cargo-about's output.
-      - uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
         with:
           tool: cargo-deny@0.20.2,cargo-about@0.9.3
       - name: cargo deny (advisories, licenses, bans, sources)
@@ -105,22 +142,46 @@ jobs:
 
   deploy-policy:
     name: Deploy manifests policy (Helm + kustomize)
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) && vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: azure/setup-helm@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          version: v3.16.4
+          persist-credentials: false
+      # Helm from get.helm.sh, checked against sha256 values pinned here (azure/setup-helm checks
+      # none). To bump: set HELM_VERSION and both sums from the release notes of that version.
+      - name: Install Helm
+        env:
+          HELM_VERSION: v3.16.4
+          HELM_SHA256_AMD64: fc307327959aa38ed8f9f7e66d45492bb022a66c3e5da6063958254b9767d179
+          HELM_SHA256_ARM64: d3f8f15b3d9ec8c8678fbf3280c3e5902efabe5912e2f9fcf29107efbc8ead69
+        run: |
+          set -euo pipefail
+          case "$(uname -m)" in
+            x86_64) arch=amd64; sum="$HELM_SHA256_AMD64" ;;
+            aarch64 | arm64) arch=arm64; sum="$HELM_SHA256_ARM64" ;;
+            *) echo "::error::no pinned Helm checksum for $(uname -m)"; exit 1 ;;
+          esac
+          tarball="helm-${HELM_VERSION}-linux-${arch}.tar.gz"
+          tmp="$(mktemp -d)"
+          curl -fsSL -o "${tmp}/${tarball}" "https://get.helm.sh/${tarball}"
+          echo "${sum}  ${tmp}/${tarball}" | sha256sum -c -
+          tar -xzf "${tmp}/${tarball}" -C "${tmp}" "linux-${arch}/helm"
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 "${tmp}/linux-${arch}/helm" "$HOME/.local/bin/helm"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/helm" version
       # kubectl, yq (v4) and jq ship with the ubuntu runner image.
       - name: Lint, render, check-deploy-policy (fails on pods/exec RBAC, seal env, shared secrets)
         run: scripts/ci-deploy-policy.sh
 
   prometheus-rules:
     name: Alert rules (promtool)
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) && vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
       - name: PyYAML (for render-prometheusrule.py)
@@ -133,31 +194,35 @@ jobs:
 
   frost-tls-smoke:
     name: FROST TLS cluster smoke
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) && vars.CI_RUNNER || 'ubuntu-latest' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: mTLS + sealed-share compose smoke (Health / DKG / Sign)
         run: scripts/ci-frost-tls-smoke.sh
 
   conformance:
     name: Canton conformance suite
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) && vars.CI_RUNNER || 'ubuntu-latest' }}
     # Heavy (publishes a large slice of Canton locally) — run on schedule/manual, not per-PR.
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
         with:
           distribution: temurin
           java-version: "17"
           cache: sbt
 
-      - uses: sbt/setup-sbt@v1
+      - uses: sbt/setup-sbt@7e114eae4f32ec3f93c851c2793376a77f384409 # v1.5.15
 
       - name: Cache Canton module closure (ivy local)
         id: canton-cache
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.ivy2/local/com.daml
           key: canton-full-${{ runner.os }}-${{ runner.arch }}-${{ env.CANTON_TAG }}-v1

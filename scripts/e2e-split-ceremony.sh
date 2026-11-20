@@ -16,11 +16,12 @@
 # intent with its client certificate — runs on every node under the intent's ceremony id (the
 # driver's refresh refused: signer_may_refresh off, audit C2); verify-key again
 # (new digest, refresh count 1); a re-import after refresh is refused; restart of every node then
-# verify-key; a Sign with one node down and no signing intent (accepted: require_intent off, the
-# rolling-upgrade mode, journaled as no-intent), verified independently by OpenSSL; then
-# require_intent on: the same intent-less Sign is refused, and verify-key --sign-test still passes.
+# verify-key; a Sign with one node down and no signing intent (accepted: the explicit opt-out
+# require_intent false, journaled as no-intent), verified independently by OpenSSL; then
+# require_intent at its default (on with TLS): the same intent-less Sign is refused, and verify-key
+# --sign-test still passes.
 #
-# Requires: cargo, openssl (3.x, for Ed25519 verify), jq, grpcurl.
+# Requires: cargo, openssl (3.x, for Ed25519 verify), jq, grpcurl, xxd.
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -57,27 +58,38 @@ cleanup() {
 trap cleanup EXIT
 
 step "Build rutli-cosigner and rutli-dealer from the working tree"
+# shellcheck disable=SC2086  # CARGO_FLAGS is a list of flags, split on purpose
 (cd "$REPO/frost" && cargo build ${CARGO_FLAGS:-} -p rutli-cosigner --bins)
 BIN="$REPO/frost/target/debug"
 COSIGNER="$BIN/rutli-cosigner"
 DEALER="$BIN/rutli-dealer"
 
 step "mTLS trust domain, seal secret, configs (deploy/frost/config-tls on 127.0.0.1:$((BASE_PORT + 1))..$((BASE_PORT + 3)))"
+# Every node pins the TLS key of every cosigner (peers[].tls_spki_sha256, required with TLS): the
+# configs take the pins of the certificates just made from certs/peer-pins.json.
 "$REPO/scripts/gen-frost-certs.sh" 3 "$WORK/certs" >/dev/null
 export RUTLI_SEAL_SECRET
 RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
 mkconfig() { # node-config-name  cert-name  out
-  jq --arg work "$WORK" --arg cert "$2" --argjson base "$BASE_PORT" '
+  jq --arg work "$WORK" --arg cert "$2" --argjson base "$BASE_PORT" \
+    --slurpfile peerpins "$WORK/certs/peer-pins.json" '
       .listen = "127.0.0.1:\($base + .identifier)"
     | .data_dir = "\($work)/node\(.identifier)"
-    | .peers |= map(.endpoint = "https://127.0.0.1:\($base + .identifier)")
+    | .peers |= map(.endpoint = "https://127.0.0.1:\($base + .identifier)"
+        | .tls_spki_sha256 = ($peerpins[0].peerPins[.identifier | tostring] // error("no TLS key pin for cosigner\(.identifier)")))
     | .tls.ca_cert = "\($work)/certs/ca.crt"
     | .tls.cert = "\($work)/certs/\($cert).crt"
     | .tls.key = "\($work)/certs/\($cert).key"
     | .refresh_allowlist = ["refresher"]
     | .signing_policy.signer_may_refresh = false
+    | .signing_policy.require_ceremony_intent = false
+    | .signing_policy.require_intent = false
     | del(.metrics_listen)' "$REPO/deploy/frost/config-tls/$1.json" >"$3"
 }
+# Both intent checks are on by default with TLS and start off here. require_ceremony_intent: the raw
+# intent-less Dkg probes must reach the reserved-id check (AlreadyExists); step 6 turns it on.
+# require_intent: step 9 signs with grpcurl, which cannot sign an intent (the opt-out is what it
+# tests); step 10 removes it again.
 for i in 1 2 3; do mkconfig "cosigner$i" "cosigner$i" "$WORK/c$i.json"; done
 # The operator role (operator_allowlist: KeyStatus + CeremonySignTest only) runs verify-key; the
 # refresher role (refresh_allowlist: Refresh + KeyStatus only), like the refresh CronJob, runs
@@ -91,8 +103,8 @@ start() {
   PIDS[$1]=$!
 }
 stop() { kill "${PIDS[$1]}" 2>/dev/null || true; wait "${PIDS[$1]}" 2>/dev/null || true; PIDS[$1]=0; }
-wait_healthy() {
-  for _ in $(seq 1 120); do
+wait_healthy() { # up to 60 s; a cold debug build on a busy runner can take a while
+  for _ in $(seq 1 240); do
     "$COSIGNER" --config "$WORK/c$1.json" health >/dev/null 2>&1 && return 0
     sleep 0.25
   done
@@ -274,7 +286,7 @@ for i in 1 2 3; do wait_healthy "$i"; done
 rep="$(cli --config "$WORK/operator.json" verify-key --key-id "$KEY_ID" --expect-fingerprint "$FP" --sign-test --json || true)"
 jq -e '.ok and .refresh_count == 1' <<<"$rep" >/dev/null || fail "verify-key after restart: $rep"
 
-step "9. Sign with node 3 down and no signing intent (require_intent off), verified by OpenSSL under the Canton public key"
+step "9. Sign with node 3 down and no signing intent (require_intent false), verified by OpenSSL under the Canton public key"
 stop 3
 MSG_HEX="1220$(printf 'rutli e2e split ceremony' | openssl dgst -sha256 -hex | awk '{print $NF}')"
 MSG_B64="$(printf '%s' "$MSG_HEX" | xxd -r -p | base64)"
@@ -293,15 +305,16 @@ grep -q '"purpose":"sign-test"' "$WORK"/node1/journal/"$KEY_ID"/*.jsonl \
   || fail "node 1 did not journal the ceremony sign tests"
 echo "journaled on node 1: the sign tests and the intent-less signature"
 
-step "10. require_intent on (every node): an intent-less Sign is refused, the ceremony sign test still passes"
+step "10. require_intent at its default, on with TLS (every node): an intent-less Sign is refused, the ceremony sign test still passes"
 for i in 1 2 3; do
-  jq '.signing_policy.require_intent = true' "$WORK/c$i.json" >"$WORK/c$i.json.new" && mv "$WORK/c$i.json.new" "$WORK/c$i.json"
+  jq 'del(.signing_policy.require_intent)' "$WORK/c$i.json" >"$WORK/c$i.json.new" && mv "$WORK/c$i.json.new" "$WORK/c$i.json"
 done
 for i in 1 2; do stop "$i"; done
 for i in 1 2 3; do start "$i"; done
 for i in 1 2 3; do wait_healthy "$i"; done
 if out="$(grpc -d "{\"key_id\":\"$KEY_ID\",\"message\":\"$MSG_B64\"}" "127.0.0.1:$((BASE_PORT + 1))" \
   rutli.cosigner.v1.Signer/Sign 2>&1)"; then fail "an intent-less Sign succeeded with require_intent on"; fi
+# shellcheck disable=SC2015  # fail is the intended else-branch
 grep -q "PermissionDenied" <<<"$out" && grep -q "no signing intent" <<<"$out" \
   || fail "intent-less Sign refused for the wrong reason: $out"
 echo "intent-less Sign -> PermissionDenied"

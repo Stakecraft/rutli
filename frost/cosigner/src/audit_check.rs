@@ -31,6 +31,12 @@
 //! Both chains are verified first; a broken one is an error of its own. Entries older than the
 //! other side's first record (journal retention, a driver audit log started later) are skipped and
 //! counted, not reported.
+//!
+//! An empty side proves nothing: an empty driver audit log, journals that are all empty, or two
+//! sides with no signature between them to compare give the verdict [`Verdict::NothingToCompare`],
+//! never "consistent". One empty journal among others is only a warning: with `t < n` a node the
+//! leaders never pick journals nothing, and `--min-journals` holds each audited sign to the
+//! threshold anyway. A driver audit log cut down to nothing is the extreme case of a truncated tail.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -205,11 +211,38 @@ impl Default for Options {
     }
 }
 
-/// The verdict: what was compared, and every discrepancy.
+/// What was compared, every discrepancy, and every reason the comparison proves nothing.
 #[derive(Debug, Default)]
 pub struct Report {
     pub lines: Vec<String>,
     pub discrepancies: usize,
+    /// Why there was nothing to compare (an empty driver audit log, only empty journals, no
+    /// signature on either side). Each is also a `NOTHING TO COMPARE:` line.
+    pub nothing_to_compare: Vec<String>,
+}
+
+/// The outcome of [`cross_check`]. Only [`Verdict::Consistent`] is a pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// Signatures were compared and every one matched.
+    Consistent,
+    /// At least one `DISCREPANCY:` line.
+    Discrepancies,
+    /// No discrepancy, but the driver audit log or every supplied journal was empty, or no
+    /// signature was compared at all: the check proves nothing.
+    NothingToCompare,
+}
+
+impl Verdict {
+    /// The process exit status: 0 consistent, 1 discrepancies, 3 nothing to compare (2 is an
+    /// unreadable file or a broken chain, before any verdict).
+    pub fn exit_code(self) -> i32 {
+        match self {
+            Verdict::Consistent => 0,
+            Verdict::Discrepancies => 1,
+            Verdict::NothingToCompare => 3,
+        }
+    }
 }
 
 impl Report {
@@ -219,6 +252,21 @@ impl Report {
     fn flag(&mut self, s: String) {
         self.discrepancies += 1;
         self.lines.push(format!("DISCREPANCY: {s}"));
+    }
+    fn empty(&mut self, s: String) {
+        self.lines.push(format!("NOTHING TO COMPARE: {s}"));
+        self.nothing_to_compare.push(s);
+    }
+    /// Discrepancies win over an empty side; only a comparison that found signatures and no
+    /// discrepancy is consistent.
+    pub fn verdict(&self) -> Verdict {
+        if self.discrepancies > 0 {
+            Verdict::Discrepancies
+        } else if !self.nothing_to_compare.is_empty() {
+            Verdict::NothingToCompare
+        } else {
+            Verdict::Consistent
+        }
     }
 }
 
@@ -263,7 +311,18 @@ pub fn cross_check(audit: &DriverAudit, journals: &[(String, Vec<JournalEntry>)]
     let mut first_ts: BTreeMap<String, u64> = BTreeMap::new();
     let mut no_intent: BTreeMap<(String, String), (usize, u64, u64)> = BTreeMap::new();
     let mut skipped_old = 0usize;
+    // Signatures actually put side by side: journaled signs inside the driver audit's window, and
+    // audited ok signs inside the journals' window.
+    let mut compared = 0usize;
     for (label, entries) in journals {
+        if entries.is_empty() {
+            // Not a failure on its own: with t < n a node the leaders never pick journals nothing.
+            // `--min-journals` still holds every audited sign to the threshold.
+            r.info(format!(
+                "WARNING: journal {label} is empty — that node took part in no signature, or the path is wrong \
+                 (a node's data_dir/journal, one subdirectory per key) or the copy failed"
+            ));
+        }
         r.info(format!(
             "journal {label}: {} entr{} over {} key(s)",
             entries.len(),
@@ -279,6 +338,7 @@ pub fn cross_check(audit: &DriverAudit, journals: &[(String, Vec<JournalEntry>)]
                         skipped_old += 1;
                         continue;
                     }
+                    compared += 1;
                     journaled
                         .entry((e.key_id.clone(), e.request_id.clone()))
                         .or_default()
@@ -367,6 +427,7 @@ pub fn cross_check(audit: &DriverAudit, journals: &[(String, Vec<JournalEntry>)]
                 skipped_retention += 1;
                 continue;
             }
+            compared += 1;
             let n = by_message.and_then(|m| m.get(msg)).map_or(0, |(_, l)| l.len());
             if n < opts.min_journals {
                 r.flag(format!(
@@ -385,6 +446,7 @@ pub fn cross_check(audit: &DriverAudit, journals: &[(String, Vec<JournalEntry>)]
                 continue;
             }
             legacy_compared += 1;
+            compared += 1;
             let n = by_message.and_then(|m| m.values().map(|(_, l)| l.len()).max()).unwrap_or(0);
             if n < opts.min_journals {
                 r.flag(format!(
@@ -425,10 +487,35 @@ pub fn cross_check(audit: &DriverAudit, journals: &[(String, Vec<JournalEntry>)]
     if legacy > 0 {
         r.info(format!("{legacy} driver sign(s) without an intent: not matchable"));
     }
-    r.info(if r.discrepancies == 0 {
-        "consistent: every journaled signature is in the driver audit log and every audited one is journaled".into()
-    } else {
-        format!("{} discrepanc(ies)", r.discrepancies)
+    if audit.entries == 0 {
+        r.empty(
+            "the driver audit log is empty — copy the driver's audit-log-path (after the journals); an \
+             empty log cannot show which signatures the driver made, and a log cut down to nothing is the \
+             extreme case of a truncated tail"
+                .into(),
+        );
+    } else if journals.iter().all(|(_, e)| e.is_empty()) {
+        r.empty(
+            "every supplied journal is empty — check the paths (each node's data_dir/journal) and copy them in \
+             full; empty journals cannot show which signatures the cluster made"
+                .into(),
+        );
+    } else if compared == 0 && r.nothing_to_compare.is_empty() {
+        r.empty(
+            "no signature on either side falls inside the other side's records — nothing was compared \
+             (no signs yet, or the journals and the driver audit log cover different periods)"
+                .into(),
+        );
+    }
+    r.info(match r.verdict() {
+        Verdict::Consistent => format!(
+            "consistent: {compared} signature record(s) compared; every journaled signature is in the driver \
+             audit log and every audited one is journaled"
+        ),
+        Verdict::Discrepancies => format!("{} discrepanc(ies)", r.discrepancies),
+        Verdict::NothingToCompare => {
+            "NOT consistent: nothing to compare, so this run proves nothing (exit 3)".into()
+        }
     });
     r
 }
@@ -591,6 +678,56 @@ mod tests {
         assert_eq!(r.discrepancies, 1, "{:#?}", r.lines);
         assert!(r.lines.iter().any(|l| l.contains("signed over 2 different messages")), "{:#?}", r.lines);
         assert!(r.lines.iter().any(|l| l.contains("without msg= (an older driver)")), "{:#?}", r.lines);
+    }
+
+    #[test]
+    fn an_empty_side_is_nothing_to_compare_never_consistent() {
+        let (rid, m1) = ("a".repeat(32), "11".repeat(34));
+        let audit =
+            DriverAudit { entries: 1, signs: vec![signed_msg(1, &rid, &m1)], first_ts_ms: Some(1_000), torn_tail: false };
+        let full = vec![("n1".to_string(), vec![journaled(1, &rid, &m1, 2_000)])];
+        assert_eq!(cross_check(&audit, &full, &Options::default()).verdict(), Verdict::Consistent);
+
+        // An empty driver audit log next to a full journal.
+        let r = cross_check(&DriverAudit::default(), &full, &Options::default());
+        assert_eq!((r.verdict(), r.discrepancies), (Verdict::NothingToCompare, 0), "{:#?}", r.lines);
+        assert!(r.lines.iter().any(|l| l.starts_with("NOTHING TO COMPARE: the driver audit log is empty")), "{:#?}", r.lines);
+        assert!(!r.lines.iter().any(|l| l.starts_with("consistent")), "{:#?}", r.lines);
+        assert_eq!(r.verdict().exit_code(), 3);
+
+        // Both empty.
+        let r = cross_check(&DriverAudit::default(), &[("n1".to_string(), vec![])], &Options::default());
+        assert_eq!(r.verdict(), Verdict::NothingToCompare, "{:#?}", r.lines);
+
+        // A full driver audit log next to only empty journals (the sign is then "for a key no
+        // journal holds", which was skipped and passed).
+        let r = cross_check(&audit, &[("n1".to_string(), vec![]), ("n2".to_string(), vec![])], &Options::default());
+        assert_eq!(r.verdict(), Verdict::NothingToCompare, "{:#?}", r.lines);
+        assert!(r.lines.iter().any(|l| l.contains("every supplied journal is empty")), "{:#?}", r.lines);
+
+        // One empty journal among full ones (a node the leaders never picked): a warning, and the
+        // threshold check still applies.
+        let mut one_empty = full.clone();
+        one_empty.push(("n2".to_string(), vec![]));
+        let r = cross_check(&audit, &one_empty, &Options::default());
+        assert_eq!(r.verdict(), Verdict::Consistent, "{:#?}", r.lines);
+        assert!(r.lines.iter().any(|l| l.starts_with("WARNING: journal n2 is empty")), "{:#?}", r.lines);
+        let r = cross_check(&audit, &one_empty, &Options { min_journals: 2, allow_no_intent: false });
+        assert_eq!(r.verdict(), Verdict::Discrepancies, "{:#?}", r.lines);
+
+        // Entries on both sides, but no signature to compare (a deployment that never signed).
+        let no_signs = DriverAudit { entries: 3, signs: vec![], first_ts_ms: Some(1_000), torn_tail: false };
+        let mut test_only = journaled(1, &rid, &m1, 2_000);
+        test_only.purpose = "sign-test".into();
+        let r = cross_check(&no_signs, &[("n1".to_string(), vec![test_only])], &Options::default());
+        assert_eq!(r.verdict(), Verdict::NothingToCompare, "{:#?}", r.lines);
+        assert!(r.lines.iter().any(|l| l.contains("nothing was compared")), "{:#?}", r.lines);
+
+        // A discrepancy wins over nothing to compare.
+        let r = cross_check(&DriverAudit::default(), &[("n1".to_string(), vec![journaled(1, &rid, &m1, 2_000)])], &Options::default());
+        assert_eq!(r.verdict(), Verdict::NothingToCompare, "an empty log skips every journal entry: {:#?}", r.lines);
+        let r = cross_check(&no_signs, &[("n1".to_string(), vec![journaled(1, &rid, &m1, 2_000)]), ("n2".to_string(), vec![])], &Options::default());
+        assert_eq!((r.verdict(), r.verdict().exit_code()), (Verdict::Discrepancies, 1), "{:#?}", r.lines);
     }
 
     #[test]

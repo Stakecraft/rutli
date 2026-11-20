@@ -121,6 +121,47 @@ private static final long serialVersionUID = 0L;
     return wrapped_ == null ? com.stakecraft.rutli.grpc.WrappedKey.getDefaultInstance() : wrapped_;
   }
 
+  public static final int TOMBSTONE_FIELD_NUMBER = 4;
+  private com.stakecraft.rutli.grpc.KeyManifest tombstone_;
+  /**
+   * <pre>
+   * The tombstone (as in ListKeys) when the caller set include_tombstone and the key is deleted
+   * here; spec, public_key_der and wrapped are then empty.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.KeyManifest tombstone = 4;</code>
+   * @return Whether the tombstone field is set.
+   */
+  @java.lang.Override
+  public boolean hasTombstone() {
+    return ((bitField0_ & 0x00000002) != 0);
+  }
+  /**
+   * <pre>
+   * The tombstone (as in ListKeys) when the caller set include_tombstone and the key is deleted
+   * here; spec, public_key_der and wrapped are then empty.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.KeyManifest tombstone = 4;</code>
+   * @return The tombstone.
+   */
+  @java.lang.Override
+  public com.stakecraft.rutli.grpc.KeyManifest getTombstone() {
+    return tombstone_ == null ? com.stakecraft.rutli.grpc.KeyManifest.getDefaultInstance() : tombstone_;
+  }
+  /**
+   * <pre>
+   * The tombstone (as in ListKeys) when the caller set include_tombstone and the key is deleted
+   * here; spec, public_key_der and wrapped are then empty.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.KeyManifest tombstone = 4;</code>
+   */
+  @java.lang.Override
+  public com.stakecraft.rutli.grpc.KeyManifestOrBuilder getTombstoneOrBuilder() {
+    return tombstone_ == null ? com.stakecraft.rutli.grpc.KeyManifest.getDefaultInstance() : tombstone_;
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -144,6 +185,9 @@ private static final long serialVersionUID = 0L;
     if (((bitField0_ & 0x00000001) != 0)) {
       output.writeMessage(3, getWrapped());
     }
+    if (((bitField0_ & 0x00000002) != 0)) {
+      output.writeMessage(4, getTombstone());
+    }
     getUnknownFields().writeTo(output);
   }
 
@@ -163,6 +207,10 @@ private static final long serialVersionUID = 0L;
     if (((bitField0_ & 0x00000001) != 0)) {
       size += com.google.protobuf.CodedOutputStream
         .computeMessageSize(3, getWrapped());
+    }
+    if (((bitField0_ & 0x00000002) != 0)) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeMessageSize(4, getTombstone());
     }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
@@ -188,6 +236,11 @@ private static final long serialVersionUID = 0L;
       if (!getWrapped()
           .equals(other.getWrapped())) return false;
     }
+    if (hasTombstone() != other.hasTombstone()) return false;
+    if (hasTombstone()) {
+      if (!getTombstone()
+          .equals(other.getTombstone())) return false;
+    }
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -206,6 +259,10 @@ private static final long serialVersionUID = 0L;
     if (hasWrapped()) {
       hash = (37 * hash) + WRAPPED_FIELD_NUMBER;
       hash = (53 * hash) + getWrapped().hashCode();
+    }
+    if (hasTombstone()) {
+      hash = (37 * hash) + TOMBSTONE_FIELD_NUMBER;
+      hash = (53 * hash) + getTombstone().hashCode();
     }
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
@@ -338,6 +395,7 @@ private static final long serialVersionUID = 0L;
       if (com.google.protobuf.GeneratedMessage
               .alwaysUseFieldBuilders) {
         getWrappedFieldBuilder();
+        getTombstoneFieldBuilder();
       }
     }
     @java.lang.Override
@@ -350,6 +408,11 @@ private static final long serialVersionUID = 0L;
       if (wrappedBuilder_ != null) {
         wrappedBuilder_.dispose();
         wrappedBuilder_ = null;
+      }
+      tombstone_ = null;
+      if (tombstoneBuilder_ != null) {
+        tombstoneBuilder_.dispose();
+        tombstoneBuilder_ = null;
       }
       return this;
     }
@@ -397,6 +460,12 @@ private static final long serialVersionUID = 0L;
             : wrappedBuilder_.build();
         to_bitField0_ |= 0x00000001;
       }
+      if (((from_bitField0_ & 0x00000008) != 0)) {
+        result.tombstone_ = tombstoneBuilder_ == null
+            ? tombstone_
+            : tombstoneBuilder_.build();
+        to_bitField0_ |= 0x00000002;
+      }
       result.bitField0_ |= to_bitField0_;
     }
 
@@ -422,6 +491,9 @@ private static final long serialVersionUID = 0L;
       }
       if (other.hasWrapped()) {
         mergeWrapped(other.getWrapped());
+      }
+      if (other.hasTombstone()) {
+        mergeTombstone(other.getTombstone());
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -466,6 +538,13 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000004;
               break;
             } // case 26
+            case 34: {
+              input.readMessage(
+                  getTombstoneFieldBuilder().getBuilder(),
+                  extensionRegistry);
+              bitField0_ |= 0x00000008;
+              break;
+            } // case 34
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -706,6 +785,172 @@ private static final long serialVersionUID = 0L;
         wrapped_ = null;
       }
       return wrappedBuilder_;
+    }
+
+    private com.stakecraft.rutli.grpc.KeyManifest tombstone_;
+    private com.google.protobuf.SingleFieldBuilder<
+        com.stakecraft.rutli.grpc.KeyManifest, com.stakecraft.rutli.grpc.KeyManifest.Builder, com.stakecraft.rutli.grpc.KeyManifestOrBuilder> tombstoneBuilder_;
+    /**
+     * <pre>
+     * The tombstone (as in ListKeys) when the caller set include_tombstone and the key is deleted
+     * here; spec, public_key_der and wrapped are then empty.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.KeyManifest tombstone = 4;</code>
+     * @return Whether the tombstone field is set.
+     */
+    public boolean hasTombstone() {
+      return ((bitField0_ & 0x00000008) != 0);
+    }
+    /**
+     * <pre>
+     * The tombstone (as in ListKeys) when the caller set include_tombstone and the key is deleted
+     * here; spec, public_key_der and wrapped are then empty.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.KeyManifest tombstone = 4;</code>
+     * @return The tombstone.
+     */
+    public com.stakecraft.rutli.grpc.KeyManifest getTombstone() {
+      if (tombstoneBuilder_ == null) {
+        return tombstone_ == null ? com.stakecraft.rutli.grpc.KeyManifest.getDefaultInstance() : tombstone_;
+      } else {
+        return tombstoneBuilder_.getMessage();
+      }
+    }
+    /**
+     * <pre>
+     * The tombstone (as in ListKeys) when the caller set include_tombstone and the key is deleted
+     * here; spec, public_key_der and wrapped are then empty.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.KeyManifest tombstone = 4;</code>
+     */
+    public Builder setTombstone(com.stakecraft.rutli.grpc.KeyManifest value) {
+      if (tombstoneBuilder_ == null) {
+        if (value == null) {
+          throw new NullPointerException();
+        }
+        tombstone_ = value;
+      } else {
+        tombstoneBuilder_.setMessage(value);
+      }
+      bitField0_ |= 0x00000008;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * The tombstone (as in ListKeys) when the caller set include_tombstone and the key is deleted
+     * here; spec, public_key_der and wrapped are then empty.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.KeyManifest tombstone = 4;</code>
+     */
+    public Builder setTombstone(
+        com.stakecraft.rutli.grpc.KeyManifest.Builder builderForValue) {
+      if (tombstoneBuilder_ == null) {
+        tombstone_ = builderForValue.build();
+      } else {
+        tombstoneBuilder_.setMessage(builderForValue.build());
+      }
+      bitField0_ |= 0x00000008;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * The tombstone (as in ListKeys) when the caller set include_tombstone and the key is deleted
+     * here; spec, public_key_der and wrapped are then empty.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.KeyManifest tombstone = 4;</code>
+     */
+    public Builder mergeTombstone(com.stakecraft.rutli.grpc.KeyManifest value) {
+      if (tombstoneBuilder_ == null) {
+        if (((bitField0_ & 0x00000008) != 0) &&
+          tombstone_ != null &&
+          tombstone_ != com.stakecraft.rutli.grpc.KeyManifest.getDefaultInstance()) {
+          getTombstoneBuilder().mergeFrom(value);
+        } else {
+          tombstone_ = value;
+        }
+      } else {
+        tombstoneBuilder_.mergeFrom(value);
+      }
+      if (tombstone_ != null) {
+        bitField0_ |= 0x00000008;
+        onChanged();
+      }
+      return this;
+    }
+    /**
+     * <pre>
+     * The tombstone (as in ListKeys) when the caller set include_tombstone and the key is deleted
+     * here; spec, public_key_der and wrapped are then empty.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.KeyManifest tombstone = 4;</code>
+     */
+    public Builder clearTombstone() {
+      bitField0_ = (bitField0_ & ~0x00000008);
+      tombstone_ = null;
+      if (tombstoneBuilder_ != null) {
+        tombstoneBuilder_.dispose();
+        tombstoneBuilder_ = null;
+      }
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * The tombstone (as in ListKeys) when the caller set include_tombstone and the key is deleted
+     * here; spec, public_key_der and wrapped are then empty.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.KeyManifest tombstone = 4;</code>
+     */
+    public com.stakecraft.rutli.grpc.KeyManifest.Builder getTombstoneBuilder() {
+      bitField0_ |= 0x00000008;
+      onChanged();
+      return getTombstoneFieldBuilder().getBuilder();
+    }
+    /**
+     * <pre>
+     * The tombstone (as in ListKeys) when the caller set include_tombstone and the key is deleted
+     * here; spec, public_key_der and wrapped are then empty.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.KeyManifest tombstone = 4;</code>
+     */
+    public com.stakecraft.rutli.grpc.KeyManifestOrBuilder getTombstoneOrBuilder() {
+      if (tombstoneBuilder_ != null) {
+        return tombstoneBuilder_.getMessageOrBuilder();
+      } else {
+        return tombstone_ == null ?
+            com.stakecraft.rutli.grpc.KeyManifest.getDefaultInstance() : tombstone_;
+      }
+    }
+    /**
+     * <pre>
+     * The tombstone (as in ListKeys) when the caller set include_tombstone and the key is deleted
+     * here; spec, public_key_der and wrapped are then empty.
+     * </pre>
+     *
+     * <code>.rutli.cosigner.v1.KeyManifest tombstone = 4;</code>
+     */
+    private com.google.protobuf.SingleFieldBuilder<
+        com.stakecraft.rutli.grpc.KeyManifest, com.stakecraft.rutli.grpc.KeyManifest.Builder, com.stakecraft.rutli.grpc.KeyManifestOrBuilder> 
+        getTombstoneFieldBuilder() {
+      if (tombstoneBuilder_ == null) {
+        tombstoneBuilder_ = new com.google.protobuf.SingleFieldBuilder<
+            com.stakecraft.rutli.grpc.KeyManifest, com.stakecraft.rutli.grpc.KeyManifest.Builder, com.stakecraft.rutli.grpc.KeyManifestOrBuilder>(
+                getTombstone(),
+                getParentForChildren(),
+                isClean());
+        tombstone_ = null;
+      }
+      return tombstoneBuilder_;
     }
 
     // @@protoc_insertion_point(builder_scope:rutli.cosigner.v1.FetchKeyReply)

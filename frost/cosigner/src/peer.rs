@@ -74,6 +74,13 @@ pub trait PeerApi: Send + Sync {
     ) -> Result<Vec<u8>>;
     /// Pull a hosted key from this peer, wrapped to the caller.
     async fn fetch_key(&self, key_id: &str) -> Result<(String, Vec<u8>, crate::wrap::Wrapped)>;
+    /// [`PeerApi::fetch_key`], telling a tombstone apart from "not held": what a node asks before
+    /// it stores a key it lacks. The default — a peer that cannot say — reports what `fetch_key`
+    /// reports, a tombstone included as NOT_FOUND.
+    async fn fetch_key_state(&self, key_id: &str) -> Result<FetchedCopy> {
+        let (spec, _public_key_der, wrapped) = self.fetch_key(key_id).await?;
+        Ok(FetchedCopy::Key { spec, wrapped })
+    }
     /// This peer's live hosted keys: (key_id, spec, commitment). Tombstones excluded.
     async fn list_keys(&self) -> Result<Vec<(String, String, Vec<u8>)>>;
     /// This peer's full inventory for anti-entropy: live keys and tombstones (audit M2). The
@@ -178,6 +185,14 @@ pub trait PeerApi: Send + Sync {
     }
 }
 
+/// What a peer answers for a hosted key id ([`PeerApi::fetch_key_state`]); NOT_FOUND is an error.
+pub enum FetchedCopy {
+    /// Its live copy, wrapped to the caller.
+    Key { spec: String, wrapped: crate::wrap::Wrapped },
+    /// Its tombstone, with the delete intent for the caller to verify.
+    Tombstone(Box<pb::KeyManifest>),
+}
+
 fn unsupported(what: &str) -> crate::DaemonError {
     crate::DaemonError::CeremonyRefused(format!("this peer does not support {what}"))
 }
@@ -215,6 +230,16 @@ impl LocalPeer {
     fn asker(&self) -> Option<String> {
         self.caller.as_ref().and_then(|c| c.index().ok()).map(|i| format!("cosigner{i}"))
     }
+
+    /// Who opens and owns the sign sessions this handle starts: the in-process leader
+    /// ([`crate::node::SessionOwner::Local`], which no remote caller can be), or the node it acts
+    /// for, by the CN the serving node would see over gRPC.
+    fn session_owner(&self) -> crate::node::SessionOwner {
+        match self.asker() {
+            Some(cn) => crate::node::SessionOwner::Peer(cn),
+            None => crate::node::SessionOwner::Local,
+        }
+    }
 }
 
 /// Wire an in-process cluster's mesh: each node reaches every other through a [`LocalPeer`]
@@ -242,7 +267,8 @@ impl PeerApi for LocalPeer {
     }
     async fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &Round1Ctx) -> Result<SigningCommitments> {
         let (key_id, session_id, ctx) = (key_id.to_owned(), session_id.to_owned(), ctx.clone());
-        self.node.blocking(move |n| n.sign_round1(&key_id, &session_id, &ctx)).await
+        let owner = self.session_owner();
+        self.node.blocking(move |n| n.sign_round1_as(&key_id, &session_id, &ctx, &owner)).await
     }
     async fn sign_round2(
         &self,
@@ -254,13 +280,13 @@ impl PeerApi for LocalPeer {
     ) -> Result<SignatureShare> {
         let (key_id, session_id) = (key_id.to_owned(), session_id.to_owned());
         let (message, commitments, digest) = (message.to_vec(), commitments.clone(), intent_digest.copied());
+        let owner = self.session_owner();
         self.node
-            .blocking(move |n| n.sign_round2_with(&key_id, &session_id, &message, &commitments, digest))
+            .blocking(move |n| n.sign_round2_as(&key_id, &session_id, &message, &commitments, digest, &owner))
             .await
     }
     async fn abort_sign(&self, key_id: &str, session_id: &str) -> Result<()> {
-        self.node.abort_sign(key_id, session_id);
-        Ok(())
+        self.node.abort_sign_as(key_id, session_id, &self.session_owner())
     }
     async fn ceremony_fence(&self, ceremony_id: &str, key_id: &str, kind: &'static str) -> Result<()> {
         self.node.ceremony_fence_from(ceremony_id, key_id, kind, self.asker().as_deref())
@@ -279,21 +305,24 @@ impl PeerApi for LocalPeer {
 
     async fn replicate_key(
         &self,
-        _ceremony_id: &str,
+        ceremony_id: &str,
         key_id: &str,
         spec: &str,
         _public_key_der: &[u8],
         wrapped: &crate::wrap::Wrapped,
     ) -> Result<Vec<u8>> {
-        let spec = crate::hosted::HostedSpec::parse(spec)?;
-        let key = self.node.hosted_unwrap(key_id, spec, wrapped)?; // crypto only, no IO
-        let (key_id, ceremony_id) = (key_id.to_owned(), _ceremony_id.to_owned());
-        self.node
-            .blocking(move |n| {
-                n.hosted_store_for(&key_id, &key, Some(&ceremony_id))?;
-                n.hosted_commitment(&key)
-            })
-            .await
+        // The same rules as `Peer.ReplicateKey`: the caller is the node this handle acts for.
+        let sender = self.caller.as_ref().and_then(|c| c.index().ok());
+        crate::orchestrator::accept_replica(
+            &self.node,
+            ceremony_id,
+            key_id,
+            spec,
+            wrapped,
+            self.asker().as_deref(),
+            sender,
+        )
+        .await
     }
 
     async fn fetch_key(&self, key_id: &str) -> Result<(String, Vec<u8>, crate::wrap::Wrapped)> {
@@ -313,6 +342,15 @@ impl PeerApi for LocalPeer {
                 Ok((key.spec.as_str().to_string(), pub_der, w))
             })
             .await
+    }
+
+    async fn fetch_key_state(&self, key_id: &str) -> Result<FetchedCopy> {
+        let id = key_id.to_owned();
+        if let Some(t) = self.node.blocking(move |n| n.hosted_tombstone_manifest(&id)).await? {
+            return Ok(FetchedCopy::Tombstone(Box::new(t)));
+        }
+        let (spec, _public_key_der, wrapped) = self.fetch_key(key_id).await?;
+        Ok(FetchedCopy::Key { spec, wrapped })
     }
 
     async fn list_keys(&self) -> Result<Vec<(String, String, Vec<u8>)>> {
@@ -461,19 +499,44 @@ pub struct GrpcPeer {
 }
 
 impl GrpcPeer {
-    pub fn connect_lazy(
+    /// A peer at `endpoint`, dialled through `dial` ([`crate::tls::PeerDial`]: the TLS handshake
+    /// under the peer's own server name, then its key pins), or in plaintext without one (dev).
+    pub fn connect_lazy(identifier: Identifier, endpoint: &str, dial: Option<crate::tls::PeerDial>) -> Result<Self> {
+        match dial {
+            Some(dial) => {
+                let connector = dial.connector();
+                Self::connect_lazy_over(identifier, endpoint, &dial, connector)
+            }
+            None => {
+                let ep = tonic::transport::Endpoint::from_shared(endpoint.to_string())
+                    .map_err(|e| crate::DaemonError::Config(format!("bad endpoint {endpoint}: {e}")))?
+                    .timeout(PEER_RPC_TIMEOUT)
+                    .connect_timeout(PEER_RPC_TIMEOUT);
+                Ok(Self { identifier, client: PeerClient::new(ep.connect_lazy()) })
+            }
+        }
+    }
+
+    /// [`GrpcPeer::connect_lazy`] through a connector built from `dial`
+    /// ([`crate::tls::PeerDial::connector_over`]): tests run the mesh over in-memory streams.
+    pub fn connect_lazy_over<C>(
         identifier: Identifier,
         endpoint: &str,
-        tls: Option<tonic::transport::ClientTlsConfig>,
-    ) -> Result<Self> {
-        let mut ep = tonic::transport::Endpoint::from_shared(endpoint.to_string())
-            .map_err(|e| crate::DaemonError::Config(format!("bad endpoint {endpoint}: {e}")))?
+        dial: &crate::tls::PeerDial,
+        connector: crate::tls::PeerConnector<C>,
+    ) -> Result<Self>
+    where
+        C: tonic::codegen::Service<tonic::codegen::http::Uri> + Send + 'static,
+        C::Future: Send + 'static,
+        C::Error: Into<crate::tls::BoxError>,
+        hyper_util::rt::TokioIo<C::Response>: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let channel = dial
+            .endpoint(endpoint)?
             .timeout(PEER_RPC_TIMEOUT)
-            .connect_timeout(PEER_RPC_TIMEOUT);
-        if let Some(t) = tls {
-            ep = ep.tls_config(t)?;
-        }
-        Ok(Self { identifier, client: PeerClient::new(ep.connect_lazy()) })
+            .connect_timeout(PEER_RPC_TIMEOUT)
+            .connect_with_connector_lazy(connector);
+        Ok(Self { identifier, client: PeerClient::new(channel) })
     }
 }
 
@@ -598,7 +661,9 @@ impl PeerApi for GrpcPeer {
                 public_key_der: public_key_der.to_vec(),
                 wrapped: Some(to_pb_wrapped(wrapped)),
             })
-            .await?
+            .await
+            // A conflict keeps its type across the mesh (the `hosted-conflict` trailer).
+            .map_err(|s| crate::DaemonError::from_peer_status(s, key_id, None))?
             .into_inner();
         Ok(reply.commitment)
     }
@@ -607,11 +672,24 @@ impl PeerApi for GrpcPeer {
         let reply = self
             .client
             .clone()
-            .fetch_key(pb::FetchKeyRequest { key_id: key_id.into() })
+            .fetch_key(pb::FetchKeyRequest { key_id: key_id.into(), include_tombstone: false })
             .await?
             .into_inner();
         let wrapped = from_pb_wrapped(reply.wrapped)?;
         Ok((reply.spec, reply.public_key_der, wrapped))
+    }
+
+    async fn fetch_key_state(&self, key_id: &str) -> Result<FetchedCopy> {
+        let reply = self
+            .client
+            .clone()
+            .fetch_key(pb::FetchKeyRequest { key_id: key_id.into(), include_tombstone: true })
+            .await?
+            .into_inner();
+        if let Some(t) = reply.tombstone.filter(|t| t.tombstone) {
+            return Ok(FetchedCopy::Tombstone(Box::new(t)));
+        }
+        Ok(FetchedCopy::Key { spec: reply.spec, wrapped: from_pb_wrapped(reply.wrapped)? })
     }
 
     async fn list_keys(&self) -> Result<Vec<(String, String, Vec<u8>)>> {
@@ -674,7 +752,8 @@ impl PeerApi for GrpcPeer {
                 protocol: crate::ceremony::CEREMONY_PROTOCOL,
                 intent: intent.cloned(),
             })
-            .await?;
+            .await
+            .map_err(crate::error::from_fence_status)?;
         Ok(())
     }
 

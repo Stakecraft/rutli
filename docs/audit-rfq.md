@@ -129,6 +129,7 @@ completed 2026-11-12) and the rc.6 review fixes. The release candidates are supe
 | h | **Optional carry of protocol signing and ECIES encryption keys (milestone B6)** | Implemented and in `v0.4.0-rc.2`. A discouraged path: the recommended migration carries only the namespace key and gives the new node fresh keys. It touches the offline dealer's usage guard (`rutli-dealer --expect-usage`, envelope v3), adds the `HostedKeyStatus` RPC and the `rutli-cosigner verify-hosted` CLI, and docs | `frost/core/src/dealer.rs`, `frost/cosigner/src/bin/rutli-dealer.rs`, `frost/cosigner` (`verify-hosted`), `docs/` |
 | i | **In-place migration of an existing node (Flow 2a)** | Procedure, in `v0.4.0`; rehearsed end to end on DevNet (milestone B8, 2026-10-23 to 2026-11-12). The existing participant keeps its database and UID: all its active keys are carried into the cluster with their fingerprints (namespace via the split ceremony, protocol signing and ECIES via B6), the node is restarted with `crypto.provider = kms`, the keys are registered by KMS id before it reconnects, then rotated per the operator's choice and the old plaintext rows removed. Mostly runbook and Canton console steps, little new code; not a procedure Digital Asset documents. We want the sequence, the rollback story and the residue reviewed. What the rehearsal did not cover is listed in the runbook's status. |
 | j | **Internal-review remediation, batch C** | Shipped in `v0.4.0-rc.3`; a wire change. Confidential peer-to-peer delivery of DKG/refresh round-2 packages over mTLS (DS-C1); cosigner-enforced signed signing intents with per-node approvals, journal and rate limit (DS-C2); two-phase ceremonies with epochs (DS-H1); share format v2 with AAD; hosted-key tombstones. Our priority area for re-review (section 1.1) | `frost/core` (DKG, refresh), `frost/cosigner` (`orchestrator`, `node`, `service`, `keystore`, `peer`), `cosigner.proto`, `driver/src/main` (intent signing, approval gate) |
+| k | **Pre-audit hardening for `v0.5.0`** | On `main` since 2026-11-19 and 2026-11-20, not released. A cosigner and the driver refuse a config key they do not know; signing intents required by default with TLS; cosigners pin each other's TLS keys (inbound and outbound), required with TLS; a sign session belongs to the peer that opened it, with per-opener caps; one peer lying about the epoch cannot bench both honest nodes; a minimum interval between refreshes, checked by every node; the driver fails over past a bad signature and refuses a misspelt approval mode; the production profile and `check-config`; release images built on hosted runners, signed and attested. The list for operators: `docs/upgrading-to-0.5.md` | `frost/cosigner` (`config`, `profile`, `peer`, `node`, `service`, `sign_policy`, `orchestrator`), `driver/src/main`, `.github/workflows/publish-image.yml` |
 
 ### Approximate size
 
@@ -203,7 +204,7 @@ Where we would like attention, in order:
 
 After the first engagement, four features are planned for Rütli 1.0. They are new code on the key
 path, so we want them reviewed by the same team before 1.0 is tagged, as a second, smaller phase once
-they are code-complete (expected in the first half of 2027):
+they are code-complete (expected in mid-2027):
 
 | Feature | What it does | Where we want attention |
 |---|---|---|

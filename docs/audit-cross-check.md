@@ -23,7 +23,7 @@ when the SHA-256 of the journal's `digest` bytes equals the line's `msg=`.
 | A message journaled under an audited request id that no `msg=` of that request id names (`… was signed OUT OF BAND — the driver audit log signed only msg=<sha256> (seq N) …`) | The driver draws a fresh request id for every sign and binds one message to it, so this message was signed with the driver's certificate outside the driver, re-using an audited request id. The line names both the message the driver signed and the one signed out of band (its journaled digest and `msg=` hash), and which journals hold it. Journal entries are compared per authorized operation (key, request id, message), as the cosigners charge them, not per bare request id. |
 | For audit lines without `msg=` (a driver from 0.4.0-rc.2 or earlier): one request id journaled over more messages than the driver audit has signs for it | The same out-of-band signing, but such a line does not say which message the driver signed, so the check can only count. |
 | An `outcome=ok` sign in the driver audit that fewer than `--min-journals` journals hold (with `msg=`: that exact message) | A journal was lost or rolled back (for example, a node restored from an old volume), or not every journal was supplied. |
-| Journal entries with `purpose: "no-intent"` | Signatures nobody can attribute: an older driver or leader, accepted while `signing_policy.require_intent` was off. Pass `--allow-no-intent` for the rollout window. After that, treat them as unexplained signatures. |
+| Journal entries with `purpose: "no-intent"` | Signatures nobody can attribute: an older driver or leader, accepted while `signing_policy.require_intent` was off (the default up to 0.4.0, now only the explicit `false`). Pass `--allow-no-intent` for the rollout window. After that, treat them as unexplained signatures. |
 | A broken hash chain on either side (exit 2) | The file was edited. Keep the evidence. |
 
 What is not compared:
@@ -38,6 +38,7 @@ What is not compared:
   report gives a count of these (`driver sign(s) without msg= (an older driver)`). One log can mix both
   kinds across a driver upgrade.
 - A key that no supplied journal holds at all. Make sure every node's journal is copied in full.
+  When every supplied journal is empty, the run gives exit `3` (below).
 
 ## Running it
 
@@ -61,8 +62,23 @@ rutli-cosigner audit-cross-check \
   --min-journals 2
 ```
 
-Exit status: `0` means consistent, `1` means discrepancies (each listed on a `DISCREPANCY:` line), and `2`
-means a file is unreadable or a hash chain is broken.
+Exit status:
+
+| Exit | Verdict |
+|---|---|
+| `0` | Consistent: signatures were compared, and every one matched. |
+| `1` | Discrepancies, each listed on a `DISCREPANCY:` line. |
+| `2` | A file is missing or unreadable, or a hash chain is broken. |
+| `3` | Nothing to compare: the driver audit log is empty, every supplied journal is empty, or no signature on either side falls inside the other side's records. Each reason is on a `NOTHING TO COMPARE:` line. **Not a pass.** |
+
+Only `0` is a pass. Treat `3` as a failed check, not as a quiet week. An empty driver audit log is
+what a log cut down to nothing looks like, the extreme case of a truncated tail. Empty journals are
+usually the wrong path, or a copy that failed (`kubectl cp` or `kubectl exec … cat` into a file
+leaves an empty file behind when it fails). One empty journal among others only prints a `WARNING:`
+line: with `t < n` a node the leaders never pick journals nothing, and `--min-journals` still holds
+every audited signature to the threshold. A deployment that has not signed anything yet also gets
+`3`; that is expected, and the check means nothing until there are signatures to compare. When there
+are discrepancies as well, the exit is `1`.
 
 Run it on a schedule, for example weekly alongside the soak check, and after any incident involving the
 participant host or the driver certificate. The journals answer a question the driver can no longer
