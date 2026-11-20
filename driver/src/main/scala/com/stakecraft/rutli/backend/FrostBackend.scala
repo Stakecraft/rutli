@@ -885,6 +885,9 @@ class FrostBackend(
     * which leads the same id under a fresh intent (it holds the key, adopts it from agreeing peers or
     * refuses; it never mints over a copy) and is checked again. Each endpoint is tried at most once.
     * A leader whose reply fails the check loses the lead and does not become the preferred one.
+    * The check uses what is left of the call's `requestTimeout`, keeping room for one more attempt;
+    * when no attempt could follow, a reply short only because endpoints were silent ends the call
+    * with that (non-retryable) error, not a spent request timeout.
     */
   private def generateHosted(keyId: String, spec: String): Future[String] = {
     val notes = currentNotes.get
@@ -923,13 +926,33 @@ class FrostBackend(
     }
     Future(blocking {
       val start = preferred.get
+      // One budget for the whole call: every attempt and every copy check comes out of it.
+      val budgetEnd = System.nanoTime() + requestTimeout.toNanos
       val answered = new AtomicInteger(-1)
+      val attempts = new AtomicInteger(0)
+      val attemptStarted = new java.util.concurrent.atomic.AtomicLong(0L)
       // A refusal (thrown) fails the call at once and costs the leader the lead here; a rejection
       // (returned) is demoted and failed over by withCheckedFailover.
       val check = (endpoint: String, reply: GenerateKeyReply) => {
         val leader = answered.get
-        try confirmHostedCopies(keyId, spec, reply, withIntent, endpoint, notes)
-        catch {
+        val now = System.nanoTime()
+        val left = budgetEnd - now
+        // The copy check uses what is left of the budget, keeping room for one more attempt while
+        // an endpoint is left to lead: up to one attempt deadline, at most half of what is left, and
+        // only if that is at least as long as the attempt that just answered took. Otherwise the
+        // check gets all of it, and a rejection ends the call here with its own error: a next
+        // attempt could not finish, and the call would end on "request-timeout spent" instead.
+        val reserve = math.min(attemptTimeout.toNanos, left / 2)
+        val another = attempts.get < channels.size && reserve >= math.max(MinAttempt.toNanos, now - attemptStarted.get)
+        val probeBudget = FiniteDuration(math.max(left - (if (another) reserve else 0L), 0L), NANOSECONDS)
+        try {
+          val outcome: Option[Rejected] = confirmHostedCopies(keyId, spec, reply, withIntent, endpoint, notes, probeBudget)
+          if (outcome.nonEmpty && (!another || budgetEnd - System.nanoTime() < MinAttempt.toNanos)) {
+            logger.warn(s"FROST: generateKey via $endpoint not confirmed; no attempt left in this call")
+            throw outcome.get.error
+          }
+          outcome
+        } catch {
           case e: KmsDriverException =>
             demote(leader)
             throw e
@@ -945,11 +968,15 @@ class FrostBackend(
         check,
         NoPreference,
         start,
-        (i: Int) => answered.set(i),
+        (i: Int) => {
+          answered.set(i)
+          attempts.incrementAndGet()
+          attemptStarted.set(System.nanoTime())
+        },
         // One attempt covers Capabilities and GenerateKey at that cosigner; the copy check after
-        // it has its own deadline.
+        // it takes its time from the same budget (above).
         attemptTimeout,
-        System.nanoTime() + requestTimeout.toNanos,
+        budgetEnd,
       )(stub => stub.generateKey(request(stub)))
       preferred.compareAndSet(start, answered.get)
       reply
@@ -976,8 +1003,8 @@ class FrostBackend(
     * Two outcomes when it is not accepted:
     *  - a [[Rejected]] (code `UNCONFIRMED`) when too few copies confirm only because endpoints were
     *    silent: the silent ones could have confirmed. The caller fails over to the next endpoint,
-    *    and when none is left the rejection's error (non-retryable, naming the silent endpoints)
-    *    ends the call;
+    *    and when none is left (or the call's budget cannot fit another attempt) the rejection's
+    *    error (non-retryable, naming the silent endpoints) ends the call;
     *  - a thrown non-retryable [[KmsDriverException]] for everything else (a wrong spec, no
     *    commitment where one is due, a node reporting other material, too few copies although the
     *    nodes answered). The key id never reaches Canton: a leader whose reply the cluster does not
@@ -995,6 +1022,7 @@ class FrostBackend(
       withIntent: Boolean,
       leaderEndpoint: String,
       notes: AuditNotes,
+      probeBudget: FiniteDuration,
   ): Option[Rejected] = {
     def refuse(why: String): Nothing = {
       notes.add("hosted-check=failed")
@@ -1010,13 +1038,21 @@ class FrostBackend(
           "its copies are not checked"
       )
       None
-    } else checkCopies(keyId, reply, leaderEndpoint, notes, refuse)
+    } else checkCopies(keyId, reply, leaderEndpoint, notes, refuse, probeBudget)
   }
 
-  /** One endpoint's answer to the copy probe: its `KeyInfo`, or why it gave none (`Left`, silent). */
-  private def probeCopies(keyId: String): Vector[(String, Either[String, KeyInfoReply])] = {
+  /** One endpoint's answer to the copy probe: its `KeyInfo`, or why it gave none (`Left`, silent).
+    * The whole probe ends within `budget` (what the call can spend on it): each `KeyInfo` gets that
+    * less [[ProbeSlack]], at most 10 s. When that leaves less than [[MinAttempt]], no endpoint is
+    * asked and every one counts as silent (`NO_TIME`). */
+  private def probeCopies(keyId: String, budget: FiniteDuration): Vector[(String, Either[String, KeyInfoReply])] = {
+    val deadline = requestTimeout.min(10.seconds).min(budget - ProbeSlack)
+    if (deadline < MinAttempt) channels.indices.toVector.map(i => endpoints(i) -> (Left("NO_TIME"): Either[String, KeyInfoReply]))
+    else probeCopiesWithin(keyId, deadline)
+  }
+
+  private def probeCopiesWithin(keyId: String, deadline: FiniteDuration): Vector[(String, Either[String, KeyInfoReply])] = {
     val req = KeyInfoRequest.newBuilder().setKeyId(keyId).setLocalOnly(true).build()
-    val deadline = requestTimeout.min(10.seconds)
     val probes: Vector[Future[(String, Either[String, KeyInfoReply])]] = channels.indices.toVector.map { i =>
       Future(blocking {
         val answer: Either[String, KeyInfoReply] =
@@ -1035,8 +1071,9 @@ class FrostBackend(
       })
     }
     // Each call has its own deadline, so this wait normally ends with every probe complete. If it
-    // fires anyway (a starved pool), the answers already in hand are kept and the rest are silent.
-    try scala.concurrent.Await.ready(Future.sequence(probes), deadline + 2.seconds)
+    // fires anyway (a starved pool, a call stuck before its deadline applies), the answers already
+    // in hand are kept and the rest are silent.
+    try scala.concurrent.Await.ready(Future.sequence(probes), deadline + ProbeSlack)
     catch { case _: java.util.concurrent.TimeoutException => () }
     probes.zipWithIndex.map { case (f, i) =>
       f.value match {
@@ -1054,8 +1091,9 @@ class FrostBackend(
       leaderEndpoint: String,
       notes: AuditNotes,
       refuse: String => Nothing,
+      probeBudget: FiniteDuration,
   ): Option[Rejected] = {
-    val answers = probeCopies(keyId)
+    val answers = probeCopies(keyId, probeBudget)
     def same(r: KeyInfoReply): Boolean =
       r.getCommitment == reply.getCommitment && r.getSpec == reply.getSpec && r.getPublicKeyDer == reply.getPublicKeyDer
     val confirming = answers.collect { case (e, Right(r)) if r.getExists && !r.getCommitment.isEmpty && same(r) => e }
@@ -1674,6 +1712,8 @@ object FrostBackend {
 
   /** No attempt starts with less of the call's budget left than this: it could not succeed. */
   private val MinAttempt: FiniteDuration = 50.millis
+  /** How much longer than its calls' deadline the hosted-key copy probe waits for them. */
+  private val ProbeSlack: FiniteDuration = 200.millis
   /** `observed` for a [[withCheckedFailover]] call whose answer must not make its node the
     * preferred leader by itself (no endpoint has this index, so the compare-and-set never hits). */
   private val NoPreference = -1

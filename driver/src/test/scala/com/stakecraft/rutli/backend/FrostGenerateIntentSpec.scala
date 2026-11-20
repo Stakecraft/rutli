@@ -53,8 +53,8 @@ class FrostGenerateIntentSpec extends AnyWordSpec with Matchers with BeforeAndAf
   private final case class Copy(commitment: ByteString, spec: String, publicKey: ByteString)
 
   /** A cosigner stand-in for hosted-key generation: reports `nodeId` as its roster identifier,
-    * answers GenerateKey with `reply` (or fails with `failGenerate`), records every GenerateKey, and
-    * answers KeyInfo(local_only) with its own `copy`. */
+    * answers GenerateKey with `reply` after `generateDelay` (or fails with `failGenerate`), records
+    * every GenerateKey, and answers KeyInfo(local_only) with its own `copy`. */
   private final class HostedNode(@volatile var nodeId: Int) extends SignerGrpc.SignerImplBase {
     /** The address the backend dials for this node (set by [[cluster]]). */
     @volatile var endpoint: String = ""
@@ -62,6 +62,7 @@ class FrostGenerateIntentSpec extends AnyWordSpec with Matchers with BeforeAndAf
     @volatile var reply: Copy = Copy(CommitmentA, Aes, ByteString.EMPTY)
     @volatile var created: Boolean = true
     @volatile var failGenerate: Option[Status] = None
+    @volatile var generateDelay: FiniteDuration = Duration.Zero
     /** KeyInfo answers UNAVAILABLE this many more times (then normally), or always. */
     @volatile var keyInfoFailures: Int = 0
     @volatile var keyInfoDown: Boolean = false
@@ -83,6 +84,7 @@ class FrostGenerateIntentSpec extends AnyWordSpec with Matchers with BeforeAndAf
     }
     override def generateKey(req: GenerateKeyRequest, obs: StreamObserver[GenerateKeyReply]): Unit = {
       generates.add(req)
+      if (generateDelay > Duration.Zero) Thread.sleep(generateDelay.toMillis)
       failGenerate match {
         case Some(st) => obs.onError(st.withDescription("test: refused").asRuntimeException())
         case None =>
@@ -159,6 +161,17 @@ class FrostGenerateIntentSpec extends AnyWordSpec with Matchers with BeforeAndAf
     }
     (backend, nodes)
   }
+
+  /** One generation with every copy in place, so the cluster id is learned and the connections are
+    * up before a test times a call; then the nodes' records are cleared. */
+  private def warmUp(backend: FrostBackend, nodes: IndexedSeq[HostedNode]): Unit = {
+    nodes.foreach(_.copy = Some(AesCopy))
+    Await.result(backend.generateSymmetricKey(Some("warm")), 20.seconds)
+    nodes.foreach { n => n.generates.clear(); n.keyInfos.clear() }
+  }
+
+  /** Milliseconds since `t0` (a System.nanoTime). */
+  private def msSince(t0: Long): Long = (System.nanoTime() - t0) / 1000000L
 
   private def decode(i: SignedIntent): SignIntent = SignIntent.parseFrom(i.getIntent)
 
@@ -284,6 +297,59 @@ class FrostGenerateIntentSpec extends AnyWordSpec with Matchers with BeforeAndAf
         Await.result(backend.withAuditNotes(notes)(backend.generateSymmetricKey(Some("stuck"))), 20.seconds)
         notes.render should include("hosted-check=ok copies=2")
         nodes.map(_.generates.size) shouldBe Seq(1, 0, 0)
+      } finally backend.close()
+    }
+
+    "finish within the request timeout when one copy probe hangs" in {
+      val (backend, nodes) = cluster(3, timeout = 3.seconds)
+      try {
+        warmUp(backend, nodes)
+        FrostGenerateIntentSpec.probeFaults.put(nodes(2).endpoint, "hang")
+        val notes = new AuditNotes
+        val t0 = System.nanoTime()
+        Await.result(backend.withAuditNotes(notes)(backend.generateSymmetricKey(Some("bounded"))), 20.seconds)
+        msSince(t0) should be <= 3500L
+        notes.render should include("hosted-check=ok copies=2")
+        nodes.map(_.generates.size) shouldBe Seq(1, 0, 0)
+      } finally backend.close()
+    }
+
+    "fail with the unconfirmed error, not a spent request timeout, when no second attempt fits" in {
+      val (backend, nodes) = cluster(3, timeout = 3.seconds)
+      try {
+        warmUp(backend, nodes)
+        // The leader takes most of the budget; the copy check cannot leave room for another leader.
+        nodes.foreach(_.generateDelay = 2.seconds)
+        FrostGenerateIntentSpec.probeFaults.put(nodes(1).endpoint, "hang")
+        FrostGenerateIntentSpec.probeFaults.put(nodes(2).endpoint, "hang")
+        val t0 = System.nanoTime()
+        val ex = the[KmsDriverException] thrownBy Await.result(backend.generateSymmetricKey(Some("late")), 20.seconds)
+        msSince(t0) should be <= 3500L
+        ex.retryable shouldBe false
+        chain(ex) should include("only 1 cosigner(s) confirm")
+        chain(ex) should include(s"silent: ${nodes(1).endpoint}, ${nodes(2).endpoint}")
+        nodes.map(_.generates.size) shouldBe Seq(1, 0, 0)
+      } finally backend.close()
+    }
+
+    "lead again under a fresh intent within the budget when the first check is short only by silence" in {
+      val (backend, nodes) = cluster(3, timeout = 6.seconds)
+      try {
+        warmUp(backend, nodes)
+        nodes(1).keyInfoFailures = 1
+        FrostGenerateIntentSpec.probeFaults.put(nodes(2).endpoint, "hang")
+        val notes = new AuditNotes
+        val t0 = System.nanoTime()
+        val keyId = Await.result(backend.withAuditNotes(notes)(backend.generateSymmetricKey(Some("again"))), 20.seconds)
+        msSince(t0) should be <= 6500L
+        nodes.map(_.generates.size) shouldBe Seq(1, 1, 0)
+        val first = decode(nodes(0).generates.asScala.toList.loneElement.getIntent)
+        val second = decode(nodes(1).generates.asScala.toList.loneElement.getIntent)
+        Seq(first, second).foreach(_.getKeyId shouldBe keyId)
+        (first.getLeader, second.getLeader) shouldBe ((1, 2))
+        second.getRequestId should not be first.getRequestId
+        notes.render should include("reason=UNCONFIRMED")
+        notes.render should include("hosted-check=ok copies=2")
       } finally backend.close()
     }
 

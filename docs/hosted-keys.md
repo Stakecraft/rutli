@@ -309,7 +309,9 @@ completed), nodes without a copy, and nodes too old to send a commitment count n
   same way. Each endpoint leads at most once per call. The log line is `hosted key <id> from
   <endpoint> not confirmed: … silent: <endpoints>`, the audit entry carries `hosted-check=unconfirmed`
   and a `failover=… reason=UNCONFIRMED` note. When no endpoint is left, the call fails, not
-  retryable, with that message.
+  retryable, with that message. The check uses what is left of the driver's `request-timeout`,
+  keeping room for one more attempt; when no attempt could follow in time, the call also fails with
+  that message, never with a spent request timeout.
 - Anything else (absent copies where the leader reported a key, a wrong spec, an endpoint reporting
   other material): the call fails at once, not retryable. One endpoint that reports other material
   is enough. That is the endpoint's own statement and the driver cannot check it: a faulty or
