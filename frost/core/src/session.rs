@@ -236,6 +236,14 @@ pub struct Cosigner {
     pending: Mutex<BTreeMap<String, Pending>>,
 }
 
+/// The signing share is wiped when the cosigner is dropped (an evicted or replaced cache entry, a
+/// refresh, shutdown). frost's `KeyPackage` implements `Zeroize` but does not wipe itself on drop.
+impl Drop for Cosigner {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.key_package);
+    }
+}
+
 /// How many times a [`Cosigner`]'s in-flight session map was recovered after a holder panicked
 /// (its sessions dropped), process-wide. The daemon exports it as a metric.
 static LOCK_POISON_RECOVERIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

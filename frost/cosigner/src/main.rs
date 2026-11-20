@@ -591,6 +591,8 @@ async fn main() -> Result<()> {
         _ => {}
     }
     tracing::info!(identifier = cfg.identifier, listen = %cfg.listen, "starting cosigner");
+    // Before any key store is opened: a crash must not write share memory to a core file.
+    log_core_dumps(&rutli_cosigner::process_hardening::disable_core_dumps());
     // Peer key pins: required with TLS unless opted out, and this node's own key must be among its
     // own pins — or every peer would refuse it. Before anything else, so a bad rollout stops here.
     cfg.check_peer_pins_required()?;
@@ -1216,6 +1218,42 @@ fn check_config_command(path: &std::path::Path) -> ! {
         println!("meets the production profile");
     }
     std::process::exit(if required == 0 { 0 } else { 1 })
+}
+
+/// Startup: what [`rutli_cosigner::process_hardening::disable_core_dumps`] achieved, in one line.
+fn log_core_dumps(d: &rutli_cosigner::process_hardening::CoreDumps) {
+    let pattern = d.core_pattern.as_deref().unwrap_or("unknown");
+    let suid = d.suid_dumpable.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into());
+    let linux = cfg!(target_os = "linux");
+    if !d.may_dump() {
+        tracing::info!(
+            rlimit_core_zero = d.core_limit_zero,
+            not_dumpable = d.not_dumpable,
+            core_pattern = pattern,
+            suid_dumpable = %suid,
+            "core dumps off: RLIMIT_CORE=0{}",
+            if linux { ", not dumpable" } else { " (PR_SET_DUMPABLE is Linux-only)" }
+        );
+    } else {
+        tracing::warn!(
+            rlimit_core_zero = d.core_limit_zero,
+            not_dumpable = d.not_dumpable,
+            core_pattern = pattern,
+            suid_dumpable = %suid,
+            "core dumps may still capture this process's memory: {}",
+            [
+                (!d.core_limit_zero).then_some("RLIMIT_CORE could not be set to 0"),
+                (linux && !d.not_dumpable).then_some("PR_SET_DUMPABLE could not be cleared"),
+                (d.suid_dumpable == Some(2)).then_some("the host dumps non-dumpable processes (suid_dumpable=2)"),
+                (!d.not_dumpable && d.core_pattern.as_deref().is_some_and(|p| p.starts_with('|')))
+                    .then_some("a piped core_pattern ignores RLIMIT_CORE for a dumpable process"),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("; ")
+        );
+    }
 }
 
 /// Startup: the production-profile findings of a node that is not refusing on them (a production

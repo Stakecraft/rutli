@@ -108,6 +108,23 @@ Its exit codes are those of `check-config` above.
 Placement is not a config setting and the profile cannot check it: each cosigner in its own cluster
 or cloud account is a go-live gate ([audit-prep.md](audit-prep.md#operator-go-live-gates-post-audit)).
 
+## Process hardening (every profile)
+
+At start, before it opens a key store, the cosigner daemon turns core dumps off: `RLIMIT_CORE = 0`
+and, on Linux, `PR_SET_DUMPABLE = 0`. Not dumpable also means another process of the same user
+cannot ptrace it or read `/proc/<pid>/mem`; `kubectl exec` and the exec readiness probe start new
+processes and are not affected. One start-up line says what took effect:
+
+```text
+INFO core dumps off: RLIMIT_CORE=0, not dumpable rlimit_core_zero=true not_dumpable=true core_pattern=… suid_dumpable=0
+```
+
+A `WARN core dumps may still capture this process's memory: …` line names what did not take effect.
+A host with `fs.suid_dumpable = 2` is reported as a risk.
+
+Key shares are also wiped from memory when the process drops them: the share loaded from a key
+file, the signing cache's copy (on eviction, refresh, shutdown) and the shares a ceremony builds.
+
 ## Upgrading
 
 With this release the chart's `profile` defaults to `production`. **An existing install that does
