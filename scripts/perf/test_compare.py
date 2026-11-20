@@ -289,6 +289,30 @@ class KeyClasses(unittest.TestCase):
             self.assertIn(f'{t["cn"]}: ["{t["prefix"]}"', deploy)
 
 
+class SlowNode(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+    def test_the_scenarios_are_ms_and_policy(self):
+        import argparse
+        import cluster
+        self.assertEqual(cluster.parse_slow_node("2500:sticky, 6000:rotate"), [(2500, "sticky"), (6000, "rotate")])
+        for bad in ("2500", "x:rotate", "0:rotate", "2500:random"):
+            with self.assertRaises(argparse.ArgumentTypeError):
+                cluster.parse_slow_node(bad)
+
+    def test_node_shares_are_over_the_successful_signatures(self):
+        import cluster
+        load = {"client": {"ok": 300}, "server": {"targets": {
+            "cosigner1": {"counters": {"rutli_sign_requests_total": 100.0, "rutli_sign_journal_entries_total": 200.0}},
+            "cosigner2": {"counters": {"rutli_sign_requests_total{outcome=\"ok\"}": 100.0,
+                                       "rutli_sign_journal_entries_total": 200.0}},
+        }}}
+        self.assertEqual(cluster.node_shares(load), {"cosigner1": {"led": 0.33, "took_part": 0.67},
+                                                     "cosigner2": {"led": 0.33, "took_part": 0.67}})
+        self.assertEqual(cluster.node_shares({"client": {"ok": 0}}), {})
+
+
 class RigOrCluster(unittest.TestCase):
     def test_only_a_cluster_answer_is_the_clusters_failure(self):
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

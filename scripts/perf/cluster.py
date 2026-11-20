@@ -88,7 +88,7 @@ class K8sCluster:
         self.client_flags = []
         for flag, value in (client_policy or {}).items():
             if value is not None:
-                self.client_flags += [f"--{flag.replace('_', '-')}", f"{value:g}"]
+                self.client_flags += [f"--{flag.replace('_', '-')}", value if isinstance(value, str) else f"{value:g}"]
 
     @staticmethod
     def pod(node):
@@ -157,6 +157,32 @@ class K8sCluster:
 
     def pvc_of(self, node):
         return f"{self.ns}/data-{self.pod(node)[: -len('-0')]}"
+
+
+def node_shares(load):
+    """Per cosigner, from one load's server readings: the share of the successful signatures it
+    led (rutli_sign_requests_total) and took part in (rutli_sign_journal_entries_total: one entry
+    per share released). Rounded to 0.01; {} without readings."""
+    ok = load.get("client", {}).get("ok", 0)
+    out = {}
+    for node, t in (load.get("server", {}).get("targets") or {}).items():
+        counters = t.get("counters", {})
+        led = sum(v for k, v in counters.items() if k.split("{")[0] == "rutli_sign_requests_total")
+        part = sum(v for k, v in counters.items() if k.split("{")[0] == "rutli_sign_journal_entries_total")
+        if ok:
+            out[node] = {"led": round(led / ok, 2), "took_part": round(part / ok, 2)}
+    return out
+
+
+def parse_slow_node(text):
+    """`--slow-node`: comma-separated ms:policy pairs (policy sticky or rotate)."""
+    out = []
+    for item in [x.strip() for x in text.split(",") if x.strip()]:
+        ms, _, policy = item.partition(":")
+        if not ms.isdigit() or int(ms) <= 0 or policy not in ("sticky", "rotate"):
+            raise argparse.ArgumentTypeError(f"--slow-node: {item!r} is not <ms>:sticky|rotate")
+        out.append((int(ms), policy))
+    return out
 
 
 def ramp_phases(base_mix, step_secs):
@@ -429,7 +455,7 @@ class Suite(base.Runner):
 
     # -- disruption ----------------------------------------------------------------------------
 
-    def under_load(self, name, victims, strike, recover, allowed=()):
+    def under_load(self, name, victims, strike, recover, allowed=(), flags=None, clients=6):
         """The steady stream for `disrupt_secs`; 15 s in, `strike()`; 15 s before its end,
         `recover()` (always, even if the strike failed); then wait for the cluster. Every
         signature must succeed: a threshold of cosigners keeps signing throughout."""
@@ -440,8 +466,8 @@ class Suite(base.Runner):
             # load generator's last scrape is not known here, and a counter that went down tells
             # it reliably (prom.rs).
             proc = self.loadgen_start(
-                ["sign", "--key", base.KEY_STEADY, "--name", name, "--rate", str(self.args.rate), "--clients", "6",
-                 "--duration-secs", str(secs)]
+                ["sign", "--key", base.KEY_STEADY, "--name", name, "--rate", str(self.args.rate), "--clients", str(clients),
+                 "--duration-secs", str(secs)], flags=flags
             )
             problems, spot_loads = [], []
             time.sleep(15)
@@ -571,8 +597,36 @@ class Suite(base.Runner):
             self.under_load(f"net-delay-{ms}ms", [], lambda: self.hook("HOOK_NET_DELAY", "start", ms, *nodes),
                             lambda: self.hook("HOOK_NET_DELAY", "stop", ms, *nodes))
             self.results[-1]["compare_latency"] = True
+            self.slow_node(victim)
         else:
             self.skip("net-delay", "HOOK_NET_DELAY is not set")
+            self.skip("slow-node", "HOOK_NET_DELAY is not set")
+
+    def slow_node(self, victim):
+        """One cosigner slow, not dead: HOOK_NET_DELAY on its node alone, under the steady stream
+        with the driver's deadlines and each leader policy of --slow-node (ms:policy). Under 5 s
+        (the sign attempt deadline) nothing should demote it: rotate then brings it into about
+        2/3 of the signatures against about 1/2 under a healthy sticky leader. Over 5 s rotate
+        demotes it. Each run records the policy, which cosigner was slow, and every cosigner's
+        share of the signatures it led and took part in (its rutli_sign_requests_total and
+        rutli_sign_journal_entries_total over the signatures that succeeded)."""
+        node = self.cluster.node_of(victim)
+        for ms, policy in self.args.slow_node:
+            name = f"slow-node-{ms}ms-{policy}"
+            # Enough clients that the slow cosigner's signatures do not hold the stream back.
+            clients = max(6, int(self.args.rate * (ms / 1000.0 + 1)) + 6)
+            self.under_load(name, [], lambda ms=ms: self.hook("HOOK_NET_DELAY", "start", str(ms), node),
+                            lambda ms=ms: self.hook("HOOK_NET_DELAY", "stop", str(ms), node),
+                            flags=DRIVER_DEADLINES + ["--sign-leader", policy], clients=clients)
+            r = self.results[-1]
+            r.update({"sign_leader": policy, "slow_cosigner": victim, "added_delay_ms": ms})
+            if r["loads"] and "failed" not in r["loads"][0]:
+                load = r["loads"][0]
+                r["node_shares"] = node_shares(load)
+                r["failovers"] = load.get("client", {}).get("failovers", {})
+                mine = r["node_shares"].get(victim, {})
+                log(f"  slow {victim} (+{ms} ms, {policy}): led {mine.get('led')}, took part in {mine.get('took_part')} "
+                    f"of the signatures; failovers {r['failovers']}")
 
     # -- connection setup ----------------------------------------------------------------------
 
@@ -1000,6 +1054,11 @@ def main():
     p.add_argument("--rate", type=int, default=None, help="steady stream signatures/s; default: the profile's, else 20")
     p.add_argument("--disrupt-secs", type=int, default=120)
     p.add_argument("--net-delay-ms", type=int, default=50)
+    p.add_argument("--slow-node", type=parse_slow_node, default=parse_slow_node("2500:sticky,2500:rotate,6000:rotate"),
+                   help="the slow-node scenarios (with HOOK_NET_DELAY): added delay in ms and leader policy each")
+    p.add_argument("--sign-leader", choices=("sticky", "rotate"), default=None,
+                   help="where the load generator starts a signature, as the driver's frost.sign-leader "
+                        "(default: sticky; rotate with --driver-deadlines, the driver's default)")
     p.add_argument("--settle-secs", type=int, default=600,
                    help="after a disruption, how long the cluster may take to sign normally again")
     p.add_argument("--max-rss-mib", type=int, default=None, help="default: the profile's, else 256 (the chart's limit)")
@@ -1029,12 +1088,14 @@ def main():
         args.sign_attempt_timeout_secs = args.sign_attempt_timeout_secs or 5.0
         args.attempt_timeout_secs = args.attempt_timeout_secs or 10.0
         args.request_timeout_secs = args.request_timeout_secs or 30.0
+        args.sign_leader = args.sign_leader or "rotate"
     for flag in ("sign_attempt_timeout_secs", "attempt_timeout_secs", "request_timeout_secs"):
         if getattr(args, flag) is not None and getattr(args, flag) <= 0:
             p.error(f"--{flag.replace('_', '-')} must be positive")
     client_policy = {"sign_attempt_timeout_secs": args.sign_attempt_timeout_secs,
                      "attempt_timeout_secs": args.attempt_timeout_secs,
-                     "request_timeout_secs": args.request_timeout_secs}
+                     "request_timeout_secs": args.request_timeout_secs,
+                     "sign_leader": args.sign_leader}
     cluster = K8sCluster(args.namespace, args.env_name, args.load_path, client_policy)
     # A diagnostic installation (k8s-deploy.sh --diagnostic-tmpfs) says so on its namespace; its
     # results are labelled and never a baseline.

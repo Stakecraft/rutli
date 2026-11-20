@@ -136,6 +136,32 @@ Ceremonies keep one attempt with the full timeout, as the driver runs them. The 
 in the result (`client_policy`), and runs under different policies are not compared. Use it when
 the numbers should say what a driver would see, for example in `node-kill` and `partition-isolated`.
 
+`--sign-leader rotate|sticky` sets where a signature starts, as the driver's `frost.sign-leader`;
+`--driver-deadlines` implies `rotate`, the driver's default. Under `sticky`, every call starts at
+the client's leader and moves it on a failover. Under `rotate`, each signature starts at the next
+cosigner in turn that has not failed to serve in the last 60 s (`frost.leader-recovery`), or at
+the sticky leader when none qualifies. Failover then walks the ring as before; a signature never
+moves the sticky leader, a failure does. ECDH and ceremonies stay sticky in both. The driver also
+skips a cosigner that answered another group key for that key; the load generator pins no group
+keys, so it has no such case. The policy is part of `client_policy`.
+
+### Slow node
+
+With `HOOK_NET_DELAY`, `disrupt` also slows one cosigner down without stopping it: the hook adds
+delay on that cosigner's Kubernetes node alone, under the steady stream, with the driver's
+deadlines and each leader policy of `--slow-node` (default `2500:sticky,2500:rotate,6000:rotate`).
+Each scenario records the slow cosigner, the policy and every cosigner's share of the signatures
+it led and took part in (`node_shares`, from `rutli_sign_requests_total` and
+`rutli_sign_journal_entries_total`), and the failovers by code.
+
+- At 2.5 s, under the 5 s sign-attempt deadline, nothing demotes the slow cosigner. Under
+  `rotate` it takes part in about 2/3 of the signatures, against about 1/2 under a healthy sticky
+  leader: the trade-off of rotating.
+- At 6 s, every signature that starts at the slow cosigner fails over after 5 s and demotes it
+  for 60 s. Then one signature in each recovery period tries it again.
+
+Every signature must still succeed.
+
 ## Provider hooks
 
 What only the infrastructure can do — power a machine off, detach a disk, cut the network — goes
