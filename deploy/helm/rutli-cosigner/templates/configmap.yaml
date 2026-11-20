@@ -75,6 +75,9 @@ data:
     {{- end }}
   {{- end }}
 {{- end }}
+{{- $ids := list }}
+{{- range $node := $nodes }}{{ $ids = append $ids (int $node.id) }}{{ end }}
+{{- $pins := include "rutli-cosigner.peerPins" (dict "root" $ "ids" $ids) | fromJson }}
 {{- range $node := $nodes }}
 {{- $id := int $node.id }}
   cosigner-{{ $id }}.json: |
@@ -95,7 +98,7 @@ data:
       "data_dir": "/data",
       "peers": [
         {{- range $k, $peer := $nodes }}
-        { "identifier": {{ int $peer.id }}, "endpoint": "https://{{ $peer.service }}.{{ $.Release.Namespace }}.svc:{{ $port }}"{{ if $hosted.enabled }}, "dist_public_key": {{ $peer.distPublicKey | lower | quote }}{{ end }} }{{ if lt (add $k 1) (len $nodes) }},{{ end }}
+        { "identifier": {{ int $peer.id }}, "endpoint": "https://{{ $peer.service }}.{{ $.Release.Namespace }}.svc:{{ $port }}"{{ if $hosted.enabled }}, "dist_public_key": {{ $peer.distPublicKey | lower | quote }}{{ end }}{{ with index $pins (toString (int $peer.id)) }}, "tls_spki_sha256": {{ . | toJson }}{{ end }} }{{ if lt (add $k 1) (len $nodes) }},{{ end }}
         {{- end }}
       ],
       "tls": {
@@ -103,6 +106,9 @@ data:
         "cert": "/certs/cosigner{{ $id }}.crt",
         {{- if $.Values.tls.allowExpiredCa }}
         "allow_expired_ca": true,
+        {{- end }}
+        {{- if eq (toString $.Values.tls.requirePeerPins) "false" }}
+        "require_peer_pins": false,
         {{- end }}
         "key": "/certs/cosigner{{ $id }}.key"
       },
@@ -127,6 +133,9 @@ data:
     }
 {{- end }}
 {{- else }}
+{{- $ids := list }}
+{{- range $i := until $n }}{{ $ids = append $ids (add $i 1) }}{{ end }}
+{{- $pins := include "rutli-cosigner.peerPins" (dict "root" $ "ids" $ids) | fromJson }}
 {{- range $i := until $n }}
 {{- $id := add $i 1 }}
   cosigner-{{ $id }}.json: |
@@ -148,7 +157,7 @@ data:
       "peers": [
         {{- range $j := until $n }}
         {{- $jid := add $j 1 }}
-        { "identifier": {{ $jid }}, "endpoint": "https://{{ $fullname }}-{{ $j }}.{{ $fullname }}:{{ $port }}" }{{ if lt (add $j 1) $n }},{{ end }}
+        { "identifier": {{ $jid }}, "endpoint": "https://{{ $fullname }}-{{ $j }}.{{ $fullname }}:{{ $port }}"{{ with index $pins (toString $jid) }}, "tls_spki_sha256": {{ . | toJson }}{{ end }} }{{ if lt (add $j 1) $n }},{{ end }}
         {{- end }}
       ],
       "tls": {
@@ -157,6 +166,9 @@ data:
         "key": "/certs/cosigner{{ $id }}.key",
         {{- if $.Values.tls.allowExpiredCa }}
         "allow_expired_ca": true,
+        {{- end }}
+        {{- if eq (toString $.Values.tls.requirePeerPins) "false" }}
+        "require_peer_pins": false,
         {{- end }}
         "domain": {{ $domain | quote }}
       },

@@ -51,7 +51,7 @@ trap cleanup EXIT
 # The example configs keep the defaults: DKG and refresh need a client-signed ceremony intent, and a
 # signature a client-signed signing intent. The smoke drives DKG and Sign through grpcurl, which
 # cannot sign either, so it runs on copies that opt out of both (docker-compose.tls.smoke.yml mounts
-# them).
+# them). Their peers get the TLS key pins of the certificates made below.
 echo "==> Writing the smoke configs (ceremony and signing intents opted out)"
 rm -rf "$SMOKE_CONFIG"
 mkdir -p "$SMOKE_CONFIG"
@@ -69,9 +69,9 @@ for src in sys.argv[2:]:
 PY
 chmod -R a+rX "$SMOKE_CONFIG"
 
-echo "==> Generating mTLS certs"
+echo "==> Generating mTLS certs (and pinning their keys in the smoke configs)"
 rm -rf "$CERTS"
-scripts/gen-frost-certs.sh 3 "$CERTS"
+RUTLI_PIN_CONFIGS="$SMOKE_CONFIG" scripts/gen-frost-certs.sh 3 "$CERTS"
 # Resolve the path now: gen-frost-certs.sh creates the directory 0700 (umask 077), and after the chown
 # below the runner user can no longer enter it.
 CERTS_ABS="$(cd "$CERTS" && pwd)"

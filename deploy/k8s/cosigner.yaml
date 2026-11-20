@@ -14,10 +14,10 @@ kind: NetworkPolicy
 metadata:
   name: rutli-cosigner-ingress
   labels:
-    helm.sh/chart: rutli-cosigner-0.4.0
+    helm.sh/chart: rutli-cosigner-0.4.1
     app.kubernetes.io/name: rutli-cosigner
     app.kubernetes.io/instance: rutli
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "0.4.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: rutli
 spec:
@@ -54,10 +54,10 @@ kind: NetworkPolicy
 metadata:
   name: rutli-cosigner-egress
   labels:
-    helm.sh/chart: rutli-cosigner-0.4.0
+    helm.sh/chart: rutli-cosigner-0.4.1
     app.kubernetes.io/name: rutli-cosigner
     app.kubernetes.io/instance: rutli
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "0.4.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: rutli
 spec:
@@ -87,10 +87,10 @@ kind: PodDisruptionBudget
 metadata:
   name: rutli-cosigner
   labels:
-    helm.sh/chart: rutli-cosigner-0.4.0
+    helm.sh/chart: rutli-cosigner-0.4.1
     app.kubernetes.io/name: rutli-cosigner
     app.kubernetes.io/instance: rutli
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "0.4.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: rutli
 spec:
@@ -111,10 +111,10 @@ kind: ConfigMap
 metadata:
   name: rutli-cosigner-backup
   labels:
-    helm.sh/chart: rutli-cosigner-0.4.0
+    helm.sh/chart: rutli-cosigner-0.4.1
     app.kubernetes.io/name: rutli-cosigner
     app.kubernetes.io/instance: rutli
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "0.4.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: rutli
 data:
@@ -199,10 +199,10 @@ kind: ConfigMap
 metadata:
   name: rutli-cosigner-config
   labels:
-    helm.sh/chart: rutli-cosigner-0.4.0
+    helm.sh/chart: rutli-cosigner-0.4.1
     app.kubernetes.io/name: rutli-cosigner
     app.kubernetes.io/instance: rutli
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "0.4.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: rutli
 data:
@@ -217,9 +217,9 @@ data:
       "threshold": 2,
       "data_dir": "/data",
       "peers": [
-        { "identifier": 1, "endpoint": "https://rutli-node-1.rutli.svc:9101" },
-        { "identifier": 2, "endpoint": "https://rutli-node-2.rutli.svc:9101" },
-        { "identifier": 3, "endpoint": "https://rutli-node-3.rutli.svc:9101" }
+        { "identifier": 1, "endpoint": "https://rutli-node-1.rutli.svc:9101", "tls_spki_sha256": ["0000000000000000000000000000000000000000000000000000000000000001"] },
+        { "identifier": 2, "endpoint": "https://rutli-node-2.rutli.svc:9101", "tls_spki_sha256": ["0000000000000000000000000000000000000000000000000000000000000002"] },
+        { "identifier": 3, "endpoint": "https://rutli-node-3.rutli.svc:9101", "tls_spki_sha256": ["0000000000000000000000000000000000000000000000000000000000000003"] }
       ],
       "tls": {
         "ca_cert": "/certs/ca.crt",
@@ -242,9 +242,9 @@ data:
       "threshold": 2,
       "data_dir": "/data",
       "peers": [
-        { "identifier": 1, "endpoint": "https://rutli-node-1.rutli.svc:9101" },
-        { "identifier": 2, "endpoint": "https://rutli-node-2.rutli.svc:9101" },
-        { "identifier": 3, "endpoint": "https://rutli-node-3.rutli.svc:9101" }
+        { "identifier": 1, "endpoint": "https://rutli-node-1.rutli.svc:9101", "tls_spki_sha256": ["0000000000000000000000000000000000000000000000000000000000000001"] },
+        { "identifier": 2, "endpoint": "https://rutli-node-2.rutli.svc:9101", "tls_spki_sha256": ["0000000000000000000000000000000000000000000000000000000000000002"] },
+        { "identifier": 3, "endpoint": "https://rutli-node-3.rutli.svc:9101", "tls_spki_sha256": ["0000000000000000000000000000000000000000000000000000000000000003"] }
       ],
       "tls": {
         "ca_cert": "/certs/ca.crt",
@@ -267,9 +267,9 @@ data:
       "threshold": 2,
       "data_dir": "/data",
       "peers": [
-        { "identifier": 1, "endpoint": "https://rutli-node-1.rutli.svc:9101" },
-        { "identifier": 2, "endpoint": "https://rutli-node-2.rutli.svc:9101" },
-        { "identifier": 3, "endpoint": "https://rutli-node-3.rutli.svc:9101" }
+        { "identifier": 1, "endpoint": "https://rutli-node-1.rutli.svc:9101", "tls_spki_sha256": ["0000000000000000000000000000000000000000000000000000000000000001"] },
+        { "identifier": 2, "endpoint": "https://rutli-node-2.rutli.svc:9101", "tls_spki_sha256": ["0000000000000000000000000000000000000000000000000000000000000002"] },
+        { "identifier": 3, "endpoint": "https://rutli-node-3.rutli.svc:9101", "tls_spki_sha256": ["0000000000000000000000000000000000000000000000000000000000000003"] }
       ],
       "tls": {
         "ca_cert": "/certs/ca.crt",
@@ -291,10 +291,10 @@ kind: PersistentVolumeClaim
 metadata:
   name: data-rutli-cosigner-n1
   labels:
-    helm.sh/chart: rutli-cosigner-0.4.0
+    helm.sh/chart: rutli-cosigner-0.4.1
     app.kubernetes.io/name: rutli-cosigner
     app.kubernetes.io/instance: rutli
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "0.4.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: rutli
     rutli.io/node: "1"
@@ -313,10 +313,10 @@ kind: PersistentVolumeClaim
 metadata:
   name: rutli-cosigner-backup-n1
   labels:
-    helm.sh/chart: rutli-cosigner-0.4.0
+    helm.sh/chart: rutli-cosigner-0.4.1
     app.kubernetes.io/name: rutli-cosigner
     app.kubernetes.io/instance: rutli
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "0.4.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: rutli
     rutli.io/node: "1"
@@ -335,10 +335,10 @@ kind: PersistentVolumeClaim
 metadata:
   name: data-rutli-cosigner-n2
   labels:
-    helm.sh/chart: rutli-cosigner-0.4.0
+    helm.sh/chart: rutli-cosigner-0.4.1
     app.kubernetes.io/name: rutli-cosigner
     app.kubernetes.io/instance: rutli
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "0.4.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: rutli
     rutli.io/node: "2"
@@ -357,10 +357,10 @@ kind: PersistentVolumeClaim
 metadata:
   name: rutli-cosigner-backup-n2
   labels:
-    helm.sh/chart: rutli-cosigner-0.4.0
+    helm.sh/chart: rutli-cosigner-0.4.1
     app.kubernetes.io/name: rutli-cosigner
     app.kubernetes.io/instance: rutli
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "0.4.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: rutli
     rutli.io/node: "2"
@@ -379,10 +379,10 @@ kind: PersistentVolumeClaim
 metadata:
   name: data-rutli-cosigner-n3
   labels:
-    helm.sh/chart: rutli-cosigner-0.4.0
+    helm.sh/chart: rutli-cosigner-0.4.1
     app.kubernetes.io/name: rutli-cosigner
     app.kubernetes.io/instance: rutli
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "0.4.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: rutli
     rutli.io/node: "3"
@@ -401,10 +401,10 @@ kind: PersistentVolumeClaim
 metadata:
   name: rutli-cosigner-backup-n3
   labels:
-    helm.sh/chart: rutli-cosigner-0.4.0
+    helm.sh/chart: rutli-cosigner-0.4.1
     app.kubernetes.io/name: rutli-cosigner
     app.kubernetes.io/instance: rutli
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "0.4.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: rutli
     rutli.io/node: "3"
@@ -424,10 +424,10 @@ kind: Service
 metadata:
   name: rutli-node-1
   labels:
-    helm.sh/chart: rutli-cosigner-0.4.0
+    helm.sh/chart: rutli-cosigner-0.4.1
     app.kubernetes.io/name: rutli-cosigner
     app.kubernetes.io/instance: rutli
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "0.4.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: rutli
     rutli.io/node: "1"
@@ -452,10 +452,10 @@ kind: Service
 metadata:
   name: rutli-node-2
   labels:
-    helm.sh/chart: rutli-cosigner-0.4.0
+    helm.sh/chart: rutli-cosigner-0.4.1
     app.kubernetes.io/name: rutli-cosigner
     app.kubernetes.io/instance: rutli
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "0.4.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: rutli
     rutli.io/node: "2"
@@ -480,10 +480,10 @@ kind: Service
 metadata:
   name: rutli-node-3
   labels:
-    helm.sh/chart: rutli-cosigner-0.4.0
+    helm.sh/chart: rutli-cosigner-0.4.1
     app.kubernetes.io/name: rutli-cosigner
     app.kubernetes.io/instance: rutli
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "0.4.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: rutli
     rutli.io/node: "3"
@@ -508,10 +508,10 @@ kind: Service
 metadata:
   name: rutli-cosigner
   labels:
-    helm.sh/chart: rutli-cosigner-0.4.0
+    helm.sh/chart: rutli-cosigner-0.4.1
     app.kubernetes.io/name: rutli-cosigner
     app.kubernetes.io/instance: rutli
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "0.4.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: rutli
 spec:
@@ -540,10 +540,10 @@ kind: StatefulSet
 metadata:
   name: rutli-cosigner-n1
   labels:
-    helm.sh/chart: rutli-cosigner-0.4.0
+    helm.sh/chart: rutli-cosigner-0.4.1
     app.kubernetes.io/name: rutli-cosigner
     app.kubernetes.io/instance: rutli
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "0.4.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: rutli
     rutli.io/node: "1"
@@ -597,7 +597,7 @@ spec:
               app.kubernetes.io/instance: rutli
       containers:
         - name: cosigner
-          image: ghcr.io/stakecraft/rutli-cosigner:0.4.0@sha256:6e606d2b00b53a6d70864a15693a697e0052c0e458386c18c22307eba4912d98
+          image: ghcr.io/stakecraft/rutli-cosigner:0.4.1@sha256:16ad19650b580609dfd0b90136cfe07ec65126addcbdbd4c8676da41fd558326
           imagePullPolicy: IfNotPresent
           args: ["--config", "/config/cosigner-1.json"]
           env:
@@ -644,7 +644,7 @@ spec:
         # Copies this node's SEALED key files to this node's destination. Data volume read-only; no
         # seal bundle, no TLS key, no API token: it never holds anything that opens a share.
         - name: backup
-          image: ghcr.io/stakecraft/rutli-cosigner:0.4.0@sha256:6e606d2b00b53a6d70864a15693a697e0052c0e458386c18c22307eba4912d98
+          image: ghcr.io/stakecraft/rutli-cosigner:0.4.1@sha256:16ad19650b580609dfd0b90136cfe07ec65126addcbdbd4c8676da41fd558326
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "/destination/backup-loop.sh"]
           env:
@@ -722,10 +722,10 @@ kind: StatefulSet
 metadata:
   name: rutli-cosigner-n2
   labels:
-    helm.sh/chart: rutli-cosigner-0.4.0
+    helm.sh/chart: rutli-cosigner-0.4.1
     app.kubernetes.io/name: rutli-cosigner
     app.kubernetes.io/instance: rutli
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "0.4.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: rutli
     rutli.io/node: "2"
@@ -779,7 +779,7 @@ spec:
               app.kubernetes.io/instance: rutli
       containers:
         - name: cosigner
-          image: ghcr.io/stakecraft/rutli-cosigner:0.4.0@sha256:6e606d2b00b53a6d70864a15693a697e0052c0e458386c18c22307eba4912d98
+          image: ghcr.io/stakecraft/rutli-cosigner:0.4.1@sha256:16ad19650b580609dfd0b90136cfe07ec65126addcbdbd4c8676da41fd558326
           imagePullPolicy: IfNotPresent
           args: ["--config", "/config/cosigner-2.json"]
           env:
@@ -826,7 +826,7 @@ spec:
         # Copies this node's SEALED key files to this node's destination. Data volume read-only; no
         # seal bundle, no TLS key, no API token: it never holds anything that opens a share.
         - name: backup
-          image: ghcr.io/stakecraft/rutli-cosigner:0.4.0@sha256:6e606d2b00b53a6d70864a15693a697e0052c0e458386c18c22307eba4912d98
+          image: ghcr.io/stakecraft/rutli-cosigner:0.4.1@sha256:16ad19650b580609dfd0b90136cfe07ec65126addcbdbd4c8676da41fd558326
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "/destination/backup-loop.sh"]
           env:
@@ -904,10 +904,10 @@ kind: StatefulSet
 metadata:
   name: rutli-cosigner-n3
   labels:
-    helm.sh/chart: rutli-cosigner-0.4.0
+    helm.sh/chart: rutli-cosigner-0.4.1
     app.kubernetes.io/name: rutli-cosigner
     app.kubernetes.io/instance: rutli
-    app.kubernetes.io/version: "0.4.0"
+    app.kubernetes.io/version: "0.4.1"
     app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: rutli
     rutli.io/node: "3"
@@ -961,7 +961,7 @@ spec:
               app.kubernetes.io/instance: rutli
       containers:
         - name: cosigner
-          image: ghcr.io/stakecraft/rutli-cosigner:0.4.0@sha256:6e606d2b00b53a6d70864a15693a697e0052c0e458386c18c22307eba4912d98
+          image: ghcr.io/stakecraft/rutli-cosigner:0.4.1@sha256:16ad19650b580609dfd0b90136cfe07ec65126addcbdbd4c8676da41fd558326
           imagePullPolicy: IfNotPresent
           args: ["--config", "/config/cosigner-3.json"]
           env:
@@ -1008,7 +1008,7 @@ spec:
         # Copies this node's SEALED key files to this node's destination. Data volume read-only; no
         # seal bundle, no TLS key, no API token: it never holds anything that opens a share.
         - name: backup
-          image: ghcr.io/stakecraft/rutli-cosigner:0.4.0@sha256:6e606d2b00b53a6d70864a15693a697e0052c0e458386c18c22307eba4912d98
+          image: ghcr.io/stakecraft/rutli-cosigner:0.4.1@sha256:16ad19650b580609dfd0b90136cfe07ec65126addcbdbd4c8676da41fd558326
           imagePullPolicy: IfNotPresent
           command: ["/bin/sh", "/destination/backup-loop.sh"]
           env:

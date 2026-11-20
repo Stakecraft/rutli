@@ -137,8 +137,8 @@ for src in sys.argv[2:]:
 PY
 
 echo "==> Generating mTLS certs"
-# RUTLI_PIN_CONFIGS: where gen-frost-certs.sh writes each peer's key pin into the configs, once it
-# supports peer pins; until then the variable is ignored.
+# RUTLI_PIN_CONFIGS: gen-frost-certs.sh writes the TLS key pin of each cosigner certificate it makes
+# into the load-test configs (peers[].tls_spki_sha256, required with TLS) before any node starts.
 RUTLI_PIN_CONFIGS="$PERF_CONFIG" scripts/gen-frost-certs.sh 3 "$CERTS"
 chmod -R a+rX "$PERF_CONFIG"
 # Resolve the path now: the directory is 0700, and after the chown below this user cannot enter it.

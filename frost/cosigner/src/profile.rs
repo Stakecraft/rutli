@@ -79,6 +79,9 @@ pub fn findings(cfg: &Config) -> Vec<Finding> {
         Some(t) if t.allow_expired_ca => req("tls.allow_expired_ca", "true".into(), "false"),
         Some(_) => {}
     }
+    if cfg.tls.as_ref().is_some_and(|t| !t.peer_pins_required()) {
+        req("tls.require_peer_pins", "false (the explicit opt-out)".into(), "on (unset or true): a pin for every peer");
+    }
     match &cfg.share_seal {
         None => req("share_seal", "missing (key files in plaintext)".into(), "share_seal.secret_file (a per-node seal bundle)"),
         Some(s) if s.secret_env.is_some() => req(
@@ -279,6 +282,7 @@ mod tests {
         let breaks: Vec<Break> = vec![
             ("tls", Level::Required, |c| c.tls = None),
             ("tls.allow_expired_ca", Level::Required, |c| c.tls.as_mut().unwrap().allow_expired_ca = true),
+            ("tls.require_peer_pins", Level::Required, |c| c.tls.as_mut().unwrap().require_peer_pins = Some(false)),
             ("share_seal", Level::Required, |c| c.share_seal = None),
             ("share_seal.secret_env", Level::Required, |c| {
                 c.share_seal = Some(ShareSealConfig { secret_env: Some("SEAL".into()), secret_file: None })

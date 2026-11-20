@@ -207,3 +207,41 @@ fn msg_names_which_message_the_driver_signed_and_which_were_signed_out_of_band()
         "{out}"
     );
 }
+
+#[test]
+fn an_empty_or_missing_side_is_nothing_to_compare_not_consistent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (audit, j1, j2) = (tmp.path().join("audit.jsonl"), tmp.path().join("j1"), tmp.path().join("j2"));
+    let a = "a".repeat(32);
+    journal(&j1, 1, &[("frost-ns", PURPOSE_SIGN, &a, T0 + 1500)]);
+
+    // An empty driver audit log next to a journal that holds a signature.
+    std::fs::write(&audit, "").unwrap();
+    let (code, out) = run(&audit, &[&j1], &[]);
+    assert_eq!(code, 3, "{out}");
+    assert!(out.contains("NOTHING TO COMPARE: the driver audit log is empty"), "{out}");
+    assert!(!out.lines().any(|l| l.starts_with("consistent")), "{out}");
+
+    // A missing driver audit log, or a missing journal directory: unreadable (exit 2).
+    let (code, out) = run(&tmp.path().join("nope.jsonl"), &[&j1], &[]);
+    assert_eq!(code, 2, "{out}");
+    driver_log(&audit, &[("sign", sign_detail("frost-ns", &a, true))]);
+    let (code, out) = run(&audit, &[&tmp.path().join("nope")], &[]);
+    assert_eq!(code, 2, "{out}");
+
+    // An empty journal directory (for example the wrong path) next to an audited signature.
+    std::fs::create_dir_all(&j2).unwrap();
+    let (code, out) = run(&audit, &[&j2], &[]);
+    assert_eq!(code, 3, "{out}");
+    assert!(out.contains("every supplied journal is empty"), "{out}");
+    // Among a full one it is a node that signed nothing: a warning; the threshold still applies.
+    let (code, out) = run(&audit, &[&j1, &j2], &[]);
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("WARNING: journal") && out.contains("is empty"), "{out}");
+    let (code, out) = run(&audit, &[&j1, &j2], &["--min-journals", "2"]);
+    assert_eq!(code, 1, "{out}");
+
+    // The full pair passes.
+    let (code, out) = run(&audit, &[&j1], &[]);
+    assert_eq!(code, 0, "{out}");
+}

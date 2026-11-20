@@ -157,7 +157,7 @@ fn a_store_call_parked_on_a_hung_volume_does_not_freeze_health_or_other_keys() {
     rt.block_on(run_dkg(&peers, "b")).unwrap();
 
     let signer1 = signer_svc(&nodes[0], &peers);
-    let peer1 = Arc::new(PeerSvc { node: nodes[0].clone(), allowed_cns: None, peer_ids: None });
+    let peer1 = Arc::new(PeerSvc { node: nodes[0].clone(), allowed_cns: None, peer_ids: None, peer_pins: None });
     let health = |svc: &Arc<SignerSvc>| {
         let svc = svc.clone();
         async move { Signer::health(&*svc, Request::new(HealthRequest {})).await.unwrap().into_inner() }
