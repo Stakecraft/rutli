@@ -25,6 +25,15 @@ All notable changes to Rütli are documented here. Format loosely follows
     `keyfile` and `signingPolicy.signer_pins` before the first apply. The compose examples set
     `lab`. A cosigner older than this release refuses a config with `profile` (unknown key), so
     roll back the chart and the image together.
+- **The driver has the same profile: `profile = production` in `crypto.kms.config`.** It stops the
+  participant at startup while any enforcement setting is off, and names each one. The settings
+  are: backend `frost`; a delegate other than `software`; mTLS without `allow-expired-ca`; at least
+  two endpoints, each with its own `tls-name`; `sign-intents` on; `cluster-id` set; the audit log
+  and the signing journal; an HSM PIN from `pin-env`. A missing approval rule for the namespace key
+  is advisory. `lab` logs the same list. Unset behaves as `lab` with a warning and becomes
+  `production` in 0.6, so an existing driver config starts unchanged until then.
+  `com.stakecraft.rutli.tools.ConfigCheck` lists the findings offline. A driver older than this
+  release refuses a config with `profile` (unknown key).
 
 - **A cosigner refuses to start on a config key it does not know.** Until now only the `keyfile`
   block was parsed strictly. A misspelt key such as `require_intnet`, or `requireIntent` in

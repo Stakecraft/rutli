@@ -15,7 +15,7 @@ keep working. The production profile is one setting that requires all of them:
 | unset | As `lab`, with a warning. **Unset becomes `production` in 0.6.** |
 
 The Helm chart and the manifests in `deploy/k8s/` ship with `production`. The compose examples in
-`deploy/frost/` say `lab` explicitly.
+`deploy/frost/` and the DevNet driver configs in `deploy/devnet/` say `lab` explicitly.
 
 ## `check-config`
 
@@ -69,7 +69,38 @@ The intent rows are not listed separately for a node without TLS: the `tls` row 
 
 Coming with a pending change (it adds its own row when it lands): `signing_policy.refresh_min_interval_secs`
 (a minimum interval between refreshes).
-The driver's rows follow in its own change.
+
+## Driver: what the profile requires
+
+The same setting in the driver's block, `crypto.kms.config`:
+
+```hocon
+crypto.kms.config = { profile = "production", backend = "frost", ... }
+```
+
+A production driver with a required finding stops the participant at startup with a config error
+that names each setting. The offline check reads a Canton config file, or the driver block alone:
+
+```bash
+java -cp rutli-driver.jar com.stakecraft.rutli.tools.ConfigCheck \
+  --config participant.conf --at canton.participants.participant1.crypto.kms.config
+```
+
+Its exit codes are those of `check-config` above.
+
+| Setting | Default | Production requires | Why |
+|---|---|---|---|
+| `backend` | `software` | `frost` | The namespace key on the cosigner cluster, never in the participant. |
+| `frost.delegate` | `hsm` | `hsm`, or `none` with `hosted-keys` | `software` keeps keys in the participant's memory or a local file. |
+| `frost.tls` | optional | present | No mTLS, no intents, no roles. |
+| `frost.tls.allow-expired-ca` | `false` | `false` | An emergency setting for a CA rotation. |
+| `frost.endpoints` | a bare url is allowed | at least 2, each with its own, distinct `tls-name` | A group key is believed on two agreeing answers. Without a per-endpoint name, one cosigner certificate can answer for every address. |
+| `frost.sign-intents` | `on` | `on` | `off` is an emergency switch. |
+| `frost.cluster-id` | learned from the cluster | set | A learned value follows a majority of the cosigners; a set one cannot be steered. |
+| `audit-log-path` | unset | set | The hash-chained audit log `audit-cross-check` compares with the journals. |
+| `signing-journal` | unset | set | The driver's own record of every signature. |
+| `hsm.pin` (with an HSM) | — | not inline; use `hsm.pin-env` | The PIN stays out of the config file. |
+| `approval` | unset | **advisory**: a quorum rule for the namespace key (`<key-prefix>frost-namespace`) | Human approval of namespace-key signatures. A deployment decision, so it is reported and never refuses. |
 
 Placement is not a config setting and the profile cannot check it: each cosigner in its own cluster
 or cloud account is a go-live gate ([audit-prep.md](audit-prep.md#operator-go-live-gates-post-audit)).
