@@ -432,20 +432,34 @@ async fn a_dropped_attempt_leaves_no_session_on_any_member() {
         Arc::new(as_seen_by(&nodes, 4, 0)),
     ];
     let msg = rutli_frost_core::dealer::canton_test_message(b"caller went away");
-    let cut = tokio::time::timeout(std::time::Duration::from_millis(300), sign(&nodes[0], &peers, KEY, &msg)).await;
-    assert!(cut.is_err(), "the sign was still waiting on node 3");
-    // The aborts run as their own task.
-    for _ in 0..50 {
-        if nodes.iter().all(|n| n.pending_sign_count(KEY) == 0) {
-            break;
+    let aborts = || log.lock().unwrap().iter().filter(|(_, c, _)| *c == "abort").count();
+    // Waits on a condition, not on a fixed time: a loaded runner can be slow at every step.
+    async fn eventually(what: &str, mut done: impl FnMut() -> bool) {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !done() {
+            assert!(std::time::Instant::now() < until, "timed out waiting for {what}");
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
+    let signing = {
+        let (node, peers) = (nodes[0].clone(), peers.clone());
+        tokio::spawn(async move { sign(&node, &peers, KEY, &msg).await })
+    };
+    // The caller goes away only once node 3 has opened its session and hangs, so that every
+    // member of the attempt holds a session to abort.
+    eventually("node 3 to open its session", || nodes[2].pending_sign_count(KEY) == 1).await;
+    assert!(!signing.is_finished(), "the sign is still waiting on node 3");
+    signing.abort();
+    assert!(signing.await.unwrap_err().is_cancelled());
+    // The aborts run as their own task.
+    eventually("every member to be aborted", || {
+        aborts() >= 3 && nodes.iter().all(|n| n.pending_sign_count(KEY) == 0)
+    })
+    .await;
     for (i, n) in nodes.iter().enumerate() {
         assert_eq!(n.pending_sign_count(KEY), 0, "node {} holds nothing", i + 1);
     }
-    let aborts = log.lock().unwrap().iter().filter(|(_, c, _)| *c == "abort").count();
-    assert_eq!(aborts, 3, "nodes 1, 2 and the hanging node 3 are each aborted once");
+    assert_eq!(aborts(), 3, "nodes 1, 2 and the hanging node 3 are each aborted once");
 }
 
 /// A member whose round 1 reply never came may still have opened the session: the leader aborts
