@@ -135,7 +135,7 @@ work="$(cd "$work" && pwd)"
 if [ "$cmd" = upgrade ]; then
   echo "==> helm upgrade to $image"
   # shellcheck disable=SC2046 # image_args prints flags meant to be split
-  helm upgrade "$RELEASE" "$CHART" -n "$ns" -f "$work/values.yaml" ${extra_values[@]+"${extra_values[@]}"} $(image_args "$image")
+  helm upgrade "$RELEASE" "$CHART" -n "$ns" -f "$work/values.yaml" -f "$work/certs/peer-pins.json" ${extra_values[@]+"${extra_values[@]}"} $(image_args "$image")
   wait_cosigners
   exit 0
 fi
@@ -160,6 +160,8 @@ kubectl label namespace "$ns" --overwrite rutli.io/client-ns=true pod-security.k
   || echo "WARNING: could not label namespace $ns; it needs rutli.io/client-ns=true for the load generator to reach the cosigners" >&2
 
 echo "==> Certificates (throwaway CA)"
+# gen-frost-certs.sh also writes certs/peer-pins.json, the TLS key pin of each cosigner certificate
+# (Helm value peerPins). The chart refuses to render without them; install and upgrade pass it.
 "$REPO/scripts/gen-frost-certs.sh" 3 "$work/certs"
 label() { k label "$@" rutli-perf/suite=1 --overwrite >/dev/null; }
 k create secret generic rutli-cosigner-ca --from-file=ca.crt="$work/certs/ca.crt"
@@ -272,7 +274,7 @@ EOF
 
 echo "==> Chart"
 # shellcheck disable=SC2046 # image_args prints flags meant to be split
-helm install "$RELEASE" "$CHART" -n "$ns" -f "$work/values.yaml" ${extra_values[@]+"${extra_values[@]}"} $(image_args "$cosigner_image")
+helm install "$RELEASE" "$CHART" -n "$ns" -f "$work/values.yaml" -f "$work/certs/peer-pins.json" ${extra_values[@]+"${extra_values[@]}"} $(image_args "$cosigner_image")
 # The chart keeps its volumes on uninstall: label them, so `uninstall` deletes these and no others.
 for i in 1 2 3; do label pvc "data-$RELEASE-n$i"; done
 wait_cosigners
