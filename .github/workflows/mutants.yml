@@ -35,14 +35,13 @@ env:
 jobs:
   mutants:
     name: cargo-mutants (${{ matrix.module }})
-    # Same runner selection as ci.yml: a fork's or Dependabot's pull request never reaches the
-    # self-hosted runners.
+    # Same runner selection as ci.yml: GitHub-hosted ubuntu-latest unless vars.CI_RUNNER is given;
+    # a fork's or Dependabot's pull request is always hosted. The largest modules (intent, journal,
+    # seal) take about two hours with --jobs 3 on a 4-vCPU hosted runner; 240 minutes is the cap.
     runs-on: ${{ github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) && vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 240
     strategy:
       fail-fast: false
-      # Two self-hosted runners.
-      max-parallel: 2
       # One job per module; scripts/mutants.sh maps each to its file and the tests that reach it.
       # A pull request runs only the smallest module.
       matrix:
@@ -140,7 +139,7 @@ jobs:
     permissions:
       issues: write
     steps:
-      # curl + jq rather than `gh`: the self-hosted runner image ships jq, not the GitHub CLI.
+      # curl + jq rather than `gh`: works on a self-hosted runner image too, which ships jq but not the GitHub CLI.
       - name: Open or update the issue
         env:
           GH_TOKEN: ${{ github.token }}

@@ -34,6 +34,7 @@ use crate::pb;
 use crate::journal::{JournalEntry, Limits, SignJournal};
 use crate::node::Round1Ctx;
 use crate::{DaemonError, Result};
+use rutli_frost_core::session::SessionOwner;
 
 /// Whether `now_ms` falls in another wall-clock minute than the last call that returned true for
 /// `last` (which holds that minute): a warning logged only then is logged at most once a minute.
@@ -53,6 +54,8 @@ pub enum SessionAuth {
     NoIntent,
 }
 
+type Remembered = (Instant, SessionAuth, SessionOwner);
+
 /// One node's signing policy and sign journal.
 pub struct SignGuard {
     verifier: Arc<IntentVerifier>,
@@ -61,9 +64,12 @@ pub struct SignGuard {
     require_ceremony_intent: bool,
     /// The sign test at this node, as a peer: the operator role must not loop it on any node.
     sign_test_limiter: crate::ratelimit::DecryptRateLimiter,
-    /// (key id, session id) -> what authorized it. Keyed by both: a session id is the leader's
-    /// choice, so the same id opened for another key must never stand in for this one.
-    sessions: Mutex<HashMap<(String, String), (Instant, SessionAuth)>>,
+    /// (key id, session id) -> when, what authorized it, and who opened it. Keyed by both: a
+    /// session id is the leader's choice, so the same id opened for another key must never stand
+    /// in for this one. The opener is kept here as well as with the session's nonces, so a round 2
+    /// from another caller cannot take the authorization even in the moment between a round 1's
+    /// nonces and its authorization being stored.
+    sessions: Mutex<HashMap<(String, String), Remembered>>,
     last_absent_warning: AtomicU64,
     last_ceremony_absent_warning: AtomicU64,
 }
@@ -74,9 +80,10 @@ impl SignGuard {
         journal: SignJournal,
         sign_test_per_min: u32,
     ) -> Self {
-        let require_intent = verifier.policy().require_intent;
-        // Unset = on, the default of a node that verifies intents; the daemon settles it for a
-        // plaintext node ([`crate::config::SigningPolicyConfig::ceremony_intent_required`]).
+        // Both switches: unset = on, the default of a node that verifies intents; the daemon
+        // settles them for a plaintext node ([`crate::config::SigningPolicyConfig::intent_required`],
+        // [`crate::config::SigningPolicyConfig::ceremony_intent_required`]).
+        let require_intent = verifier.policy().require_intent.unwrap_or(true);
         let require_ceremony_intent = verifier.policy().require_ceremony_intent.unwrap_or(true);
         Self {
             verifier,
@@ -194,29 +201,62 @@ impl SignGuard {
             tracing::warn!(
                 key_id,
                 "sign round without a signing intent accepted (signing_policy.require_intent is off) — \
-                 expected only until the driver runs a release with intents; then turn require_intent on"
+                 expected only while the driver does not sign intents; then remove the opt-out"
             );
         }
         Ok(SessionAuth::NoIntent)
     }
 
-    /// Remember what authorized `session_id` of `key_id` (after its round 1 succeeded).
-    pub fn remember(&self, key_id: &str, session_id: &str, auth: SessionAuth) {
+    /// Remember what authorized `session_id` of `key_id` and who opened it (after its round 1
+    /// succeeded).
+    pub fn remember(&self, key_id: &str, session_id: &str, auth: SessionAuth, owner: SessionOwner) {
         let mut s = self.sessions();
-        s.retain(|_, (started, _)| started.elapsed() < rutli_frost_core::session::PENDING_TTL);
-        s.insert((key_id.to_string(), session_id.to_string()), (Instant::now(), auth));
+        s.retain(|_, (started, _, _)| started.elapsed() < rutli_frost_core::session::PENDING_TTL);
+        s.insert((key_id.to_string(), session_id.to_string()), (Instant::now(), auth, owner));
     }
 
-    /// What authorized `session_id` of `key_id`, removed (round 2 runs once).
-    pub fn take(&self, key_id: &str, session_id: &str) -> Option<SessionAuth> {
-        self.sessions().remove(&(key_id.to_string(), session_id.to_string())).map(|(_, a)| a)
+    /// Whether an authorization for `session_id` of `key_id` is held (for inspection; nothing is
+    /// taken).
+    pub fn holds(&self, key_id: &str, session_id: &str) -> bool {
+        self.sessions().contains_key(&(key_id.to_string(), session_id.to_string()))
     }
 
-    pub fn forget(&self, key_id: &str, session_id: &str) {
-        self.sessions().remove(&(key_id.to_string(), session_id.to_string()));
+    /// What authorized `session_id` of `key_id`, removed (round 2 runs once), for a round 2 from
+    /// `caller`: `Err(owner)`, and the authorization stays, when another caller opened the session.
+    pub fn take_as(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        caller: &SessionOwner,
+    ) -> std::result::Result<Option<SessionAuth>, SessionOwner> {
+        let mut s = self.sessions();
+        let k = (key_id.to_string(), session_id.to_string());
+        match s.get(&k) {
+            Some((_, _, owner)) if owner != caller => Err(owner.clone()),
+            _ => Ok(s.remove(&k).map(|(_, a, _)| a)),
+        }
     }
 
-    fn sessions(&self) -> std::sync::MutexGuard<'_, HashMap<(String, String), (Instant, SessionAuth)>> {
+    /// Put back an authorization [`SignGuard::take_as`] took for `caller`, when the round 2 that
+    /// took it was then refused before the session's nonces were taken. Never replaces an entry
+    /// stored since (a newer round 1 under the same id).
+    pub fn restore(&self, key_id: &str, session_id: &str, auth: SessionAuth, caller: SessionOwner) {
+        self.sessions()
+            .entry((key_id.to_string(), session_id.to_string()))
+            .or_insert_with(|| (Instant::now(), auth, caller));
+    }
+
+    /// Drop the authorization of `session_id` of `key_id` for an abort by `caller`: kept when
+    /// another caller opened the session.
+    pub fn forget_as(&self, key_id: &str, session_id: &str, caller: &SessionOwner) {
+        let mut s = self.sessions();
+        let k = (key_id.to_string(), session_id.to_string());
+        if s.get(&k).is_some_and(|(_, _, owner)| owner == caller) {
+            s.remove(&k);
+        }
+    }
+
+    fn sessions(&self) -> std::sync::MutexGuard<'_, HashMap<(String, String), Remembered>> {
         // A panicking holder leaves at worst a stale entry; dropping them all fails closed (those
         // sessions are refused at round 2 when an intent is required, else signed without one).
         self.sessions.lock().unwrap_or_else(|p| {
@@ -299,7 +339,7 @@ mod tests {
 
     /// A guard with no CA (the paths tested here never verify an intent) over a journal in `dir`.
     fn guard(dir: &std::path::Path, require_intent: bool) -> SignGuard {
-        let policy = SigningPolicyConfig { require_intent, ..Default::default() };
+        let policy = SigningPolicyConfig { require_intent: Some(require_intent), ..Default::default() };
         let verifier = IntentVerifier::new(Vec::new(), false, "c".into(), Vec::<String>::new(), &policy).unwrap();
         let journal = SignJournal::open(dir.join("journal"), 1, Retention { days: 90, max_bytes: 1 << 20 }).unwrap();
         SignGuard::new(Arc::new(verifier), journal, 10)
@@ -332,16 +372,22 @@ mod tests {
     fn remembered_sessions_are_kept_per_key_until_taken_or_forgotten() {
         let tmp = tempfile::tempdir().unwrap();
         let g = guard(tmp.path(), false);
-        g.remember(KEY, "s1", SessionAuth::NoIntent);
-        g.remember(KEY, "s2", SessionAuth::SignTest);
-        g.remember(KEY, "s3", SessionAuth::NoIntent);
+        let me = SessionOwner::Local;
+        let other = SessionOwner::Peer("cosigner2".into());
+        g.remember(KEY, "s1", SessionAuth::NoIntent, me.clone());
+        g.remember(KEY, "s2", SessionAuth::SignTest, me.clone());
+        g.remember(KEY, "s3", SessionAuth::NoIntent, me.clone());
         // A later `remember` sweeps only entries past the TTL, never live ones.
-        assert_eq!(g.take(KEY, "s1"), Some(SessionAuth::NoIntent));
-        assert_eq!(g.take(KEY, "s1"), None, "round 2 runs once");
-        assert_eq!(g.take("frost-other", "s2"), None, "a session id never stands in for another key's");
-        g.forget(KEY, "s2");
-        assert_eq!(g.take(KEY, "s2"), None);
-        assert_eq!(g.take(KEY, "s3"), Some(SessionAuth::NoIntent));
+        assert_eq!(g.take_as(KEY, "s1", &me), Ok(Some(SessionAuth::NoIntent)));
+        assert_eq!(g.take_as(KEY, "s1", &me), Ok(None), "round 2 runs once");
+        assert_eq!(g.take_as("frost-other", "s2", &me), Ok(None), "a session id never stands in for another key's");
+        // Another caller can neither take nor drop a session it did not open.
+        assert_eq!(g.take_as(KEY, "s2", &other), Err(me.clone()));
+        g.forget_as(KEY, "s2", &other);
+        assert!(g.holds(KEY, "s2"));
+        g.forget_as(KEY, "s2", &me);
+        assert!(!g.holds(KEY, "s2"));
+        assert_eq!(g.take_as(KEY, "s3", &me), Ok(Some(SessionAuth::NoIntent)));
     }
 
     #[test]

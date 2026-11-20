@@ -23,14 +23,14 @@ run shares (timeouts, exclusions) in `frost/.cargo/mutants.toml`.
 ## Running it
 
 The workflow `.github/workflows/mutants.yml` runs every Monday at 06:00 UTC and on demand (Actions →
-Mutation testing → Run workflow): one job per module, two at a time, each time-boxed to four hours.
+Mutation testing → Run workflow): one job per module, all in parallel on GitHub-hosted runners, each time-boxed to four hours.
 It is a report: missed mutants do not fail it. It fails only when cargo-mutants cannot do its job —
 the unmutated tests already fail (exit code 4), a usage error (1) or an internal error (70). A
 scheduled run that fails that way (or runs out of time, or produces no results) opens an issue
 titled "Mutation testing: the scheduled run failed" (labels `type:test`, `prio:p1`), or comments on
 the one already open. A pull request that changes this setup (the workflow, `scripts/mutants.sh`,
 `scripts/mutants-summary.py`, `frost/.cargo/mutants.toml`) runs only the `nonce_store` module, as a
-check of the plumbing. A full run takes a few hours on two runners; each module runs `--jobs 3`.
+check of the plumbing. The largest modules take about two hours each; each module runs `--jobs 3`.
 
 Locally, from the repository root, with cargo-mutants installed (`cargo install --locked
 cargo-mutants`, the version the workflow pins):
