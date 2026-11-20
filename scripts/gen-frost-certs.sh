@@ -28,6 +28,11 @@
 #   RUTLI_CA_DAYS=<n>   Validity of a NEW CA in days (default 825). Leaves are always 825 days.
 #   RUTLI_CERTS="..."   Space-separated subset of the certs to issue, among `cosigner1..N driver
 #                       operator refresher` (default: all of them).
+#   RUTLI_EXTRA_CLIENTS="..."
+#                       Space-separated names of more client certs (CN = the name, clientAuth), e.g.
+#                       a second tenant's driver on a shared test cluster (`driver-b`). Lowercase
+#                       letters, digits and `-`, starting with a letter, at most 32; never a name
+#                       of the list above.
 #   RUTLI_FORCE=1       Overwrite what is already in OUT_DIR: a ca.key or a key-less ca.crt when
 #                       minting a new CA, a different ca.crt when reusing one, or any leaf key
 #                       about to be issued. Without it the script refuses all of these.
@@ -90,6 +95,11 @@ for c in $CERTS; do
 done
 # shellcheck disable=SC2116,SC2086  # the echo collapses whitespace in the cert list
 [ -n "$(echo $CERTS)" ] || die "RUTLI_CERTS is empty"
+EXTRA_CLIENTS="${RUTLI_EXTRA_CLIENTS:-}"
+for c in $EXTRA_CLIENTS; do
+  [[ "$c" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || die "RUTLI_EXTRA_CLIENTS: '$c' is not [a-z][a-z0-9-]{0,31}"
+  case " $ALL_CERTS " in *" $c "*) die "RUTLI_EXTRA_CLIENTS: '$c' is one of the standard certs" ;; esac
+done
 
 if [ -n "$PIN_CONFIGS" ]; then
   [ -d "$PIN_CONFIGS" ] || die "RUTLI_PIN_CONFIGS: no directory $PIN_CONFIGS"
@@ -204,6 +214,11 @@ if wanted refresher; then
   echo "Generating refresher client cert..."
   gen_cert "refresher" "subjectAltName=DNS:refresher,DNS:localhost,IP:127.0.0.1" "clientAuth"
 fi
+
+for c in $EXTRA_CLIENTS; do
+  echo "Generating client cert $c..."
+  gen_cert "$c" "subjectAltName=DNS:$c,DNS:localhost,IP:127.0.0.1" "clientAuth"
+done
 
 rm -f ca.srl
 # Certificates are public; keys stay 0600 (umask 077 above).

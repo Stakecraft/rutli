@@ -258,6 +258,37 @@ class RealLoad(unittest.TestCase):
         self.assertIsNone(h[0]["factor"])
 
 
+class KeyClasses(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+    def suite(self, profile):
+        import cluster
+        s = cluster.Suite.__new__(cluster.Suite)
+        s.profile = profile
+        return s
+
+    def test_without_tenants_one_driver_on_the_suite_keys(self):
+        s = self.suite({})
+        self.assertEqual(s.tenants(), [{"name": "a", "cn": "driver", "prefix": "perf-"}])
+        self.assertEqual(s.class_keys(s.tenants()[0]), {})
+
+    def test_the_production_profile_names_what_k8s_deploy_limits(self):
+        import json
+        here = os.path.dirname(os.path.abspath(__file__))
+        with open(os.path.join(here, "profiles", "production.json")) as f:
+            s = self.suite(json.load(f))
+        keys = [s.class_keys(t) for t in s.tenants()]
+        self.assertEqual(keys, [{"namespace": "perf-frost-namespace", "hosted": "perf-rutli-enc"},
+                                {"namespace": "tenantb-frost-namespace", "hosted": "tenantb-rutli-enc"}])
+        with open(os.path.join(here, "k8s-deploy.sh")) as f:
+            deploy = f.read()
+        # The namespace rate limits and the ACLs of the install match the profile's names.
+        for t, k in zip(s.tenants(), keys):
+            self.assertIn(f"key_id_prefix: {k['namespace']}, per_min: 10, per_day: 200", deploy)
+            self.assertIn(f'{t["cn"]}: ["{t["prefix"]}"', deploy)
+
+
 class RigOrCluster(unittest.TestCase):
     def test_only_a_cluster_answer_is_the_clusters_failure(self):
         sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))

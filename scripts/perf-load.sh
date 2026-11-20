@@ -131,6 +131,8 @@ for src in sys.argv[2:]:
     policy["sign_rate_limit_per_min"] = 0
     policy["sign_rate_limit_per_day"] = 0
     policy["rate_limits"] = [{"key_id_prefix": "perf-limited", "per_min": 120, "per_day": 100000}]
+    # limit-ceremony refreshes with the refresher's certificate, as a refresh job does.
+    cfg["refresh_allowlist"] = ["refresher"]
     with open(os.path.join(out, os.path.basename(src)), "w") as f:
         json.dump(cfg, f, indent=2)
         f.write("\n")

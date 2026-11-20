@@ -109,7 +109,9 @@ class ComposeCluster:
             args += ["--metrics", f"{node}=http://{node}:9200/metrics"]
         return args
 
-    def loadgen_argv(self, args, timeout_secs):
+    def loadgen_argv(self, args, timeout_secs, cn=None, flags=None):
+        """`cn`: the client certificate (certs/<cn>.crt), the driver's by default. `flags`: more
+        load generator flags (a deadline policy)."""
         # The generator holds a connection per client and cosigner: far above Docker's default
         # descriptor limit in the limit-sessions scenario. The cosigners keep the default.
         argv = ["docker", "run", "--rm", "--label", "rutli-perf=loadgen", "--network", self.network,
@@ -117,8 +119,9 @@ class ComposeCluster:
         if self.uid:
             argv += ["--user", self.uid]
         argv += ["-v", f"{self.certs}:/certs:ro", "--entrypoint", "rutli-loadgen", self.image]
-        argv += ["--ca", "/certs/ca.crt", "--cert", "/certs/driver.crt", "--key", "/certs/driver.key"]
-        argv += ["--timeout-secs", str(timeout_secs)]
+        cn = cn or "driver"
+        argv += ["--ca", "/certs/ca.crt", "--cert", f"/certs/{cn}.crt", "--key", f"/certs/{cn}.key"]
+        argv += ["--timeout-secs", str(timeout_secs)] + list(flags or [])
         return argv + self._targets() + args
 
     @staticmethod
@@ -150,8 +153,10 @@ class Runner:
 
     # -- the load generator -------------------------------------------------------------------
 
-    def loadgen_start(self, args, timeout_secs=30):
-        argv = self.cluster.loadgen_argv(args, timeout_secs)
+    def loadgen_start(self, args, timeout_secs=30, cn=None, flags=None):
+        """`cn`: run as that client certificate (default the driver's); `flags`: a deadline policy
+        that replaces the run's own."""
+        argv = self.cluster.loadgen_argv(args, timeout_secs, cn=cn, flags=flags)
         return subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def loadgen_finish(self, proc, wall_timeout):
@@ -177,8 +182,8 @@ class Runner:
         except json.JSONDecodeError as e:
             return {"failed": f"the load generator's output is not JSON: {e}", "stdout": out[-2000:], "rig": True}
 
-    def loadgen(self, args, timeout_secs=30, wall_timeout=600):
-        return self.loadgen_finish(self.loadgen_start(args, timeout_secs), wall_timeout)
+    def loadgen(self, args, timeout_secs=30, wall_timeout=600, cn=None, flags=None):
+        return self.loadgen_finish(self.loadgen_start(args, timeout_secs, cn=cn, flags=flags), wall_timeout)
 
     def wait_healthy(self, within=120):
         return "failed" not in self.loadgen(["wait", "--within-secs", str(within)], wall_timeout=within + 60)
@@ -491,8 +496,11 @@ class Runner:
                 self.loadgen(["dkg", "--prefix", f"{storm}-same", "--same-key", "--retry-aborted", "6",
                               "--name", "dkg-same-key", "--count", "10", "--clients", "10"],
                              timeout_secs=120, wall_timeout=900),
-                # A refresh right after a refresh: allowed or refused, never a broken key.
+                # A refresh right after a refresh: allowed or refused, never a broken key. With the
+                # refresher's certificate, as the refresh job runs it: a production cluster does not
+                # let the driver refresh (signing_policy.signer_may_refresh false).
                 self.loadgen(["refresh", "--key", KEY_SECOND, "--name", "refresh-twice", "--count", "2", "--clients", "1"],
+                             cn="refresher",
                              timeout_secs=120, wall_timeout=900),
             ]
 
