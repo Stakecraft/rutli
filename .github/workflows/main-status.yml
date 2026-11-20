@@ -10,6 +10,8 @@
 #
 # The list of watched workflows is WATCHED in scripts/main-status.py; a unit test checks that each
 # of them exists and pushes to main without a path filter. Add the quality workflow there when it lands.
+# A cancelled run, or a watched workflow that never starts on the tip, keeps the issue open until the
+# next push; re-run the workflow to settle it.
 #
 # workflow_run workflows run with the repository's write token on the default branch's code: this
 # one checks out main (never the commit under test), runs nothing from it, and only reads run

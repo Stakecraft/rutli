@@ -42,7 +42,7 @@ def classify(runs, watched=WATCHED):
     """
     latest = {}
     for r in runs:
-        if r.get("event") != "push" or r.get("name") not in watched:
+        if r.get("event") != "push" or r.get("head_branch") != "main" or r.get("name") not in watched:
             continue
         cur = latest.get(r["name"])
         if cur is None or (r["run_number"], r.get("run_attempt", 1)) > (cur["run_number"], cur.get("run_attempt", 1)):
@@ -71,7 +71,7 @@ def failed(states):
 
 def render_failure(sha, subject, failures, repo):
     """Markdown body: the commit, the failing workflows, their failing jobs and links."""
-    lines = [f"First failing commit seen: [`{sha[:12]}`](https://github.com/{repo}/commit/{sha}) {subject}", ""]
+    lines = [f"First failing commit seen: [`{sha[:12]}`](https://github.com/{repo}/commit/{sha}) `{subject}`", ""]
     for name, run, jobs in failures:
         lines.append(f"- **{name}**: [run {run['id']}]({run['html_url']}) ({run.get('conclusion')})")
         for j in jobs:
@@ -112,8 +112,9 @@ class Gh:
         return self.api(f"repos/{self.repo}/commits/{sha}")["commit"]["message"].split("\n", 1)[0]
 
     def open_issue(self):
+        # No --search: the search index lags, a plain listing does not (a second run must see the issue).
         out = json.loads(self._run(["issue", "list", "--repo", self.repo, "--state", "open", "--label", LABELS[0],
-                                    "--search", f'"{TITLE}" in:title', "--json", "number,title,body,comments"]))
+                                    "--limit", "100", "--json", "number,title,body,comments"]))
         out = [i for i in out if i["title"] == TITLE]
         return out[0] if out else None
 
@@ -136,13 +137,19 @@ def handle(gh, event_sha, repo):
     states = classify(gh.runs_for(event_sha))
     red = False
     fails = failed(states)
+    tip = gh.tip()
+    tip_states = states if tip == event_sha else classify(gh.runs_for(tip))
+    if fails and tip != event_sha and all_green(tip_states) and not gh.open_issue():
+        # An older commit finishing red after the tip is green: nothing would ever close the issue.
+        log.append(f"{event_sha[:12]} is red but the tip {tip[:12]} is green: no issue opened")
+        fails = []
     if fails:
         red = True
         issue = gh.open_issue()
         seen = ""
         if issue:
             seen = (issue.get("body") or "") + "\n".join(c.get("body", "") for c in issue.get("comments", []))
-        new = [(n, r) for n, r in fails if r["html_url"] not in seen]
+        new = [(n, r) for n, r in fails if f"({r['html_url']})" not in seen]
         if new:
             failures = [(n, r, [j for j in gh.jobs(r["id"]) if j.get("conclusion") in RED]) for n, r in new]
             subject = gh.commit_subject(event_sha)
@@ -157,8 +164,6 @@ def handle(gh, event_sha, repo):
     else:
         log.append("no red workflow on " + event_sha[:12])
 
-    tip = gh.tip()
-    tip_states = states if tip == event_sha else classify(gh.runs_for(tip))
     if all_green(tip_states):
         issue = gh.open_issue()
         if issue:

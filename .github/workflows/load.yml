@@ -77,9 +77,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          id="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
-            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/load.yml/runs?branch=main&status=success&per_page=50" \
-            | jq -r '[.workflow_runs[] | select(.event == "schedule" or .event == "workflow_dispatch")][0].id // empty')" || id=""
+          # Only timed runs (schedule, manual) are baselines: a push to main runs on a hosted runner.
+          # One query per event, so any number of pushes since cannot hide the last timed run.
+          id=""
+          for ev in schedule workflow_dispatch; do
+            run="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/load.yml/runs?branch=main&status=success&event=${ev}&per_page=1" \
+              | jq -r '.workflow_runs[0] | select(. != null) | "\(.created_at) \(.id)"')" || run=""
+            if [ -n "$run" ]; then printf '%s\n' "$run"; fi
+          done > "${RUNNER_TEMP}/previous.txt"
+          id="$(sort -r "${RUNNER_TEMP}/previous.txt" | head -n 1 | cut -d' ' -f2)"
           echo "run_id=${id}" >> "$GITHUB_OUTPUT"
           echo "previous green run: ${id:-none}"
 

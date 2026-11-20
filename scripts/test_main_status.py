@@ -16,10 +16,10 @@ SHA = "a" * 40
 TIP = "b" * 40
 
 
-def run(name, conclusion="success", status="completed", n=1, attempt=1, event="push", id_=None):
+def run(name, conclusion="success", status="completed", n=1, attempt=1, event="push", id_=None, branch="main"):
     rid = id_ or (abs(hash((name, n, attempt))) % 10**6)
     return {"id": rid, "name": name, "event": event, "status": status, "conclusion": conclusion,
-            "run_number": n, "run_attempt": attempt, "html_url": f"https://x/runs/{rid}"}
+            "run_number": n, "run_attempt": attempt, "head_branch": branch, "html_url": f"https://x/runs/{rid}"}
 
 
 def all_runs(**over):
@@ -90,6 +90,10 @@ class ClassifyTests(unittest.TestCase):
         runs = all_runs(CI=run("CI", "failure", n=5, attempt=1)) + [run("CI", "success", n=5, attempt=2)]
         self.assertEqual(ms.classify(runs)["CI"][0], "green")
 
+    def test_tag_runs_ignored(self):
+        runs = all_runs() + [run("E2E ceremonies", "failure", n=99, branch="v0.5.0-rc.1")]
+        self.assertTrue(ms.all_green(ms.classify(runs)))
+
     def test_other_events_and_workflows_ignored(self):
         runs = all_runs() + [run("CI", "failure", n=99, event="pull_request"), run("Unrelated", "failure", n=3)]
         self.assertTrue(ms.all_green(ms.classify(runs)))
@@ -97,7 +101,7 @@ class ClassifyTests(unittest.TestCase):
 
 class HandleTests(unittest.TestCase):
     def test_red_opens_one_issue_with_commit_job_and_link(self):
-        gh = FakeGh(all_runs(E2E=None) if False else all_runs(**{"E2E ceremonies": run("E2E ceremonies", "failure", id_=42)}))
+        gh = FakeGh(all_runs(**{"E2E ceremonies": run("E2E ceremonies", "failure", id_=42)}))
         red, log = ms.handle(gh, SHA, REPO)
         self.assertTrue(red)
         self.assertEqual(len(gh.created), 1)
@@ -130,6 +134,17 @@ class HandleTests(unittest.TestCase):
         red, log = ms.handle(gh, SHA, REPO)  # an older commit finishing red: comment, and the green tip closes
         self.assertTrue(red)
         self.assertEqual(gh.closed, [7])
+
+    def test_old_commit_red_after_green_tip_opens_nothing(self):
+        gh = FakeGh({SHA: all_runs(CI=run("CI", "failure", id_=42)), TIP: all_runs()}, tip=TIP)
+        ms.handle(gh, SHA, REPO)
+        self.assertEqual(gh.created, [])
+
+    def test_run_url_match_is_exact(self):
+        issue = {"number": 7, "title": ms.TITLE, "body": "[run 1](https://x/runs/1234)", "comments": []}
+        gh = FakeGh(all_runs(CI=run("CI", "failure", id_=123)), issue=issue)
+        ms.handle(gh, SHA, REPO)
+        self.assertEqual(len(gh.comments), 1)
 
     def test_green_without_issue_does_nothing(self):
         gh = FakeGh(all_runs())
