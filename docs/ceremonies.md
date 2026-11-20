@@ -289,6 +289,30 @@ epochs existed, or installed by the split ceremony, reads as 0. `verify-key` rep
 epoch and flags a mix. A refresh is refused unless every node reports the same epoch and PKP
 digest (`Peer.KeyEpoch`).
 
+### Proving an epoch
+
+A committed refresh shows that every node staged and voted for one outcome, and each node checked that
+the new verifying shares interpolate to the group key. It does not show that the shares **sign
+together**. `verify-key --sign-test` does: every `t`-subset of the roster signs, every signature
+verifies under the group key, and every node reports the same epoch and sharing. It runs from a
+workstation, so no node knows its result. To record it, run on **every** node, beside its daemon:
+
+```sh
+rutli-cosigner --config C1 verify-key --key-id "$KEY" --expect-fingerprint "$FP" --sign-test --json > verify.json
+rutli-cosigner --config C<i> keyfile prove --key-id "$KEY" --epoch "$EPOCH" --report verify.json
+```
+
+`keyfile prove` checks the report against this node's own live key and writes the clear marker
+`keys/.proven/<key>.<epoch>.json` (no lock, nothing on the signing path touched). It refuses when the
+report is not clean, does not cover the whole roster and every quorum, names another epoch, group key
+or sharing than this node's live ones, or when this node's live epoch is not the one named: a node
+that missed the refresh cannot stamp it. **The report is the operator's statement**: the node cannot
+check who produced it, so the marker records the report's SHA-256 and this node's clock. A marker
+dated in the future is ignored. Stamping again keeps the first time. Backup retention keeps the
+archives of older epochs until the newer epoch is proven and old enough (`docs/disaster-recovery.md`).
+`rutli_key_epoch_proven{key}` is `1` while the live epoch has a marker, and `RutliKeyEpochUnproven`
+fires when it has been `0` for three days.
+
 ### Signing across epochs
 
 Shares of different sharings never combine, so signing is epoch-aware (audit H1, M1):

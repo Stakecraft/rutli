@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Arc;
 
+use sha2::Digest as _;
+
 use rutli_cosigner::hosted::{HostedKey, HostedSpec};
 use rutli_cosigner::keystore::KeyStore;
 use rutli_cosigner::seal::{KeyFileBinding, Sealer};
@@ -125,4 +127,76 @@ fn migrate_downgrade_and_status_rewrite_every_key_file_under_the_instance_lock()
     let locked = cosigner(&cfg, &["keyfile", "migrate"]);
     assert!(!locked.status.success(), "{}", text(&locked));
     assert_eq!(version_of(&a), Some(1));
+}
+
+/// A dealt 2-of-3 share for node 1 at `epoch`, and the report `verify-key --sign-test --json` would
+/// print for it when the whole cluster agrees.
+fn share_and_report(key_id: &str, epoch: u64) -> (rutli_cosigner::keystore::Share, serde_json::Value) {
+    let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&[5u8; 32], &[1, 2, 3], 2).unwrap();
+    let share = rutli_cosigner::keystore::Share {
+        key_package: frost_ed25519::keys::KeyPackage::try_from(shares[0].clone()).unwrap(),
+        public_key_package: pkp,
+        origin: None,
+        epoch,
+        key_id: key_id.into(),
+    };
+    let digest = hex::encode(share.pkp_digest().unwrap());
+    let group = hex::encode(rutli_frost_core::dkg::group_verifying_key_bytes(&share.public_key_package).unwrap());
+    let report = serde_json::json!({
+        "key_id": key_id, "ok": true, "problems": [], "group_verifying_key": group,
+        "pkp_digest": digest, "threshold": 2, "epoch": epoch,
+        "nodes": (1..=3).map(|i| serde_json::json!({
+            "identifier": i, "endpoint": "x", "present": true, "pkp_digest": digest,
+            "own_share_in_package": true, "epoch": epoch, "stale": false,
+        })).collect::<Vec<_>>(),
+        "sign_test": [
+            {"leader": 1, "signers": [1, 2], "ok": true},
+            {"leader": 2, "signers": [1, 3], "ok": true},
+            {"leader": 3, "signers": [2, 3], "ok": true},
+        ],
+    });
+    (share, report)
+}
+
+#[test]
+fn keyfile_prove_writes_a_marker_only_for_this_nodes_live_epoch_and_sharing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = config(tmp.path(), 2);
+    let (share, report) = share_and_report("frost-prove", 4);
+    let ks = sealed_store(tmp.path(), 2);
+    ks.create("frost-prove", &share).unwrap();
+    // The header digest the gauges and the retention compare is the share's PKP digest.
+    let file = std::fs::read(keys(tmp.path()).join("frost-prove.json")).unwrap();
+    assert_eq!(rutli_cosigner::seal::header_of(&file).unwrap().digest, hex::encode(share.pkp_digest().unwrap()));
+
+    let report_path = tmp.path().join("report.json");
+    std::fs::write(&report_path, report.to_string()).unwrap();
+    let r = report_path.to_str().unwrap();
+    let marker = keys(tmp.path()).join(".proven").join("frost-prove.4.json");
+
+    // Another epoch than this node's live one: refused, nothing written.
+    let wrong = cosigner(&cfg, &["keyfile", "prove", "--key-id", "frost-prove", "--epoch", "5", "--report", r]);
+    assert!(!wrong.status.success() && text(&wrong).contains("epoch 4"), "{}", text(&wrong));
+    assert!(!marker.exists());
+
+    // A report whose group key is not this node's: refused.
+    let mut other = report.clone();
+    other["group_verifying_key"] = hex::encode([1u8; 32]).into();
+    let other_path = tmp.path().join("other.json");
+    std::fs::write(&other_path, other.to_string()).unwrap();
+    let bad = cosigner(&cfg, &["keyfile", "prove", "--key-id", "frost-prove", "--epoch", "4", "--report", other_path.to_str().unwrap()]);
+    assert!(!bad.status.success() && text(&bad).contains("group key"), "{}", text(&bad));
+    assert!(!marker.exists());
+
+    // The right epoch and report: the marker, and a note that it is the operator's statement.
+    let ok = cosigner(&cfg, &["keyfile", "prove", "--key-id", "frost-prove", "--epoch", "4", "--report", r]);
+    assert!(ok.status.success(), "{}", text(&ok));
+    assert!(text(&ok).contains("YOUR statement"), "{}", text(&ok));
+    let m: serde_json::Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
+    assert_eq!(m["epoch"], 4);
+    assert_eq!(m["pkp_digest"], report["pkp_digest"]);
+    assert_eq!(m["report_sha256"], hex::encode(sha2::Sha256::digest(report.to_string().as_bytes())));
+    // The key file itself is untouched, and the store still loads (the marker dir is no key file).
+    assert_eq!(sealed_store(tmp.path(), 2).load("frost-prove").unwrap().epoch, 4);
+    assert_eq!(sealed_store(tmp.path(), 2).list_frost().unwrap(), vec!["frost-prove".to_string()]);
 }

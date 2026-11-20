@@ -36,6 +36,7 @@ pub mod node;
 pub mod orchestrator;
 pub mod peer;
 pub mod profile;
+pub mod proof;
 pub mod ratelimit;
 pub mod refresh_interval;
 pub mod request_auth;
