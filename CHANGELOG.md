@@ -98,6 +98,23 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Fixed
 
+- **A DKG for a key another client created is refused instead of returned.** Since 0.4.0-rc.3 a
+  DKG for an id every cosigner already holds returns the existing key, so that Canton's retry after
+  a timeout succeeds. A second participant on the same cluster without `frost.key-prefix` was handed
+  the first participant's keys that way, without a warning. `DkgReply` now carries `existing` and
+  `origin_ceremony_id`, the DKG that created the key. The driver accepts an existing key only as a
+  retry of a ceremony it started itself. Otherwise the DKG fails with a message naming
+  `frost.key-prefix` and the new `frost.adopt-existing-keys`, for deliberately adopting a key after
+  checking it.
+  - **Restart gap.** Until the driver keeps its ceremony ids durably (next to its group-key pins), a
+    driver that restarts in the middle of a bootstrap is refused too. Adopt the key with
+    `frost.adopt-existing-keys` after checking it.
+  - **Rolling upgrade.** A 0.4.x driver ignores the new fields and behaves as before. A 0.5.0
+    driver with a leader older than 0.5.0 cannot tell and accepts the key with a warning, as before.
+    The DKG request is unchanged. The cosigners talk to each other as before (no peer message
+    changed).
+  - The Java stubs in `driver/src/main/java` were regenerated. They now also carry
+    `KeyEpochReply.stale_by_own_record`, which was missing from them.
 - **A cosigner that answers a sign wrongly no longer stays the driver's leader.** Up to 0.4.0 the
   driver made any node that answered its preferred leader before it checked the signature. One
   compromised cosigner that returned a signature that does not verify, or `NOT_FOUND`,

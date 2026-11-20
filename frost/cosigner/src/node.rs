@@ -4713,3 +4713,42 @@ mod hosted_id_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod dkg_existing_tests {
+    use super::*;
+    use crate::peer::{LocalPeer, PeerApi};
+
+    /// `DkgReply.existing` / `origin_ceremony_id`: a new key names its own ceremony; a second DKG
+    /// for the id returns the key with `existing`, and the leader can name the DKG that created it.
+    #[tokio::test]
+    async fn a_repeated_dkg_says_the_key_existed_and_which_ceremony_made_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nodes: Vec<Arc<Node>> = (1..=3u16)
+            .map(|i| {
+                let ks = KeyStore::open(tmp.path().join(format!("n{i}"))).unwrap();
+                Arc::new(Node::new(Identifier::try_from(i).unwrap(), 3, 2, ks))
+            })
+            .collect();
+        crate::peer::wire_local_mesh(&nodes).unwrap();
+        let peers: Vec<Arc<dyn PeerApi>> =
+            nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+
+        let first = crate::orchestrator::run_dkg_outcome(&peers, "k", None).await.unwrap();
+        assert!(!first.existing);
+        let made_by = first.ceremony_id.clone().expect("a new key names its ceremony");
+        assert!(made_by.starts_with("dkg"), "{made_by}");
+
+        let again = crate::orchestrator::run_dkg_outcome(&peers, "k", None).await.unwrap();
+        assert_eq!((again.group_key, again.existing, again.ceremony_id.clone()), (first.group_key, true, None));
+        for n in &nodes {
+            assert_eq!(n.committed_dkg_ceremony("k", &first.group_key).unwrap(), Some(made_by.clone()));
+            assert_eq!(n.committed_dkg_ceremony("k", &[7u8; 32]).unwrap(), None, "another group key");
+            assert_eq!(n.committed_dkg_ceremony("other", &first.group_key).unwrap(), None, "no such key");
+        }
+
+        // After a refresh the sharing is no longer the DKG's: no origin to name.
+        crate::orchestrator::run_refresh(&peers, "k").await.unwrap();
+        assert_eq!(nodes[0].committed_dkg_ceremony("k", &first.group_key).unwrap(), None);
+    }
+}

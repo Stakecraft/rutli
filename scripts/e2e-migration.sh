@@ -43,7 +43,11 @@
 #   §6        rollback before the point of no return, with newp1 already onboarded: newp1 stopped,
 #             oldp started on its old database, the party still there and transacting, the orphan
 #             member offboarded from oldp. Then Steps 4 and 5 again with newp2, another NEW_ID and
-#             another signing key name.
+#             another signing key name. First newp2 asks for the rolled-back attempt's name: its
+#             driver did not create that key (newp1's did), so the DKG is refused (DkgReply.existing,
+#             0.5.0). This is also the two-participants-one-cluster case: newp2 shares newp1's key
+#             prefix, so it asks for exactly the id newp1 created, as two participants without
+#             `frost.key-prefix` would.
 #   Step 6    NOT the Splice re-onboard (it needs a Splice validator app, Scan and a DSO; see
 #             "Not covered" below). In its place, the topology changes its party migrator makes,
 #             issued from newp2 and signed by the imported namespace key through FROST: the old
@@ -254,6 +258,11 @@ step_4_to_7_cutover() {
   wait_marker migrated 900
   env_canton_out | grep "^E2E" || true
   env_canton_out | grep -q "^E2E-ROLLBACK " || fail "the rollback did not run"
+  env_canton_out | grep -q "^E2E-REFUSED-RETRY " || fail "the retry under the rolled-back key name was not refused"
+  local clogs=() clog
+  while IFS= read -r clog; do clogs+=("$clog"); done < <(env_canton_logs)
+  grep -qh "the cluster already holds this key" "${clogs[@]}" 2>/dev/null \
+    || fail "the refusal is not the driver's existing-key refusal (no 'the cluster already holds this key' in the Canton log)"
   NEW_PID="$(value migrated NEW_PID)"
   SIG_KMS_ID="$(value migrated SIG_KMS_ID)"
   ENC_KMS_ID="$(value migrated ENC_KMS_ID)"
@@ -506,13 +515,21 @@ def hosts(via: ParticipantReference): Seq[ParticipantId] =
     .filter(_.item.partyId == VALIDATOR_PARTY).flatMap(_.item.participants.map(_.participantId))
 
 // Steps 4.3 and 5: a new participant on a fresh database, its keys, its identity, its onboarding.
-def onboard(newp: LocalParticipantReference, newId: String, signingName: String, cfg: SynchronizerConnectionConfig): (ParticipantId, SigningPublicKey, EncryptionPublicKey) = {
+def onboard(newp: LocalParticipantReference, newId: String, signingName: String, cfg: SynchronizerConnectionConfig, refusedName: Option[String] = None): (ParticipantId, SigningPublicKey, EncryptionPublicKey) = {
   newp.start()
   utils.retry_until_true(newp.health.is_ready_for_id())
   check(newp.keys.secret.list().isEmpty, s"${newp.name} starts with keys in its store")
   // Step 5.1: the imported namespace key, by id. It must come back with the old fingerprint.
   val nsK = newp.keys.secret.register_kms_signing_key(KEY_ID, Set(SigningKeyUsage.Namespace), "namespace")
   check(nsK.fingerprint.unwrap == NS_FP, s"register_kms_signing_key($KEY_ID) returned ${nsK.fingerprint}, not $NS_FP")
+  // §6: a retry under the rolled-back attempt's key name. The cluster holds that key from another
+  // participant's DKG, so this driver refuses it instead of reusing the burned member's key.
+  refusedName.foreach { name =>
+    val attempt = scala.util.Try(newp.keys.secret.generate_signing_key(name, SigningKeyUsage.ProtocolWithProofOfOwnership ++ SigningKeyUsage.SequencerAuthenticationOnly, Some(SigningKeySpec.EcCurve25519)))
+    check(attempt.isFailure, s"${newp.name}: a DKG under the rolled-back attempt's name '$name' was accepted (got ${attempt.toOption.map(_.fingerprint)})")
+    check(newp.keys.secret.list().size == 1, s"${newp.name} stored a key after the refusal: ${newp.keys.secret.list().map(k => k.name -> k.kmsKeyId)}")
+    println(s"E2E-REFUSED-RETRY ${newp.name} '$name'")
+  }
   // Step 5.2: fresh keys, a FROST DKG and a cluster-hosted ECIES key.
   val sigK = newp.keys.secret.generate_signing_key(signingName, SigningKeyUsage.ProtocolWithProofOfOwnership ++ SigningKeyUsage.SequencerAuthenticationOnly, Some(SigningKeySpec.EcCurve25519))
   val encK = newp.keys.secret.generate_encryption_key("encryption", Some(EncryptionKeySpec.EcP256))
@@ -564,7 +581,7 @@ println(s"E2E-ROLLBACK ${ROLLED_BACK_PID.toProtoPrimitive} offboarded, $VALIDATO
 // ------------------------------------------------------------------------------------------------
 val ACS_FILE = Paths.get(WORK, "acs-old.gz").toString
 val ACS_REFERENCE = stopOld(ACS_FILE)
-val (newPid, newSigning, newEncryption) = onboard(newp2, NEW_ID, "signing-2", restoredCfg)
+val (newPid, newSigning, newEncryption) = onboard(newp2, NEW_ID, "signing-2", restoredCfg, refusedName = Some("signing"))
 val NEW_PID = newPid
 check(newSigning.fingerprint != rolledBackSigning.fingerprint, "the retry got the signing key of the rolled-back attempt")
 newp2.dars.upload(DAR)

@@ -73,10 +73,18 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
     val dkgs = new ConcurrentLinkedQueue[DkgRequest]()
     /** Fail this many DKGs with UNAVAILABLE (a leader the driver fails over from). */
     @volatile var failDkgs = 0
+    /** `DkgReply.existing` to report (None: a leader older than 0.5.0, which leaves it out), and
+      * the origin ceremony id for a request. */
+    @volatile var reportExisting: Option[Boolean] = None
+    @volatile var origin: DkgRequest => String = _ => ""
     override def dkg(req: DkgRequest, obs: StreamObserver[DkgReply]): Unit = {
       dkgs.add(req)
       if (failDkgs > 0) { failDkgs -= 1; obs.onError(Status.UNAVAILABLE.withDescription("test: down").asRuntimeException()) }
-      else { obs.onNext(DkgReply.newBuilder().setGroupVerifyingKey(ByteString.copyFrom(GroupRaw)).build()); obs.onCompleted() }
+      else {
+        val b = DkgReply.newBuilder().setGroupVerifyingKey(ByteString.copyFrom(GroupRaw)).setOriginCeremonyId(origin(req))
+        reportExisting.foreach(e => b.setExisting(e))
+        obs.onNext(b.build()); obs.onCompleted()
+      }
     }
     override def deleteKey(req: DeleteKeyRequest, obs: StreamObserver[DeleteKeyReply]): Unit = {
       deletes.add(req)
@@ -125,9 +133,18 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
     s"localhost:${s.getPort}"
   }
 
-  private def backend(eps: Seq[(String, String)], clusterId: Option[String] = None, signIntents: Boolean = true) =
+  private def backend(
+      eps: Seq[(String, String)],
+      clusterId: Option[String] = None,
+      signIntents: Boolean = true,
+      adopt: Set[String] = Set.empty,
+  ) =
     new FrostBackend(eps.map(_._1), new NoDelegateBackend, logger, Some(tls), 10.seconds,
-      endpointTlsNames = eps.toMap, clusterId = clusterId, signIntents = signIntents)
+      endpointTlsNames = eps.toMap, clusterId = clusterId, signIntents = signIntents, adoptExistingKeys = adopt)
+
+  /** The DKG ceremony id a request's intent names, as the cosigners derive it. */
+  private def ceremonyOf(req: DkgRequest): String =
+    FrostIntentSigner.ceremonyId(FrostIntentSigner.PurposeDkg, decode(req.getIntent).getRequestId.toByteArray)
 
   private def decode(i: SignedIntent): SignIntent = SignIntent.parseFrom(i.getIntent)
 
@@ -366,6 +383,58 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
         Await.result(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")), 20.seconds)
         rec.dkgs.asScala.toList.loneElement.hasIntent shouldBe false
       } finally b.close()
+    }
+
+    "accept a key that already existed only when it came from this driver's own ceremony" in {
+      val rec = new Recorder(Cluster)
+      val b = backend(Seq(serve("cosigner1", rec) -> "cosigner1"))
+      try {
+        // A new key, then Canton's retry: the second call (a new intent) is told the key existed,
+        // created by the FIRST call's ceremony: a retry of this driver's own DKG.
+        rec.reportExisting = Some(false)
+        rec.origin = ceremonyOf
+        Await.result(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")), 20.seconds)
+        val first = ceremonyOf(rec.dkgs.asScala.head)
+        rec.reportExisting = Some(true)
+        rec.origin = _ => first
+        Await.result(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")), 20.seconds) shouldBe "frost-ns"
+      } finally b.close()
+    }
+
+    "refuse a key another client's ceremony created, naming the way out, unless the operator adopts it" in {
+      val rec = new Recorder(Cluster)
+      rec.reportExisting = Some(true)
+      rec.origin = _ => "dkg-00000000000000000000000000000000"
+      val b = backend(Seq(serve("cosigner1", rec) -> "cosigner1"))
+      try {
+        val ex = the[KmsDriverException] thrownBy
+          Await.result(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")), 20.seconds)
+        ex.retryable shouldBe false
+        val msg = ex.getCause.getMessage
+        msg should (include("frost-ns") and include("already exists") and include("frost.adopt-existing-keys") and include("verify-key"))
+        // An unknown origin (the leader's record is gone) is refused the same way.
+        rec.origin = _ => ""
+        the[KmsDriverException] thrownBy Await.result(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")), 20.seconds)
+      } finally b.close()
+      val adopting = backend(Seq(serve("cosigner1b", rec) -> "cosigner1b"), adopt = Set("frost-ns"))
+      try Await.result(adopting.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")), 20.seconds) shouldBe "frost-ns"
+      finally adopting.close()
+    }
+
+    "accept, with a warning, a reply from a leader older than 0.5.0 (no existing field)" in {
+      val rec = new Recorder(Cluster)
+      rec.reportExisting = None
+      val b = backend(Seq(serve("cosigner1", rec) -> "cosigner1"))
+      try Await.result(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")), 20.seconds) shouldBe "frost-ns"
+      finally b.close()
+    }
+
+    "accept an existing key for a DKG sent without an intent, which cannot be matched" in {
+      val rec = new Recorder(Cluster)
+      rec.reportExisting = Some(true)
+      val b = backend(Seq(serve("cosigner1", rec) -> "cosigner1"), signIntents = false)
+      try Await.result(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")), 20.seconds) shouldBe "frost-ns"
+      finally b.close()
     }
 
     "send no ceremony intent while no cluster id is known" in {
