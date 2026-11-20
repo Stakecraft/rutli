@@ -4,7 +4,7 @@ A 2-of-3 [`rutli-cosigner`](../../frost/cosigner) cluster. Each node holds one k
 ever holds the whole namespace key. The Canton KMS driver's `FrostBackend` connects to any node's
 `Signer` API to run DKG and to sign.
 
-Two compose files (default image `ghcr.io/stakecraft/rutli-cosigner:0.4.0`, pinned by digest; override with
+Two compose files (default image `ghcr.io/stakecraft/rutli-cosigner:0.4.1`, pinned by digest; override with
 `RUTLI_COSIGNER_IMAGE` or `--build` from `frost/`; from 0.5.0 on, verify a release digest as
 [SECURITY.md, "Verify the image"](../../SECURITY.md#verify-the-image) shows):
 - `docker-compose.yml` — **dev**: plaintext gRPC, unsealed shares. Fastest to try.
