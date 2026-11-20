@@ -85,4 +85,16 @@ public interface NodeInfoReplyOrBuilder extends
    * @return The ceremonyProtocol.
    */
   int getCeremonyProtocol();
+
+  /**
+   * <pre>
+   * The hosted-key creation protocol this node speaks: 2 = it verifies a client generate intent at
+   * its genkey fence (SignIntent purpose "generate-key"); 0 (absent) from a cosigner older than
+   * 0.5.0. A leader asked to generate with an intent refuses while a reachable node reports &lt; 2.
+   * </pre>
+   *
+   * <code>uint32 hosted_protocol = 5;</code>
+   * @return The hostedProtocol.
+   */
+  int getHostedProtocol();
 }

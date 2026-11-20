@@ -899,8 +899,8 @@ async fn main() -> Result<()> {
         let tls = cfg.tls.is_some();
         if !tls {
             tracing::warn!(
-                "this node runs without TLS, so it verifies no intents: a signature, a DKG or a \
-                 refresh without a client-signed intent is accepted (counted in \
+                "this node runs without TLS, so it verifies no intents: a signature, a DKG, a refresh \
+                 or a hosted-key generation without a client-signed intent is accepted (counted in \
                  rutli_sign_intent_absent_total and rutli_ceremony_intent_absent_total) — plaintext \
                  is for development only"
             );
@@ -916,11 +916,11 @@ async fn main() -> Result<()> {
         }
         if tls && !policy.ceremony_intent_required(tls) {
             tracing::warn!(
-                "signing_policy.require_ceremony_intent is off (set to false): a DKG or refresh without a \
-                 client-signed ceremony intent is accepted (counted in \
+                "signing_policy.require_ceremony_intent is off (set to false): a DKG, a refresh or a \
+                 hosted-key generation without a client-signed intent is accepted (counted in \
                  rutli_ceremony_intent_absent_total), so a compromised cosigner can start one on this \
-                 node — remove the opt-out, on every node, once the driver (0.4.0-rc.4 or later) and \
-                 the refresh job sign ceremony intents (docs/approval-quorum.md)"
+                 node, or create a hosted key nobody asked for — remove the opt-out, on every node, once \
+                 the driver (0.5.0 or later) and the refresh job sign their intents (docs/approval-quorum.md)"
             );
         }
         if policy.signer_may_refresh {
@@ -2202,6 +2202,7 @@ async fn delete_hosted_key_command(
         not_after_ms: now + 120_000,
         approval_nonce: nonce,
         approvals: collected,
+        ..Default::default()
     };
     let signed = rutli_cosigner::intent::sign_intent(&signer, &intent)?;
     let reply = client

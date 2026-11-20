@@ -71,7 +71,8 @@
 #
 # rutli_hosted_replication_refusals_total{reason} (0.5.0) counts hosted key material a node refused
 # to store, or a generation it aborted: unfenced | conflict | disagreement | unconfirmed | invalid |
-# timestamp | generate-conflict | unverifiable | throttled. Its series are primed at zero.
+# timestamp | generate-conflict | unverifiable | throttled | spec | intent | mixed-version. Its
+# series are primed at zero.
 #
 # The hosted-key metrics (rutli_hosted_*, rutli_anti_entropy_*, rutli_key_replicas,
 # rutli_unreadable_key_files_total, rutli_decrypt_rate_limited_total) cover
@@ -320,8 +321,8 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Rütli cosigner {{ $labels.instance }} refused a DKG/refresh ceremony intent ({{ $labels.reason }})"
-          description: "{{ $labels.instance }} refused to fence or start a DKG or refresh (reason {{ $labels.reason }}). On the mesh path (the cosigner log says 'ceremony fence refused' / 'ceremony part 1 refused' and names the asking peer) a cosigner led a ceremony no authorized client signed for: missing with signing_policy.require_ceremony_intent on means either a leader on an older release (it drops the intent: finish the rollout) or that peer is compromised; signer, certificate, signature, pin, cluster, purpose, key, ceremony-id mean something presented an intent this node did not accept — investigate the asking cosigner. At the leader (Signer.Dkg/Refresh): signer = a refresh by the driver with signer_may_refresh off, or an intent replayed through another client's connection; missing = an old driver or refresh CLI; expiry = clock skew (NTP). docs/ceremonies.md, Ceremony intents."
+          summary: "Rütli cosigner {{ $labels.instance }} refused a ceremony or generate intent ({{ $labels.reason }})"
+          description: "{{ $labels.instance }} refused to fence or start a DKG or refresh, or to fence a hosted-key generation (reason {{ $labels.reason }}). On the mesh path (the cosigner log says 'ceremony fence refused' / 'ceremony part 1 refused' / 'ceremony genkey fence refused' and names the asking peer and the key) a cosigner led a ceremony or a key generation no authorized client signed for: missing with signing_policy.require_ceremony_intent on means either a leader on an older release (it drops the intent: finish the rollout) or that peer is compromised; signer, certificate, signature, pin, cluster, purpose, key, spec, leader, ceremony-id mean something presented an intent this node did not accept — investigate the asking cosigner (leader: a cosigner presented a generate intent the client signed for another cosigner). At the leader (Signer.Dkg/Refresh/GenerateKey): signer = a refresh by the driver with signer_may_refresh off, or an intent replayed through another client's connection; missing = a driver older than 0.5.0 (GenerateKey) or 0.4.0-rc.4 (Dkg), or an old refresh CLI; expiry = clock skew (NTP). docs/ceremonies.md, Ceremony intents; docs/hosted-keys.md, Generate."
 
       - alert: RutliCeremonyIntentAbsent
         expr: increase(rutli_ceremony_intent_absent_total[1h]) > 0
@@ -329,8 +330,8 @@ groups:
         labels:
           severity: info
         annotations:
-          summary: "Rütli cosigner {{ $labels.instance }} ran a DKG/refresh without a client ceremony intent"
-          description: "{{ $labels.instance }} took part in a DKG or refresh that carried no client-signed ceremony intent, accepted because signing_policy.require_ceremony_intent is off on this node: set to false (the opt-out; on by default with TLS since 0.4.0-rc.6), or the node runs without TLS. A compromised cosigner can still start (and split) ceremonies on it. Once the driver (0.4.0-rc.4 or later) and the refresh job sign ceremony intents, remove the opt-out on every node (docs/approval-quorum.md, Switching enforcement on). On a cluster that enforces, this never fires."
+          summary: "Rütli cosigner {{ $labels.instance }} ran a DKG/refresh or a hosted-key generation without a client intent"
+          description: "{{ $labels.instance }} took part in a DKG, a refresh or a hosted-key generation that carried no client-signed intent, accepted because signing_policy.require_ceremony_intent is off on this node: set to false (the opt-out; on by default with TLS since 0.4.0-rc.6), or the node runs without TLS. A compromised cosigner can still start (and split) ceremonies on it, and create a hosted key nobody asked for. Once the driver (0.5.0 or later) and the refresh job sign their intents, remove the opt-out on every node (docs/approval-quorum.md, Switching enforcement on). On a cluster that enforces, this never fires."
 
       - alert: RutliRefreshRefused
         expr: sum by (instance) (increase(rutli_refresh_interval_refusals_total[15m])) > 0
@@ -454,14 +455,16 @@ groups:
         # trying to plant a key, or a 0.4.0 node's anti-entropy push during a rolling upgrade),
         # material that does not validate, or a time in the future. "unconfirmed" (one copy only,
         # normal while a node is down) and the conflict reasons (paged by RutliHostedKeyConflict)
-        # are left out.
-        expr: sum by (instance, reason) (increase(rutli_hosted_replication_refusals_total{reason=~"unfenced|invalid|timestamp|unverifiable|throttled"}[15m])) > 0
+        # are left out. "spec" and "intent" (0.5.0): a push that does not match what the generation's
+        # fence was taken under; "mixed-version": a generation this node led, refused while a
+        # reachable cosigner predates generate intents.
+        expr: sum by (instance, reason) (increase(rutli_hosted_replication_refusals_total{reason=~"unfenced|invalid|timestamp|unverifiable|throttled|spec|intent|mixed-version"}[15m])) > 0
         for: 0m
         labels:
           severity: warning
         annotations:
           summary: "Rütli cosigner {{ $labels.instance }} refused hosted key material ({{ $labels.reason }})"
-          description: "{{ $labels.instance }} refused hosted key material from a peer (reason {{ $labels.reason }}). unfenced: a peer pushed a key this node does not hold without holding this node's generation fence for it. During a rolling upgrade from 0.4.0 this is a 0.4.0 node's anti-entropy push and stops once this node has pulled the key itself; otherwise suspect the peer named in the log. invalid: the material does not open or validate (an RSA or EC key whose public half is not its own). timestamp: a creation or undelete time in the future beyond signing_policy.clock_skew_secs — check that node's clock. unverifiable: a push refused because another cosigner answered with a copy this node cannot check (see invalid / timestamp for that cosigner). throttled: read-repair lookups for keys this node lacks exceed 20 a second — a client flooding made-up key ids; the requests got UNAVAILABLE and the driver failed over. Nothing was stored. The cosigner log names the key and the peer."
+          description: "{{ $labels.instance }} refused hosted key material from a peer (reason {{ $labels.reason }}). unfenced: a peer pushed a key this node does not hold without holding this node's generation fence for it. During a rolling upgrade from 0.4.0 this is a 0.4.0 node's anti-entropy push and stops once this node has pulled the key itself; otherwise suspect the peer named in the log. invalid: the material does not open or validate (an RSA or EC key whose public half is not its own). timestamp: a creation or undelete time in the future beyond signing_policy.clock_skew_secs — check that node's clock. unverifiable: a push refused because another cosigner answered with a copy this node cannot check (see invalid / timestamp for that cosigner). throttled: read-repair lookups for keys this node lacks exceed 20 a second — a client flooding made-up key ids; the requests got UNAVAILABLE and the driver failed over. spec: a peer pushed a key of another spec than the generation's fence declared; intent: a push under a fence taken without a generate intent on a node that now requires one — suspect the peer in the log. mixed-version: this node, as leader, refused a generation because a reachable cosigner is older than 0.5.0 — finish the upgrade. Nothing was stored. The cosigner log names the key and the peer."
 
       - alert: RutliHostedRollbackIncomplete
         expr: increase(rutli_hosted_rollback_incomplete_total[1h]) > 0
