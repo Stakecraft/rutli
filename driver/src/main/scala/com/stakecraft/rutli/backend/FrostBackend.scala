@@ -916,7 +916,7 @@ class FrostBackend(
           pinStore.foreach { store =>
             try store.recordCeremony(keyId, ceremony)
             catch {
-              case e: java.io.IOException =>
+              case e: Exception =>
                 throw KmsDriverException(
                   new IllegalStateException(s"cannot record DKG ceremony $ceremony for $keyId in ${store.dir}: ${e.getMessage}", e),
                   retryable = true,

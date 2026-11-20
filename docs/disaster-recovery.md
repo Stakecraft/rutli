@@ -463,6 +463,8 @@ also an audit-log entry (`group-key-pin keyId=… groupKey=… source=…`). Fro
 key: a cosigner that answers another one is logged at ERROR, noted (`groupkey-dissent=<endpoint>`)
 and routed around. A call fails only when every answering cosigner differs from the pin.
 
+- **The pin directory belongs to one participant.** Never share it between participants or copy it
+  to another one: its pins and recorded ceremony ids are what this driver trusts as its own.
 - **Back up the pin directory with the participant's state** (audit log and signing journal).
   `java -cp rutli-driver.jar com.stakecraft.rutli.tools.StateCheck --pin-dir <dir>` checks a copy
   read-only and lists every pin.
