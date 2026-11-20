@@ -1,0 +1,39 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# The repository's Actions cache against GitHub's 10 GB limit: a weekly table by cache family, a
+# warning at 8 GB and a red run at 9.5 GB. Above the limit GitHub evicts the least recently used
+# entries and builds go cold, which matters most once CI runs on hosted runners (docs/ci-cache.md).
+name: Cache usage
+
+on:
+  schedule:
+    - cron: "0 7 * * 1" # Mondays 07:00 UTC
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - scripts/cache-usage.sh
+      - .github/workflows/cache-usage.yml
+
+permissions:
+  contents: read
+
+jobs:
+  usage:
+    name: Actions cache size
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Cache size by family
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          # A pull request that touches this file only checks that it runs; it never fails it.
+          FAIL_GB: ${{ github.event_name == 'pull_request' && '1000' || '9.5' }}
+        run: scripts/cache-usage.sh

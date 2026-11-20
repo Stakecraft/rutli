@@ -97,6 +97,9 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: frost
+          # Only main saves: a pull request saves its own 440 MB copy per dependency change and
+          # fills the repository's 10 GB cache (docs/ci-cache.md). Pull requests still restore main's.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
         with:
