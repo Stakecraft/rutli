@@ -67,8 +67,10 @@ what it leaves behind cannot skew the measurements of the others); `--suites` pi
 Every scenario also checks that no cosigner restarted unless the scenario did it, and that their
 memory and file descriptors stay within bounds. A cosigner a disruption restarts on purpose is not
 judged by its health the moment the load ends but by `time_to_healthy_secs`: the seconds from the
-end of the disruption until every cosigner answers Health ok again, which must stay within
-`--settle-secs`.
+end of the disruption (a node's reboot included) until every cosigner answers Health ok again. It
+fails when they are not healthy within `--settle-secs` of the end of the recovery step. After a
+rig failure in a disruption (a hook or `kubectl` error), what follows in that scenario is counted
+as the rig's too.
 
 The load generator runs detached in its pod: `scripts/perf/k8s_loadgen.py` starts each run with a
 short `kubectl exec`, polls for its end, and fetches the report afterwards, retrying each call, so

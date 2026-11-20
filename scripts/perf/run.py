@@ -30,6 +30,7 @@ Standard library only. Usage: see scripts/perf-load.sh, or `run.py --help`.
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -47,6 +48,21 @@ LIMITED_PER_MIN = 120
 THRESHOLD, CLUSTER_SIZE = 2, 3
 # hosted_keys.decrypt_rate_limit_per_min of deploy/frost/config-tls: a bucket of one minute's worth.
 DECRYPT_PER_MIN = 6000
+
+
+# What rutli-loadgen prints when the cluster itself refused what a run needed: its error line
+# carries the gRPC code of a cosigner's answer, or says the cosigners did not become healthy or
+# agree on a cluster id. Any other failure (an unreadable file, a usage error, a panic, a lost
+# connection to the pod) is the rig's.
+CLUSTER_ANSWER = re.compile(
+    r"rutli-loadgen: .*(\b(Cancelled|Unknown|InvalidArgument|DeadlineExceeded|NotFound|AlreadyExists|"
+    r"PermissionDenied|ResourceExhausted|FailedPrecondition|Aborted|OutOfRange|Unimplemented|Internal|"
+    r"Unavailable|DataLoss|Unauthenticated)\b|not healthy after|do not agree on a cluster id)")
+
+
+def rig_failure(returncode, stderr):
+    """Whether a failed rutli-loadgen run is the rig's failure rather than the cluster's."""
+    return not (returncode == 2 and CLUSTER_ANSWER.search(stderr or ""))
 
 
 def log(msg):
@@ -117,7 +133,8 @@ class Runner:
         """The JSON report of a started load generator, or {"failed": why}. `"rig": True` marks a
         failure of the test rig (the load generator could not be run or reached, or never
         finished) rather than an answer of the cluster: rutli-loadgen itself exits 2 when the
-        cluster refused what it needed (a DKG, a key), any other code is the rig's."""
+        cluster refused what it needed (a DKG, a key) and says so (`rig_failure`); anything else
+        is the rig's."""
         try:
             out, err = proc.communicate(timeout=wall_timeout)
         except subprocess.TimeoutExpired:
@@ -129,11 +146,11 @@ class Runner:
             log(f"  {line}")
         if proc.returncode != 0:
             return {"failed": f"the load generator exited {proc.returncode}", "stderr": err[-2000:],
-                    "rig": proc.returncode != 2}
+                    "rig": rig_failure(proc.returncode, err)}
         try:
             return json.loads(out) if out.strip() else {}
         except json.JSONDecodeError as e:
-            return {"failed": f"the load generator's output is not JSON: {e}", "stdout": out[-2000:]}
+            return {"failed": f"the load generator's output is not JSON: {e}", "stdout": out[-2000:], "rig": True}
 
     def loadgen(self, args, timeout_secs=30, wall_timeout=600):
         return self.loadgen_finish(self.loadgen_start(args, timeout_secs), wall_timeout)

@@ -196,7 +196,7 @@ class Suite(base.Runner):
 
     def time_to_healthy(self, since):
         """Seconds from `since` until every cosigner answers Health ok again, or None if that
-        does not happen within --settle-secs."""
+        does not happen within --settle-secs from now."""
         asked = time.time()
         r = self.loadgen(["wait", "--within-secs", str(self.args.settle_secs)], wall_timeout=self.args.settle_secs + 120)
         if "failed" in r or "healthy_after_secs" not in r:
@@ -263,15 +263,20 @@ class Suite(base.Runner):
                 except (subprocess.SubprocessError, OSError) as e:
                     problems.append({"failed": f"recover: {e}", "rig": True})
                 # A disrupted cosigner restarting is expected; what counts is how long until it
-                # serves again, from the end of the disruption.
+                # serves again. Measured from the end of the disruption (recovery included: a
+                # rebooting node is part of it); the limit applies from the end of recovery.
                 healthy[0] = self.time_to_healthy(ended)
             report = self.loadgen_finish(proc, secs + 900)
+            # After a rig failure (a hook or kubectl error) the cluster's state is not what the
+            # scenario meant to produce: what follows says nothing about Rütli.
+            rig = bool(problems)
             if healthy[0] is None:
                 problems.append({"failed": f"{', '.join(victims) or 'a cosigner'} was not healthy again within "
-                                           f"{self.args.settle_secs} s of the end of the disruption"})
+                                           f"{self.args.settle_secs} s of the end of the recovery", "rig": rig})
             settled[0] = self.settle()
             if settled[0] is None:
-                problems.append({"failed": f"the cluster did not sign normally again within {self.args.settle_secs} s"})
+                problems.append({"failed": f"the cluster did not sign normally again within {self.args.settle_secs} s",
+                                 "rig": rig})
             return [report] + problems
 
         settled, healthy = [None], [None]
@@ -402,6 +407,14 @@ class Suite(base.Runner):
             ok = (not entry.get("setup_failed") and not entry.get("list_keys_failed")
                   and not entry.get("sign", {}).get("failed") and not entry.get("sign", {}).get("errors")
                   and all(not t.get("errors") for t in entry.get("list_keys", {}).values()))
+            # Only the rig's fault if every failure here is a rig failure: errors the cluster
+            # answered with, or a run that failed on the cluster's answer, are Rütli's.
+            if not ok and "failed" not in setup:
+                cluster_side = (entry.get("sign", {}).get("errors")
+                                or any(t.get("errors") for t in entry.get("list_keys", {}).values())
+                                or (load.get("failed") and not load.get("rig"))
+                                or (lk.get("failed") and not lk.get("rig")))
+                entry["rig"] = not cluster_side
             entry["passed"] = bool(ok)
             log(f"  {n} keys: {'ok' if ok else 'FAILED'}: sign p99 {entry.get('sign', {}).get('latency', {}).get('p99_ms')} ms, "
                 f"list-keys mean {[round(t.get('mean_ms', 0), 1) for t in entry.get('list_keys', {}).values()]} ms")

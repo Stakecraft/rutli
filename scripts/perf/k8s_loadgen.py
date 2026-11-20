@@ -60,14 +60,17 @@ def main(argv=None):
     a = p.parse_args(argv)
     args = a.args[1:] if a.args[:1] == ["--"] else a.args
     ns, run = a.namespace, uuid.uuid4().hex[:12]
+    q = shlex.quote
     base = f"{a.dir}/{run}"
-    cmd = " ".join(shlex.quote(x) for x in ["rutli-loadgen", *args])
+    claim, out_f, err_f, rc_f, pid_f = (q(base + x) for x in (".claim", ".out", ".err", ".rc", ".pid"))
+    cmd = " ".join(q(x) for x in ["rutli-loadgen", *args])
 
     # Start it detached: the shell that kubectl waits for returns at once; the run's exit code
-    # lands in .rc when it ends. A start whose answer was lost is not repeated if it took.
-    start = (f"mkdir -p {shlex.quote(a.dir)} && if [ ! -e {base}.pid ]; then "
-             f"( {cmd} >{base}.out 2>{base}.err; echo $? >{base}.rc ) </dev/null >/dev/null 2>&1 & "
-             f"echo $! >{base}.pid; fi")
+    # lands in .rc when it ends. The claim directory is created atomically before anything starts,
+    # so a start retried after its answer was lost never launches a second run.
+    start = (f"mkdir -p {q(a.dir)} && if mkdir {claim} 2>/dev/null; then "
+             f"( {cmd} >{out_f} 2>{err_f}; echo $? >{rc_f} ) </dev/null >/dev/null 2>&1 & "
+             f"echo $! >{pid_f}; fi")
     rc, _, err = kexec(ns, start)
     if rc != 0:
         log(f"could not start the load generator: {err.strip()[-500:]}")
@@ -81,18 +84,24 @@ def main(argv=None):
         # long ones are polled every --poll-secs.
         time.sleep(pause)
         pause = min(pause * 2, a.poll_secs)
-        rc, out, _ = kexec(ns, f"cat {base}.rc 2>/dev/null || true", attempts=3, timeout=30)
-        if rc == 0 and out.strip().isdigit():
-            code = int(out.strip())
+        rc, out, _ = kexec(ns, f"if [ -e {rc_f} ]; then cat {rc_f}; elif [ -d {claim} ]; then echo running; "
+                               f"else echo lost; fi", attempts=3, timeout=30)
+        answer = out.strip()
+        if rc == 0 and answer.isdigit():
+            code = int(answer)
             break
+        if rc == 0 and answer == "lost":
+            # The pod's /tmp is an emptyDir: its files vanish when the pod is replaced.
+            log("the run's files are gone from the pod (was the load generator pod restarted?)")
+            return RIG_FAILED
     if code is None:
         log(f"the load generator did not finish within {a.max_secs:g} s, or its end could not be observed")
-        kexec(ns, f"kill $(cat {base}.pid) 2>/dev/null || true", attempts=2)
+        kexec(ns, f"kill $(cat {pid_f}) 2>/dev/null || true", attempts=2)
         return RIG_FAILED
 
-    rc_err, err, _ = kexec(ns, f"cat {base}.err")
-    rc_out, out, _ = kexec(ns, f"cat {base}.out")
-    kexec(ns, f"rm -f {base}.out {base}.err {base}.rc {base}.pid", attempts=2)
+    rc_err, err, _ = kexec(ns, f"cat {err_f}")
+    rc_out, out, _ = kexec(ns, f"cat {out_f}")
+    kexec(ns, f"rm -f {out_f} {err_f} {rc_f} {pid_f}; rmdir {claim}", attempts=2)
     if rc_out != 0 or rc_err != 0:
         log("the load generator finished, but its output could not be fetched")
         return RIG_FAILED

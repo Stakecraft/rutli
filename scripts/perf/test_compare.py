@@ -195,5 +195,28 @@ class Cluster(unittest.TestCase):
         self.assertIn("DKG refused", problems[0])
 
 
+class RigOrCluster(unittest.TestCase):
+    def test_only_a_cluster_answer_is_the_clusters_failure(self):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import run
+        cluster = [
+            "rutli-loadgen: DKG of perf-t0-kc-0: FailedPrecondition: ceremony refused: cosigner 2 could not report",
+            "rutli-loadgen: GroupKey of k: NotFound: unknown key",
+            "rutli-loadgen: not healthy after 120 s: [\"cosigner2\"]",
+            "rutli-loadgen: the cosigners do not agree on a cluster id (answers: [])",
+        ]
+        for line in cluster:
+            self.assertFalse(run.rig_failure(2, "progress\n" + line), line)
+        rig = [
+            (2, "rutli-loadgen: cannot read /certs/ca.crt: No such file or directory"),
+            (2, "error: unexpected argument '--bogus' found\n\nUsage: rutli-loadgen [OPTIONS]"),
+            (101, "thread 'main' panicked at src/main.rs:1:1"),
+            (3, "k8s_loadgen: could not start the load generator: error: connection reset by peer"),
+            (1, "error: error reading from error stream: connection reset by peer"),
+        ]
+        for code, line in rig:
+            self.assertTrue(run.rig_failure(code, line), line)
+
+
 if __name__ == "__main__":
     unittest.main()
