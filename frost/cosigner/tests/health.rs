@@ -88,7 +88,7 @@ async fn unreadable_keys_dir_makes_health_not_serving() {
     let group_key =
         Signer::group_key(&svc, Request::new(GroupKeyRequest { key_id: "some-key".into() })).await;
     let key_info =
-        Signer::key_info(&svc, Request::new(KeyInfoRequest { key_id: "some-key".into() })).await;
+        Signer::key_info(&svc, Request::new(KeyInfoRequest { key_id: "some-key".into(), ..Default::default() })).await;
     let decrypt = Signer::decrypt(
         &svc,
         Request::new(DecryptRequest { key_id: "some-key".into(), ciphertext: vec![0; 256] }),

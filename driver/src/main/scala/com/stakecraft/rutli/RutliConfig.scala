@@ -23,6 +23,10 @@ package com.stakecraft.rutli
   *                      quorum of configured approvers signs the request.
   * @param signingJournal Persistent per-key signing journal (replay detection + optional rate
   *                      limit). See [[com.stakecraft.rutli.guard.SigningJournal]].
+  * @param profile       `production` | `lab` ([[ProductionProfile]], docs/production-profile.md).
+  *                      Production: the driver refuses to start while an enforcement setting is not
+  *                      at its production value, naming each one. Lab: logged only. Unset: as lab,
+  *                      with a warning; it becomes production in 0.6.
   */
 final case class RutliConfig(
     backend: String = "software",
@@ -33,6 +37,7 @@ final case class RutliConfig(
     software: Option[SoftwareConfig] = None,
     approval: Option[com.stakecraft.rutli.policy.ApprovalPolicy] = None,
     signingJournal: Option[SigningJournalConfig] = None,
+    profile: Option[String] = None,
 )
 
 /** Software-backend config (applies when `backend = "software"` OR `frost.delegate = "software"`).

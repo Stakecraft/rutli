@@ -137,6 +137,12 @@ pub const NONCE_PRUNE_INTERVAL: Duration = Duration::from_secs(10 * 60);
 /// it is followed by another a few seconds later.
 pub const NONCE_PRUNE_BUDGET: usize = 10_000;
 
+/// Read-repair fan-outs (a request for a hosted key this node lacks asks every peer) allowed per
+/// second on one node, and the burst. Beyond it the request answers UNAVAILABLE, never NOT_FOUND,
+/// so the ceiling cannot hide a key: the driver fails over. The anti-entropy sweep is not counted.
+pub const REPAIR_FANOUT_PER_SEC: f64 = 20.0;
+pub const REPAIR_FANOUT_BURST: f64 = 40.0;
+
 /// The epoch a DKG commits its key at; each committed refresh adds one.
 pub const FIRST_EPOCH: u64 = 1;
 
@@ -259,12 +265,19 @@ pub struct Node {
     /// Set when hosted (non-FROST) keys are enabled: this node's derived wrapping key plus the
     /// cluster identity envelopes are bound to. `None` disables every hosted-key operation.
     hosted: Option<HostedCtx>,
-    /// Hosted keys this node created under a genkey ceremony (key id -> ceremony id): the only keys
-    /// a PurgeKey without a delete intent may remove — the rollback of a generation that missed its
-    /// write quorum, while that generation still holds the fence (audit M2).
-    hosted_created_in: Mutex<std::collections::HashMap<String, String>>,
+    /// Hosted keys this node created under a genkey ceremony (key id -> (ceremony id, when that
+    /// ceremony's guard was taken)): the only keys a PurgeKey without a delete intent may remove —
+    /// the rollback of a generation that missed its write quorum, while that very fence (the same
+    /// guard instance, not a later fence under the same ceremony id) is still held (audit M2).
+    hosted_created_in: Mutex<std::collections::HashMap<String, (String, Instant)>>,
     /// `hosted_keys.delete_grace_secs`: how long a tombstone retains the deleted key's material.
     delete_grace: Duration,
+    /// `hosted_keys.write_quorum`: how many nodes a hosted-key write reaches. A node concludes that
+    /// no node holds a key only when at least `n - write_quorum + 1` nodes (itself included) said
+    /// so, since a written key sits on at least `write_quorum` of them.
+    hosted_write_quorum: usize,
+    /// Token bucket for read-repair fan-outs (each asks every peer): (tokens, last refill).
+    repair_bucket: Mutex<(f64, Instant)>,
     /// Caps on no-votes for unknown ceremony ids: (per asker, total). See
     /// [`MAX_UNKNOWN_NO_VOTES_PER_ASKER`].
     unknown_no_vote_caps: (usize, usize),
@@ -407,6 +420,8 @@ impl Node {
             hosted: None,
             hosted_created_in: Mutex::new(Default::default()),
             delete_grace: Duration::from_secs(crate::config::DEFAULT_DELETE_GRACE_SECS),
+            hosted_write_quorum: crate::orchestrator::DEFAULT_WRITE_QUORUM,
+            repair_bucket: Mutex::new((REPAIR_FANOUT_BURST, Instant::now())),
             unknown_no_vote_caps: (MAX_UNKNOWN_NO_VOTES_PER_ASKER, MAX_UNKNOWN_NO_VOTES),
             regather_delay: MIXED_EVIDENCE_REGATHER,
             #[cfg(test)]
@@ -497,11 +512,8 @@ impl Node {
                 Err(_) => false,
             };
             if promoted {
-                let done = CeremonyRecord {
-                    state: RecordState::Committed,
-                    updated_ms: crate::ceremony_record::now_ms(),
-                    ..rec.clone()
-                };
+                let now = crate::ceremony_record::now_ms();
+                let done = CeremonyRecord { state: RecordState::Committed, updated_ms: now, resolved_ms: now, ..rec.clone() };
                 self.record_store.write(Some(&rec), &done)?;
                 records.insert(done.ceremony_id.clone(), done);
                 tracing::info!(
@@ -889,7 +901,7 @@ impl Node {
         self.release_ceremony(key_id, ceremony_id);
         // Past its fence a generation can no longer be rolled back.
         let mut created = crate::sync::recover(&self.hosted_created_in, "hosted_created_in");
-        if created.get(key_id).is_some_and(|c| c == ceremony_id) {
+        if created.get(key_id).is_some_and(|(c, _)| c == ceremony_id) {
             created.remove(key_id);
         }
     }
@@ -1794,6 +1806,7 @@ impl Node {
             )));
         }
         self.refuse_if_staged(key_id)?;
+        let mut waived = None;
         match kind {
             CeremonyKind::Dkg => {
                 if self.keystore.exists(key_id) {
@@ -1801,6 +1814,9 @@ impl Node {
                 }
             }
             CeremonyKind::Refresh => {
+                // Before the share is even unsealed, and before any fence mark or guard.
+                let requested_by = verified.as_ref().map(|v| v.signer_cn.as_str());
+                waived = self.check_refresh_interval(key_id, Some(ceremony_id), requested_by, leader)?;
                 let share = self.keystore.load(key_id)?;
                 if let Some((epoch, digest)) = expect {
                     let mine = share.pkp_digest()?;
@@ -1822,6 +1838,7 @@ impl Node {
         // A fence without an intent (allowed only where intents are not required) never writes a
         // mark, but it is refused under a marked id all the same: otherwise a node that opted out
         // would let any peer re-fence a client's ceremony once its leader's guard went.
+        let requested_by = verified.as_ref().map(|v| v.signer_cn.clone());
         match verified {
             Some(_) => self.mark_fenced(ceremony_id, key_id, leader)?,
             None => self.refuse_if_fenced(ceremony_id)?,
@@ -1835,6 +1852,9 @@ impl Node {
                 "ceremony {ceremony_id} already holds the guard for {key_id} on this node — a second \
                  fence under one ceremony id (a second leader for one client intent) is refused"
             )));
+        }
+        if let Some((last, at)) = &waived {
+            self.note_waiver_used(key_id, ceremony_id, last, *at, requested_by.as_deref(), leader);
         }
         Ok(())
     }
@@ -1890,6 +1910,103 @@ impl Node {
             )));
         }
         Ok(())
+    }
+
+    /// The refresh-interval verdict for `key_id` on this node now
+    /// ([`crate::refresh_interval::verdict`]). No signing policy (a node built by hand, as some
+    /// tests do; the daemon always installs one): no limit, as no intents.
+    pub fn refresh_interval_verdict(&self, key_id: &str) -> Result<crate::refresh_interval::Verdict> {
+        let Some(g) = &self.sign_guard else { return Ok(crate::refresh_interval::Verdict::Allowed) };
+        let policy = g.verifier().policy();
+        let last = crate::refresh_interval::last_counted(self.book()?.records.values(), key_id);
+        Ok(crate::refresh_interval::verdict(
+            last.as_ref(),
+            crate::ceremony_record::now_ms(),
+            policy.refresh_min_interval_secs,
+            policy.refresh_waiver_ms(),
+        ))
+    }
+
+    /// The leader's own refresh-interval check, on `Signer.Refresh` before it contacts any peer:
+    /// a refresh this node would refuse at its own fence is refused before anything starts.
+    /// `requested_by`: the calling client's CN, for the log.
+    pub fn refuse_refresh_too_soon(&self, key_id: &str, requested_by: Option<&str>) -> Result<()> {
+        self.check_refresh_interval(key_id, None, requested_by, None).map(|_| ())
+    }
+
+    /// Log and count a refresh this node let through the interval under the operator's waiver —
+    /// called only once the fence (or part 1's session) was actually taken under it, so a burst of
+    /// fences for a waived key counts the one that got the guard, not every attempt.
+    fn note_waiver_used(
+        &self,
+        key_id: &str,
+        ceremony_id: &str,
+        w: &crate::refresh_interval::CountedRefresh,
+        waived_at_ms: u64,
+        requested_by: Option<&str>,
+        leader: Option<&str>,
+    ) {
+        metrics::counter!(crate::metrics::REFRESH_INTERVAL_WAIVED).increment(1);
+        tracing::warn!(
+            key_id,
+            ceremony_id,
+            node = self.index().unwrap_or_default(),
+            requested_by = requested_by.unwrap_or("<no intent>"),
+            leader = leader.unwrap_or("<this node>"),
+            last_refresh = %w.ceremony_id,
+            last_refresh_at = %crate::audit_check::fmt_ms(w.at_ms),
+            waived_at = %crate::audit_check::fmt_ms(waived_at_ms),
+            "refresh inside refresh_min_interval_secs let through by \
+             signing_policy.refresh_interval_waived_at (one per key after that time) — remove \
+             the waiver from every node's config once the incident refresh is done"
+        );
+    }
+
+    /// Refuse a refresh of `key_id` within `signing_policy.refresh_min_interval_secs` of the last
+    /// one this node took part in ([`crate::refresh_interval`]), before any guard, fence mark,
+    /// session or crypto. `ceremony_id`: the fence or part 1 asking (`None`: the leader's own
+    /// check on `Signer.Refresh`). `Ok(Some(..))`: let through by the waiver — the caller notes it
+    /// ([`Node::note_waiver_used`]) once it holds the guard. Refusals are counted every time and
+    /// logged at most once a minute per key.
+    fn check_refresh_interval(
+        &self,
+        key_id: &str,
+        ceremony_id: Option<&str>,
+        requested_by: Option<&str>,
+        leader: Option<&str>,
+    ) -> Result<Option<(crate::refresh_interval::CountedRefresh, u64)>> {
+        use crate::refresh_interval::Verdict;
+        match self.refresh_interval_verdict(key_id)? {
+            Verdict::Allowed => Ok(None),
+            Verdict::Waived { last, waived_at_ms } => Ok(Some((last, waived_at_ms))),
+            Verdict::TooSoon { last, next_ms } => {
+                metrics::counter!(crate::metrics::REFRESH_INTERVAL_REFUSALS).increment(1);
+                let interval = self.sign_guard.as_ref().map_or(0, |g| g.verifier().policy().refresh_min_interval_secs);
+                let msg = format!(
+                    "refresh of {key_id} refused by node {}: it took part in refresh {} at {}, less than \
+                     signing_policy.refresh_min_interval_secs ({interval} s) ago; it takes part in the next \
+                     refresh of the key from {}. An incident refresh that cannot wait needs \
+                     signing_policy.refresh_interval_waived_at on every node (docs/ceremonies.md, \
+                     \"Refresh interval\")",
+                    self.index().unwrap_or_default(),
+                    last.ceremony_id,
+                    crate::audit_check::fmt_ms(last.at_ms),
+                    crate::audit_check::fmt_ms(next_ms),
+                );
+                if refresh_refusal_log_due(key_id) {
+                    tracing::warn!(
+                        key_id,
+                        ceremony_id = ceremony_id.unwrap_or("<leader pre-check>"),
+                        requested_by = requested_by.unwrap_or("<no intent>"),
+                        leader = leader.unwrap_or("<this node>"),
+                        last_refresh = %last.ceremony_id,
+                        "{msg} — outside a documented incident nobody refreshes this often: check who holds \
+                         the refresher (and, while signer_may_refresh is on, the driver) certificate"
+                    );
+                }
+                Err(DaemonError::RefreshTooSoon(msg))
+            }
+        }
     }
 
     fn refuse_if_staged(&self, key_id: &str) -> Result<()> {
@@ -2094,7 +2211,9 @@ impl Node {
     ) -> Result<round1::Package> {
         crate::keystore::validate_ceremony_id(ceremony_id)?;
         crate::keystore::validate_key_id(key_id)?;
-        let verified = self.authorize_ceremony(kind, key_id, ceremony_id, intent)?.is_some();
+        let verified_by = self.authorize_ceremony(kind, key_id, ceremony_id, intent)?.map(|v| v.signer_cn);
+        let verified = verified_by.is_some();
+        let mut waived = None;
         let old = match kind {
             CeremonyKind::Dkg => {
                 // `…frost-import-…` ids belong to the split ceremony. Refusing them here, on every
@@ -2113,13 +2232,21 @@ impl Node {
                 if !self.keystore.exists(key_id) {
                     return Err(DaemonError::UnknownKey(key_id.to_string()));
                 }
+                // Again at part 1: where intents are not required, part 1 may run with no fence.
+                waived = self.check_refresh_interval(key_id, Some(ceremony_id), verified_by.as_deref(), leader)?;
                 // No reverse fence over in-flight signs: see `ceremony_fence`.
                 let share = self.keystore.load(key_id)?;
                 Some((share.epoch, share.pkp_digest()?))
             }
         };
         self.check_roster(roster)?;
-        self.start_session(ceremony_id, key_id, kind, roster.to_vec(), old, leader, verified)
+        // A waiver use is noted where the guard is taken: here only when no fence took it first.
+        let fenced = self.guards().get(key_id).is_some_and(|g| g.owner == ceremony_id);
+        let package = self.start_session(ceremony_id, key_id, kind, roster.to_vec(), old, leader, verified)?;
+        if let (Some((last, at)), false) = (&waived, fenced) {
+            self.note_waiver_used(key_id, ceremony_id, last, *at, verified_by.as_deref(), leader);
+        }
+        Ok(package)
     }
 
     /// Part 2: check the leader's round-1 map — exactly the roster, and this node's own package
@@ -2440,6 +2567,7 @@ impl Node {
             peers_settled: false,
             created_ms: now,
             updated_ms: now,
+            resolved_ms: 0,
             quarantined: false,
             split_detected_ms: 0,
             unknown_asked_by: None,
@@ -2736,6 +2864,7 @@ impl Node {
             state,
             reason,
             updated_ms: now,
+            resolved_ms: now,
             quarantined: aborted && quarantine,
             split_detected_ms: if aborted && split { now } else { 0 },
             ..rec.clone()
@@ -2945,6 +3074,33 @@ impl Node {
 
     /// Ceremonies this node aborted while a peer reports them COMMITTED, quarantine still held:
     /// `rutli_ceremonies_split`.
+    /// Publish `rutli_refreshes_6d{key}`: refreshes of each key this node committed in the last
+    /// 6 days (by commit time), from its ceremony records (a key whose refreshes aged out reads 0).
+    pub fn publish_refresh_gauge(&self) {
+        let Ok(book) = self.book() else { return };
+        let since = crate::ceremony_record::now_ms().saturating_sub(6 * 24 * 3600 * 1000);
+        let keys: std::collections::BTreeSet<&str> =
+            book.records.values().filter(|r| r.kind == "refresh" && !r.key_id.is_empty()).map(|r| r.key_id.as_str()).collect();
+        let counts: Vec<(String, usize)> = keys
+            .into_iter()
+            .map(|k| (k.to_string(), crate::refresh_interval::committed_since(book.records.values(), k, since)))
+            .collect();
+        drop(book);
+        // Keys published before whose records have since been garbage-collected read 0, not stale.
+        static PUBLISHED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+            std::sync::Mutex::new(std::collections::BTreeSet::new());
+        let mut published = PUBLISHED.lock().unwrap_or_else(|p| p.into_inner());
+        let gone: Vec<String> = published.iter().filter(|k| !counts.iter().any(|(c, _)| c == *k)).cloned().collect();
+        for key in gone {
+            metrics::gauge!(crate::metrics::REFRESHES_6D, "key" => key.clone()).set(0.0);
+            published.remove(&key);
+        }
+        for (key, n) in counts {
+            metrics::gauge!(crate::metrics::REFRESHES_6D, "key" => key.clone()).set(n as f64);
+            published.insert(key);
+        }
+    }
+
     pub fn split_count(&self) -> usize {
         self.quarantined_records().iter().filter(|r| r.split_detected_ms != 0).count()
     }
@@ -2979,6 +3135,7 @@ impl Node {
             recovered: true,
             reason: format!("recovered by the operator after: {}", rec.reason),
             updated_ms: now,
+            resolved_ms: now,
             ..rec.clone()
         };
         self.record_store.write_recovery(&rec, &done)?;
@@ -3112,11 +3269,37 @@ pub struct StagedOutcome {
 
 /// Hosted keys may never live under an id reserved for the split ceremony (`…frost-import-…`).
 /// The refusal for a write under a tombstoned id: ALREADY_EXISTS, naming the break-glass.
+/// Whether a refresh-interval refusal for `key_id` should be logged now: at most once a minute per
+/// key (every refusal is counted in `rutli_refresh_interval_refusals_total`), so a client looping
+/// refreshes cannot flood the log.
+fn refresh_refusal_log_due(key_id: &str) -> bool {
+    static LAST: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>> = std::sync::Mutex::new(None);
+    let minute = crate::ceremony_record::now_ms() / 60_000;
+    let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
+    let map = last.get_or_insert_with(Default::default);
+    // Key ids that reach this point passed validate_key_id and exist here; bound the map anyway.
+    if map.len() > 256 {
+        map.clear();
+    }
+    map.insert(key_id.to_string(), minute) != Some(minute)
+}
+
 pub(crate) fn tombstoned(key_id: &str) -> DaemonError {
     DaemonError::KeyExists(format!(
         "{key_id} is tombstoned (deleted): hosted key ids are never reused — undelete it \
          (rutli-cosigner hosted-undelete, within the grace period), or clear the tombstone on EVERY \
          node (rutli-cosigner hosted-clear-tombstone) before generating it again"
+    ))
+}
+
+/// The refusal of a push into an id this node does not hold, from a caller that does not hold
+/// this node's generation fence for it under the ceremony id it names.
+pub(crate) fn unfenced_push(key_id: &str, ceremony_id: &str, caller: Option<&str>) -> DaemonError {
+    DaemonError::HostedPushRefused(format!(
+        "{key_id} is not held here, and {} holds no generation fence for it on this node under \
+         ceremony {ceremony_id:?} — a key this node lacks is pulled from two agreeing peers, never \
+         accepted from one",
+        caller.map(|c| format!("caller {c:?}")).unwrap_or_else(|| "the caller".into())
     ))
 }
 
@@ -3336,6 +3519,12 @@ impl Node {
     /// [`Node::hosted_store`], noting the genkey ceremony that created it here (`created_by`), so
     /// that generation — and only it, while it holds its fence — may roll it back.
     pub fn hosted_store_for(&self, key_id: &str, key: &crate::hosted::HostedKey, created_by: Option<&str>) -> Result<()> {
+        self.hosted_store_created(key_id, key, created_by).map(|_| ())
+    }
+
+    /// [`Node::hosted_store_for`], returning whether this call created the file (`false`: an
+    /// identical copy was already here).
+    fn hosted_store_created(&self, key_id: &str, key: &crate::hosted::HostedKey, created_by: Option<&str>) -> Result<bool> {
         self.hosted_ctx()?;
         // A peer may never push a hosted key under an id reserved for the split ceremony: it would
         // squat on an import, or (with a rename-based write) replace an installed share.
@@ -3358,27 +3547,40 @@ impl Node {
                 HostedState::Absent => return Err(DaemonError::UnknownKey(key_id.to_string())),
             };
             if node.hosted_commitment(&existing)? != node.hosted_commitment(key)? {
-                return Err(DaemonError::KeyExists(format!(
-                    "{key_id} already exists here with different material — refusing to overwrite"
-                )));
+                // The wording is matched by leaders of the next release on a 0.4.0 node's refusal
+                // (`orchestrator::is_material_conflict`); keep "different material" in it.
+                return Err(DaemonError::HostedConflict {
+                    key_id: key_id.to_string(),
+                    detail: "it already exists here with different material — refusing to overwrite".into(),
+                });
             }
             Ok(()) // identical replica: idempotent no-op
         };
         if self.keystore.exists(key_id) {
-            return identical_or_conflict(self);
+            return identical_or_conflict(self).map(|_| false);
         }
         // create, not save: a file that appeared since the check (a racing push, a FROST share, a
         // tombstone) is never renamed over; it is compared like any existing one.
         match self.keystore.create_hosted(key_id, key) {
-            Err(DaemonError::KeyExists(_)) => identical_or_conflict(self),
+            Err(DaemonError::KeyExists(_)) => identical_or_conflict(self).map(|_| false),
             Ok(()) => {
+                // Bound to the guard instance the ceremony holds now: a later fence under the same
+                // ceremony id (after this one was released or lapsed) is another instance and can
+                // never roll this key back.
                 if let Some(c) = created_by {
-                    crate::sync::recover(&self.hosted_created_in, "hosted_created_in")
-                        .insert(key_id.to_string(), c.to_string());
+                    let started = self
+                        .guards()
+                        .get(key_id)
+                        .filter(|g| g.owner == c && g.kind == "genkey")
+                        .map(|g| g.started);
+                    if let Some(started) = started {
+                        crate::sync::recover(&self.hosted_created_in, "hosted_created_in")
+                            .insert(key_id.to_string(), (c.to_string(), started));
+                    }
                 }
-                Ok(())
+                Ok(true)
             }
-            other => other,
+            Err(e) => Err(e),
         }
     }
 
@@ -3402,6 +3604,50 @@ impl Node {
     pub fn with_delete_grace(mut self, grace: Duration) -> Self {
         self.delete_grace = grace;
         self
+    }
+
+    /// `hosted_keys.write_quorum` (see the field).
+    pub fn with_hosted_write_quorum(mut self, q: usize) -> Self {
+        self.hosted_write_quorum = q.max(1);
+        self
+    }
+
+    pub fn hosted_write_quorum(&self) -> usize {
+        self.hosted_write_quorum
+    }
+
+    /// Take one read-repair fan-out from this node's ceiling ([`REPAIR_FANOUT_PER_SEC`]).
+    pub fn take_repair_token(&self) -> bool {
+        let mut b = crate::sync::recover(&self.repair_bucket, "rate_limiter");
+        let now = Instant::now();
+        let refill = now.duration_since(b.1).as_secs_f64() * REPAIR_FANOUT_PER_SEC;
+        b.0 = (b.0 + refill).min(REPAIR_FANOUT_BURST);
+        b.1 = now;
+        if b.0 >= 1.0 {
+            b.0 -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// This node's tombstone for `key_id` as `ListKeys` reports it, if it holds one: what a peer's
+    /// `FetchKey` with `include_tombstone` gets, so it never pulls a deleted key back.
+    pub fn hosted_tombstone_manifest(&self, key_id: &str) -> Result<Option<crate::pb::KeyManifest>> {
+        use prost::Message;
+        self.hosted_ctx()?;
+        match self.hosted_state(key_id)? {
+            HostedState::Tombstone(t) => Ok(Some(crate::pb::KeyManifest {
+                commitment: hex::decode(&t.commitment).unwrap_or_default(),
+                delete_intent: t.intent()?.encode_to_vec(),
+                tombstone: true,
+                deleted_at_ms: t.deleted_at_ms,
+                spec: t.spec.clone(),
+                created_at: t.created_at,
+                key_id: t.key_id.clone(),
+            })),
+            _ => Ok(None),
+        }
     }
 
     /// Delete hosted key `key_id` on this node by the client's delete intent (audit M2): verify it
@@ -3510,12 +3756,22 @@ impl Node {
     /// guard, may roll it back — not any peer that learned the generation's ceremony id.
     pub fn hosted_rollback_purge_from(&self, ceremony_id: &str, key_id: &str, leader: Option<&str>) -> Result<bool> {
         self.hosted_ctx()?;
-        let fenced = self.guards().get(key_id).is_some_and(|g| {
-            g.owner == ceremony_id && g.kind == "genkey" && g.leader.as_deref() == leader
-        });
+        let guard_started = self
+            .guards()
+            .get(key_id)
+            .filter(|g| g.owner == ceremony_id && g.kind == "genkey" && g.leader.as_deref() == leader)
+            .map(|g| g.started);
+        let fenced = guard_started.is_some();
         let created_here = crate::sync::recover(&self.hosted_created_in, "hosted_created_in")
             .get(key_id)
-            .is_some_and(|c| c == ceremony_id);
+            .is_some_and(|(c, started)| c == ceremony_id && Some(*started) == guard_started);
+        if fenced && !created_here && matches!(self.hosted_state(key_id)?, HostedState::Absent) {
+            // Nothing this generation created here (its push never landed, or was refused): there
+            // is nothing to roll back. The rollback still ends this fence instance here, so a push
+            // of the same generation that is still checking its peers can no longer store.
+            self.end_genkey_instance(ceremony_id, key_id);
+            return Ok(false);
+        }
         if !(fenced && created_here) {
             return Err(crate::intent::refused_delete(
                 "rollback",
@@ -3525,14 +3781,25 @@ impl Node {
                 ),
             ));
         }
-        match self.hosted_state(key_id)? {
+        let outcome = match self.hosted_state(key_id)? {
             HostedState::Live(_) => {
                 self.keystore.delete(key_id)?;
-                crate::sync::recover(&self.hosted_created_in, "hosted_created_in").remove(key_id);
-                Ok(true)
+                true
             }
-            HostedState::Absent => Ok(false),
-            _ => Err(DaemonError::Config(format!("{key_id} is no longer the key this generation created"))),
+            HostedState::Absent => false,
+            _ => return Err(DaemonError::Config(format!("{key_id} is no longer the key this generation created"))),
+        };
+        self.end_genkey_instance(ceremony_id, key_id);
+        Ok(outcome)
+    }
+
+    /// End generation `ceremony_id`'s fence on `key_id` here after its rollback: the guard and the
+    /// created-by marker go, so nothing of that generation can be stored or purged here any more.
+    fn end_genkey_instance(&self, ceremony_id: &str, key_id: &str) {
+        self.release_ceremony(key_id, ceremony_id);
+        let mut created = crate::sync::recover(&self.hosted_created_in, "hosted_created_in");
+        if created.get(key_id).is_some_and(|(c, _)| c == ceremony_id) {
+            created.remove(key_id);
         }
     }
 
@@ -3675,10 +3942,109 @@ impl Node {
                 "wrapped key spec does not match the declared spec".into(),
             ));
         }
-        // A peer's material must be self-consistent before it is stored: an EC key whose public
-        // half is not its own would have this node serve a public key it cannot decrypt for.
+        // A peer's material must be self-consistent before it is stored: an EC or RSA key whose
+        // public half is not its own would have this node serve a public key it cannot decrypt for.
         key.validate()?;
+        // And its times bounded: a creation or undelete time in the future would make the copy
+        // refuse every delete until then.
+        key.check_times(crate::intent::now_ms(), self.hosted_skew_ms())?;
         Ok(key)
+    }
+
+    /// The clock skew allowance hosted-key timestamps are checked with: the signing policy's
+    /// `clock_skew_secs`, or its default without a policy (tests, tools).
+    pub fn hosted_skew_ms(&self) -> u64 {
+        self.sign_guard
+            .as_ref()
+            .map(|g| g.verifier().skew_ms())
+            .unwrap_or(crate::config::DEFAULT_CLOCK_SKEW_SECS * 1000)
+    }
+
+    /// Whether this node's guard for `key_id` is the generation fence of `ceremony_id`, taken by
+    /// `leader` (the caller's certificate CN; `None` for this node's own in-process leader). The
+    /// same test the rollback purge applies: only the caller that fenced a generation here may
+    /// create the key here.
+    pub fn hosted_genkey_fenced_by(&self, key_id: &str, ceremony_id: &str, leader: Option<&str>) -> bool {
+        self.guards()
+            .get(key_id)
+            .is_some_and(|g| g.owner == ceremony_id && g.kind == "genkey" && g.leader.as_deref() == leader)
+    }
+
+    /// What a peer's push of `key` under `key_id` meets here, before anything is stored:
+    /// `Some(commitment)` when this node already holds the identical key (an idempotent no-op),
+    /// `None` when the id is absent. A different key here is [`DaemonError::HostedConflict`]; a
+    /// tombstone, a FROST share, a reserved or non-hosted id are refused as by
+    /// [`Node::hosted_store_for`].
+    pub fn hosted_push_check(&self, key_id: &str, key: &crate::hosted::HostedKey) -> Result<Option<Vec<u8>>> {
+        self.hosted_ctx()?;
+        refuse_reserved_for_hosted(key_id)?;
+        refuse_unless_hosted_id(key_id)?;
+        match self.hosted_state(key_id)? {
+            HostedState::Absent => Ok(None),
+            HostedState::Tombstone(_) => Err(tombstoned(key_id)),
+            HostedState::Frost => Err(DaemonError::KeyExists(format!("{key_id} is a FROST share here"))),
+            HostedState::Live(existing) => {
+                let mine = self.hosted_commitment(&existing)?;
+                if mine != self.hosted_commitment(key)? {
+                    return Err(DaemonError::HostedConflict {
+                        key_id: key_id.to_string(),
+                        detail: "it already exists here with different material — refusing to overwrite".into(),
+                    });
+                }
+                Ok(Some(mine))
+            }
+        }
+    }
+
+    /// Store a peer's push: only while `leader` holds this node's generation fence for `key_id`
+    /// under `ceremony_id` ([`Node::hosted_genkey_fenced_by`]), noting the ceremony so that its
+    /// rollback, and only it, may remove the key again. An identical copy already here is a no-op.
+    /// Returns this node's commitment to what it holds.
+    pub fn hosted_store_pushed(
+        &self,
+        key_id: &str,
+        key: &crate::hosted::HostedKey,
+        ceremony_id: &str,
+        leader: Option<&str>,
+    ) -> Result<Vec<u8>> {
+        if let Some(c) = self.hosted_push_check(key_id, key)? {
+            return Ok(c);
+        }
+        if !self.hosted_genkey_fenced_by(key_id, ceremony_id, leader) {
+            return Err(unfenced_push(key_id, ceremony_id, leader));
+        }
+        let created = self.hosted_store_created(key_id, key, Some(ceremony_id))?;
+        // The generation may have been rolled back while this push was checking its peers (the
+        // rollback ends the fence instance here): then the copy just written is this push's own
+        // orphan, and it goes again.
+        if created && !self.hosted_genkey_fenced_by(key_id, ceremony_id, leader) {
+            self.keystore.delete(key_id)?;
+            crate::sync::recover(&self.hosted_created_in, "hosted_created_in").remove(key_id);
+            return Err(unfenced_push(key_id, ceremony_id, leader));
+        }
+        self.hosted_commitment(key)
+    }
+
+    /// This node's mesh peers (every other roster node, as this node dials it); empty before the
+    /// mesh is attached (tools, some tests).
+    pub fn mesh_peers(&self) -> Vec<Arc<dyn crate::peer::PeerApi>> {
+        self.mesh.get().cloned().unwrap_or_default()
+    }
+
+    /// Hosted keys held here whose creation or undelete time lies in the future beyond the clock
+    /// skew allowance (they refuse every delete until then): (key id, why). Unreadable files are
+    /// skipped (they are counted by the inventory).
+    pub fn hosted_future_timestamps(&self) -> Result<Vec<(String, String)>> {
+        let (now, skew) = (crate::intent::now_ms(), self.hosted_skew_ms());
+        let mut out = Vec::new();
+        for key_id in self.hosted_list()? {
+            if let Ok(key) = self.hosted_load(&key_id) {
+                if let Err(e) = key.check_times(now, skew) {
+                    out.push((key_id, e.to_string()));
+                }
+            }
+        }
+        Ok(out)
     }
 
     // -- crypto operations served to the driver --

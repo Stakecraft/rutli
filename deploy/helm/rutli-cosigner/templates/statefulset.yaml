@@ -92,6 +92,8 @@ spec:
               chmod 0400 "/certs/cosigner${id}.key"
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.tlsSelect.resources | nindent 12 }}
           volumeMounts:
             - { name: tls-src, mountPath: /tls-src, readOnly: true }
             - { name: certs, mountPath: /certs }

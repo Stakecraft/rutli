@@ -142,15 +142,27 @@ async fn anti_entropy_and_read_repair_carry_ec_keys() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, _) = hosted_cluster(&tmp);
 
-    // Only node 3 has it (the others were down for the write).
+    // Nodes 2 and 3 have it (node 1 was down for the write): node 1's sweep pulls it, since two
+    // peers agree.
     let (key, _) = nodes[2].hosted_generate("rutli-enc-ec-2", HostedSpec::EcP256).unwrap();
-    let (pulled, _) = anti_entropy_sweep(&nodes[1], &view_of(&nodes, 1)).await.unwrap();
-    assert!(pulled >= 1);
-    assert!(repair_hosted_key(&nodes[0], &view_of(&nodes, 0), "rutli-enc-ec-2").await.unwrap());
+    nodes[1].hosted_store("rutli-enc-ec-2", &key).unwrap();
+    assert_eq!(anti_entropy_sweep(&nodes[0], &view_of(&nodes, 0)).await.unwrap(), 1);
+    // Read-repair likewise, for a second key.
+    let (other, _) = nodes[2].hosted_generate("rutli-enc-ec-3", HostedSpec::EcP256).unwrap();
+    nodes[0].hosted_store("rutli-enc-ec-3", &other).unwrap();
+    assert!(repair_hosted_key(&nodes[1], &view_of(&nodes, 1), "rutli-enc-ec-3").await.unwrap());
     let z = key.ecdh_p256(&v()).unwrap();
     for n in &nodes {
         assert_eq!(n.hosted_ecdh("rutli-enc-ec-2", &v()).unwrap().as_ref(), z.as_ref());
+        assert_eq!(n.hosted_ecdh("rutli-enc-ec-3", &v()).unwrap().as_ref(), other.ecdh_p256(&v()).unwrap().as_ref());
     }
+    // A key only one node holds is not pulled: one peer's word is not enough.
+    nodes[2].hosted_generate("rutli-enc-ec-4", HostedSpec::EcP256).unwrap();
+    assert!(matches!(
+        repair_hosted_key(&nodes[0], &view_of(&nodes, 0), "rutli-enc-ec-4").await,
+        Err(rutli_cosigner::DaemonError::HostedUnconfirmed { .. })
+    ));
+    assert!(!nodes[0].hosted_exists("rutli-enc-ec-4"));
 }
 
 #[tokio::test]
@@ -248,8 +260,16 @@ async fn ecdh_derive_answers_the_known_vector_and_any_node_serves_it() {
     let kat = HostedKey::ec_p256_from_scalar(&hex::decode(KAT_D).unwrap(), 1).unwrap();
     nodes[0].hosted_store("rutli-enc-kat", &kat).unwrap();
 
-    // Node 2 lacks the key: the RPC read-repairs from a peer before answering.
+    // Node 2 lacks the key and only one peer holds it: UNAVAILABLE (the driver fails over to a
+    // node that holds it), never NOT_FOUND, and nothing is stored.
     let svc = signer(&nodes[1], &view_of(&nodes, 1), 0);
+    let e = ecdh(&svc, "rutli-enc-kat", &v()).await.unwrap_err();
+    assert_eq!(e.code(), Code::Unavailable, "{e:?}");
+    assert_eq!(e.metadata().get("rutli-error").and_then(|v| v.to_str().ok()), Some("hosted-unconfirmed"));
+    assert!(!nodes[1].hosted_exists("rutli-enc-kat"));
+
+    // Two peers hold it: the RPC read-repairs before answering.
+    nodes[2].hosted_store("rutli-enc-kat", &kat).unwrap();
     assert_eq!(hex::encode(ecdh(&svc, "rutli-enc-kat", &v()).await.unwrap()), KAT_Z);
     assert!(nodes[1].hosted_exists("rutli-enc-kat"), "read-repair stored the key");
 
@@ -482,8 +502,12 @@ async fn verify_hosted_sees_each_nodes_own_copy_and_the_canton_fingerprint() {
     assert!(r.problems.iter().any(|p| p == "node 2: does not hold the key"), "{:?}", r.problems);
     assert!(!nodes[1].hosted_exists(id), "HostedKeyStatus must not read-repair");
 
-    // Anti-entropy pushes it everywhere; now the cluster agrees on Canton's key.
-    anti_entropy_sweep(&nodes[0], &peers).await.unwrap();
+    // Node 1's sweep pushes nothing. Imported on a second node, the third pulls it (two agree);
+    // now the cluster agrees on Canton's key.
+    anti_entropy_sweep(&nodes[0], &view_of(&nodes, 0)).await.unwrap();
+    assert!(!nodes[1].hosted_exists(id), "the sweep no longer pushes");
+    nodes[1].hosted_store(id, &imported.key).unwrap();
+    assert_eq!(anti_entropy_sweep(&nodes[2], &view_of(&nodes, 2)).await.unwrap(), 1);
     let r = check_hosted_views(id, &fp, &[1, 2, 3], &hosted_views(&nodes, &peers, id).await);
     assert!(r.ok, "{:?}", r.problems);
     let canton_pub = rutli_canton_key::parse_public_key(&read("encryption.pub.bin")).unwrap();
@@ -571,7 +595,8 @@ async fn import_key_into_a_running_node_races_safely_with_anti_entropy() {
     for _ in 0..25 {
         let tmp = tempfile::tempdir().unwrap();
         let (nodes, _) = hosted_cluster(&tmp);
-        nodes[1].hosted_store(id, &key).unwrap(); // imported on node 2 first
+        nodes[1].hosted_store(id, &key).unwrap(); // imported on nodes 2 and 3 first
+        nodes[2].hosted_store(id, &key).unwrap();
         let store = cli_store(&tmp);
         let k = key.clone();
         let cli = tokio::task::spawn_blocking(move || install_imported(&store, id, &k));
@@ -626,7 +651,8 @@ async fn import_key_into_a_running_node_races_safely_with_anti_entropy() {
         Err(rutli_cosigner::DaemonError::NotHostedKeyId(_))
     ));
 
-    // The running node serves the key it did not write itself, and anti-entropy pushes it on.
+    // The running node serves the key it did not write itself; imported on a second node too, the
+    // third pulls it.
     let canton_pub = rutli_canton_key::parse_public_key(&read("encryption.pub.bin")).unwrap();
     let served = signer(&nodes[0], &peers, 0)
         .public_key(Request::new(pb::PublicKeyRequest { key_id: id.into() }))
@@ -634,8 +660,9 @@ async fn import_key_into_a_running_node_races_safely_with_anti_entropy() {
         .unwrap()
         .into_inner();
     assert_eq!(served.public_key_der, canton_pub.public.spki_der());
-    let (_, pushed) = anti_entropy_sweep(&nodes[0], &peers).await.unwrap();
-    assert_eq!(pushed, 2);
+    assert_eq!(anti_entropy_sweep(&nodes[0], &view_of(&nodes, 0)).await.unwrap(), 0, "nothing to pull, nothing pushed");
+    nodes[1].hosted_store(id, &key).unwrap();
+    assert_eq!(anti_entropy_sweep(&nodes[2], &view_of(&nodes, 2)).await.unwrap(), 1);
     let views = hosted_views(&nodes, &peers, id).await;
     assert!(rutli_cosigner::verify_hosted::check_hosted_views(id, &fp, &[1, 2, 3], &views).ok);
 }

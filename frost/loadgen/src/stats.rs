@@ -94,6 +94,23 @@ pub struct ClientReport {
     /// Per cosigner that gave the final answer: its successes, its errors and the latency of
     /// its successes (a request that failed over counts for the cosigner it ended on).
     pub by_leader: BTreeMap<String, LeaderReport>,
+    /// With --eager-connect: how long each client's first connection took, set by the caller.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connect: Option<ConnectReport>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, PartialEq)]
+pub struct ConnectReport {
+    /// Of the connections that were made.
+    pub latency: Latency,
+    /// Connections that failed: `timeout` (no connection within --timeout-secs) or `error`.
+    pub errors: BTreeMap<String, u64>,
+    pub error_sample: Option<String>,
+}
+
+/// [`latency`] for callers outside this module (connection times).
+pub fn latency_of(micros: &mut [u64]) -> Latency {
+    latency(micros)
 }
 
 #[derive(Debug, Default, Clone, Serialize, PartialEq)]
@@ -180,6 +197,7 @@ impl Recorder {
                     (name, LeaderReport { ok: micros.len() as u64, errors, latency: latency(&mut micros) })
                 })
                 .collect(),
+            connect: None,
         }
     }
 }

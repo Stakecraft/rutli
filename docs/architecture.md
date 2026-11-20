@@ -173,8 +173,10 @@ rationale in [hosted-keys-design.md](hosted-keys-design.md)):
   pin, it refuses to start when that pin does not match its seal keys, so a wrong bundle or wrong
   mount is caught *before* any key exists. Without the own pin the mismatch shows only when peers
   refuse to replicate to it.
-- **Anti-entropy and read-repair.** A sweep every 300 s pulls keys this node lacks and pushes keys a
-  peer lacks; a request landing on a lagging replica pulls on demand. Hosted keys are
+- **Anti-entropy and read-repair.** A sweep every 300 s pulls keys this node lacks; a request
+  landing on a lagging replica pulls on demand. Since 0.5.0 a node stores a key it lacks only when
+  two peers return the same copy, the sweep never pushes, and a peer's push into an id the node
+  lacks is accepted only from the leader holding its generation fence (`docs/hosted-keys.md` §4). Hosted keys are
   create-once-immutable (Canton rotates by minting a new id plus a topology transaction), so a
   commitment mismatch between two nodes under one key id is a **hard error** — page-worthy, never
   auto-reconciled.
@@ -212,7 +214,11 @@ The honest framing, to be used wherever this tradeoff comes up:
 ## One cluster, several participants — `frost.key-prefix`
 
 The driver derives FROST key ids **deterministically from Canton's key name** (`namespace` →
-`frost-namespace`, `signing` → `frost-signing`), and hosted ids as `rutli-<kind>-<name>-<uuid>`. The
+`frost-namespace`, `signing` → `frost-signing`), and hosted ids as `rutli-<kind>-<name>-<uuid>`.
+Who names the key matters: a Splice validator calls it `namespace`, Canton's own auto-init calls
+it `<node>-namespace` (so `frost-participant1-namespace`). Rules, ACLs and rate limits match ids by
+prefix, so a rule written for one form never matches the other. Take the real id from the driver
+log ("initiating distributed key generation for …") or `keys.secret.list()`. The
 determinism is deliberate — a retry or a failover must ask for the *same* namespace key, never mint
 a second one — but it means two participants pointed at the same cosigner cluster both ask for
 `frost-namespace`. Before 0.4.0-rc.3 the cluster's create-once guard refused the second

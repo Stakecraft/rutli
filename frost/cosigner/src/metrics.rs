@@ -87,6 +87,19 @@ pub const SIGN_JOURNAL_ERRORS: &str = "rutli_sign_journal_errors_total";
 /// signature, cluster, purpose, key, expiry, acl, malformed, ceremony-id, missing). A refusal on the
 /// mesh path means a leader asked for a ceremony no authorized client requested: alert on it.
 pub const CEREMONY_INTENT_REFUSALS: &str = "rutli_ceremony_intent_refusals_total";
+/// Counter: refreshes this node refused to take part in (as leader, at a fence or at part 1)
+/// because it took part in a refresh of the same key less than
+/// `signing_policy.refresh_min_interval_secs` ago. Outside a documented incident nobody should
+/// refresh that often: alert on it.
+pub const REFRESH_INTERVAL_REFUSALS: &str = "rutli_refresh_interval_refusals_total";
+/// Counter: refreshes this node let through the interval because of
+/// `signing_policy.refresh_interval_waived_at` (the operator's incident path).
+pub const REFRESH_INTERVAL_WAIVED: &str = "rutli_refresh_interval_waived_total";
+/// Gauge, label `key`: refreshes of the key this node committed in the last 6 days (by commit
+/// time), from its ceremony records (so it survives a restart). The shipped schedule is weekly; the
+/// window is a day shorter so a weekly run that lands a little early is not two in the window.
+/// Above 1 means a refresh outside the schedule.
+pub const REFRESHES_6D: &str = "rutli_refreshes_6d";
 /// Counter: DKG/refresh fences and part 1s this node accepted without a ceremony intent (a leader
 /// or client that predates them), because `signing_policy.require_ceremony_intent` is off.
 pub const CEREMONY_INTENT_ABSENT: &str = "rutli_ceremony_intent_absent_total";
@@ -131,11 +144,20 @@ pub const GRPC_HANDSHAKE_TIMEOUTS: &str = "rutli_grpc_handshake_timeouts_total";
 /// Background loops restarted after a panic in a pass ([`crate::supervise`]), by `loop`. The node
 /// kept going; the panic itself is a bug — alert on any increase and report it.
 pub const BACKGROUND_LOOP_RESTARTS: &str = "rutli_background_loop_restarts_total";
-/// Hosted keys repaired by anti-entropy (pulled here or pushed to a peer).
+/// Hosted keys anti-entropy pulled to this node (each confirmed by two peers). The sweep no longer
+/// pushes keys to peers.
 pub const ANTI_ENTROPY_REPAIRS: &str = "rutli_anti_entropy_repairs_total";
-/// Hosted keys found with *different* material on two nodes under one id. Any increase is a
-/// page-worthy invariant violation, not a transient.
+/// Hosted keys found with *different* material on two nodes under one id: by the sweep, by a pull
+/// that met two materials, by a push refused over another copy, by a generation aborted on one.
+/// Any increase is a page-worthy invariant violation, not a transient.
 pub const ANTI_ENTROPY_CONFLICTS: &str = "rutli_anti_entropy_conflicts_total";
+/// Counter, label `reason`: hosted key material this node refused to store, or a generation it
+/// aborted (see [`HOSTED_REFUSAL_REASONS`]). The log line names the key and the peer.
+pub const HOSTED_REPLICATION_REFUSALS: &str = "rutli_hosted_replication_refusals_total";
+/// Gauge: hosted keys held here whose creation or undelete time lies in the future beyond the
+/// clock skew allowance (set at start-up and by every sweep). Such a key refuses every delete until
+/// that time.
+pub const HOSTED_FUTURE_TIMESTAMPS: &str = "rutli_hosted_keys_future_timestamp";
 /// Hosted keys held by this node.
 pub const HOSTED_KEYS: &str = "rutli_hosted_keys";
 /// Key files present on disk that could not be opened (wrong seal secret, corruption). Skipped
@@ -166,6 +188,17 @@ pub const KEY_REPLICAS: &str = "rutli_key_replicas";
 /// that state, so alert on it (critical). Refreshed by the daemon's own probe loop and by every
 /// `Signer.Health` call; not the same as [`UNREADABLE_KEY_FILES`] (one file failing to unseal).
 pub const KEYSTORE_UNREADABLE: &str = "rutli_keystore_unreadable";
+
+/// Mesh connections refused because the peer's TLS certificate carries a key not pinned in its
+/// `peers[].tls_spki_sha256`. Labels: `direction` = "inbound" (a peer called this node) |
+/// "outbound" (this node dialled a peer). A stale pin after a key roll, or a certificate that is
+/// not that node's: alert on any increase.
+pub const PEER_PIN_REFUSALS: &str = "rutli_peer_pin_refusals_total";
+/// Roster peers this node accepts by certificate name alone (no `tls_spki_sha256`), possible only
+/// with `tls.require_peer_pins: false`. 0 on a fully pinned node.
+pub const PEER_PINS_UNPINNED: &str = "rutli_peer_pins_unpinned";
+/// The `direction` values of `rutli_peer_pin_refusals_total`.
+pub const PEER_PIN_DIRECTIONS: &[&str] = &["inbound", "outbound"];
 
 /// Every `reason` label value `rutli_sign_policy_refusals_total` can carry (the string literals the
 /// `refused(..)` call sites in `intent.rs`, `sign_policy.rs`, `service.rs` and `node.rs` pass).
@@ -248,6 +281,35 @@ pub const SESSION_CAPS: &[&str] = &["key", "opener", "request"];
 /// The `loop` names of `rutli_background_loop_restarts_total`: the first argument of every
 /// `supervise::spawn_supervised` call (`RutliBackgroundLoopRestarted`); a test checks the call sites.
 pub const BACKGROUND_LOOPS: &[&str] = &["anti_entropy", "ceremony_resolver", "epoch_check", "nonce_pruner"];
+/// Every `reason` of `rutli_hosted_replication_refusals_total` (`hosted_refusal(..)` call sites in
+/// `orchestrator.rs`):
+/// - `unfenced`: a push into an id this node lacks from a caller without its generation fence;
+/// - `conflict`: a push refused because this node or another peer holds different material;
+/// - `disagreement`: a pull refused because peers hold different material;
+/// - `unconfirmed`: a pull refused because fewer than two peers returned the same material;
+/// - `invalid`: material that does not open, parse or validate (an RSA or EC key whose public half
+///   is not its own);
+/// - `timestamp`: material whose creation or undelete time lies in the future;
+/// - `generate-conflict`: a generation this node led, aborted because a peer holds other material;
+/// - `unverifiable`: a push refused because another peer answered with a copy this node cannot check;
+/// - `throttled`: a read-repair refused because this node's fan-out ceiling is reached.
+pub const HOSTED_REFUSAL_REASONS: &[&str] = &[
+    "unfenced",
+    "conflict",
+    "disagreement",
+    "unconfirmed",
+    "invalid",
+    "timestamp",
+    "generate-conflict",
+    "unverifiable",
+    "throttled",
+];
+/// Counter: nodes the rollback of an aborted hosted-key generation did not reach (each may keep a
+/// copy the generation wrote). The log line names the node and the key.
+pub const HOSTED_ROLLBACK_INCOMPLETE: &str = "rutli_hosted_rollback_incomplete_total";
+/// Counter: missing hosted keys a sweep tried to pull and did not (unconfirmed, conflicting, or an
+/// error); each is logged with its key id at debug level, refusals also by reason.
+pub const ANTI_ENTROPY_PULL_FAILURES: &str = "rutli_anti_entropy_pull_failures_total";
 /// The `op` values of `rutli_hosted_key_ops_total` (`record_hosted_op` call sites in `service.rs`);
 /// `result` is "ok" | "error" (`RutliHostedKeyErrors`).
 pub const HOSTED_KEY_OPS_NAMES: &[&str] =
@@ -320,12 +382,20 @@ fn prime() {
     metrics::counter!(GRPC_ACCEPT_ERRORS).absolute(0);
     metrics::counter!(GRPC_HANDSHAKE_TIMEOUTS).absolute(0);
     metrics::counter!(ANTI_ENTROPY_CONFLICTS).absolute(0);
+    for reason in HOSTED_REFUSAL_REASONS {
+        metrics::counter!(HOSTED_REPLICATION_REFUSALS, "reason" => *reason).absolute(0);
+    }
+    metrics::gauge!(HOSTED_FUTURE_TIMESTAMPS).set(0.0);
+    metrics::counter!(HOSTED_ROLLBACK_INCOMPLETE).absolute(0);
+    metrics::counter!(ANTI_ENTROPY_PULL_FAILURES).absolute(0);
     metrics::gauge!(HOSTED_KEYS).set(0.0);
     metrics::counter!(UNREADABLE_KEY_FILES).absolute(0);
     metrics::counter!(DECRYPT_RATE_LIMITED).absolute(0);
     metrics::counter!(CEREMONY_SIGN_TEST_RATE_LIMITED).absolute(0);
     metrics::counter!(SIGN_INTENT_ABSENT).absolute(0);
     metrics::counter!(CEREMONY_INTENT_ABSENT).absolute(0);
+    metrics::counter!(REFRESH_INTERVAL_REFUSALS).absolute(0);
+    metrics::counter!(REFRESH_INTERVAL_WAIVED).absolute(0);
     metrics::counter!(SIGN_RATE_LIMITED).absolute(0);
     metrics::counter!(SIGNER_ACL_ABSENT).absolute(0);
     metrics::counter!(SIGN_JOURNAL_ENTRIES).absolute(0);
@@ -364,11 +434,16 @@ fn prime() {
     metrics::counter!(SIGN_ABORTS).absolute(0);
     metrics::gauge!(PENDING_SIGN_SESSIONS).set(0.0);
     metrics::gauge!(KEYSTORE_UNREADABLE).set(0.0);
+    for direction in PEER_PIN_DIRECTIONS {
+        metrics::counter!(PEER_PIN_REFUSALS, "direction" => *direction).absolute(0);
+    }
 }
 
 /// Register help texts (shown in the Prometheus exposition; harmless without a recorder).
 pub fn describe() {
     describe_counter!(SIGN_REQUESTS, "Leader-side Sign RPC outcomes, by result");
+    describe_counter!(PEER_PIN_REFUSALS, "Mesh connections refused for a TLS key not pinned in peers[].tls_spki_sha256, by direction");
+    describe_gauge!(PEER_PINS_UNPINNED, "Roster peers accepted by certificate name alone (tls.require_peer_pins: false)");
     describe_histogram!(SIGN_DURATION, Unit::Seconds, "Leader-side Sign RPC latency, by result");
     describe_counter!(CEREMONY_REQUESTS, "DKG/refresh ceremony outcomes, by kind and result");
     describe_counter!(CEREMONY_RESOLUTIONS, "Two-phase ceremonies resolved on this node, by result");
@@ -382,6 +457,15 @@ pub fn describe() {
     describe_counter!(SIGN_INTENT_ABSENT, "Sign rounds accepted without a signing intent (require_intent off)");
     describe_counter!(SIGN_POLICY_REFUSALS, "Signing-policy refusals at this node, by reason");
     describe_counter!(CEREMONY_INTENT_REFUSALS, "DKG/refresh ceremony intents refused at this node, by reason");
+    describe_counter!(
+        REFRESH_INTERVAL_REFUSALS,
+        "Refreshes refused at this node because the key was refreshed less than refresh_min_interval_secs ago"
+    );
+    describe_counter!(
+        REFRESH_INTERVAL_WAIVED,
+        "Refreshes let through the interval at this node by refresh_interval_waived_at"
+    );
+    describe_gauge!(REFRESHES_6D, "Refreshes of the key this node committed in the last 6 days");
     describe_counter!(
         CEREMONY_INTENT_ABSENT,
         "DKG/refresh fences and part 1s accepted without a ceremony intent (require_ceremony_intent off)"
@@ -411,8 +495,21 @@ pub fn describe() {
     );
     describe_counter!(SIGN_SESSIONS_REFUSED, "Sign round 1s refused by a cap on sessions waiting for round 2, by cap");
     describe_gauge!(PENDING_SIGN_SESSIONS, "In-flight round-1 sign sessions held on this node");
-    describe_counter!(ANTI_ENTROPY_REPAIRS, "Hosted keys repaired by anti-entropy");
+    describe_counter!(ANTI_ENTROPY_REPAIRS, "Hosted keys anti-entropy pulled to this node (confirmed by two peers)");
     describe_counter!(ANTI_ENTROPY_CONFLICTS, "Hosted keys with divergent material across nodes");
+    describe_counter!(
+        HOSTED_REPLICATION_REFUSALS,
+        "Hosted key material refused or generations aborted on this node, by reason"
+    );
+    describe_counter!(ANTI_ENTROPY_PULL_FAILURES, "Missing hosted keys a sweep tried to pull and did not");
+    describe_counter!(
+        HOSTED_ROLLBACK_INCOMPLETE,
+        "Nodes an aborted hosted-key generation's rollback did not reach"
+    );
+    describe_gauge!(
+        HOSTED_FUTURE_TIMESTAMPS,
+        "Hosted keys held here with a creation or undelete time in the future"
+    );
     describe_gauge!(HOSTED_KEYS, "Cluster-hosted keys held by this node");
     describe_counter!(HOSTED_KEY_OPS, "Hosted-key operations, by op and result");
     describe_counter!(UNREADABLE_KEY_FILES, "Key files that could not be opened and were skipped");
@@ -522,6 +619,7 @@ mod tests {
             (SIGN_SESSION_OWNER_REFUSALS, one("call", SESSION_OWNER_CALLS)),
             (SIGN_SESSIONS_REFUSED, one("cap", SESSION_CAPS)),
             (BACKGROUND_LOOP_RESTARTS, one("loop", BACKGROUND_LOOPS)),
+            (HOSTED_REPLICATION_REFUSALS, one("reason", HOSTED_REFUSAL_REASONS)),
         ];
         let mut ops = Vec::new();
         for op in HOSTED_KEY_OPS_NAMES {
@@ -681,6 +779,7 @@ mod tests {
             }),
         );
         each("record_hosted_op", Box::new(|lit, what| assert!(HOSTED_KEY_OPS_NAMES.contains(&lit), "{what}: {lit:?}")));
+        each("hosted_refusal", Box::new(|lit, what| assert!(HOSTED_REFUSAL_REASONS.contains(&lit), "{what}: {lit:?}")));
     }
 
     /// The lock names behind `rutli_lock_poison_recoveries_total{lock}`: `sync::recover(&l, "x")`,

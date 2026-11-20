@@ -62,4 +62,15 @@ public interface GenerateKeyReplyOrBuilder extends
    * @return The replicas.
    */
   int getReplicas();
+
+  /**
+   * <pre>
+   * The leader's keyed commitment to the key material (as in KeyManifest.commitment). Empty from a
+   * cosigner older than 0.5.0. A client compares it with every node's KeyInfo(local_only).
+   * </pre>
+   *
+   * <code>bytes commitment = 6;</code>
+   * @return The commitment.
+   */
+  com.google.protobuf.ByteString getCommitment();
 }

@@ -132,7 +132,8 @@ RutliDriver (JVM)  ──FrostBackend──►  gRPC/mTLS  ──►  Cosigner c
 ```
 
 - `n` cosigners, threshold `t` (e.g. 2-of-3). Each holds one FROST share, each on a separate
-  host / cloud account / region — all operated by the single node operator (self-custody).
+  host / cloud account / region — all within the node operator's organisation (self-custody), each
+  administered by different people (go-live gate, `docs/audit-prep.md`).
 - Each share ideally sealed in an enclave/HSM ("MPC-of-HSM"): breach needs `t` enclaves.
 - A node's keystore may also hold **cluster-hosted keys** (ECIES P-256 and RSA encryption, AES
   symmetric), which are

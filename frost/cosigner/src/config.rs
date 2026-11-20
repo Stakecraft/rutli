@@ -9,6 +9,12 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// `"production"` or `"lab"` ([`crate::profile`], docs/production-profile.md). Production: the
+    /// node refuses to start while any enforcement setting is not at its production value, and the
+    /// error names each one. Lab: the gaps are logged at startup. Unset: as lab, with a warning
+    /// (unset becomes production in 0.6). `rutli-cosigner check-config` lists the same findings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<crate::profile::Profile>,
     /// This node's FROST identifier (1..=n).
     pub identifier: u16,
     /// Address this node's gRPC server listens on (host:port).
@@ -216,6 +222,28 @@ pub struct SigningPolicyConfig {
     /// stolen driver certificate cannot drive share refreshes.
     #[serde(default = "default_true")]
     pub signer_may_refresh: bool,
+    /// Shortest time between two refreshes of one key that this node takes part in, in seconds.
+    /// Checked by every node at the refresh fence and at part 1, before any guard, session or
+    /// crypto, so a refresh led by any node (or by a compromised cosigner) is held to it by every
+    /// honest node. Measured from the last refresh of the key that this node staged — committed, or
+    /// aborted after it staged — read from its own ceremony records, so it survives a restart.
+    /// Refreshes that failed before staging do not count. `0` turns the limit off.
+    ///
+    /// Default 72 h: the shipped refresh CronJob runs weekly and the backup sidecar daily, so every
+    /// epoch is backed up at least twice before the next refresh can start, and a stolen refresher
+    /// (or driver) certificate cannot move the key to a new epoch faster than backups follow. At
+    /// most [`MAX_REFRESH_MIN_INTERVAL_SECS`] (the ceremony record retention).
+    #[serde(default = "default_refresh_min_interval")]
+    pub refresh_min_interval_secs: u64,
+    /// The incident path past `refresh_min_interval_secs`: a UTC time (`2026-11-19T14:00:00Z`) set
+    /// by the operator on every node. Until a refresh of a key has staged on this node after that
+    /// time, one refresh of the key is let through the interval (logged, and counted in
+    /// `rutli_refresh_interval_waived_total`); after it, the interval applies again. Ignored 24 h
+    /// after the time; up to `clock_skew_secs` ahead of the node's clock is accepted (it applies once
+    /// the clock reaches it), further ahead is a config error. No
+    /// client certificate can set it: it is this node's own config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_interval_waived_at: Option<String>,
     /// Per-client key ACL: Signer client CN -> the key-id prefixes it may use (`""` = every key).
     /// Checked on every key-scoped Signer RPC at the node the client calls, and on the intent's
     /// signer by every node in a signature. Multi-tenant clusters give each participant's driver
@@ -272,6 +300,8 @@ impl Default for SigningPolicyConfig {
             require_ceremony_intent: None,
             signer_acl_required: false,
             signer_may_refresh: true,
+            refresh_min_interval_secs: default_refresh_min_interval(),
+            refresh_interval_waived_at: None,
             signer_acl: BTreeMap::new(),
             signer_pins: BTreeMap::new(),
             intent_max_lifetime_secs: default_intent_max_lifetime(),
@@ -326,6 +356,15 @@ fn default_quorum_mode() -> String {
 }
 fn default_quorum_threshold() -> u32 {
     2
+}
+/// 72 hours: see [`SigningPolicyConfig::refresh_min_interval_secs`].
+pub const DEFAULT_REFRESH_MIN_INTERVAL_SECS: u64 = 72 * 3600;
+/// The longest interval: the ceremony records it is measured from are kept 30 days.
+pub const MAX_REFRESH_MIN_INTERVAL_SECS: u64 = crate::ceremony::RECORD_RETENTION.as_secs();
+/// How long after its time a `refresh_interval_waived_at` still applies.
+pub const REFRESH_WAIVER_LIFETIME_MS: u64 = 24 * 3600 * 1000;
+fn default_refresh_min_interval() -> u64 {
+    DEFAULT_REFRESH_MIN_INTERVAL_SECS
 }
 /// The driver's intents live 180 s; 300 s leaves room without letting one live long.
 pub const DEFAULT_INTENT_MAX_LIFETIME_SECS: u64 = 300;
@@ -390,6 +429,12 @@ impl SigningPolicyConfig {
         })
     }
 
+    /// `refresh_interval_waived_at` in Unix milliseconds (`None`: unset or unparsable; `validate`
+    /// refuses the latter).
+    pub fn refresh_waiver_ms(&self) -> Option<u64> {
+        self.refresh_interval_waived_at.as_deref().and_then(crate::audit_check::parse_instant_ms)
+    }
+
     /// `require_intent` as it applies on a node with (`tls`) or without TLS: as set, else on with
     /// TLS and off without — a plaintext node verifies no intents, so it could sign nothing.
     pub fn intent_required(&self, tls: bool) -> bool {
@@ -432,6 +477,27 @@ impl SigningPolicyConfig {
         }
         if self.max_shares_per_request == 0 {
             return Err(Config("signing_policy.max_shares_per_request must be at least 1".into()));
+        }
+        if self.refresh_min_interval_secs > MAX_REFRESH_MIN_INTERVAL_SECS {
+            return Err(Config(format!(
+                "signing_policy.refresh_min_interval_secs must be at most {MAX_REFRESH_MIN_INTERVAL_SECS} \
+                 (30 days, how long the ceremony records it is measured from are kept)"
+            )));
+        }
+        if let Some(at) = &self.refresh_interval_waived_at {
+            let Some(ms) = self.refresh_waiver_ms() else {
+                return Err(Config(format!(
+                    "signing_policy.refresh_interval_waived_at {at:?} is not a UTC time like 2026-11-19T14:00:00Z"
+                )));
+            };
+            if ms > crate::intent::now_ms() + self.clock_skew_secs * 1000 {
+                return Err(Config(format!(
+                    "signing_policy.refresh_interval_waived_at {at:?} is more than clock_skew_secs ({} s) \
+                     ahead of this node's clock: use the time you decided to refresh, not a later one \
+                     (up to clock_skew_secs ahead is accepted, for clocks that differ)",
+                    self.clock_skew_secs
+                )));
+            }
         }
         if self.journal_max_mib_per_key < 4 {
             return Err(Config("signing_policy.journal_max_mib_per_key must be at least 4".into()));
@@ -649,7 +715,26 @@ pub struct TlsConfig {
     /// must stay in the bundle until every leaf is swapped (docs/ca-rotation.md). Remove it after.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub allow_expired_ca: bool,
+    /// Refuse to start unless every roster peer, this node included, has `tls_spki_sha256`. Without
+    /// pins a peer is any certificate with its name under the cluster CA: a replaced node's old
+    /// certificate, or one minted by whoever holds the CA key.
+    ///
+    /// **Unset = on** since 0.5.0 ([`TlsConfig::peer_pins_required`]). `false` is the explicit
+    /// opt-out; the node then warns at startup and dials unpinned peers by name only. Pins that are
+    /// listed are checked either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_peer_pins: Option<bool>,
 }
+
+impl TlsConfig {
+    /// `require_peer_pins` as it applies: as set, else on.
+    pub fn peer_pins_required(&self) -> bool {
+        self.require_peer_pins.unwrap_or(true)
+    }
+}
+
+/// At most this many pins per peer: the current key, and its successor during a key roll.
+pub const MAX_PEER_PINS: usize = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -674,6 +759,15 @@ pub struct PeerConfig {
     /// parsing digits out of whatever CN it has.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tls_client_cn: Option<String>,
+    /// SPKI pins: SHA-256 hex of the SubjectPublicKeyInfo of the key this peer's TLS certificate
+    /// may carry, one or two (two only while its key is rolled). Checked when the peer calls this
+    /// node and when this node dials it; a certificate with another key is refused however valid
+    /// it is — revocation without the CA. `rutli-cosigner tls spki <cert>` prints the value (as
+    /// `openssl x509 -in cosigner2.crt -noout -pubkey | openssl pkey -pubin -outform DER |
+    /// sha256sum` does). Required for every peer with TLS unless `tls.require_peer_pins` is
+    /// `false`. This node's own entry must list the key of its own `tls.cert`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_spki_sha256: Option<Vec<String>>,
 }
 
 impl PeerConfig {
@@ -684,7 +778,17 @@ impl PeerConfig {
             dist_public_key: None,
             tls_server_name: None,
             tls_client_cn: None,
+            tls_spki_sha256: None,
         }
+    }
+
+    /// The decoded `tls_spki_sha256`; `None` when the peer is not pinned.
+    pub fn tls_spki_pins(&self) -> crate::Result<Option<Vec<[u8; 32]>>> {
+        let field = format!("peers[id={}].tls_spki_sha256", self.identifier);
+        self.tls_spki_sha256
+            .as_ref()
+            .map(|list| list.iter().map(|h| hex32(&field, h)).collect())
+            .transpose()
     }
 
     /// The server name to verify when dialling this peer.
@@ -735,6 +839,86 @@ impl Config {
             Some(t) => crate::wrap::cluster_id_from_ca(&std::fs::read(&t.ca_cert)?),
             None => "plaintext-dev".to_string(),
         })
+    }
+
+    /// The shape of `peers[].tls_spki_sha256`, on any config: one or two 64-hex values, none
+    /// repeated, no value under two peers (one key cannot be two nodes), and only with `tls`.
+    /// Whether pins are *required* is [`Config::check_peer_pins_required`], which only a node runs:
+    /// an operator CLI config may leave them out.
+    fn validate_peer_pins(&self) -> crate::Result<()> {
+        use crate::DaemonError::Config;
+        let mut owner: std::collections::HashMap<[u8; 32], u16> = std::collections::HashMap::new();
+        for p in &self.peers {
+            let Some(list) = &p.tls_spki_sha256 else { continue };
+            let field = format!("peers[id={}].tls_spki_sha256", p.identifier);
+            if self.tls.is_none() {
+                return Err(Config(format!("{field} needs tls: the pins are checked on the mesh's TLS certificates")));
+            }
+            if list.is_empty() {
+                return Err(Config(format!("{field} is empty — pin the peer's key, or omit the field")));
+            }
+            if list.len() > MAX_PEER_PINS {
+                return Err(Config(format!(
+                    "{field} lists {} keys — at most {MAX_PEER_PINS}: the current key and, during a key roll, the next",
+                    list.len()
+                )));
+            }
+            let mut mine = std::collections::HashSet::new();
+            for pin in p.tls_spki_pins()?.unwrap_or_default() {
+                if !mine.insert(pin) {
+                    return Err(Config(format!("{field} lists {} twice", hex::encode(pin))));
+                }
+                if let Some(other) = owner.insert(pin, p.identifier) {
+                    return Err(Config(format!(
+                        "{field} pins {}, which peers[id={other}] pins too — one TLS key cannot be two nodes",
+                        hex::encode(pin)
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// On a node with TLS and `tls.require_peer_pins` not `false`: every roster peer, this node
+    /// included, must have `tls_spki_sha256`. Run at daemon start and by the commands that join the
+    /// mesh as this node; not by [`Config::validate`], because an operator CLI config shares this
+    /// shape and need not pin.
+    pub fn check_peer_pins_required(&self) -> crate::Result<()> {
+        let Some(tls) = &self.tls else { return Ok(()) };
+        if !tls.peer_pins_required() {
+            return Ok(());
+        }
+        let mut missing: Vec<u16> =
+            self.peers.iter().filter(|p| p.tls_spki_sha256.is_none()).map(|p| p.identifier).collect();
+        missing.sort_unstable();
+        match missing.first() {
+            None => Ok(()),
+            Some(first) => Err(crate::DaemonError::Config(format!(
+                "peers[id={first}].tls_spki_sha256 is missing (unpinned peers: {missing:?}) — pin every \
+                 cosigner's TLS key (`rutli-cosigner tls spki <cosignerN.crt>`), or set \
+                 tls.require_peer_pins: false"
+            ))),
+        }
+    }
+
+    /// The node's own certificate key must be among the pins of its own roster entry, when that
+    /// entry has pins: a node about to present a key its peers do not pin would be refused by all
+    /// of them. Reads `tls.cert`.
+    pub fn check_own_peer_pin(&self) -> crate::Result<()> {
+        let Some(tls) = &self.tls else { return Ok(()) };
+        let Some(me) = self.peers.iter().find(|p| p.identifier == self.identifier) else { return Ok(()) };
+        let Some(pins) = me.tls_spki_pins()? else { return Ok(()) };
+        let mine = crate::tls::spki_sha256_of_pem_file(&tls.cert)?;
+        if pins.contains(&mine) {
+            return Ok(());
+        }
+        Err(crate::DaemonError::Config(format!(
+            "this node's certificate key {} ({}) is not in its own peers[id={}].tls_spki_sha256 — the \
+             peers would refuse it; add the new pin on every node before swapping the certificate",
+            hex::encode(mine),
+            tls.cert.display(),
+            self.identifier
+        )))
     }
 
     /// Mesh caller identity: client-certificate CN → roster identifier, exact match only.
@@ -852,6 +1036,7 @@ impl Config {
                 )));
             }
         }
+        self.validate_peer_pins()?;
         // The mesh allowlist is exactly the roster's client CNs: a CN on it that names no roster
         // node could drive the raw FROST rounds as nobody in particular, and a roster node missing
         // from it could not take part.
@@ -1014,6 +1199,12 @@ impl Config {
             }
         }
         self.keyfile.validate(self.share_seal.is_some())?;
+        if self.profile == Some(crate::profile::Profile::Production) {
+            let required = crate::profile::required(self);
+            if !required.is_empty() {
+                return Err(Config(crate::profile::refusal(&required)));
+            }
+        }
         Ok(())
     }
 }
@@ -1022,8 +1213,9 @@ impl Config {
 mod tests {
     use super::*;
 
-    fn base(tls: Option<TlsConfig>, allow: Option<Vec<String>>) -> Config {
+    pub(super) fn base(tls: Option<TlsConfig>, allow: Option<Vec<String>>) -> Config {
         Config {
+            profile: None,
             identifier: 1,
             listen: "127.0.0.1:9101".into(),
             threshold: 2,
@@ -1049,13 +1241,14 @@ mod tests {
         }
     }
 
-    fn tls() -> TlsConfig {
+    pub(super) fn tls() -> TlsConfig {
         TlsConfig {
             ca_cert: "/ca".into(),
             allow_expired_ca: false,
             cert: "/cert".into(),
             key: "/key".into(),
             domain: Some("rutli-cosigner".into()),
+            require_peer_pins: None,
         }
     }
 
@@ -1183,6 +1376,32 @@ mod tests {
         let mut c = mesh_ok();
         c.signing_policy.require_ceremony_intent = Some(true);
         c.validate().unwrap();
+
+        // The refresh interval: a real limit by default (72 h), 0 = off, at most the record
+        // retention; the waiver is a past UTC time.
+        assert_eq!((d.refresh_min_interval_secs, parsed.refresh_min_interval_secs), (72 * 3600, 72 * 3600));
+        assert_eq!((d.refresh_interval_waived_at.as_deref(), d.refresh_waiver_ms()), (None, None));
+        assert!(!serde_json::to_string(&d).unwrap().contains("refresh_interval_waived_at"));
+        let mut c = mesh_ok();
+        c.signing_policy.refresh_min_interval_secs = 0;
+        c.validate().unwrap();
+        c.signing_policy.refresh_min_interval_secs = 30 * 24 * 3600 + 1;
+        assert!(c.validate().unwrap_err().to_string().contains("refresh_min_interval_secs"));
+        let mut c = mesh_ok();
+        c.signing_policy.refresh_interval_waived_at = Some("2026-11-01T14:00:00Z".into());
+        c.validate().unwrap();
+        assert_eq!(c.signing_policy.refresh_waiver_ms(), Some(1_793_541_600_000));
+        for bad in ["yesterday", "2026-11-19 14:00:00", "1795615200"] {
+            c.signing_policy.refresh_interval_waived_at = Some(bad.into());
+            assert!(c.validate().unwrap_err().to_string().contains("not a UTC time"), "{bad}");
+        }
+        c.signing_policy.refresh_interval_waived_at = Some(crate::audit_check::fmt_ms(crate::intent::now_ms() + 3_600_000));
+        assert!(c.validate().unwrap_err().to_string().contains("ahead of this node's clock"));
+        // Within the clock skew ahead is accepted (an operator's clock and a node's differ).
+        c.signing_policy.refresh_interval_waived_at = Some(crate::audit_check::fmt_ms(crate::intent::now_ms() + 60_000));
+        c.validate().unwrap();
+        let typo: std::result::Result<SigningPolicyConfig, _> = serde_json::from_str(r#"{"refresh_interval_secs": 0}"#);
+        assert!(typo.is_err(), "a misspelt key is refused, not ignored");
 
         let mut c = mesh_ok();
         c.signing_policy.signer_acl.insert("nobody".into(), vec!["".into()]);
@@ -1356,6 +1575,7 @@ mod hosted_config_tests {
 
     fn cfg(hosted: Option<HostedKeysConfig>, seal: bool) -> Config {
         Config {
+            profile: None,
             identifier: 1,
             listen: "127.0.0.1:9101".into(),
             threshold: 2,
@@ -1462,6 +1682,7 @@ mod hosted_config_tests {
             cert: "/cert".into(),
             key: "/key".into(),
             domain: None,
+            require_peer_pins: None,
         };
         let with = |f: &dyn Fn(&mut HostedKeysConfig), tls_on: bool| {
             let mut h = hosted(true, 2);
@@ -1654,12 +1875,20 @@ mod strict_parse_tests {
     fn every_shipped_config_loads() {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let tmp = tempfile::tempdir().unwrap();
-        let mut seen = 0;
+        let (mut seen, mut production) = (0, 0);
         for dir in ["deploy/frost/config", "deploy/frost/config-tls"] {
             for entry in std::fs::read_dir(repo.join(dir)).unwrap() {
                 let path = entry.unwrap().path();
                 if path.extension().is_some_and(|e| e == "json") {
-                    Config::load(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                    let cfg = Config::load(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                    assert_eq!(cfg.profile, Some(crate::profile::Profile::Lab), "{}: compose examples say lab", path.display());
+                    // The compose TLS cluster's certificates are made per checkout, so its configs
+                    // ship without pins and the node refuses to start until they are added
+                    // (deploy/frost/README.md: gen-frost-certs.sh with RUTLI_PIN_CONFIGS).
+                    if cfg.tls.is_some() {
+                        let e = cfg.check_peer_pins_required().unwrap_err().to_string();
+                        assert!(e.contains("tls_spki_sha256 is missing"), "{}: {e}", path.display());
+                    }
                     seen += 1;
                 }
             }
@@ -1680,11 +1909,164 @@ mod strict_parse_tests {
                     json.push_str(lines.next().unwrap());
                     json.push('\n');
                 }
-                load_text(tmp.path(), name, &json).unwrap_or_else(|e| panic!("{file} {name}: {e}"));
+                let parsed: Config = serde_json::from_str(&json).unwrap_or_else(|e| panic!("{file} {name}: {e}"));
+                let cfg = if parsed.profile == Some(crate::profile::Profile::Production) {
+                    // The rendered manifests ship with the production profile on. What is left for
+                    // the operator is only what a checked-in manifest cannot know: the per-cluster
+                    // values (deploy/k8s/values.yaml says which). Everything else must already be on.
+                    let mut as_lab = parsed.clone();
+                    as_lab.profile = Some(crate::profile::Profile::Lab);
+                    as_lab.validate().unwrap_or_else(|e| panic!("{file} {name}: {e}"));
+                    let left: Vec<_> = crate::profile::required(&parsed).iter().map(|f| f.setting).collect();
+                    let per_cluster = [
+                        "cluster_id",
+                        "keyfile.write_version",
+                        "keyfile.cluster_uuid",
+                        "keyfile.accept_v1",
+                        "signing_policy.signer_pins",
+                    ];
+                    assert!(left.iter().all(|s| per_cluster.contains(s)), "{file} {name}: {left:?}");
+                    production += 1;
+                    as_lab
+                } else {
+                    load_text(tmp.path(), name, &json).unwrap_or_else(|e| panic!("{file} {name}: {e}"))
+                };
+                // The rendered node configs carry a pin for every node (placeholders in
+                // deploy/k8s/values.yaml until the operator sets the real ones).
+                if name.starts_with("cosigner-") {
+                    cfg.check_peer_pins_required().unwrap_or_else(|e| panic!("{file} {name}: {e}"));
+                }
                 seen += 1;
             }
         }
         // 3 + 3 compose configs, 3 client configs, 3 rendered node configs.
         assert_eq!(seen, 12, "a shipped config was not found");
+        assert_eq!(production, 3, "the rendered node configs ship with the production profile");
+    }
+
+    use super::tests::{base, tls};
+
+    fn pinned(mut c: Config, pins: &[(u16, &[&str])]) -> Config {
+        for (id, list) in pins {
+            let p = c.peers.iter_mut().find(|p| p.identifier == *id).unwrap();
+            p.tls_spki_sha256 = Some(list.iter().map(|h| h.to_string()).collect());
+        }
+        c
+    }
+
+    const PIN_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const PIN_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const PIN_C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+    const PIN_D: &str = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd";
+
+    fn mesh_tls() -> Config {
+        base(Some(tls()), Some(vec!["driver".into()])).with_peer_allowlist()
+    }
+
+    impl Config {
+        fn with_peer_allowlist(mut self) -> Self {
+            self.peer_allowlist = Some((1..=3).map(|i| format!("cosigner{i}")).collect());
+            self
+        }
+    }
+
+    #[test]
+    fn peer_pins_are_required_with_tls_unless_opted_out() {
+        // Unset = on: a node with TLS and an unpinned roster entry refuses to start, naming it.
+        let c = pinned(mesh_tls(), &[(1, &[PIN_A]), (3, &[PIN_C])]);
+        c.validate().unwrap();
+        let e = c.check_peer_pins_required().unwrap_err().to_string();
+        assert!(e.contains("peers[id=2].tls_spki_sha256 is missing") && e.contains("require_peer_pins"), "{e}");
+        // Every node pinned: fine.
+        pinned(c.clone(), &[(2, &[PIN_B])]).check_peer_pins_required().unwrap();
+        // The explicit opt-out.
+        let mut out = c.clone();
+        out.tls.as_mut().unwrap().require_peer_pins = Some(false);
+        out.check_peer_pins_required().unwrap();
+        // `true` is the default spelled out.
+        let mut on = c;
+        on.tls.as_mut().unwrap().require_peer_pins = Some(true);
+        assert!(on.check_peer_pins_required().is_err());
+        // Plaintext: nothing to pin.
+        base(None, None).check_peer_pins_required().unwrap();
+        // The key round-trips; unset is not written.
+        let t: TlsConfig = serde_json::from_str(r#"{"ca_cert":"a","cert":"b","key":"c","require_peer_pins":false}"#).unwrap();
+        assert_eq!(t.require_peer_pins, Some(false));
+        assert!(!tls().peer_pins_required() || !serde_json::to_string(&tls()).unwrap().contains("require_peer_pins"));
+    }
+
+    #[test]
+    fn peer_pins_have_the_right_shape() {
+        let ok = pinned(mesh_tls(), &[(1, &[PIN_A]), (2, &[PIN_B, PIN_D]), (3, &[PIN_C])]);
+        ok.validate().unwrap();
+        assert_eq!(ok.peers[1].tls_spki_pins().unwrap().unwrap().len(), 2);
+        assert_eq!(ok.peers[0].tls_spki_pins().unwrap().unwrap()[0], [0xaa; 32]);
+        let err = |c: Config| c.validate().unwrap_err().to_string();
+        let e = err(pinned(mesh_tls(), &[(2, &[])]));
+        assert!(e.contains("peers[id=2].tls_spki_sha256 is empty"), "{e}");
+        let e = err(pinned(mesh_tls(), &[(2, &[PIN_A, PIN_B, PIN_C])]));
+        assert!(e.contains("at most 2"), "{e}");
+        let e = err(pinned(mesh_tls(), &[(2, &["abcd"])]));
+        assert!(e.contains("peers[id=2].tls_spki_sha256 must be 64 hex"), "{e}");
+        let e = err(pinned(mesh_tls(), &[(2, &[PIN_B, PIN_B])]));
+        assert!(e.contains("twice"), "{e}");
+        // One key cannot be two nodes.
+        let e = err(pinned(mesh_tls(), &[(1, &[PIN_A]), (3, &[PIN_C, PIN_A])]));
+        assert!(e.contains("peers[id=3]") && e.contains("peers[id=1] pins too"), "{e}");
+        // Pins need TLS.
+        let e = err(pinned(base(None, None), &[(1, &[PIN_A])]));
+        assert!(e.contains("needs tls"), "{e}");
+        // Upper-case hex is the same key.
+        let upper = PIN_A.to_uppercase();
+        let c = pinned(mesh_tls(), &[(1, &[upper.as_str()])]);
+        assert_eq!(c.peers[0].tls_spki_pins().unwrap().unwrap()[0], [0xaa; 32]);
+    }
+
+    #[test]
+    fn a_node_refuses_its_own_certificate_when_its_own_entry_does_not_pin_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(vec!["cosigner1".to_string()]).unwrap();
+        params.distinguished_name.push(rcgen::DnType::CommonName, "cosigner1");
+        let cert = params.self_signed(&key).unwrap();
+        let path = tmp.path().join("cosigner1.crt");
+        std::fs::write(&path, cert.pem()).unwrap();
+        let mine = hex::encode(crate::tls::spki_sha256(cert.der()).unwrap());
+        assert_eq!(hex::encode(crate::tls::spki_sha256_of_pem_file(&path).unwrap()), mine);
+
+        let mut c = mesh_tls();
+        c.tls.as_mut().unwrap().cert = path;
+        // No pins on its own entry (opted out): nothing to compare.
+        c.check_own_peer_pin().unwrap();
+        // Its own key among its pins (also during a roll, next to the next key).
+        pinned(c.clone(), &[(1, &[mine.as_str()])]).check_own_peer_pin().unwrap();
+        pinned(c.clone(), &[(1, &[PIN_A, mine.as_str()])]).check_own_peer_pin().unwrap();
+        // Another node's pins do not matter here.
+        pinned(c.clone(), &[(1, &[mine.as_str()]), (2, &[PIN_B])]).check_own_peer_pin().unwrap();
+        // A leaf swapped before its pin was rolled out.
+        let e = pinned(c, &[(1, &[PIN_A])]).check_own_peer_pin().unwrap_err().to_string();
+        assert!(e.contains(&mine) && e.contains("peers[id=1].tls_spki_sha256"), "{e}");
+    }
+
+    #[test]
+    fn the_previous_release_shape_still_loads_and_pins_are_optional_in_a_client_config() {
+        // A config written for this release that a 0.4.0 node must also read is the same JSON:
+        // 0.4.0 ignores the new keys. Here: the keys parse, and a client config (the operator CLI's)
+        // loads without them, because only a node requires pins.
+        let tmp = tempfile::tempdir().unwrap();
+        let text = format!(
+            r#"{{"identifier":1,"listen":"127.0.0.1:0","threshold":2,"data_dir":"/tmp",
+               "peers":[{{"identifier":1,"endpoint":"https://a:1","tls_spki_sha256":["{PIN_A}"]}},
+                        {{"identifier":2,"endpoint":"https://b:1","tls_spki_sha256":["{PIN_B}","{PIN_D}"]}}],
+               "tls":{{"ca_cert":"/ca","cert":"/c","key":"/k","require_peer_pins":true}},
+               "signer_allowlist":["driver"],"peer_allowlist":["cosigner1","cosigner2"]}}"#
+        );
+        let c = load_text(tmp.path(), "pinned.json", &text).unwrap();
+        c.check_peer_pins_required().unwrap();
+        let client = r#"{"identifier":1,"listen":"127.0.0.1:0","threshold":2,"data_dir":"/tmp",
+               "peers":[{"identifier":1,"endpoint":"https://a:1"},{"identifier":2,"endpoint":"https://b:1"}],
+               "tls":{"ca_cert":"/ca","cert":"/c","key":"/k"},
+               "signer_allowlist":["driver"],"peer_allowlist":["cosigner1","cosigner2"]}"#;
+        load_text(tmp.path(), "client.json", client).unwrap();
     }
 }

@@ -108,7 +108,9 @@ HSM gives you, and a contradiction of the cluster's own 2-of-3 fault model. 2-of
 because anti-entropy and read-repair ship with it (section 4); do not disable the sweep. Below
 quorum a write **rolls back** rather than leaving one lonely copy (section 3). A configured
 `write_quorum` is honoured on the `GenerateKey` path — set it to `3` if you would rather a write
-fail than commit while a cosigner is down.
+fail than commit while a cosigner is down. Since 0.5.0 a node that lacks a key pulls it only when
+**two** peers hold the same copy, so automatic repair needs at least three cosigners and
+`write_quorum` of at least 2; the daemon warns at startup otherwise.
 
 **Run hosted keys only on a TLS cluster.** Replication rides the mesh Peer API, which is gated by
 `peer_allowlist` (see [`phase-2-frost.md`](phase-2-frost.md) — the driver must never be on that
@@ -171,7 +173,9 @@ Two deliberate absences:
 
 - **No automatic fallback to the delegate on `NOT_FOUND`.** A fallback would silently re-create split
   custody — some keys in the cluster, some on the host — which is the shape of the August incident.
-  Read-repair (section 4) is what makes `NOT_FOUND` authoritative. Endpoint failover stays restricted
+  Read-repair (section 4) is what makes `NOT_FOUND` authoritative: a node that lacks a key and
+  cannot confirm it from two peers answers `UNAVAILABLE` (trailer `rutli-error: hosted-unconfirmed`),
+  never `NOT_FOUND`, so the driver moves on to a node that holds it. Endpoint failover stays restricted
   to a node that is down or broken (`UNAVAILABLE` / `DEADLINE_EXCEEDED`, and `INTERNAL` / `UNKNOWN`
   for reads and decryptions), as for signing — with one exception, for EC keys only: a
   cosigner that predates `ec-p256-ecies` cannot read-repair one, so its "not found" is not
@@ -253,10 +257,30 @@ You rarely drive these RPCs by hand: Canton mints keys through the driver's
 `GenerateKey(key_id, spec)` on any cosigner. That node leads:
 
 1. Fences the key id on every peer, so two concurrent generates for the same id serialize.
-2. Generates locally, then wraps and pushes a replica to each peer.
-3. Verifies each peer's commitment to the stored material matches its own — a peer that stored
-   something else does not count toward the quorum.
-4. Reports `created` and `replicas`.
+2. If it does not hold the id, asks its peers. Two that hold the same copy: it adopts that key
+   (`created = false`) instead of minting a second one. One copy only, or copies that disagree: it
+   refuses (`UNAVAILABLE` or `ABORTED`, below) and mints nothing.
+3. Otherwise, and only when `n - write_quorum + 1` nodes (itself included) answered that they hold
+   nothing under the id, generates a key, then wraps and pushes a replica to each peer. A silent
+   node does not count as "not held": with 2-of-3 the leader and one peer are enough, so one node
+   down still mints; with five nodes and `write_quorum: 2` four answers are needed, so one node down
+   still mints and two down do not (`UNAVAILABLE`). A key the client was given sits on at least
+   `write_quorum` nodes, so it cannot hide among the silent ones. A peer stores a key it
+   lacks only from the caller holding its fence for the id, and only if no other peer it can reach
+   holds different material.
+4. Verifies each peer's commitment to the stored material matches its own.
+5. Reports `created`, `replicas` and its own `commitment` to the material (since 0.5.0).
+
+**A conflict aborts the generation** (since 0.5.0). A peer that holds other material under the id,
+or answers with a commitment to other material, or refuses because another peer holds other
+material, is never outvoted by the nodes that agree: the leader rolls the generation back and
+answers `ABORTED` with the trailer `rutli-error: hosted-conflict`. The driver does not fail over on
+it. `rutli_anti_entropy_conflicts_total` and
+`rutli_hosted_replication_refusals_total{reason="generate-conflict"}` count it, the log line
+(`hosted key generation ABORTED`) names the key and the peer, and `RutliHostedKeyConflict` pages.
+Follow "When `rutli_anti_entropy_conflicts_total` increases" (section 4). Up to 0.4.0 such a peer
+only failed to count toward the quorum, so the leader and one more node could report the key
+created while a third served other material.
 
 Supported specs:
 
@@ -277,8 +301,24 @@ generation while the generation still holds its fence — a `PurgeKey` without a
 nothing else, and only the generation's leader (the caller whose fence took the guard) may send it,
 so a leader cannot use "rollback" to destroy an existing key, nor another peer a fresh copy — a
 single node holding the only copy is precisely the failure this feature exists to prevent. Above
-quorum but below n, the key is created, a warning is logged, and anti-entropy repairs the missing
-replica.
+quorum but below n, the key is created, a warning is logged, and the missing node pulls the key at
+its next sweep (two nodes hold it).
+
+**A leader that dies mid-generation** leaves the copies it already wrote. Nothing rolls them
+back, and its fences lapse after the orphan timeout (15 minutes). The leader writes a new key to its
+own disk only after the write quorum holds it. What is left, step by step (2-of-3):
+
+| The leader dies… | What is left | What a retry with the same id does |
+|---|---|---|
+| before any replica | nothing on any disk | mints a new key, cleanly |
+| after one replica, before its own write | one copy on that peer, served there | if that peer answers: refuses (`UNAVAILABLE`), the driver moves to that peer, which returns the key and replicates it. If that peer and the first leader are both down: refuses (too few "not held" answers). **If that peer is down and the first leader is back (empty): mints a second key; when the peer returns, the id is forked** (paged as a conflict) |
+| after its own write, before the reply | copies on the write quorum | returns or adopts that key, or refuses; never a second key (a mint needs `n - write_quorum + 1` "not held" answers, and the quorum cannot hide among the rest) |
+| after a rollback that missed a node | that node's copy (`rutli_hosted_rollback_incomplete_total`, `RutliHostedRollbackIncomplete`) | as the second row |
+
+The second and last rows are open: a copy written by a generation nobody confirmed is served by
+the node holding it. Until a later release makes such replicas non-servable until the generation is
+confirmed, act on `RutliHostedRollbackIncomplete` and on a conflict by hand (section 4). A key no
+retry ever claims stays where it is; delete it with `DeleteKey` if it matters.
 
 ### Use
 
@@ -361,7 +401,7 @@ delete pushed the key back to everyone at its next anti-entropy sweep.
   The file is first written by the first start with hosted keys on (every CN on the role then
   counts as granted long ago): **start every node on this release once before granting a new delete
   role**, so the grant is recorded. A node restored from a backup taken before
-  the delete is converted by its next sweep; nothing is ever pushed to a node holding the tombstone.
+  the delete is converted by its next sweep; a node holding the tombstone never pulls the key back.
   A tombstone never applies to a copy created or undeleted after its intent was issued.
 - **Undelete** within the grace period: `rutli-cosigner hosted-undelete --key-id <id>` on every
   node, daemon stopped (`disaster-recovery.md` §3g). The break-glass "cleared intent" markers
@@ -386,10 +426,40 @@ that sealed them is dropped (`seal rotate-dek`, then `seal drop-previous` — `d
 
 ### Anti-entropy
 
-Every `anti_entropy_interval_secs` (default 300) each node compares inventories with its peers,
-**pulls** keys it lacks and **pushes** keys a peer lacks. Pushing heals an under-quorum write;
-pulling heals a node rebuilt from a stale backup. Repairs increment
-`rutli_anti_entropy_repairs_total` and are logged with the key id and the peer.
+Every `anti_entropy_interval_secs` (default 300) each node lists its peers' inventories (at the
+same time, 10 s each; a peer that does not answer is logged and the sweep goes on without it),
+applies their tombstones, and **pulls** each key it lacks, once per sweep. It stores a key only
+when **two peers return the same material and every other peer answers** with no other material,
+no copy it cannot check, and no valid tombstone (a peer's tombstone is applied here instead).
+**Only an answer counts**: a silent peer is unknown, never "does not hold it", so in five nodes a
+pull waits for a node that is down (reads fail over meanwhile). One sweep pulls at most 256
+missing ids, 64 per listing peer, ids more peers list first; the rest wait for the next sweep, and
+the sweep logs `the pull bound of this sweep is reached`. A pull that fails is counted in
+`rutli_anti_entropy_pull_failures_total`. The material is
+unwrapped and checked on the pulling node, and the commitment computed there, never taken from the
+peer. That heals a node that was down during a 2-of-3 write and a node rebuilt from a stale backup.
+Pulls increment `rutli_anti_entropy_repairs_total` and are logged with the key id and the peers.
+
+**The sweep never pushes** (since 0.5.0). Up to 0.4.0 a node also pushed every key a peer lacked,
+and a node that pulled took the first peer whose copy opened; one compromised node could plant its
+own material on a node that lacked a key, and the plant then spread. Now each node pulls for itself.
+
+What the two-peer rule means in practice:
+
+- One node down (2-of-3) is normal. A key the two live nodes hold is served by both; the third
+  pulls it when it is back. A key only one *reachable* node holds is not pulled: the node that
+  lacks it answers `UNAVAILABLE` for it (the driver fails over) and logs `a missing hosted key is
+  not confirmed` each sweep, counted as
+  `rutli_hosted_replication_refusals_total{reason="unconfirmed"}`, until a second holder is back.
+  No node ever drops a key it holds.
+- A key held by **one node only** (its other holders lost for good, or written with
+  `write_quorum: 1`) is never copied automatically. `RutliHostedKeyCriticallyUnderReplicated` pages
+  for it. Copy it by hand: `export-key` on the holder, `import-key` on a second node; the third then
+  pulls it. Check with `verify-hosted`.
+- Peers that hold **different** material: nothing is stored, the node answers `UNAVAILABLE` for the
+  id, and the conflict is logged and counted (`reason="disagreement"`). Section 4, "When
+  `rutli_anti_entropy_conflicts_total` increases".
+- A deleted key is never pulled back: a node checks its own tombstone before it asks any peer.
 
 **The sweep covers hosted keys only.** A FROST share is never listed, fetched or copied between
 nodes — two cosigners holding the same share would silently break the threshold scheme. This is
@@ -407,9 +477,80 @@ replicated or repaired. Handling: [`observability.md`](observability.md).
 
 ### Read-repair
 
-A hosted-key request that lands on a node missing that key pulls it from a peer *before* answering,
-rather than returning `NOT_FOUND`. This is what lets the driver treat `NOT_FOUND` as authoritative
-and refuse to fall back to a delegate.
+A hosted-key request that lands on a node missing that key pulls it *before* answering, rather than
+returning `NOT_FOUND`. This is what lets the driver treat `NOT_FOUND` as authoritative and refuse to
+fall back to a delegate. The same rule as the sweep applies, on every path that reads a key:
+`PublicKey`, `KeyInfo`, `Decrypt`, `EcdhDerive`, `SymmetricEncrypt`, `SymmetricDecrypt`. A node
+serves only material it holds or that its peers confirmed. Short of that it answers `UNAVAILABLE`
+(`hosted-unconfirmed`). It answers `NOT_FOUND` only when `n - write_quorum + 1` nodes, itself
+included, answered that they hold nothing under the id (with 2-of-3: itself and one peer), or a
+node holds a tombstone for it.
+
+Each node allows 20 read-repair fan-outs a second (burst 40); each asks every peer. Past that, a
+request for a key the node lacks answers `UNAVAILABLE` without asking anyone (`reason="throttled"`)
+— never `NOT_FOUND`, so the ceiling cannot hide a key: the driver fails over to a node that holds
+it. Keys the node holds are served as always. There is no negative cache: one that answered
+`NOT_FOUND` could hide a key created meanwhile on a node its generation could not reach.
+
+`KeyInfo` with `local_only` (since 0.5.0) reports the node's own copy as it is — `commitment` and
+the public key its private key derives, no read-repair, no replica count, `exists = false` when it
+lacks the key — so a client can compare every node after a generation.
+
+### Pushes a node refuses
+
+A peer's `ReplicateKey` for an id the node lacks is accepted only from the caller that holds the
+node's generation fence for that id under the ceremony id it names, and only if no other peer the
+node can reach holds different material. Identical material over a held id is a no-op; different
+material is refused (`ABORTED`, `hosted-conflict`). Every refusal is logged with the peer and the key
+and counted in `rutli_hosted_replication_refusals_total{reason}`:
+
+| reason | what was refused | what to do |
+|---|---|---|
+| `unfenced` | a push into an id this node lacks, from a caller without its generation fence | during a roll from 0.4.0: a 0.4.0 node's sweep push, stops once this node has pulled the key; otherwise suspect the peer in the log |
+| `conflict` | a push of material that differs from this node's copy, or from another peer's | page (`RutliHostedKeyConflict`), section 4 |
+| `disagreement` | a pull: peers hold different material | as `conflict` |
+| `unconfirmed` | a pull: fewer than two peers hold the same copy | normal while a node is down; a single copy for good needs a hand copy (above) |
+| `invalid` | material that does not open or validate (an RSA or EC key whose public half is not its own) | suspect the peer in the log |
+| `timestamp` | a creation or undelete time in the future beyond `signing_policy.clock_skew_secs` | check that node's clock |
+| `generate-conflict` | a generation this node led, aborted | as `conflict` |
+| `unverifiable` | a push, while another peer answers with a copy this node cannot check | as `invalid` or `timestamp` for that peer |
+| `throttled` | a read-repair, or a push's peer check, past this node's fan-out ceiling ("try again", never a conflict) | a client flooding lookups for keys this node lacks (check the driver certificate's use), or a peer fencing and pushing made-up ids (check the peer in the log) |
+
+A rollback that cannot reach a node it fenced is logged (`did not reach this cosigner`) and counted
+in `rutli_hosted_rollback_incomplete_total` (`RutliHostedRollbackIncomplete`): that node may keep
+a copy of a key nobody was given. Check with `verify-hosted` and quarantine the file by hand
+(below).
+
+A key **held here** with a time in the future (written before 0.5.0) is reported at startup and by
+every sweep (`rutli_hosted_keys_future_timestamp`, `RutliHostedKeyFutureTimestamp`, log line `hosted
+key with a time in the future`). It keeps serving, but every delete of it is refused as stale until
+that time, and other nodes do not pull this copy. Check the clocks; if the copy is suspect, treat it
+as a divergent replica (section 4).
+
+### Upgrading from 0.4.0 (mixed versions)
+
+Upgrade one cosigner at a time. **Do not create or delete hosted keys while the cluster is
+mixed**; serving keys that exist keeps working. Upgraded nodes enforce the new rules on what *they*
+accept and nothing more:
+
+- **A 0.4.0 node** still accepts a push into an id it lacks from any peer, pulls the first copy
+  that opens, accepts future timestamps and an RSA key whose public half is not its own, and, as a
+  leader, writes its own copy first and treats a conflict as a failed replica. A 0.4.0 leader that
+  dies after its own write can still fork the id with a retry.
+- **Deletes:** a 0.4.0 node ignores `include_tombstone` and answers NOT_FOUND for a deleted key. So
+  until every node is upgraded, a node that lacks a deleted key can pull it back from two old
+  replicas that still hold it, and serves it until its next sweep applies the tombstone from the
+  inventory.
+- **A 0.5.0 leader with 0.4.0 peers** fences and pushes as before (`ReplicateKey` and `FetchKey`
+  are unchanged); a 0.4.0 peer's create-once refusal ("different material") aborts the generation.
+- **A 0.4.0 leader with a 0.5.0 peer:** the 0.5.0 peer accepts its fenced push after its own peer
+  check; a 0.5.0 refusal is a failed replica to the 0.4.0 leader.
+- **A 0.4.0 node's sweep** still pushes keys a peer lacks. A 0.5.0 node refuses the push
+  (`unfenced`, `RutliHostedReplicationRefused`, and an `anti-entropy push failed` warning on the
+  0.4.0 node) and pulls the key itself once its peers confirm it. Expect a few during the roll.
+
+Before you start, check `rutli_anti_entropy_conflicts_total` and run `verify-hosted` for every
+hosted key; a divergence from before the upgrade is handled below.
 
 ### Replica count
 
@@ -446,8 +587,9 @@ Two node-specific rules:
 - **Back up and restore per node.** Never restore cosigner 1's backup onto cosigner 2 — it contains
   cosigner 1's FROST share, and two nodes holding the same share breaks the threshold silently.
 - **A rebuilt node still needs its own FROST share** from backup (`disaster-recovery.md` §1/§2). Its
-  hosted keys come back on their own: the next sweep pulls them, or the first request read-repairs
-  them.
+  hosted keys come back on their own: the next sweep pulls every key two peers hold, or the first
+  request read-repairs it. A key only one other node holds does not come back on its own (section 4,
+  "Anti-entropy").
 
 ### Export and import (portable copies)
 
@@ -474,7 +616,8 @@ rutli-cosigner --config /etc/rutli/cosigner-1.json export-key \
   --out /media/offline/rutli-enc.export --passphrase-env EXPORT_PASS
 
 # Import into a different cluster (daemon running or stopped, see "Why importing next to a running
-# daemon is safe" below); anti-entropy replicates the key to the rest of that cluster on its own.
+# daemon is safe" below). Run it on every cosigner of that cluster: a node pulls a key only from two
+# peers that hold the same copy, so a key imported on one node stays there.
 rutli-cosigner --config /etc/rutli/cosigner-1.json import-key \
   --in /media/offline/rutli-enc.export --passphrase-env EXPORT_PASS
 ```
@@ -509,7 +652,7 @@ Properties worth knowing before you rely on them:
 A node moving into the cluster ([roadmap-migration.md](roadmap-migration.md)) can keep its
 encryption key instead of rotating it — discouraged, see [migration.md](migration.md), "Carrying
 the signing and encryption keys". Export it on the old node (`keys.secret.download`, preview
-commands enabled, and on Canton 3.7 `canton.parameters.enable-key-download = yes`; preferably with a password), then on one cosigner. Its daemon may be running
+commands enabled, and on Canton 3.7 `canton.parameters.enable-key-download = yes`; preferably with a password), then on every cosigner (on two, the third pulls it). A daemon may be running
 (`kubectl exec` into the pod, the export copied onto a tmpfs and deleted afterwards) or stopped:
 
 ```sh
@@ -535,11 +678,11 @@ val key = participant.keys.secret.register_kms_encryption_key("<prefix>rutli-enc
 The key id must be one the driver routes to hosted keys: `<frost.key-prefix>rutli-<name>` in
 `[A-Za-z0-9_-]`, never containing `frost-`. Pass the participant's prefix as `--key-prefix` to have
 it enforced (otherwise the inferred prefix is printed for you to check). Import into a cluster whose
-cosigners are all upgraded (rollout order above): anti-entropy cannot push an EC key to an older
-node, and the driver will not advertise ECIES while one remains. Anti-entropy and read-repair
-spread the key (within one `hosted_keys.anti_entropy_interval_secs` of a running daemon, or once a
-stopped one starts). Then, before registering it, check that every node holds it and serves
-Canton's key — operator certificate, public values only:
+cosigners are all upgraded (rollout order above): an older node cannot serve an EC key, and the
+driver will not advertise ECIES while one remains. Import on every cosigner, or on two and let the
+third pull it (within one `hosted_keys.anti_entropy_interval_secs` of a running daemon, or once a
+stopped one starts; a node pulls only what two peers hold). Then, before registering it, check that
+every node holds it and serves Canton's key — operator certificate, public values only:
 
 ```sh
 rutli-cosigner --config <operator config> verify-hosted \
@@ -558,7 +701,7 @@ place with a no-replace rename (or link), then a directory fsync. The daemon see
 the whole sealed file, never a partial one, and nothing is ever replaced. The daemon keeps no
 in-memory copy of hosted keys — every serve, listing and repair reads the file — so the key is
 served from the next request on. The one concurrent writer is the daemon itself, pulling the same
-id from a peer where it was imported first: exactly one create wins and the other compares,
+id from two peers where it was imported first: exactly one create wins and the other compares,
 identical material being a no-op on either side and different material a conflict on either side,
 never an overwrite (`export::install_imported`; pinned by the test
 `import_key_into_a_running_node_races_safely_with_anti_entropy`, both interleavings).
@@ -568,11 +711,17 @@ this key in the clear — purge them (`b0-cutover-spike.md`, `roadmap-migration.
 
 ### When `rutli_anti_entropy_conflicts_total` increases
 
-**This is a page, not a warning** (`RutliHostedKeyConflict`, severity critical). It means two nodes
-hold *different material* under the same key id. Hosted keys are create-once-immutable, so this
-cannot happen in normal operation — it is an invariant violation, not replication lag. The sweep
-deliberately refuses to reconcile: picking a side automatically could destroy the only copy that can
-decrypt already-recorded traffic.
+**This is a page, not a warning** (`RutliHostedKeyConflict`, severity critical). It means a node
+saw *different material* under one key id: a peer holds other material than this node (the sweep,
+log `hosted key CONFLICT`), peers it would pull from disagree (`reason="disagreement"`), it refused
+a push over another copy (`reason="conflict"`), or a generation it led was aborted (`hosted key
+generation ABORTED`). Hosted keys are create-once-immutable, so this cannot happen in normal
+operation — it is an invariant violation, not replication lag. It is counted each time it is seen,
+so an unresolved conflict adds to the counter at every sweep and the page stays on until about an
+hour after it is resolved. Nothing reconciles it automatically:
+picking a side could destroy the only copy that can decrypt already-recorded traffic. Each holder
+keeps serving its own copy; a node that lacks the key answers `UNAVAILABLE` for it while the copies
+disagree.
 
 1. Find the key id and the peer — both are in the cosigner's error log.
 2. Change nothing. Do not delete either copy, do not restore "a good backup" over one, do not rotate
@@ -589,10 +738,19 @@ decrypt already-recorded traffic.
    possibility as live until you have ruled it out.
 5. Only once the live copy is identified: stop the divergent node, move that key's file out of its
    `data_dir/keys/` (one file per key id) into a quarantine directory, and restart it — the next
-   sweep re-pulls the live material. **Do not use `DeleteKey` for this.** It tombstones the key
-   cluster-wide, including the copy you just decided was the good one.
+   sweep re-pulls the live material once two other nodes hold it. If only one other node holds the
+   live copy, import it there by hand (`export-key` on the holder, `import-key` on the restarted
+   node). For an AES key, a known Canton blob that decrypts on a node tells you that node holds the
+   live copy. **Do not use `DeleteKey` for this.** It tombstones the key cluster-wide, including
+   the copy you just decided was the good one.
 6. Rotate the key through Canton topology afterwards if there is any chance the divergent material
    was ever used, and treat the interval since divergence as a confidentiality incident (section 5).
+
+**A replica that diverged before 0.5.0** is handled the same way. 0.5.0 does nothing new to it at
+startup: each holder keeps serving its own copy, every sweep logs the conflict and counts it, so the
+page keeps firing until it is resolved. A node that lacks the key refuses to pull it while the
+copies disagree. If you suspect a node may be compromised, rebuild it rather than only quarantining
+the file.
 
 ## 5. Security model and limits
 
@@ -658,6 +816,12 @@ Properties to understand before you rely on hosted keys in production.
   Canton's own decryptor behaves the same way and the driver matches it exactly; in practice the
   plaintext is a session key whose use fails authenticated decryption if it was altered. An upstream
   property, recorded so nobody rediscovers it as a Rütli bug.
+
+- **Replication integrity rests on agreement between nodes** (since 0.5.0, section 4): a node stores
+  a key it lacks only when two peers agree, or from the generation leader that fenced it and no
+  other reachable peer contradicts. One compromised node can still create a key under an id nobody
+  has created yet, and is not caught when every other holder is unreachable from the receiving node
+  (`docs/security/threat-model.md`). A later release binds generation to a client intent.
 
 Operational consequences worth writing into your runbook:
 

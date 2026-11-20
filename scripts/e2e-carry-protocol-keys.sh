@@ -18,8 +18,9 @@
 #      `<prefix>frost-import-seqauth-<fp8>`; a pre-B6-shaped bundle is refused by import-share;
 #      import-share, verify-key --sign-test (operator cert, provenance says "protocol"), refresh,
 #      verify-key again. The dealer refuses the signing key in namespace mode first.
-#   2. `encryption` (ECIES P-256): import-key into node 1 with its daemon RUNNING, then
-#      verify-hosted (operator cert) until anti-entropy has put it on every node.
+#   2. `encryption` (ECIES P-256): import-key into nodes 1 and 2 with their daemons RUNNING (a
+#      node pulls a hosted key only from two peers that hold the same copy), then verify-hosted
+#      (operator cert) until anti-entropy has put it on node 3 too.
 #   3. Canton 3.6.1, one process: sequencer, mediator, participant1 (rutli KMS, frost backend,
 #      hosted ECIES keys, no delegate, key-prefix "e2e6-") and participant2 (JCE). participant1
 #      registers the three carried keys by KMS id — signing as `ProtocolWithProofOfOwnership`,
@@ -99,6 +100,8 @@ for f in "$COSIGNER" "$DEALER"; do [ -x "$f" ] || fail "no $f"; done
 [ -f "$DRIVER_JAR" ] || fail "no $DRIVER_JAR"
 
 step "mTLS trust domain, seal secret, configs (127.0.0.1:$((BASE_PORT + 1))..$((BASE_PORT + 3)))"
+# Every node pins the TLS key of every cosigner (peers[].tls_spki_sha256, required with TLS): the
+# configs take the pins of the certificates just made from certs/peer-pins.json.
 "$REPO/scripts/gen-frost-certs.sh" 3 "$WORK/certs" >/dev/null
 export RUTLI_SEAL_SECRET
 RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
@@ -107,10 +110,12 @@ RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
 DRIVER_PIN="$(openssl x509 -in "$WORK/certs/driver.crt" -noout -pubkey | openssl pkey -pubin -outform DER \
   | openssl dgst -sha256 -hex | awk '{print $NF}')"
 mkconfig() { # node-config-name  cert-name  out
-  jq --arg work "$WORK" --arg cert "$2" --argjson base "$BASE_PORT" --arg prefix "$PREFIX" --arg pin "$DRIVER_PIN" '
+  jq --arg work "$WORK" --arg cert "$2" --argjson base "$BASE_PORT" --arg prefix "$PREFIX" --arg pin "$DRIVER_PIN" \
+    --slurpfile peerpins "$WORK/certs/peer-pins.json" '
       .listen = "127.0.0.1:\($base + .identifier)"
     | .data_dir = "\($work)/node\(.identifier)"
-    | .peers |= map(.endpoint = "https://127.0.0.1:\($base + .identifier)")
+    | .peers |= map(.endpoint = "https://127.0.0.1:\($base + .identifier)"
+        | .tls_spki_sha256 = ($peerpins[0].peerPins[.identifier | tostring] // error("no TLS key pin for cosigner\(.identifier)")))
     | .tls.ca_cert = "\($work)/certs/ca.crt"
     | .tls.cert = "\($work)/certs/\($cert).crt"
     | .tls.key = "\($work)/certs/\($cert).key"
@@ -209,12 +214,14 @@ carry() { # vector-name  key-id  fingerprint  recorded-usage-json
 carry signing "$SIG_ID" "$SIG_FP" '["proof-of-ownership","signing"]'
 carry sequencer-auth "$SEQ_ID" "$SEQ_FP" '["proof-of-ownership","sequencer-auth"]'
 
-step "2. import-key: the ECIES encryption key into node 1, its daemon running"
-cli --config "$WORK/c1.json" import-key --in "$VEC/encryption.export-pw.bin" \
-  --passphrase-env E2E_EXPORT_PASSWORD --key-id "$ENC_ID" --key-prefix "$PREFIX" --expect-fingerprint "$ENC_FP"
+step "2. import-key: the ECIES encryption key into nodes 1 and 2, their daemons running"
+for i in 1 2; do
+  cli --config "$WORK/c$i.json" import-key --in "$VEC/encryption.export-pw.bin" \
+    --passphrase-env E2E_EXPORT_PASSWORD --key-id "$ENC_ID" --key-prefix "$PREFIX" --expect-fingerprint "$ENC_FP"
+done
 first="$(cli --config "$WORK/operator.json" verify-hosted --key-id "$ENC_ID" --expect-fingerprint "$ENC_FP" --json 2>/dev/null || true)"
 echo "verify-hosted right after the import: ok=$(jq .ok <<<"$first"), $(jq -c '[.nodes[] | {identifier, present}]' <<<"$first")"
-step "   verify-hosted (operator cert) until anti-entropy has put it on every node"
+step "   verify-hosted (operator cert) until anti-entropy has put it on node 3 too"
 ok=""
 for _ in $(seq 1 60); do # up to 2 min; anti-entropy runs every 10 s
   rep="$(cli --config "$WORK/operator.json" verify-hosted --key-id "$ENC_ID" --expect-fingerprint "$ENC_FP" --json 2>/dev/null || true)"

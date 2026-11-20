@@ -36,7 +36,7 @@ use rutli_cosigner::intent::{self, DeletePolicy, IntentVerifier};
 use rutli_cosigner::journal::{Retention, SignJournal};
 use rutli_cosigner::keystore::KeyStore;
 use rutli_cosigner::node::{Node, Round1Ctx, TombstoneOutcome};
-use rutli_cosigner::orchestrator::{anti_entropy_sweep, delete_hosted_key, generate_hosted_key, Peers};
+use rutli_cosigner::orchestrator::{anti_entropy_sweep, delete_hosted_key, generate_hosted_key, repair_hosted_key, Peers};
 use rutli_cosigner::pb;
 use rutli_cosigner::peer::{GrpcPeer, LocalPeer, PeerApi};
 use rutli_cosigner::seal::{KeyFileBinding, Sealer};
@@ -574,6 +574,81 @@ impl PeerApi for LyingPeer {
     }
 }
 
+/// A deleted key is never pulled back: the tombstone is checked before any peer is asked, so a
+/// node that holds it answers NOT_FOUND even while two peers that missed the delete still hold the
+/// same live copy (which would otherwise be enough to pull it).
+#[tokio::test]
+async fn a_tombstoned_id_is_not_pulled_back_even_when_two_peers_hold_it() {
+    let c = cluster();
+    let id = "rutli-sym-tomb-pull";
+    c.generate(id).await;
+    // Node 1 alone applied the delete (the others missed it).
+    let outcome = c.nodes[0].hosted_apply_tombstone(id, &delete_intent(&c.ids, "operator", id), intent::Expiry::Enforce, None).unwrap();
+    assert_eq!(outcome, TombstoneOutcome::Converted);
+    let as_node1: Peers = c
+        .nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone()).on_behalf_of(c.nodes[0].clone())) as Arc<dyn PeerApi>)
+        .collect();
+    assert!(!repair_hosted_key(&c.nodes[0], &as_node1, id).await.unwrap(), "NOT_FOUND, not a pull");
+    assert_eq!(anti_entropy_sweep(&c.nodes[0], &as_node1).await.unwrap(), 0);
+    assert_eq!(c.states(id)[0], (false, true));
+}
+
+/// A peer's tombstone is learnt before a pull or a generation stores anything: a node that lacks
+/// a key that one peer deleted and another still holds records the tombstone (its delete intent
+/// verified here) and answers NOT_FOUND; a leader refuses to generate the id. A tombstone whose
+/// intent does not verify is an answer this node cannot use: no pull.
+#[tokio::test]
+async fn a_peer_tombstone_stops_a_pull_and_a_generation() {
+    let c = cluster();
+    let id = "rutli-sym-peer-tomb";
+    c.generate(id).await;
+    // Node 1 deleted it (the others missed the delete); node 3 is rebuilt empty.
+    c.nodes[0].hosted_apply_tombstone(id, &delete_intent(&c.ids, "operator", id), intent::Expiry::Enforce, None).unwrap();
+    std::fs::remove_file(c.file(3, id)).unwrap();
+    let as_node3: Peers = c
+        .nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone()).on_behalf_of(c.nodes[2].clone())) as Arc<dyn PeerApi>)
+        .collect();
+    assert!(!repair_hosted_key(&c.nodes[2], &as_node3, id).await.unwrap(), "NOT_FOUND, not a pull");
+    assert_eq!(c.states(id)[2], (false, true), "node 3 recorded the peer's tombstone");
+
+    // A leader that lacks the id learns the tombstone the same way and refuses to generate it.
+    let id2 = "rutli-sym-peer-tomb-gen";
+    c.generate(id2).await;
+    c.nodes[0].hosted_apply_tombstone(id2, &delete_intent(&c.ids, "operator", id2), intent::Expiry::Enforce, None).unwrap();
+    std::fs::remove_file(c.file(3, id2)).unwrap();
+    let e = generate_hosted_key(&c.nodes[2], &as_node3, id2, HostedSpec::Aes256Gcm, 2).await;
+    assert!(matches!(&e, Err(DaemonError::KeyExists(m)) if m.contains("tombstoned")), "{e:?}");
+    assert!(!c.nodes[2].hosted_exists(id2));
+}
+
+/// A creation time far in the future would make every node refuse every delete of the key as
+/// "stale". Such a key is refused when it arrives from a peer, even from the generation's leader,
+/// with the signing policy's clock skew as the allowance.
+#[tokio::test]
+async fn a_pushed_key_with_a_future_creation_time_is_refused() {
+    let c = cluster();
+    let id = "rutli-sym-forever";
+    let mut key = rutli_cosigner::hosted::HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
+    key.created_at = u64::MAX / 2000;
+    let leader = LocalPeer::new(c.nodes[1].clone()).on_behalf_of(c.nodes[0].clone());
+    leader.ceremony_fence("genkey-forever", id, "genkey").await.unwrap();
+    let to2 = c.nodes[1].dist_public_key().unwrap();
+    let w = c.nodes[0].hosted_wrap_for(id, &key, 2, &to2).unwrap();
+    let e = leader.replicate_key("genkey-forever", id, "aes-256-gcm", &[], &w).await.unwrap_err();
+    assert!(matches!(e, DaemonError::HostedInvalid(_)), "{e:?}");
+    assert!(!c.nodes[1].hosted_exists(id));
+    // Within the skew allowance it is accepted, and a fresh delete intent still applies to it.
+    key.created_at = rutli_cosigner::hosted::now_secs() + 60;
+    let w = c.nodes[0].hosted_wrap_for(id, &key, 2, &to2).unwrap();
+    leader.replicate_key("genkey-forever", id, "aes-256-gcm", &[], &w).await.unwrap();
+    let outcome = c.nodes[1].hosted_apply_tombstone(id, &delete_intent(&c.ids, "operator", id), intent::Expiry::Enforce, None).unwrap();
+    assert_eq!(outcome, TombstoneOutcome::Converted);
+}
+
 // ── grace, undelete, regeneration ─────────────────────────────────────────────────────────────
 
 #[tokio::test]
@@ -705,6 +780,7 @@ async fn serve_mesh(c: &Cluster) -> (Vec<String>, Vec<tokio::task::JoinHandle<()
             key: dir.join(format!("{cn}.key")),
             domain: None,
             allow_expired_ca: false,
+            require_peer_pins: None,
         })
         .unwrap()
     };
@@ -725,7 +801,7 @@ async fn serve_mesh(c: &Cluster) -> (Vec<String>, Vec<tokio::task::JoinHandle<()
                         GrpcPeer::connect_lazy(
                             Identifier::try_from(j as u16 + 1).unwrap(),
                             &endpoints[j],
-                            Some(tls[i].client_for(&format!("cosigner{}", j + 1))),
+                            Some(tls[i].dial_as(&format!("cosigner{}", j + 1), None, 0).unwrap()),
                         )
                         .unwrap(),
                     ) as Arc<dyn PeerApi>
@@ -747,6 +823,7 @@ async fn serve_mesh(c: &Cluster) -> (Vec<String>, Vec<tokio::task::JoinHandle<()
             node: c.nodes[i].clone(),
             allowed_cns: Some(Arc::new((1..=N).map(|k| format!("cosigner{k}")).collect::<HashSet<_>>())),
             peer_ids: Some(Arc::new((1..=N).map(|k| (format!("cosigner{k}"), k)).collect())),
+            peer_pins: None,
         };
         let server = tonic::transport::Server::builder()
             .tls_config(tls[i].server.clone())
@@ -809,7 +886,7 @@ async fn the_driver_certificate_cannot_delete_and_the_delete_role_can() {
     // ListKeys carries the tombstone with its intent; KeyInfo answers "does not exist".
     let listed = cosigner3.list_keys(pb::ListKeysRequest {}).await.unwrap().into_inner().keys;
     assert!(listed.iter().any(|k| k.key_id == "rutli-sym-9" && k.tombstone && !k.delete_intent.is_empty()));
-    let info = driver.key_info(pb::KeyInfoRequest { key_id: "rutli-sym-9".into() }).await.unwrap().into_inner();
+    let info = driver.key_info(pb::KeyInfoRequest { key_id: "rutli-sym-9".into(), ..Default::default() }).await.unwrap().into_inner();
     assert!(!info.exists);
     for s in &servers {
         s.abort();

@@ -191,6 +191,10 @@ helm -n rutli diff upgrade rutli deploy/helm/rutli-cosigner \
 The render must contain no PVC named `data-rutli-cosigner-n*` (the existing claims are reused), the
 three backup PVCs `rutli-cosigner-backup-n*`, and no `RUTLI_SEAL_SECRET`.
 
+With a 0.5.0 or later chart the render also needs `peerPins`, one per node: the exported values
+carry them once the soak runs 0.5.0 (`CHANGELOG.md`, 0.5.0 upgrade note). This migration keeps every
+certificate, so the pins do not change.
+
 ## 4. Protect the volumes
 
 ```sh

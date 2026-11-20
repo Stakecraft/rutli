@@ -43,6 +43,9 @@
 #   rutli_hosted_key_ops_total{op=..., result="ok"|"error"}          counter
 #   rutli_anti_entropy_repairs_total                                 counter
 #   rutli_anti_entropy_conflicts_total                               counter
+#   rutli_hosted_replication_refusals_total{reason=...}              counter
+#   rutli_hosted_keys_future_timestamp                               gauge
+#   rutli_hosted_rollback_incomplete_total                           counter
 #   rutli_key_replicas                                               gauge
 #   rutli_sign_intent_absent_total                                   counter
 #   rutli_sign_policy_refusals_total{reason=...}                     counter
@@ -58,11 +61,17 @@
 #   rutli_hosted_tombstones_written_total{how=...}                   counter
 #   rutli_hosted_tombstones{retained="true"|"false"}                 gauge
 #   rutli_keyfiles{format="v1"|"v2"|"plaintext", dek=...}            gauge
+#   rutli_peer_pin_refusals_total{direction="inbound"|"outbound"}     counter (primed at 0)
+#   rutli_peer_pins_unpinned                                         gauge
 #
 # The signing-policy series (audit C2) and the delete/tombstone series (audit M2) are not
 # pre-primed either — a series first appears when it first counts — so their rules alert on
 # increases. rutli_keyfiles is set once at start-up (audit M4: key-file format and which DEK seals
 # each file).
+#
+# rutli_hosted_replication_refusals_total{reason} (0.5.0) counts hosted key material a node refused
+# to store, or a generation it aborted: unfenced | conflict | disagreement | unconfirmed | invalid |
+# timestamp | generate-conflict | unverifiable | throttled. Its series are primed at zero.
 #
 # The hosted-key metrics (rutli_hosted_*, rutli_anti_entropy_*, rutli_key_replicas,
 # rutli_unreadable_key_files_total, rutli_decrypt_rate_limited_total) cover
@@ -89,6 +98,22 @@ groups:
         annotations:
           summary: "Rütli cosigner {{ $labels.instance }} is down"
           description: "Cosigner instance {{ $labels.instance }} (job rutli-cosigner) has had up == 0 for more than 2 minutes. With a 2-of-3 quorum, one lost cosigner leaves zero margin — a second failure will halt signing entirely."
+
+      - alert: RutliCosignerRolloutPending
+        # The chart's per-node StatefulSets use updateStrategy OnDelete: `helm upgrade` changes the
+        # pod template but restarts nothing, so a cosigner runs the old image until
+        # scripts/upgrade-cosigners.sh rolls it. updated < replicas is that gap (kube-state-metrics).
+        # The selector matches the default StatefulSet names (<release>-rutli-cosigner-n<id>); with a
+        # fullnameOverride or nameOverride, change it.
+        expr: |
+          kube_statefulset_status_replicas_updated{statefulset=~".*rutli-cosigner.*"}
+            < kube_statefulset_replicas{statefulset=~".*rutli-cosigner.*"}
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner StatefulSet {{ $labels.statefulset }} runs an old pod template"
+          description: "StatefulSet {{ $labels.statefulset }} has had a newer pod template than its pod for at least 30 minutes. The chart sets updateStrategy OnDelete on the per-node StatefulSets, so a helm upgrade restarts no pod by itself and the cosigner keeps the old image and settings until it is rolled. Run scripts/upgrade-cosigners.sh --status to see the running and the target revision of each node, then scripts/upgrade-cosigners.sh to roll them one at a time (docs: chart README, Upgrading). Not an outage: signing is unaffected, but the cluster is not on the version you deployed."
 
       - alert: RutliKeystoreUnreadable
         # The cosigner's own key-store probe (every 15s, and on Signer.Health calls) cannot list
@@ -222,6 +247,24 @@ groups:
           summary: "Rütli cosigner {{ $labels.instance }} refused signatures by policy ({{ $labels.reason }})"
           description: "{{ $labels.instance }} refused to take part in a signature because its signing policy said no (reason {{ $labels.reason }}). Expected reasons during a rollout: missing (require_intent on, its default with TLS, while the driver does not sign intents: a driver older than 0.4.0-rc.3 or frost.sign-intents = off), approval (a gated key without its approvals), expiry (clock skew beyond clock_skew_secs — check NTP on the driver and the node). Suspicious ones: signer, certificate, signature, pin, cluster, key — something presented an intent this node did not accept, which is what a compromised cosigner or a stolen-but-revoked driver key looks like. The cosigner log names the refusal; cross-check the driver audit log (docs/approval-quorum.md)."
 
+      - alert: RutliPeerPinRefused
+        expr: sum by (instance, direction) (increase(rutli_peer_pin_refusals_total[15m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} refused a peer's TLS key ({{ $labels.direction }})"
+          description: "{{ $labels.instance }} refused a mesh connection because the peer's certificate carries a key that is not pinned in its peers[].tls_spki_sha256 (direction {{ $labels.direction }}: inbound = a peer called this node, outbound = this node dialled a peer). The certificate's name and chain were valid. Either a pin is stale (a certificate was swapped before its new pin reached every node — the log line names the CN and the key it saw: compare with `rutli-cosigner tls spki <cert>`), or something with a CA-signed certificate for that node's name answered or called in its place: a replaced node's old certificate, or one minted with the CA key. Treat the second as an incident (docs/security/threat-model.md, Holder of the cluster CA key; docs/ca-rotation.md §10)."
+
+      - alert: RutliPeerPinsOff
+        expr: max by (instance) (rutli_peer_pins_unpinned) > 0
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} accepts {{ $value }} peer(s) by certificate name alone"
+          description: "{{ $labels.instance }} runs with tls.require_peer_pins: false and some roster entries have no tls_spki_sha256. Any certificate with such a peer's name under the cluster CA is accepted as that peer — a replaced node's old certificate, or one minted with the CA key. Expected only during a rollout; pin every node (`rutli-cosigner tls spki <cert>`, Helm peerPins) and remove the opt-out."
+
       - alert: RutliSignUnknownSessions
         # "More than 3": increase() extrapolates to the window's edges, so 3 events can read as a
         # little over 3 (about 3.2 at a 60 s scrape interval) and 4 as a little under or over 4.
@@ -277,6 +320,24 @@ groups:
         annotations:
           summary: "Rütli cosigner {{ $labels.instance }} ran a DKG/refresh without a client ceremony intent"
           description: "{{ $labels.instance }} took part in a DKG or refresh that carried no client-signed ceremony intent, accepted because signing_policy.require_ceremony_intent is off on this node: set to false (the opt-out; on by default with TLS since 0.4.0-rc.6), or the node runs without TLS. A compromised cosigner can still start (and split) ceremonies on it. Once the driver (0.4.0-rc.4 or later) and the refresh job sign ceremony intents, remove the opt-out on every node (docs/approval-quorum.md, Switching enforcement on). On a cluster that enforces, this never fires."
+
+      - alert: RutliRefreshRefused
+        expr: sum by (instance) (increase(rutli_refresh_interval_refusals_total[15m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} refused a refresh that came too soon"
+          description: "{{ $labels.instance }} refused to take part in a refresh because it took part in a refresh of the same key less than signing_policy.refresh_min_interval_secs ago (default 72 h). The refusal (cosigner log, and the client's error) names the ceremony it counts from: look that ceremony up (rutli-cosigner ceremony status, or verify-key's refresh count). If it committed and you did not start it, the key is already on a new epoch and every older backup no longer restores a node: first make sure every node has a backup of the new epoch: the backup sidecar takes one within backup.checkEverySecs (5 min) of the commit; check each node's backup container log for BACKUP_TRIGGER followed by BACKUP_OK after the commit time. Then replace the credential: the refresher certificate's signer_pins entry, and turn signer_may_refresh off if the driver certificate may be the one. A refusal right after one of your own runs is expected. An incident refresh that cannot wait needs signing_policy.refresh_interval_waived_at on every node (docs/ceremonies.md, Refresh interval)."
+
+      - alert: RutliRefreshOffSchedule
+        expr: max by (key) (rutli_refreshes_6d) > 1
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli key {{ $labels.key }} was refreshed more than once in 6 days"
+          description: "A cosigner committed more than one refresh of {{ $labels.key }} in the last 6 days, counted by commit time. The shipped schedule is weekly; the window is a day shorter than the schedule so a weekly run that lands a little early (scheduler jitter) does not fire this. Check that each refresh was yours (an incident refresh, a retried run); if not, replace the refresher certificate's pin and turn signer_may_refresh off. Every refresh leaves the nodes' older backups unable to restore them: check that each node logged BACKUP_TRIGGER and BACKUP_OK after the last refresh (docs/disaster-recovery.md, docs/ceremonies.md Refresh interval)."
 
       - alert: RutliSignRateLimited
         expr: increase(rutli_sign_rate_limited_total[10m]) > 0
@@ -375,7 +436,39 @@ groups:
           severity: critical
         annotations:
           summary: "Rütli hosted key conflict detected on {{ $labels.instance }}"
-          description: "{{ $labels.instance }} found a peer holding DIFFERENT material under a key id it also holds. Hosted keys are create-once-immutable, so this is an invariant violation — not replication lag — and anti-entropy deliberately refuses to reconcile it: picking a side automatically could destroy the only copy that can decrypt already-recorded traffic. Find the conflicting key id in the cosigner logs (logged at error level), stop rotating that key, and resolve by hand."
+          description: "{{ $labels.instance }} saw two different materials under one hosted key id: a peer holds other material than this node (anti-entropy), peers that it would pull from disagree, it refused a push over another copy, or a GenerateKey it led was aborted and rolled back. Hosted keys are create-once-immutable, so this is an invariant violation — not replication lag — and nothing reconciles it automatically: picking a side could destroy the only copy that can decrypt already-recorded traffic. A node that lacks the key answers UNAVAILABLE for it while the copies disagree. Find the key id and the peers in the cosigner logs (error level, \"CONFLICT\" or \"ABORTED\"), stop rotating that key, run verify-hosted, and resolve by hand (docs/hosted-keys.md, section 4: When rutli_anti_entropy_conflicts_total increases)."
+
+      - alert: RutliHostedReplicationRefused
+        # Material a node would not store: a push without the receiver's generation fence (a peer
+        # trying to plant a key, or a 0.4.0 node's anti-entropy push during a rolling upgrade),
+        # material that does not validate, or a time in the future. "unconfirmed" (one copy only,
+        # normal while a node is down) and the conflict reasons (paged by RutliHostedKeyConflict)
+        # are left out.
+        expr: sum by (instance, reason) (increase(rutli_hosted_replication_refusals_total{reason=~"unfenced|invalid|timestamp|unverifiable|throttled"}[15m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} refused hosted key material ({{ $labels.reason }})"
+          description: "{{ $labels.instance }} refused hosted key material from a peer (reason {{ $labels.reason }}). unfenced: a peer pushed a key this node does not hold without holding this node's generation fence for it. During a rolling upgrade from 0.4.0 this is a 0.4.0 node's anti-entropy push and stops once this node has pulled the key itself; otherwise suspect the peer named in the log. invalid: the material does not open or validate (an RSA or EC key whose public half is not its own). timestamp: a creation or undelete time in the future beyond signing_policy.clock_skew_secs — check that node's clock. unverifiable: a push refused because another cosigner answered with a copy this node cannot check (see invalid / timestamp for that cosigner). throttled: read-repair lookups for keys this node lacks exceed 20 a second — a client flooding made-up key ids; the requests got UNAVAILABLE and the driver failed over. Nothing was stored. The cosigner log names the key and the peer."
+
+      - alert: RutliHostedRollbackIncomplete
+        expr: increase(rutli_hosted_rollback_incomplete_total[1h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} could not roll back an aborted hosted-key generation everywhere"
+          description: "A GenerateKey led by {{ $labels.instance }} was aborted, and its rollback did not reach at least one cosigner (log: \"did not reach this cosigner\", with the node and the key). That node may keep, and serve, a copy of a key no client was given; if it is down when the client retries, the retry can create a second key under the id. Run verify-hosted for the key; if the copy is still there and no client uses the key, quarantine that file by hand (docs/hosted-keys.md, section 3, \"A leader that dies mid-generation\")."
+
+      - alert: RutliHostedKeyFutureTimestamp
+        expr: max by (instance) (rutli_hosted_keys_future_timestamp) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} holds a hosted key with a time in the future"
+          description: "{{ $labels.instance }} holds hosted keys whose creation or undelete time lies in the future beyond the clock skew allowance (written before 0.5.0, which refuses such keys from peers). The key still serves, but every delete of it is refused as stale until that time, and other nodes will not pull this copy. The cosigner log names the key (\"hosted key with a time in the future\"). Check the clocks of the cosigners; see docs/hosted-keys.md."
 
       - alert: RutliHostedKeyUnderReplicated
         # A write quorum below the cluster size is only safe because anti-entropy heals the
@@ -386,7 +479,7 @@ groups:
           severity: warning
         annotations:
           summary: "Rütli hosted key under-replicated on {{ $labels.instance }}"
-          description: "At least one cluster-hosted key is held by fewer than 3 cosigners and has not healed within 30 minutes. A key written at the 2-of-3 write quorum is expected to be repaired by the next anti-entropy sweep (default 300s), so a sustained shortfall means a cosigner is down or sweeps are failing. Check that every cosigner is up and reachable on the mesh."
+          description: "At least one cluster-hosted key is held by fewer than 3 cosigners and has not healed within 30 minutes. A key written at the 2-of-3 write quorum is pulled by the missing node's next anti-entropy sweep (default 300s) once two other nodes hold it, so a sustained shortfall means a cosigner is down, sweeps are failing, or only one node holds the key (rutli_hosted_replication_refusals_total{reason=\"unconfirmed\"} on the node that lacks it). Check that every cosigner is up and reachable on the mesh."
 
       - alert: RutliHostedKeyCriticallyUnderReplicated
         expr: rutli_key_replicas < 2
@@ -395,7 +488,7 @@ groups:
           severity: critical
         annotations:
           summary: "Rütli hosted key has a single copy on {{ $labels.instance }}"
-          description: "At least one cluster-hosted key is held by only ONE cosigner. Losing that node loses the key, and because Canton peers encrypt to the published public key, the loss is unrecoverable for already-recorded traffic (see docs/disaster-recovery.md 3b). Restore the missing cosigners immediately; do not rotate or delete keys until replication recovers."
+          description: "At least one cluster-hosted key is held by only ONE cosigner. Losing that node loses the key, and because Canton peers encrypt to the published public key, the loss is unrecoverable for already-recorded traffic (see docs/disaster-recovery.md 3b). A key on one node is not copied automatically: another node pulls only what two peers hold. Restore the missing cosigners immediately; if they are gone, copy the key by hand (export-key on the holder, import-key on another node, docs/disaster-recovery.md). Do not rotate or delete keys until replication recovers."
 
       - alert: RutliHostedKeyErrors
         expr: rate(rutli_hosted_key_ops_total{result="error"}[5m]) > 0
@@ -413,7 +506,7 @@ groups:
           severity: warning
         annotations:
           summary: "Rütli hosted keys are unevenly replicated across job {{ $labels.job }}"
-          description: "Cosigners in job {{ $labels.job }} report different hosted-key counts, meaning at least one key exists on fewer nodes than the cluster has. Writes commit at write_quorum (default 2 of 3), so a node that was down during a GenerateKey lags legitimately until the anti-entropy sweep heals it (default every 300s; the gauge itself only refreshes at the end of a node's own sweep or when a peer lists its keys). Divergence sustained for 20 minutes means healing is failing — check rutli_anti_entropy_repairs_total and the sweep logs. Two replicas survive one node loss; one survives none."
+          description: "Cosigners in job {{ $labels.job }} report different hosted-key counts, meaning at least one key exists on fewer nodes than the cluster has. Writes commit at write_quorum (default 2 of 3), so a node that was down during a GenerateKey lags legitimately until its own anti-entropy sweep pulls the key from two peers (default every 300s; the gauge itself only refreshes at the end of a node's own sweep or when a peer lists its keys). Divergence sustained for 20 minutes means healing is failing — check rutli_anti_entropy_repairs_total and the sweep logs. Two replicas survive one node loss; one survives none."
 
       - alert: RutliUnreadableKeyFiles
         # The counter is bumped once per inventory listing that hits a bad file (this node's own
@@ -426,7 +519,7 @@ groups:
           severity: warning
         annotations:
           summary: "Rütli key file on {{ $labels.instance }} cannot be read"
-          description: "{{ $labels.instance }} has a key file on disk it cannot open, and has been unable to open it for at least 15 minutes. Such a file is logged, counted and SKIPPED from the hosted-key inventory — failing the whole listing would stop anti-entropy for every healthy key too — so the damaged key is invisible to replication: it is neither pushed to peers nor pulled back from them, while rutli_hosted_keys can still look even across the cluster. Usual causes are a seal master secret rotated without re-sealing the existing files, a partial or foreign restore, or disk corruption. It does not self-heal. Take the key id from the cosigner's error log, then restore the seal secret that file was written under, restore a good copy (rutli-cosigner restore, or import-key from an export — see docs/disaster-recovery.md 3d), or, after confirming a readable copy on another cosigner, delete the file so anti-entropy can replace it."
+          description: "{{ $labels.instance }} has a key file on disk it cannot open, and has been unable to open it for at least 15 minutes. Such a file is logged, counted and SKIPPED from the hosted-key inventory — failing the whole listing would stop anti-entropy for every healthy key too — so the damaged key is invisible to replication: peers do not see this node's copy, and this node does not pull the key back, while rutli_hosted_keys can still look even across the cluster. Usual causes are a seal master secret rotated without re-sealing the existing files, a partial or foreign restore, or disk corruption. It does not self-heal. Take the key id from the cosigner's error log, then restore the seal secret that file was written under, restore a good copy (rutli-cosigner restore, or import-key from an export — see docs/disaster-recovery.md 3d), or, after confirming a readable copy on another cosigner, delete the file so anti-entropy can replace it."
 
       - alert: RutliDecryptRateLimited
         # Refusals mean one of two things, and both need a human: a node that has outgrown its
