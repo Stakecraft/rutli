@@ -100,6 +100,10 @@ class ComposeCluster:
         argv += ["--timeout-secs", str(timeout_secs)]
         return argv + self._targets() + args
 
+    @staticmethod
+    def generator_fd_limit():
+        return 65536  # the --ulimit of loadgen_argv
+
     def exec(self, node, shell):
         out = subprocess.run(
             self.compose + ["exec", "-T", node, "sh", "-c", shell],
@@ -224,6 +228,10 @@ class Runner:
             # (cluster.py records that), not by its health the moment the load ends.
             unhealthy = sorted(n for n, ok in load.get("health", {}).items() if not ok and n not in restarted)
             check("every cosigner is healthy afterwards", not unhealthy, ", ".join(unhealthy))
+        if unexpected:
+            # Enough context in the log to tell the cluster from the rig without the artifact: what
+            # the cosigners counted at their accept path, and the messages behind the codes.
+            unexpected.append(self.connection_context(loads))
         check("no request ended in a code the scenario does not allow", not unexpected, "; ".join(unexpected))
         check("every answer verifies", bad == 0, f"{bad} answers did not verify: {samples.get('OK', '')[:160]}")
         for code in required:
@@ -267,6 +275,32 @@ class Runner:
         }
         self.results.append(result)
         return result, check
+
+    def connection_context(self, loads):
+        """One line: the cosigners' handshake timeouts and accept errors during the loads, their
+        open connections and connection limit at the end, the error messages behind the codes, and
+        the load generator's descriptor limit."""
+        timeouts = accept = 0
+        conns, limits, messages = {}, {}, {}
+        for load in loads:
+            server = load.get("server", {})
+            for k, v in server.get("counters", {}).items():
+                if k.startswith("rutli_grpc_handshake_timeouts_total"):
+                    timeouts += v
+                elif k.startswith("rutli_grpc_accept_errors_total"):
+                    accept += v
+            for node, t in server.get("targets", {}).items():
+                for k, v in t.get("gauges", {}).items():
+                    if k == "rutli_grpc_connections":
+                        conns[node] = v
+                    elif k == "rutli_grpc_connection_limit":
+                        limits[node] = v
+            for msg, n in load.get("client", {}).get("error_messages", {}).items():
+                messages[msg] = messages.get(msg, 0) + n
+        top = sorted(messages.items(), key=lambda kv: -kv[1])[:4]
+        return (f"cosigners: handshake timeouts {timeouts:g}, accept errors {accept:g}, connections at the end "
+                f"{conns or '?'}, connection limit {limits or '?'}; generator descriptor limit "
+                f"{self.cluster.generator_fd_limit()}; messages: " + "; ".join(f"{n} x {m[:120]}" for m, n in top))
 
     def close(self, result):
         result["passed"] = all(c["ok"] for c in result["checks"])
@@ -413,7 +447,23 @@ class Runner:
 
         r, check = self.scenario("limit-ceremony", ceremonies, allowed=ceremony_codes)
         if len(r["loads"]) == 3 and "failed" not in r["loads"][1]:
-            check("a DKG of the contested key succeeded", r["loads"][1].get("client", {}).get("ok", 0) >= 1)
+            # Ten DKGs of one key at once may all abort each other (ABORTED: retry later); what the
+            # cosigners promise is that the key id is not left wedged: one DKG afterwards succeeds,
+            # or answers ALREADY_EXISTS if one of the ten won. That no two of them answered
+            # different keys is checked with every answer ("every answer verifies").
+            after = {}
+            for attempt in range(3):
+                after = self.loadgen(["dkg", "--prefix", f"{storm}-same", "--same-key", "--name", "dkg-same-key-after",
+                                      "--count", "1", "--clients", "1"], timeout_secs=120, wall_timeout=600)
+                client = after.get("client", {})
+                if client.get("ok") or client.get("errors", {}).get("ALREADY_EXISTS"):
+                    break
+                time.sleep(5)
+            client = after.get("client", {})
+            r["contested_key_winners"] = r["loads"][1].get("client", {}).get("ok", 0)
+            check("the contested key id can be generated after the storm (it is not wedged)",
+                  bool(client.get("ok") or client.get("errors", {}).get("ALREADY_EXISTS")),
+                  f"three DKGs afterwards: {client.get('errors') or after.get('failed')}")
         if r["loads"] and "failed" not in r["loads"][0]:
             check("some of the 80 DKGs succeeded", r["loads"][0].get("client", {}).get("ok", 0) >= 1)
         self.close(r)

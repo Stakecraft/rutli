@@ -229,5 +229,31 @@ class RigOrCluster(unittest.TestCase):
             self.assertTrue(run.rig_failure(code, line), line)
 
 
+class ConnectionContext(unittest.TestCase):
+    def test_the_accept_path_and_messages_are_summarised(self):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import run
+
+        class Fake:
+            @staticmethod
+            def generator_fd_limit():
+                return 1024
+
+        runner = run.Runner(Fake(), None)
+        load = {
+            "client": {"error_messages": {"UNKNOWN: transport error": 94, "CANCELLED: operation was canceled": 7}},
+            "server": {
+                "counters": {"rutli_grpc_handshake_timeouts_total": 12.0, "rutli_grpc_accept_errors_total": 1.0},
+                "targets": {"cosigner1": {"gauges": {"rutli_grpc_connections": 2.0, "rutli_grpc_connection_limit": 768.0}}},
+            },
+        }
+        line = runner.connection_context([load])
+        self.assertIn("handshake timeouts 12", line)
+        self.assertIn("accept errors 1", line)
+        self.assertIn("'cosigner1': 768.0", line)
+        self.assertIn("generator descriptor limit 1024", line)
+        self.assertIn("94 x UNKNOWN: transport error", line)
+
+
 if __name__ == "__main__":
     unittest.main()

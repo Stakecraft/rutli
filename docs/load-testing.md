@@ -61,7 +61,7 @@ builds it, plus the generator.
 | `restart` | the steady stream while one cosigner is killed (`SIGKILL`) and started again | every request still succeeds: clients fail over, leaders sign with the other member |
 | `cold-cache` | one cosigner restarted, then 300 signatures at once through it | every request succeeds and no cosigner loses a session between the two rounds (`rutli_sign_round2_unknown_session_total` does not move) |
 | `limit-rate` | 400 signatures on a key limited to 120 a minute | at least 120 and at most 180 succeed (each is charged on the two nodes that signed it), the rest are `RESOURCE_EXHAUSTED` |
-| `limit-ceremony` | 80 DKGs at once (a node holds 64 ceremony sessions), 10 DKGs of one key at once, two refreshes back to back | refusals only with the codes a busy or refusing node gives; every DKG of the contested key that succeeds answers the same group key; a refresh leaves the group key unchanged |
+| `limit-ceremony` | 80 DKGs at once (a node holds 64 ceremony sessions), 10 DKGs of one key at once, two refreshes back to back | refusals only with the codes a busy or refusing node gives; every DKG of the contested key that succeeds answers the same group key, and the key id can still be generated afterwards (all ten may abort each other: `ABORTED` means retry later); a refresh leaves the group key unchanged |
 | `limit-decrypt` | 12 000 `EcdhDerive` on a key limited to 6 000 a minute | no more than the bucket and its refill succeed, the surplus is `RESOURCE_EXHAUSTED` |
 | `limit-sessions` | 1 500 signatures of one key asked of one leader at the same moment | refusals and timeouts are allowed, wrong answers are not; the nodes stay up |
 | `recovery` | a short stream on both keys after all of the above | every request succeeds |
