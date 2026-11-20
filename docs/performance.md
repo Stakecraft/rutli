@@ -130,7 +130,7 @@ Latencies are the load generator's, in milliseconds, for 2-of-3 signatures.
 |---|---|---|---|---|
 | steady | 20 signatures a second for 60 s | 59 | 123 | 1 200 of 1 200 ok |
 | clients | several clients at once | 116 | 183 | 4 056 of 4 056 ok |
-| burst | 200 signatures asked for at the same moment | 5 637 | 10 460 | 200 of 200 ok; |
+| burst | 200 signatures asked for at the same moment | 5 637 | 10 460 | 200 of 200 ok |
 | restart | one cosigner killed (SIGKILL) and started again under load | 109 | 9 218 | 800 of 800 ok |
 | cold-cache | one cosigner restarted under load | 473 | 10 467 | 300 of 300 ok |
 | keys: 1, 10, 100 FROST keys (and as many hosted keys) | signing over all of them | 61, 61, 78 | 123, 152, 161 | all ok; the slowest cosigner's mean `ListKeys` time was 167, 181 and 289 ms |

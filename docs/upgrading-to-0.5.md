@@ -39,7 +39,7 @@ image digest) before relying on them.
 3. Do not swap a certificate during the upgrade. To roll a key later: [ca-rotation.md](ca-rotation.md) §10.
 
 To upgrade without pins, set `tls.require_peer_pins: false` (Helm: `tls.requirePeerPins=false`).
-The node warns at start and exports `rutli_peer_pins_unpinned`. This is an opt-out. Without pins a
+The node warns at start and exports a non-zero `rutli_peer_pins_unpinned`. This is an opt-out. Without pins a
 node still accepts whatever presents a valid certificate for a peer's name.
 
 Detail: CHANGELOG ("Cosigners pin each other's TLS keys"), chart README ("Peer key pins"),
@@ -71,7 +71,8 @@ too while a required finding is open. Run them with the config as it will be, or
 
 A key is refreshed at most once per 72 hours (`signing_policy.refresh_min_interval_secs`, default
 259200, at most 30 days; `0` turns it off, with a warning). Every node checks it, and a node on
-0.5.0 refuses a refresh led by a 0.4.x node. So the limit holds as soon as one node runs 0.5.0.
+0.5.0 refuses a refresh, led by any node, that comes inside the interval. A refresh needs every node, so
+the limit holds as soon as one node runs 0.5.0.
 
 - Scripts, drills and runbooks that refresh twice in a row will fail. Give test configs
   `refresh_min_interval_secs: 0`.
@@ -106,7 +107,7 @@ these numbers: about as many sessions as it has signs in flight. No setting. A r
 
 Re-apply the alert rules (`deploy/monitoring/prometheus-rules.yml`, or the rendered
 `deploy/monitoring/k8s/prometheusrule.yaml`). The alerts added since 0.4.0 include
-`RutliGrpcAcceptErrors`, `RutliGrpcConnectionsNearLimit`, `RutliSignSessionCapReached`,
+`RutliGrpcAcceptErrors` and `RutliGrpcConnectionsNearLimit` (both already in 0.4.1), `RutliSignSessionCapReached`,
 `RutliSignSessionOwnerRefused`, `RutliSignUnknownSessions`, `RutliRefreshRefused`,
 `RutliRefreshOffSchedule` and `RutliBackgroundLoopRestarted`. A sign round 2 for a session a node no
 longer holds now answers `ABORTED`, not `INTERNAL`.
@@ -140,7 +141,7 @@ nodes still pin its unchanged key. With the Helm chart, roll back the chart and 
 
 ## 7. After the upgrade
 
-- Every node: `check-config` exits 0 under `production`; `rutli_peer_pins_unpinned` is absent.
+- Every node: `check-config` exits 0 under `production`; `rutli_peer_pins_unpinned` is 0.
 - `verify-key` for every key reports one epoch and no stale node.
 - Then, in your own time: key-file v2 and `accept_v1: false`, and per-node seal bundles if you still
   share one seal secret ([runbook-per-node-seal.md](runbook-per-node-seal.md)). Both are on the

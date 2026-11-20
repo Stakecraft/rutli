@@ -92,7 +92,7 @@ CANTON_HOME=/path/to/canton-open-source-3.6.1 \
 ```
 
 The compose examples are for labs: their configs run without the production profile (a cosigner
-logs what the profile would require and starts). Never put an authority key on them; the
+logs what the profile would require and starts; the TLS example also needs the peer pins from `scripts/gen-frost-certs.sh` first). Never put an authority key on them; the
 production path is under "Where to go next". Same `=== OK … ===`, but now the namespace key was
 **born distributed**. Confirm the shares landed
 on the three cosigners:
