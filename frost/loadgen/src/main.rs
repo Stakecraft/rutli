@@ -485,11 +485,15 @@ impl Run {
                             // Another request generated it: the key it points at must be the one
                             // the winners answered.
                             let at = moves.leader.unwrap_or(0);
-                            let mut c = client.conns[at].clone();
-                            let req = pb::GroupKeyRequest { key_id: key_id.clone() };
-                            let wrong = match bounded(limit, c.group_key(req)).await {
-                                Ok(reply) => same_as_first(&reply.group_verifying_key),
-                                Err(e) => Some(format!("GroupKey after ALREADY_EXISTS: {}: {}", code_name(e.code()), e.message())),
+                            let wrong = match client.conns.get(at).cloned() {
+                                None => Some(format!("GroupKey after ALREADY_EXISTS: no connection {at}")),
+                                Some(mut c) => {
+                                    let req = pb::GroupKeyRequest { key_id: key_id.clone() };
+                                    match bounded(limit, c.group_key(req)).await {
+                                        Ok(reply) => same_as_first(&reply.group_verifying_key),
+                                        Err(e) => Some(format!("GroupKey after ALREADY_EXISTS: {}: {}", code_name(e.code()), e.message())),
+                                    }
+                                }
                             };
                             match wrong {
                                 None => break (Err(s), moves),
