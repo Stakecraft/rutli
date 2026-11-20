@@ -47,4 +47,5 @@ jobs:
         run: scripts/check-runner-guard.sh
       - name: No self-hosted runner for this run
         if: runner.environment != 'self-hosted'
-        run: echo "::notice::this run landed on a hosted runner (PERF_RUNNER and CI_RUNNER are not set): no installed guard to check"
+        run: |
+          echo "::notice::this run landed on a hosted runner (PERF_RUNNER and CI_RUNNER are not set), so there is no installed guard to check"
