@@ -688,7 +688,9 @@ public final class SignerGrpc {
 
     /**
      * <pre>
-     * Generate a hosted key. key_id is caller-supplied, making retries idempotent.
+     * Generate a hosted key. key_id is caller-supplied, making retries idempotent. Since 0.5.0 it
+     * carries a client-signed generate intent (GenerateKeyRequest.intent), which every node verifies
+     * at its fence (CeremonyFenceRequest.intent).
      * </pre>
      */
     default void generateKey(com.stakecraft.rutli.grpc.GenerateKeyRequest request,
@@ -903,7 +905,9 @@ public final class SignerGrpc {
 
     /**
      * <pre>
-     * Generate a hosted key. key_id is caller-supplied, making retries idempotent.
+     * Generate a hosted key. key_id is caller-supplied, making retries idempotent. Since 0.5.0 it
+     * carries a client-signed generate intent (GenerateKeyRequest.intent), which every node verifies
+     * at its fence (CeremonyFenceRequest.intent).
      * </pre>
      */
     public void generateKey(com.stakecraft.rutli.grpc.GenerateKeyRequest request,
@@ -1104,7 +1108,9 @@ public final class SignerGrpc {
 
     /**
      * <pre>
-     * Generate a hosted key. key_id is caller-supplied, making retries idempotent.
+     * Generate a hosted key. key_id is caller-supplied, making retries idempotent. Since 0.5.0 it
+     * carries a client-signed generate intent (GenerateKeyRequest.intent), which every node verifies
+     * at its fence (CeremonyFenceRequest.intent).
      * </pre>
      */
     public com.stakecraft.rutli.grpc.GenerateKeyReply generateKey(com.stakecraft.rutli.grpc.GenerateKeyRequest request) throws io.grpc.StatusException {
@@ -1296,7 +1302,9 @@ public final class SignerGrpc {
 
     /**
      * <pre>
-     * Generate a hosted key. key_id is caller-supplied, making retries idempotent.
+     * Generate a hosted key. key_id is caller-supplied, making retries idempotent. Since 0.5.0 it
+     * carries a client-signed generate intent (GenerateKeyRequest.intent), which every node verifies
+     * at its fence (CeremonyFenceRequest.intent).
      * </pre>
      */
     public com.stakecraft.rutli.grpc.GenerateKeyReply generateKey(com.stakecraft.rutli.grpc.GenerateKeyRequest request) {
@@ -1496,7 +1504,9 @@ public final class SignerGrpc {
 
     /**
      * <pre>
-     * Generate a hosted key. key_id is caller-supplied, making retries idempotent.
+     * Generate a hosted key. key_id is caller-supplied, making retries idempotent. Since 0.5.0 it
+     * carries a client-signed generate intent (GenerateKeyRequest.intent), which every node verifies
+     * at its fence (CeremonyFenceRequest.intent).
      * </pre>
      */
     public com.google.common.util.concurrent.ListenableFuture<com.stakecraft.rutli.grpc.GenerateKeyReply> generateKey(

@@ -202,15 +202,18 @@ pub struct SigningPolicyConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_intent: Option<bool>,
     /// Refuse to take part in a DKG or refresh (its fence and part 1) without a valid client-signed
-    /// ceremony intent naming exactly that ceremony. On: absence is refusal — a compromised cosigner
-    /// cannot start a DKG or refresh on this node that no authorized client asked for. Off: an
-    /// intent that is present is verified in full (and refused if invalid); a ceremony without one
-    /// is accepted and counted in `rutli_ceremony_intent_absent_total`.
+    /// ceremony intent naming exactly that ceremony, and (since 0.5.0) in a hosted-key generation
+    /// (its fence, and a push under it) without a valid client-signed generate intent naming the
+    /// key, its spec and the leading cosigner. On: absence is refusal — a compromised cosigner
+    /// cannot start a DKG or refresh, or create a hosted key, on this node that no authorized
+    /// client asked for. Off: an intent that is present is verified in full (and refused if
+    /// invalid); one without is accepted and counted in `rutli_ceremony_intent_absent_total`.
     ///
     /// **Unset = on** since 0.4.0-rc.6 ([`SigningPolicyConfig::ceremony_intent_required`]), except
     /// on a plaintext node, which verifies no intents (`true` there is a config error). `false` is
-    /// the explicit opt-out, for a rolling upgrade while the driver is older than 0.4.0-rc.4 or the
-    /// refresh job does not sign its refreshes yet; the node then warns at startup.
+    /// the explicit opt-out, for a rolling upgrade while the driver is older than 0.5.0 (generate
+    /// intents; 0.4.0-rc.4 for DKG) or the refresh job does not sign its refreshes yet; the node then
+    /// warns at startup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_ceremony_intent: Option<bool>,
     /// Refuse every key operation by a Signer client CN that has no `signer_acl` entry. Off: a CN

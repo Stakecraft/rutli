@@ -415,6 +415,7 @@ impl Run {
                     not_after_ms: now + INTENT_LIFETIME_MS,
                     approval_nonce: Vec::new(),
                     approvals: Vec::new(),
+                    ..Default::default()
                 };
                 match intent::sign_intent(&self.ctx.signer, &unsigned) {
                     Err(e) => (Err(tonic::Status::internal(format!("client: {e}"))), Route::default()),
@@ -872,16 +873,47 @@ async fn setup(ctx: &Ctx, frost_keys: &[String], ecies_keys: &[String]) -> Resul
         eprintln!("setup: FROST key {key_id} {}", if created { "generated" } else { "exists" });
         report.frost_keys.insert(key_id.clone(), SetupKey { public_key: hex::encode(key), created });
     }
+    // A hosted key is created under a generate intent naming the cosigner asked to lead (by its
+    // roster identifier, from Capabilities) and the spec. A cosigner of a release before generate
+    // intents reports identifier 0 and gets none: the cluster suite generates keys on the previous
+    // release before it upgrades.
+    let leader_id = if ecies_keys.is_empty() {
+        0
+    } else {
+        bounded(ctx.timeout, leader.capabilities(pb::CapabilitiesRequest {}))
+            .await
+            .map_err(|s| format!("Capabilities: {:?}: {}", s.code(), s.message()))?
+            .node_identifier
+    };
     // Paced: a cosigner accepts a bounded rate of pushes to its peers (a hosted-key generation
     // costs one at each), and answers UNAVAILABLE past it. Such an answer is retried for that key
-    // after a pause, a few times, instead of failing the setup.
+    // after a pause, a few times, instead of failing the setup. Every attempt carries a freshly
+    // signed intent: each node spends an intent's request id at its fence, so a retry with the
+    // first attempt's intent would be refused there.
     const GENERATIONS_PER_SEC: f64 = 10.0;
     for key_id in ecies_keys {
-        let request = pb::GenerateKeyRequest { key_id: key_id.clone(), spec: ECIES_SPEC.into() };
         let mut attempt = 0;
         let reply = loop {
+            let intent = match leader_id {
+                0 => None,
+                id => {
+                    let id = u16::try_from(id)
+                        .map_err(|_| format!("GenerateKey of {key_id}: roster identifier {id} out of range"))?;
+                    let unsigned = intent::generate_intent(
+                        &cluster,
+                        key_id,
+                        ECIES_SPEC,
+                        id,
+                        intent::new_request_id(),
+                        intent::now_ms(),
+                        INTENT_LIFETIME_MS,
+                    );
+                    Some(intent::sign_intent(&ctx.signer, &unsigned)?)
+                }
+            };
+            let request = pb::GenerateKeyRequest { key_id: key_id.clone(), spec: ECIES_SPEC.into(), intent };
             tokio::time::sleep(Duration::from_secs_f64(1.0 / GENERATIONS_PER_SEC)).await;
-            match bounded(ctx.timeout, leader.generate_key(request.clone())).await {
+            match bounded(ctx.timeout, leader.generate_key(request)).await {
                 Err(s) if s.code() == tonic::Code::Unavailable && attempt < 5 => {
                     attempt += 1;
                     eprintln!("setup: hosted key {key_id}: UNAVAILABLE ({}), retrying in {} s", s.message(), 2 * attempt);

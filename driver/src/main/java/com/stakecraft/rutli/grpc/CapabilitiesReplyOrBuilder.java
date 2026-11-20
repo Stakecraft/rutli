@@ -81,4 +81,15 @@ public interface CapabilitiesReplyOrBuilder extends
    */
   com.google.protobuf.ByteString
       getClusterIdBytes();
+
+  /**
+   * <pre>
+   * This cosigner's roster identifier: what a generate intent sent to it names as SignIntent.leader.
+   * 0 from a cosigner older than 0.5.0; the driver then does not ask it to generate a hosted key.
+   * </pre>
+   *
+   * <code>uint32 node_identifier = 4;</code>
+   * @return The nodeIdentifier.
+   */
+  int getNodeIdentifier();
 }

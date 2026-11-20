@@ -48,4 +48,37 @@ public interface GenerateKeyRequestOrBuilder extends
    */
   com.google.protobuf.ByteString
       getSpecBytes();
+
+  /**
+   * <pre>
+   * The client's generate intent (SignIntent purpose "generate-key" for key_id and spec, naming this
+   * cosigner as leader), signed by the calling client. Required unless every node sets
+   * signing_policy.require_ceremony_intent to false. A 0.4.0 cosigner ignores it.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+   * @return Whether the intent field is set.
+   */
+  boolean hasIntent();
+  /**
+   * <pre>
+   * The client's generate intent (SignIntent purpose "generate-key" for key_id and spec, naming this
+   * cosigner as leader), signed by the calling client. Required unless every node sets
+   * signing_policy.require_ceremony_intent to false. A 0.4.0 cosigner ignores it.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+   * @return The intent.
+   */
+  com.stakecraft.rutli.grpc.SignedIntent getIntent();
+  /**
+   * <pre>
+   * The client's generate intent (SignIntent purpose "generate-key" for key_id and spec, naming this
+   * cosigner as leader), signed by the calling client. Required unless every node sets
+   * signing_policy.require_ceremony_intent to false. A 0.4.0 cosigner ignores it.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.SignedIntent intent = 3;</code>
+   */
+  com.stakecraft.rutli.grpc.SignedIntentOrBuilder getIntentOrBuilder();
 }

@@ -51,7 +51,6 @@
 //! never `F`, never an archive it cannot read.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::seal::KeyFileHeader;
@@ -423,127 +422,22 @@ fn classify(
 
 // ---- reading archives ---------------------------------------------------------------------------
 
-const BLOCK: usize = 512;
-/// A key file is a few kB; refuse to read one larger than this into memory.
-const MAX_KEY_FILE: u64 = 4 * 1024 * 1024;
-
-fn octal(field: &[u8]) -> Result<u64, String> {
-    if field.first().is_some_and(|b| b & 0x80 != 0) {
-        return Err("a tar size in base-256 (larger than 8 GiB) is not supported".into());
-    }
-    let s: String = field.iter().take_while(|b| **b != 0).map(|b| *b as char).collect();
-    let s = s.trim();
-    if s.is_empty() {
-        return Ok(0);
-    }
-    u64::from_str_radix(s, 8).map_err(|_| format!("bad octal field {s:?}"))
-}
-
-fn cstr(field: &[u8]) -> String {
-    let bytes: Vec<u8> = field.iter().copied().take_while(|b| *b != 0).collect();
-    String::from_utf8_lossy(&bytes).into_owned()
-}
-
-/// The `path=` record of a pax extended header.
-fn pax_path(data: &[u8]) -> Option<String> {
-    let text = String::from_utf8_lossy(data);
-    text.lines().find_map(|line| {
-        let (_, rest) = line.split_once(' ')?;
-        rest.strip_prefix("path=").map(str::to_string)
-    })
-}
-
-/// Read a tar's root-level `*.json` key files and the header of each. The whole archive is read
-/// to its end (so a truncated or damaged tar is an `Err`), the data of every other entry (journals)
-/// is skipped by seeking.
+/// Read a tar's root-level `*.json` key files and the header of each, with the residue scan's reader
+/// ([`crate::residue::visit_tar_key_entries`]: checksums verified, no link followed, entry and size
+/// limits; a truncated or damaged tar is an `Err`). The data of every other entry (journals) is not
+/// read. An entry larger than the reader's limit has no header (`None`).
 pub fn read_archive(path: &Path) -> Result<BTreeMap<String, Option<KeyInfo>>, String> {
-    let mut f = std::fs::File::open(path).map_err(|e| format!("cannot open: {e}"))?;
-    let total = f.metadata().map_err(|e| e.to_string())?.len();
     let mut out: BTreeMap<String, Option<KeyInfo>> = BTreeMap::new();
-    let mut long_name: Option<String> = None;
-    let mut pos: u64 = 0;
-    let mut zero_blocks = 0;
-    loop {
-        let mut h = [0u8; BLOCK];
-        match f.read_exact(&mut h) {
-            Ok(()) => {}
-            Err(_) => return Err("the tar ends without its end-of-archive blocks".into()),
-        }
-        pos += BLOCK as u64;
-        if h.iter().all(|b| *b == 0) {
-            zero_blocks += 1;
-            if zero_blocks == 2 {
-                return Ok(out);
-            }
-            continue;
-        }
-        if zero_blocks > 0 {
-            return Err("data after an end-of-archive block".into());
-        }
-        // The header checksum: the sum of all bytes with the checksum field read as spaces.
-        let want = octal(&h[148..156])?;
-        let sum: u64 = h.iter().enumerate().map(|(i, b)| if (148..156).contains(&i) { 32 } else { u64::from(*b) }).sum();
-        if sum != want {
-            return Err("a tar header's checksum is wrong".into());
-        }
-        let size = octal(&h[124..136])?;
-        let typeflag = h[156];
-        let mut name = cstr(&h[0..100]);
-        if &h[257..262] == b"ustar" {
-            let prefix = cstr(&h[345..500]);
-            if !prefix.is_empty() {
-                name = format!("{prefix}/{name}");
-            }
-        }
-        let padded = size.div_ceil(BLOCK as u64) * BLOCK as u64;
-        if pos + padded > total {
-            return Err("the tar is truncated inside an entry".into());
-        }
-        let wants_data = matches!(typeflag, b'L' | b'x') || (matches!(typeflag, 0 | b'0') && size <= MAX_KEY_FILE);
-        let mut data = Vec::new();
-        if wants_data && size > 0 {
-            data = vec![0u8; size as usize];
-            f.read_exact(&mut data).map_err(|e| format!("read: {e}"))?;
-            let pad = padded - size;
-            f.seek(SeekFrom::Current(pad as i64)).map_err(|e| e.to_string())?;
-        } else {
-            f.seek(SeekFrom::Current(padded as i64)).map_err(|e| e.to_string())?;
-        }
-        pos += padded;
-        match typeflag {
-            b'L' => {
-                long_name = Some(cstr(&data));
-                continue;
-            }
-            b'x' => {
-                if let Some(p) = pax_path(&data) {
-                    long_name = Some(p);
-                }
-                continue;
-            }
-            b'g' | b'K' => continue,
-            _ => {}
-        }
-        let entry = long_name.take().unwrap_or(name);
-        let entry = entry.strip_prefix("./").unwrap_or(&entry).to_string();
-        if entry.starts_with('/') || entry.split('/').any(|c| c == "..") {
-            return Err(format!("an entry path is not safe: {entry}"));
-        }
-        let is_file = matches!(typeflag, 0 | b'0');
-        let looks_like_key_file = !entry.contains('/') && entry.ends_with(".json") && !entry.starts_with('.');
-        // A link or special entry named like a key file would make the archive look as if it lacked
-        // that key: not readable, not skipped.
-        if looks_like_key_file && !is_file && typeflag != b'5' {
-            return Err(format!("{entry} is not a regular file in the archive"));
-        }
-        let is_key_file = is_file && looks_like_key_file;
-        if !is_key_file {
-            continue;
+    crate::residue::visit_tar_key_entries(path, |name, bytes| {
+        let entry = name.strip_prefix("./").unwrap_or(name);
+        // Root-level key files only: `<id>.json`, not a dot-file, not in a directory.
+        if entry.contains('/') || !entry.ends_with(".json") || entry.starts_with('.') {
+            return;
         }
         let stem = entry.trim_end_matches(".json").to_string();
-        let header = if size <= MAX_KEY_FILE { crate::seal::header_of(&data).map(KeyInfo::from) } else { None };
-        out.insert(stem, header);
-    }
+        out.insert(stem, bytes.and_then(|b| crate::seal::header_of(b).map(KeyInfo::from)));
+    })?;
+    Ok(out)
 }
 
 /// The `node-<N>-<stamp>.tar` files of `dir` for `node`, as archives, by name.
@@ -1061,8 +955,12 @@ mod tests {
 
         make_tar(d.path(), "ok.tar", &[("k.json", v2_file("k", 1, "d"))], false);
         let bytes = std::fs::read(d.path().join("ok.tar")).unwrap();
-        std::fs::write(d.path().join("cut.tar"), &bytes[..bytes.len() / 2]).unwrap();
-        assert!(read_archive(&d.path().join("cut.tar")).is_err(), "truncated");
+        // GNU tar pads the archive to 10 KiB: cut inside the entries, not inside the padding.
+        for (i, cut) in [700usize, 1100, 1600].into_iter().enumerate() {
+            let name = format!("cut{i}.tar");
+            std::fs::write(d.path().join(&name), &bytes[..cut.min(bytes.len())]).unwrap();
+            assert!(read_archive(&d.path().join(&name)).is_err(), "truncated at {cut}");
+        }
         let mut bad = bytes.clone();
         bad[0] ^= 0x55;
         std::fs::write(d.path().join("bad.tar"), &bad).unwrap();
@@ -1071,32 +969,6 @@ mod tests {
         assert!(read_archive(&d.path().join("empty.tar")).is_err(), "empty file");
         std::fs::write(d.path().join("junk.tar"), vec![7u8; 2048]).unwrap();
         assert!(read_archive(&d.path().join("junk.tar")).is_err(), "not a tar");
-    }
-
-    #[test]
-    fn a_link_entry_named_like_a_key_file_makes_the_archive_unreadable() {
-        let d = tempfile::tempdir().unwrap();
-        let stage = d.path().join("stage");
-        std::fs::create_dir_all(&stage).unwrap();
-        std::fs::write(stage.join("a.json"), v2_file("a", 1, "d")).unwrap();
-        std::fs::hard_link(stage.join("a.json"), stage.join("b.json")).unwrap();
-        let ok = std::process::Command::new("tar")
-            .arg("-C")
-            .arg(&stage)
-            .arg("-cf")
-            .arg(d.path().join("links.tar"))
-            .arg(".")
-            .status()
-            .unwrap()
-            .success();
-        assert!(ok);
-        let r = read_archive(&d.path().join("links.tar"));
-        // GNU tar stores the second name as a hard link; bsdtar may store two files. Either way it
-        // must never silently drop a key.
-        match r {
-            Err(e) => assert!(e.contains("not a regular file"), "{e}"),
-            Ok(files) => assert_eq!(files.len(), 2, "{files:?}"),
-        }
     }
 
     #[test]

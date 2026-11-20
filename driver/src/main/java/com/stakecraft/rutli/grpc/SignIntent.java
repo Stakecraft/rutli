@@ -10,9 +10,12 @@ package com.stakecraft.rutli.grpc;
  * What a client authorizes: one signature by key_id over digest, until not_after_ms — or, with
  * purpose "delete-key", the deletion of hosted key key_id — or, with purpose "dkg" / "refresh", one
  * DKG / share refresh of key_id (a ceremony intent: digest and approvals empty; the ceremony id is
- * "&lt;purpose&gt;-" ‖ hex(request_id), so one intent names exactly one ceremony on every node). Carried
- * serialized inside SignedIntent.intent, so the verified bytes are exactly the signed bytes. The
- * purpose separates the domains: no node accepts an intent of one purpose for another.
+ * "&lt;purpose&gt;-" ‖ hex(request_id), so one intent names exactly one ceremony on every node) — or,
+ * with purpose "generate-key", the creation of hosted key key_id of spec hosted_spec, led by the
+ * cosigner whose roster identifier is leader (digest and approvals empty; the ceremony id is
+ * "genkey-" ‖ hex(request_id)). Carried serialized inside SignedIntent.intent, so the verified
+ * bytes are exactly the signed bytes. The purpose separates the domains: no node accepts an intent
+ * of one purpose for another.
  * </pre>
  *
  * Protobuf type {@code rutli.cosigner.v1.SignIntent}
@@ -43,6 +46,7 @@ private static final long serialVersionUID = 0L;
     requestId_ = com.google.protobuf.ByteString.EMPTY;
     approvalNonce_ = com.google.protobuf.ByteString.EMPTY;
     approvals_ = java.util.Collections.emptyList();
+    hostedSpec_ = "";
   }
 
   public static final com.google.protobuf.Descriptors.Descriptor
@@ -125,7 +129,7 @@ private static final long serialVersionUID = 0L;
   private volatile java.lang.Object purpose_ = "";
   /**
    * <pre>
-   * "sign" | "delete-key" | "dkg" | "refresh"
+   * "sign" | "delete-key" | "dkg" | "refresh" | "generate-key"
    * </pre>
    *
    * <code>string purpose = 3;</code>
@@ -146,7 +150,7 @@ private static final long serialVersionUID = 0L;
   }
   /**
    * <pre>
-   * "sign" | "delete-key" | "dkg" | "refresh"
+   * "sign" | "delete-key" | "dkg" | "refresh" | "generate-key"
    * </pre>
    *
    * <code>string purpose = 3;</code>
@@ -322,6 +326,72 @@ private static final long serialVersionUID = 0L;
     return approvals_.get(index);
   }
 
+  public static final int HOSTED_SPEC_FIELD_NUMBER = 11;
+  @SuppressWarnings("serial")
+  private volatile java.lang.Object hostedSpec_ = "";
+  /**
+   * <pre>
+   * "generate-key" only (empty for every other purpose): the spec of the key to create
+   * ("rsa-2048-oaep-sha256", "aes-256-gcm", "ec-p256-ecies") and the roster identifier of the
+   * cosigner the client asked to lead it (CapabilitiesReply.node_identifier of the endpoint it
+   * called). A node accepts the generation's fence only from that cosigner, so a cosigner shown the
+   * intent in a fence cannot lead the generation itself.
+   * </pre>
+   *
+   * <code>string hosted_spec = 11;</code>
+   * @return The hostedSpec.
+   */
+  @java.lang.Override
+  public java.lang.String getHostedSpec() {
+    java.lang.Object ref = hostedSpec_;
+    if (ref instanceof java.lang.String) {
+      return (java.lang.String) ref;
+    } else {
+      com.google.protobuf.ByteString bs = 
+          (com.google.protobuf.ByteString) ref;
+      java.lang.String s = bs.toStringUtf8();
+      hostedSpec_ = s;
+      return s;
+    }
+  }
+  /**
+   * <pre>
+   * "generate-key" only (empty for every other purpose): the spec of the key to create
+   * ("rsa-2048-oaep-sha256", "aes-256-gcm", "ec-p256-ecies") and the roster identifier of the
+   * cosigner the client asked to lead it (CapabilitiesReply.node_identifier of the endpoint it
+   * called). A node accepts the generation's fence only from that cosigner, so a cosigner shown the
+   * intent in a fence cannot lead the generation itself.
+   * </pre>
+   *
+   * <code>string hosted_spec = 11;</code>
+   * @return The bytes for hostedSpec.
+   */
+  @java.lang.Override
+  public com.google.protobuf.ByteString
+      getHostedSpecBytes() {
+    java.lang.Object ref = hostedSpec_;
+    if (ref instanceof java.lang.String) {
+      com.google.protobuf.ByteString b = 
+          com.google.protobuf.ByteString.copyFromUtf8(
+              (java.lang.String) ref);
+      hostedSpec_ = b;
+      return b;
+    } else {
+      return (com.google.protobuf.ByteString) ref;
+    }
+  }
+
+  public static final int LEADER_FIELD_NUMBER = 12;
+  private int leader_ = 0;
+  /**
+   * <code>uint32 leader = 12;</code>
+   * @return The leader.
+   */
+  @java.lang.Override
+  public int getLeader() {
+    return leader_;
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -365,6 +435,12 @@ private static final long serialVersionUID = 0L;
     }
     for (int i = 0; i < approvals_.size(); i++) {
       output.writeMessage(10, approvals_.get(i));
+    }
+    if (!com.google.protobuf.GeneratedMessage.isStringEmpty(hostedSpec_)) {
+      com.google.protobuf.GeneratedMessage.writeString(output, 11, hostedSpec_);
+    }
+    if (leader_ != 0) {
+      output.writeUInt32(12, leader_);
     }
     getUnknownFields().writeTo(output);
   }
@@ -412,6 +488,13 @@ private static final long serialVersionUID = 0L;
       size += com.google.protobuf.CodedOutputStream
         .computeMessageSize(10, approvals_.get(i));
     }
+    if (!com.google.protobuf.GeneratedMessage.isStringEmpty(hostedSpec_)) {
+      size += com.google.protobuf.GeneratedMessage.computeStringSize(11, hostedSpec_);
+    }
+    if (leader_ != 0) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeUInt32Size(12, leader_);
+    }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
     return size;
@@ -447,6 +530,10 @@ private static final long serialVersionUID = 0L;
         .equals(other.getApprovalNonce())) return false;
     if (!getApprovalsList()
         .equals(other.getApprovalsList())) return false;
+    if (!getHostedSpec()
+        .equals(other.getHostedSpec())) return false;
+    if (getLeader()
+        != other.getLeader()) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -482,6 +569,10 @@ private static final long serialVersionUID = 0L;
       hash = (37 * hash) + APPROVALS_FIELD_NUMBER;
       hash = (53 * hash) + getApprovalsList().hashCode();
     }
+    hash = (37 * hash) + HOSTED_SPEC_FIELD_NUMBER;
+    hash = (53 * hash) + getHostedSpec().hashCode();
+    hash = (37 * hash) + LEADER_FIELD_NUMBER;
+    hash = (53 * hash) + getLeader();
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -584,9 +675,12 @@ private static final long serialVersionUID = 0L;
    * What a client authorizes: one signature by key_id over digest, until not_after_ms — or, with
    * purpose "delete-key", the deletion of hosted key key_id — or, with purpose "dkg" / "refresh", one
    * DKG / share refresh of key_id (a ceremony intent: digest and approvals empty; the ceremony id is
-   * "&lt;purpose&gt;-" ‖ hex(request_id), so one intent names exactly one ceremony on every node). Carried
-   * serialized inside SignedIntent.intent, so the verified bytes are exactly the signed bytes. The
-   * purpose separates the domains: no node accepts an intent of one purpose for another.
+   * "&lt;purpose&gt;-" ‖ hex(request_id), so one intent names exactly one ceremony on every node) — or,
+   * with purpose "generate-key", the creation of hosted key key_id of spec hosted_spec, led by the
+   * cosigner whose roster identifier is leader (digest and approvals empty; the ceremony id is
+   * "genkey-" ‖ hex(request_id)). Carried serialized inside SignedIntent.intent, so the verified
+   * bytes are exactly the signed bytes. The purpose separates the domains: no node accepts an intent
+   * of one purpose for another.
    * </pre>
    *
    * Protobuf type {@code rutli.cosigner.v1.SignIntent}
@@ -638,6 +732,8 @@ private static final long serialVersionUID = 0L;
         approvalsBuilder_.clear();
       }
       bitField0_ = (bitField0_ & ~0x00000200);
+      hostedSpec_ = "";
+      leader_ = 0;
       return this;
     }
 
@@ -711,6 +807,12 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000100) != 0)) {
         result.approvalNonce_ = approvalNonce_;
       }
+      if (((from_bitField0_ & 0x00000400) != 0)) {
+        result.hostedSpec_ = hostedSpec_;
+      }
+      if (((from_bitField0_ & 0x00000800) != 0)) {
+        result.leader_ = leader_;
+      }
     }
 
     @java.lang.Override
@@ -783,6 +885,14 @@ private static final long serialVersionUID = 0L;
             approvalsBuilder_.addAllMessages(other.approvals_);
           }
         }
+      }
+      if (!other.getHostedSpec().isEmpty()) {
+        hostedSpec_ = other.hostedSpec_;
+        bitField0_ |= 0x00000400;
+        onChanged();
+      }
+      if (other.getLeader() != 0) {
+        setLeader(other.getLeader());
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -868,6 +978,16 @@ private static final long serialVersionUID = 0L;
               }
               break;
             } // case 82
+            case 90: {
+              hostedSpec_ = input.readStringRequireUtf8();
+              bitField0_ |= 0x00000400;
+              break;
+            } // case 90
+            case 96: {
+              leader_ = input.readUInt32();
+              bitField0_ |= 0x00000800;
+              break;
+            } // case 96
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -1024,7 +1144,7 @@ private static final long serialVersionUID = 0L;
     private java.lang.Object purpose_ = "";
     /**
      * <pre>
-     * "sign" | "delete-key" | "dkg" | "refresh"
+     * "sign" | "delete-key" | "dkg" | "refresh" | "generate-key"
      * </pre>
      *
      * <code>string purpose = 3;</code>
@@ -1044,7 +1164,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * "sign" | "delete-key" | "dkg" | "refresh"
+     * "sign" | "delete-key" | "dkg" | "refresh" | "generate-key"
      * </pre>
      *
      * <code>string purpose = 3;</code>
@@ -1065,7 +1185,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * "sign" | "delete-key" | "dkg" | "refresh"
+     * "sign" | "delete-key" | "dkg" | "refresh" | "generate-key"
      * </pre>
      *
      * <code>string purpose = 3;</code>
@@ -1082,7 +1202,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * "sign" | "delete-key" | "dkg" | "refresh"
+     * "sign" | "delete-key" | "dkg" | "refresh" | "generate-key"
      * </pre>
      *
      * <code>string purpose = 3;</code>
@@ -1096,7 +1216,7 @@ private static final long serialVersionUID = 0L;
     }
     /**
      * <pre>
-     * "sign" | "delete-key" | "dkg" | "refresh"
+     * "sign" | "delete-key" | "dkg" | "refresh" | "generate-key"
      * </pre>
      *
      * <code>string purpose = 3;</code>
@@ -1643,6 +1763,150 @@ private static final long serialVersionUID = 0L;
         approvals_ = null;
       }
       return approvalsBuilder_;
+    }
+
+    private java.lang.Object hostedSpec_ = "";
+    /**
+     * <pre>
+     * "generate-key" only (empty for every other purpose): the spec of the key to create
+     * ("rsa-2048-oaep-sha256", "aes-256-gcm", "ec-p256-ecies") and the roster identifier of the
+     * cosigner the client asked to lead it (CapabilitiesReply.node_identifier of the endpoint it
+     * called). A node accepts the generation's fence only from that cosigner, so a cosigner shown the
+     * intent in a fence cannot lead the generation itself.
+     * </pre>
+     *
+     * <code>string hosted_spec = 11;</code>
+     * @return The hostedSpec.
+     */
+    public java.lang.String getHostedSpec() {
+      java.lang.Object ref = hostedSpec_;
+      if (!(ref instanceof java.lang.String)) {
+        com.google.protobuf.ByteString bs =
+            (com.google.protobuf.ByteString) ref;
+        java.lang.String s = bs.toStringUtf8();
+        hostedSpec_ = s;
+        return s;
+      } else {
+        return (java.lang.String) ref;
+      }
+    }
+    /**
+     * <pre>
+     * "generate-key" only (empty for every other purpose): the spec of the key to create
+     * ("rsa-2048-oaep-sha256", "aes-256-gcm", "ec-p256-ecies") and the roster identifier of the
+     * cosigner the client asked to lead it (CapabilitiesReply.node_identifier of the endpoint it
+     * called). A node accepts the generation's fence only from that cosigner, so a cosigner shown the
+     * intent in a fence cannot lead the generation itself.
+     * </pre>
+     *
+     * <code>string hosted_spec = 11;</code>
+     * @return The bytes for hostedSpec.
+     */
+    public com.google.protobuf.ByteString
+        getHostedSpecBytes() {
+      java.lang.Object ref = hostedSpec_;
+      if (ref instanceof String) {
+        com.google.protobuf.ByteString b = 
+            com.google.protobuf.ByteString.copyFromUtf8(
+                (java.lang.String) ref);
+        hostedSpec_ = b;
+        return b;
+      } else {
+        return (com.google.protobuf.ByteString) ref;
+      }
+    }
+    /**
+     * <pre>
+     * "generate-key" only (empty for every other purpose): the spec of the key to create
+     * ("rsa-2048-oaep-sha256", "aes-256-gcm", "ec-p256-ecies") and the roster identifier of the
+     * cosigner the client asked to lead it (CapabilitiesReply.node_identifier of the endpoint it
+     * called). A node accepts the generation's fence only from that cosigner, so a cosigner shown the
+     * intent in a fence cannot lead the generation itself.
+     * </pre>
+     *
+     * <code>string hosted_spec = 11;</code>
+     * @param value The hostedSpec to set.
+     * @return This builder for chaining.
+     */
+    public Builder setHostedSpec(
+        java.lang.String value) {
+      if (value == null) { throw new NullPointerException(); }
+      hostedSpec_ = value;
+      bitField0_ |= 0x00000400;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * "generate-key" only (empty for every other purpose): the spec of the key to create
+     * ("rsa-2048-oaep-sha256", "aes-256-gcm", "ec-p256-ecies") and the roster identifier of the
+     * cosigner the client asked to lead it (CapabilitiesReply.node_identifier of the endpoint it
+     * called). A node accepts the generation's fence only from that cosigner, so a cosigner shown the
+     * intent in a fence cannot lead the generation itself.
+     * </pre>
+     *
+     * <code>string hosted_spec = 11;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearHostedSpec() {
+      hostedSpec_ = getDefaultInstance().getHostedSpec();
+      bitField0_ = (bitField0_ & ~0x00000400);
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * "generate-key" only (empty for every other purpose): the spec of the key to create
+     * ("rsa-2048-oaep-sha256", "aes-256-gcm", "ec-p256-ecies") and the roster identifier of the
+     * cosigner the client asked to lead it (CapabilitiesReply.node_identifier of the endpoint it
+     * called). A node accepts the generation's fence only from that cosigner, so a cosigner shown the
+     * intent in a fence cannot lead the generation itself.
+     * </pre>
+     *
+     * <code>string hosted_spec = 11;</code>
+     * @param value The bytes for hostedSpec to set.
+     * @return This builder for chaining.
+     */
+    public Builder setHostedSpecBytes(
+        com.google.protobuf.ByteString value) {
+      if (value == null) { throw new NullPointerException(); }
+      checkByteStringIsUtf8(value);
+      hostedSpec_ = value;
+      bitField0_ |= 0x00000400;
+      onChanged();
+      return this;
+    }
+
+    private int leader_ ;
+    /**
+     * <code>uint32 leader = 12;</code>
+     * @return The leader.
+     */
+    @java.lang.Override
+    public int getLeader() {
+      return leader_;
+    }
+    /**
+     * <code>uint32 leader = 12;</code>
+     * @param value The leader to set.
+     * @return This builder for chaining.
+     */
+    public Builder setLeader(int value) {
+
+      leader_ = value;
+      bitField0_ |= 0x00000800;
+      onChanged();
+      return this;
+    }
+    /**
+     * <code>uint32 leader = 12;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearLeader() {
+      bitField0_ = (bitField0_ & ~0x00000800);
+      leader_ = 0;
+      onChanged();
+      return this;
     }
 
     // @@protoc_insertion_point(builder_scope:rutli.cosigner.v1.SignIntent)

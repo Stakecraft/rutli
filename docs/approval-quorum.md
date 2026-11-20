@@ -136,7 +136,7 @@ All per node, in `signing_policy`. The defaults are in brackets.
 | Setting | Meaning |
 |---|---|
 | `require_intent` [unset = on with TLS, since 0.5.0] | A sign round without a valid client-signed intent is refused. The split ceremony's sign test needs none. `false` is the explicit opt-out while the driver is older than 0.4.0-rc.3 or runs with `frost.sign-intents = off`: verified if present, accepted and counted if absent (`rutli_sign_intent_absent_total`), with a startup warning. A plaintext node verifies no intents: unset means off there, and `true` is a config error |
-| `require_ceremony_intent` [unset = on with TLS, since 0.4.0-rc.6] | A DKG/refresh fence or part 1 without a valid client-signed ceremony intent is refused (`docs/ceremonies.md`, "Ceremony intents"). `false` is the explicit opt-out while the driver is older than 0.4.0-rc.4 or the refresh job's image predates the cosigners' release: verified if present, accepted and counted if absent (`rutli_ceremony_intent_absent_total`), with a startup warning. A plaintext node verifies no intents: unset means off there, and `true` is a config error |
+| `require_ceremony_intent` [unset = on with TLS, since 0.4.0-rc.6] | A DKG/refresh fence or part 1 without a valid client-signed ceremony intent is refused (`docs/ceremonies.md`, "Ceremony intents"), and since 0.5.0 a hosted-key generation (its fence, and a push under it) without a valid generate intent (`docs/hosted-keys.md`, "Generate"). `false` is the explicit opt-out while the driver is older than 0.5.0 (0.4.0-rc.4 for DKG) or the refresh job's image predates the cosigners' release: verified if present, accepted and counted if absent (`rutli_ceremony_intent_absent_total`), with a startup warning. For hosted keys the opt-out is cluster-wide in effect: one node with `false` and one compromised holder make the two copies of a key no client asked for (`write_quorum: 2`), which the enforcing nodes then pull; use it only as a temporary rollout state, on every node. A plaintext node verifies no intents: unset means off there, and `true` is a config error |
 | `signer_acl` [none] | Client CN → key-id prefixes it may use (`""` = every key). Checked on every key-scoped Signer RPC and on the intent signer at every node. Give each tenant's driver its own CN and prefix |
 | `signer_acl_required` [false] | A signer CN without an ACL entry is refused |
 | `signer_pins` [none] | Client CN → SHA-256 of the SubjectPublicKeyInfo of each key allowed under that CN: `openssl x509 -in driver.crt -noout -pubkey \| openssl pkey -pubin -outform DER \| sha256sum`. A CA-valid certificate with an unpinned key is refused on the Signer API and as an intent signer. This is **revocation without the CA**: issue a new driver certificate and replace the pin |
@@ -216,12 +216,20 @@ Switch on in this order:
    **The refresh interval** (0.5.0) is on by default (72 h) and needs no switch. Turning
    `signer_may_refresh` off still matters: while it is on, a stolen driver certificate can refresh
    too, once per interval.
+
+   **Generate intents** (0.5.0, the same switch): a node that enforces refuses a hosted-key
+   generation without a valid generate intent naming the key, its spec and the leading cosigner.
+   They need the 0.5.0 driver; with an older driver keep `require_ceremony_intent: false` until it
+   is upgraded (`docs/hosted-keys.md`, "Upgrading from 0.4.0"). One node with the opt-out weakens
+   the whole cluster, not just itself (`docs/security/threat-model.md`): remove it everywhere once
+   the driver is upgraded.
 5. Schedule `rutli-cosigner audit-cross-check` (weekly, and after any incident). From now on, do not
    pass `--allow-no-intent`: an intent-less journal entry is an unexplained signature.
 
 Rollback: turning a flag off is immediate (restart). A driver downgrade to a release older than
 0.4.0-rc.3 needs `require_intent: false` (and, older than 0.4.0-rc.4, `require_ceremony_intent:
-false`) first, or every sign (and DKG) is refused. So does `frost.sign-intents = off`. A refresh
+false`) first, or every sign (and DKG) is refused. A driver downgrade below 0.5.0 needs
+`require_ceremony_intent: false` first, or every hosted-key generation is refused. So does `frost.sign-intents = off`. A refresh
 CronJob image older than this release needs `require_ceremony_intent: false`.
 
 ## Approving hosted-key deletes

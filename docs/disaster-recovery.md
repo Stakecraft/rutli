@@ -209,7 +209,7 @@ kubectl -n rutli logs rutli-cosigner-n2-0 -c backup | grep BACKUP_
 helm upgrade rutli deploy/helm/rutli-cosigner -n rutli -f saved-values.yaml --set 'maintenanceNodes={2}'
 kubectl -n rutli exec rutli-cosigner-n2-0 -c backup -- cat /backup/node-2-<stamp>.tar > node-2.tar
 kubectl -n rutli exec -i rutli-cosigner-n2-0 -c cosigner -- mkdir -p /tmp/restore
-kubectl -n rutli exec -i rutli-cosigner-n2-0 -c cosigner -- tar -C /tmp/restore -xf - < node-2.tar
+kubectl -n rutli exec -i rutli-cosigner-n2-0 -c cosigner -- tar -C /tmp/restore -xf - --exclude=./journal < node-2.tar
 kubectl -n rutli exec rutli-cosigner-n2-0 -c cosigner -- rutli-cosigner --config /config/cosigner-2.json restore --from /tmp/restore
 # ... and back to service: the daemon opens the restored store and runs its stale-share check
 helm upgrade rutli deploy/helm/rutli-cosigner -n rutli -f saved-values.yaml --set 'maintenanceNodes={}'
