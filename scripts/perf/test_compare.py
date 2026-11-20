@@ -189,10 +189,65 @@ class Cluster(unittest.TestCase):
         self.assertEqual(problems, ["rig: ecies: the load generator ran: the load generator exited 3"])
         self.assertTrue(v[("ecies", "check")].startswith("RIG FAILED"))
 
+    def test_a_diagnostic_run_is_never_a_baseline(self):
+        previous = cluster_run(headroom=300, ramp_p99=5)
+        previous["diagnostic"] = "tmpfs"
+        v, problems = self.verdicts(previous, cluster_run(headroom=10, ramp_p99=500))
+        self.assertEqual(problems, [])
+        self.assertIn("never a baseline", v[("(all)", "latency")])
+        current = cluster_run(headroom=1)
+        current["diagnostic"] = "tmpfs"
+        _, problems = self.verdicts(cluster_run(headroom=300), current)
+        self.assertEqual(problems, [])
+
     def test_a_failed_key_count_fails_on_its_own(self):
         _, problems = self.verdicts(None, cluster_run(keys_ok=False))
         self.assertEqual(len(problems), 1)
         self.assertIn("DKG refused", problems[0])
+
+
+class RealLoad(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+    def test_a_profile_without_phases_is_one_phase_of_step_secs(self):
+        import cluster
+        ph = cluster.ramp_phases({"sign_per_sec": 2, "ecdh_per_sec": 0.5}, 300)
+        self.assertEqual(ph, [{"name": "step", "sign_per_sec": 2.0, "ecdh_per_sec": 0.5, "secs": 300}])
+        ph = cluster.ramp_phases({"phases": [{"name": "burst", "sign_per_sec": 2.3, "secs": 10}]}, 300)
+        self.assertEqual(ph, [{"name": "burst", "sign_per_sec": 2.3, "ecdh_per_sec": 0.0, "secs": 10}])
+
+    def test_headroom_against_each_measure(self):
+        import cluster
+        real = [{"name": "average", "per_sec": 0.063, "min_secs": 60},
+                {"name": "busiest minute", "per_sec": 0.87, "min_secs": 60},
+                {"name": "burst", "per_sec": 2.3, "min_secs": 0}]
+        steps = []
+        for f, burst_ok, minute_ok in [(10, True, True), (45, True, True), (70, False, True), (100, None, True),
+                                       (150, None, False)]:
+            phases = {"average": {"sign_per_sec": 0.063 * f, "secs": 120, "passed": True},
+                      "busiest-minute": {"sign_per_sec": 0.87 * f, "secs": 60, "passed": minute_ok}}
+            if burst_ok is not None:
+                phases["burst"] = {"sign_per_sec": 2.3 * f, "secs": 10, "passed": burst_ok}
+            steps.append({"factor": f, "phases": phases})
+        h = {x["name"]: x for x in cluster.real_load_headroom(steps, real)}
+        # The busiest minute passed at x100 (87/s): x1381 of the average, x100 of the minute.
+        self.assertAlmostEqual(h["average"]["factor"], round(87.0 / 0.063, 1))
+        self.assertEqual(h["busiest minute"]["factor"], 100.0)
+        # The burst passed at x45 (103.5/s); a minute at 87/s is shorter in rate.
+        self.assertEqual(h["burst"]["factor"], 45.0)
+        self.assertNotIn("lower_bound", h["burst"])
+        # Every measure saw a failing phase that stands for it (the minute at x150).
+        self.assertNotIn("lower_bound", h["average"])
+
+    def test_a_measure_never_failed_is_a_lower_bound(self):
+        import cluster
+        steps = [{"factor": 1, "phases": {"average": {"sign_per_sec": 0.063, "secs": 120, "passed": True}}}]
+        h = cluster.real_load_headroom(steps, [{"name": "average", "per_sec": 0.063, "min_secs": 60}])
+        self.assertEqual(h[0]["factor"], 1.0)
+        self.assertTrue(h[0]["lower_bound"])
+        h = cluster.real_load_headroom([], [{"name": "average", "per_sec": 0.063}])
+        self.assertIsNone(h[0]["factor"])
 
 
 class RigOrCluster(unittest.TestCase):
@@ -216,6 +271,42 @@ class RigOrCluster(unittest.TestCase):
         ]
         for code, line in rig:
             self.assertTrue(run.rig_failure(code, line), line)
+
+
+class ConnectionContext(unittest.TestCase):
+    def test_the_accept_path_and_messages_are_summarised(self):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import run
+
+        class Fake:
+            @staticmethod
+            def generator_fd_limit():
+                return 1024
+
+        runner = run.Runner(Fake(), None)
+        load = {
+            "client": {"error_messages": {"UNKNOWN: transport error": 94, "CANCELLED: operation was canceled": 7}},
+            "server": {
+                "counters": {"rutli_grpc_handshake_timeouts_total": 12.0, "rutli_grpc_accept_errors_total": 1.0},
+                "targets": {"cosigner1": {"gauges": {"rutli_grpc_connections": 2.0, "rutli_grpc_connection_limit": 768.0}}},
+            },
+        }
+        line = runner.connection_context([load])
+        self.assertIn("handshake timeouts 12", line)
+        self.assertIn("accept errors 1", line)
+        self.assertIn("'cosigner1': 768.0", line)
+        self.assertIn("descriptors peak ? of 1024", line)
+        self.assertIn("94 x UNKNOWN: transport error", line)
+        self.assertIn("verdict: handshake timeouts 12 > 0", line)
+
+    def test_the_verdict(self):
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import run
+        self.assertTrue(run.context_verdict(3, 0.0, 10, 1024).startswith("handshake timeouts 3 > 0"))
+        self.assertIn("rig was strained", run.context_verdict(3, 0.4, 10, 1024))
+        self.assertEqual(run.context_verdict(0, 0.4, 10, 1024), "the rig: generator throttled 40%")
+        self.assertEqual(run.context_verdict(0, 0.0, 1000, "1024"), "the rig: generator descriptors 1000 of 1024")
+        self.assertTrue(run.context_verdict(0, None, None, "?").startswith("undecided"))
 
 
 if __name__ == "__main__":
