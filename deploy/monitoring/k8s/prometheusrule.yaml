@@ -111,13 +111,18 @@ spec:
         severity: critical
       annotations:
         summary: "R\xFCtli cosigner {{ $labels.instance }} holds a stale share of {{ $labels.key }}"
-        description: "{{ $labels.instance }} found its share of {{ $labels.key }} behind the cluster:\
-          \ a newer committed sharing (epoch) exists that this node never voted for, or its own ceremony\
-          \ record names a newer epoch than its share. Typical cause: a restore from an old backup or\
-          \ a volume snapshot rollback. It refuses to sign or lead for the key, so signing continues on\
-          \ the other cosigners \u2014 at 2-of-3 with no margin left. Fix: restore a current backup of\
-          \ this node (daemon stopped) or re-enrol it; the mark clears by itself once the share is current\
-          \ (docs/ceremonies.md, Signing across epochs). Never copy another node's share file."
+        description: "{{ $labels.instance }} marked its share of {{ $labels.key }} stale and refuses to\
+          \ sign or lead for the key, so signing continues on the other cosigners \u2014 at 2-of-3 with\
+          \ no margin left. First read the reason in the node's log (`this node's share is STALE`). If\
+          \ it says the claim is unconfirmed, one cosigner claims a newer epoch and none that holds this\
+          \ node's epoch answered: a wrong or compromised cosigner can cause that while the others restart\
+          \ or a refresh is still committing. Do not restore anything yet: compare `rutli-cosigner verify-key`\
+          \ across the nodes; the mark clears by itself on the next pass that reaches a cosigner on this\
+          \ node's epoch, at most 30 s later. Otherwise a newer committed sharing exists that this node\
+          \ never voted for, or its own ceremony record names a newer epoch than its share \u2014 typically\
+          \ a restore from an old backup or a volume snapshot rollback. Fix: restore a current backup\
+          \ of this node (daemon stopped) or re-enrol it; the mark clears by itself once the share is\
+          \ current (docs/ceremonies.md, Signing across epochs). Never copy another node's share file."
     - alert: RutliEpochMismatch
       expr: increase(rutli_epoch_mismatch_total[15m]) > 0
       for: 0m
@@ -201,6 +206,36 @@ spec:
           \ signer, certificate, signature, pin, cluster, key \u2014 something presented an intent this\
           \ node did not accept, which is what a compromised cosigner or a stolen-but-revoked driver key\
           \ looks like. The cosigner log names the refusal; cross-check the driver audit log (docs/approval-quorum.md)."
+    - alert: RutliPeerPinRefused
+      expr: sum by (instance, direction) (increase(rutli_peer_pin_refusals_total[15m])) > 0
+      for: 0m
+      labels:
+        severity: critical
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }} refused a peer's TLS key ({{ $labels.direction\
+          \ }})"
+        description: "{{ $labels.instance }} refused a mesh connection because the peer's certificate\
+          \ carries a key that is not pinned in its peers[].tls_spki_sha256 (direction {{ $labels.direction\
+          \ }}: inbound = a peer called this node, outbound = this node dialled a peer). The certificate's\
+          \ name and chain were valid. Either a pin is stale (a certificate was swapped before its new\
+          \ pin reached every node \u2014 the log line names the CN and the key it saw: compare with `rutli-cosigner\
+          \ tls spki <cert>`), or something with a CA-signed certificate for that node's name answered\
+          \ or called in its place: a replaced node's old certificate, or one minted with the CA key.\
+          \ Treat the second as an incident (docs/security/threat-model.md, Holder of the cluster CA key;\
+          \ docs/ca-rotation.md \xA710)."
+    - alert: RutliPeerPinsOff
+      expr: max by (instance) (rutli_peer_pins_unpinned) > 0
+      for: 1h
+      labels:
+        severity: warning
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }} accepts {{ $value }} peer(s) by certificate\
+          \ name alone"
+        description: "{{ $labels.instance }} runs with tls.require_peer_pins: false and some roster entries\
+          \ have no tls_spki_sha256. Any certificate with such a peer's name under the cluster CA is accepted\
+          \ as that peer \u2014 a replaced node's old certificate, or one minted with the CA key. Expected\
+          \ only during a rollout; pin every node (`rutli-cosigner tls spki <cert>`, Helm peerPins) and\
+          \ remove the opt-out."
     - alert: RutliSignUnknownSessions
       expr: increase(rutli_sign_round2_unknown_session_total[15m]) > 3.5
       for: 0m
@@ -215,11 +250,47 @@ spec:
           less margin. One or two right after this node restarted or committed a refresh are normal and
           stay under this threshold. More means one of: the node restarts again and again (check its restart
           count and log); it keeps dropping its loaded keys (RutliLockPoisonRecovered); or a peer sends
-          round 2 for sessions it never opened here, which a correct cosigner does not do. A leader whose
-          sign lost this node logs it (`excluding a cosigner from this signature`, with `unknown signing
-          session` and the session id). This node does not log the request, so if no leader''s log accounts
-          for the count, suspect the other cosigners. On a node that requires signing intents such a request
-          used to count under RutliSignPolicyRefusals (reason missing).'
+          round 2 for session ids this node never had, which a correct cosigner does not do (a round 2
+          for another leader''s live session is refused and counted under RutliSignSessionOwnerRefused
+          instead). A leader whose sign lost this node logs it (`excluding a cosigner from this signature`,
+          with `unknown signing session` and the session id). This node does not log the request, so if
+          no leader''s log accounts for the count, suspect the other cosigners. On a node that requires
+          signing intents such a request used to count under RutliSignPolicyRefusals (reason missing).'
+    - alert: RutliSignSessionOwnerRefused
+      expr: sum by (instance, call) (increase(rutli_sign_session_owner_refusals_total[15m])) > 0
+      for: 0m
+      labels:
+        severity: warning
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }} refused a sign {{ $labels.call }} from a peer\
+          \ that did not open the session"
+        description: "{{ $labels.instance }} got a sign round 2 or abort ({{ $labels.call }}) for a live\
+          \ session that another caller opened. Since 0.5.0 a sign session belongs to the peer whose certificate\
+          \ CN opened it (or to the node's own leader), so the request was refused and took nothing: no\
+          \ other peer can abort or advance the session. A correct cosigner never sends this. The cosigner\
+          \ log line 'refused a sign \u2026 from a caller that did not open the session' names the caller\
+          \ and the owner: investigate the caller as compromised."
+    - alert: RutliSignSessionCapReached
+      expr: sum by (instance, cap) (increase(rutli_sign_sessions_refused_total[15m])) > 0
+      for: 0m
+      labels:
+        severity: warning
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }} refused sign round 1: too many waiting sessions\
+          \ ({{ $labels.cap }})"
+        description: '{{ $labels.instance }} refused a sign round 1 because a cap on sessions waiting
+          for round 2 was reached. cap=opener: one opener (a peer''s certificate CN, or the node''s own
+          leader) holds 256 sessions for one key; cap=request: one opener holds 20 sessions for one signing
+          request. An honest leader holds about as many as it has signs in flight (normally a few; up
+          to about 128 on a large participant host or a leader serving two participants) plus sessions
+          of calls the driver gave up on, which it now aborts, so either that opener floods this node
+          with round 1s (a compromised cosigner replaying an intent it saw) or it is leaking sessions.
+          Only that opener is refused: other leaders keep their room, and a leader that hears this answer
+          tries other cosigners instead of excluding this one. On a mesh without TLS no peer is identified,
+          so all remote leaders share one opener''s room and one filler takes all of it. cap=key: all
+          openers together hold 1024 for the key, which needs at least four openers at their caps. The
+          cosigner log line ''refusing sign round 1: too many sessions waiting for round 2'' names the
+          opener; rutli_pending_sign_sessions shows the total. Sessions expire after 5 minutes.'
     - alert: RutliSignIntentAbsent
       expr: increase(rutli_sign_intent_absent_total[1h]) > 0
       for: 1h
@@ -266,6 +337,39 @@ spec:
           TLS. A compromised cosigner can still start (and split) ceremonies on it. Once the driver (0.4.0-rc.4
           or later) and the refresh job sign ceremony intents, remove the opt-out on every node (docs/approval-quorum.md,
           Switching enforcement on). On a cluster that enforces, this never fires.'
+    - alert: RutliRefreshRefused
+      expr: sum by (instance) (increase(rutli_refresh_interval_refusals_total[15m])) > 0
+      for: 0m
+      labels:
+        severity: warning
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }} refused a refresh that came too soon"
+        description: '{{ $labels.instance }} refused to take part in a refresh because it took part in
+          a refresh of the same key less than signing_policy.refresh_min_interval_secs ago (default 72
+          h). The refusal (cosigner log, and the client''s error) names the ceremony it counts from: look
+          that ceremony up (rutli-cosigner ceremony status, or verify-key''s refresh count). If it committed
+          and you did not start it, the key is already on a new epoch and every older backup no longer
+          restores a node: first make sure every node has a backup of the new epoch: the backup sidecar
+          takes one within backup.checkEverySecs (5 min) of the commit; check each node''s backup container
+          log for BACKUP_TRIGGER followed by BACKUP_OK after the commit time. Then replace the credential:
+          the refresher certificate''s signer_pins entry, and turn signer_may_refresh off if the driver
+          certificate may be the one. A refusal right after one of your own runs is expected. An incident
+          refresh that cannot wait needs signing_policy.refresh_interval_waived_at on every node (docs/ceremonies.md,
+          Refresh interval).'
+    - alert: RutliRefreshOffSchedule
+      expr: max by (key) (rutli_refreshes_6d) > 1
+      for: 0m
+      labels:
+        severity: warning
+      annotations:
+        summary: "R\xFCtli key {{ $labels.key }} was refreshed more than once in 6 days"
+        description: 'A cosigner committed more than one refresh of {{ $labels.key }} in the last 6 days,
+          counted by commit time. The shipped schedule is weekly; the window is a day shorter than the
+          schedule so a weekly run that lands a little early (scheduler jitter) does not fire this. Check
+          that each refresh was yours (an incident refresh, a retried run); if not, replace the refresher
+          certificate''s pin and turn signer_may_refresh off. Every refresh leaves the nodes'' older backups
+          unable to restore them: check that each node logged BACKUP_TRIGGER and BACKUP_OK after the last
+          refresh (docs/disaster-recovery.md, docs/ceremonies.md Refresh interval).'
     - alert: RutliSignRateLimited
       expr: increase(rutli_sign_rate_limited_total[10m]) > 0
       for: 0m
@@ -357,6 +461,45 @@ spec:
           may have been dropped, ceremony votes reloaded from disk), but a panic is a bug: find it in
           the cosigner log just before ''recovered a lock poisoned by a panicking request'' and report
           it.'
+    - alert: RutliGrpcAcceptErrors
+      expr: increase(rutli_grpc_accept_errors_total[15m]) > 0
+      for: 0m
+      labels:
+        severity: warning
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }} failed to accept gRPC connections"
+        description: '{{ $labels.instance }} could not accept new gRPC connections and is retrying with
+          a backoff; meanwhile the driver and the peers cannot reach it. Usually the process is out of
+          file descriptors: compare rutli_fd_limit with rutli_grpc_connections and the node''s open descriptors,
+          and look for ''accepting a gRPC connection failed'' in its log. Raise the container''s nofile
+          limit if rutli_fd_limit is low.'
+    - alert: RutliGrpcConnectionsNearLimit
+      expr: rutli_grpc_connections / rutli_grpc_connection_limit > 0.9
+      for: 5m
+      labels:
+        severity: warning
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }} is near its gRPC connection limit"
+        description: '{{ $labels.instance }} has had more than 90% of its gRPC connection slots in use
+          for 5 minutes. Past the limit, new connections wait in the listen backlog, so the driver or
+          a peer may time out. A cosigner normally needs a handful of connections (the drivers and the
+          peers multiplex calls); many more come from a misbehaving client or something holding connections
+          open. Check the sources of the connections to the gRPC port.'
+    - alert: RutliBackgroundLoopRestarted
+      expr: increase(rutli_background_loop_restarts_total[1h]) > 0
+      for: 0m
+      labels:
+        severity: warning
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }} restarted its {{ $labels.loop }} loop after\
+          \ a panic"
+        description: 'A pass of the {{ $labels.loop }} background loop panicked on {{ $labels.instance
+          }}. The loop was restarted after 30 s (anti_entropy then also waits one anti_entropy_interval_secs
+          before its next sweep) and keeps running, but a panic is a bug: find it in the cosigner log
+          at ''background loop panicked; restarting it'' (the panic message is in the same line) and report
+          it. A loop that panics on every pass gets no pass done: ceremony_resolver leaves STAGED ceremonies
+          unresolved, epoch_check stops refreshing stale-share marks, nonce_pruner lets burned nonce markers
+          pile up on the key volume, anti_entropy stops healing hosted keys.'
     - alert: RutliHostedKeyConflict
       expr: increase(rutli_anti_entropy_conflicts_total[1h]) > 0
       for: 0m

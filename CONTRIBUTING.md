@@ -18,12 +18,25 @@ is reviewed as security-critical. This page explains how to get a change in.
   [docs/security/threat-model.md](docs/security/threat-model.md) before changing anything on the
   key path.
 
+## Where work is tracked
+
+- **Issues** in the release milestone (now `v0.5.0`) are the plan for the next release.
+- Labels: `area:*` (frost, driver, deploy, ci, docs), `type:*` (bug, hardening, feature, test,
+  chore, quality), `prio:p0` (blocks the release), `prio:p1`, `prio:p2`.
+- `status:in-progress` means someone is working on it; the issue has a comment saying who and on
+  which branch. Check this, and the open pull requests, before you start, so two people do not fix
+  the same thing.
+- Security findings are tracked privately in draft security advisories until the fix is released.
+
 ## Development setup
 
 Prerequisites (details in [QUICKSTART.md](QUICKSTART.md)):
 
 - **JDK 17** and **sbt**, for the driver;
-- **Rust stable** with `clippy`, for the cosigner, dealer and FROST core;
+- **Rust** with `clippy`, for the cosigner, dealer and FROST core: the version in
+  `frost/rust-toolchain.toml`, which rustup selects inside `frost/` (if it does not install it on
+  first use, run `rustup toolchain install` and `rustup component add clippy` there). CI and the
+  release image build with the same version;
 - **Docker** with the compose plugin, for the TLS cluster smoke test;
 - **Helm 3**, `kubectl`, `yq` v4 and `jq`, for the deployment policy checks.
 
@@ -48,6 +61,12 @@ FROST core, cosigner and dealer (tests and lints):
 ```bash
 cd frost && cargo test --locked && cargo clippy --all-targets -- -D warnings
 ```
+
+This includes property tests (`proptest`, files `prop_*.rs` under each crate's `tests/`): nonce
+single use across restarts, key-file and export formats, fingerprints, the sign rate limit, the epoch
+check and signing intents. Case counts are set per test to keep the run short; for a longer local
+run, raise them with `PROPTEST_CASES=2000 cargo test --test 'prop_*'`. A failing case prints its minimal
+input: add it to the suite as a plain regression test.
 
 Deployment manifests (Helm lint, render, and the policy that forbids `pods/exec` RBAC, seal
 secrets in env and shared secrets):
@@ -117,6 +136,26 @@ This appends `Signed-off-by: Your Name <you@example.com>`, matching your Git ide
 without sign-offs cannot be merged. To fix the last commit, run `git commit --amend -s`; for a whole
 branch, `git rebase --signoff main`.
 
+## Quality gates
+
+Besides the checks above, CI tracks quality metrics for every language in the repository. New
+checks start as a ratchet: the current state of `main` is recorded as a baseline, and a pull request
+fails only if it makes a metric worse. Old debt does not block a change; new debt does not get in.
+The baseline moves forward when debt is paid off, and at each release.
+
+| Area | Checks |
+|---|---|
+| Rust (`frost/`) | `cargo fmt`, `clippy -D warnings`, tests, `cargo deny`, `cargo audit`, `cargo geiger` (unsafe count), `rustqual` score, coverage (`cargo llvm-cov`) |
+| Scala (`driver/`) | tests, `scalafmt`, compiler warnings, coverage (`scoverage`) |
+| Shell (`scripts/`, `deploy/`) | `shellcheck`, `shfmt` |
+| Python | `ruff` |
+| Helm / k8s | `helm lint`, render + `scripts/check-deploy-policy.sh`, `kubeconform` |
+| Dockerfiles, images | `hadolint`, `trivy` |
+| GitHub Actions | `actionlint`, `zizmor`, pinned actions |
+| Protobuf | `buf lint`, `buf breaking` against the last release |
+| Alert rules | `promtool` |
+| Repository | `gitleaks`, `typos`, link check |
+
 ## Review and merge
 
 - CI for pull requests from forks runs on GitHub-hosted runners, and a maintainer approves the first
@@ -125,6 +164,11 @@ branch, `git rebase --signoff main`.
   intents, ceremonies, key routing, TLS) get a second, independent review and may wait for the next
   audit window.
 - Pull requests are merged by rebase, so keep the branch history clean.
+
+## Releases
+
+Releases follow [docs/release-process.md](docs/release-process.md): feature freeze, release
+candidate, QA, soak, go/no-go, tag.
 
 ## License
 

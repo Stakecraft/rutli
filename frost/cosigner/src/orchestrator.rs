@@ -4,7 +4,7 @@
 //! Leader-side coordination of DKG and signing across the peer set. Transport-agnostic: it drives
 //! [`PeerApi`], so the same code runs over gRPC in production and over in-process peers in tests.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use frost_ed25519 as frost;
@@ -383,7 +383,7 @@ pub const SIGN_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
 ///   refuses too. A leader whose own share is stale declines to lead (UNAVAILABLE, the driver
 ///   fails over).
 /// * Candidate t-subsets are the roster's combinations, leader first then by identifier. Each
-///   attempt is a fresh session (new session id, fresh round-1 commitments from every member —
+///   attempt is a fresh session (a new random session id per member, fresh round-1 commitments from every member —
 ///   commitments are never reused across subsets). A member that fails round 1 or round 2, or whose
 ///   share fails verification at aggregation (frost's cheater detection names it), is excluded for
 ///   the rest of the request; its session is aborted on the members that hold nonces, and the next
@@ -443,54 +443,79 @@ pub async fn sign_with_intent(
     // Sharings peers reported that differ from ours and are not older (epoch-mismatch refusals).
     let mut elsewhere: BTreeMap<Identifier, crate::node::KeyVersion> = BTreeMap::new();
     let mut attempts = 0usize;
-    for subset in combinations(ordered.len(), threshold) {
-        let members: Vec<&Arc<dyn PeerApi>> = subset.iter().map(|&i| ordered[i]).collect();
-        if members.iter().any(|p| excluded.contains_key(&p.identifier())) {
-            continue;
-        }
-        if attempts >= MAX_SIGN_ATTEMPTS || started.elapsed() >= SIGN_BUDGET {
-            break;
-        }
-        attempts += 1;
-        if attempts > 1 {
-            metrics::counter!(crate::metrics::SIGN_RETRIES).increment(1);
-        }
-        let ctx =
-            crate::node::Round1Ctx { leader_view: Some(me.view), intent: intent.cloned(), ..Default::default() };
-        match attempt(node, &members, key_id, message, &ctx, "sign").await {
-            Ok(signature) => return Ok(signature),
-            Err(Attempt::Fatal(e)) => return Err(e),
-            Err(Attempt::Members(failed)) => {
-                for (id, e) in failed {
-                    if policy_refusal.is_none() && is_policy_refusal(&e) {
-                        policy_refusal = Some(clone_policy_refusal(&e));
-                    }
-                    if let DaemonError::EpochMismatch { peer, .. } = &e {
-                        if peer.0 >= me.view.0 {
-                            elsewhere.insert(id, *peer);
+    // Members that answered "no room for this leader's sessions" (a cap on waiting sessions). Not
+    // a failure of theirs: the room is this leader's own, filled by its earlier sessions. They are
+    // skipped while other subsets remain, never excluded, and tried once more after a pass.
+    let mut busy: BTreeSet<Identifier> = BTreeSet::new();
+    let mut busy_retried = false;
+    'passes: loop {
+        for subset in combinations(ordered.len(), threshold) {
+            let members: Vec<&Arc<dyn PeerApi>> = subset.iter().map(|&i| ordered[i]).collect();
+            if members.iter().any(|p| excluded.contains_key(&p.identifier()) || busy.contains(&p.identifier())) {
+                continue;
+            }
+            if attempts >= MAX_SIGN_ATTEMPTS || started.elapsed() >= SIGN_BUDGET {
+                break 'passes;
+            }
+            attempts += 1;
+            if attempts > 1 {
+                metrics::counter!(crate::metrics::SIGN_RETRIES).increment(1);
+            }
+            let ctx =
+                crate::node::Round1Ctx { leader_view: Some(me.view), intent: intent.cloned(), ..Default::default() };
+            match attempt(node, &members, key_id, message, &ctx, "sign").await {
+                Ok(signature) => return Ok(signature),
+                Err(Attempt::Fatal(e)) => return Err(e),
+                Err(Attempt::Members(failed)) => {
+                    for (id, e) in failed {
+                        if is_sessions_full(&e) {
+                            tracing::warn!(key_id, peer = ?id, error = %e, "a cosigner has no room for this leader's sign sessions; trying a subset without it");
+                            busy.insert(id);
+                            continue;
                         }
+                        if policy_refusal.is_none() && is_policy_refusal(&e) {
+                            policy_refusal = Some(clone_policy_refusal(&e));
+                        }
+                        if let DaemonError::EpochMismatch { peer, .. } = &e {
+                            if peer.0 >= me.view.0 {
+                                elsewhere.insert(id, *peer);
+                            }
+                        }
+                        tracing::warn!(key_id, peer = ?id, error = %e, "excluding a cosigner from this signature");
+                        excluded.insert(id, e.to_string());
                     }
-                    tracing::warn!(key_id, peer = ?id, error = %e, "excluding a cosigner from this signature");
-                    excluded.insert(id, e.to_string());
-                }
-                if let Some((view, holders)) = quorum_elsewhere(&elsewhere, threshold) {
-                    nudge_resolver(node, key_id);
-                    return Err(DaemonError::NotServing(format!(
-                        "{holders} cosigners hold sharing epoch {} (pkp {}…) of {key_id}, but this node \
-                         holds epoch {} (pkp {}…) — not leading; another cosigner can sign",
-                        view.0,
-                        &hex::encode(view.1)[..12],
-                        me.view.0,
-                        &hex::encode(me.view.1)[..12]
-                    )));
+                    if let Some((view, holders)) = quorum_elsewhere(&elsewhere, threshold) {
+                        nudge_resolver(node, key_id);
+                        return Err(DaemonError::NotServing(format!(
+                            "{holders} cosigners hold sharing epoch {} (pkp {}…) of {key_id}, but this node \
+                             holds epoch {} (pkp {}…) — not leading; another cosigner can sign",
+                            view.0,
+                            &hex::encode(view.1)[..12],
+                            me.view.0,
+                            &hex::encode(me.view.1)[..12]
+                        )));
+                    }
                 }
             }
         }
+        if !busy.is_empty() && !busy_retried {
+            busy_retried = true;
+            busy.clear();
+            continue 'passes;
+        }
+        break;
     }
     let usable = ordered.len() - excluded.len();
-    tracing::warn!(key_id, attempts, ?excluded, "sign gave up: no t-subset of cosigners could sign");
+    tracing::warn!(key_id, attempts, ?excluded, ?busy, "sign gave up: no t-subset of cosigners could sign");
     if let Some(refusal) = policy_refusal {
         return Err(refusal);
+    }
+    if !busy.is_empty() {
+        // UNAVAILABLE: the driver fails over to another leader, which has its own room.
+        return Err(DaemonError::NotServing(format!(
+            "sign for {key_id}: cosigner(s) {busy:?} have no room for more of this leader's sign sessions \
+             (and no subset without them could sign) — another cosigner can lead"
+        )));
     }
     if usable < threshold {
         Err(DaemonError::ThresholdNotMet { needed: threshold, got: usable })
@@ -500,6 +525,19 @@ pub async fn sign_with_intent(
             started.elapsed(),
             excluded.len()
         )))
+    }
+}
+
+/// A member's "no room for this leader's sessions" (a cap on waiting sign sessions), in process or
+/// over gRPC (the `rutli-error: sessions-full` trailer).
+fn is_sessions_full(e: &DaemonError) -> bool {
+    match e {
+        DaemonError::Core(rutli_frost_core::CoreError::SessionsFull { .. }) => true,
+        DaemonError::Status(s) => s
+            .metadata()
+            .get(crate::error::ERROR_TRAILER)
+            .is_some_and(|v| v.to_str().ok() == Some(crate::error::SESSIONS_FULL)),
+        _ => false,
     }
 }
 
@@ -523,11 +561,18 @@ enum Attempt {
     Fatal(DaemonError),
 }
 
-/// One signing session over exactly `members`: round 1 to each (fresh nonces under a fresh session
-/// id, bound to `message` and this signer set), round 2 to each, aggregate. On a member's failure
-/// the session is aborted on every member still holding nonces for it, so nothing lingers until
-/// the pending TTL; a member that already produced its share has burned its nonce and is
-/// unaffected.
+/// One signing session over exactly `members`: round 1 to each (fresh nonces, bound to `message`
+/// and this signer set), round 2 to each, aggregate. On a member's failure the session is aborted
+/// on every member still holding nonces for it, so nothing lingers until the pending TTL; a member
+/// that already produced its share has burned its nonce and is unaffected.
+///
+/// Each member, this node's own share included, gets its own random session id, used for its
+/// round 1, round 2 and abort. FROST needs no common id: the members agree on the message and the
+/// commitment map (keyed by identifier), and each node keys its nonces and its single-use marker
+/// by the id it was given. A member therefore never learns the id another member's copy lives
+/// under, so it cannot open that id there first (the leader's round 1 would meet a duplicate and
+/// exclude an honest node), abort it or send its round 2. The attempt id is for the leader's log
+/// only and never leaves this node.
 async fn attempt(
     node: &Arc<Node>,
     members: &[&Arc<dyn PeerApi>],
@@ -536,7 +581,16 @@ async fn attempt(
     base: &crate::node::Round1Ctx,
     prefix: &str,
 ) -> std::result::Result<[u8; 64], Attempt> {
-    let session_id = new_id(prefix);
+    let attempt_id = new_id("attempt");
+    let sessions: Vec<String> = members.iter().map(|_| new_id(prefix)).collect();
+    // The members, not their session ids: the id map is what this design keeps from each member.
+    tracing::debug!(
+        key_id,
+        attempt = %attempt_id,
+        members = ?members.iter().map(|p| p.identifier()).collect::<Vec<_>>(),
+        "sign attempt: one session id per member"
+    );
+    let mut open = OpenSessions { key_id: key_id.to_owned(), opened: Vec::new() };
     let mut signers = Vec::with_capacity(members.len());
     for p in members {
         signers.push(crate::hosted::identifier_index(p.identifier()).map_err(Attempt::Fatal)?);
@@ -544,32 +598,39 @@ async fn attempt(
     let ctx = &crate::node::Round1Ctx { message: Some(message.to_vec()), signers: Some(signers), ..base.clone() };
     let mut commitments: BTreeMap<Identifier, SigningCommitments> = BTreeMap::new();
     for (i, p) in members.iter().enumerate() {
-        match p.sign_round1(key_id, &session_id, ctx).await {
+        // Noted before asking: a round 1 that times out or errors may still have opened the
+        // session on the member, so a failure aborts it there too.
+        open.opened.push(((*p).clone(), sessions[i].clone()));
+        match p.sign_round1(key_id, &sessions[i], ctx).await {
             Ok(c) => {
                 commitments.insert(p.identifier(), c);
             }
             Err(e) => {
                 metrics::counter!(crate::metrics::SIGN_ROUND1_SKIPS).increment(1);
-                abort_sign(&members[..i], key_id, &session_id).await;
+                tracing::debug!(key_id, attempt = %attempt_id, peer = ?p.identifier(), "sign round 1 failed");
+                open.abort_now().await;
                 return Err(Attempt::Members(vec![(p.identifier(), e)]));
             }
         }
     }
     let intent_digest = ctx.intent.as_ref().map(crate::intent::intent_digest);
     let mut shares: BTreeMap<Identifier, SignatureShare> = BTreeMap::new();
-    for p in members {
-        match p.sign_round2(key_id, &session_id, message, &commitments, intent_digest.as_ref()).await {
+    for (i, p) in members.iter().enumerate() {
+        match p.sign_round2(key_id, &sessions[i], message, &commitments, intent_digest.as_ref()).await {
             Ok(share) => {
                 shares.insert(p.identifier(), share);
             }
             Err(e) => {
+                tracing::debug!(key_id, attempt = %attempt_id, peer = ?p.identifier(), "sign round 2 failed");
                 // Members before this one burned their nonce; this one and later ones may still
                 // hold theirs — free them now.
-                abort_sign(members, key_id, &session_id).await;
+                open.abort_now().await;
                 return Err(Attempt::Members(vec![(p.identifier(), e)]));
             }
         }
     }
+    // Every member answered round 2: every session is burned, nothing is left to abort.
+    open.opened.clear();
     let (k, m) = (key_id.to_owned(), message.to_vec());
     match node.blocking(move |n| n.aggregate(&k, &m, &commitments, &shares)).await {
         Ok(signature) => Ok(signature),
@@ -684,13 +745,51 @@ pub async fn ceremony_sign_test(
     }
 }
 
+/// The sessions an attempt asked its members to open and has not seen used. A failure aborts them
+/// ([`OpenSessions::abort_now`]); an attempt dropped before it finished (the driver's call was
+/// cancelled or ran out of time, and tonic dropped the request's future) aborts them from `Drop`.
+/// Without that they would stay on the members until the pending TTL, counted against this
+/// leader's caps there, and a burst of cancelled calls would leave it no room. Each abort runs as
+/// its own task, so it finishes even if the attempt is dropped while waiting for it, and the list is
+/// taken when the abort starts, so no session is aborted twice by it.
+struct OpenSessions {
+    key_id: String,
+    opened: Vec<(Arc<dyn PeerApi>, String)>,
+}
+
+impl OpenSessions {
+    fn spawn_abort(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        if self.opened.is_empty() {
+            return None;
+        }
+        let runtime = tokio::runtime::Handle::try_current().ok()?;
+        let (opened, key_id) = (std::mem::take(&mut self.opened), self.key_id.clone());
+        Some(runtime.spawn(async move { abort_sign(&opened, &key_id).await }))
+    }
+
+    async fn abort_now(&mut self) {
+        if let Some(task) = self.spawn_abort() {
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for OpenSessions {
+    fn drop(&mut self) {
+        if !self.opened.is_empty() {
+            tracing::debug!(key_id = %self.key_id, sessions = self.opened.len(), "sign attempt dropped before it finished; aborting its sessions");
+            let _ = self.spawn_abort();
+        }
+    }
+}
+
 /// Best-effort: tell each quorum member to drop the in-flight session so its round-1 nonces are
 /// freed now instead of at the pending-TTL sweep. Errors are swallowed — abort is a courtesy, and
 /// the per-session TTL is the correctness backstop. Aborting a session a peer already completed
 /// (round-2 done) is a harmless no-op.
-async fn abort_sign(chosen: &[&Arc<dyn PeerApi>], key_id: &str, session_id: &str) {
+async fn abort_sign(opened: &[(Arc<dyn PeerApi>, String)], key_id: &str) {
     metrics::counter!(crate::metrics::SIGN_ABORTS).increment(1);
-    for p in chosen {
+    for (p, session_id) in opened {
         if let Err(e) = p.abort_sign(key_id, session_id).await {
             tracing::debug!(peer = ?p.identifier(), error = %e, "sign abort failed; nonces will TTL-expire");
         }

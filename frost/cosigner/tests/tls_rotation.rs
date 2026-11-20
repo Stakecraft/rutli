@@ -78,7 +78,7 @@ fn tls_files(dir: &Path, name: &str, issuer: &Ca, cn: &str, trust: &[&Ca]) -> Tl
     std::fs::write(&cert_path, cert).unwrap();
     std::fs::write(&key_path, key).unwrap();
     std::fs::write(&ca_path, bundle).unwrap();
-    TlsConfig { ca_cert: ca_path, cert: cert_path, key: key_path, domain: None, allow_expired_ca: false }
+    TlsConfig { ca_cert: ca_path, cert: cert_path, key: key_path, domain: None, allow_expired_ca: false, require_peer_pins: None }
 }
 
 /// Node 1 serves the Peer API with `server`'s TLS; node 2 dials it with `client`'s TLS and asks
@@ -91,7 +91,7 @@ async fn node_info(dir: &Path, server: &TlsConfig, client: &TlsConfig) -> Result
     let peer = GrpcPeer::connect_lazy(
         Identifier::try_from(1u16).unwrap(),
         &endpoint,
-        Some(client_tls.client_for(NODE1)),
+        Some(client_tls.dial_as(NODE1, None, 0).unwrap()),
     )
     .unwrap();
     let result = peer.node_info().await.map(|(id, _)| id).map_err(|e| format!("{e:?}"));
@@ -111,7 +111,7 @@ async fn serve(dir: &Path, server: &TlsConfig) -> (String, tokio::task::JoinHand
     );
     let peer_cns: Arc<HashSet<String>> = Arc::new((1..=3).map(|i| format!("cosigner{i}")).collect());
     let peer_ids = Arc::new((1..=3u16).map(|i| (format!("cosigner{i}"), i)).collect());
-    let svc = PeerSvc { node, allowed_cns: Some(peer_cns), peer_ids: Some(peer_ids) };
+    let svc = PeerSvc { node, allowed_cns: Some(peer_cns), peer_ids: Some(peer_ids), peer_pins: None };
 
     let server_tls = rutli_cosigner::tls::load(server).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -229,7 +229,7 @@ fn tls_files_raw(dir: &Path, name: &str, (cert, key): (String, String), trust: S
     std::fs::write(&cert_path, cert).unwrap();
     std::fs::write(&key_path, key).unwrap();
     std::fs::write(&ca_path, trust).unwrap();
-    TlsConfig { ca_cert: ca_path, cert: cert_path, key: key_path, domain: None, allow_expired_ca: false }
+    TlsConfig { ca_cert: ca_path, cert: cert_path, key: key_path, domain: None, allow_expired_ca: false, require_peer_pins: None }
 }
 
 fn load_err(cfg: &TlsConfig) -> String {

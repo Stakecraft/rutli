@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
 
-use crate::node::Node;
+use crate::node::{Node, SessionOwner};
 use crate::orchestrator::{self, Peers};
 use crate::pb;
 use crate::pb::peer_server::Peer;
@@ -356,6 +356,12 @@ impl Signer for SignerSvc {
         let caller = caller_of(&req);
         let intent = req.into_inner().intent;
         self.check_ceremony_intent(caller.as_ref(), crate::node::CeremonyKind::Refresh, &key_id, intent.as_ref())?;
+        // The refresh interval, at this node before it contacts any peer: a refresh refused here
+        // leaves nothing anywhere. Every node checks it again at its own fence, so this is not the
+        // load-bearing check — a leader that skips it is still held to it by every other node.
+        self.node
+            .refuse_refresh_too_soon(&key_id, caller.as_ref().map(|c| c.cn.as_str()))
+            .map_err(Status::from)?;
         let result = match self.node.refuse_if_keystore_down() {
             Ok(()) => orchestrator::run_refresh_with_intent(&self.peers, &key_id, intent).await,
             Err(e) => Err(e),
@@ -812,11 +818,101 @@ pub struct PeerSvc {
     /// roster identifier, exact match ([`crate::config::Config::peer_identities`]). `None` falls
     /// back to the strict `cosigner<N>` rule ([`crate::request_auth::identifier_from_cn`]).
     pub peer_ids: Option<Arc<std::collections::HashMap<String, u16>>>,
+    /// The roster and its key pins: client-cert CN → (roster identifier, the SPKI SHA-256 values
+    /// its certificate may carry, if any) — `peers[].tls_spki_sha256` ([`PeerPins::from_config`]).
+    /// When set, every Peer RPC needs a certificate whose one CN is a roster node's client CN, and
+    /// a node with pins is refused with any other key, however valid its certificate — whether or
+    /// not `allowed_cns` is set. A node without pins (`tls.require_peer_pins: false`) passes on
+    /// its name. `None` = no pin checks (plaintext dev).
+    pub peer_pins: Option<Arc<PeerPins>>,
+}
+
+/// One roster node as the Peer API knows it: its identifier and its TLS key pins, if any.
+type RosterEntry = (u16, Option<Vec<[u8; 32]>>);
+
+/// The roster's client CNs and their TLS key pins.
+#[derive(Debug, Default, Clone)]
+pub struct PeerPins(std::collections::HashMap<String, RosterEntry>);
+
+impl PeerPins {
+    /// From the roster: every peer under its client CN, with its `tls_spki_sha256` if it lists
+    /// one. Two peers with one client CN are an error (config validation refuses them too): the
+    /// map must never keep one of them silently.
+    pub fn from_config(cfg: &crate::config::Config) -> crate::Result<Self> {
+        let mut map = std::collections::HashMap::new();
+        for p in &cfg.peers {
+            if let Some((other, _)) = map.insert(p.client_cn(), (p.identifier, p.tls_spki_pins()?)) {
+                return Err(crate::DaemonError::Config(format!(
+                    "peers[id={}] and peers[id={other}] have the same client CN {:?}",
+                    p.identifier,
+                    p.client_cn()
+                )));
+            }
+        }
+        Ok(Self(map))
+    }
+
+    /// The caller of a Peer RPC, from its leaf certificate (DER): its CN must be exactly one roster
+    /// node's client CN, and its key one of that node's pins (when it has any). Returns the CN.
+    pub fn identify(&self, leaf: Option<&[u8]>) -> Result<String, Status> {
+        let leaf = leaf.ok_or_else(|| Status::unauthenticated("client certificate required for the Peer API"))?;
+        let cn = cn_of(leaf).ok_or_else(|| Status::unauthenticated("client certificate has no usable Common Name"))?;
+        if !self.0.contains_key(&cn) {
+            return Err(Status::permission_denied(format!(
+                "client '{cn}' is not the configured client CN of any roster node"
+            )));
+        }
+        self.check(&cn, Some(leaf))?;
+        Ok(cn)
+    }
+
+    /// Check the leaf certificate (DER) a caller with client CN `cn` presented. `Ok` when `cn`
+    /// has no pins (and when it is no roster CN: [`PeerPins::identify`] refuses that).
+    pub fn check(&self, cn: &str, leaf: Option<&[u8]>) -> Result<(), Status> {
+        let Some((id, Some(pins))) = self.0.get(cn) else { return Ok(()) };
+        let seen = leaf.and_then(crate::tls::spki_sha256);
+        if seen.is_some_and(|h| pins.contains(&h)) {
+            return Ok(());
+        }
+        metrics::counter!(crate::metrics::PEER_PIN_REFUSALS, "direction" => "inbound").increment(1);
+        let seen = seen.map(hex::encode).unwrap_or_else(|| "(unreadable certificate)".into());
+        tracing::error!(peer = id, %cn, spki_sha256 = %seen, "refused a peer's TLS key (inbound)");
+        Err(Status::permission_denied(format!(
+            "peer certificate '{cn}' carries TLS key sha256 {seen}, which is not pinned in \
+             peers[id={id}].tls_spki_sha256 — a stale pin, or not that node"
+        )))
+    }
 }
 
 impl PeerSvc {
+    /// Every Peer RPC goes through here (directly, or through [`PeerSvc::authenticated_peer`] /
+    /// [`PeerSvc::delivery_sender`]): the CN allowlist, then the key pin of that CN.
     fn authorize<T>(&self, req: &Request<T>) -> Result<Option<String>, Status> {
-        authorize_cn(self.allowed_cns.as_deref(), req, "Peer")
+        let cn = authorize_cn(self.allowed_cns.as_deref(), req, "Peer")?;
+        // The pins do not depend on the allowlist: with pins configured the caller is identified
+        // from its certificate (one CN, a roster node's) and its key checked, allowlist or not.
+        match &self.peer_pins {
+            Some(pins) => {
+                let certs = req.peer_certs();
+                let found = pins.identify(certs.as_ref().and_then(|c| c.first()).map(|c| c.as_ref()))?;
+                Ok(Some(found))
+            }
+            None => Ok(cn),
+        }
+    }
+
+    /// Whether callers are identified by their certificate: a peer allowlist or roster pins.
+    fn identifies_callers(&self) -> bool {
+        self.allowed_cns.is_some() || self.peer_pins.is_some()
+    }
+
+    /// [`PeerSvc::authorize`], and who the caller is as the owner of the sign sessions it opens:
+    /// the CN of its client certificate as the peer allowlist checked it. With no peer allowlist (a
+    /// plaintext dev mesh; the allowlist is required under TLS) no caller is identified, certificate
+    /// or not, and every caller is the one owner [`SessionOwner::Unidentified`], as before sessions
+    /// had owners. Never [`SessionOwner::Local`]: that is this node's own in-process leader.
+    fn session_owner<T>(&self, req: &Request<T>) -> Result<SessionOwner, Status> {
+        Ok(self.authorize(req)?.map_or(SessionOwner::Unidentified, SessionOwner::Peer))
     }
 
     /// The sender of a round-2 delivery: the caller's certificate identity, which must equal the
@@ -824,7 +920,7 @@ impl PeerSvc {
     /// (plaintext dev mode, where nothing on the mesh is authenticated) the claim is taken as is.
     fn delivery_sender<T>(&self, req: &Request<T>, claimed: u32) -> Result<u16, Status> {
         let claimed = u16::try_from(claimed).map_err(|_| Status::invalid_argument("sender out of range"))?;
-        if self.allowed_cns.is_none() {
+        if !self.identifies_callers() {
             self.authorize(req)?;
             return Ok(claimed);
         }
@@ -870,7 +966,8 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::SignRound1Request>,
     ) -> Result<Response<pb::SignRound1Reply>, Status> {
-        self.authorize(&req)?;
+        // The caller opens the session: only it may send its round 2 or abort it.
+        let opener = self.session_owner(&req)?;
         let r = req.into_inner();
         // An empty digest is a leader from before epochs: no sharing declared (see the proto).
         let leader_view = match r.pkp_digest.len() {
@@ -898,7 +995,7 @@ impl Peer for PeerSvc {
         };
         let commitments = self
             .node
-            .blocking(move |n| n.sign_round1(&r.key_id, &r.session_id, &ctx))
+            .blocking(move |n| n.sign_round1_as(&r.key_id, &r.session_id, &ctx, &opener))
             .await
             .map_err(Status::from)?;
         Ok(Response::new(pb::SignRound1Reply {
@@ -910,7 +1007,7 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::SignRound2Request>,
     ) -> Result<Response<pb::SignRound2Reply>, Status> {
-        self.authorize(&req)?;
+        let caller = self.session_owner(&req)?;
         let r = req.into_inner();
         let commitments: BTreeMap<_, _> = de(&r.commitments_map)?;
         // One blocking call, so burn-before-sign stays exactly as it is inline: round 2 creates
@@ -923,7 +1020,9 @@ impl Peer for PeerSvc {
         };
         let share = self
             .node
-            .blocking(move |n| n.sign_round2_with(&r.key_id, &r.session_id, &r.message, &commitments, intent_digest))
+            .blocking(move |n| {
+                n.sign_round2_as(&r.key_id, &r.session_id, &r.message, &commitments, intent_digest, &caller)
+            })
             .await
             .map_err(Status::from)?;
         Ok(Response::new(pb::SignRound2Reply { share: json(&share)? }))
@@ -933,9 +1032,9 @@ impl Peer for PeerSvc {
         &self,
         req: Request<pb::AbortSignRequest>,
     ) -> Result<Response<pb::AbortSignReply>, Status> {
-        self.authorize(&req)?;
+        let caller = self.session_owner(&req)?;
         let r = req.into_inner();
-        self.node.abort_sign(&r.key_id, &r.session_id);
+        self.node.abort_sign_as(&r.key_id, &r.session_id, &caller).map_err(Status::from)?;
         Ok(Response::new(pb::AbortSignReply {}))
     }
 
@@ -1367,6 +1466,43 @@ mod tests {
         bmp.distinguished_name
             .push(rcgen::DnType::CommonName, rcgen::DnValue::BmpString("driver".try_into().unwrap()));
         assert_eq!(cn_of(bmp.self_signed(&key).unwrap().der()), None);
+    }
+
+    #[test]
+    fn a_pinned_peer_cn_is_refused_with_another_key_and_names_what_it_saw() {
+        let leaf = |cn: &str| {
+            let key = rcgen::KeyPair::generate().unwrap();
+            let mut p = rcgen::CertificateParams::new(vec![cn.to_string()]).unwrap();
+            p.distinguished_name.push(rcgen::DnType::CommonName, cn);
+            p.self_signed(&key).unwrap()
+        };
+        let (real, old) = (leaf("cosigner2"), leaf("cosigner2"));
+        let pin = |c: &rcgen::Certificate| crate::tls::spki_sha256(c.der()).unwrap();
+        let mut cfg: crate::config::Config = serde_json::from_str(
+            r#"{"identifier":1,"listen":"x","threshold":2,"data_dir":"/tmp",
+                "peers":[{"identifier":1,"endpoint":"a"},{"identifier":2,"endpoint":"b"},{"identifier":3,"endpoint":"c"}]}"#,
+        )
+        .unwrap();
+        cfg.peers[1].tls_spki_sha256 = Some(vec![hex::encode(pin(&real))]);
+        let pins = super::PeerPins::from_config(&cfg).unwrap();
+        pins.check("cosigner2", Some(real.der())).unwrap();
+        let e = pins.check("cosigner2", Some(old.der())).unwrap_err();
+        assert_eq!(e.code(), tonic::Code::PermissionDenied);
+        assert!(e.message().contains("'cosigner2'") && e.message().contains(&hex::encode(pin(&old))), "{e:?}");
+        assert!(e.message().contains("peers[id=2].tls_spki_sha256"), "{e:?}");
+        // No certificate to read, or garbage: refused, never waved through.
+        assert!(pins.check("cosigner2", None).is_err());
+        assert!(pins.check("cosigner2", Some(b"junk")).is_err());
+        // A roster CN without pins (only with tls.require_peer_pins: false) passes on its name.
+        pins.check("cosigner3", Some(old.der())).unwrap();
+        // Identification needs a roster CN, whatever the allowlist says.
+        assert_eq!(pins.identify(Some(real.der())).unwrap(), "cosigner2");
+        assert_eq!(pins.identify(Some(old.der())).unwrap_err().code(), tonic::Code::PermissionDenied);
+        assert_eq!(pins.identify(Some(leaf("driver").der())).unwrap_err().code(), tonic::Code::PermissionDenied);
+        assert_eq!(pins.identify(None).unwrap_err().code(), tonic::Code::Unauthenticated);
+        // Two roster entries with one client CN: refused, never one of them kept.
+        cfg.peers[2].tls_client_cn = Some("cosigner2".into());
+        assert!(super::PeerPins::from_config(&cfg).unwrap_err().to_string().contains("same client CN"));
     }
 
     #[test]

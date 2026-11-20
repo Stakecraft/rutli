@@ -1,0 +1,21 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+# Overlay for the load tests (scripts/perf-load.sh): no host port binds (the load generator runs on
+# the compose network), and the configs from ./config-tls-perf — the examples with the sign rate
+# limit lifted except for one key prefix, written by that script. The examples themselves keep
+# the defaults.
+# Used as: docker compose -f docker-compose.tls.yml -f docker-compose.perf.yml ...
+
+services:
+  cosigner1:
+    ports: !override []
+    volumes:
+      - ./config-tls-perf:/config:ro
+  cosigner2:
+    ports: !override []
+    volumes:
+      - ./config-tls-perf:/config:ro
+  cosigner3:
+    ports: !override []
+    volumes:
+      - ./config-tls-perf:/config:ro

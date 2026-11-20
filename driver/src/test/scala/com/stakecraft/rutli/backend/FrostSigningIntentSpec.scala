@@ -66,6 +66,8 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
   private final class Recorder(@volatile var clusterId: String, failSigns: Int = 0) extends SignerGrpc.SignerImplBase {
     /** Refuse an intent for any other cluster, as a cosigner does (intent.rs, reason "cluster"). */
     @volatile var accept: Option[String] = None
+    /** Refuse every Sign with this status (a policy refusal, say). */
+    @volatile var refuse: Option[Status] = None
     val signs = new ConcurrentLinkedQueue[SignRequest]()
     val deletes = new ConcurrentLinkedQueue[DeleteKeyRequest]()
     val dkgs = new ConcurrentLinkedQueue[DkgRequest]()
@@ -90,7 +92,8 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
     override def sign(req: SignRequest, obs: StreamObserver[SignReply]): Unit = {
       signs.add(req)
       val named = if (req.hasIntent) Some(SignIntent.parseFrom(req.getIntent.getIntent).getClusterId) else None
-      if (accept.isDefined && named.isDefined && named != accept)
+      if (refuse.isDefined) obs.onError(refuse.get.asRuntimeException())
+      else if (accept.isDefined && named.isDefined && named != accept)
         obs.onError(
           Status.PERMISSION_DENIED
             .withDescription(s"signing intent refused: intent is for cluster \"${named.get}\", this is ${accept.get}")
@@ -248,6 +251,10 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
         Await.result(b.withAuditNotes(notes)(b.sign(Digest, Key, SigningAlgoSpec.Ed25519)), 20.seconds) shouldBe ed25519(Digest)
         decode(recs.flatMap(_.signs.asScala).last.getIntent).getClusterId shouldBe Cluster
         notes.render should include("intent-cluster=relearned")
+        // The stale id was the driver's: the refusing node keeps the lead and gets the retry.
+        recs.map(_.signs.size) shouldBe Seq(3, 0)
+        Await.result(b.sign(Digest, Key, SigningAlgoSpec.Ed25519), 20.seconds)
+        recs.map(_.signs.size) shouldBe Seq(4, 0)
       } finally b.close()
       // A configured id is never "re-learned": the refusal is the answer.
       val rec = new Recorder(Cluster)
@@ -258,6 +265,21 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
         e.getMessage should include("intent is for cluster")
         rec.signs.size shouldBe 1
       } finally pinned.close()
+    }
+
+    "move the next sign off a node that refuses a sign carrying an intent, without retrying it elsewhere" in {
+      val (strict, other) = (new Recorder(Cluster), new Recorder(Cluster))
+      val b = backend(Seq(serve("cosigner1", strict) -> "cosigner1", serve("cosigner2", other) -> "cosigner2"))
+      try {
+        strict.refuse = Some(Status.PERMISSION_DENIED.withDescription("signing intent refused: test"))
+        val e = intercept[io.grpc.StatusRuntimeException](Await.result(b.sign(Digest, Key, SigningAlgoSpec.Ed25519), 20.seconds))
+        e.getStatus.getCode shouldBe Status.Code.PERMISSION_DENIED
+        other.signs.size shouldBe 0 // returned at once
+        // Every cosigner checks the intent on its own share, so the next call may start elsewhere.
+        Await.result(b.sign(Digest, Key, SigningAlgoSpec.Ed25519), 20.seconds) shouldBe ed25519(Digest)
+        strict.signs.size shouldBe 1
+        other.signs.size shouldBe 1
+      } finally b.close()
     }
 
     "not be attached at all with frost.sign-intents = off" in {

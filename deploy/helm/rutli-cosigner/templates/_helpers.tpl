@@ -90,3 +90,55 @@ topology=perNode: the roster as a JSON list of nodes with every default filled i
 {{- end }}
 {{- $out | toJson }}
 {{- end }}
+
+{{/*
+The peer pins (values.peerPins) for the roster ids in .ids, validated, as JSON: {"<id>": [hex...]}.
+Use as
+  {{- $pins := include "rutli-cosigner.peerPins" (dict "root" . "ids" $ids) | fromJson }}
+Fails on a node with no pins while tls.requirePeerPins is not false, an id outside the roster, a
+value that is not 64 hex, more than two values, or one value under two nodes.
+*/}}
+{{- define "rutli-cosigner.peerPins" -}}
+{{- $root := .root }}
+{{- $src := $root.Values.peerPins | default dict }}
+{{- $required := ne (toString $root.Values.tls.requirePeerPins) "false" }}
+{{- $roster := dict }}
+{{- range $id := .ids }}{{ $_ := set $roster (toString (int $id)) true }}{{ end }}
+{{- range $k, $_ := $src }}
+  {{- if not (hasKey $roster (toString $k)) }}
+    {{- fail (printf "peerPins.%q names no node of the roster (ids %s)" (toString $k) (keys $roster | sortAlpha | join ", ")) }}
+  {{- end }}
+{{- end }}
+{{- $out := dict }}
+{{- $owner := dict }}
+{{- range $id := .ids }}
+  {{- $key := toString (int $id) }}
+  {{- $list := index $src $key }}
+  {{- if not $list }}
+    {{- if $required }}
+      {{- fail (printf "peerPins.%q is missing: pin every cosigner's TLS key (rutli-cosigner tls spki cosigner%s.crt, or -f certs/peer-pins.json from scripts/gen-frost-certs.sh), or set tls.requirePeerPins: false" $key $key) }}
+    {{- end }}
+  {{- else }}
+    {{- if not (kindIs "slice" $list) }}
+      {{- fail (printf "peerPins.%q must be a list of one or two SHA-256 hex values" $key) }}
+    {{- end }}
+    {{- if gt (len $list) 2 }}
+      {{- fail (printf "peerPins.%q lists %d keys — at most 2: the current key and, during a key roll, the next" $key (len $list)) }}
+    {{- end }}
+    {{- $clean := list }}
+    {{- range $pin := $list }}
+      {{- $pin = toString $pin | lower }}
+      {{- if not (regexMatch "^[0-9a-f]{64}$" $pin) }}
+        {{- fail (printf "peerPins.%q: %q is not 64 hex characters (the SHA-256 of the certificate's SubjectPublicKeyInfo)" $key $pin) }}
+      {{- end }}
+      {{- if hasKey $owner $pin }}
+        {{- fail (printf "peerPins.%q pins %s, which peerPins.%q pins too — one TLS key cannot be two nodes" $key $pin (get $owner $pin)) }}
+      {{- end }}
+      {{- $_ := set $owner $pin $key }}
+      {{- $clean = append $clean $pin }}
+    {{- end }}
+    {{- $_ := set $out $key $clean }}
+  {{- end }}
+{{- end }}
+{{- $out | toJson }}
+{{- end }}

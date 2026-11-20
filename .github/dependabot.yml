@@ -1,0 +1,38 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Keeps the pinned SHAs and digests from rotting. Every update is a pull request a maintainer reads
+# before merging: a new action SHA or base image digest is new code in the release path.
+#
+# Not here, on purpose:
+# - cargo: frost/Cargo.lock changes need frost/THIRD-PARTY-LICENSES.txt regenerated in the same
+#   commit (CI compares them), which Dependabot cannot do, and the cargo-deny job already fails on
+#   any open advisory. Crate updates stay manual.
+# - dtolnay/rust-toolchain is pinned to a commit of a branch, which Dependabot does not follow, and
+#   the Rust version (frost/rust-toolchain.toml + frost/Dockerfile) is bumped by hand, both together.
+# Dependabot's pull requests run CI on GitHub-hosted runners only (ci.yml `runs-on` and the runner
+# guard in deploy/ci-runner): they bring action code nobody has reviewed yet.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: ci
+
+  # Digest refreshes of the runtime base image (debian) in frost/Dockerfile. The rust image is left
+  # out: its version must move together with frost/rust-toolchain.toml, which Dependabot cannot
+  # edit, so the image build check would fail every such pull request. Bump Rust by hand
+  # (docs/releasing.md).
+  - package-ecosystem: docker
+    directory: /frost
+    schedule:
+      interval: monthly
+    ignore:
+      - dependency-name: rust
+    commit-message:
+      prefix: build
