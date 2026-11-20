@@ -131,7 +131,7 @@ metrics endpoint: that line and the `failover=` notes in the audit log show the 
 
 | Value | Where each sign starts | Load for 2-of-3 |
 |---|---|---|
-| `rotate` (default) | The next endpoint in turn, among the healthy ones: not demoted within `leader-recovery`, and not a cosigner that answered another group key for that key. | Each node leads 1/3 of the signs. With the cosigners picking the second member by the request id, each node releases a share for 2/3 of them. |
+| `rotate` (default) | The next endpoint in turn, among the healthy ones: not demoted within `leader-recovery`, and not a cosigner that answered another group key for that key. If none is healthy, the sticky choice. | Each node leads 1/3 of the signs. With the cosigners picking the second member by the request id, each node releases a share for 2/3 of them. |
 | `sticky` | The preferred leader, as before 0.5.0. | One node leads every sign and releases a share for all of them; the other two release one for half each. |
 
 Rotation changes only where a sign starts. One Canton call still has one attempt in flight, keeps
@@ -147,10 +147,12 @@ under `sticky` with a healthy leader. A node slower than the deadline is demoted
 `leader-recovery` in both modes.
 
 **Per-node sign rate limits.** `signing_policy.sign_rate_limit_per_min` / `_per_day` and the
-`rate_limits` rules are counted on each node, once per request id, for every signature the node
-takes part in. Under `sticky` one node takes part in every signature. Under `rotate` each node
-takes part in about 2/3. A limit sized for the total rate of one key therefore still holds on every
-node: no node's count goes up when you switch to `rotate`.
+`rate_limits` rules are counted on each node, once per request id (failovers of one call share the
+charge), for every signature the node takes part in. Under `sticky` the leading node takes part in
+every signature and the other two in about half each. Under `rotate` each node takes part in about
+2/3. Switching to `rotate` lowers the busiest node's count and raises the other two's, from 1/2 to
+2/3 of the key's rate. A limit sized for the key's whole rate holds on every node in both modes. A
+limit sized for the share a non-leading node used to see does not: check those before switching.
 
 **The default.** `rotate` is the default in this release only if it has run on the two test stands
 for at least two weeks before the feature freeze without a finding. If it has not, the default goes

@@ -380,15 +380,14 @@ class FrostBackend(
     }
   }
 
-  /** Where a sign for `keyId` starts: `start`, or the first endpoint after it in ring order that has
-    * not dissented about this key's group key. */
   /** Where the next sign for `keyId` starts.
     *
     * Sticky: the preferred leader, past this key's group-key dissenters ([[leaderFor]]).
     * Rotate: the next endpoint in turn (one shared counter, so concurrent signs spread too) that is
-    * healthy: not demoted within [[leaderRecovery]] and not a dissenter for this key. When none is,
-    * it falls back to the sticky choice. Ceremonies and hosted-key calls never come here: they stay
-    * on the preferred leader. */
+    * healthy: not demoted within [[leaderRecovery]] and not a dissenter for this key. Only when no
+    * endpoint is healthy does it fall back to the sticky choice (a call has to start somewhere).
+    * This picks the start only: failover then walks the ring from it, as in sticky mode.
+    * Ceremonies and hosted-key calls never come here: they stay on the preferred leader. */
   private[backend] def signStart(keyId: String): Int =
     if (!rotateSigns) leaderFor(keyId, startIndex())
     else {
@@ -406,6 +405,8 @@ class FrostBackend(
   /** The rotation counter of [[signStart]]. */
   private val signCursor = new AtomicInteger(0)
 
+  /** Where a sign for `keyId` starts: `start`, or the first endpoint after it in ring order that has
+    * not dissented about this key's group key. */
   private def leaderFor(keyId: String, start: Int): Int =
     Option(dissenters.get(keyId)).fold(start) { bad =>
       (0 until channels.size).map(k => (start + k) % channels.size).find(i => !bad.contains(Integer.valueOf(i))).getOrElse(start)
@@ -1262,7 +1263,7 @@ class FrostBackend(
                       s"(${e.getStatus.getDescription}); learning the cluster id again"
                   )
                   notes.add("intent-cluster=relearned")
-                  attempt(relearned = true, Some(lastTried.get))
+                  attempt(relearned = true, Some(lastTried.get).filter(_ >= 0))
               }
             }
             attempt(relearned = false, None)
