@@ -120,7 +120,8 @@ metadata:
 data:
   backup-loop.sh: |
     #!/bin/sh
-    # Daily at $DAILY_AT_UTC: tar this node's committed, sealed key files (keys/*.json; never
+    # Daily at $DAILY_AT_UTC, and within $CHECK_EVERY_SECS of any change to the key files (a refresh
+    # commit, a new or deleted key): tar this node's committed, sealed key files (keys/*.json; never
     # dotfiles, nonce markers or staged files), its break-glass cleared-delete-intent markers
     # (keys/.cleared/*, empty files; `restore` merges them — audit F7) and its sign journals
     # (journal/<key>/*.jsonl, the node's own record of every signature share it released —
@@ -130,6 +131,7 @@ data:
     # unready.
     set -u
     run() {
+      ok=0
       stamp=$(date -u +%Y%m%dT%H%M%SZ)
       tar="/work/node-${NODE_ID}-${stamp}.tar"
       stage="/work/stage-${stamp}"
@@ -171,18 +173,44 @@ data:
       bytes=$(wc -c < "$tar" | tr -d ' ')
       if sh /destination/ship.sh "$tar" "${NODE_ID}"; then
         echo "BACKUP_OK node=${NODE_ID} files=${n} journal_segments=${journals} cleared_markers=${cleared} bytes=${bytes} dest=pvc stamp=${stamp}"
+        ok=1
       else
         echo "BACKUP_FAILED node=${NODE_ID} reason=ship files=${n} bytes=${bytes} stamp=${stamp}"
       fi
       rm -f "$tar"
     }
-    [ "${RUN_ON_START:-false}" = "true" ] && run
-    while :; do
+    # A fingerprint of the committed key files (names and checksums of keys/*.json; empty when there
+    # are none). A refresh replaces each key's file only when it commits on this node (staged shares
+    # live in keys/.staged/, which is never copied), so a changed fingerprint means a new epoch or a
+    # new or deleted key, and signing never changes it. Every refresh makes this node's older backups
+    # unable to restore it: back up as soon as the fingerprint moves, and retry until it succeeds.
+    keysig() {
+      list=$(cd /data/keys 2>/dev/null && find . -maxdepth 1 -type f -name '*.json' ! -name '.*' | sort)
+      [ -n "$list" ] && (cd /data/keys && echo "$list" | xargs cksum) | cksum
+    }
+    backup_now() { sig=$(keysig); run; [ "$ok" = 1 ] && last="$sig"; }
+    next_daily() {
       now=$(date -u +%s)
-      next=$(date -u -d "$(date -u +%F) ${DAILY_AT_UTC}" +%s)
-      [ "$next" -le "$now" ] && next=$((next + 86400))
-      sleep $((next - now))
-      run
+      t=$(date -u -d "$(date -u +%F) ${DAILY_AT_UTC}" +%s)
+      [ "$t" -le "$now" ] && t=$((t + 86400))
+      echo "$t"
+    }
+    every="${CHECK_EVERY_SECS:-300}"
+    last=""
+    if [ "${RUN_ON_START:-false}" = "true" ]; then backup_now; else last=$(keysig); fi
+    next=$(next_daily)
+    while :; do
+      wait=$((next - $(date -u +%s)))
+      # every=0: no change check, the daily run only (the split ceremony's window).
+      [ "$every" -gt 0 ] && [ "$wait" -gt "$every" ] && wait="$every"
+      [ "$wait" -gt 0 ] && sleep "$wait"
+      if [ "$(date -u +%s)" -ge "$next" ]; then
+        backup_now
+        next=$(next_daily)
+      elif [ "$every" -gt 0 ] && sig=$(keysig) && [ -n "$sig" ] && [ "$sig" != "$last" ]; then
+        echo "BACKUP_TRIGGER node=${NODE_ID} reason=key-files-changed"
+        backup_now
+      fi
     done
   ship.sh: |
     #!/bin/sh
@@ -645,6 +673,7 @@ spec:
             - { name: NODE_ID, value: "1" }
             - { name: DAILY_AT_UTC, value: "03:17" }
             - { name: RUN_ON_START, value: "true" }
+            - { name: CHECK_EVERY_SECS, value: "300" }
           resources:
             limits:
               cpu: 100m
@@ -827,6 +856,7 @@ spec:
             - { name: NODE_ID, value: "2" }
             - { name: DAILY_AT_UTC, value: "03:17" }
             - { name: RUN_ON_START, value: "true" }
+            - { name: CHECK_EVERY_SECS, value: "300" }
           resources:
             limits:
               cpu: 100m
@@ -1009,6 +1039,7 @@ spec:
             - { name: NODE_ID, value: "3" }
             - { name: DAILY_AT_UTC, value: "03:17" }
             - { name: RUN_ON_START, value: "true" }
+            - { name: CHECK_EVERY_SECS, value: "300" }
           resources:
             limits:
               cpu: 100m

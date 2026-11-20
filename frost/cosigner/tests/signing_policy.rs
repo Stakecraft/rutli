@@ -1024,7 +1024,14 @@ async fn a_sign_test_round_for_another_message_is_refused_at_the_peer() {
 #[tokio::test]
 async fn signer_dkg_and_refresh_need_the_callers_own_ceremony_intent() {
     use rutli_cosigner::node::CeremonyKind::{Dkg, Refresh};
-    let policy = SigningPolicyConfig { require_ceremony_intent: Some(true), signer_may_refresh: false, ..Default::default() };
+    // The replay below is a second refresh right after the first: no refresh interval here
+    // (`a_refresh_inside_the_interval_is_refused_at_the_leader_over_grpc` covers it).
+    let policy = SigningPolicyConfig {
+        require_ceremony_intent: Some(true),
+        signer_may_refresh: false,
+        refresh_min_interval_secs: 0,
+        ..Default::default()
+    };
     let c = cluster(|_| policy.clone(), Some(vec!["refresher".into()])).await;
     let group = c.group_key().to_vec();
     let refresh = |intent| pb::RefreshRequest { key_id: KEY.into(), intent };
@@ -1059,6 +1066,50 @@ async fn signer_dkg_and_refresh_need_the_callers_own_ceremony_intent() {
     );
     c.signer("driver", 0).await.dkg(dkg(Some(ceremony_by(&c.ids, "driver", Dkg, key, 4)))).await.unwrap();
     assert!(c.nodes[2].key_epoch(key).unwrap().present);
+}
+
+/// The refresh interval over mTLS: a second refresh is refused whichever node the client calls —
+/// FAILED_PRECONDITION with the `rutli-error: refresh-too-soon` trailer — and when the leader
+/// itself has no interval (a node on 0.4.0, or one whose config was changed), an honest peer's
+/// refusal at its fence comes back to the client the same way. No node moves.
+#[tokio::test]
+async fn a_refresh_inside_the_interval_is_refused_at_the_leader_over_grpc() {
+    use rutli_cosigner::node::CeremonyKind::Refresh;
+    let policy = SigningPolicyConfig { require_ceremony_intent: Some(true), signer_may_refresh: false, ..Default::default() };
+    let refresh = |intent| pb::RefreshRequest { key_id: KEY.into(), intent };
+    #[track_caller]
+    fn too_soon(r: std::result::Result<impl std::fmt::Debug, tonic::Status>) -> tonic::Status {
+        let err = r.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition, "{err:?}");
+        assert_eq!(err.metadata().get("rutli-error").and_then(|v| v.to_str().ok()), Some("refresh-too-soon"), "{err:?}");
+        assert!(err.message().contains("refresh_min_interval_secs"), "{err:?}");
+        err
+    }
+
+    let c = cluster(|_| policy.clone(), Some(vec!["refresher".into()])).await;
+    c.signer("refresher", 0).await.refresh(refresh(Some(ceremony_by(&c.ids, "refresher", Refresh, KEY, 1)))).await.unwrap();
+    let epoch = c.nodes[0].key_epoch(KEY).unwrap().epoch;
+    for leader in 0..N as usize {
+        let x = ceremony_by(&c.ids, "refresher", Refresh, KEY, 2 + leader as u8);
+        too_soon(c.signer("refresher", leader).await.refresh(refresh(Some(x))).await);
+    }
+    for n in &c.nodes {
+        assert_eq!(n.key_epoch(KEY).unwrap().epoch, epoch);
+        assert!(n.staged_records().is_empty());
+    }
+
+    // Node 1 (endpoint 0) without the interval leads: its own pre-check and fence pass, and node 2,
+    // the first peer it fences, refuses over the mesh; the refusal names node 2.
+    let no_interval = SigningPolicyConfig { refresh_min_interval_secs: 0, ..policy.clone() };
+    let c = cluster(|i| if i == 1 { no_interval.clone() } else { policy.clone() }, Some(vec!["refresher".into()])).await;
+    c.signer("refresher", 1).await.refresh(refresh(Some(ceremony_by(&c.ids, "refresher", Refresh, KEY, 1)))).await.unwrap();
+    let epoch = c.nodes[0].key_epoch(KEY).unwrap().epoch;
+    let err = too_soon(c.signer("refresher", 0).await.refresh(refresh(Some(ceremony_by(&c.ids, "refresher", Refresh, KEY, 2)))).await);
+    assert!(err.message().contains("refused by node 2"), "the refusal comes from a peer's fence: {err:?}");
+    for n in &c.nodes {
+        assert_eq!(n.key_epoch(KEY).unwrap().epoch, epoch);
+        assert!(n.staged_records().is_empty());
+    }
 }
 
 /// A compromised cosigner on the mesh: a DKG/refresh fence or part 1 without a valid client intent

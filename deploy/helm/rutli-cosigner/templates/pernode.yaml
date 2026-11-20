@@ -166,6 +166,7 @@ spec:
             - { name: NODE_ID, value: {{ $id | quote }} }
             - { name: DAILY_AT_UTC, value: {{ $backup.dailyAtUtc | quote }} }
             - { name: RUN_ON_START, value: {{ $backup.runOnStart | toString | quote }} }
+            - { name: CHECK_EVERY_SECS, value: {{ $backup.checkEverySecs | toString | quote }} }
           resources:
             {{- toYaml $backup.resources | nindent 12 }}
           securityContext:

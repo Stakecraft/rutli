@@ -356,6 +356,12 @@ impl Signer for SignerSvc {
         let caller = caller_of(&req);
         let intent = req.into_inner().intent;
         self.check_ceremony_intent(caller.as_ref(), crate::node::CeremonyKind::Refresh, &key_id, intent.as_ref())?;
+        // The refresh interval, at this node before it contacts any peer: a refresh refused here
+        // leaves nothing anywhere. Every node checks it again at its own fence, so this is not the
+        // load-bearing check — a leader that skips it is still held to it by every other node.
+        self.node
+            .refuse_refresh_too_soon(&key_id, caller.as_ref().map(|c| c.cn.as_str()))
+            .map_err(Status::from)?;
         let result = match self.node.refuse_if_keystore_down() {
             Ok(()) => orchestrator::run_refresh_with_intent(&self.peers, &key_id, intent).await,
             Err(e) => Err(e),

@@ -22,10 +22,10 @@ key, Canton can rotate them.
 | Event | Recoverable? | Procedure |
 |---|---|---|
 | Up to `n − t` cosigners down | Yes, automatically | Signing continues; the driver fails over to live cosigners. Rebuild the lost nodes at leisure (below). |
-| A cosigner's disk lost, share backup exists | Yes | **Restore from backup** (§1). |
-| A cosigner's disk lost, no backup | Yes, if ≥ `t` others survive | **Repair the share** from survivors (§2). |
-| More than `n − t` cosigners lost simultaneously | Only from backups | **Restore ≥ `t` shares** from cold backups (§3). Without backups this is unrecoverable — which is why §4 is mandatory. |
-| Suspected key compromise (≥ `t` shares may be exposed) | Mitigate, not undo | The key cannot be rotated. **Proactively refresh** (invalidates pre-refresh shares) and escalate to a governance decision on the node's future. See `docs/phase-2-frost.md`. |
+| A cosigner's disk lost, its backup of the **current epoch** exists | Yes | **Restore from backup** (§1). A backup taken before the last refresh does not restore the node ("Backups and refreshes", below). |
+| A cosigner's disk lost, no backup of the current epoch | Not in place, today | The other `t` nodes keep signing. Networked repair (§2) is not shipped. The way back to `n` nodes is a cluster rebuild from `t` nodes' backups of one older epoch (§3), which rolls the key back to that epoch; then refresh. |
+| More than `n − t` cosigners lost simultaneously | Only from backups | **Restore `t` nodes from backups of one common epoch** (§3). Without such backups this is unrecoverable — which is why §4 is mandatory. |
+| Suspected key compromise (shares may be exposed) | Mitigate, not undo | The key cannot be rotated. If fewer than `t` shares of one epoch may be exposed, **refresh now** (inside the refresh interval this needs the operator's waiver: [ceremonies.md](ceremonies.md#refresh-interval)): the exposed shares no longer combine with the live ones. Then back up every node, rotate each node's DEK and drop the backups taken before the refresh (§3h): a refresh does not change the seal key that opens a node's old backups, and old shares of `t` nodes from one epoch still combine with each other. If `t` shares of one epoch may be exposed, no refresh helps: treat the key as compromised and escalate to a governance decision on the node's future. See `docs/phase-2-frost.md`. |
 | A cosigner rebuilt, its **cluster-hosted** keys gone with it | Yes, automatically | It pulls them back from a peer — read-repair on demand, anti-entropy within one sweep (§3c). No backup needed while ≥ 1 cosigner still holds the key. |
 | Every copy of a **cluster-hosted** key lost (whole cluster, no backup) | Only from backups | Restore **one** node's own backup onto that node (§3); the cluster re-replicates from it. With no backup the key is gone — rotate in Canton and accept §3b's bounded data gap. |
 | Every **seal bundle** (or the legacy master secret) lost (backups intact but unopenable) | Only from an export | A sealed backup is useless without its node's seal bundle. An `export-key` artifact taken beforehand is the only recovery — see §3d. Without either, the key is gone: rotate in Canton and accept §3b's bounded gap. |
@@ -85,6 +85,41 @@ the SHA-256 of the backup file) — and nothing else in the backup is exempted. 
 way is then **behind its peers**: at its next start the node's stale-share check marks it stale and
 it refuses to sign with it until it is current (`RutliStaleShare`; re-enrol it, or refresh once
 every node is back on one epoch). It is a way to keep a copy, not a way to sign with an old sharing.
+
+### Backups and refreshes
+
+A node's backup restores that node only if it holds the node's share of the **current epoch** of
+each key: the sharing the other nodes hold. Every refresh moves every node to a new epoch:
+
+- **From the moment a refresh commits, every backup taken before it is of the old epoch.** `restore`
+  refuses to put an older epoch over a live share, or under one this node's ceremony records say it
+  committed. On a wiped node (no share, no records) it writes it. The node's stale-share check then
+  marks the key stale, and the node does not sign with it (`RutliStaleShare`), only when a live peer
+  holds a newer epoch of the key and no peer holds this node's sharing. `t` nodes restored to one
+  epoch together (§3) sign normally.
+- An old-epoch backup is still useful in one case: backups of `t` nodes **from the same epoch**
+  combine and can rebuild the cluster (§3). Old shares of different epochs never combine.
+- So **a backup must follow every refresh, on every node.** On Kubernetes the backup sidecar does
+  this by itself: besides its daily run it checks every `backup.checkEverySecs` (default 300 s)
+  whether the node's committed key files changed, and backs up then (log line
+  `BACKUP_TRIGGER node=<id> reason=key-files-changed`, then `BACKUP_OK`). Each node's backup of the
+  new epoch exists within about 5 minutes of the refresh committing on that node, whatever time the
+  refresh ran; a failed one is retried at that pace. Outside Kubernetes, run `backup` right after
+  each refresh. Until that backup exists, a lost node cannot be restored from its own backup: the
+  other nodes keep signing, and §3 from the previous epoch is the fallback.
+- **A backup taken during a refresh** holds what is live on that node at that moment. Staged shares
+  (`keys/.staged/`) and ceremony records are never copied, and a commit replaces each key file in
+  one rename, so every copied file is either the old epoch or the new one, never half of each. A
+  copy of the old epoch is an ordinary old-epoch backup (above); the commit then changes the files
+  and triggers the next backup.
+- Keep each node's backups of at least the two newest epochs (`backup.destination.keep`, 14 tars by
+  default; change-triggered runs count too), so `t` nodes always share one.
+- Each node takes part in at most one refresh of a key per `signing_policy.refresh_min_interval_secs`
+  (default 72 h, counted from the commit, [ceremonies.md](ceremonies.md#refresh-interval)), so
+  nobody can refresh faster than backups follow. Each node counts from its own ceremony records,
+  which backups do not carry: a rebuilt or restored node enforces nothing until its next refresh,
+  while the others still do. Only if every node lost its records is one refresh free. Alert on `BACKUP_FAILED`, above all after a
+  `BACKUP_TRIGGER`.
 
 Store backups **off the node's host** and, ideally, geographically separated. Because the shares are
 sealed, the backup is only usable together with the node's seal bundle (a per-node Secret, never on
@@ -151,25 +186,32 @@ If a cosigner is destroyed and its share was never backed up, `t` surviving cosi
 exactly its old share via the Repairable Threshold Scheme — without any of them, or the recovered
 node, ever learning the group secret. The group key is unchanged. The cryptographic primitive is
 implemented and tested (`rutli-frost-core::repair`); the networked cosigner-mesh ceremony that drives
-it over gRPC is the current build's follow-up. Until it ships, prefer §1 (keep backups) as the
-first-line recovery.
+it over gRPC is the current build's follow-up. **It is not shipped:** today a node lost without a
+backup of the current epoch cannot be repaired in place. Keep §1 backups current ("Backups and
+refreshes").
 
 ## §3 Catastrophic restore (below threshold lost at once)
 
 If more than `n − t` cosigners are lost at the same time, live signing stops (you're below
-threshold) but the key is **not** lost as long as you hold **≥ `t` share backups**:
+threshold) but the key is **not** lost as long as you hold **backups of `t` different nodes, all of
+one epoch** (taken between the same two refreshes). `t` backups of different epochs do not combine.
 
-1. Provision fresh cosigner hosts, each with its node's TLS certificate and key, or a new one whose
+1. Pick the newest epoch for which you hold `t` nodes' backups. The epoch is in each key file; a
+   `restore` that refuses names it.
+2. Provision fresh cosigner hosts, each with its node's TLS certificate and key, or a new one whose
    pin is on every node, survivors included, before it starts (§1).
-2. `rutli-cosigner restore` at least `t` shares from cold backups onto them (with their seal
-   secrets).
-3. Start the daemons; the cluster reaches threshold and signs again (verified group key unchanged).
-4. Rebuild the remaining cosigners (§1 restore, or re-add and repair once §2 ships) to return to full
-   `n`, then **proactively refresh** so the temporarily-assembled quorum's shares are rotated.
+3. `rutli-cosigner restore` those `t` nodes' backups onto them (with their seal secrets).
+4. A surviving node on a newer epoch does not combine with the restored ones. Restore it to the
+   same epoch (break-glass, §1) or rebuild it.
+5. Start the daemons; the cluster reaches threshold and signs again (verified group key unchanged).
+6. Rebuild the remaining cosigners to return to full `n`, then **refresh** (with the operator's
+   waiver if the last refresh is less than the interval ago:
+   [ceremonies.md](ceremonies.md#refresh-interval)) and back up every node. Restoring an older epoch
+   makes its old shares live again, so this refresh is not optional.
 
 Cluster-hosted keys have a lower bar here: every node holds the whole key, so **one** restored
 backup is enough (from the node it was taken on), and anti-entropy pushes each key to the rebuilt
-nodes within one sweep. Shares are the part that needs `≥ t` distinct backups.
+nodes within one sweep. Shares are the part that needs `t` nodes' backups of one epoch.
 
 ## §3b Lost delegate encryption key (software backend without persistence)
 
@@ -349,9 +391,10 @@ its share (provenance included, inside the sealed file), and `verify-key` is the
 Three things differ:
 
 - **Founding backups come after the first refresh, never before.** Keep backups out of the ceremony window. On Kubernetes
-  the per-pod `backup` sidecar runs daily at `backup.dailyAtUtc` and at every pod start and cannot
-  be paused: schedule around the daily run and restart no cosigner between `import-share` and the
-  refresh. A backup taken between `import-share` and the refresh holds the *dealt*
+  the per-pod `backup` sidecar runs daily at `backup.dailyAtUtc`, at every pod start, and within
+  `backup.checkEverySecs` of a change to the key files, which `import-share` is. Put
+  `backup.checkEverySecs: 0` in the values before the ceremony, schedule around the daily run,
+  restart no cosigner between `import-share` and the refresh, and restore the setting afterwards. A backup taken between `import-share` and the refresh holds the *dealt*
   shares, and `t` of those plus the seal secret are the key as the dealer produced it. Any such
   backup goes on the ceremony's destruction list. The daemon logs a startup WARN for every imported
   key that has never been refreshed.
@@ -469,8 +512,10 @@ the master.
 
 ## §4 What you MUST have in place before go-live
 
-- **≥ `t` cosigner share backups**, encrypted (sealed) and stored in ≥ 2 separated locations. This is
-  the difference between "recoverable" and "irrecoverable" for the catastrophic case.
+- **Every cosigner's share backup, taken after the latest refresh**, encrypted (sealed) and stored
+  in ≥ 2 separated locations, with older epochs kept too ("Backups and refreshes"). `t` nodes'
+  backups of one epoch are the difference between "recoverable" and "irrecoverable" for the
+  catastrophic case.
 - **Seal secrets** for those shares in a secret manager, in a different trust domain from the backups.
 - On Kubernetes, backups run as the per-pod **backup sidecar** (perNode topology): the data volume
   read-only, no seal bundle, no TLS key, one destination per node. **Never mount a cosigner volume
@@ -491,7 +536,8 @@ the master.
   only way to issue operator, replacement, renewal or new-node certificates; losing it forces a CA
   rotation (§3f). Record the CA's sha256 and the leaves' expiry date, and keep the cluster id pinned
   (`cluster_id`) so the CA file can change without touching it.
-- A **proactive-refresh schedule** so a share exposed at any point has a bounded useful lifetime.
+- A **proactive-refresh schedule** so a share exposed at any point has a bounded useful lifetime,
+  with a backup of every node right after each refresh.
 - A decision, recorded, on whether to take an **`export-key` artifact** for each hosted key. It is
   the only recovery from lost seal bundles (or legacy master), and it cannot be produced retroactively — but it
   is also a portable copy of a private key, so storing one is a deliberate tradeoff, not a default.
@@ -514,11 +560,12 @@ the master.
 After any restore/repair, confirm the node identity did not change:
 
 ```sh
-# the group verifying key (and therefore the Canton namespace) must be identical to before
-rutli-cosigner --config … refresh --key-id frost-<node>-namespace   # prints the group key; compare
-# or, read-only, every node at once: present, same package, own verifying share consistent
+# the group verifying key (and therefore the Canton namespace) must be identical to before;
+# read-only, every node at once: present, same package, own verifying share consistent
 # (operator cert; add --sign-test for an imported key: every t-subset of cosigners signs)
 rutli-cosigner --config … verify-key --key-id frost-<node>-namespace --expect-fingerprint 1220…
+# a refresh also prints the group key, but it is refused within refresh_min_interval_secs of the
+# last one (ceremonies.md, "Refresh interval"), and each refresh needs a backup of every node after it
 # and confirm the participant still reports the same PAR::…::<fingerprint> identity in the Canton console.
 ```
 

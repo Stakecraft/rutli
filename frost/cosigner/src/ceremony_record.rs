@@ -112,6 +112,11 @@ pub struct CeremonyRecord {
     pub created_ms: u64,
     #[serde(default)]
     pub updated_ms: u64,
+    /// When this node resolved a STAGED vote: wrote COMMITTED (promoted the share) or ABORTED.
+    /// Unlike `updated_ms` it never moves afterwards (settling, a quarantine drop). 0 = unresolved,
+    /// or a record written before 0.5.0 (readers fall back to `updated_ms`, which is never earlier).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub resolved_ms: u64,
     /// ABORTED by the resolver with its staged share kept (quarantined), in case a peer reports it
     /// COMMITTED later (audit F3). Cleared when the share is dropped.
     #[serde(default, skip_serializing_if = "is_false")]
@@ -158,6 +163,7 @@ impl CeremonyRecord {
             peers_settled: false,
             created_ms: now,
             updated_ms: now,
+            resolved_ms: 0,
             quarantined: false,
             split_detected_ms: 0,
             unknown_asked_by: None,

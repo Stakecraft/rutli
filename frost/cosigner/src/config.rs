@@ -216,6 +216,28 @@ pub struct SigningPolicyConfig {
     /// stolen driver certificate cannot drive share refreshes.
     #[serde(default = "default_true")]
     pub signer_may_refresh: bool,
+    /// Shortest time between two refreshes of one key that this node takes part in, in seconds.
+    /// Checked by every node at the refresh fence and at part 1, before any guard, session or
+    /// crypto, so a refresh led by any node (or by a compromised cosigner) is held to it by every
+    /// honest node. Measured from the last refresh of the key that this node staged — committed, or
+    /// aborted after it staged — read from its own ceremony records, so it survives a restart.
+    /// Refreshes that failed before staging do not count. `0` turns the limit off.
+    ///
+    /// Default 72 h: the shipped refresh CronJob runs weekly and the backup sidecar daily, so every
+    /// epoch is backed up at least twice before the next refresh can start, and a stolen refresher
+    /// (or driver) certificate cannot move the key to a new epoch faster than backups follow. At
+    /// most [`MAX_REFRESH_MIN_INTERVAL_SECS`] (the ceremony record retention).
+    #[serde(default = "default_refresh_min_interval")]
+    pub refresh_min_interval_secs: u64,
+    /// The incident path past `refresh_min_interval_secs`: a UTC time (`2026-11-19T14:00:00Z`) set
+    /// by the operator on every node. Until a refresh of a key has staged on this node after that
+    /// time, one refresh of the key is let through the interval (logged, and counted in
+    /// `rutli_refresh_interval_waived_total`); after it, the interval applies again. Ignored 24 h
+    /// after the time; up to `clock_skew_secs` ahead of the node's clock is accepted (it applies once
+    /// the clock reaches it), further ahead is a config error. No
+    /// client certificate can set it: it is this node's own config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refresh_interval_waived_at: Option<String>,
     /// Per-client key ACL: Signer client CN -> the key-id prefixes it may use (`""` = every key).
     /// Checked on every key-scoped Signer RPC at the node the client calls, and on the intent's
     /// signer by every node in a signature. Multi-tenant clusters give each participant's driver
@@ -272,6 +294,8 @@ impl Default for SigningPolicyConfig {
             require_ceremony_intent: None,
             signer_acl_required: false,
             signer_may_refresh: true,
+            refresh_min_interval_secs: default_refresh_min_interval(),
+            refresh_interval_waived_at: None,
             signer_acl: BTreeMap::new(),
             signer_pins: BTreeMap::new(),
             intent_max_lifetime_secs: default_intent_max_lifetime(),
@@ -326,6 +350,15 @@ fn default_quorum_mode() -> String {
 }
 fn default_quorum_threshold() -> u32 {
     2
+}
+/// 72 hours: see [`SigningPolicyConfig::refresh_min_interval_secs`].
+pub const DEFAULT_REFRESH_MIN_INTERVAL_SECS: u64 = 72 * 3600;
+/// The longest interval: the ceremony records it is measured from are kept 30 days.
+pub const MAX_REFRESH_MIN_INTERVAL_SECS: u64 = crate::ceremony::RECORD_RETENTION.as_secs();
+/// How long after its time a `refresh_interval_waived_at` still applies.
+pub const REFRESH_WAIVER_LIFETIME_MS: u64 = 24 * 3600 * 1000;
+fn default_refresh_min_interval() -> u64 {
+    DEFAULT_REFRESH_MIN_INTERVAL_SECS
 }
 /// The driver's intents live 180 s; 300 s leaves room without letting one live long.
 pub const DEFAULT_INTENT_MAX_LIFETIME_SECS: u64 = 300;
@@ -390,6 +423,12 @@ impl SigningPolicyConfig {
         })
     }
 
+    /// `refresh_interval_waived_at` in Unix milliseconds (`None`: unset or unparsable; `validate`
+    /// refuses the latter).
+    pub fn refresh_waiver_ms(&self) -> Option<u64> {
+        self.refresh_interval_waived_at.as_deref().and_then(crate::audit_check::parse_instant_ms)
+    }
+
     /// `require_intent` as it applies on a node with (`tls`) or without TLS: as set, else on with
     /// TLS and off without — a plaintext node verifies no intents, so it could sign nothing.
     pub fn intent_required(&self, tls: bool) -> bool {
@@ -432,6 +471,27 @@ impl SigningPolicyConfig {
         }
         if self.max_shares_per_request == 0 {
             return Err(Config("signing_policy.max_shares_per_request must be at least 1".into()));
+        }
+        if self.refresh_min_interval_secs > MAX_REFRESH_MIN_INTERVAL_SECS {
+            return Err(Config(format!(
+                "signing_policy.refresh_min_interval_secs must be at most {MAX_REFRESH_MIN_INTERVAL_SECS} \
+                 (30 days, how long the ceremony records it is measured from are kept)"
+            )));
+        }
+        if let Some(at) = &self.refresh_interval_waived_at {
+            let Some(ms) = self.refresh_waiver_ms() else {
+                return Err(Config(format!(
+                    "signing_policy.refresh_interval_waived_at {at:?} is not a UTC time like 2026-11-19T14:00:00Z"
+                )));
+            };
+            if ms > crate::intent::now_ms() + self.clock_skew_secs * 1000 {
+                return Err(Config(format!(
+                    "signing_policy.refresh_interval_waived_at {at:?} is more than clock_skew_secs ({} s) \
+                     ahead of this node's clock: use the time you decided to refresh, not a later one \
+                     (up to clock_skew_secs ahead is accepted, for clocks that differ)",
+                    self.clock_skew_secs
+                )));
+            }
         }
         if self.journal_max_mib_per_key < 4 {
             return Err(Config("signing_policy.journal_max_mib_per_key must be at least 4".into()));
@@ -1303,6 +1363,32 @@ mod tests {
         let mut c = mesh_ok();
         c.signing_policy.require_ceremony_intent = Some(true);
         c.validate().unwrap();
+
+        // The refresh interval: a real limit by default (72 h), 0 = off, at most the record
+        // retention; the waiver is a past UTC time.
+        assert_eq!((d.refresh_min_interval_secs, parsed.refresh_min_interval_secs), (72 * 3600, 72 * 3600));
+        assert_eq!((d.refresh_interval_waived_at.as_deref(), d.refresh_waiver_ms()), (None, None));
+        assert!(!serde_json::to_string(&d).unwrap().contains("refresh_interval_waived_at"));
+        let mut c = mesh_ok();
+        c.signing_policy.refresh_min_interval_secs = 0;
+        c.validate().unwrap();
+        c.signing_policy.refresh_min_interval_secs = 30 * 24 * 3600 + 1;
+        assert!(c.validate().unwrap_err().to_string().contains("refresh_min_interval_secs"));
+        let mut c = mesh_ok();
+        c.signing_policy.refresh_interval_waived_at = Some("2026-11-01T14:00:00Z".into());
+        c.validate().unwrap();
+        assert_eq!(c.signing_policy.refresh_waiver_ms(), Some(1_793_541_600_000));
+        for bad in ["yesterday", "2026-11-19 14:00:00", "1795615200"] {
+            c.signing_policy.refresh_interval_waived_at = Some(bad.into());
+            assert!(c.validate().unwrap_err().to_string().contains("not a UTC time"), "{bad}");
+        }
+        c.signing_policy.refresh_interval_waived_at = Some(crate::audit_check::fmt_ms(crate::intent::now_ms() + 3_600_000));
+        assert!(c.validate().unwrap_err().to_string().contains("ahead of this node's clock"));
+        // Within the clock skew ahead is accepted (an operator's clock and a node's differ).
+        c.signing_policy.refresh_interval_waived_at = Some(crate::audit_check::fmt_ms(crate::intent::now_ms() + 60_000));
+        c.validate().unwrap();
+        let typo: std::result::Result<SigningPolicyConfig, _> = serde_json::from_str(r#"{"refresh_interval_secs": 0}"#);
+        assert!(typo.is_err(), "a misspelt key is refused, not ignored");
 
         let mut c = mesh_ok();
         c.signing_policy.signer_acl.insert("nobody".into(), vec!["".into()]);
