@@ -73,6 +73,8 @@ object ProductionProfile {
           req("frost.endpoints", s"a tls-name used twice (${names.diff(names.distinct).distinct.mkString(", ")})", "a distinct tls-name per cosigner")
         if (!f.signIntentsEnabled) req("frost.sign-intents", "off", "on")
         if (f.clusterId.forall(_.trim.isEmpty)) req("frost.cluster-id", "learned from the cluster", "set (the cosigners' cluster_id)")
+        if (f.pinDir.forall(_.trim.isEmpty))
+          req("frost.pin-dir", "missing (group-key pins in memory only)", "a directory on the participant's durable volume")
     }
     if (cfg.auditLogPath.forall(_.trim.isEmpty)) req("audit-log-path", "missing", "a path on the participant's durable volume")
     if (cfg.signingJournal.isEmpty) req("signing-journal", "missing", "signing-journal { dir = ... }")
@@ -84,14 +86,31 @@ object ProductionProfile {
         "hsm.pin-env only (the PIN from the environment), no inline hsm.pin",
       )
 
-    // Advisory: human approval of namespace-key signatures.
-    val namespaceKey = FrostKeyIds(cfg.frost.map(_.keyPrefix).getOrElse("")).frost(Some("namespace"))
-    if (cfg.approval.flatMap(_.thresholdFor(namespaceKey)).isEmpty)
+    // Advisory: the namespace key. A Splice validator names it `namespace`, Canton's own auto-init
+    // `<node>-namespace`, so its FROST id is `<key-prefix>frost-namespace` or
+    // `<key-prefix>frost-<node>-namespace`; the driver does not know the node name.
+    val frostPrefix = cfg.frost.map(_.keyPrefix).getOrElse("") + FrostKeyIds.FrostTag
+    def isNamespaceId(id: String): Boolean = id.startsWith(frostPrefix) && id.endsWith("namespace")
+    val namespaceIds = s"${frostPrefix}<node>-namespace"
+    // Human approval of its signatures: a quorum rule over every FROST key, or one naming it.
+    val approved = cfg.approval.exists(_.rules.exists { r =>
+      r.mode == com.stakecraft.rutli.policy.ApprovalPolicy.Quorum &&
+      (frostPrefix.startsWith(r.keyIdPrefix) || isNamespaceId(r.keyIdPrefix))
+    })
+    if (!approved)
       out += Finding(
         Advisory,
         "approval",
-        s"no quorum rule for $namespaceKey",
+        s"no quorum rule covering $namespaceIds",
         "a quorum approval rule for the namespace key (docs/approval-quorum.md)",
+      )
+    // An operator anchor for its first pin.
+    if (cfg.backend == "frost" && cfg.frost.exists(f => !f.expectedGroupKeys.keys.exists(isNamespaceId)))
+      out += Finding(
+        Advisory,
+        "frost.expected-group-keys",
+        s"no entry for $namespaceIds",
+        s"its group key from the key ceremony record, so a first pin is checked against it",
       )
     out.result()
   }
