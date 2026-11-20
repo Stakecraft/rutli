@@ -632,10 +632,10 @@ mod tests {
         // Empty, one byte, version byte plus a nonce one byte short, and a wrong version.
         assert!(k.decrypt_symmetric(&[]).is_err());
         assert!(k.decrypt_symmetric(&[SYM_FORMAT_V1]).is_err());
-        assert!(k.decrypt_symmetric(&vec![SYM_FORMAT_V1; SYM_NONCE_LEN]).is_err());
-        assert!(k.decrypt_symmetric(&vec![SYM_FORMAT_V1.wrapping_add(1); 1 + SYM_NONCE_LEN + 16]).is_err());
+        assert!(k.decrypt_symmetric(&[SYM_FORMAT_V1; SYM_NONCE_LEN]).is_err());
+        assert!(k.decrypt_symmetric(&[SYM_FORMAT_V1.wrapping_add(1); 1 + SYM_NONCE_LEN + 16]).is_err());
         // Exactly version + nonce and no ciphertext: reaches the AEAD, which refuses it.
-        assert!(k.decrypt_symmetric(&vec![SYM_FORMAT_V1; 1 + SYM_NONCE_LEN]).is_err());
+        assert!(k.decrypt_symmetric(&[SYM_FORMAT_V1; 1 + SYM_NONCE_LEN]).is_err());
     }
 
     #[test]
