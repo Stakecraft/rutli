@@ -803,6 +803,29 @@ async fn a_replayed_intent_is_capped_per_request() {
     assert!(matches!(err, DaemonError::RateLimited(ref m) if m.contains("max_shares_per_request")), "{err:?}");
 }
 
+/// A driver that fails over presents the same intent to each leader in turn (one per attempt
+/// deadline). The share cap is per node and per request id, so however many leaders it tries, no
+/// node releases more than `max_shares_per_request` shares for that request.
+#[tokio::test]
+async fn failing_over_across_leaders_under_one_intent_stays_within_the_share_cap() {
+    let tmp = tempfile::tempdir().unwrap();
+    let policy = SigningPolicyConfig { require_intent: Some(true), max_shares_per_request: 2, ..Default::default() };
+    let (ids, nodes) = local(tmp.path(), &policy).await;
+    let msg = digest(b"failed over");
+    let i1 = intent_by(&ids, "driver", KEY, &msg, 90);
+    let all = peers_of(&nodes);
+    let pair = |a: usize, b: usize| -> Peers { vec![all[a].clone(), all[b].clone()] };
+    // Each leader signs with itself and the next node: two shares per node in all.
+    for (lead, other) in [(0, 1), (1, 2), (2, 0)] {
+        sign_with_intent(&nodes[lead], &pair(lead, other), KEY, &msg, Some(&i1)).await.unwrap();
+    }
+    // Any further attempt under the same intent finds its nodes at the cap.
+    for (lead, other) in [(0, 1), (1, 2), (2, 0)] {
+        let err = sign_with_intent(&nodes[lead], &pair(lead, other), KEY, &msg, Some(&i1)).await.unwrap_err();
+        assert!(matches!(err, DaemonError::RateLimited(ref m) if m.contains("max_shares_per_request")), "{err:?}");
+    }
+}
+
 /// The journal entry is written before the share leaves: a node that cannot journal releases no
 /// share and burns no nonce marker.
 #[tokio::test]

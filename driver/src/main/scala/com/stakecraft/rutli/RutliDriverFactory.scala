@@ -145,6 +145,9 @@ final class RutliDriverFactory extends KmsDriverFactory {
   ): RutliDriver = {
     implicit val ec: ExecutionContext = executionContext
     val logger = loggerFactory(classOf[RutliDriver])
+    // Before anything is opened or dialled: a production driver with an enforcement gap stops here,
+    // naming each setting (docs/production-profile.md).
+    ProductionProfile.enforce(config, logger)
 
     // FROST gRPC calls and approval polling BLOCK. Run them on a dedicated bounded daemon pool so a
     // burst of gated signs or a slow cluster can't starve Canton's shared ExecutionContext. Only
@@ -222,16 +225,27 @@ final class RutliDriverFactory extends KmsDriverFactory {
                 "endpoints = [{ url = \"…\", tls-name = \"cosigner<id>\" }, …]"
             )
           }
+        if (frost.signAttemptTimeout > frost.requestTimeout || frost.attemptTimeout > frost.requestTimeout)
+          throw new IllegalArgumentException(
+            s"frost.sign-attempt-timeout (${frost.signAttemptTimeout}) and frost.attempt-timeout (${frost.attemptTimeout}) " +
+              s"must not exceed frost.request-timeout (${frost.requestTimeout})"
+          )
         new FrostBackend(
           eps.map(_.url),
           buildBackend(frost.delegate),
           logger,
           frost.tls,
+          requestTimeout = frost.requestTimeout,
           hostedKeys = frost.hostedKeys,
           keyPrefix = frost.keyPrefix,
           endpointTlsNames = eps.flatMap(e => e.tlsName.map(e.url -> _)).toMap,
           clusterId = frost.clusterId,
           signIntents = frost.signIntentsEnabled,
+          attemptTimeout = frost.attemptTimeout,
+          signAttemptTimeout = frost.signAttemptTimeout,
+          keepaliveTime = frost.keepaliveTime,
+          keepaliveTimeout = frost.keepaliveTimeout,
+          leaderRecovery = frost.leaderRecovery,
         )(blockingEc)
       case other =>
         throw new IllegalArgumentException(

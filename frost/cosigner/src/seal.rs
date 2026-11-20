@@ -1019,6 +1019,7 @@ mod tests {
             p.dist_public_key = k.map(hex::encode);
         }
         crate::config::Config {
+            profile: None,
             identifier: 2,
             listen: "127.0.0.1:0".into(),
             threshold: 2,

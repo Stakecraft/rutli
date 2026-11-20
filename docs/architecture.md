@@ -104,6 +104,53 @@ Backends, added over the phases:
 Routing by key type lets each key sit on the right backend simultaneously (e.g. namespace key on
 FROST threshold, encryption key cluster-hosted or on an HSM) behind one Canton-facing driver.
 
+### Deadlines, keepalive and what Canton waits for
+
+A cosigner that stops answering without closing its connections (its machine powered off, its
+network cut) must cost one short deadline, not a minute. The driver has four settings in its `frost`
+block:
+
+| Setting | Default | What it bounds |
+|---|---|---|
+| `sign-attempt-timeout` | 5 s | One sign attempt at one cosigner. On the deadline the attempt is cancelled and the sign fails over to the next cosigner with the same signing intent. |
+| `attempt-timeout` | 10 s | One attempt of any other call that fails over (reads, decrypt, symmetric crypto, hosted-key writes); at most one such deadline per cosigner. |
+| `request-timeout` | 30 s | The whole driver call, every attempt included. A DKG's attempt gets all that is left of it; a DKG fails over only on a refused connection (no ceremony started), never on a deadline. |
+| `keepalive-time` / `keepalive-timeout` | 10 s / 5 s | HTTP/2 pings on every cosigner channel, also while idle: a dead connection is torn down in about 15 s, and the next call fails over at once instead of waiting for a deadline. |
+
+One attempt is in flight at a time. A failed-over sign keeps its request id. Each cosigner charges
+its rate limit once per request id, and releases at most `signing_policy.max_shares_per_request`
+shares for it, however many leaders the driver tries. In a node's sign journal a failed-over sign
+shows as one more entry under the same `request_id`, with the same digest, from the leader that
+completed it. A deadline takes the lead from that cosigner, so the next calls start at the next
+one. After `leader-recovery` (60 s) the first endpoint in the list gets the lead back. If it still
+fails, it loses the lead again, at the cost of one attempt. Each change of leader is logged at INFO
+with the new leader order (`FROST: leader is now … ; leader order a > b > c`). The driver has no
+metrics endpoint: that line and the `failover=` notes in the audit log show the order.
+
+**What Canton waits for.** Canton puts no deadline on a KMS driver call. It retries a *retryable*
+failure forever, with a backoff up to 10 s (`KmsConfig.retries.failures`, Canton 3.6/3.7). The
+driver reports only "the cluster could not be reached in time" as retryable (`UNAVAILABLE`,
+`DEADLINE_EXCEEDED`, the request budget spent, too few cosigners answering a group-key query). A refusal (`PERMISSION_DENIED`, `RESOURCE_EXHAUSTED`, a bad request, an
+unknown key), a signature that does not verify, a group key that differs from the pin, and
+cosigners that disagree are not retryable, so Canton stops at once rather than retrying a
+condition that will not clear.
+
+**The confirmation window.** Above the KMS, time does matter. A participant's confirmation response
+must be sequenced before `request time + confirmationResponseTimeout`, a dynamic synchronizer
+parameter: **30 s in Canton's defaults**. Splice's value is not verified here. Read the live value
+from the synchronizer's dynamic parameters, through the Canton console's
+`topology.synchronizer_parameters` commands on the participant, as `confirmationResponseTimeout`.
+
+With Canton's session signing keys off (the default), **every confirmation response is a threshold
+signature through the cosigners**. The response must be signed and sequenced inside that window, so
+the per-attempt deadline is what keeps one dead cosigner from costing a confirmation. At 5 s, two
+failed attempts and a third that succeeds fit in about 11 s. A call that uses the whole 30 s budget
+has missed the window anyway. Session signing keys (`crypto.session-signing-keys.enabled`) take the
+cosigners off that path: the KMS key signs a short-lived session key, and the session key signs the
+messages. The trade-off is that the session key's private half sits in the participant's memory
+for its validity (5 minutes by default). Whether that is acceptable is the operator's decision;
+Rütli does not set it either way.
+
 ## Phase 2 MPC cluster — two Horcrux-informed decisions
 
 **1. DKG by default; sharding only to migrate.** Horcrux shards an *existing*
@@ -214,7 +261,11 @@ The honest framing, to be used wherever this tradeoff comes up:
 ## One cluster, several participants — `frost.key-prefix`
 
 The driver derives FROST key ids **deterministically from Canton's key name** (`namespace` →
-`frost-namespace`, `signing` → `frost-signing`), and hosted ids as `rutli-<kind>-<name>-<uuid>`. The
+`frost-namespace`, `signing` → `frost-signing`), and hosted ids as `rutli-<kind>-<name>-<uuid>`.
+Who names the key matters: a Splice validator calls it `namespace`, Canton's own auto-init calls
+it `<node>-namespace` (so `frost-participant1-namespace`). Rules, ACLs and rate limits match ids by
+prefix, so a rule written for one form never matches the other. Take the real id from the driver
+log ("initiating distributed key generation for …") or `keys.secret.list()`. The
 determinism is deliberate — a retry or a failover must ask for the *same* namespace key, never mint
 a second one — but it means two participants pointed at the same cosigner cluster both ask for
 `frost-namespace`. Before 0.4.0-rc.3 the cluster's create-once guard refused the second

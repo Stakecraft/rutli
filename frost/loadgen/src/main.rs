@@ -177,6 +177,11 @@ struct Load {
     /// from zero, so the scrape before the run is not subtracted from it.
     #[arg(long = "restarted")]
     restarted: Vec<String>,
+    /// Before the load starts, every client opens its connection to its first cosigner, all at
+    /// once, and the time each takes is reported (`connect`): the cost of many clients
+    /// connecting together, apart from the requests.
+    #[arg(long)]
+    eager_connect: bool,
 }
 
 fn name_value(s: &str) -> Result<(String, String), String> {
@@ -222,6 +227,25 @@ impl Ctx {
             .connect_timeout(Duration::from_secs(5))
             .tls_config(self.tls.clone().domain_name(name.clone()))?;
         Ok(SignerClient::new(endpoint.connect_lazy()))
+    }
+
+    /// A client for target `i`, connected now: how long the connection (TCP and TLS) took, or why
+    /// it failed.
+    async fn connect_now(&self, i: usize) -> (Result<SignerClient<Channel>, String>, Duration) {
+        let (name, url) = &self.targets[i];
+        let begun = Instant::now();
+        let endpoint = match Endpoint::from_shared(url.clone())
+            .map_err(|e| e.to_string())
+            .and_then(|e| e.connect_timeout(self.timeout).tls_config(self.tls.clone().domain_name(name.clone())).map_err(|e| e.to_string()))
+        {
+            Ok(e) => e,
+            Err(e) => return (Err(e), begun.elapsed()),
+        };
+        let channel = endpoint.connect().await.map_err(|e| {
+            let source = std::error::Error::source(&e).map(|s| format!(": {s}")).unwrap_or_default();
+            format!("{e}{source}")
+        });
+        (channel.map(SignerClient::new), begun.elapsed())
     }
 
     fn connect_all(&self) -> Result<Vec<SignerClient<Channel>>, Fail> {
@@ -487,6 +511,38 @@ async fn generate(run: Arc<Run>, load: &Load) -> Result<stats::ClientReport, Fai
             leader: AtomicUsize::new(prefer.unwrap_or(i % ctx.targets.len())),
         }));
     }
+    let mut connect_report = None;
+    if load.eager_connect {
+        // Every client's first cosigner, connected at the same moment.
+        let mut tasks = tokio::task::JoinSet::new();
+        for (i, client) in clients.iter_mut().enumerate() {
+            let first = client.leader.load(Ordering::Relaxed);
+            let ctx = run.ctx.clone();
+            tasks.spawn(async move { (i, first, ctx.connect_now(first).await) });
+        }
+        let mut micros = Vec::new();
+        let mut errors: BTreeMap<String, u64> = BTreeMap::new();
+        let mut sample = None;
+        let mut connected: Vec<(usize, usize, SignerClient<Channel>)> = Vec::new();
+        while let Some(joined) = tasks.join_next().await {
+            let (i, first, (result, took)) = joined?;
+            match result {
+                Ok(conn) => {
+                    micros.push(took.as_micros() as u64);
+                    connected.push((i, first, conn));
+                }
+                Err(e) => {
+                    let kind = if took >= run.ctx.timeout { "timeout" } else { "error" };
+                    *errors.entry(kind.to_string()).or_default() += 1;
+                    sample.get_or_insert(e);
+                }
+            }
+        }
+        for (i, first, conn) in connected {
+            Arc::get_mut(&mut clients[i]).expect("not shared yet").conns[first] = conn;
+        }
+        connect_report = Some(stats::ConnectReport { latency: stats::latency_of(&mut micros), errors, error_sample: sample });
+    }
     let deadline = (load.duration_secs > 0).then(|| Duration::from_secs(load.duration_secs));
     let count = load.count;
     let over = move |started: Instant, seq: u64| {
@@ -541,7 +597,9 @@ async fn generate(run: Arc<Run>, load: &Load) -> Result<stats::ClientReport, Fai
 
     let wall = started.elapsed();
     let recorder = std::mem::take(&mut *run.recorder.lock().unwrap_or_else(|p| p.into_inner()));
-    Ok(recorder.report(wall))
+    let mut report = recorder.report(wall);
+    report.connect = connect_report;
+    Ok(report)
 }
 
 /// Every metrics page, by target name; and the scrapes that failed, in words.
@@ -571,12 +629,13 @@ async fn health(ctx: &Ctx) -> BTreeMap<String, bool> {
     out
 }
 
-async fn wait_healthy(ctx: &Ctx, within: Duration) -> Result<(), Fail> {
+/// Wait until every cosigner answers Health ok; how long that took.
+async fn wait_healthy(ctx: &Ctx, within: Duration) -> Result<Duration, Fail> {
     let started = Instant::now();
     loop {
         let state = health(ctx).await;
         if state.values().all(|ok| *ok) {
-            return Ok(());
+            return Ok(started.elapsed());
         }
         if started.elapsed() >= within {
             let down: Vec<&String> = state.iter().filter(|(_, ok)| !**ok).map(|(n, _)| n).collect();
@@ -726,9 +785,9 @@ async fn setup(ctx: &Ctx, frost_keys: &[String], ecies_keys: &[String]) -> Resul
         report.frost_keys.insert(key_id.clone(), SetupKey { public_key: hex::encode(key), created });
     }
     // A hosted key is created under a generate intent naming the cosigner asked to lead (by its
-    // roster identifier, from Capabilities) and the spec; a fresh one per key, as the driver does.
-    // A cosigner of a release before generate intents reports identifier 0 and gets none: the
-    // cluster suite generates keys on the previous release before it upgrades.
+    // roster identifier, from Capabilities) and the spec. A cosigner of a release before generate
+    // intents reports identifier 0 and gets none: the cluster suite generates keys on the previous
+    // release before it upgrades.
     let leader_id = if ecies_keys.is_empty() {
         0
     } else {
@@ -737,28 +796,44 @@ async fn setup(ctx: &Ctx, frost_keys: &[String], ecies_keys: &[String]) -> Resul
             .map_err(|s| format!("Capabilities: {:?}: {}", s.code(), s.message()))?
             .node_identifier
     };
+    // Paced: a cosigner accepts a bounded rate of pushes to its peers (a hosted-key generation
+    // costs one at each), and answers UNAVAILABLE past it. Such an answer is retried for that key
+    // after a pause, a few times, instead of failing the setup. Every attempt carries a freshly
+    // signed intent: each node spends an intent's request id at its fence, so a retry with the
+    // first attempt's intent would be refused there.
+    const GENERATIONS_PER_SEC: f64 = 10.0;
     for key_id in ecies_keys {
-        let intent = match leader_id {
-            0 => None,
-            id => {
-                let id = u16::try_from(id)
-                    .map_err(|_| format!("GenerateKey of {key_id}: roster identifier {id} out of range"))?;
-                let unsigned = intent::generate_intent(
-                    &cluster,
-                    key_id,
-                    ECIES_SPEC,
-                    id,
-                    intent::new_request_id(),
-                    intent::now_ms(),
-                    INTENT_LIFETIME_MS,
-                );
-                Some(intent::sign_intent(&ctx.signer, &unsigned)?)
+        let mut attempt = 0;
+        let reply = loop {
+            let intent = match leader_id {
+                0 => None,
+                id => {
+                    let id = u16::try_from(id)
+                        .map_err(|_| format!("GenerateKey of {key_id}: roster identifier {id} out of range"))?;
+                    let unsigned = intent::generate_intent(
+                        &cluster,
+                        key_id,
+                        ECIES_SPEC,
+                        id,
+                        intent::new_request_id(),
+                        intent::now_ms(),
+                        INTENT_LIFETIME_MS,
+                    );
+                    Some(intent::sign_intent(&ctx.signer, &unsigned)?)
+                }
+            };
+            let request = pb::GenerateKeyRequest { key_id: key_id.clone(), spec: ECIES_SPEC.into(), intent };
+            tokio::time::sleep(Duration::from_secs_f64(1.0 / GENERATIONS_PER_SEC)).await;
+            match bounded(ctx.timeout, leader.generate_key(request)).await {
+                Err(s) if s.code() == tonic::Code::Unavailable && attempt < 5 => {
+                    attempt += 1;
+                    eprintln!("setup: hosted key {key_id}: UNAVAILABLE ({}), retrying in {} s", s.message(), 2 * attempt);
+                    tokio::time::sleep(Duration::from_secs(2 * attempt)).await;
+                }
+                answer => break answer,
             }
-        };
-        let request = pb::GenerateKeyRequest { key_id: key_id.clone(), spec: ECIES_SPEC.into(), intent };
-        let reply = bounded(ctx.timeout, leader.generate_key(request))
-            .await
-            .map_err(|s| format!("GenerateKey of {key_id}: {:?}: {}", s.code(), s.message()))?;
+        }
+        .map_err(|s| format!("GenerateKey of {key_id}: {:?}: {}", s.code(), s.message()))?;
         eprintln!("setup: hosted key {key_id} {} ({} replicas)", if reply.created { "generated" } else { "exists" }, reply.replicas);
         report
             .ecies_keys
@@ -803,7 +878,10 @@ async fn run(cli: Cli) -> Result<(), Fail> {
     let ctx = Arc::new(Ctx::new(&cli)?);
     let ca = cli.ca.clone();
     match cli.command {
-        Command::Wait { within_secs } => wait_healthy(&ctx, Duration::from_secs(within_secs)).await,
+        Command::Wait { within_secs } => {
+            let took = wait_healthy(&ctx, Duration::from_secs(within_secs)).await?;
+            print_json(&serde_json::json!({ "command": "wait", "healthy_after_secs": (took.as_secs_f64() * 10.0).round() / 10.0 }))
+        }
         Command::Setup { frost_keys, ecies_keys } => print_json(&setup(&ctx, &frost_keys, &ecies_keys).await?),
         Command::Sign { keys, load } => {
             let cluster = cluster_id(&ctx).await?;

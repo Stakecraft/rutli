@@ -34,12 +34,20 @@ echo "no peerPins: refused; tls.requirePeerPins=false: rendered with the opt-out
 echo "==> helm lint"
 helm lint "$C" -f "$PINS" >/dev/null
 for v in "$C"/ci/*.yaml; do helm lint "$C" -f "$v" >/dev/null; done
-helm lint "$C" -f "$REPO/deploy/soak/cosigner-values.yaml" -f "$PINS" >/dev/null
+# The soak still runs the legacy topology, which cannot meet the production profile (the chart's
+# default): its upgrade needs `profile: lab` (docs/production-profile.md, "Upgrading"). Without it
+# the chart refuses to render, so a plain `helm upgrade` cannot move the soak either.
+SOAK_LAB=(--set profile=lab)
+helm lint "$C" -f "$REPO/deploy/soak/cosigner-values.yaml" -f "$PINS" "${SOAK_LAB[@]}" >/dev/null
 
 echo "==> render"
 helm template rutli "$C" -n rutli -f "$PINS" >"$OUT/pernode-default.yaml"
 for v in "$C"/ci/*.yaml; do helm template rutli "$C" -n rutli -f "$v" >"$OUT/$(basename "$v" .yaml).yaml"; done
-helm template rutli "$C" -n rutli -f "$REPO/deploy/soak/cosigner-values.yaml" -f "$PINS" >"$OUT/soak.yaml"
+helm template rutli "$C" -n rutli -f "$REPO/deploy/soak/cosigner-values.yaml" -f "$PINS" "${SOAK_LAB[@]}" >"$OUT/soak.yaml"
+if helm template rutli "$C" -n rutli -f "$REPO/deploy/soak/cosigner-values.yaml" -f "$PINS" >/dev/null 2>&1; then
+  echo "the soak's legacy values render under the production profile — the chart's legacy guard is broken" >&2
+  exit 1
+fi
 kubectl kustomize "$REPO/deploy/k8s" >"$OUT/k8s.yaml"
 
 echo "==> deploy/k8s is the current chart render"
@@ -50,6 +58,34 @@ for f in pernode-default pernode-values pernode-migrated-soak-values k8s; do
   printf '%s: ' "$f"
   "$REPO/scripts/check-deploy-policy.sh" "$OUT/$f.yaml"
 done
+
+echo "==> update strategy: perNode StatefulSets are OnDelete (an upgrade must not restart all cosigners at once)"
+for f in pernode-default pernode-values pernode-migrated-soak-values k8s; do
+  n="$(yq -N 'select(.kind == "StatefulSet") | .metadata.name' "$OUT/$f.yaml" | wc -l | tr -d ' ')"
+  bad="$(yq -N 'select(.kind == "StatefulSet") | select(.spec.updateStrategy.type != "OnDelete") | .metadata.name' "$OUT/$f.yaml")"
+  if [ "$n" -lt 3 ] || [ -n "$bad" ]; then
+    echo "$f: $n StatefulSets, without updateStrategy OnDelete: ${bad:-none}" >&2
+    exit 1
+  fi
+done
+echo "perNode renders: OnDelete on every StatefulSet"
+legacy_strategy="$(yq -N 'select(.kind == "StatefulSet") | .spec.updateStrategy' "$OUT/legacy-values.yaml" "$OUT/soak.yaml" | grep -vx -e null -e '---' || true)"
+if [ -n "$legacy_strategy" ]; then
+  echo "the legacy StatefulSet must not get an updateStrategy (it already rolls one pod at a time): $legacy_strategy" >&2
+  exit 1
+fi
+echo "legacy renders: no updateStrategy, unchanged"
+helm template rutli "$C" -n rutli -f "$C/ci/pernode-values.yaml" --set updateStrategy.type=RollingUpdate >"$OUT/rolling.yaml"
+[ "$(yq -N 'select(.kind == "StatefulSet") | .spec.updateStrategy.type' "$OUT/rolling.yaml" | sort -u)" = RollingUpdate ] \
+  || { echo "updateStrategy.type=RollingUpdate was not honoured" >&2; exit 1; }
+if helm template rutli "$C" -n rutli -f "$C/ci/pernode-values.yaml" --set updateStrategy.type=Bogus >/dev/null 2>&1; then
+  echo "an unknown updateStrategy.type was accepted" >&2
+  exit 1
+fi
+echo "updateStrategy.type: RollingUpdate honoured, unknown values refused"
+
+echo "==> scripts/upgrade-cosigners.sh against a fake kubectl"
+"$REPO/scripts/test-upgrade-cosigners.sh" | tail -1
 
 echo "==> policy: the legacy topology must be rejected"
 if "$REPO/scripts/check-deploy-policy.sh" "$OUT/legacy-values.yaml" 2>/dev/null; then

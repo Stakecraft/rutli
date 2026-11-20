@@ -100,6 +100,22 @@ groups:
           summary: "Rütli cosigner {{ $labels.instance }} is down"
           description: "Cosigner instance {{ $labels.instance }} (job rutli-cosigner) has had up == 0 for more than 2 minutes. With a 2-of-3 quorum, one lost cosigner leaves zero margin — a second failure will halt signing entirely."
 
+      - alert: RutliCosignerRolloutPending
+        # The chart's per-node StatefulSets use updateStrategy OnDelete: `helm upgrade` changes the
+        # pod template but restarts nothing, so a cosigner runs the old image until
+        # scripts/upgrade-cosigners.sh rolls it. updated < replicas is that gap (kube-state-metrics).
+        # The selector matches the default StatefulSet names (<release>-rutli-cosigner-n<id>); with a
+        # fullnameOverride or nameOverride, change it.
+        expr: |
+          kube_statefulset_status_replicas_updated{statefulset=~".*rutli-cosigner.*"}
+            < kube_statefulset_replicas{statefulset=~".*rutli-cosigner.*"}
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner StatefulSet {{ $labels.statefulset }} runs an old pod template"
+          description: "StatefulSet {{ $labels.statefulset }} has had a newer pod template than its pod for at least 30 minutes. The chart sets updateStrategy OnDelete on the per-node StatefulSets, so a helm upgrade restarts no pod by itself and the cosigner keeps the old image and settings until it is rolled. Run scripts/upgrade-cosigners.sh --status to see the running and the target revision of each node, then scripts/upgrade-cosigners.sh to roll them one at a time (docs: chart README, Upgrading). Not an outage: signing is unaffected, but the cluster is not on the version you deployed."
+
       - alert: RutliKeystoreUnreadable
         # The cosigner's own key-store probe (every 15s, and on Signer.Health calls) cannot list
         # data_dir/keys, write to it, or open any key file in it. `up` stays 1 — the process and

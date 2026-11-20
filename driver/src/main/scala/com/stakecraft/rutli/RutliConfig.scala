@@ -23,6 +23,10 @@ package com.stakecraft.rutli
   *                      quorum of configured approvers signs the request.
   * @param signingJournal Persistent per-key signing journal (replay detection + optional rate
   *                      limit). See [[com.stakecraft.rutli.guard.SigningJournal]].
+  * @param profile       `production` | `lab` ([[ProductionProfile]], docs/production-profile.md).
+  *                      Production: the driver refuses to start while an enforcement setting is not
+  *                      at its production value, naming each one. Lab: logged only. Unset: as lab,
+  *                      with a warning; it becomes production in 0.6.
   */
 final case class RutliConfig(
     backend: String = "software",
@@ -33,6 +37,7 @@ final case class RutliConfig(
     software: Option[SoftwareConfig] = None,
     approval: Option[com.stakecraft.rutli.policy.ApprovalPolicy] = None,
     signingJournal: Option[SigningJournalConfig] = None,
+    profile: Option[String] = None,
 )
 
 /** Software-backend config (applies when `backend = "software"` OR `frost.delegate = "software"`).
@@ -104,6 +109,19 @@ final case class SigningJournalConfig(
   * @param signIntents `on` (default) | `off`: attach a signing intent to every FROST sign. `off` is
   *                   an emergency switch (a cluster-id or intent problem) that only works while
   *                   the cosigners do not set `signing_policy.require_intent`.
+  * @param requestTimeout     The budget of one driver call across every cosigner it tries (30 s).
+  *                   A DKG gets all of it in one attempt.
+  * @param attemptTimeout     The deadline of one attempt at one cosigner, for everything but signs
+  *                   and ceremonies (10 s).
+  * @param signAttemptTimeout The deadline of one sign attempt at one cosigner (5 s): a confirmation
+  *                   response must be signed within the synchronizer's confirmation response
+  *                   timeout (30 s by Canton's default), so two failovers must fit.
+  * @param keepaliveTime      HTTP/2 keepalive on every cosigner channel, also while idle (10 s; gRPC
+  *                   refuses less than 10 s).
+  * @param keepaliveTimeout   How long a keepalive ping may go unanswered before the connection is
+  *                   torn down and the next call fails over (5 s).
+  * @param leaderRecovery     After this long the first endpoint gets the lead back, after it lost it
+  *                   (60 s).
   */
 final case class FrostConfig(
     endpoint: Option[String] = None,
@@ -114,6 +132,12 @@ final case class FrostConfig(
     keyPrefix: String = "",
     clusterId: Option[String] = None,
     signIntents: String = "on",
+    requestTimeout: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.FiniteDuration(30, "s"),
+    attemptTimeout: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.FiniteDuration(10, "s"),
+    signAttemptTimeout: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.FiniteDuration(5, "s"),
+    keepaliveTime: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.FiniteDuration(10, "s"),
+    keepaliveTimeout: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.FiniteDuration(5, "s"),
+    leaderRecovery: scala.concurrent.duration.FiniteDuration = scala.concurrent.duration.FiniteDuration(60, "s"),
 ) {
 
   /** `sign-intents` as a switch; anything but on/off (or true/false) is a config error. */

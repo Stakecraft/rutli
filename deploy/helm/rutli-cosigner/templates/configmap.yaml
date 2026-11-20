@@ -45,6 +45,13 @@ data:
     {{- fail (printf "clusterId %q must be exactly 16 lowercase hex characters — the id derived from the current CA: shasum -a 256 ca.crt | cut -c1-16" $clusterId) }}
   {{- end }}
 {{- end }}
+{{- $profile := .Values.profile | default "production" }}
+{{- if not (has $profile (list "production" "lab")) }}
+  {{- fail (printf "profile %q must be production or lab (docs/production-profile.md)" $profile) }}
+{{- end }}
+{{- if and (eq $profile "production") (eq (include "rutli-cosigner.topology" .) "legacy") }}
+  {{- fail "profile production needs topology perNode: the legacy topology seals every node with one shared secret. Set profile: lab until the install runs docs/runbook-per-node-seal.md (docs/production-profile.md)" }}
+{{- end }}
 {{- $hosted := .Values.hostedKeys }}
 {{- if $hosted.enabled }}
   {{- $q := int $hosted.writeQuorum }}
@@ -75,6 +82,7 @@ data:
 {{- $id := int $node.id }}
   cosigner-{{ $id }}.json: |
     {
+      "profile": {{ $profile | quote }},
       "identifier": {{ $id }},
       {{- if $clusterId }}
       "cluster_id": {{ $clusterId | quote }},
@@ -132,6 +140,7 @@ data:
 {{- $id := add $i 1 }}
   cosigner-{{ $id }}.json: |
     {
+      "profile": {{ $profile | quote }},
       "identifier": {{ $id }},
       {{- if $clusterId }}
       "cluster_id": {{ $clusterId | quote }},

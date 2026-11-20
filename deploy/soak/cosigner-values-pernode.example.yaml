@@ -6,7 +6,8 @@
 # from `rutli-cosigner seal split-legacy` (public values — safe to commit), and pass it INSTEAD of
 # cosigner-values.yaml:
 #   helm -n rutli upgrade rutli deploy/helm/rutli-cosigner -f <exported values> -f deploy/soak/cosigner-values-pernode.yaml
-# The chart refuses to render while a placeholder is left in.
+# The chart refuses to render while a placeholder is left in. From 0.5.0 it also needs peerPins for
+# every node; they come with the exported values (the certificates do not change here).
 topology: perNode
 persistence:
   storageClassName: hcloud-volumes

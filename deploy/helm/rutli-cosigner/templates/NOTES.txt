@@ -29,6 +29,17 @@ Canton driver endpoints (one per node, each with its own TLS name):
     { url = "{{ $node.service }}.{{ $.Release.Namespace }}.svc.cluster.local:{{ $port }}", tls-name = "cosigner{{ int $node.id }}" },
 {{- end }}
   ]
+{{- if eq (include "rutli-cosigner.updateStrategy" .) "OnDelete" }}
+
+Upgrades: updateStrategy is OnDelete, so `helm upgrade` restarts no pod. After every upgrade that
+changes the pod template (image, resources, probes, env), roll the cosigners ONE AT A TIME:
+  scripts/upgrade-cosigners.sh -n {{ .Release.Namespace }} --release {{ .Release.Name }}
+  scripts/upgrade-cosigners.sh -n {{ .Release.Namespace }} --release {{ .Release.Name }} --status   (running vs target revision per node)
+Until the pods are rolled they keep the old image; the RutliCosignerRolloutPending alert fires after 30 minutes.
+{{- else }}
+
+WARNING: updateStrategy is RollingUpdate: an upgrade restarts all {{ len $nodes }} single-replica cosigners at once and signing stops until two are back.
+{{- end }}
 {{- if .Values.backup.enabled }}
 
 Backups: each pod's `backup` sidecar copies that node's sealed key files daily at
