@@ -99,6 +99,8 @@ for f in "$COSIGNER" "$DEALER"; do [ -x "$f" ] || fail "no $f"; done
 [ -f "$DRIVER_JAR" ] || fail "no $DRIVER_JAR"
 
 step "mTLS trust domain, seal secret, configs (127.0.0.1:$((BASE_PORT + 1))..$((BASE_PORT + 3)))"
+# Every node pins the TLS key of every cosigner (peers[].tls_spki_sha256, required with TLS): the
+# configs take the pins of the certificates just made from certs/peer-pins.json.
 "$REPO/scripts/gen-frost-certs.sh" 3 "$WORK/certs" >/dev/null
 export RUTLI_SEAL_SECRET
 RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
@@ -107,10 +109,12 @@ RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
 DRIVER_PIN="$(openssl x509 -in "$WORK/certs/driver.crt" -noout -pubkey | openssl pkey -pubin -outform DER \
   | openssl dgst -sha256 -hex | awk '{print $NF}')"
 mkconfig() { # node-config-name  cert-name  out
-  jq --arg work "$WORK" --arg cert "$2" --argjson base "$BASE_PORT" --arg prefix "$PREFIX" --arg pin "$DRIVER_PIN" '
+  jq --arg work "$WORK" --arg cert "$2" --argjson base "$BASE_PORT" --arg prefix "$PREFIX" --arg pin "$DRIVER_PIN" \
+    --slurpfile peerpins "$WORK/certs/peer-pins.json" '
       .listen = "127.0.0.1:\($base + .identifier)"
     | .data_dir = "\($work)/node\(.identifier)"
-    | .peers |= map(.endpoint = "https://127.0.0.1:\($base + .identifier)")
+    | .peers |= map(.endpoint = "https://127.0.0.1:\($base + .identifier)"
+        | .tls_spki_sha256 = ($peerpins[0].peerPins[.identifier | tostring] // error("no TLS key pin for cosigner\(.identifier)")))
     | .tls.ca_cert = "\($work)/certs/ca.crt"
     | .tls.cert = "\($work)/certs/\($cert).crt"
     | .tls.key = "\($work)/certs/\($cert).key"

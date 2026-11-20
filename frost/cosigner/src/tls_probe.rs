@@ -43,29 +43,9 @@ impl TlsProbe {
     /// trust anchors of `ca_cert`, this side's certificate and key, ALPN `h2`, and `domain` as the
     /// server name when set.
     pub fn new(cfg: &TlsConfig) -> Result<Self> {
-        let bad = |what: &str, e: &dyn std::fmt::Display| DaemonError::Config(format!("tls probe {what}: {e}"));
         let anchors = crate::trust::load_trust_anchors(&crate::tls::read_pem(&cfg.ca_cert)?, cfg.allow_expired_ca)
-            .map_err(|e| bad("ca_cert", &e))?;
-        let mut roots = rustls::RootCertStore::empty();
-        for a in anchors {
-            roots.add(a.der.into()).map_err(|e| bad("ca_cert", &e))?;
-        }
-        let certs = rustls_pemfile::certs(&mut crate::tls::read_pem(&cfg.cert)?.as_slice())
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| bad("cert", &e))?;
-        let key = rustls_pemfile::private_key(&mut crate::tls::read_pem(&cfg.key)?.as_slice())
-            .map_err(|e| bad("key", &e))?
-            .ok_or_else(|| bad("key", &"no private key in the file"))?;
-        let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
-            rustls::crypto::ring::default_provider(),
-        ))
-        .with_safe_default_protocol_versions()
-        .map_err(|e| bad("config", &e))?
-        .with_root_certificates(roots)
-        .with_client_auth_cert(certs, key)
-        .map_err(|e| bad("cert", &e))?;
-        config.alpn_protocols = vec![b"h2".to_vec()];
-        Ok(Self { config: Arc::new(config), domain: cfg.domain.clone() })
+            .map_err(|e| DaemonError::Config(format!("tls probe ca_cert: {e}")))?;
+        Ok(Self { config: crate::tls::rustls_client(cfg, &anchors)?, domain: cfg.domain.clone() })
     }
 
     /// Connect to `endpoint` (`https://host:port`) and report how the node refuses this client at

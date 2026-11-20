@@ -1,0 +1,9 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+# CI render: the chart's defaults plus placeholder TLS key pins, which every render needs
+# (tls.requirePeerPins unset = on). scripts/ci-deploy-policy.sh also layers it over the soak's
+# values, standing in for the pins the live install carries in its own values.
+peerPins:
+  "1": ["1111111111111111111111111111111111111111111111111111111111111111"]
+  "2": ["2222222222222222222222222222222222222222222222222222222222222222"]
+  "3": ["3333333333333333333333333333333333333333333333333333333333333333"]

@@ -55,7 +55,21 @@ done
 
 Each bundle holds one node's share DEK and hosted-key distribution seed and nothing else. Keep the
 CA key in your secret manager, and keep each node's bundle in a **different trust domain** from that
-node's backups (see `docs/disaster-recovery.md`).
+node's backups (see `docs/disaster-recovery.md`). One CA per cluster: never issue another cluster's
+certificates from it.
+
+Then pin the cosigners' TLS keys. Each node checks that a peer's certificate carries the key listed
+for it (`peers[].tls_spki_sha256`), when the peer calls it and when it dials the peer, and refuses to
+start without a pin for every node. `deploy/k8s/values.yaml` holds placeholders, which no node
+starts with. `gen-frost-certs.sh` printed the real values and wrote them to `certs/peer-pins.json`;
+put them under `peerPins` in `values.yaml` and re-render:
+
+```sh
+cat certs/peer-pins.json                      # {"peerPins": {"1": ["<64 hex>"], ...}}
+rutli-cosigner tls spki certs/cosigner1.crt   # the same value for one certificate
+$EDITOR deploy/k8s/values.yaml                # peerPins: "1": [...], "2": [...], "3": [...]
+scripts/render-k8s.sh
+```
 
 ## 3. Deploy
 
@@ -63,12 +77,16 @@ node's backups (see `docs/disaster-recovery.md`).
 kubectl apply -k deploy/k8s
 for i in 1 2 3; do kubectl -n rutli rollout status statefulset/rutli-cosigner-n$i; done
 kubectl -n rutli get pods -l app.kubernetes.io/name=rutli-cosigner   # rutli-cosigner-n{1,2,3}-0 Running
-kubectl -n rutli logs rutli-cosigner-n1-0 -c cosigner | grep -E 'mutual TLS enabled|share sealing enabled \(bundle node=1\)'
+kubectl -n rutli logs rutli-cosigner-n1-0 -c cosigner | grep -E 'mutual TLS enabled|share sealing enabled \(bundle node=1\)|TLS key pins'
 ```
 
 `values.yaml` sets the production profile (`docs/production-profile.md`): the cosigners refuse
 to start until the per-cluster values are filled in (`clusterId`, `keyfile`, `signingPolicy.signer_pins`)
 and re-rendered. Check the rendered config first: `rutli-cosigner --config cosigner-1.json check-config`.
+
+A cosigner that logs `is not in its own peers[id=N].tls_spki_sha256` exits at once, and Kubernetes
+restarts it in a loop (CrashLoopBackOff): the config still holds the placeholder pins, or pins of
+other certificates. Fix `peerPins` (§2), re-render and apply.
 
 No key exists yet — DKG runs when the key is first requested (§4). Other `t`-of-`n`: set
 `replicaCount`/`threshold` in `values.yaml`, re-render, and add certs and bundles.
@@ -259,7 +277,7 @@ and mounts the same volume read-only. A CSI volume snapshot is fine (storage lay
 
 ## Notes / hardening
 
-- The image is pinned by tag and digest in `kustomization.yaml` (currently `0.4.0`). To use your own build, pin it by digest:
+- The image is pinned by tag and digest in `kustomization.yaml` (currently `0.4.1`). To use your own build, pin it by digest:
   `kustomize edit set image ghcr.io/stakecraft/rutli-cosigner@sha256:…`
   From 0.5.0 on, release images are signed and carry build provenance; verify a release digest
   before you deploy it ([SECURITY.md, "Verify the image"](../../SECURITY.md#verify-the-image)).

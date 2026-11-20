@@ -40,6 +40,7 @@ live config. It works under any `profile`.
 |---|---|---|---|
 | `tls` | optional | present | Without mTLS there are no roles and no intents. A plaintext node verifies nothing. |
 | `tls.allow_expired_ca` | `false` | `false` | An emergency setting for a CA rotation. |
+| `tls.require_peer_pins` | unset = on | on (not `false`) | Without peer key pins, any certificate with a peer's name under the cluster CA is that peer: a replaced node's old certificate, or one minted by whoever holds the CA key. |
 | `share_seal` | optional | `secret_file` (a per-node seal bundle), no `secret_env` | Key files are plaintext without sealing. The legacy shared secret opens every node's files (P10, [runbook-per-node-seal.md](runbook-per-node-seal.md)). |
 | `signer_allowlist` | required with TLS | non-empty | Only the driver may sign. |
 | `operator_allowlist` | optional | non-empty | `verify-key` without a credential that can sign. |
@@ -66,8 +67,8 @@ live config. It works under any `profile`.
 
 The intent rows are not listed separately for a node without TLS: the `tls` row covers them.
 
-Coming with pending changes (each adds its own row when it lands): `tls.require_peer_pins` (peer
-key pins) and `signing_policy.refresh_min_interval_secs` (a minimum interval between refreshes).
+Coming with a pending change (it adds its own row when it lands): `signing_policy.refresh_min_interval_secs`
+(a minimum interval between refreshes).
 The driver's rows follow in its own change.
 
 Placement is not a config setting and the profile cannot check it: each cosigner in its own cluster

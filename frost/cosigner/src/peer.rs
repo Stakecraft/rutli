@@ -472,19 +472,44 @@ pub struct GrpcPeer {
 }
 
 impl GrpcPeer {
-    pub fn connect_lazy(
+    /// A peer at `endpoint`, dialled through `dial` ([`crate::tls::PeerDial`]: the TLS handshake
+    /// under the peer's own server name, then its key pins), or in plaintext without one (dev).
+    pub fn connect_lazy(identifier: Identifier, endpoint: &str, dial: Option<crate::tls::PeerDial>) -> Result<Self> {
+        match dial {
+            Some(dial) => {
+                let connector = dial.connector();
+                Self::connect_lazy_over(identifier, endpoint, &dial, connector)
+            }
+            None => {
+                let ep = tonic::transport::Endpoint::from_shared(endpoint.to_string())
+                    .map_err(|e| crate::DaemonError::Config(format!("bad endpoint {endpoint}: {e}")))?
+                    .timeout(PEER_RPC_TIMEOUT)
+                    .connect_timeout(PEER_RPC_TIMEOUT);
+                Ok(Self { identifier, client: PeerClient::new(ep.connect_lazy()) })
+            }
+        }
+    }
+
+    /// [`GrpcPeer::connect_lazy`] through a connector built from `dial`
+    /// ([`crate::tls::PeerDial::connector_over`]): tests run the mesh over in-memory streams.
+    pub fn connect_lazy_over<C>(
         identifier: Identifier,
         endpoint: &str,
-        tls: Option<tonic::transport::ClientTlsConfig>,
-    ) -> Result<Self> {
-        let mut ep = tonic::transport::Endpoint::from_shared(endpoint.to_string())
-            .map_err(|e| crate::DaemonError::Config(format!("bad endpoint {endpoint}: {e}")))?
+        dial: &crate::tls::PeerDial,
+        connector: crate::tls::PeerConnector<C>,
+    ) -> Result<Self>
+    where
+        C: tonic::codegen::Service<tonic::codegen::http::Uri> + Send + 'static,
+        C::Future: Send + 'static,
+        C::Error: Into<crate::tls::BoxError>,
+        hyper_util::rt::TokioIo<C::Response>: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+    {
+        let channel = dial
+            .endpoint(endpoint)?
             .timeout(PEER_RPC_TIMEOUT)
-            .connect_timeout(PEER_RPC_TIMEOUT);
-        if let Some(t) = tls {
-            ep = ep.tls_config(t)?;
-        }
-        Ok(Self { identifier, client: PeerClient::new(ep.connect_lazy()) })
+            .connect_timeout(PEER_RPC_TIMEOUT)
+            .connect_with_connector_lazy(connector);
+        Ok(Self { identifier, client: PeerClient::new(channel) })
     }
 }
 

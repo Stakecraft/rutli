@@ -3,6 +3,9 @@
 #
 # Chart values deploy/k8s/cosigner.yaml is rendered with (scripts/render-k8s.sh). Edit here, then
 # re-render; or install the chart directly with your own values.
+#
+# peerPins (below) are PLACEHOLDERS that must be replaced before the render you apply: a cosigner
+# refuses to start while its own entry does not pin its own certificate.
 topology: perNode
 # The chart's default: the cosigners refuse to start until every enforcement setting is on
 # (docs/production-profile.md). Before the first apply, fill in the per-cluster values a checked-in
@@ -20,6 +23,16 @@ refreshAllowlist: [refresher]
 # values (README §5), or with the chart.
 hostedKeys:
   enabled: false
+# TLS key pins of the three cosigners (peers[].tls_spki_sha256). PLACEHOLDERS (000…0001 to 000…0003,
+# not a real key hash): replace them with the
+# pins of your certificates before you apply — scripts/gen-frost-certs.sh prints them and writes
+# certs/peer-pins.json; `rutli-cosigner tls spki certs/cosigner1.crt` prints one — and re-render.
+# A cosigner refuses to start while its own entry does not list its certificate's key, so these
+# values cannot run by mistake.
+peerPins:
+  "1": ["0000000000000000000000000000000000000000000000000000000000000001"]
+  "2": ["0000000000000000000000000000000000000000000000000000000000000002"]
+  "3": ["0000000000000000000000000000000000000000000000000000000000000003"]
 # Per-node backup sidecars into per-node backup PVCs (README, "Backups").
 backup:
   enabled: true

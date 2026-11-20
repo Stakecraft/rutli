@@ -8,8 +8,8 @@ All notable changes to Rütli are documented here. Format loosely follows
 ### Changed (breaking default)
 
 - **The production profile: `"profile": "production"` makes a cosigner refuse to start while any
-  enforcement setting is off, and the Helm chart now defaults to it.** The threat model assumes TLS,
-  per-node sealing, the operator and refresher roles, signing and ceremony intents, epoch match, the
+  enforcement setting is off, and the Helm chart now defaults to it.** The threat model assumes TLS
+  with peer key pins, per-node sealing, the operator and refresher roles, signing and ceremony intents, epoch match, the
   signer ACL and SPKI pins, rate limits, key-file v2 and a pinned cluster id. Several of these are
   off by default. Under `production` the node now names each one that is not set and stops. `lab`
   logs the same list and starts. Unset behaves as `lab` with a warning, and **becomes `production`
@@ -64,6 +64,54 @@ All notable changes to Rütli are documented here. Format loosely follows
     first. Remove it once the driver signs intents.
   - Clusters that already set `require_intent: true` see no change.
   - Docs: `docs/approval-quorum.md` ("Switching enforcement on"), `docs/security/threat-model.md`.
+- **Cosigners pin each other's TLS keys, and a node with TLS refuses to start without the pins.**
+  Before, a peer was any certificate with CN `cosignerN` under the cluster CA. A replaced node's old
+  certificate stayed a valid peer until it expired, and whoever held the CA key could mint
+  `cosignerN` and, from a position on the network, receive that node's round-2 packages in a DKG or
+  refresh. Each roster entry now lists the SHA-256 of the SubjectPublicKeyInfo of that node's
+  certificate, one or two values (two during a key roll):
+  `"peers": [{ "identifier": 2, "endpoint": "…", "tls_spki_sha256": ["<64 hex>"] }]`. A node checks
+  the key of a peer that calls it (every Peer RPC) and of a peer it dials, before any request.
+  A mismatch is refused with the certificate's CN and the key it saw, logged, and counted in
+  `rutli_peer_pin_refusals_total{direction="inbound"|"outbound"}`. Pins are required for every
+  roster entry when TLS is on: `tls.require_peer_pins` unset is on, `false` is the explicit opt-out,
+  with a startup warning and `rutli_peer_pins_unpinned`. A node also refuses to start when its own
+  certificate's key is not in its own entry. One value under two nodes, an empty list or more than
+  two values are config errors. The offline ceremony commands (`ceremony resolve`, `recover-commit`,
+  `drop-quarantine`, `discard-partial-key`) join the mesh as the node, under the same rules. The
+  operator CLI (`refresh`, `verify-key`, `verify-hosted`, `delete-hosted-key`) is a Signer API
+  client: it checks a node's key when its client config lists pins, and does not require them.
+  New command: `rutli-cosigner tls spki <cert>…` prints a certificate's pin; with `--config` and
+  `tls spki --peers`, it shows the key each running node presents and whether it is pinned.
+  Helm: `peerPins` (node id → values) and `tls.requirePeerPins`; the chart refuses to render while
+  a node has no pins. `scripts/gen-frost-certs.sh` prints the pins of the cosigner certificates it
+  leaves in its output directory and writes them to `peer-pins.json`, a Helm values file;
+  `RUTLI_PIN_CONFIGS=<dir>` writes them into the JSON configs in `<dir>`. Not in this release: the
+  driver does not pin the cosigners, and `signer_pins` stay optional for the client roles.
+
+  **Upgrade note (from 0.4.0), one node at a time:**
+  1. Get the pin of every cosigner's current certificate: `rutli-cosigner tls spki cosigner1.crt …`
+     (this release's binary, on a workstation), or `openssl x509 -in cosigner1.crt -noout -pubkey |
+     openssl pkey -pubin -outform DER | sha256sum`.
+  2. Add the pins to every node's config while every node still runs 0.4.0. 0.4.0 ignores
+     `tls_spki_sha256` and `require_peer_pins`. With Helm, upgrade to this chart with the image still
+     at 0.4.0 and `peerPins` set: only the ConfigMap changes, and no pod restarts. Keep `peerPins` in
+     the saved values.
+  3. Upgrade one node to 0.5.0. It checks that every roster entry has a pin and that its own key is
+     in its own entry, and logs `peer N TLS key pins` for every node. Its peers on 0.4.0 still
+     present the keys you pinned, so it accepts them both ways, and they do not check pins at all.
+     Gate: signatures complete through this node, and `rutli_peer_pin_refusals_total` stays at 0.
+  4. Repeat for every other node. The protection holds once every node runs 0.5.0: a node on 0.4.0
+     still dials whatever answers with a valid certificate for the peer's name.
+  - A rollback of one node to 0.4.0 works with the same config: it ignores the pins, and the other
+    nodes still pin its unchanged key.
+  - Do not swap a certificate during the upgrade. To roll a key later: pins `[old, new]` on every
+    node, swap the certificate, then pins `[new]` (`docs/ca-rotation.md` §10).
+  - To upgrade without pins, set `tls.require_peer_pins: false` (Helm: `tls.requirePeerPins=false`)
+    and add them later. These keys come with this release because 0.5.0 refuses keys it does not
+    know: a key added in a later release would have to reach the binary before the config.
+  - Docs: `docs/security/threat-model.md` ("Holder of the cluster CA key"), `docs/ca-rotation.md`
+    (pins in Phases A and D, §10 key roll and emergency eviction), chart README ("Peer key pins").
 
 ### Security
 
@@ -79,7 +127,7 @@ All notable changes to Rütli are documented here. Format loosely follows
   bytes; `rutli_grpc_handshake_timeouts_total`), and an error during a handshake no longer ends
   the server. The server sends HTTP/2 keepalive pings
   (every 60 s, 20 s timeout), so connections to peers that vanished are closed. If the gRPC server
-  ever returns without a shutdown request, the daemon logs it and exits non-zero.
+  ever returns without a shutdown request, the daemon logs it and exits non-zero. Also in 0.4.1.
 - **heapless 0.7.17: nine `unsound` RustSec advisories (RUSTSEC-2026-0574 to -0582) are ignored in
   `frost/deny.toml`, with the reason recorded per advisory.** heapless comes in only through
   frost-core 2.2.0 → postcard 1.1.3, and no release of either moves it to the fixed heapless 0.9.4.
@@ -87,7 +135,7 @@ All notable changes to Rütli are documented here. Format loosely follows
   postcard itself uses only heapless' `Vec` and `String`, in functions frost-core does not call;
   and the cosigner and dealer binaries contain no heapless code (checked on their symbol tables).
   No code change; the same holds for 0.4.0 as released. In the lockfile, spin moves from 0.9.8 to
-  0.9.9, because 0.9.8 was yanked.
+  0.9.9, because 0.9.8 was yanked. The ignores are also in 0.4.1, which keeps spin 0.9.8.
 
 ### Changed
 
@@ -117,6 +165,15 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Fixed
 
+- **`rutli-cosigner audit-cross-check` no longer reports an empty side as consistent.** An empty
+  driver audit log passed with exit 0, and every journaled signature was skipped as "older than the
+  driver audit log". Empty journal directories passed the same way, their audited signatures skipped as
+  "for keys no journal holds". Now an empty driver audit log, journals that are all empty, or a run that
+  compared no signature at all prints `NOTHING TO COMPARE:` with the reason and exits **3**. Exit 3 is
+  not a pass. A script that treats only exit 1 as a finding must also treat 3 as one (the e2e scripts
+  in `scripts/` fail on any non-zero exit). Discrepancies still take precedence (exit 1). A missing file
+  is still exit 2. One empty journal among others prints a `WARNING:` line only: a node the leaders
+  never picked journals nothing. `docs/audit-cross-check.md`.
 - **A cosigner that answers a sign wrongly no longer stays the driver's leader.** Up to 0.4.0 the
   driver made any node that answered its preferred leader before it checked the signature. One
   compromised cosigner that returned a signature that does not verify, or `NOT_FOUND`,
@@ -215,11 +272,11 @@ All notable changes to Rütli are documented here. Format loosely follows
   only applied to a file the export created: an `--out` that already existed (for example 0644)
   kept its mode and received the artifact, with `--unsafe-plaintext` the raw private key, and a
   symlink at `--out` was followed. `export-key` now refuses an existing `--out` or a symlink, like
-  the other commands that write key material.
+  the other commands that write key material. Also in 0.4.1.
 - **The cosigner did not stop on SIGTERM.** It handled only SIGINT, and in its image it runs as
   PID 1, where the kernel ignores a signal without a handler: every pod stop waited out the grace
   period and ended in SIGKILL, with no drain of in-flight requests. It now shuts down gracefully on
-  SIGTERM or SIGINT.
+  SIGTERM or SIGINT. Also in 0.4.1.
 - **`{:?}` on a cluster-hosted key printed its private key.** `HostedKey` derived `Debug`, so a
   test assertion, a log field or a panic message that formatted a key (or a tombstone still
   holding one) would have shown `private_der`. No log line did. Its `Debug` now prints
@@ -346,6 +403,49 @@ All notable changes to Rütli are documented here. Format loosely follows
 - **The sealed software delegate is a test and migration aid, not a production option.** `docs/hosted-keys.md` and
   `docs/disaster-recovery.md` said it stays supported for production keys; `SECURITY.md` said never. The two now agree
   with `SECURITY.md`: it keeps every encryption key on the participant host; use cluster hosting or the HSM delegate.
+
+## [0.4.1] — 2026-11-20
+
+_0.4.0 with two security fixes in the cosigner (serving under a low file-descriptor limit;
+`export-key` and existing files), and the cosigner now stops on SIGTERM. No wire, key-file or
+config change; roll the cosigners in any order. The driver is unchanged apart from its version
+number._
+
+### Security
+
+- **The cosigner keeps serving when it runs short of file descriptors, and never stops serving
+  without saying so.** At start-up it raises its soft open-file limit to the hard limit and logs
+  both (`rutli_fd_limit`). It accepts gRPC connections in its own loop: an accept error such as
+  running out of descriptors is retried after a short backoff and reported
+  (`rutli_grpc_accept_errors_total`, alert `RutliGrpcAcceptErrors`), where it used to end the
+  server. Open connections are capped below the descriptor limit (the soft limit less 256, or half
+  of it under a limit below 512, at most 4096); past the cap new connections wait in the listen backlog
+  (`rutli_grpc_connections`, `rutli_grpc_connection_limit`, alert `RutliGrpcConnectionsNearLimit`).
+  A new connection gets 5 s to finish its TLS handshake (without TLS: to send its first
+  bytes; `rutli_grpc_handshake_timeouts_total`), and an error during a handshake no longer ends
+  the server. The server sends HTTP/2 keepalive pings
+  (every 60 s, 20 s timeout), so connections to peers that vanished are closed. If the gRPC server
+  ever returns without a shutdown request, the daemon logs it and exits non-zero.
+- **`export-key` refuses an existing `--out` or a symlink.** The 0600 mode only applied to a
+  file the export created: an `--out` that already existed (for example 0644) kept its mode and
+  received the artifact, with `--unsafe-plaintext` the raw private key, and a symlink at `--out`
+  was followed. `export-key` now creates a new owner-only file, like the other commands that write
+  key material, and removes it again if the write fails. The export passphrase is wiped from memory
+  after use.
+
+### Fixed
+
+- **The cosigner stops on SIGTERM.** It handled only SIGINT, and in its image it runs as PID 1,
+  where the kernel ignores a signal without a handler: every pod stop waited out the grace period
+  and ended in SIGKILL, with no drain of in-flight requests. It now shuts down gracefully on
+  SIGTERM or SIGINT. (From 0.5.0's changes.)
+
+### Build
+
+- `frost/deny.toml` ignores the nine heapless 0.7.17 `unsound` advisories
+  (RUSTSEC-2026-0574 to -0582), with the reason per advisory: heapless comes in only through
+  frost-core 2.2.0 → postcard 1.1.3, and none of the affected functions is reachable. No code or
+  lockfile change for it.
 
 ## [0.4.0] — 2026-11-14
 

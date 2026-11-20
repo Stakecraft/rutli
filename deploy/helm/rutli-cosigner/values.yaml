@@ -68,8 +68,8 @@ seal:
 
 image:
   repository: ghcr.io/stakecraft/rutli-cosigner
-  # Multi-arch index digest for v0.4.0 (amd64 + arm64). Retag/retarget carefully.
-  tag: "0.4.0@sha256:6e606d2b00b53a6d70864a15693a697e0052c0e458386c18c22307eba4912d98"
+  # Multi-arch index digest for v0.4.1 (amd64 + arm64). Retag/retarget carefully.
+  tag: "0.4.1@sha256:16ad19650b580609dfd0b90136cfe07ec65126addcbdbd4c8676da41fd558326"
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
@@ -101,6 +101,26 @@ tls:
   # true accepts an expired or not-yet-valid CA (never a non-CA): emergency use only, to rotate
   # away from a CA that has already expired (docs/ca-rotation.md). Set it back to false after.
   allowExpiredCa: false
+  # Refuse to render (and each cosigner refuses to start) unless every node has peerPins below.
+  # Unset = on. false is the explicit opt-out: the nodes then accept a peer whose certificate has the
+  # right name under the cluster CA, whatever its key, and warn at startup while it is set.
+  # requirePeerPins: false
+
+# TLS key pins of the cosigners, rendered into every node's roster as peers[].tls_spki_sha256: node
+# id -> one or two SHA-256 hex values of the SubjectPublicKeyInfo of that node's TLS certificate.
+# Two only while that node's key is rolled (docs/ca-rotation.md). Every node checks them when a
+# peer calls it and when it dials a peer, so a certificate with the right name but another key —
+# a replaced node's old one, or one minted by whoever holds the CA key — is refused. Required for
+# every node unless tls.requirePeerPins is false. Get a value with
+#   rutli-cosigner tls spki cosigner2.crt
+# or from peer-pins.json, which scripts/gen-frost-certs.sh writes next to the certificates (it is a
+# values file: helm ... -f certs/peer-pins.json). A map, not a nodes[] field, so a values file that
+# holds only the pins merges with the others.
+#   peerPins:
+#     "1": ["5f0c…"]
+#     "2": ["9a41…", "c7d2…"]   # node 2's key roll: old and new
+#     "3": ["0be8…"]
+peerPins: {}
 
 # tls.layout=shared only: the legacy Secret with ca.crt + cosigner1..N .crt/.key.
 tlsSecretName: rutli-cosigner-tls
