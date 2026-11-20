@@ -13,13 +13,26 @@ release by the maintainer.
 2. `scripts/third-party-licenses.sh --check` passes (CI runs it). After any dependency change, and
    after every version bump (the Rust notices list the workspace's own crates with their version),
    regenerate and commit both `THIRD-PARTY-LICENSES.txt` files first.
-3. `CHANGELOG.md`: move `[Unreleased]` under the new version.
+3. `CHANGELOG.md`: run `python3 scripts/changelog.py assemble <version> <YYYY-MM-DD>`. It writes the
+   `## [<version>] — <date>` section above the previous release from the fragments in `changelog.d/`
+   and from whatever is still under `[Unreleased]`, adds the release link at the bottom, and deletes
+   the fragments. Read the result, edit the wording, and add the upgrade notes. For a release
+   candidate add `--keep`: the fragments stay for the final release, and you fold or delete the rc
+   section by hand when you assemble the final one. The release pull request carries the label
+   `no-changelog` (it changes the version files and `CHANGELOG.md` itself).
 4. "Latest release" references name the new version: `SECURITY.md` (status and supported-versions
    table) and the version placeholder in `.github/ISSUE_TEMPLATE/bug_report.yml`.
 5. Tag only after the release PR is merged, and tag the merge commit by its SHA
    (`git tag -a v<version> -m v<version> <sha>`), never a branch head that still carries the old versions.
 6. The "Image build check" workflow is green on `main` (it builds both platforms the way the release
    does, without pushing; run it by hand if its last run is old).
+
+## Upgrading a cluster to a release
+
+A per-node install does not restart its cosigners on `helm upgrade` (`updateStrategy: OnDelete`):
+run `scripts/upgrade-cosigners.sh` afterwards, which restarts them one at a time and waits for each.
+Never restart all three at once; with threshold 2 of 3 nothing can sign until two are back. See the
+chart README, "Upgrading: one cosigner at a time".
 
 ## After the image is built: pin it by digest
 

@@ -684,12 +684,19 @@ that has the pin, an unpinned rotation is not even possible without
   re-render with `scripts/render-k8s.sh` (and keep it there: each node records its id in
   `data_dir/cluster-id` and refuses another). Secrets as in `secrets.example.yaml` (`perNode`
   layout: `rutli-cosigner-ca` and `rutli-cosigner-tls-<id>`). Roll with `kubectl delete pod` as
-  above, on the pods `rutli-cosigner-n<id>-0`.
+  above, on the pods `rutli-cosigner-n<id>-0`. With pins, Phase A and Phase D change `peerPins` in
+  the same `values.yaml` (old and new, then new only) before the re-render.
 - **Docker Compose** (`deploy/frost`): the same config field. Restart one container at a time
   (`docker compose restart cosignerN`). The certs are bind-mounted, so replace the files in place.
+  With pins, edit `peers[].tls_spki_sha256` in every config in Phase A (each node's old and new pin)
+  and Phase D (new only), before that phase's restarts. Do not point `RUTLI_PIN_CONFIGS` at the
+  live configs in Phase 1: it writes the new pins alone, which belong only in Phase D.
 - **Adding a node or issuing an operator cert later:** restore the CA key from escrow into a
   temporary 0700 dir, then `RUTLI_CA_DIR=<dir> RUTLI_CERTS="operator" scripts/gen-frost-certs.sh 3 <out>`.
-  Delete the plaintext key afterwards.
+  Delete the plaintext key afterwards. A new cosigner's certificate (`RUTLI_CA_DIR=<dir>
+  RUTLI_CERTS=cosigner4 scripts/gen-frost-certs.sh 4 <out>`) needs its pin (`rutli-cosigner tls
+  spki <out>/cosigner4.crt`) in its roster entry on every node, the new node included, before any
+  node starts with that roster.
 
 ## 10. Rolling one cosigner's TLS key (peer pins)
 

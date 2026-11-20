@@ -125,6 +125,12 @@ Store backups **off the node's host** and, ideally, geographically separated. Be
 sealed, the backup is only usable together with the node's seal bundle (a per-node Secret, never on
 the backup path) — keep the two recovery inputs in separate trust domains.
 
+A rebuilt node also needs its TLS certificate and key, which no backup holds. Every peer pins that
+key (`peers[].tls_spki_sha256`, required with TLS since 0.5.0), so reuse the node's old certificate
+and key if you still have them. A new certificate has a new key: put its pin on every node first
+([ca-rotation.md](ca-rotation.md) §10), or the rebuilt node refuses to start (its own key is not in
+its own entry) and its peers refuse it.
+
 **On Kubernetes: never mount a cosigner volume into another pod.** A cosigner's `data` PVC is
 mounted by that cosigner's pod and by nothing else, ever — not a backup Job, not a debug pod, not a
 sidecar. On 2026-10-07 the DevNet soak lost all signing for five minutes (54 failed signs) because a
@@ -192,7 +198,8 @@ one epoch** (taken between the same two refreshes). `t` backups of different epo
 
 1. Pick the newest epoch for which you hold `t` nodes' backups. The epoch is in each key file; a
    `restore` that refuses names it.
-2. Provision fresh cosigner hosts.
+2. Provision fresh cosigner hosts, each with its node's TLS certificate and key, or a new one whose
+   pin is on every node, survivors included, before it starts (§1).
 3. `rutli-cosigner restore` those `t` nodes' backups onto them (with their seal secrets).
 4. A surviving node on a newer epoch does not combine with the restored ones. Restore it to the
    same epoch (break-glass, §1) or rebuild it.
@@ -329,6 +336,8 @@ rather than silently continuing with a wrong or empty key set:
   from the CA file), so material cannot cross trust domains;
 - the rebuilt node's certificate CN present in every peer's `peer_allowlist` — replication runs over
   the mesh Peer API, which is allowlisted;
+- the rebuilt node's TLS key pinned in every peer's entry for it (`peers[].tls_spki_sha256`, since
+  0.5.0): with a new certificate, roll its pin first (§1);
 - **at least two live cosigners that hold the same copy of the key.** A key only one cosigner still
   holds is not pulled (`RutliHostedKeyCriticallyUnderReplicated` pages for it). Copy it by hand:
   `export-key` on the holder (daemon stopped), `import-key` on the rebuilt node, then
@@ -449,9 +458,10 @@ renewals. Losing it (the DevNet soak, found 2026-10-09) does not stop anything t
   restart ([ca-rotation.md](ca-rotation.md) §6), and treat `Sign` calls in that window as suspect
   (driver audit log).
 
-**Recovery:** a zero-downtime CA rotation. Pin the cluster id, have the cosigners trust old + new,
-give the driver the bundle and a new leaf (one participant restart), swap the cosigner leaves, then
-drop the old CA. Every intermediate state is mutually compatible, so a rolling restart never splits
+**Recovery:** a zero-downtime CA rotation. Pin the cluster id, have the cosigners trust old + new
+(and pin each node's old and new TLS key), give the driver the bundle and a new leaf (one participant
+restart), swap the cosigner leaves, then drop the old CA (and the old pins). Every intermediate
+state is mutually compatible, so a rolling restart never splits
 the mesh. Exact commands, per-step gates and rollback: [ca-rotation.md](ca-rotation.md).
 
 **Prevention (§4):** escrow the new CA key encrypted in two independent locations, test the restore

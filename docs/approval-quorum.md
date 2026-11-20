@@ -89,6 +89,8 @@ approval {
   timeout   = 30m
   rules = [
     # Matches the full key id: with `frost.key-prefix = "soak1-"` this must be "soak1-frost-".
+    # A rule for the namespace key alone must name it as it is minted: "frost-namespace" on a Splice
+    # validator, "frost-<node>-namespace" with Canton's own auto-init (docs/architecture.md).
     { key-id-prefix = "frost-", mode = "quorum", threshold = 2 }
   ]
   approvers = [
@@ -158,6 +160,10 @@ and `rutli_ceremony_intent_refusals_total{reason}`, and for the refresh interval
 `RutliRefreshOffSchedule`).
 
 ## Switching enforcement on
+
+The production profile ([production-profile.md](production-profile.md)) requires all of the below
+at once, and `rutli-cosigner check-config` lists what a config still lacks. Switch them on in the
+order of this section, then set `"profile": "production"`.
 
 The defaults require both kinds of intent on a node with TLS: ceremony intents since 0.4.0-rc.6,
 signing intents since 0.5.0. Such a cosigner refuses a DKG from a driver older than

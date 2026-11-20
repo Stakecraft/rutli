@@ -5,7 +5,54 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+### Changed (operators must act)
+
+- **Helm chart: a `helm upgrade` of a per-node install no longer restarts the cosigners; roll them
+  with `scripts/upgrade-cosigners.sh`.** The three per-node StatefulSets now use
+  `updateStrategy.type: OnDelete` (new value, default). Before, one `helm upgrade` restarted all three
+  single-replica pods at once, and with threshold 2 of 3 nothing could sign until two were back:
+  measured on a real three-node cluster, an outage of about 11 s and 54 of 750 signatures
+  `UNAVAILABLE`. Now Helm changes the spec and restarts nothing; the script deletes one pod, waits
+  until the replacement runs the new revision and is Ready, waits `--settle` seconds (default 120;
+  use 300 on 0.4.x), checks all three are Ready, and takes the next. It is resumable, has `--only`,
+  `--dry-run`, `--force` (restart nodes already on the target revision, for config-only changes),
+  `--status` (running vs target revision and image per node) and `--allow-degraded` (the
+  repair of one node that is not Ready, never a second node down). **Upgrade note:** after every
+  `helm upgrade` that changes the pod template (image, resources, probes), run the script; until then
+  the pods keep the old image, which `--status` and the new `RutliCosignerRolloutPending` alert
+  (30 minutes) show. The `helm upgrade` that installs this chart version restarts no pod itself.
+  `updateStrategy.type=RollingUpdate` restores the old behaviour. The legacy single StatefulSet is
+  unchanged. Chart README, "Upgrading: one cosigner at a time".
+
 ### Changed (breaking default)
+
+- **The production profile: `"profile": "production"` makes a cosigner refuse to start while any
+  enforcement setting is off, and the Helm chart now defaults to it.** The threat model assumes TLS
+  with peer key pins, per-node sealing, the operator and refresher roles, signing and ceremony intents, epoch match, the
+  signer ACL and SPKI pins, rate limits, key-file v2 and a pinned cluster id. Several of these are
+  off by default. Under `production` the node now names each one that is not set and stops. `lab`
+  logs the same list and starts. Unset behaves as `lab` with a warning, and **becomes `production`
+  in 0.6**. The new `rutli-cosigner check-config` prints the list without starting anything, under
+  any profile (exit 0 clean, 1 required findings, 2 the config does not load). An approval rule for
+  the namespace key is an advisory finding: reported, never refused. Table: `docs/production-profile.md`.
+  - **Upgrade note.** The chart's new `profile: production` default stops an install that does not
+    meet the list. Before `helm upgrade`, run `check-config` with the new image against the live
+    config and fix what it lists, in the order `docs/production-profile.md` ("Upgrading") gives.
+    Or set `profile: lab` for the upgrade and remove it once `check-config` exits 0. The chart
+    refuses `production` with `topology: legacy` at render time. `deploy/k8s` ships with
+    `production` and the enforcement that needs no per-cluster value. Fill in `clusterId`,
+    `keyfile` and `signingPolicy.signer_pins` before the first apply. The compose examples set
+    `lab`. A cosigner older than this release refuses a config with `profile` (unknown key), so
+    roll back the chart and the image together.
+- **The driver has the same profile: `profile = production` in `crypto.kms.config`.** It stops the
+  participant at startup while any enforcement setting is off, and names each one. The settings
+  are: backend `frost`; a delegate other than `software`; mTLS without `allow-expired-ca`; at least
+  two endpoints, each with its own `tls-name`; `sign-intents` on; `cluster-id` set; the audit log
+  and the signing journal; an HSM PIN from `pin-env`. A missing approval rule for the namespace key
+  is advisory. `lab` logs the same list. Unset behaves as `lab` with a warning and becomes
+  `production` in 0.6, so an existing driver config starts unchanged until then.
+  `com.stakecraft.rutli.tools.ConfigCheck` lists the findings offline. A driver older than this
+  release refuses a config with `profile` (unknown key).
 
 - **A cosigner refuses to start on a config key it does not know.** Until now only the `keyfile`
   block was parsed strictly. A misspelt key such as `require_intnet`, or `requireIntent` in
@@ -145,82 +192,6 @@ All notable changes to Rütli are documented here. Format loosely follows
   the server. The server sends HTTP/2 keepalive pings
   (every 60 s, 20 s timeout), so connections to peers that vanished are closed. If the gRPC server
   ever returns without a shutdown request, the daemon logs it and exits non-zero. Also in 0.4.1.
-- **A cosigner no longer makes hosted key material servable on one peer's word.** Up to 0.4.0 one
-  compromised cosigner could get an honest node to store its own material for a hosted key id that
-  node did not hold yet: by pushing it during another node's `GenerateKey`, by fencing the id
-  itself and pushing, by answering a read-repair first, or through the sweep's push, which then
-  spread the copy. A leader also counted a node holding other material as a failed replica, so the
-  leader and one more node could report a key created while a third served something else. Now:
-  - A node stores a hosted key it does not hold only when two peers return the same material and
-    every other peer answers, with no other material, no copy it cannot check and no valid
-    tombstone (read-repair, the anti-entropy sweep, a leader that finds the key on its peers). Only
-    an answer counts: a silent peer is unknown, never "does not hold it". Short of that it stores
-    nothing and answers `UNAVAILABLE` (trailer `rutli-error: hosted-unconfirmed`); it answers
-    `NOT_FOUND` only when `n - write_quorum + 1` nodes said they hold nothing under the id, or a node
-    holds a tombstone for it (which a node lacking the key now applies before it pulls). This holds
-    on every path that reads a key: `PublicKey`, `KeyInfo`, `Decrypt`, `EcdhDerive`,
-    `SymmetricEncrypt`, `SymmetricDecrypt`. Read-repair fan-outs are capped at 20 a second per node;
-    past that a lookup answers `UNAVAILABLE`, never `NOT_FOUND`.
-  - The anti-entropy sweep no longer pushes. Each node pulls what it lacks, once per key per sweep.
-  - A push into an id a node lacks is accepted only from the caller holding that node's generation
-    fence for the id under the ceremony id it names, and only if no other peer that answers holds
-    different material, a copy the node cannot check, or a valid tombstone.
-  - A conflict aborts a generation: the leader rolls it back and answers `ABORTED` (trailer
-    `rutli-error: hosted-conflict`). A rollback that misses a node is logged and counted
-    (`rutli_hosted_rollback_incomplete_total`, `RutliHostedRollbackIncomplete`). A leader that lacks
-    the id adopts a key its peers confirm instead of minting one, refuses over an unconfirmed
-    copy, and mints only when `n - write_quorum + 1` nodes answered that they hold nothing under
-    the id (with five nodes and `write_quorum: 2`, two nodes down stop generation). The leader
-    writes a new key to its own disk only after the write quorum holds it. A rollback purge undoes
-    only a write made under the same fence instance, and ends that fence on the node it reaches.
-  - Each pull or push check is charged to a per-node fan-out ceiling, and one sweep pulls at most
-    256 missing ids (64 per listing peer; ids more peers list first); the rest wait for the next
-    sweep. Decrypt budgets are charged once the key is loaded.
-  - Times on a pulled key are the latest of the agreeing peers', not the earliest.
-  - The sweep lists its peers at the same time, 10 s each, and goes on without a peer that hangs.
-  - A key from a peer whose creation or undelete time lies in the future (beyond
-    `signing_policy.clock_skew_secs`) is refused, so it cannot make itself undeletable. An RSA key
-    whose public half is not its own is refused, as EC keys already were.
-  - Every refusal is logged with the peer and the key and counted in the new
-    `rutli_hosted_replication_refusals_total{reason}`; conflicts also count in
-    `rutli_anti_entropy_conflicts_total`. Keys held with a future time are reported in the new
-    `rutli_hosted_keys_future_timestamp`. New alerts `RutliHostedReplicationRefused` and
-    `RutliHostedKeyFutureTimestamp`.
-  - `GenerateKeyReply` carries the leader's `commitment`, and `KeyInfo` with `local_only` reports a
-    node's own copy (`commitment`, derived `public_key_der`, no read-repair), for the driver's check
-    after a generation in a later release.
-
-  What stays open, in `docs/security/threat-model.md`: a compromised cosigner can still fence an id
-  nobody has created yet, store its own material on one honest node and keep a copy itself; it is
-  then the second agreeing peer, so the material spreads by pull and a later generation adopts it.
-  The next change closes this with a client-signed intent for creating a hosted key. A plant still
-  lands when every other holder is unreachable from the receiving node, and with `write_quorum: 2`
-  it can be one of the two holders without keeping a copy. With honest nodes only, a leader that
-  dies after writing one replica, with that replica's node down when the client retries, can still
-  leave the id forked (paged as a conflict); `docs/hosted-keys.md` has the step table.
-
-  **What changes for operators:**
-  - A key held by one node only is no longer copied automatically. That is a key whose other
-    holders are gone for good, a key written with `write_quorum: 1`, or a cluster of two cosigners.
-    `RutliHostedKeyCriticallyUnderReplicated` pages for it; copy it by hand with `export-key` and
-    `import-key` (`docs/hosted-keys.md` §4, `docs/disaster-recovery.md` §3c).
-  - `import-key` writes to one node, and the sweep no longer spreads it from there: run it on every
-    cosigner, or on two and let the third pull.
-  - After losing the whole cluster, restore two nodes' backups (or one, plus a hand copy).
-  - The daemon warns at startup when `hosted_keys.write_quorum` is below 2 or the roster has fewer
-    than three cosigners.
-
-  **Upgrade note (from 0.4.0):** upgrade one cosigner at a time, and **do not create or delete
-  hosted keys while the cluster is mixed**; existing keys keep being served. Upgraded nodes enforce
-  the new rules only on what they accept. A 0.4.0 node still accepts a push from any peer, pulls
-  the first copy and, as leader, writes its own copy first and treats a conflict as a failed
-  replica; a 0.4.0 leader that dies after its own write can still fork the id with a retry. A 0.4.0
-  node answers NOT_FOUND for a deleted key (it ignores `include_tombstone`), so until every node is
-  upgraded a deleted key can be pulled back from two old replicas until the next sweep applies the
-  tombstone. A 0.4.0 node's sweep push to an upgraded node is refused (`reason="unfenced"`,
-  `RutliHostedReplicationRefused`) until the upgraded node has pulled the key itself. Before you start, run `verify-hosted` for every hosted key and check
-  `rutli_anti_entropy_conflicts_total`: a replica that diverged earlier is not repaired by the
-  upgrade (`docs/hosted-keys.md` §4).
 - **heapless 0.7.17: nine `unsound` RustSec advisories (RUSTSEC-2026-0574 to -0582) are ignored in
   `frost/deny.toml`, with the reason recorded per advisory.** heapless comes in only through
   frost-core 2.2.0 → postcard 1.1.3, and no release of either moves it to the fixed heapless 0.9.4.
@@ -232,6 +203,14 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Changed
 
+- **Helm chart: the PodDisruptionBudget sets `unhealthyPodEvictionPolicy: AlwaysAllow`** (new value
+  `podDisruptionBudget.unhealthyPodEvictionPolicy`; set it to `""` to omit the field). A pod that is
+  running but not ready can now be evicted by a node drain, so one stuck cosigner no longer blocks
+  the drain; ready pods stay protected by `minAvailable`. Needs Kubernetes 1.27+ (the chart already
+  requires 1.29). The legacy topology's `tls-select` init container gets requests and limits (new
+  value `tlsSelect.resources`), and the soak-check CronJob in `deploy/soak` gets requests and limits.
+  Upgrade: `helm upgrade` changes the PodDisruptionBudget, and in the legacy topology (the DevNet
+  soak) it rolls the StatefulSet once because the pod template changes.
 - **A sign round 2 for a session the node no longer holds answers `ABORTED`, not `INTERNAL`,** and
   is counted in the new `rutli_sign_round2_unknown_session_total`. It is what a node answers
   after a restart or a ceremony commit between the two rounds, or past the session TTL; nothing
@@ -258,6 +237,12 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Fixed
 
+- **The production profile's namespace-key advisory recognises Canton's own key name.** Canton's
+  auto-init names the namespace key `<node>-namespace`, so its FROST id is
+  `<prefix>frost-<node>-namespace`. A Splice validator names it `namespace`. The cosigner's advisory
+  looked for the Splice form only and flagged a correct rule for the other. The docs and the Helm
+  values example now say which form applies and where to read the real id, because a rule written
+  for the wrong form never matches.
 - **`rutli-cosigner audit-cross-check` no longer reports an empty side as consistent.** An empty
   driver audit log passed with exit 0, and every journaled signature was skipped as "older than the
   driver audit log". Empty journal directories passed the same way, their audited signatures skipped as
@@ -496,6 +481,20 @@ All notable changes to Rütli are documented here. Format loosely follows
 - **The sealed software delegate is a test and migration aid, not a production option.** `docs/hosted-keys.md` and
   `docs/disaster-recovery.md` said it stays supported for production keys; `SECURITY.md` said never. The two now agree
   with `SECURITY.md`: it keeps every encryption key on the participant host; use cluster hosting or the HSM delegate.
+
+### Build
+
+- **Every push to main runs the whole set of checks once, unfiltered, and a red main opens an issue.**
+  `e2e.yml`, `image-build-check.yml`, `cluster-suite.yml` and `load.yml` now run on every push to
+  main (before: only when a path filter matched, or only on pull requests; main broke unnoticed
+  when two changes met that no single pull request's checks covered). The new workflow
+  `main-status.yml` watches them and CI: on a failure it opens the issue "main is red" (labels
+  `prio:p0`, `type:test`) with the first failing commit, the failing jobs and links, or comments on
+  the open one; it closes the issue when every check is green on the tip of main. Pushes to main are
+  never cancelled by a later push. The load test on a push runs on a GitHub-hosted runner and
+  compares nothing, so the weekly comparison keeps its baseline on the repository's runner; its
+  baseline lookup now ignores runs from pushes. The e2e workflow's own failure issue is replaced by
+  "main is red". README: status badge for main.
 
 ## [0.4.1] — 2026-11-20
 

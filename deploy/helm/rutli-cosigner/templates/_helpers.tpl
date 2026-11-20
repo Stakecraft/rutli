@@ -40,6 +40,15 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s:%s" .Values.image.repository .Values.image.tag }}
 {{- end }}
 
+{{/* perNode: how a changed pod template reaches the pods. OnDelete (default) or RollingUpdate. */}}
+{{- define "rutli-cosigner.updateStrategy" -}}
+{{- $t := .Values.updateStrategy.type | default "OnDelete" }}
+{{- if not (has $t (list "OnDelete" "RollingUpdate")) }}
+{{- fail (printf "updateStrategy.type must be OnDelete or RollingUpdate, got %q" $t) }}
+{{- end }}
+{{- $t }}
+{{- end }}
+
 {{/* The validated topology: "legacy" or "perNode". Every template branches on this. */}}
 {{- define "rutli-cosigner.topology" -}}
 {{- $t := .Values.topology | default "perNode" }}

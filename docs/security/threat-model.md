@@ -18,7 +18,10 @@ The statements below hold for a cluster where:
   (on by default with TLS since 0.5.0, unless opted out with `false`),
   `require_ceremony_intent` (on by default since 0.4.0-rc.6, unless opted out with `false`),
   `signer_acl_required`, `signer_may_refresh: false`, `require_epoch_match`
-  (`docs/approval-quorum.md`, "Switching enforcement on");
+  (`docs/approval-quorum.md`, "Switching enforcement on"). The production profile
+  (`"profile": "production"`) requires every setting this model assumes, and a node refuses to start
+  without them; [production-profile.md](../production-profile.md) has the full table, and
+  `rutli-cosigner check-config` lists what a config is missing;
 - key files are written in format v2 (`keyfile.write_version: 2`, `cluster_uuid` set) and the
   legacy shared seal master has been retired: per-node seal bundles, DEKs rotated
   (`seal rotate-dek`), the master escrowed offline and then destroyed (decision P1);

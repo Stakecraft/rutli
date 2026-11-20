@@ -111,7 +111,8 @@ Hosted keys require mutual TLS and sealed shares — `deploy/frost/config/` (pla
 enable them, and a cosigner refuses to start with `hosted_keys.enabled` and no `share_seal`.
 
 ```sh
-scripts/gen-frost-certs.sh 3 deploy/frost/certs                 # CA + cosigner certs + driver cert
+RUTLI_PIN_CONFIGS=deploy/frost/config-tls \
+  scripts/gen-frost-certs.sh 3 deploy/frost/certs               # CA + cosigner certs + driver cert, pinned
 export RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"              # from a secret manager in prod
 docker compose -f deploy/frost/docker-compose.tls.yml up -d
 ```

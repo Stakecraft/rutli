@@ -16,6 +16,11 @@ metadata:
   name: rutli-soak-check
   labels:
     app: rutli-soak-check
+  annotations:
+    # kube-linter: the stock alpine image installs bash, curl and jq with apk at start, which needs
+    # root and a writable root filesystem. The job holds no secret and no key and has no write access.
+    ignore-check.kube-linter.io/run-as-non-root: "apk add needs root in the stock alpine image"
+    ignore-check.kube-linter.io/no-read-only-root-fs: "apk add writes to the root filesystem"
 spec:
   schedule: "0 8 * * *" # daily 08:00 UTC, as in docs/testnet-soak.md
   concurrencyPolicy: Forbid
@@ -51,6 +56,9 @@ spec:
               securityContext:
                 allowPrivilegeEscalation: false
                 capabilities: { drop: ["ALL"] }
+              resources:
+                requests: { cpu: 10m, memory: 32Mi }
+                limits: { cpu: 200m, memory: 128Mi }
               volumeMounts:
                 - { name: script, mountPath: /soak, readOnly: true }
           volumes:

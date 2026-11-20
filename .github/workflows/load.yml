@@ -19,6 +19,9 @@ on:
       steady_secs:
         description: "Length of the steady stream in seconds (60 for a short run; 7200 to 14400 for a release candidate)"
         default: "60"
+  push:
+    # No path filter on a push to main: every commit on main gets the whole set (see main-status.yml).
+    branches: [main]
   pull_request:
     paths:
       - "frost/loadgen/**"
@@ -33,16 +36,16 @@ permissions:
 
 # A new push replaces a pull request's run; runs on main (weekly, manual) never cancel each other.
 concurrency:
-  group: load-${{ github.ref }}
+  group: load-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   load:
     name: Load scenarios (compose)
     # Weekly and manual runs on the repository's own runner when it is configured: the same
-    # machine every week, so latencies compare. A pull request (which compares nothing) runs on a
-    # GitHub-hosted runner and leaves the repository's runners to the per-commit CI.
-    runs-on: ${{ github.event_name != 'pull_request' && vars.CI_RUNNER || 'ubuntu-24.04' }}
+    # machine every week, so latencies compare. A pull request or a push to main (neither compares
+    # anything) runs on a GitHub-hosted runner and leaves the repository's runners to the per-commit CI.
+    runs-on: ${{ contains(fromJSON('["schedule","workflow_dispatch"]'), github.event_name) && vars.CI_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 330 || 60 }}
     permissions:
       contents: read
@@ -69,14 +72,21 @@ jobs:
       # regressed would accept the regression a week later.
       - name: Find the last green run on main
         id: previous
-        if: github.event_name != 'pull_request'
+        if: contains(fromJSON('["schedule","workflow_dispatch"]'), github.event_name)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          id="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
-            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/load.yml/runs?branch=main&status=success&per_page=1" \
-            | jq -r '.workflow_runs[0].id // empty')" || id=""
+          # Only timed runs (schedule, manual) are baselines: a push to main runs on a hosted runner.
+          # One query per event, so any number of pushes since cannot hide the last timed run.
+          id=""
+          for ev in schedule workflow_dispatch; do
+            run="$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/load.yml/runs?branch=main&status=success&event=${ev}&per_page=1" \
+              | jq -r '.workflow_runs[0] | select(. != null) | "\(.created_at) \(.id)"')" || run=""
+            if [ -n "$run" ]; then printf '%s\n' "$run"; fi
+          done > "${RUNNER_TEMP}/previous.txt"
+          id="$(sort -r "${RUNNER_TEMP}/previous.txt" | head -n 1 | cut -d' ' -f2)"
           echo "run_id=${id}" >> "$GITHUB_OUTPUT"
           echo "previous green run: ${id:-none}"
 
@@ -118,8 +128,9 @@ jobs:
   regression-issue:
     name: Open an issue on a regression
     needs: load
-    # Scheduled and manual runs on main only: a pull request shows its own red check.
-    if: failure() && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    # Scheduled and manual runs on main only: a pull request shows its own red check, a failed push
+    # to main is reported by main-status.yml.
+    if: failure() && contains(fromJSON('["schedule","workflow_dispatch"]'), github.event_name) && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
