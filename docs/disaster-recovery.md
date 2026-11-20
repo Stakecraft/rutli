@@ -26,8 +26,8 @@ key, Canton can rotate them.
 | A cosigner's disk lost, no backup of the current epoch | Not in place, today | The other `t` nodes keep signing. Networked repair (§2) is not shipped. The way back to `n` nodes is a cluster rebuild from `t` nodes' backups of one older epoch (§3), which rolls the key back to that epoch; then refresh. |
 | More than `n − t` cosigners lost simultaneously | Only from backups | **Restore `t` nodes from backups of one common epoch** (§3). Without such backups this is unrecoverable — which is why §4 is mandatory. |
 | Suspected key compromise (shares may be exposed) | Mitigate, not undo | The key cannot be rotated. If fewer than `t` shares of one epoch may be exposed, **refresh now** (inside the refresh interval this needs the operator's waiver: [ceremonies.md](ceremonies.md#refresh-interval)): the exposed shares no longer combine with the live ones. Then back up every node, rotate each node's DEK and drop the backups taken before the refresh (§3h): a refresh does not change the seal key that opens a node's old backups, and old shares of `t` nodes from one epoch still combine with each other. If `t` shares of one epoch may be exposed, no refresh helps: treat the key as compromised and escalate to a governance decision on the node's future. See `docs/phase-2-frost.md`. |
-| A cosigner rebuilt, its **cluster-hosted** keys gone with it | Yes, automatically | It pulls them back from a peer — read-repair on demand, anti-entropy within one sweep (§3c). No backup needed while ≥ 1 cosigner still holds the key. |
-| Every copy of a **cluster-hosted** key lost (whole cluster, no backup) | Only from backups | Restore **one** node's own backup onto that node (§3); the cluster re-replicates from it. With no backup the key is gone — rotate in Canton and accept §3b's bounded data gap. |
+| A cosigner rebuilt, its **cluster-hosted** keys gone with it | Yes, automatically | It pulls them back from its peers — read-repair on demand, anti-entropy within one sweep (§3c) — for every key **two** other cosigners hold. A key only one other cosigner holds: copy it by hand (§3c). No backup needed. |
+| Every copy of a **cluster-hosted** key lost (whole cluster, no backup) | Only from backups | Restore **two** nodes' own backups, each onto its own node (§3), or one, then copy the keys to a second node by hand (§3c); the third pulls from them. With no backup the key is gone — rotate in Canton and accept §3b's bounded data gap. |
 | Every **seal bundle** (or the legacy master secret) lost (backups intact but unopenable) | Only from an export | A sealed backup is useless without its node's seal bundle. An `export-key` artifact taken beforehand is the only recovery — see §3d. Without either, the key is gone: rotate in Canton and accept §3b's bounded gap. |
 | A **cluster-hosted** encryption key exposed | Mitigate, not undo | Rotate the key in Canton topology (the namespace key signs it; node identity is untouched). Rotation protects future traffic only — recorded traffic encrypted to the old key stays readable to whoever holds it. |
 | A cosigner restored from an **old backup** / volume snapshot | Yes, detected | `restore` refuses to roll a share back to an older epoch, even with `--force` (§1). A snapshot rollback or a break-glass restore is caught at the node's next start: its share is marked stale and refused for signing until current (`RutliStaleShare`). By design, t nodes restored to the same old sharing without their ceremony records (two in 2-of-3) vouch for each other and can still sign with it: t shares of any sharing are the key. |
@@ -209,9 +209,12 @@ one epoch** (taken between the same two refreshes). `t` backups of different epo
    [ceremonies.md](ceremonies.md#refresh-interval)) and back up every node. Restoring an older epoch
    makes its old shares live again, so this refresh is not optional.
 
-Cluster-hosted keys have a lower bar here: every node holds the whole key, so **one** restored
-backup is enough (from the node it was taken on), and anti-entropy pushes each key to the rebuilt
-nodes within one sweep. Shares are the part that needs `t` nodes' backups of one epoch.
+Cluster-hosted keys have a lower bar here: every node holds the whole key. A node pulls a key it
+lacks only from **two** peers that hold the same copy (since 0.5.0; nothing is pushed), so restore
+two nodes' own backups, each onto the node it was taken on, and the third pulls every key within one
+sweep. With one usable backup, restore it, then copy each hosted key to a second node by hand
+(`export-key` on the restored node, `import-key` on the second, §3c). Shares are the part that needs
+`t` nodes' backups of one epoch.
 
 ## §3b Lost delegate encryption key (software backend without persistence)
 
@@ -303,11 +306,16 @@ operational fact is that for a single-node loss you usually will not need the ba
 
 **Automatic.** A rebuilt cosigner re-acquires hosted keys from its peers by two mechanisms:
 
-- **read-repair** — a request for a key this node lacks pulls it from a peer before answering, so a
-  lagging replica does not return `NOT_FOUND` to Canton. (The driver deliberately does not fail over
-  on `NOT_FOUND`, so that answer has to be trustworthy.)
-- **anti-entropy** — every `anti_entropy_interval_secs` (default 300) each node pulls keys it lacks
-  and pushes keys a peer lacks. The first sweep runs one interval *after* startup, not at boot.
+- **read-repair** — a request for a key this node lacks pulls it before answering, so a lagging
+  replica does not return `NOT_FOUND` to Canton. (The driver deliberately does not fail over on
+  `NOT_FOUND`, so that answer has to be trustworthy.) With fewer than two peers holding the same
+  copy it answers `UNAVAILABLE`, and the driver fails over to a node that holds the key.
+- **anti-entropy** — every `anti_entropy_interval_secs` (default 300) each node pulls the keys it
+  lacks. The first sweep runs one interval *after* startup, not at boot. Since 0.5.0 nothing is
+  pushed: each node pulls for itself.
+
+Both store a key only when **two peers return the same material** and no peer that answers returns
+other material (`docs/hosted-keys.md` §4).
 
 A node that comes back with an empty `keys/` directory is therefore serving hosted-key traffic again
 within one sweep — or immediately, on the first request that needs a key. This is also why
@@ -330,7 +338,10 @@ rather than silently continuing with a wrong or empty key set:
   the mesh Peer API, which is allowlisted;
 - the rebuilt node's TLS key pinned in every peer's entry for it (`peers[].tls_spki_sha256`, since
   0.5.0): with a new certificate, roll its pin first (§1);
-- **at least one live cosigner that still holds the key.**
+- **at least two live cosigners that hold the same copy of the key.** A key only one cosigner still
+  holds is not pulled (`RutliHostedKeyCriticallyUnderReplicated` pages for it). Copy it by hand:
+  `export-key` on the holder (daemon stopped), `import-key` on the rebuilt node, then
+  `verify-hosted`.
 
 **Not automatic, by design.**
 
@@ -343,14 +354,16 @@ rather than silently continuing with a wrong or empty key set:
   If the whole cluster is lost, recovery is restoring one node's own backup (§3). With no backup at
   all you are back in §3b: rotate in Canton and accept the bounded data gap.
 - **Divergence is never merged.** If two nodes hold different material under one key id, the sweep
-  logs an error and increments `rutli_anti_entropy_conflicts_total` instead of picking a winner. Any
-  increase is page-worthy — it means something wrote outside the create-once discipline.
+  logs an error and increments `rutli_anti_entropy_conflicts_total` instead of picking a winner, and
+  a node that lacks the key does not pull either copy. Any increase is page-worthy — it means
+  something wrote outside the create-once discipline. Recovery: `docs/hosted-keys.md` §4, "When
+  `rutli_anti_entropy_conflicts_total` increases".
 
 **Deletes are tombstones (audit M2), so a stale node no longer resurrects a deleted key.** A delete
 replaces the key file with a tombstone on every node, authorized by a delete intent each node
 verifies, and the tombstone travels in anti-entropy: a node that was down during the delete, or was
 restored from a backup taken before it, has its live copy converted by its next sweep, and nothing
-is ever pushed to (or pulled from) a node that holds the tombstone. `restore` refuses to put a
+is ever pulled into a node that holds the tombstone. `restore` refuses to put a
 deleted key back over its tombstone without a break-glass (§1). See §3g for undelete.
 
 **Delete is not erasure.** The tombstone deliberately keeps the material (sealed) for the grace
@@ -368,11 +381,12 @@ This only works if the export was taken **in advance**. Decide during the key ce
 want one; there is no way to produce it after the seal secret is lost.
 
 ```sh
-# On any node of the target cluster, stopped:
+# On every node of the target cluster (or on two; the third pulls it):
 read -rs EXPORT_PASS && export EXPORT_PASS
 rutli-cosigner --config /etc/rutli/cosigner-1.json import-key \
   --in /media/offline/rutli-enc.export --passphrase-env EXPORT_PASS
-# Start the daemon; anti-entropy replicates the key to the rest of the cluster.
+# A node pulls a key only from two peers that hold the same copy: imported on one node only, the
+# key stays there.
 ```
 
 Verify before declaring recovery: the participant's published encryption public key in Canton
@@ -552,7 +566,8 @@ the master.
   neither open its own backup nor accept a replica from a peer. Rehearse a rebuild with an empty
   `keys/` directory and confirm the node re-acquires its hosted keys (the cluster tests
   `a_node_that_missed_a_write_is_repaired_and_then_serves_decrypts` and
-  `anti_entropy_pushes_a_key_to_a_node_that_missed_it` are the automated analogues), and confirm the
+  `anti_entropy_heals_a_node_that_missed_a_write_by_pulling_never_by_a_push` are the automated
+  analogues), and confirm the
   same drill does *not* hand it a FROST share — that one still needs §1 or §2.
 
 ## Verifying a recovery

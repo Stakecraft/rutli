@@ -118,9 +118,67 @@ running there.
 ### A single compromised cosigner (its share, DEK, TLS key, memory)
 
 **Cannot:** reconstruct a key (it holds one share), impersonate another node (per-peer TLS server
-names, exact client CNs and per-peer key pins), make an honest peer release a share without a valid intent, forge
-a tombstone, roll a peer back to an old epoch, or get a peer to accept a key file it planted (v2
-headers bind cluster, node, key id and kind; plaintext is refused, M4).
+names, exact client CNs and per-peer key pins, M3), make an honest peer release a share without a valid intent, forge
+a tombstone, or roll a peer back to an old epoch. A key file carried onto another volume does not
+load there (v2 headers bind cluster, node, key id and kind; plaintext is refused, M4).
+
+Since 0.5.0 it **cannot get an honest node to store hosted key material that another node the
+honest node can reach contradicts**. A node stores a hosted key it does not hold in two ways only:
+
+- it pulls it (read-repair, the anti-entropy sweep, a leader that finds the key already on its
+  peers), and only when two peers return the same material, every other peer answers, and none
+  returns other material, a copy it cannot check, or a valid tombstone (which it applies); with one
+  copy, copies that disagree, or a silent peer, it stores nothing and answers UNAVAILABLE;
+- it accepts a push from the caller that holds its generation fence for that id under that ceremony
+  id, and only after it has asked the other peers and none that answers holds different material,
+  a copy it cannot check, or a valid tombstone. A silent peer does not block a push, or one node
+  down would stop every generation.
+
+Only an answer counts: a silent peer (down, or slower than 3 s) is unknown, never "does not hold
+it", and an answer the node cannot use is unknown, never agreement. A node answers NOT_FOUND only
+when `n - write_quorum + 1` nodes, itself included, answered that they hold nothing under the id.
+One consequence is a veto it already has: by answering with garbage for an id nobody holds, a
+compromised cosigner turns NOT_FOUND into UNAVAILABLE for that id on the nodes that ask it. Honest
+nodes give an unusable answer only when something is wrong: a copy whose creation or undelete time
+lies beyond the asking node's clock plus `clock_skew_secs` (a skewed clock on either side), or one
+that does not open (a wrong seal bundle or pin). The asking node logs it with the peer and counts it
+(`reason="timestamp"` or `"invalid"`).
+
+The sweep no longer pushes. A generation that meets other material on any node is aborted and
+rolled back instead of counting the nodes that agree. Material whose creation or undelete time lies
+in the future (beyond `clock_skew_secs`) is refused, and an RSA or EC key whose public half is not
+its own is refused. Every refusal is logged with the peer and the key and counted
+(`rutli_hosted_replication_refusals_total`, `rutli_anti_entropy_conflicts_total`).
+
+What stays open, plainly:
+
+- **An id nobody has created yet.** Genkey fences carry no client intent, so it can fence such an id
+  on an honest node, store its own material there, and keep the same material itself. It is then
+  the second agreeing peer: the material spreads to the other nodes by pull, and a later generation
+  of the id adopts it. The cluster then agrees on material the attacker chose. It reads every hosted
+  key anyway; what it gains is a key that outlives its eviction. The next change closes this: a
+  client-signed intent for creating a hosted key, without which a genkey fence is refused.
+- **Every other holder unreachable.** The receiving node checks only the peers it can reach. If
+  every other node that holds the key is unreachable from it at that moment, a fenced push lands; it
+  is reported as a conflict (`RutliHostedKeyConflict`) once they are reachable again, and nothing
+  reconciles it automatically.
+- **One of the two write-quorum holders.** With `write_quorum: 2` it can acknowledge a replica it
+  does not keep (or drop it later). If the third node was down, one honest copy then exists, and no
+  node pulls from a single copy. `write_quorum: 3` closes this, at the cost of no generation while a
+  node is down.
+- **Honest nodes, a leader that dies mid-generation.** A replica a leader wrote before it died is
+  served by the node that holds it, though the client never got an answer. If that node is down when
+  the client retries, the retry mints a second key, and when the node returns the id is forked
+  (paged as a conflict). The same holds for a copy that a rollback could not reach. The leader
+  writes its own copy last, so a leader that dies before any replica leaves nothing behind.
+  Closing the rest needs replicas that are not served until the generation is confirmed
+  (`docs/hosted-keys.md`, "A leader that dies mid-generation").
+- **A 0.4.0 node** in a mixed cluster still accepts any push into an id it lacks, pulls from the
+  first peer that answers, accepts future timestamps, writes its own copy first as a leader and
+  counts a conflicting replica as a failed one; it answers NOT_FOUND for a deleted key, so a
+  deleted key can be pulled back from two old replicas until a sweep applies the tombstone. The
+  protection is per receiving node, from its upgrade on. Do not create or delete hosted keys while
+  the cluster is mixed (`docs/hosted-keys.md`, "Upgrading from 0.4.0").
 
 It also **cannot park a hosted key on a FROST key's id** (since 0.4.0-rc.6). FROST ids are
 deterministic (`<prefix>frost-<name>`), and a peer's `ReplicateKey` needs no client authorization,
@@ -237,7 +295,8 @@ the per-asker and total caps (F2). What remains:
 - like any participant, it can veto every ceremony, onboarding DKGs included, by refusing to take
   part (n-of-n);
 - hosted-key genkey/delkey fences are not intent-gated: it can block a hosted id's generation or
-  deletion, as it can by refusing;
+  deletion, as it can by refusing, and for an id no node holds yet it can create the key on an
+  honest node (above);
 - a ceremony it binds to itself on an honest node by racing the leader's fence (above) stays on that
   node until it gives it up or the orphan timeout (15 min) passes: the leader's abort cannot end
   another leader's ceremony. That blocks only the key's ceremonies, which it can veto anyway.
@@ -437,6 +496,12 @@ keys stay test material.
 - Single trust domain under one Kubernetes administration (P10).
 - Hosted keys are whole keys on every node: one compromised node reads them all, and rotation
   protects future traffic only.
+- A compromised cosigner can still create a hosted key under an id nobody has created yet and,
+  keeping a copy itself, have the cluster adopt it; plant over a key whose other holders the
+  receiving node cannot reach; or be the second of two write-quorum holders without keeping a copy.
+  Hosted-key generation is not yet bound to a client intent.
+- A leader that dies after writing a replica, with that replica's node down at the retry, can leave
+  an id forked between honest nodes (detected as a conflict, resolved by hand).
 - A driver-key thief signs non-gated keys within the ACL and rate limits (bounded and journaled,
   not prevented).
 - No defence against a TLS-terminating mesh (P3) or a memory snapshot of a running cosigner (L7).
