@@ -84,6 +84,17 @@ jobs:
           a="$(pins .github/workflows/publish-image.yml)"; b="$(pins .github/workflows/image-build-check.yml)"
           [ -n "$a" ] && [ "$a" = "$b" ] || { echo "::error::docker action pins differ between publish-image.yml and image-build-check.yml:"; diff <(echo "$a") <(echo "$b") || true; exit 1; }
           echo "OK: same docker action pins"
+      - name: The release dry run builds and tags by the release workflow's rules
+        run: |
+          set -euo pipefail
+          # The build options (provenance, sbom) and the tag rules, without the parts that must
+          # differ: the made-up version (value=) and the ref conditions (enable=) of the tag rules.
+          rules() { grep -hE '^[[:space:]]+(provenance|sbom):|^[[:space:]]+type=(semver|raw),' "$1" \
+            | sed -E 's/^[[:space:]]+//; s/,(enable|value)=.*$//' | sort -u; }
+          a="$(rules .github/workflows/publish-image.yml)"; b="$(rules .github/workflows/image-build-check.yml)"
+          # image-build-check.yml also has provenance/sbom in its own `build` job: same values.
+          [ -n "$a" ] && [ "$a" = "$b" ] || { echo "::error::build options or tag rules differ between publish-image.yml and image-build-check.yml:"; diff <(echo "$a") <(echo "$b") || true; exit 1; }
+          echo "OK: same build options and tag rules"
 
   build:
     name: Build ${{ matrix.platform }} (no push)
@@ -224,6 +235,9 @@ jobs:
           [ "${#tags[@]}" -ge 3 ] || { echo "::error::expected the version, major.minor and latest tags, got ${#tags[@]}"; exit 1; }
           printf 'tags:%s\n' "$(printf ' %s' "${tags[@]}")"
           docker buildx imagetools create "${tags[@]}" "${IMAGE}@${DIGEST}"
+          # With one platform there is no cross-platform merge of two indexes: that part of the release
+          # is only proven on tag day. This checks the tags, the digest agreement, the attestation
+          # manifest and the readable SBOM and provenance around it.
 
           # As the index job of publish-image.yml, for one platform.
           docker buildx imagetools inspect --raw "${IMAGE}:${VERSION}" > index.json
@@ -231,7 +245,7 @@ jobs:
           reported="$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" --format '{{json .Manifest}}' | jq -r .digest)"
           [ "$digest" = "$reported" ] || { echo "::error::index digest ${digest} != buildx's ${reported}"; exit 1; }
           jq . index.json
-          jq -e --arg a "$DIGEST" '
+          jq -e '
             [.manifests[] | select(.platform.os == "linux") | {arch: .platform.architecture, d: .digest}] as $imgs
             | [.manifests[] | select(.annotations["vnd.docker.reference.type"] == "attestation-manifest")
                 | (.annotations["vnd.docker.reference.digest"] // .annotations["com.docker.reference.digest"])] as $att
@@ -240,8 +254,9 @@ jobs:
           ' index.json >/dev/null || { echo "::error::the index lacks the image or its attestation manifest"; exit 1; }
           docker buildx imagetools inspect "${IMAGE}@${digest}" --format '{{json .SBOM}}' > sbom.json
           docker buildx imagetools inspect "${IMAGE}@${digest}" --format '{{json .Provenance}}' > provenance.json
-          jq -e '(keys | length) == 1 and all(.[]; .SPDX.spdxVersion != null)' sbom.json >/dev/null \
+          # One platform: buildx prints the document itself ({"SPDX":...}), not a map by platform.
+          jq -e '(if has("SPDX") then {p: .} else . end) | (keys | length) == 1 and all(.[]; .SPDX.spdxVersion != null)' sbom.json >/dev/null \
             || { echo "::error::cannot read an SPDX SBOM"; jq -c 'keys' sbom.json; exit 1; }
-          jq -e '(keys | length) == 1 and all(.[]; .SLSA != null)' provenance.json >/dev/null \
+          jq -e '(if has("SLSA") then {p: .} else . end) | (keys | length) == 1 and all(.[]; .SLSA != null)' provenance.json >/dev/null \
             || { echo "::error::cannot read provenance"; jq -c 'keys' provenance.json; exit 1; }
           echo "OK: ${IMAGE}@${digest} holds the platform image with SBOM and provenance, tags: $(jq -r '.tags | join(" ")' <<<"$META_JSON")"
