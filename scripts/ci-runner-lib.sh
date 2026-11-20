@@ -1,9 +1,11 @@
+# shellcheck shell=bash
 # Copyright 2026 StakeCraft
 # SPDX-License-Identifier: Apache-2.0
 # Shared helpers for ci-runner-up.sh / ci-runner-down.sh. Source it; do not execute it.
 # See deploy/ci-runner/README.md for the trust model: the runner must only ever talk to the
 # docker daemon of the dedicated, host-mount-free Colima VM — never to Docker Desktop's.
 
+# shellcheck disable=SC2034  # CI_CPU/MEMORY/DISK/PROJECT/WORKDIR_DEFAULT are read by the scripts that source this file
 CI_PROFILE="${RUTLI_CI_PROFILE:-rutli-ci}"
 CI_CPU="${RUTLI_CI_CPU:-4}"
 CI_MEMORY="${RUTLI_CI_MEMORY:-8}"

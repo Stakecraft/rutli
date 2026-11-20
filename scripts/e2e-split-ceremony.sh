@@ -58,6 +58,7 @@ cleanup() {
 trap cleanup EXIT
 
 step "Build rutli-cosigner and rutli-dealer from the working tree"
+# shellcheck disable=SC2086  # CARGO_FLAGS is a list of flags, split on purpose
 (cd "$REPO/frost" && cargo build ${CARGO_FLAGS:-} -p rutli-cosigner --bins)
 BIN="$REPO/frost/target/debug"
 COSIGNER="$BIN/rutli-cosigner"
@@ -309,6 +310,7 @@ for i in 1 2 3; do start "$i"; done
 for i in 1 2 3; do wait_healthy "$i"; done
 if out="$(grpc -d "{\"key_id\":\"$KEY_ID\",\"message\":\"$MSG_B64\"}" "127.0.0.1:$((BASE_PORT + 1))" \
   rutli.cosigner.v1.Signer/Sign 2>&1)"; then fail "an intent-less Sign succeeded with require_intent on"; fi
+# shellcheck disable=SC2015  # fail is the intended else-branch
 grep -q "PermissionDenied" <<<"$out" && grep -q "no signing intent" <<<"$out" \
   || fail "intent-less Sign refused for the wrong reason: $out"
 echo "intent-less Sign -> PermissionDenied"

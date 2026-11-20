@@ -299,15 +299,31 @@ fn spied(nodes: &[Arc<Node>], faults: &[Fault]) -> (Peers, Log) {
     (peers, log)
 }
 
-/// Distinct sessions in the order they first appear in the log.
-fn sessions(log: &Log) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for (_, _, s, _) in log.lock().unwrap().iter() {
-        if !out.contains(s) {
-            out.push(s.clone());
+type Entry = (u16, &'static str, String, String);
+
+/// The log split into attempts, each starting at the leader's (node 1's) round 1. Every member of
+/// an attempt has its own session id, so attempts are told apart by the leader, not by an id.
+fn attempts(log: &Log) -> Vec<Vec<Entry>> {
+    let mut out: Vec<Vec<Entry>> = Vec::new();
+    for e in log.lock().unwrap().iter() {
+        if e.0 == 1 && e.1 == "round1" {
+            out.push(Vec::new());
+        }
+        if let Some(cur) = out.last_mut() {
+            cur.push(e.clone());
         }
     }
     out
+}
+
+/// What node `node` logged as `what` in attempt `a`.
+fn on(a: &[Entry], node: u16, what: &str) -> Vec<Entry> {
+    a.iter().filter(|(n, w, _, _)| *n == node && *w == what).cloned().collect()
+}
+
+/// The session id node `node` was given in attempt `a`.
+fn sid(a: &[Entry], node: u16) -> String {
+    on(a, node, "round1")[0].2.clone()
 }
 
 fn marker_exists(dir: &Path, node: usize, session: &str) -> bool {
@@ -325,24 +341,26 @@ async fn a_peer_failing_round2_is_routed_around_with_a_fresh_session_and_fresh_c
     let sig = sign(&nodes[0], &peers, KEY, &msg).await.unwrap();
     assert!(verifies(&group, &msg, &sig));
 
-    let s = sessions(&log);
-    assert_eq!(s.len(), 2, "one failed attempt, one good one: {s:?}");
-    assert_ne!(s[0], s[1], "each attempt is a fresh session");
-    let entries = log.lock().unwrap().clone();
-    let on = |node: u16, what: &str, session: &str| {
-        entries.iter().filter(|(n, w, s, _)| *n == node && *w == what && s == session).collect::<Vec<_>>()
-    };
+    let a = attempts(&log);
+    assert_eq!(a.len(), 2, "one failed attempt, one good one: {a:?}");
     // Attempt 1 = {1, 2}; attempt 2 = {1, 3}; node 2 is never asked again.
-    assert_eq!(on(2, "round1", &s[0]).len(), 1);
-    assert!(on(2, "round1", &s[1]).is_empty() && on(3, "round1", &s[0]).is_empty());
-    assert_eq!(on(3, "round1", &s[1]).len(), 1);
+    assert_eq!(on(&a[0], 2, "round1").len(), 1);
+    assert!(on(&a[1], 2, "round1").is_empty() && on(&a[0], 3, "round1").is_empty());
+    assert_eq!(on(&a[1], 3, "round1").len(), 1);
+    // Every member has its own session id, and every attempt fresh ones.
+    let ids = [sid(&a[0], 1), sid(&a[0], 2), sid(&a[1], 1), sid(&a[1], 3)];
+    assert_eq!(ids.iter().collect::<std::collections::BTreeSet<_>>().len(), 4, "{ids:?}");
     // The leader's commitments differ between attempts: never reused across subsets.
-    assert_ne!(on(1, "round1", &s[0])[0].3, on(1, "round1", &s[1])[0].3);
-    // The failed session: aborted on its members, the leader's nonce burned (it shared in round 2)
-    // and node 2 holding nothing; the successful one burned on both of its signers.
-    assert_eq!(on(1, "abort", &s[0]).len() + on(2, "abort", &s[0]).len(), 2);
-    assert!(marker_exists(tmp.path(), 1, &s[0]) && !marker_exists(tmp.path(), 2, &s[0]));
-    assert!(marker_exists(tmp.path(), 1, &s[1]) && marker_exists(tmp.path(), 3, &s[1]));
+    assert_ne!(on(&a[0], 1, "round1")[0].3, on(&a[1], 1, "round1")[0].3);
+    // The failed session: aborted on its members, each under its own id, the leader's nonce burned
+    // (it shared in round 2) and node 2 holding nothing; the successful one burned on both signers.
+    let aborts: Vec<Entry> = on(&a[0], 1, "abort").into_iter().chain(on(&a[0], 2, "abort")).collect();
+    assert_eq!(aborts.len(), 2);
+    for (n, _, s, _) in &aborts {
+        assert_eq!(*s, sid(&a[0], *n), "node {n} is aborted under its own id");
+    }
+    assert!(marker_exists(tmp.path(), 1, &sid(&a[0], 1)) && !marker_exists(tmp.path(), 2, &sid(&a[0], 2)));
+    assert!(marker_exists(tmp.path(), 1, &sid(&a[1], 1)) && marker_exists(tmp.path(), 3, &sid(&a[1], 3)));
     for n in &nodes {
         assert_eq!(n.pending_sign_count(KEY), 0);
     }
@@ -358,13 +376,9 @@ async fn an_invalid_signature_share_is_attributed_and_routed_around() {
     let msg = digest(b"bad share");
     let sig = sign(&nodes[0], &peers, KEY, &msg).await.unwrap();
     assert!(verifies(&group, &msg, &sig));
-    let s = sessions(&log);
-    assert_eq!(s.len(), 2, "{s:?}");
-    let entries = log.lock().unwrap().clone();
-    assert!(
-        !entries.iter().any(|(n, w, sess, _)| *n == 2 && *w == "round1" && *sess == s[1]),
-        "the culprit is not asked again"
-    );
+    let a = attempts(&log);
+    assert_eq!(a.len(), 2, "{a:?}");
+    assert!(on(&a[1], 2, "round1").is_empty(), "the culprit is not asked again");
 
     // With the culprit in every subset there is nothing to route to: the sign fails, never
     // returning a bad signature.
@@ -383,9 +397,9 @@ async fn three_of_five_retries_through_subsets_until_one_works() {
     let msg = digest(b"three of five");
     let sig = sign(&nodes[0], &peers, KEY, &msg).await.unwrap();
     assert!(verifies(&group, &msg, &sig));
-    let s = sessions(&log);
+    let a = attempts(&log);
     // {1,2,3} fails at 2 (round 1), {1,3,4} fails at 3 (round 2), {1,4,5} signs.
-    assert_eq!(s.len(), 3, "{s:?}");
+    assert_eq!(a.len(), 3, "{a:?}");
     for n in &nodes {
         assert_eq!(n.pending_sign_count(KEY), 0);
     }
@@ -448,12 +462,12 @@ async fn a_round2_tampered_in_transit_is_refused_by_the_node_and_routed_around()
     let msg = digest(b"the real message");
     let sig = sign(&nodes[0], &peers, KEY, &msg).await.unwrap();
     assert!(verifies(&group, &msg, &sig));
-    let s = sessions(&log);
+    let a = attempts(&log);
     let entries = log.lock().unwrap().clone();
     let refused: Vec<_> = entries.iter().filter(|(n, w, _, _)| *n == 2 && *w == "refused").collect();
     assert_eq!(refused.len(), 1, "{entries:?}");
     assert!(refused[0].3.contains("round-1 binding"), "{}", refused[0].3);
-    assert!(!marker_exists(tmp.path(), 2, &s[0]), "node 2 never burned (nor signed) the tampered session");
+    assert!(!marker_exists(tmp.path(), 2, &sid(&a[0], 2)), "node 2 never burned (nor signed) the tampered session");
 }
 
 // ── nonce-marker pruning (audit L4) ───────────────────────────────────────────────────────────
