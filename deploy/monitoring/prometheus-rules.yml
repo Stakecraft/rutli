@@ -298,6 +298,24 @@ groups:
           summary: "Rütli cosigner {{ $labels.instance }} ran a DKG/refresh without a client ceremony intent"
           description: "{{ $labels.instance }} took part in a DKG or refresh that carried no client-signed ceremony intent, accepted because signing_policy.require_ceremony_intent is off on this node: set to false (the opt-out; on by default with TLS since 0.4.0-rc.6), or the node runs without TLS. A compromised cosigner can still start (and split) ceremonies on it. Once the driver (0.4.0-rc.4 or later) and the refresh job sign ceremony intents, remove the opt-out on every node (docs/approval-quorum.md, Switching enforcement on). On a cluster that enforces, this never fires."
 
+      - alert: RutliRefreshRefused
+        expr: sum by (instance) (increase(rutli_refresh_interval_refusals_total[15m])) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} refused a refresh that came too soon"
+          description: "{{ $labels.instance }} refused to take part in a refresh because it took part in a refresh of the same key less than signing_policy.refresh_min_interval_secs ago (default 72 h). The refusal (cosigner log, and the client's error) names the ceremony it counts from: look that ceremony up (rutli-cosigner ceremony status, or verify-key's refresh count). If it committed and you did not start it, the key is already on a new epoch and every older backup no longer restores a node: first make sure every node has a backup of the new epoch: the backup sidecar takes one within backup.checkEverySecs (5 min) of the commit; check each node's backup container log for BACKUP_TRIGGER followed by BACKUP_OK after the commit time. Then replace the credential: the refresher certificate's signer_pins entry, and turn signer_may_refresh off if the driver certificate may be the one. A refusal right after one of your own runs is expected. An incident refresh that cannot wait needs signing_policy.refresh_interval_waived_at on every node (docs/ceremonies.md, Refresh interval)."
+
+      - alert: RutliRefreshOffSchedule
+        expr: max by (key) (rutli_refreshes_6d) > 1
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli key {{ $labels.key }} was refreshed more than once in 6 days"
+          description: "A cosigner committed more than one refresh of {{ $labels.key }} in the last 6 days, counted by commit time. The shipped schedule is weekly; the window is a day shorter than the schedule so a weekly run that lands a little early (scheduler jitter) does not fire this. Check that each refresh was yours (an incident refresh, a retried run); if not, replace the refresher certificate's pin and turn signer_may_refresh off. Every refresh leaves the nodes' older backups unable to restore them: check that each node logged BACKUP_TRIGGER and BACKUP_OK after the last refresh (docs/disaster-recovery.md, docs/ceremonies.md Refresh interval)."
+
       - alert: RutliSignRateLimited
         expr: increase(rutli_sign_rate_limited_total[10m]) > 0
         for: 0m

@@ -122,6 +122,42 @@ All notable changes to Rütli are documented here. Format loosely follows
   - Docs: `docs/security/threat-model.md` ("Holder of the cluster CA key"), `docs/ca-rotation.md`
     (pins in Phases A and D, §10 key roll and emergency eviction), chart README ("Peer key pins").
 
+- **A key is refreshed at most once per 72 hours.** Every cosigner takes part in at most one
+  refresh of a key per `signing_policy.refresh_min_interval_secs` (default 259200, at most 30 days,
+  `0` turns it off with a startup warning). Before, nothing limited refreshes: whoever held the
+  refresher certificate, or the driver certificate while `signer_may_refresh` is on, could refresh a
+  key over and over. Every refresh leaves the nodes' older backups unable to restore them, so the
+  backups could end up on no common epoch and a later loss of nodes could lose the key. Each node
+  checks the interval itself at the refresh fence and at part 1, before any guard, fence mark or
+  crypto, and the leader checks it before it contacts a peer, so a compromised cosigner leading a
+  refresh is held to it by the honest nodes. It counts from the last refresh the node staged
+  (committed, or aborted after staging), read from its ceremony records, so a restart does not
+  reset it; refreshes that failed earlier and DKGs do not count. A refused refresh fails with
+  FAILED_PRECONDITION (`refresh of <key> refused: …`, trailer `rutli-error: refresh-too-soon`) and
+  is counted in `rutli_refresh_interval_refusals_total`. It counts from when the last refresh
+  committed (or aborted after staging) on the node, a new `resolved_ms` in the ceremony record;
+  records written by 0.4.0 count from their last write. New: `rutli_refresh_interval_waived_total`,
+  `rutli_refreshes_6d{key}`, alerts `RutliRefreshRefused` and `RutliRefreshOffSchedule`.
+  **Incident path:** `signing_policy.refresh_interval_waived_at: "<UTC time>"` on every node lets one
+  refresh of each key through after that time; it lapses after 24 h, may be at most
+  `clock_skew_secs` ahead of the node's clock, and is logged at warn at every start while present. No client certificate can set it.
+
+  **Upgrade note (from 0.4.0):**
+  - A refresh within 72 h of the last one is now refused. Check scripts, drills and runbooks that
+    refresh twice in a row; give test configs `refresh_min_interval_secs: 0` explicitly.
+  - A 0.4.0 node enforces nothing, but a refresh needs every node, so the limit holds as soon as one
+    node runs 0.5.0. A refresh led by a 0.4.0 node is refused at the 0.5.0 node's fence (the client
+    sees INTERNAL wrapping the refusal) before any share is staged.
+  - The backup sidecar now also backs up within `backup.checkEverySecs` (default 300 s) of any
+    change to the node's committed key files, so a backup of the new epoch follows every refresh by
+    itself (log `BACKUP_TRIGGER … reason=key-files-changed`). Outside the chart, run `backup` after
+    each refresh. Change-triggered runs count toward `backup.destination.keep`.
+  - Turn `signer_may_refresh` off: while it is on, a stolen driver certificate can still refresh once
+    per interval.
+  - Docs: `docs/ceremonies.md` ("Refresh interval"), `docs/disaster-recovery.md` ("Backups and
+    refreshes": restoring a node needs its backup of the current epoch; a cluster rebuild needs `t`
+    nodes' backups of one epoch; a refresh does not retire old shares or rotate the seal key).
+
 ### Security
 
 - **The cosigner keeps serving when it runs short of file descriptors, and never stops serving

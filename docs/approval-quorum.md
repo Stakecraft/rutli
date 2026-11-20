@@ -139,6 +139,8 @@ All per node, in `signing_policy`. The defaults are in brackets.
 | `signer_acl_required` [false] | A signer CN without an ACL entry is refused |
 | `signer_pins` [none] | Client CN → SHA-256 of the SubjectPublicKeyInfo of each key allowed under that CN: `openssl x509 -in driver.crt -noout -pubkey \| openssl pkey -pubin -outform DER \| sha256sum`. A CA-valid certificate with an unpinned key is refused on the Signer API and as an intent signer. This is **revocation without the CA**: issue a new driver certificate and replace the pin |
 | `signer_may_refresh` [true] | The driver role keeps `Refresh`. Turn it off once the refresh job uses a `refresh_allowlist` certificate (top-level `refresh_allowlist`, Refresh + KeyStatus only; it may be the operator's CN) |
+| `refresh_min_interval_secs` [259200 = 72 h, since 0.5.0] | Each node takes part in at most one refresh of a key per interval, counted from the last refresh it staged (its ceremony records, so a restart does not reset it). Checked by every node at the fence and part 1, and by the leader before it contacts a peer. At most 30 days; `0` turns it off, with a startup warning (`docs/ceremonies.md`, "Refresh interval") |
+| `refresh_interval_waived_at` [unset] | The incident path past the interval: a UTC time (`2026-11-19T14:00:00Z`), set on every node. One refresh of each key is let through after that time, logged and counted (`rutli_refresh_interval_waived_total`); then the interval applies again. Lapses 24 h after its time. Up to `clock_skew_secs` ahead of the node's clock is accepted; further ahead is a config error. Logged at warn at every start while present. Remove it after the refresh |
 | `sign_rate_limit_per_min` / `_per_day` [300 / 20 000] | Per key, per node. Charged once per intent request id: retries, t-subsets and leader failovers of one driver call share a single charge. Rebuilt from the journal after a restart. `rate_limits: [{key_id_prefix, per_min, per_day}]` overrides by prefix. Put a tight rule on namespace keys, e.g. 10/min and 200/day |
 | `max_shares_per_request` [8] | The most shares one request id gets from this node |
 | `intent_max_lifetime_secs` / `clock_skew_secs` [300 / 120] | The driver's intents live 180 s. A node whose clock is off by more than the skew refuses every intent: fail closed, so watch NTP |
@@ -146,11 +148,14 @@ All per node, in `signing_policy`. The defaults are in brackets.
 
 New metrics: `rutli_sign_intent_absent_total`, `rutli_sign_policy_refusals_total{reason}`,
 `rutli_sign_rate_limited_total`, `rutli_signer_acl_absent_total`, `rutli_sign_journal_entries_total`,
-`rutli_sign_journal_errors_total`, and for ceremony intents `rutli_ceremony_intent_absent_total`
-and `rutli_ceremony_intent_refusals_total{reason}` (`docs/observability.md`), with alerts in
+`rutli_sign_journal_errors_total`, for ceremony intents `rutli_ceremony_intent_absent_total`
+and `rutli_ceremony_intent_refusals_total{reason}`, and for the refresh interval
+`rutli_refresh_interval_refusals_total`, `rutli_refresh_interval_waived_total` and
+`rutli_refreshes_6d{key}` (`docs/observability.md`), with alerts in
 `deploy/monitoring/prometheus-rules.yml` (`RutliSignJournalErrors`, `RutliSignPolicyRefusals`,
 `RutliSignIntentAbsent`, `RutliSignRateLimited`, `RutliSignerAclAbsent`,
-`RutliCeremonyIntentAbsent`, `RutliCeremonyIntentRefused`).
+`RutliCeremonyIntentAbsent`, `RutliCeremonyIntentRefused`, `RutliRefreshRefused`,
+`RutliRefreshOffSchedule`).
 
 ## Switching enforcement on
 
@@ -206,6 +211,9 @@ Switch on in this order:
    release. Without a refresher certificate, use the operator certificate with
    `refresh_allowlist: [operator]` (step 3); a refresh signed with the driver certificate needs
    `signer_may_refresh: true`. That is unchanged by intents.
+   **The refresh interval** (0.5.0) is on by default (72 h) and needs no switch. Turning
+   `signer_may_refresh` off still matters: while it is on, a stolen driver certificate can refresh
+   too, once per interval.
 5. Schedule `rutli-cosigner audit-cross-check` (weekly, and after any incident). From now on, do not
    pass `--allow-no-intent`: an intent-less journal entry is an unexplained signature.
 
