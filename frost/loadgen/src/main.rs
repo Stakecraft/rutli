@@ -245,7 +245,7 @@ impl Ctx {
     /// A client for target `i`. The connection is made on first use and again after it breaks, so
     /// a cosigner that is down now is no error here.
     fn connect(&self, i: usize) -> Result<SignerClient<Channel>, Fail> {
-        let (name, url) = &self.targets[i];
+        let (name, url) = self.targets.get(i).ok_or_else(|| format!("no target {i}"))?;
         let endpoint = Endpoint::from_shared(url.clone())
             .map_err(|e| format!("bad endpoint {url}: {e}"))?
             .connect_timeout(Duration::from_secs(5))
@@ -256,8 +256,10 @@ impl Ctx {
     /// A client for target `i`, connected now: how long the connection (TCP and TLS) took, or why
     /// it failed.
     async fn connect_now(&self, i: usize) -> (Result<SignerClient<Channel>, String>, Duration) {
-        let (name, url) = &self.targets[i];
         let begun = Instant::now();
+        let Some((name, url)) = self.targets.get(i) else {
+            return (Err(format!("no target {i}")), begun.elapsed());
+        };
         let endpoint = match Endpoint::from_shared(url.clone())
             .map_err(|e| e.to_string())
             .and_then(|e| e.connect_timeout(self.timeout).tls_config(self.tls.clone().domain_name(name.clone())).map_err(|e| e.to_string()))
@@ -604,7 +606,10 @@ async fn generate(run: Arc<Run>, load: &Load) -> Result<stats::ClientReport, Fai
             }
         }
         for (i, first, conn) in connected {
-            Arc::get_mut(&mut clients[i]).expect("not shared yet").conns[first] = conn;
+            let client = clients.get_mut(i).and_then(Arc::get_mut).expect("one client per index, not shared yet");
+            if let Some(slot) = client.conns.get_mut(first) {
+                *slot = conn;
+            }
         }
         connect_report = Some(stats::ConnectReport { latency: stats::latency_of(&mut micros), errors, error_sample: sample });
     }
