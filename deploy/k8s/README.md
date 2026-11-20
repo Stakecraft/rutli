@@ -273,7 +273,7 @@ and mounts the same volume read-only. A CSI volume snapshot is fine (storage lay
 
 ## Notes / hardening
 
-- The image is pinned by tag and digest in `kustomization.yaml` (currently `0.4.0`). To use your own build, pin it by digest:
+- The image is pinned by tag and digest in `kustomization.yaml` (currently `0.4.1`). To use your own build, pin it by digest:
   `kustomize edit set image ghcr.io/stakecraft/rutli-cosigner@sha256:…`
   From 0.5.0 on, release images are signed and carry build provenance; verify a release digest
   before you deploy it ([SECURITY.md, "Verify the image"](../../SECURITY.md#verify-the-image)).

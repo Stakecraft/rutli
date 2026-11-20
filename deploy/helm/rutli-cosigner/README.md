@@ -1,8 +1,8 @@
 # Helm chart: rutli-cosigner
 
 Deploys a `t`-of-`n` FROST cosigner cluster with mTLS, sealed shares, PDB, and NetworkPolicy.
-Default image: `ghcr.io/stakecraft/rutli-cosigner:0.4.0` pinned by multi-arch digest
-(`sha256:6e606d2b00b53a6d70864a15693a697e0052c0e458386c18c22307eba4912d98`). `latest` on GHCR moves
+Default image: `ghcr.io/stakecraft/rutli-cosigner:0.4.1` pinned by multi-arch digest
+(`sha256:16ad19650b580609dfd0b90136cfe07ec65126addcbdbd4c8676da41fd558326`). `latest` on GHCR moves
 only on a final (non-rc) release tag. From 0.5.0 on, release images are signed and carry build
 provenance: verify the digest before installing, as
 [SECURITY.md, "Verify the image"](../../../SECURITY.md#verify-the-image) shows.
@@ -88,7 +88,7 @@ Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org A
 |---|---|---|
 | `topology` | `perNode` | `perNode` or `legacy` (deprecated; see above) |
 | `image.repository` | `ghcr.io/stakecraft/rutli-cosigner` | |
-| `image.tag` | `0.4.0@sha256:6e606d…912d98` | Digest-pinned |
+| `image.tag` | `0.4.1@sha256:16ad19…558326` | Digest-pinned |
 | `replicaCount` / `threshold` | `3` / `2` | Must match cert count (and `nodes`, if set) |
 | `nodes` | `[]` (= 1..replicaCount) | perNode roster: `id`, `existingClaim` (reuse a PVC, e.g. the legacy `data-rutli-cosigner-<id-1>`), `sealSecret`, `tlsSecret`, `distPublicKey`, `backupClaim`, `backupSecret` |
 | `perNode.servicePrefix` | `rutli-node-` | Per-node Service `<prefix><id>` |
