@@ -19,8 +19,17 @@ GRPC_VERSION="${GRPC_VERSION:-$(sbt_version grpcVersion)}"
 # Optional: PROTOC_SHA256 and PROTOC_GEN_GRPC_JAVA_SHA256 make the script refuse a binary whose sha256
 # differs (CI sets them for linux-x86_64).
 verify() { # file expected-sha256-or-empty
-  [ -z "$2" ] || echo "$2  $1" | { command -v sha256sum >/dev/null && sha256sum -c - >/dev/null || shasum -a 256 -c - >/dev/null; } \
-    || { echo "sha256 of $1 differs from the expected $2"; exit 1; }
+  [ -z "$2" ] && return 0
+  local ok=1
+  if command -v sha256sum >/dev/null; then
+    echo "$2  $1" | sha256sum -c - >/dev/null 2>&1 && ok=0
+  else
+    echo "$2  $1" | shasum -a 256 -c - >/dev/null 2>&1 && ok=0
+  fi
+  if [ "$ok" -ne 0 ]; then
+    echo "sha256 of $(basename "$1") differs from the expected $2 (after a version bump in build.sbt, update PROTOC_SHA256 and PROTOC_GEN_GRPC_JAVA_SHA256 in .github/workflows/generated-code.yml)"
+    exit 1
+  fi
 }
 
 case "$(uname -s)-$(uname -m)" in
