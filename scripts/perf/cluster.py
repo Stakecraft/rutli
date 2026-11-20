@@ -6,7 +6,7 @@
 Bring a kubeconfig and a namespace; install with scripts/perf/k8s-deploy.sh, then
 
   cluster.py --namespace NS --profile scripts/perf/profiles/placeholder.json --out result.json \\
-             [--suites upgrade,scenarios,keys,ramp,disrupt] [--upgrade-image REF --work DIR]
+             [--suites upgrade,scenarios,connect,keys,ramp,disrupt] [--upgrade-image REF --work DIR]
 
 writes one JSON file. scripts/perf/compare.py compares it with a previous one.
 
@@ -22,6 +22,9 @@ Suites:
              under the steady stream, through the
              provider hooks below. Without a hook, a node loss falls back to cordoning the node
              and deleting the pod; the other three are reported as skipped.
+  connect    N new clients connecting at the same moment (50, 200, 500 by default), one
+             signature each: connection time apart from the request, and connections the
+             cosigners cut at their handshake deadline. A measurement, not a pass/fail test.
   keys       the key-count dimension: for each count of the profile, that many FROST keys and
              hosted keys (spread over ten tenant prefixes), sign latency over all of them, and how
              long each cosigner takes to list its hosted keys (Peer API ListKeys).
@@ -375,6 +378,33 @@ class Suite(base.Runner):
         else:
             self.skip("net-delay", "HOOK_NET_DELAY is not set")
 
+    # -- connection setup ----------------------------------------------------------------------
+
+    def connect_burst(self):
+        """N new clients connecting at the same moment, one signature each (#181): how long the
+        connections take, apart from the requests, and how many the cosigners cut at their
+        handshake deadline. A measurement: refusals and timeouts are recorded, not failed."""
+        for n in self.profile.get("connect", {}).get("clients", [50, 200, 500]):
+            n = int(n)
+            name = f"connect-{n}"
+            r, _ = self.scenario(
+                name,
+                lambda n=n, name=name: self.loadgen(
+                    ["sign", "--key", base.KEY_STEADY, "--name", name, "--count", str(n), "--clients", str(n),
+                     "--eager-connect"], timeout_secs=30, wall_timeout=900),
+                allowed=("UNAVAILABLE", "DEADLINE_EXCEEDED"),
+            )
+            load = r["loads"][0] if r["loads"] else {}
+            conn = load.get("client", {}).get("connect") or {}
+            dropped = sum(v for k, v in load.get("server", {}).get("counters", {}).items()
+                          if k.startswith("rutli_grpc_handshake_timeouts_total"))
+            r["connect"] = {"clients": n, "latency": conn.get("latency"), "errors": conn.get("errors"),
+                            "error_sample": conn.get("error_sample"), "handshake_timeouts": dropped}
+            lat = conn.get("latency") or {}
+            log(f"  {n} connections: p50 {lat.get('p50_ms')} ms, p99 {lat.get('p99_ms')} ms, failed {conn.get('errors')}, "
+                f"cut at the cosigners' handshake deadline: {dropped:g}")
+            self.close(r)
+
     # -- key count -----------------------------------------------------------------------------
 
     def key_count(self):
@@ -512,7 +542,7 @@ def main():
     p.add_argument("--profile", required=True, help="the load profile (scripts/perf/profiles/)")
     p.add_argument("--out", required=True)
     # Disruption last: whatever it leaves behind cannot skew the measurements of the others.
-    p.add_argument("--suites", default="upgrade,scenarios,keys,ramp,disrupt")
+    p.add_argument("--suites", default="upgrade,scenarios,connect,keys,ramp,disrupt")
     p.add_argument("--env-name", default="k8s",
                    help="what the result calls its environment; runs are compared within one only")
     p.add_argument("--upgrade-image", default="", help="upgrade suite: the image to upgrade to")
@@ -537,7 +567,7 @@ def main():
     args.rate = args.rate or int(steady.get("sign_per_sec", 20))
     args.max_rss_mib = args.max_rss_mib or int(profile.get("max_rss_mib", 256))
     suites = [s.strip() for s in args.suites.split(",") if s.strip()]
-    unknown = set(suites) - {"upgrade", "scenarios", "disrupt", "keys", "ramp"}
+    unknown = set(suites) - {"upgrade", "scenarios", "connect", "disrupt", "keys", "ramp"}
     if unknown:
         p.error(f"unknown suites: {sorted(unknown)}")
     if "upgrade" in suites and not (args.upgrade_image and args.work):
@@ -560,8 +590,8 @@ def main():
     suite.setup_report = setup
     if "failed" not in setup:
         for name in suites:
-            {"upgrade": suite.upgrade, "scenarios": suite.run, "disrupt": suite.disrupt,
-             "keys": suite.key_count, "ramp": suite.scale_ramp}[name]()
+            {"upgrade": suite.upgrade, "scenarios": suite.run, "connect": suite.connect_burst,
+             "disrupt": suite.disrupt, "keys": suite.key_count, "ramp": suite.scale_ramp}[name]()
 
     # `failed`: Rütli failed a check. `rig_failed`: only the test rig failed (a load generator that
     # could not be run or reached, a hook or kubectl error): nothing is known about Rütli there.
