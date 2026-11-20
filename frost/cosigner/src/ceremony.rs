@@ -290,6 +290,7 @@ pub async fn resolve_pending(node: &Arc<Node>) -> usize {
         Err(e) => tracing::warn!(error = %e, "quarantine garbage collection failed"),
     }
     metrics::gauge!(crate::metrics::CEREMONIES_SPLIT).set(node.split_count() as f64);
+    node.publish_refresh_gauge();
     for rec in node.unsettled_records() {
         let Ok(reports) = gather(node, &rec, &[]).await else { continue };
         let settled = rec
@@ -311,9 +312,10 @@ pub async fn resolve_pending(node: &Arc<Node>) -> usize {
     staged.len()
 }
 
-/// The background resolver: a pass now (startup) and every `interval`.
+/// The background resolver: a pass now (startup) and every `interval`. Restarted after a panic
+/// ([`crate::supervise`]).
 pub fn spawn_resolver(node: Arc<Node>, interval: Duration) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    crate::supervise::spawn_supervised("ceremony_resolver", node, move |node| async move {
         loop {
             resolve_pending(&node).await;
             tokio::time::sleep(interval).await;

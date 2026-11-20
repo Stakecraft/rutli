@@ -163,10 +163,12 @@ pub fn check_public_key_package(pkp: &PublicKeyPackage, t: u16) -> Result<()> {
         .collect::<Result<_>>()?;
 
     for subset in subsets(n, usize::from(t)) {
-        let xs: Vec<Identifier> = subset.iter().map(|&i| points[i].0).collect();
+        let chosen: Vec<&(Identifier, <Ed25519Group as Group>::Element)> =
+            subset.iter().map(|&i| at(&points, i)).collect::<Result<_>>()?;
+        let xs: Vec<Identifier> = chosen.iter().map(|p| p.0).collect();
         let mut acc = <Ed25519Group as Group>::identity();
-        for &i in &subset {
-            acc += points[i].1 * lagrange_at_zero(&xs, points[i].0)?;
+        for p in &chosen {
+            acc += p.1 * lagrange_at_zero(&xs, p.0)?;
         }
         if acc != group {
             return Err(CoreError::Dealer(format!(
@@ -224,7 +226,10 @@ fn verify_split(
     }
 
     // 2. One commitment for everyone, VSS-valid shares, matching verifying shares, min_signers = t.
-    let commitment = shares[0].commitment();
+    let commitment = shares
+        .first()
+        .ok_or_else(|| CoreError::Dealer("no shares to verify".into()))?
+        .commitment();
     let mut key_packages: Vec<KeyPackage> = Vec::with_capacity(shares.len());
     let outcome = (|| {
         for share in shares {
@@ -252,7 +257,8 @@ fn verify_split(
             .map_err(|_| CoreError::Dealer("seed public key is not a valid point".into()))?;
         let message = canton_test_message(b"rutli-dealer/self-test");
         for subset in subsets(key_packages.len(), usize::from(t)) {
-            let quorum: Vec<KeyPackage> = subset.iter().map(|&i| key_packages[i].clone()).collect();
+            let quorum: Vec<KeyPackage> =
+                subset.iter().map(|&i| at(&key_packages, i).cloned()).collect::<Result<_>>()?;
             let ids: Vec<Identifier> = quorum.iter().map(|kp| *kp.identifier()).collect();
             let reconstructed = frost::keys::reconstruct(&quorum);
             let signed = selftest_sign(&quorum, pkp, &message);
@@ -299,7 +305,10 @@ fn selftest_sign(
     let package = SigningPackage::new(commitments, message);
     let mut shares = BTreeMap::new();
     for kp in quorum {
-        shares.insert(*kp.identifier(), frost::round2::sign(&package, &nonces[kp.identifier()], kp)?);
+        let nonce = nonces
+            .get(kp.identifier())
+            .ok_or_else(|| CoreError::Dealer("self-test: no nonce for a signer".into()))?;
+        shares.insert(*kp.identifier(), frost::round2::sign(&package, nonce, kp)?);
     }
     let bytes = frost::aggregate(&package, &shares, pkp)?.serialize()?;
     <[u8; 64]>::try_from(bytes.as_slice())
@@ -364,6 +373,12 @@ fn subsets(n: usize, k: usize) -> Vec<Vec<usize>> {
     out
 }
 
+/// `items[i]`, or an error: the indices come from `subsets(items.len(), k)`, so a miss is a bug here,
+/// but it must not be a panic in a tool that holds key shares.
+fn at<T>(items: &[T], i: usize) -> Result<&T> {
+    items.get(i).ok_or_else(|| CoreError::Dealer(format!("internal: index {i} out of range ({})", items.len())))
+}
+
 /// Identifiers for an error message, as the small integers operators configured.
 fn describe(ids: &[Identifier]) -> String {
     let small: Vec<String> = ids
@@ -371,10 +386,11 @@ fn describe(ids: &[Identifier]) -> String {
         .map(|id| {
             let b = id.serialize();
             // Ed25519 identifiers serialize little-endian; a configured id fits in two bytes.
-            if b.len() == 32 && b[2..].iter().all(|&x| x == 0) {
-                u16::from_le_bytes([b[0], b[1]]).to_string()
-            } else {
-                hex::encode(b)
+            match b.as_slice() {
+                [lo, hi, rest @ ..] if rest.len() == 30 && rest.iter().all(|&x| x == 0) => {
+                    u16::from_le_bytes([*lo, *hi]).to_string()
+                }
+                _ => hex::encode(&b),
             }
         })
         .collect();
@@ -395,6 +411,17 @@ mod tests {
     use crate::refresh::RefreshParticipant;
 
     const IDS: [u16; 3] = [1, 2, 3];
+
+    #[test]
+    fn describe_prints_small_identifiers_as_integers_and_anything_else_as_hex() {
+        let ids: Vec<Identifier> = [1u16, 2, 300].iter().map(|&i| Identifier::try_from(i).unwrap()).collect();
+        assert_eq!(describe(&ids), "{1,2,300}");
+        // An identifier derived from a name is a full-width scalar: hex, not a truncated integer.
+        let wide = Identifier::derive(b"a name").unwrap();
+        assert_eq!(describe(&[wide]), format!("{{{}}}", hex::encode(wide.serialize())));
+        assert!(at(&[1, 2, 3], 3).is_err());
+        assert_eq!(*at(&[1, 2, 3], 2).unwrap(), 3);
+    }
 
     fn hex32(s: &str) -> [u8; 32] {
         hex::decode(s).unwrap().try_into().unwrap()

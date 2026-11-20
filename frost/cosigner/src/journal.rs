@@ -494,7 +494,7 @@ impl KeyJournal {
         let now = std::time::UNIX_EPOCH + std::time::Duration::from_millis(now_ms);
         let mut removed = false;
         while sized.len() > 1 {
-            let (path, len, modified) = &sized[0];
+            let Some((path, len, modified)) = sized.first() else { break };
             let too_old = modified.is_some_and(|m| now.duration_since(m).is_ok_and(|age| age > max_age));
             if !(too_old || total > retention.max_bytes) {
                 break;
@@ -556,7 +556,9 @@ fn read_segment(path: &Path) -> Result<(Vec<JournalEntry>, usize)> {
     } else {
         bytes.len() - bytes.iter().rposition(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0)
     };
-    let body = &bytes[..bytes.len() - torn];
+    let body = bytes
+        .get(..bytes.len().saturating_sub(torn))
+        .ok_or_else(|| corrupt(path, "the torn tail is longer than the segment"))?;
     let mut out = Vec::new();
     for (i, line) in body.split(|&b| b == b'\n').filter(|l| !l.is_empty()).enumerate() {
         let e: JournalEntry = serde_json::from_slice(line)
@@ -568,13 +570,15 @@ fn read_segment(path: &Path) -> Result<(Vec<JournalEntry>, usize)> {
 
 /// Each entry's hash, and the chain within the slice.
 fn verify_entries(entries: &[JournalEntry], path: &Path) -> Result<()> {
-    for (i, e) in entries.iter().enumerate() {
+    let mut before: Option<&JournalEntry> = None;
+    for e in entries {
         if e.hash != e.compute_hash() {
             return Err(corrupt(path, &format!("entry seq {} does not match its hash", e.seq)));
         }
-        if i > 0 && (e.prev != entries[i - 1].hash || e.seq != entries[i - 1].seq + 1) {
+        if before.is_some_and(|p| e.prev != p.hash || p.seq.checked_add(1) != Some(e.seq)) {
             return Err(corrupt(path, &format!("the chain breaks at seq {}", e.seq)));
         }
+        before = Some(e);
     }
     Ok(())
 }

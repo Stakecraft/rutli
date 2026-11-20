@@ -243,10 +243,12 @@ pub fn ed25519_key_from_spki_b64(b64: &str) -> std::result::Result<[u8; 32], Str
     let der = base64::engine::general_purpose::STANDARD
         .decode(b64.trim())
         .map_err(|_| "not base64".to_string())?;
-    if der.len() != 44 || der[..12] != ED25519_SPKI_PREFIX {
-        return Err("not an Ed25519 SubjectPublicKeyInfo (44 bytes DER)".into());
+    let not_spki = || "not an Ed25519 SubjectPublicKeyInfo (44 bytes DER)".to_string();
+    let (prefix, key) = der.split_first_chunk::<12>().ok_or_else(not_spki)?;
+    if *prefix != ED25519_SPKI_PREFIX {
+        return Err(not_spki());
     }
-    Ok(der[12..].try_into().expect("32 bytes"))
+    <[u8; 32]>::try_from(key).map_err(|_| not_spki())
 }
 
 /// Sign `intent` with `signer` (an mTLS identity): what the driver does with its own key. For
@@ -972,6 +974,25 @@ pub fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_malformed_approver_key_is_an_error_not_a_panic() {
+        use base64::Engine as _;
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let mut spki = ED25519_SPKI_PREFIX.to_vec();
+        spki.extend_from_slice(&[7u8; 32]);
+        assert_eq!(ed25519_key_from_spki_b64(&b64(&spki)).unwrap(), [7u8; 32]);
+        for bad in [&b""[..], &spki[..11], &spki[..12], &spki[..43]] {
+            assert!(ed25519_key_from_spki_b64(&b64(bad)).is_err(), "{} bytes", bad.len());
+        }
+        let mut long = spki.clone();
+        long.push(0);
+        assert!(ed25519_key_from_spki_b64(&b64(&long)).is_err(), "45 bytes");
+        let mut other_prefix = spki.clone();
+        other_prefix[4] ^= 1;
+        assert!(ed25519_key_from_spki_b64(&b64(&other_prefix)).is_err());
+        assert!(ed25519_key_from_spki_b64("not base64!").is_err());
+    }
 
     /// Parity with the driver: `FileApprovalGate.requestIdFor("participant1-frost-namespace",
     /// sha256(0x1220 ‖ 32×0xab), 16×0x01)`. The Scala side pins the same vector

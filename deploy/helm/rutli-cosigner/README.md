@@ -1,8 +1,8 @@
 # Helm chart: rutli-cosigner
 
 Deploys a `t`-of-`n` FROST cosigner cluster with mTLS, sealed shares, PDB, and NetworkPolicy.
-Default image: `ghcr.io/stakecraft/rutli-cosigner:0.4.0` pinned by multi-arch digest
-(`sha256:6e606d2b00b53a6d70864a15693a697e0052c0e458386c18c22307eba4912d98`). `latest` on GHCR moves
+Default image: `ghcr.io/stakecraft/rutli-cosigner:0.4.1` pinned by multi-arch digest
+(`sha256:16ad19650b580609dfd0b90136cfe07ec65126addcbdbd4c8676da41fd558326`). `latest` on GHCR moves
 only on a final (non-rc) release tag. From 0.5.0 on, release images are signed and carry build
 provenance: verify the digest before installing, as
 [SECURITY.md, "Verify the image"](../../../SECURITY.md#verify-the-image) shows.
@@ -36,7 +36,7 @@ Two layouts (`topology`):
 # 1. Certs (each cosigner cert carries only its own names: CN/SAN cosigner<id>)
 scripts/gen-frost-certs.sh 3 ./certs
 
-# 2. Namespace + secrets — one Secret per node, nothing shared but the CA
+# 2. Namespace + secrets — one Secret per node, nothing shared but the CA (one CA per cluster)
 kubectl create namespace rutli
 kubectl -n rutli label namespace rutli \
   pod-security.kubernetes.io/enforce=restricted \
@@ -54,9 +54,14 @@ for i in 1 2 3; do
   shred -u node-$i.json 2>/dev/null || rm -f node-$i.json
 done
 
-# 3. Install (values already pin the image digest)
-helm upgrade --install rutli deploy/helm/rutli-cosigner -n rutli
+# 3. Install (values already pin the image digest). peer-pins.json, written by gen-frost-certs.sh,
+#    is a values file with each cosigner's TLS key pin (peerPins); the chart refuses to render
+#    without them.
+helm upgrade --install rutli deploy/helm/rutli-cosigner -n rutli -f certs/peer-pins.json
 ```
+
+Keep the pins with the release's values: a later `helm upgrade` needs them as much as `clusterId`
+(`-f <saved values>` or `--reuse-values`).
 
 With `hostedKeys.enabled=true` the chart also needs `hostedKeys.commitmentKey` (one random value
 for the cluster: `openssl rand -hex 32`) and every node's `nodes[].distPublicKey` (printed by
@@ -77,13 +82,63 @@ If the GHCR package is private, create a pull secret and set `imagePullSecrets`.
 Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org API may require
 `admin:org` / packages admin to flip public).
 
+## Upgrading: one cosigner at a time
+
+With threshold 2 of 3, signing needs two cosigners up. The per-node topology runs three
+single-replica StatefulSets, and one `helm upgrade` changes all three in one apply, so a
+`RollingUpdate` would restart all three pods at once and nothing could sign until two were back
+(measured on a real cluster: about 11 s without a cosigner, 54 of 750 signatures `UNAVAILABLE`).
+Helm cannot order the resources of a release or wait for one before the next, so the chart does not
+pretend to: the StatefulSets use `updateStrategy.type: OnDelete` (the default), `helm upgrade` changes
+the spec and restarts **no pod**, and a script restarts the cosigners one by one.
+
+```sh
+helm upgrade rutli deploy/helm/rutli-cosigner -n rutli -f values.yaml -f certs/peer-pins.json --set image.tag=…
+scripts/upgrade-cosigners.sh -n rutli --release rutli --dry-run   # the plan
+scripts/upgrade-cosigners.sh -n rutli --release rutli             # roll node 1, 2, 3, one at a time
+scripts/upgrade-cosigners.sh -n rutli --release rutli --status    # running vs target revision and image
+```
+
+Until the script has run, the pods keep the old image and settings; `--status` shows it (exit 3 =
+a roll is pending) and the `RutliCosignerRolloutPending` alert fires after 30 minutes.
+
+What the script does, per node: refuses unless all other cosigners are Ready, deletes the pod, waits
+until the replacement runs the **target** revision and is Ready, waits `--settle` seconds, checks all
+three are Ready again, then moves on. It stops at the first timeout (`--timeout`, 600 s) and touches
+nothing else. It is resumable: a node already on the target revision and Ready is skipped, so run the
+same command again after a stop. `--only 2` rolls one node. `--force` restarts nodes that already run
+the target revision, for a change the pod template does not carry (a changed ConfigMap or pins, a rotated
+certificate): the chart has no config checksum annotation, so such a change never restarted pods, with or
+without OnDelete.
+
+- **What Ready proves.** The probe is `rutli-cosigner health` (see "Probes"): the key store is usable
+  and the gRPC port accepts connections. It does not prove that the peer connections are back, so the
+  script also waits `--settle` (default 120 s). The mesh was measured back within 2 s of a restart, so
+  120 s is a wide margin on 0.5. On 0.4.x, where a freshly restarted cosigner can drop one sign
+  session (fixed in 0.5), use `--settle 300` (the in-place migration runbook, `docs/runbook-migration-inplace.md`, waits five minutes between nodes for the same reason).
+- **A node that is not Ready** (an upgrade is sometimes the repair): the script refuses unless every
+  node is Ready. `--allow-degraded` rolls that one node first and still never takes a second node
+  down. With two nodes not Ready it refuses in every case: one more restart would leave no quorum.
+- **PodDisruptionBudget.** `minAvailable: 2` over all three pods guards voluntary evictions, that is
+  node drains: a drain can take at most one cosigner. It does not gate StatefulSet updates or
+  `kubectl delete pod`; the script's own checks do.
+- **Legacy topology.** The single StatefulSet already rolls its pods one at a time and does not get
+  `updateStrategy` from the chart.
+- **`updateStrategy.type=RollingUpdate`** restores the old behaviour (all three at once, signing stops
+  for the restart). Only for a cluster that may stop signing.
+- **Moving to this chart version** from one with `RollingUpdate`: the same `helm upgrade` switches the
+  StatefulSets to `OnDelete`, so that upgrade itself restarts nothing; run the script after it.
+- `scripts/perf/cluster.py --suites upgrade` (docs/cluster-suite.md) upgrades a real cluster this way
+  under a stream of signatures and requires zero failed signatures.
+
 ## Values (highlights)
 
 | Key | Default | Notes |
 |---|---|---|
 | `topology` | `perNode` | `perNode` or `legacy` (deprecated; see above) |
+| `profile` | `production` | `production`: each cosigner refuses to start while an enforcement setting is not at its production value, naming each (`docs/production-profile.md`); `lab`: logged only. `legacy` topology needs `lab`. Before upgrading an existing install, run `rutli-cosigner check-config` against the live config |
 | `image.repository` | `ghcr.io/stakecraft/rutli-cosigner` | |
-| `image.tag` | `0.4.0@sha256:6e606d…912d98` | Digest-pinned |
+| `image.tag` | `0.4.1@sha256:16ad19…558326` | Digest-pinned |
 | `replicaCount` / `threshold` | `3` / `2` | Must match cert count (and `nodes`, if set) |
 | `nodes` | `[]` (= 1..replicaCount) | perNode roster: `id`, `existingClaim` (reuse a PVC, e.g. the legacy `data-rutli-cosigner-<id-1>`), `sealSecret`, `tlsSecret`, `distPublicKey`, `backupClaim`, `backupSecret` |
 | `perNode.servicePrefix` | `rutli-node-` | Per-node Service `<prefix><id>` |
@@ -92,13 +147,15 @@ Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org A
 | `fullnameOverride` | `rutli-cosigner` | Workload / headless Service base name |
 | `tls.layout` | `perNode` | legacy topology only: `perNode` (`rutli-cosigner-ca` + `rutli-cosigner-tls-1..N`) or `shared` (one `tlsSecretName`). topology perNode always uses `rutli-cosigner-ca` + the node's own `tlsSecret` |
 | `tls.allowExpiredCa` | `false` | Accept an expired/not-yet-valid CA in `ca.crt` (never a non-CA). Emergency rotation away from an already-expired CA only |
+| `peerPins` | `{}` | TLS key pins: node id → one or two SHA-256 hex values of that cosigner certificate's SubjectPublicKeyInfo (`rutli-cosigner tls spki cosigner<id>.crt`, or `-f certs/peer-pins.json`). Rendered into every node's roster as `tls_spki_sha256`. Required for every node; two only during that node's key roll. See "Peer key pins" |
+| `tls.requirePeerPins` | unset (= on) | `false`: render without pins, and the cosigners accept a peer by certificate name alone (they warn at startup). Opt-out only |
 | `sealSecretName` | `rutli-seal` | legacy topology only: the shared master (deprecated) |
 | `signerAllowlist` | `[driver]` | Required under TLS |
 | `clusterId` | `""` | Cluster id pin (16 lowercase hex). Empty = derived from `ca.crt`'s bytes. Set it to the current derived id before changing `ca.crt` — see "Rotating the cluster CA". Never copy it to another cluster |
 | `clusterIdChangeAllowed` | `false` | Let the cosigners start under a different cluster id than the one each recorded in `data_dir/cluster-id`. Deliberate changes only, for one rollout |
 | `operatorAllowlist` | `[]` | Operator role for `verify-key` and `verify-hosted` (KeyStatus + HostedKeyStatus + CeremonySignTest only), e.g. `[operator]` |
 | `refreshAllowlist` | `[]` | Refresher role for the refresh job (Refresh + KeyStatus only, never Sign), e.g. `[refresher]`; may be `[operator]` until a refresher cert exists |
-| `signingPolicy` | `{}` | Cosigner signing policy (audit C2), rendered verbatim as `signing_policy`: `require_intent`, `require_ceremony_intent`, `signer_acl_required`, `signer_may_refresh`, `signer_acl`, `signer_pins`, rate limits, journal retention, approval `rules`/`approvers` — see `docs/approval-quorum.md`. Empty = defaults: ceremony intents required (since 0.4.0-rc.6; opt out with `require_ceremony_intent: false` while the driver is older than 0.4.0-rc.4 or the refresh job's image predates the cosigners' release), signing intents verify-if-present |
+| `signingPolicy` | `{}` | Cosigner signing policy (audit C2), rendered verbatim as `signing_policy`: `require_intent`, `require_ceremony_intent`, `signer_acl_required`, `signer_may_refresh`, `signer_acl`, `signer_pins`, rate limits, journal retention, approval `rules`/`approvers` — see `docs/approval-quorum.md`. Empty = defaults: ceremony intents required (since 0.4.0-rc.6; opt out with `require_ceremony_intent: false` while the driver is older than 0.4.0-rc.4 or the refresh job's image predates the cosigners' release), signing intents required (since 0.5.0; opt out with `require_intent: false` while the driver is older than 0.4.0-rc.3 or runs with `frost.sign-intents = off`). Each node takes part in at most one refresh of a key per `refresh_min_interval_secs` (default 72 h; incident path: `refresh_interval_waived_at`, docs/ceremonies.md "Refresh interval"). An unknown key stops the cosigner at startup |
 | `hostedKeys.enabled` | `false` | Cluster-hosted RSA/ECIES/AES keys — replicated whole keys, not threshold shares |
 | `hostedKeys.deleteAllowlist` | `[]` | Delete role (audit M2): client CNs whose signed delete intents tombstone hosted keys. Empty = no deletes; never a cosigner CN. `deleteAcl`, `deleteApprovalThreshold` (≥ 1 in production), `deleteGraceSecs` (604800) — `docs/hosted-keys.md`, Delete |
 | `keyfile` | `{}` | Key-file format (audit M4), rendered verbatim as `keyfile`: `cluster_uuid`, `write_version` (1 or 2), `accept_v1` — `docs/disaster-recovery.md` §3h |
@@ -126,6 +183,29 @@ identifies a mesh caller by an exact match on its configured client CN — so on
 certificate can no longer stand in for another (audit M3). Certificates from earlier releases also
 carry a shared `rutli-cosigner` SAN; nothing verifies it any more, and new ones do not have it.
 Certificates are read at startup: restart the pods after rotating a Secret.
+
+### Peer key pins
+
+The name is not enough either: whoever holds the CA key can issue another `cosigner2` certificate,
+and a replaced node's old certificate stays valid until it expires. So each node also checks the key
+in a peer's certificate against `peerPins` (`peers[].tls_spki_sha256` in the config), when the peer
+calls it and when it dials the peer, before any request. A mismatch is refused with the CN and
+the key it saw, counted in `rutli_peer_pin_refusals_total{direction}`. A node refuses to start when
+its own certificate's key is not in its own entry, so a leaf swapped before its pin was rolled out
+stops at that pod. Pins are read at startup, like certificates; a values change alone restarts
+nothing (the pod template does not change), so roll the pods after it.
+
+- **Planned key roll of node N:** pins `[old, new]` for N, roll every pod; swap N's leaf, restart N;
+  pins `[new]`, roll every pod. [`docs/ca-rotation.md`](../../../docs/ca-rotation.md) §10.
+- **CA rotation:** every leaf gets a new key, so the pins change with it (Phase A: old and new;
+  Phase D: new only).
+- `rutli-cosigner --config <client config with pins> tls spki --peers` shows the key each running
+  node presents and whether it is pinned.
+
+One CA per cluster. A CA that also signs another cluster's certificates (staging, a second tenant)
+makes that cluster's driver and operator certificates valid here wherever `signing_policy.signer_pins`
+does not pin them, and gives both the same derived cluster id. Peer pins keep the other cluster's
+cosigners off this mesh; nothing keeps its clients out.
 
 ### Rotating the cluster CA
 
@@ -177,7 +257,7 @@ pin must be ≥ 0.3.1.
 ## Backups
 
 `backup.enabled=true` (topology perNode) adds a `backup` sidecar to each cosigner pod. Once a day
-(`backup.dailyAtUtc`, default 03:17 UTC; plus once at pod start) it tars that node's **sealed**
+(`backup.dailyAtUtc`, default 03:17 UTC; once at pod start; and after a change, below) it tars that node's **sealed**
 `keys/*.json` — never dotfiles, nonce markers or temps — its cleared-delete-intent markers
 (`keys/.cleared/`) and its sign journals (`journal/`), and hands the tar to that node's destination:
 
@@ -196,6 +276,16 @@ one node's destination yields one node's sealed files, below threshold. Each run
 `BACKUP_OK node=<id> files=<n> bytes=<n> …` or `BACKUP_FAILED node=<id> reason=…` line; the sidecar
 never exits non-zero (a crashing sidecar would make the pod unready and eat the PDB), so alert on the
 log line or the destination's newest object.
+
+**A backup follows every refresh.** A refresh moves every node to a new epoch, and from its commit
+a node's older backups no longer restore that node (`restore` refuses an older epoch). Besides the
+daily run, the sidecar checks every `backup.checkEverySecs` (default 300) whether the node's
+committed key files changed — a refresh commit, a new or deleted key — and backs up then, logging
+`BACKUP_TRIGGER node=<id> reason=key-files-changed` first; a failed one is retried at that pace. So
+each node's backup of a new epoch exists within about 5 minutes of the commit, with no manual step.
+Staged shares (`keys/.staged/`) are never copied: a backup taken during a refresh holds the epoch
+that is live on that node at that moment. Each node takes part in at most one refresh of a key per
+`signingPolicy.refresh_min_interval_secs` (72 h by default). See `docs/disaster-recovery.md`.
 
 There is **no backup CronJob and no `pods/exec` RBAC** any more. Earlier releases ran
 `rutli-cosigner backup` inside each cosigner via `kubectl exec` from a ServiceAccount whose Role

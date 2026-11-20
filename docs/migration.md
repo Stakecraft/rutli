@@ -90,6 +90,13 @@ also hold `t` seal secrets. Details: [split-ceremony.md](split-ceremony.md) §1.
 The commands are written out in full, with expected output and STOP lines, in [b4-rehearsal.md](b4-rehearsal.md). The step
 numbers in brackets point there. Substitute the parameters from §2.
 
+`scripts/e2e-migration.sh` runs this procedure on Canton 3.6.1 in CI, with the commands as written here: a JCE participant
+with a party and contracts, Steps 1–5 against a local 2-of-3 cluster, a rollback before the point of no return (§6) and a
+second cutover, Step 7 and the parts of Step 8 a script can check. It cannot run Step 6 as written, which needs a Splice
+validator: in its place the new participant makes the topology changes the Splice party migrator makes (remove the old
+trust certificate, host the party, import the reference ACS of Step 4.2 with `repair.import_acs`). The script's header
+lists what it does not cover.
+
 ### Step 1: baselines and backups
 
 Record the party ID, wallet balance, ACS size, traffic state and the three key fingerprints (namespace, signing, encryption)
@@ -130,17 +137,32 @@ a bundle that fails authentication. Treat them as attacks** (split-ceremony.md �
    `encryption.algorithms.default = ecies-hkdf-hmac-sha-256-aes-128-cbc`. With the Splice chart, also set
    `persistence.enableParticipantDbConflictCheck=false` [4.6–4.7]. Check the driver log: `Loaded driver rutli … build <version>`,
    and that the cluster's capabilities include `ec-p256-ecies` if you use ECIES.
+   The participant must start **without an identity** and wait for one (`p.health.status` shows `WaitingForId`, and
+   `p.keys.secret.list()` is empty). The Splice participant chart starts it that way. A participant configured by hand
+   initialises itself at its first start unless its config says
+   `init { identity.type = manual, generate-topology-transactions-and-keys = false }`; with auto-init it generates its own
+   keys and identity, and Step 5 cannot run.
 
 ### Step 5: keys, identity, onboarding
 
-1. **Register the namespace key by id:** `register_kms_signing_key(KEY_ID, Set(Namespace), "namespace")`. It **must** return `NS_FP`.
-   Otherwise STOP and roll back [4.8].
+1. **Register the namespace key by id:** `register_kms_signing_key(KEY_ID, Set(SigningKeyUsage.Namespace), "namespace")`. It
+   **must** return `NS_FP`. Otherwise STOP and roll back [4.8].
 2. **Fresh keys:** `generate_signing_key("signing", <USAGE>, Some(EcCurve25519))`
    (a FROST DKG, id `${PREFIX}frost-signing`) and `generate_encryption_key("encryption", Some(EcP256))` (cluster-hosted) [4.8].
    `<USAGE>` is `SigningKeyUsage.ProtocolWithProofOfOwnership ++ SigningKeyUsage.SequencerAuthenticationOnly`;
    `SigningKeyUsage.ProofOfOwnership` itself is not accessible from the console (Lessons a).
 3. `init_id_from_uid(NEW_ID::NS_FP)`, import the old node's authorized-store identity snapshot (namespace delegation + OTK), then
-   propose the new OTK **without** `signedBy` (Canton adds the proof-of-ownership signatures) [4.9].
+   propose the new OTK **without** `signedBy` (Canton adds the proof-of-ownership signatures) [4.9]. In console terms, with
+   `sigK`/`encK` from 5.2 and the snapshot written on the old node in [4.1]:
+
+   ```scala
+   val NEW_UID = UniqueIdentifier.tryCreate(NEW_ID, NS_FP)
+   p.topology.init_id_from_uid(NEW_UID)
+   p.health.wait_for_ready_for_node_topology()
+   p.topology.transactions.import_topology_snapshot_fromV2("identity-authorized.bin", TopologyStoreId.Authorized)
+   p.topology.owner_to_key_mappings.propose(member = ParticipantId(NEW_UID), keys = NonEmpty(Seq, sigK, encK))
+   p.health.wait_for_initialized()
+   ```
 4. `connect_by_config(<old connection config>)`. The sequencer connections of the old node's config are saved and restored through
    reflection (Lessons a). If validation fails because some of the sequencers are down, retry with
    `validation = SequencerConnectionValidation.Active` (the admin-data type, Lessons b). On a busy network, expect 10–30 min while the
@@ -186,7 +208,19 @@ For each location in your inventory: act, keep before/after evidence, fill in th
 - **Snapshots, identities dumps, export files, laptops, dealer media, ceremony bundles, pre-refresh cosigner backups.**
 - State the residual exposure in the record. SSDs, copy-on-write filesystems and cloud deletes are not provable erasure.
 
-Optionally, remove the offboarded member's owner-to-key mapping, which still lists the old keys [5.2].
+Optionally, remove the offboarded member's owner-to-key mapping, which still lists the old keys [5.2]. Run it on the new
+participant, after the PNR (it is refused while the old trust certificate exists). The namespace key signs it through FROST,
+and it needs the `AlienMember` force flag (Lessons i):
+
+```scala
+val o = p.topology.owner_to_key_mappings.list(store = Some(TopologyStoreId.Synchronizer(SYNC_ID)), filterKeyOwnerUid = OLD_UID)
+  .filter(_.item.member == ParticipantId(UniqueIdentifier.tryFromProtoPrimitive(OLD_UID))).head
+p.topology.owner_to_key_mappings.propose(member = o.item.member, keys = o.item.keys, ops = TopologyChangeOp.Remove,
+  store = TopologyStoreId.Synchronizer(SYNC_ID), force = ForceFlags(ForceFlag.AlienMember))
+```
+
+The member filter matters: `filterKeyOwnerUid` matches the id and the namespace each by prefix, so even the full `OLD_UID`
+also lists `NEW_ID` when `NEW_ID` starts with `OLD_ID` (as `acme-validator-1-r` does).
 
 ## 5. Point of no return, in one place
 
@@ -201,7 +235,7 @@ participant again.
 |---|---|
 | Ceremony, before Gate B | `abort-import` per node; restart a cosigner that signed with the share before any re-import ([split-ceremony.md](split-ceremony.md) §5) |
 | Ceremony, after Gate C | No destroy path. Leave the id as residue; to retry, use a new `KEY_ID`/`CEREMONY` |
-| Cutover, before the PNR | Scale the validator, then the participant, to 0. Helm-rollback both to the old databases. If the new member already onboarded, offboard it from the old participant (it holds the namespace key). `NEW_ID` is burned ([b0-cutover-spike.md](b0-cutover-spike.md) §5 R-A) |
+| Cutover, before the PNR | Scale the validator, then the participant, to 0. Helm-rollback both to the old databases. If the new member already onboarded, offboard it from the old participant (it holds the namespace key): `p.topology.synchronizer_trust_certificates.propose(ParticipantId(UniqueIdentifier.tryCreate(NEW_ID, NS_FP)), SYNC_ID, store = Some(TopologyStoreId.Synchronizer(SYNC_ID)), change = TopologyChangeOp.Remove)`. `NEW_ID` is burned ([b0-cutover-spike.md](b0-cutover-spike.md) §5 R-A). A retry needs a new `NEW_ID` and a fresh database, and its signing key a **new name** in Step 5.2 (e.g. `"signing-2"`): since 0.5.0 a DKG under the old name is refused by the driver (the key exists and its ceremony was not this driver's), so `generate_signing_key("signing", …)` fails instead of reusing the burned member's signing key (0.4.x drivers silently reused it). `KEY_ID` is registered again as it is |
 | Cutover, after the PNR | Fix forward ([b0-cutover-spike.md](b0-cutover-spike.md) §5 R-B). Do not destroy anything until resolved |
 
 ## 7. Known limitations

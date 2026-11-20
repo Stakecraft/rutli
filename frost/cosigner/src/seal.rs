@@ -228,7 +228,7 @@ pub fn dek_id(key: &[u8; 32]) -> String {
     let mut h = Sha256::new();
     h.update(DEK_ID_CONTEXT);
     h.update(key);
-    hex::encode(&h.finalize()[..4])
+    hex::encode(h.finalize().iter().copied().take(4).collect::<Vec<u8>>())
 }
 
 /// The format of a key file's bytes: `Some(1)` for a v1 sealed envelope, `Some(2)` for v2, `None`
@@ -1066,6 +1066,7 @@ mod tests {
             p.dist_public_key = k.map(hex::encode);
         }
         crate::config::Config {
+            profile: None,
             identifier: 2,
             listen: "127.0.0.1:0".into(),
             threshold: 2,

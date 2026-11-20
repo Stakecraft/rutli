@@ -1,0 +1,13 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+# kube-linter configuration, read from the repository root by scripts/quality/k8s.sh and by a local
+# `kube-linter lint <rendered manifests>` run from here. Render the chart the way
+# scripts/ci-deploy-policy.sh does (helm template, kubectl kustomize deploy/k8s) and lint that.
+# Every exclusion carries the reason; a finding that is a real gap is fixed in the chart instead.
+checks:
+  exclude:
+    # False positive for the perNode topology. The chart runs one single-replica StatefulSet per
+    # node, and ONE PodDisruptionBudget (minAvailable: 2) selects the pods of all of them, so a drain
+    # can never take the cluster below the signing threshold. kube-linter compares the budget with
+    # the replicas of each StatefulSet on its own (1 <= 2) and cannot see the shared selector.
+    - pdb-min-available

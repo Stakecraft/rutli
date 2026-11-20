@@ -4,7 +4,7 @@
 //! Leader-side coordination of DKG and signing across the peer set. Transport-agnostic: it drives
 //! [`PeerApi`], so the same code runs over gRPC in production and over in-process peers in tests.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use frost_ed25519 as frost;
@@ -47,6 +47,22 @@ pub async fn run_dkg(peers: &Peers, key_id: &str) -> Result<[u8; 32]> {
 /// an intent (an older client) the id is random and every node decides whether it accepts that
 /// (`signing_policy.require_ceremony_intent`).
 pub async fn run_dkg_with_intent(peers: &Peers, key_id: &str, intent: Option<pb::SignedIntent>) -> Result<[u8; 32]> {
+    Ok(run_dkg_outcome(peers, key_id, intent).await?.group_key)
+}
+
+/// What a DKG request came to: the group key, whether the key already existed (the request
+/// returned it without a ceremony), and the id of the ceremony that made a new key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DkgOutcome {
+    pub group_key: [u8; 32],
+    pub existing: bool,
+    /// The ceremony that created a new key; `None` for an existing one (the leader looks up the DKG
+    /// it committed it under, [`crate::node::Node::committed_dkg_ceremony`]).
+    pub ceremony_id: Option<String>,
+}
+
+/// [`run_dkg_with_intent`], saying whether the key already existed (`DkgReply.existing`).
+pub async fn run_dkg_outcome(peers: &Peers, key_id: &str, intent: Option<pb::SignedIntent>) -> Result<DkgOutcome> {
     let (peers, key_id) = (peers.clone(), key_id.to_owned());
     crate::ceremony::detach(async move { run_dkg_attached(&peers, &key_id, intent.as_ref()).await }).await
 }
@@ -59,7 +75,7 @@ fn ceremony_id(kind: CeremonyKind, intent: Option<&pb::SignedIntent>) -> Result<
     }
 }
 
-async fn run_dkg_attached(peers: &Peers, key_id: &str, intent: Option<&pb::SignedIntent>) -> Result<[u8; 32]> {
+async fn run_dkg_attached(peers: &Peers, key_id: &str, intent: Option<&pb::SignedIntent>) -> Result<DkgOutcome> {
     // Every peer refuses too (fence and part 1); this just answers before touching the mesh.
     if crate::share_delivery::is_reserved_for_import(key_id) {
         return Err(DaemonError::ReservedKeyId(key_id.to_string()));
@@ -67,12 +83,13 @@ async fn run_dkg_attached(peers: &Peers, key_id: &str, intent: Option<&pb::Signe
     require_ceremony_protocol(peers).await?;
     let views = key_views(peers, key_id).await?;
     if let Some(existing) = dkg_preflight(peers, key_id, &views).await? {
-        return Ok(existing);
+        return Ok(DkgOutcome { group_key: existing, existing: true, ceremony_id: None });
     }
     let dkg_id = ceremony_id(CeremonyKind::Dkg, intent)?;
     fence_all(peers, &dkg_id, key_id, CeremonyKind::Dkg, None, intent).await?;
     let staged = ceremony_stage(peers, &dkg_id, key_id, CeremonyKind::Dkg, intent).await;
-    finish_ceremony(peers, &dkg_id, key_id, staged).await
+    let group_key = finish_ceremony(peers, &dkg_id, key_id, staged).await?;
+    Ok(DkgOutcome { group_key, existing: false, ceremony_id: Some(dkg_id) })
 }
 
 /// Parts 1–3 of a DKG or refresh (ceremony protocol 2): every node ends with a staged share and a
@@ -252,7 +269,10 @@ async fn dkg_preflight(
              share"
         )));
     }
-    let first = &views[0].1;
+    // `holders` is not empty, so neither is `views`; checked anyway, no panic in a preflight.
+    let Some((_, first)) = views.first() else {
+        return Err(DaemonError::CeremonyRefused(format!("no cosigner answered for {key_id}")));
+    };
     let same = views.iter().all(|(_, v)| {
         v.epoch == first.epoch && v.pkp_digest == first.pkp_digest && v.group_verifying_key == first.group_verifying_key
     });
@@ -290,12 +310,14 @@ async fn refresh_preflight(
             v.origin
         )));
     }
-    let first = &views[0].1;
+    let Some((first_id, first)) = views.first() else {
+        return Err(DaemonError::CeremonyRefused(format!("no cosigner answered for {key_id}")));
+    };
     if let Some((id, v)) = views.iter().find(|(_, v)| v.epoch != first.epoch || v.pkp_digest != first.pkp_digest) {
         return Err(DaemonError::CeremonyRefused(format!(
             "refusing to refresh {key_id}: cosigner {id} is on epoch {} but cosigner {} is on epoch {} \
              (or their sharings differ) — the nodes must hold one sharing (verify-key shows which)",
-            v.epoch, views[0].0, first.epoch
+            v.epoch, first_id, first.epoch
         )));
     }
     let digest: [u8; 32] = first
@@ -383,7 +405,7 @@ pub const SIGN_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
 ///   refuses too. A leader whose own share is stale declines to lead (UNAVAILABLE, the driver
 ///   fails over).
 /// * Candidate t-subsets are the roster's combinations, leader first then by identifier. Each
-///   attempt is a fresh session (new session id, fresh round-1 commitments from every member —
+///   attempt is a fresh session (a new random session id per member, fresh round-1 commitments from every member —
 ///   commitments are never reused across subsets). A member that fails round 1 or round 2, or whose
 ///   share fails verification at aggregation (frost's cheater detection names it), is excluded for
 ///   the rest of the request; its session is aborted on the members that hold nonces, and the next
@@ -443,54 +465,81 @@ pub async fn sign_with_intent(
     // Sharings peers reported that differ from ours and are not older (epoch-mismatch refusals).
     let mut elsewhere: BTreeMap<Identifier, crate::node::KeyVersion> = BTreeMap::new();
     let mut attempts = 0usize;
-    for subset in combinations(ordered.len(), threshold) {
-        let members: Vec<&Arc<dyn PeerApi>> = subset.iter().map(|&i| ordered[i]).collect();
-        if members.iter().any(|p| excluded.contains_key(&p.identifier())) {
-            continue;
-        }
-        if attempts >= MAX_SIGN_ATTEMPTS || started.elapsed() >= SIGN_BUDGET {
-            break;
-        }
-        attempts += 1;
-        if attempts > 1 {
-            metrics::counter!(crate::metrics::SIGN_RETRIES).increment(1);
-        }
-        let ctx =
-            crate::node::Round1Ctx { leader_view: Some(me.view), intent: intent.cloned(), ..Default::default() };
-        match attempt(node, &members, key_id, message, &ctx, "sign").await {
-            Ok(signature) => return Ok(signature),
-            Err(Attempt::Fatal(e)) => return Err(e),
-            Err(Attempt::Members(failed)) => {
-                for (id, e) in failed {
-                    if policy_refusal.is_none() && is_policy_refusal(&e) {
-                        policy_refusal = Some(clone_policy_refusal(&e));
-                    }
-                    if let DaemonError::EpochMismatch { peer, .. } = &e {
-                        if peer.0 >= me.view.0 {
-                            elsewhere.insert(id, *peer);
+    // Members that answered "no room for this leader's sessions" (a cap on waiting sessions). Not
+    // a failure of theirs: the room is this leader's own, filled by its earlier sessions. They are
+    // skipped while other subsets remain, never excluded, and tried once more after a pass.
+    let mut busy: BTreeSet<Identifier> = BTreeSet::new();
+    let mut busy_retried = false;
+    'passes: loop {
+        for subset in combinations(ordered.len(), threshold) {
+            // `combinations(ordered.len(), threshold)` yields only indices below `ordered.len()`.
+            #[allow(clippy::indexing_slicing)]
+            let members: Vec<&Arc<dyn PeerApi>> = subset.iter().map(|&i| ordered[i]).collect();
+            if members.iter().any(|p| excluded.contains_key(&p.identifier()) || busy.contains(&p.identifier())) {
+                continue;
+            }
+            if attempts >= MAX_SIGN_ATTEMPTS || started.elapsed() >= SIGN_BUDGET {
+                break 'passes;
+            }
+            attempts += 1;
+            if attempts > 1 {
+                metrics::counter!(crate::metrics::SIGN_RETRIES).increment(1);
+            }
+            let ctx =
+                crate::node::Round1Ctx { leader_view: Some(me.view), intent: intent.cloned(), ..Default::default() };
+            match attempt(node, &members, key_id, message, &ctx, "sign").await {
+                Ok(signature) => return Ok(signature),
+                Err(Attempt::Fatal(e)) => return Err(e),
+                Err(Attempt::Members(failed)) => {
+                    for (id, e) in failed {
+                        if is_sessions_full(&e) {
+                            tracing::warn!(key_id, peer = ?id, error = %e, "a cosigner has no room for this leader's sign sessions; trying a subset without it");
+                            busy.insert(id);
+                            continue;
                         }
+                        if policy_refusal.is_none() && is_policy_refusal(&e) {
+                            policy_refusal = Some(clone_policy_refusal(&e));
+                        }
+                        if let DaemonError::EpochMismatch { peer, .. } = &e {
+                            if peer.0 >= me.view.0 {
+                                elsewhere.insert(id, *peer);
+                            }
+                        }
+                        tracing::warn!(key_id, peer = ?id, error = %e, "excluding a cosigner from this signature");
+                        excluded.insert(id, e.to_string());
                     }
-                    tracing::warn!(key_id, peer = ?id, error = %e, "excluding a cosigner from this signature");
-                    excluded.insert(id, e.to_string());
-                }
-                if let Some((view, holders)) = quorum_elsewhere(&elsewhere, threshold) {
-                    nudge_resolver(node, key_id);
-                    return Err(DaemonError::NotServing(format!(
-                        "{holders} cosigners hold sharing epoch {} (pkp {}…) of {key_id}, but this node \
-                         holds epoch {} (pkp {}…) — not leading; another cosigner can sign",
-                        view.0,
-                        &hex::encode(view.1)[..12],
-                        me.view.0,
-                        &hex::encode(me.view.1)[..12]
-                    )));
+                    if let Some((view, holders)) = quorum_elsewhere(&elsewhere, threshold) {
+                        nudge_resolver(node, key_id);
+                        return Err(DaemonError::NotServing(format!(
+                            "{holders} cosigners hold sharing epoch {} (pkp {}…) of {key_id}, but this node \
+                             holds epoch {} (pkp {}…) — not leading; another cosigner can sign",
+                            view.0,
+                            &hex::encode(view.1)[..12],
+                            me.view.0,
+                            &hex::encode(me.view.1)[..12]
+                        )));
+                    }
                 }
             }
         }
+        if !busy.is_empty() && !busy_retried {
+            busy_retried = true;
+            busy.clear();
+            continue 'passes;
+        }
+        break;
     }
     let usable = ordered.len() - excluded.len();
-    tracing::warn!(key_id, attempts, ?excluded, "sign gave up: no t-subset of cosigners could sign");
+    tracing::warn!(key_id, attempts, ?excluded, ?busy, "sign gave up: no t-subset of cosigners could sign");
     if let Some(refusal) = policy_refusal {
         return Err(refusal);
+    }
+    if !busy.is_empty() {
+        // UNAVAILABLE: the driver fails over to another leader, which has its own room.
+        return Err(DaemonError::NotServing(format!(
+            "sign for {key_id}: cosigner(s) {busy:?} have no room for more of this leader's sign sessions \
+             (and no subset without them could sign) — another cosigner can lead"
+        )));
     }
     if usable < threshold {
         Err(DaemonError::ThresholdNotMet { needed: threshold, got: usable })
@@ -500,6 +549,19 @@ pub async fn sign_with_intent(
             started.elapsed(),
             excluded.len()
         )))
+    }
+}
+
+/// A member's "no room for this leader's sessions" (a cap on waiting sign sessions), in process or
+/// over gRPC (the `rutli-error: sessions-full` trailer).
+fn is_sessions_full(e: &DaemonError) -> bool {
+    match e {
+        DaemonError::Core(rutli_frost_core::CoreError::SessionsFull { .. }) => true,
+        DaemonError::Status(s) => s
+            .metadata()
+            .get(crate::error::ERROR_TRAILER)
+            .is_some_and(|v| v.to_str().ok() == Some(crate::error::SESSIONS_FULL)),
+        _ => false,
     }
 }
 
@@ -523,11 +585,18 @@ enum Attempt {
     Fatal(DaemonError),
 }
 
-/// One signing session over exactly `members`: round 1 to each (fresh nonces under a fresh session
-/// id, bound to `message` and this signer set), round 2 to each, aggregate. On a member's failure
-/// the session is aborted on every member still holding nonces for it, so nothing lingers until
-/// the pending TTL; a member that already produced its share has burned its nonce and is
-/// unaffected.
+/// One signing session over exactly `members`: round 1 to each (fresh nonces, bound to `message`
+/// and this signer set), round 2 to each, aggregate. On a member's failure the session is aborted
+/// on every member still holding nonces for it, so nothing lingers until the pending TTL; a member
+/// that already produced its share has burned its nonce and is unaffected.
+///
+/// Each member, this node's own share included, gets its own random session id, used for its
+/// round 1, round 2 and abort. FROST needs no common id: the members agree on the message and the
+/// commitment map (keyed by identifier), and each node keys its nonces and its single-use marker
+/// by the id it was given. A member therefore never learns the id another member's copy lives
+/// under, so it cannot open that id there first (the leader's round 1 would meet a duplicate and
+/// exclude an honest node), abort it or send its round 2. The attempt id is for the leader's log
+/// only and never leaves this node.
 async fn attempt(
     node: &Arc<Node>,
     members: &[&Arc<dyn PeerApi>],
@@ -536,40 +605,57 @@ async fn attempt(
     base: &crate::node::Round1Ctx,
     prefix: &str,
 ) -> std::result::Result<[u8; 64], Attempt> {
-    let session_id = new_id(prefix);
+    let attempt_id = new_id("attempt");
+    let sessions: Vec<String> = members.iter().map(|_| new_id(prefix)).collect();
+    // The members, not their session ids: the id map is what this design keeps from each member.
+    tracing::debug!(
+        key_id,
+        attempt = %attempt_id,
+        members = ?members.iter().map(|p| p.identifier()).collect::<Vec<_>>(),
+        "sign attempt: one session id per member"
+    );
+    let mut open = OpenSessions { key_id: key_id.to_owned(), opened: Vec::new() };
     let mut signers = Vec::with_capacity(members.len());
     for p in members {
         signers.push(crate::hosted::identifier_index(p.identifier()).map_err(Attempt::Fatal)?);
     }
     let ctx = &crate::node::Round1Ctx { message: Some(message.to_vec()), signers: Some(signers), ..base.clone() };
     let mut commitments: BTreeMap<Identifier, SigningCommitments> = BTreeMap::new();
-    for (i, p) in members.iter().enumerate() {
-        match p.sign_round1(key_id, &session_id, ctx).await {
+    // `sessions` has one id per member (built from `members` above), so the zip drops nothing.
+    for (p, session) in members.iter().zip(&sessions) {
+        // Noted before asking: a round 1 that times out or errors may still have opened the
+        // session on the member, so a failure aborts it there too.
+        open.opened.push(((*p).clone(), session.clone()));
+        match p.sign_round1(key_id, session, ctx).await {
             Ok(c) => {
                 commitments.insert(p.identifier(), c);
             }
             Err(e) => {
                 metrics::counter!(crate::metrics::SIGN_ROUND1_SKIPS).increment(1);
-                abort_sign(&members[..i], key_id, &session_id).await;
+                tracing::debug!(key_id, attempt = %attempt_id, peer = ?p.identifier(), "sign round 1 failed");
+                open.abort_now().await;
                 return Err(Attempt::Members(vec![(p.identifier(), e)]));
             }
         }
     }
     let intent_digest = ctx.intent.as_ref().map(crate::intent::intent_digest);
     let mut shares: BTreeMap<Identifier, SignatureShare> = BTreeMap::new();
-    for p in members {
-        match p.sign_round2(key_id, &session_id, message, &commitments, intent_digest.as_ref()).await {
+    for (p, session) in members.iter().zip(&sessions) {
+        match p.sign_round2(key_id, session, message, &commitments, intent_digest.as_ref()).await {
             Ok(share) => {
                 shares.insert(p.identifier(), share);
             }
             Err(e) => {
+                tracing::debug!(key_id, attempt = %attempt_id, peer = ?p.identifier(), "sign round 2 failed");
                 // Members before this one burned their nonce; this one and later ones may still
                 // hold theirs — free them now.
-                abort_sign(members, key_id, &session_id).await;
+                open.abort_now().await;
                 return Err(Attempt::Members(vec![(p.identifier(), e)]));
             }
         }
     }
+    // Every member answered round 2: every session is burned, nothing is left to abort.
+    open.opened.clear();
     let (k, m) = (key_id.to_owned(), message.to_vec());
     match node.blocking(move |n| n.aggregate(&k, &m, &commitments, &shares)).await {
         Ok(signature) => Ok(signature),
@@ -684,13 +770,51 @@ pub async fn ceremony_sign_test(
     }
 }
 
+/// The sessions an attempt asked its members to open and has not seen used. A failure aborts them
+/// ([`OpenSessions::abort_now`]); an attempt dropped before it finished (the driver's call was
+/// cancelled or ran out of time, and tonic dropped the request's future) aborts them from `Drop`.
+/// Without that they would stay on the members until the pending TTL, counted against this
+/// leader's caps there, and a burst of cancelled calls would leave it no room. Each abort runs as
+/// its own task, so it finishes even if the attempt is dropped while waiting for it, and the list is
+/// taken when the abort starts, so no session is aborted twice by it.
+struct OpenSessions {
+    key_id: String,
+    opened: Vec<(Arc<dyn PeerApi>, String)>,
+}
+
+impl OpenSessions {
+    fn spawn_abort(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        if self.opened.is_empty() {
+            return None;
+        }
+        let runtime = tokio::runtime::Handle::try_current().ok()?;
+        let (opened, key_id) = (std::mem::take(&mut self.opened), self.key_id.clone());
+        Some(runtime.spawn(async move { abort_sign(&opened, &key_id).await }))
+    }
+
+    async fn abort_now(&mut self) {
+        if let Some(task) = self.spawn_abort() {
+            let _ = task.await;
+        }
+    }
+}
+
+impl Drop for OpenSessions {
+    fn drop(&mut self) {
+        if !self.opened.is_empty() {
+            tracing::debug!(key_id = %self.key_id, sessions = self.opened.len(), "sign attempt dropped before it finished; aborting its sessions");
+            let _ = self.spawn_abort();
+        }
+    }
+}
+
 /// Best-effort: tell each quorum member to drop the in-flight session so its round-1 nonces are
 /// freed now instead of at the pending-TTL sweep. Errors are swallowed — abort is a courtesy, and
 /// the per-session TTL is the correctness backstop. Aborting a session a peer already completed
 /// (round-2 done) is a harmless no-op.
-async fn abort_sign(chosen: &[&Arc<dyn PeerApi>], key_id: &str, session_id: &str) {
+async fn abort_sign(opened: &[(Arc<dyn PeerApi>, String)], key_id: &str) {
     metrics::counter!(crate::metrics::SIGN_ABORTS).increment(1);
-    for p in chosen {
+    for (p, session_id) in opened {
         if let Err(e) = p.abort_sign(key_id, session_id).await {
             tracing::debug!(peer = ?p.identifier(), error = %e, "sign abort failed; nonces will TTL-expire");
         }
@@ -848,8 +972,9 @@ pub async fn generate_hosted_key(
         return Err(DaemonError::ThresholdNotMet { needed: write_quorum, got: reachable.len() });
     }
 
+    let fenced_ids: Vec<Identifier> = fenced.iter().map(|p| p.identifier()).collect();
     let outcome =
-        generate_hosted_fenced(node, peers, key_id, spec, write_quorum, &ceremony_id).await;
+        generate_hosted_fenced(node, peers, key_id, spec, write_quorum, &ceremony_id, &fenced_ids).await;
     release_fences(&fenced, &ceremony_id, key_id).await;
     outcome
 }
@@ -896,6 +1021,7 @@ async fn generate_hosted_fenced(
     spec: crate::hosted::HostedSpec,
     write_quorum: usize,
     ceremony_id: &str,
+    fenced: &[Identifier],
 ) -> Result<(crate::hosted::HostedKey, bool, usize)> {
     // RSA-2048 keygen is hundreds of milliseconds of pure CPU. Running it inline would park a
     // tokio worker for that whole time — with a small worker pool, a burst of key generations could
@@ -907,33 +1033,65 @@ async fn generate_hosted_fenced(
     };
     let (key, created) = match existing {
         Some(existing) => (existing, false),
-        None => {
-            let key = tokio::task::spawn_blocking(move || {
-                crate::hosted::HostedKey::generate(spec, crate::hosted::now_secs())
-            })
-            .await
-            .map_err(|e| DaemonError::Config(format!("key generation task failed: {e}")))??;
-            let (id, stored, ceremony) = (key_id.to_owned(), key.clone(), ceremony_id.to_owned());
-            node.blocking(move |n| n.hosted_store_for(&id, &stored, Some(&ceremony))).await?;
-            (key, true)
-        }
+        // Never mint a second key under an id a peer already holds (a generation whose leader died
+        // after replicating, a retry through another leader): adopt it when two peers agree on it,
+        // and refuse otherwise.
+        None => match adopt_existing(node, peers, key_id, spec, write_quorum).await? {
+            Some(adopted) => (adopted, false),
+            None => {
+                let key = tokio::task::spawn_blocking(move || {
+                    crate::hosted::HostedKey::generate(spec, crate::hosted::now_secs())
+                })
+                .await
+                .map_err(|e| DaemonError::Config(format!("key generation task failed: {e}")))??;
+                // A new key is written here only after the write quorum holds it (below): a leader
+                // that dies before that leaves no copy of its own.
+                (key, true)
+            }
+        },
     };
     let public_der = if spec.is_asymmetric() { key.public_key_der()? } else { Vec::new() };
 
-    // The leader already holds it; replicate to every other peer, wrapping per recipient.
+    // Replicate to every other peer, wrapping per recipient. The leader counts itself: it holds
+    // the key already, or writes it once the peers' replicas make the quorum.
     let mut replicas = 1usize;
     let mut failures = Vec::new();
+    let mut conflict = None;
     for p in peers {
         if p.identifier() == node.identifier {
             continue;
         }
         match replicate_to(node, p.as_ref(), ceremony_id, key_id, &key, &public_der).await {
             Ok(()) => replicas += 1,
+            // A peer that holds other material under the id (or found another peer that does):
+            // never outvoted by the replicas that agree. Stop here and roll back.
+            Err(e) if is_material_conflict(&e) => {
+                conflict = Some((peer_label(p.identifier()), e));
+                break;
+            }
             Err(e) => {
                 tracing::warn!(peer = ?p.identifier(), key_id, error = %e, "hosted key replication failed");
                 failures.push(e);
             }
         }
+    }
+    if let Some((who, e)) = conflict {
+        // Each node removes only a key it created in this generation, while this leader still
+        // holds its fence; a copy that was there before stays.
+        rollback_generation(peers, fenced, ceremony_id, key_id).await;
+        metrics::counter!(crate::metrics::ANTI_ENTROPY_CONFLICTS).increment(1);
+        hosted_refusal("generate-conflict");
+        tracing::error!(
+            key_id,
+            peer = %who,
+            error = %e,
+            "hosted key generation ABORTED: a cosigner holds different material under this id — \
+             rolled back; resolve the conflict by hand (docs/hosted-keys.md)"
+        );
+        return Err(DaemonError::HostedConflict {
+            key_id: key_id.to_string(),
+            detail: format!("{who} holds different material ({e}); the generation was aborted and rolled back"),
+        });
     }
 
     // A peer holding a tombstone for the id (audit M2) means the id was deleted: generating it
@@ -943,13 +1101,18 @@ async fn generate_hosted_fenced(
         // Below quorum the key is not durable enough to hand out: a single node holding the only
         // copy is exactly the failure this feature exists to prevent. Roll back so the id stays
         // free for a clean retry. Each node removes only a key it created in this generation.
-        for p in peers {
-            let _ = p.purge_key(ceremony_id, key_id).await;
-        }
+        rollback_generation(peers, fenced, ceremony_id, key_id).await;
         if tombstoned_somewhere {
             return Err(crate::node::tombstoned(key_id));
         }
         return Err(DaemonError::ThresholdNotMet { needed: write_quorum, got: replicas });
+    }
+    if created {
+        let (id, stored, ceremony) = (key_id.to_owned(), key.clone(), ceremony_id.to_owned());
+        if let Err(e) = node.blocking(move |n| n.hosted_store_for(&id, &stored, Some(&ceremony))).await {
+            rollback_generation(peers, fenced, ceremony_id, key_id).await;
+            return Err(e);
+        }
     }
     if replicas < peers.len() {
         tracing::warn!(
@@ -960,6 +1123,25 @@ async fn generate_hosted_fenced(
         );
     }
     Ok((key, created, replicas))
+}
+
+/// Roll an aborted generation back on every node it fenced: each removes only a key it created in
+/// this generation, while the fence is still held. A node the purge does not reach may keep that
+/// copy: logged with the node and the key, and counted (`rutli_hosted_rollback_incomplete_total`).
+async fn rollback_generation(peers: &Peers, fenced: &[Identifier], ceremony_id: &str, key_id: &str) {
+    for p in peers.iter().filter(|p| fenced.contains(&p.identifier())) {
+        if let Err(e) = p.purge_key(ceremony_id, key_id).await {
+            metrics::counter!(crate::metrics::HOSTED_ROLLBACK_INCOMPLETE).increment(1);
+            tracing::warn!(
+                peer = ?p.identifier(),
+                key_id,
+                ceremony_id,
+                error = %e,
+                "the rollback of an aborted hosted-key generation did not reach this cosigner: a copy \
+                 the generation wrote may remain there (docs/hosted-keys.md, \"A leader that dies\")"
+            );
+        }
+    }
 }
 
 async fn replicate_to(
@@ -995,12 +1177,49 @@ async fn replicate_to(
         .await?;
     // The peer's commitment must match ours, or it stored something else under this id.
     if commitment != node.hosted_commitment(key)? {
-        return Err(DaemonError::Disagreement(format!(
-            "peer {:?} stored different material for {key_id}",
-            peer.identifier()
-        )));
+        return Err(DaemonError::HostedConflict {
+            key_id: key_id.to_string(),
+            detail: format!("{} answered with a commitment to different material", peer_label(peer.identifier())),
+        });
     }
     Ok(())
+}
+
+/// Whether a replica's refusal means it holds (or saw) other material under the id: this release's
+/// [`DaemonError::HostedConflict`] (in process, or decoded from the `hosted-conflict` trailer), or
+/// a 0.4.0 node's create-once refusal (ALREADY_EXISTS, "... with different material ...").
+pub(crate) fn is_material_conflict(e: &DaemonError) -> bool {
+    match e {
+        DaemonError::HostedConflict { .. } => true,
+        DaemonError::KeyExists(m) => m.contains("different material"),
+        DaemonError::Status(s) => {
+            s.code() == tonic::Code::AlreadyExists && s.message().contains("different material")
+        }
+        _ => false,
+    }
+}
+
+fn peer_label(id: Identifier) -> String {
+    match crate::hosted::identifier_index(id) {
+        Ok(i) => format!("cosigner {i}"),
+        Err(_) => format!("{id:?}"),
+    }
+}
+
+/// Count material from a peer that this node refuses: a time in the future, or anything else that
+/// does not open or validate.
+fn count_bad_material(e: &DaemonError) {
+    if matches!(e, DaemonError::HostedInvalid(_)) {
+        hosted_refusal("timestamp")
+    } else {
+        hosted_refusal("invalid")
+    }
+}
+
+/// Count one refusal in `rutli_hosted_replication_refusals_total{reason}` (the reasons are listed
+/// in [`crate::metrics::HOSTED_REFUSAL_REASONS`]).
+pub(crate) fn hosted_refusal(reason: &'static str) {
+    metrics::counter!(crate::metrics::HOSTED_REPLICATION_REFUSALS, "reason" => reason).increment(1);
 }
 
 async fn release_fences(fenced: &[&Arc<dyn PeerApi>], ceremony_id: &str, key_id: &str) {
@@ -1109,96 +1328,669 @@ pub async fn hosted_replica_count(peers: &Peers, key_id: &str) -> usize {
     n
 }
 
-/// Pull a hosted key this node is missing from whichever peer has it (read-repair).
+/// How many peers must return the same material before this node stores a hosted key it does not
+/// hold (read-repair, the anti-entropy sweep, a leader adopting an existing key). A constant, also
+/// for five nodes: the threat model is one compromised cosigner, and two agreeing peers means at
+/// least one honest one.
+pub const PULL_AGREEMENT: usize = 2;
+
+/// How long a replication check waits for one peer's copy of a hosted key. Shorter than
+/// [`crate::peer::PEER_RPC_TIMEOUT`]: a push handler asks the other peers before it answers the
+/// generation's leader, whose own call to it has that deadline.
+pub const PEER_COPY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// What one peer holds under a hosted key id, as this node sees it.
 ///
-/// Without this, a decrypt that lands on a lagging replica would return NOT_FOUND to Canton — and
-/// the driver correctly does not fail over on NOT_FOUND, since that is normally authoritative.
-/// Repairing on demand is what makes NOT_FOUND trustworthy.
-pub async fn repair_hosted_key(node: &Arc<Node>, peers: &Peers, key_id: &str) -> Result<bool> {
-    if hosted_exists(node, key_id).await? {
-        return Ok(true);
-    }
-    // A deleted key is never pulled back (audit M2): its tombstone answers NOT_FOUND.
-    let id = key_id.to_owned();
-    if node.blocking(move |n| n.hosted_tombstoned(&id)).await? {
-        return Ok(false);
-    }
+/// The rule every decision below follows: **only an answer counts.** A peer that is silent (down,
+/// or slower than [`PEER_COPY_TIMEOUT`]) is unknown, never "does not hold it"; a peer whose answer
+/// this node cannot use (does not open or validate, a time in the future, a tombstone whose delete
+/// intent does not verify) holds something unknown, never nothing and never agreement.
+enum PeerCopy {
+    /// A copy that opened and validated here, with this node's commitment to it.
+    Holds { commitment: Vec<u8>, key: crate::hosted::HostedKey },
+    /// NOT_FOUND: the peer holds nothing under the id.
+    Absent,
+    /// The peer holds a tombstone for the id (its delete intent not yet checked here).
+    Tombstone(Box<pb::KeyManifest>),
+    /// It answered with something this node refuses. Logged and counted when seen.
+    Unusable,
+    /// No answer in time, or a refusal that says nothing about the key.
+    Silent,
+}
+
+/// Every peer's copy of `key_id` (this node and `exclude` left out, each roster node once), asked
+/// concurrently, each with [`PEER_COPY_TIMEOUT`]. A copy is unwrapped and validated here, and the
+/// commitment computed here, never taken from the peer.
+async fn peer_copies(
+    node: &Arc<Node>,
+    peers: &[Arc<dyn PeerApi>],
+    key_id: &str,
+    exclude: Option<u16>,
+) -> Vec<(u16, PeerCopy)> {
+    let mut asked = tokio::task::JoinSet::new();
+    let mut seen = std::collections::HashSet::new();
     for p in peers {
         if p.identifier() == node.identifier {
             continue;
         }
-        let Ok((spec, _pub_der, wrapped)) = p.fetch_key(key_id).await else { continue };
-        let Ok(spec) = crate::hosted::HostedSpec::parse(&spec) else { continue };
-        match node.hosted_unwrap(key_id, spec, &wrapped) {
-            Ok(key) => {
-                let id = key_id.to_owned();
-                node.blocking(move |n| n.hosted_store(&id, &key)).await?;
-                tracing::info!(key_id, from = ?p.identifier(), "repaired missing hosted key from peer");
-                return Ok(true);
+        let Ok(id) = crate::hosted::identifier_index(p.identifier()) else { continue };
+        // A roster entry listed twice is one node: it counts once.
+        if Some(id) == exclude || !seen.insert(id) {
+            continue;
+        }
+        let (p, id_owned) = (p.clone(), key_id.to_owned());
+        asked.spawn(async move { (id, tokio::time::timeout(PEER_COPY_TIMEOUT, p.fetch_key_state(&id_owned)).await) });
+    }
+    let mut out = Vec::new();
+    while let Some(joined) = asked.join_next().await {
+        // A task that failed (panicked) is a peer that did not answer: counted silent below.
+        let Ok((peer, answer)) = joined else { continue };
+        let copy = match answer {
+            Err(_) => PeerCopy::Silent,
+            Ok(Err(e)) if is_not_found(&e) => PeerCopy::Absent,
+            Ok(Err(e)) => {
+                tracing::debug!(key_id, peer, error = %e, "no usable answer from peer for a hosted key");
+                PeerCopy::Silent
+            }
+            Ok(Ok(crate::peer::FetchedCopy::Tombstone(t))) => PeerCopy::Tombstone(t),
+            Ok(Ok(crate::peer::FetchedCopy::Key { spec, wrapped })) => {
+                let opened = crate::hosted::HostedSpec::parse(&spec)
+                    .and_then(|spec| node.hosted_unwrap(key_id, spec, &wrapped))
+                    .and_then(|key| Ok((node.hosted_commitment(&key)?, key)));
+                match opened {
+                    Ok((commitment, key)) => PeerCopy::Holds { commitment, key },
+                    Err(e) => {
+                        count_bad_material(&e);
+                        tracing::warn!(key_id, peer, error = %e, "a peer's copy of a hosted key is refused: it does not open or validate here");
+                        PeerCopy::Unusable
+                    }
+                }
+            }
+        };
+        out.push((peer, copy));
+    }
+    for id in seen {
+        if Some(id) != exclude && !out.iter().any(|(p, _)| *p == id) {
+            out.push((id, PeerCopy::Silent));
+        }
+    }
+    out.sort_by_key(|(peer, _)| *peer);
+    out
+}
+
+/// NOT_FOUND, in process or over the mesh.
+fn is_not_found(e: &DaemonError) -> bool {
+    match e {
+        DaemonError::UnknownKey(_) => true,
+        DaemonError::Status(s) => s.code() == tonic::Code::NotFound,
+        _ => false,
+    }
+}
+
+/// The peers' answers about one key id, sorted by kind.
+#[derive(Default)]
+struct Tally {
+    holders: BTreeMap<Vec<u8>, Vec<(u16, crate::hosted::HostedKey)>>,
+    absent: Vec<u16>,
+    tombstones: Vec<(u16, Box<pb::KeyManifest>)>,
+    unusable: Vec<u16>,
+    silent: Vec<u16>,
+}
+
+impl Tally {
+    fn of(copies: Vec<(u16, PeerCopy)>) -> Self {
+        let mut t = Tally::default();
+        for (peer, copy) in copies {
+            match copy {
+                PeerCopy::Holds { commitment, key } => t.holders.entry(commitment).or_default().push((peer, key)),
+                PeerCopy::Absent => t.absent.push(peer),
+                PeerCopy::Tombstone(m) => t.tombstones.push((peer, m)),
+                PeerCopy::Unusable => t.unusable.push(peer),
+                PeerCopy::Silent => t.silent.push(peer),
+            }
+        }
+        t
+    }
+
+    /// (peer, short commitment) of every holder, when they hold different material.
+    fn disagreement(&self) -> Option<Vec<(u16, String)>> {
+        (self.holders.len() > 1).then(|| {
+            self.holders
+                .iter()
+                .flat_map(|(c, holders)| holders.iter().map(move |(p, _)| (*p, hex::encode(&c[..6]))))
+                .collect()
+        })
+    }
+
+    fn supporters(&self) -> Vec<u16> {
+        self.holders.values().flatten().map(|(p, _)| *p).collect()
+    }
+
+    /// The agreed key: [`PULL_AGREEMENT`] peers return the same material, no peer returns other
+    /// material, and **every** peer answered with something usable — a silent or unusable peer
+    /// may hold other material, so it blocks a confirmation. Of the supporters' times, the latest
+    /// creation time and the latest undelete time (`None` only when no supporter has one): the
+    /// times are not committed to, and an earlier time would let a delete intent issued before the
+    /// real creation or undelete apply. Every supporter's times are already bounded by now plus
+    /// the clock skew.
+    fn confirmed(&self) -> Option<(crate::hosted::HostedKey, Vec<u16>)> {
+        if self.holders.len() != 1 || !self.silent.is_empty() || !self.unusable.is_empty() || !self.tombstones.is_empty() {
+            return None;
+        }
+        let holders = self.holders.values().next()?;
+        if holders.len() < PULL_AGREEMENT {
+            return None;
+        }
+        let mut key = holders[0].1.clone();
+        key.created_at = holders.iter().map(|(_, k)| k.created_at).max().unwrap_or(key.created_at);
+        key.undeleted_at_ms = holders.iter().filter_map(|(_, k)| k.undeleted_at_ms).max();
+        Some((key, holders.iter().map(|(p, _)| *p).collect()))
+    }
+
+    /// Nothing usable was returned at all: no holder, no unusable answer, no tombstone left.
+    fn none_held(&self) -> bool {
+        self.holders.is_empty() && self.unusable.is_empty() && self.tombstones.is_empty()
+    }
+}
+
+/// How many distinct roster nodes `peers` and this node make.
+fn roster_size(node: &Node, peers: &[Arc<dyn PeerApi>]) -> usize {
+    let mut ids: std::collections::HashSet<Identifier> = peers.iter().map(|p| p.identifier()).collect();
+    ids.insert(node.identifier);
+    ids.len()
+}
+
+/// Whether enough nodes said "I do not hold it" for this node to conclude that no node does: a
+/// written key sits on at least `write_quorum` nodes, so `n - write_quorum + 1` explicit absences
+/// (this node included) leave no room for a written copy among the nodes that did not answer.
+fn absence_is_proven(n: usize, write_quorum: usize, absent_peers: usize) -> bool {
+    let q = write_quorum.clamp(1, n.max(1));
+    absent_peers + 1 > n - q
+}
+
+/// Apply the peers' tombstones for `key_id` here, with the checks the sweep applies (each delete
+/// intent verified by this node). Returns whether the id is deleted: this node now holds a
+/// tombstone for it, or a peer's tombstone verified here (also where this node's own tombstone was
+/// cleared by hand, which it does not take back). A tombstone that does not verify is logged and
+/// moved to `unusable`.
+async fn apply_peer_tombstones(node: &Arc<Node>, key_id: &str, t: &mut Tally) -> Result<bool> {
+    let mut verified = false;
+    for (peer, m) in std::mem::take(&mut t.tombstones) {
+        match apply_peer_tombstone(node, &m).await {
+            Ok(outcome) => {
+                verified = true;
+                if outcome != crate::node::TombstoneOutcome::Already {
+                    tracing::warn!(key_id, from = peer, ?outcome, "applied a peer's tombstone before pulling: the key is deleted");
+                }
             }
             Err(e) => {
-                tracing::warn!(key_id, peer = ?p.identifier(), error = %e, "hosted key repair failed");
+                tracing::error!(key_id, peer, error = %e, "REFUSED a peer's tombstone — an answer this node cannot use");
+                t.unusable.push(peer);
             }
         }
     }
-    Ok(false)
+    let id = key_id.to_owned();
+    Ok(verified || node.blocking(move |n| n.hosted_tombstoned(&id)).await?)
 }
 
-/// One anti-entropy sweep: apply peers' tombstones, pull anything this node is missing, and push
-/// anything a peer is missing.
+/// Apply one peer tombstone (a `KeyManifest` with `tombstone` set) on this node, verifying its
+/// delete intent here. Shared by the sweep, read-repair, a leader's look and a push check.
+async fn apply_peer_tombstone(node: &Arc<Node>, t: &pb::KeyManifest) -> Result<crate::node::TombstoneOutcome> {
+    // A deletion time in the future is refused like a key's: now plus the clock skew allowance.
+    let limit = crate::intent::now_ms().saturating_add(node.hosted_skew_ms());
+    if t.deleted_at_ms > limit {
+        hosted_refusal("timestamp");
+        return Err(DaemonError::HostedInvalid(format!(
+            "peer tombstone for {}: deleted_at {} ms lies in the future (limit {limit} ms)",
+            t.key_id, t.deleted_at_ms
+        )));
+    }
+    let intent = <pb::SignedIntent as prost::Message>::decode(t.delete_intent.as_slice()).map_err(|e| {
+        crate::intent::refused_delete("malformed", format!("peer tombstone for {}: {e}", t.key_id))
+    })?;
+    let info = crate::node::DeletedKeyInfo { spec: t.spec.clone(), created_at: t.created_at, commitment: t.commitment.clone() };
+    let (deleted_at_ms, id) = (t.deleted_at_ms, t.key_id.clone());
+    node.blocking(move |n| {
+        n.hosted_apply_tombstone(&id, &intent, crate::intent::Expiry::Propagated { deleted_at_ms }, Some(&info))
+    })
+    .await
+}
+
+/// Pull a hosted key this node is missing (the sweep, and tests). Unthrottled: read-repair on the
+/// request path goes through [`read_repair`].
 ///
-/// Pushing is what heals an under-quorum write; pulling is what heals a node restored from a stale
-/// backup. Applies to hosted keys ONLY — a FROST share must never be copied between nodes, since
-/// two nodes holding the same share silently breaks the threshold.
+/// Without this, a decrypt that lands on a lagging replica would return NOT_FOUND to Canton — and
+/// the driver correctly does not fail over on NOT_FOUND, since that is normally authoritative.
+/// Repairing on demand is what makes NOT_FOUND trustworthy.
+///
+/// `Ok(true)`: held (now or before). `Ok(false)` (NOT_FOUND): tombstoned here or at a peer that
+/// answered (the tombstone is applied here first), or no node holds it — and enough nodes said so
+/// ([`absence_is_proven`]). The key is stored only when [`Tally::confirmed`]. Everything else —
+/// one copy, copies that disagree, a silent or unusable peer — is
+/// [`DaemonError::HostedUnconfirmed`] (UNAVAILABLE), so the caller fails over.
+pub async fn repair_hosted_key(node: &Arc<Node>, peers: &Peers, key_id: &str) -> Result<bool> {
+    match locally_settled(node, key_id).await? {
+        Some(answer) => Ok(answer),
+        None => pull_missing(node, peers, key_id).await,
+    }
+}
+
+/// [`repair_hosted_key`] for a request: within this node's read-repair ceiling
+/// ([`crate::node::REPAIR_FANOUT_PER_SEC`]). Over it, UNAVAILABLE — never NOT_FOUND, so a client
+/// that floods made-up ids cannot hide a real key; the driver fails over.
+pub async fn read_repair(node: &Arc<Node>, peers: &Peers, key_id: &str) -> Result<bool> {
+    if let Some(answer) = locally_settled(node, key_id).await? {
+        return Ok(answer);
+    }
+    if !node.take_repair_token() {
+        hosted_refusal("throttled");
+        tracing::debug!(key_id, "read-repair ceiling reached: answering UNAVAILABLE without asking the peers");
+        return Err(DaemonError::HostedUnconfirmed {
+            key_id: key_id.to_string(),
+            detail: "this node's read-repair ceiling is reached; retry, or ask another cosigner".into(),
+        });
+    }
+    pull_missing(node, peers, key_id).await
+}
+
+/// Held here (`Some(true)`), tombstoned here (`Some(false)`: a deleted key is never pulled back,
+/// checked before any peer is asked), or neither (`None`).
+async fn locally_settled(node: &Arc<Node>, key_id: &str) -> Result<Option<bool>> {
+    if hosted_exists(node, key_id).await? {
+        return Ok(Some(true));
+    }
+    let id = key_id.to_owned();
+    if node.blocking(move |n| n.hosted_tombstoned(&id)).await? {
+        return Ok(Some(false));
+    }
+    Ok(None)
+}
+
+async fn pull_missing(node: &Arc<Node>, peers: &Peers, key_id: &str) -> Result<bool> {
+    let n = roster_size(node, peers);
+    let mut t = Tally::of(peer_copies(node, peers, key_id, None).await);
+    if !t.tombstones.is_empty() && apply_peer_tombstones(node, key_id, &mut t).await? {
+        return Ok(false);
+    }
+    if let Some(held) = t.disagreement() {
+        metrics::counter!(crate::metrics::ANTI_ENTROPY_CONFLICTS).increment(1);
+        hosted_refusal("disagreement");
+        tracing::error!(
+            key_id,
+            peers = ?held,
+            "hosted key CONFLICT: peers hold different material under this id — this node \
+             stores neither and answers UNAVAILABLE; resolve by hand (docs/hosted-keys.md)"
+        );
+        return Err(DaemonError::HostedUnconfirmed {
+            key_id: key_id.to_string(),
+            detail: format!("peers hold different material (peer, commitment): {held:?}"),
+        });
+    }
+    if t.none_held() {
+        if absence_is_proven(n, node.hosted_write_quorum(), t.absent.len()) {
+            return Ok(false);
+        }
+        hosted_refusal("unconfirmed");
+        tracing::warn!(
+            key_id,
+            absent = ?t.absent,
+            silent = ?t.silent,
+            "too few cosigners answered for this node to say a hosted key does not exist — \
+             answering UNAVAILABLE, not NOT_FOUND"
+        );
+        return Err(DaemonError::HostedUnconfirmed {
+            key_id: key_id.to_string(),
+            detail: format!(
+                "{} of {n} cosigners answered that they do not hold it (this one included), {} silent",
+                t.absent.len() + 1,
+                t.silent.len()
+            ),
+        });
+    }
+    if let Some((key, supporters)) = t.confirmed() {
+        let id = key_id.to_owned();
+        node.blocking(move |n| n.hosted_store(&id, &key)).await?;
+        tracing::info!(key_id, from = ?supporters, "pulled a missing hosted key, confirmed by every peer");
+        return Ok(true);
+    }
+    hosted_refusal("unconfirmed");
+    tracing::warn!(
+        key_id,
+        holders = ?t.supporters(),
+        refused = ?t.unusable,
+        silent = ?t.silent,
+        "a missing hosted key is not confirmed: fewer than two peers hold the same copy, or a peer \
+         is silent or answered with something unusable — not pulled; this node answers UNAVAILABLE \
+         for it until every peer answers"
+    );
+    Err(DaemonError::HostedUnconfirmed {
+        key_id: key_id.to_string(),
+        detail: format!(
+            "holders {:?}, unusable {:?}, silent {:?}; {PULL_AGREEMENT} agreeing copies and an answer from every peer are needed",
+            t.supporters(),
+            t.unusable,
+            t.silent
+        ),
+    })
+}
+
+/// A leader that lacks `key_id`: whether a peer already holds it. `Some(key)` when the copies are
+/// confirmed ([`Tally::confirmed`]; stored here, not as created by this generation, so a rollback
+/// leaves it); `None` — mint — only when no peer holds anything under the id **and** enough nodes
+/// said so ([`absence_is_proven`]: `n - write_quorum + 1`, this one included). A key the client was
+/// given sits on at least `write_quorum` nodes, so it cannot hide among the silent ones; with
+/// 2-of-3 this node and one peer are enough, so one node down still mints. Otherwise, and for one
+/// copy, copies that disagree, an unusable answer or a peer's tombstone, the generation is refused:
+/// minting a second key over a copy would fork the id.
+async fn adopt_existing(
+    node: &Arc<Node>,
+    peers: &Peers,
+    key_id: &str,
+    spec: crate::hosted::HostedSpec,
+    write_quorum: usize,
+) -> Result<Option<crate::hosted::HostedKey>> {
+    let mut t = Tally::of(peer_copies(node, peers, key_id, None).await);
+    if !t.tombstones.is_empty() && apply_peer_tombstones(node, key_id, &mut t).await? {
+        return Err(crate::node::tombstoned(key_id));
+    }
+    if let Some(held) = t.disagreement() {
+        metrics::counter!(crate::metrics::ANTI_ENTROPY_CONFLICTS).increment(1);
+        hosted_refusal("generate-conflict");
+        tracing::error!(key_id, peers = ?held, "hosted key generation refused: peers hold different material under this id");
+        return Err(DaemonError::HostedConflict {
+            key_id: key_id.to_string(),
+            detail: format!("peers hold different material (peer, commitment): {held:?}"),
+        });
+    }
+    if t.none_held() {
+        let n = roster_size(node, peers);
+        if absence_is_proven(n, write_quorum, t.absent.len()) {
+            return Ok(None);
+        }
+        hosted_refusal("unconfirmed");
+        tracing::warn!(
+            key_id,
+            absent = ?t.absent,
+            silent = ?t.silent,
+            "hosted key generation refused: too few cosigners answered that they hold nothing under \
+             this id — a key could sit on the silent ones"
+        );
+        return Err(DaemonError::HostedUnconfirmed {
+            key_id: key_id.to_string(),
+            detail: format!(
+                "{} of {n} cosigners answered that they hold nothing under the id (this one included); \
+                 {} needed before a new key is minted",
+                t.absent.len() + 1,
+                n + 1 - write_quorum.clamp(1, n.max(1))
+            ),
+        });
+    }
+    if let Some((key, supporters)) = t.confirmed() {
+        if key.spec != spec {
+            return Err(DaemonError::KeyExists(format!(
+                "{key_id} already exists with spec {} (requested {})",
+                key.spec.as_str(),
+                spec.as_str()
+            )));
+        }
+        let (id, stored) = (key_id.to_owned(), key.clone());
+        node.blocking(move |n| n.hosted_store(&id, &stored)).await?;
+        tracing::info!(key_id, from = ?supporters, "generation found the key on agreeing peers: adopted, not minted");
+        return Ok(Some(key));
+    }
+    hosted_refusal("unconfirmed");
+    tracing::warn!(
+        key_id,
+        holders = ?t.supporters(),
+        refused = ?t.unusable,
+        silent = ?t.silent,
+        "hosted key generation refused: a peer holds a copy that is not confirmed"
+    );
+    Err(DaemonError::HostedUnconfirmed {
+        key_id: key_id.to_string(),
+        detail: format!(
+            "holders {:?}, unusable {:?}, silent {:?}; a new key is not minted over a copy",
+            t.supporters(),
+            t.unusable,
+            t.silent
+        ),
+    })
+}
+
+/// A peer's push of hosted key `key_id` (`Peer.ReplicateKey`, or the in-process peer): the same
+/// rules over every transport. `leader` is the caller's certificate CN (`None`: no caller
+/// identity, a plaintext dev mesh), `sender` its roster identifier when known.
+///
+/// - Identical material already here: a no-op. Different material here: refused,
+///   [`DaemonError::HostedConflict`].
+/// - An id this node does not hold: accepted only while `leader` holds this node's generation
+///   fence for the id under `ceremony_id` (FAILED_PRECONDITION otherwise), and only if no other
+///   peer that answers holds different material (HostedConflict), a tombstone (refused as
+///   tombstoned, the tombstone applied here) or a copy this node cannot check
+///   (HostedUnconfirmed). A silent peer does not block the push, or one node down would stop
+///   every generation.
+///
+/// Every refusal is logged with the caller and the key, and counted.
+pub async fn accept_replica(
+    node: &Arc<Node>,
+    ceremony_id: &str,
+    key_id: &str,
+    spec: &str,
+    wrapped: &crate::wrap::Wrapped,
+    leader: Option<&str>,
+    sender: Option<u16>,
+) -> Result<Vec<u8>> {
+    let from = match (sender, leader) {
+        (Some(s), _) => format!("cosigner {s}"),
+        (None, Some(cn)) => cn.to_string(),
+        (None, None) => "an unidentified caller".to_string(),
+    };
+    let spec = crate::hosted::HostedSpec::parse(spec)?;
+    let key = match node.hosted_unwrap(key_id, spec, wrapped) {
+        Ok(key) => key,
+        Err(e) => {
+            count_bad_material(&e);
+            tracing::warn!(key_id, peer = %from, error = %e, "refused a pushed hosted key: it does not open or validate");
+            return Err(e);
+        }
+    };
+    let (id, k) = (key_id.to_owned(), key.clone());
+    match node.blocking(move |n| n.hosted_push_check(&id, &k)).await {
+        Ok(Some(commitment)) => return Ok(commitment),
+        Ok(None) => {}
+        Err(e @ DaemonError::HostedConflict { .. }) => {
+            metrics::counter!(crate::metrics::ANTI_ENTROPY_CONFLICTS).increment(1);
+            hosted_refusal("conflict");
+            tracing::error!(key_id, peer = %from, "refused a pushed hosted key: this node holds different material under the id");
+            return Err(e);
+        }
+        Err(e) => return Err(e),
+    }
+    if !node.hosted_genkey_fenced_by(key_id, ceremony_id, leader) {
+        hosted_refusal("unfenced");
+        tracing::warn!(
+            key_id,
+            peer = %from,
+            ceremony_id,
+            "refused a pushed hosted key: the id is not held here and the caller holds no \
+             generation fence for it under that ceremony (a 0.4.0 node's anti-entropy push looks \
+             like this; this node pulls the key itself once two peers agree)"
+        );
+        return Err(crate::node::unfenced_push(key_id, ceremony_id, leader));
+    }
+    // Each such check asks every peer: charged to this node's fan-out ceiling, so a peer that fences
+    // and pushes made-up ids in a loop is bounded. Over it: "try again" (UNAVAILABLE), which the
+    // leader counts as a failed replica, never as a conflict.
+    if !node.take_repair_token() {
+        hosted_refusal("throttled");
+        tracing::warn!(key_id, peer = %from, "refused a pushed hosted key for now: this node's fan-out ceiling is reached");
+        return Err(DaemonError::HostedUnconfirmed {
+            key_id: key_id.to_string(),
+            detail: "this node's fan-out ceiling is reached; try again".into(),
+        });
+    }
+    // The fence holder may still be the one compromised node: before a key this node lacks is
+    // stored, no other peer that answers may hold different material, a tombstone, or a copy this
+    // node cannot check.
+    let mine = node.hosted_commitment(&key)?;
+    let mut t = Tally::of(peer_copies(node, &node.mesh_peers(), key_id, sender).await);
+    if !t.tombstones.is_empty() && apply_peer_tombstones(node, key_id, &mut t).await? {
+        tracing::warn!(key_id, peer = %from, "refused a pushed hosted key: a peer holds a valid tombstone for the id");
+        return Err(crate::node::tombstoned(key_id));
+    }
+    if let Some(other) = t.holders.iter().find(|(c, _)| **c != mine).and_then(|(_, h)| h.first().map(|(p, _)| *p)) {
+        metrics::counter!(crate::metrics::ANTI_ENTROPY_CONFLICTS).increment(1);
+        hosted_refusal("conflict");
+        tracing::error!(
+            key_id,
+            peer = %from,
+            holder = other,
+            "refused a pushed hosted key: another cosigner holds different material under the id"
+        );
+        return Err(DaemonError::HostedConflict {
+            key_id: key_id.to_string(),
+            detail: format!("cosigner {other} holds different material; the push from {from} is refused"),
+        });
+    }
+    if !t.unusable.is_empty() {
+        hosted_refusal("unverifiable");
+        tracing::warn!(
+            key_id,
+            peer = %from,
+            unusable = ?t.unusable,
+            "refused a pushed hosted key: another cosigner answered with a copy this node cannot check"
+        );
+        return Err(DaemonError::HostedUnconfirmed {
+            key_id: key_id.to_string(),
+            detail: format!("cosigner(s) {:?} answered with a copy this node cannot check; the push from {from} is refused", t.unusable),
+        });
+    }
+    let (id, cid, cn) = (key_id.to_owned(), ceremony_id.to_owned(), leader.map(str::to_owned));
+    node.blocking(move |n| n.hosted_store_pushed(&id, &key, &cid, cn.as_deref())).await
+}
+
+/// Log and publish (`rutli_hosted_keys_future_timestamp`) the hosted keys held here whose creation
+/// or undelete time lies in the future. Run at start-up and by every sweep.
+pub async fn report_future_timestamps(node: &Arc<Node>) {
+    match node.blocking(|n| n.hosted_future_timestamps()).await {
+        Ok(found) => {
+            metrics::gauge!(crate::metrics::HOSTED_FUTURE_TIMESTAMPS).set(found.len() as f64);
+            for (key_id, why) in &found {
+                tracing::error!(
+                    key_id = %key_id,
+                    why = %why,
+                    "hosted key with a time in the future: it refuses every delete until then — check \
+                     the clock of the node that created it (docs/hosted-keys.md)"
+                );
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "could not check hosted-key timestamps"),
+    }
+}
+
+/// One anti-entropy sweep: apply peers' tombstones, then pull what this node is missing. Returns
+/// how many keys it pulled.
+///
+/// Pulling is what heals a node that missed a write (down during a 2-of-3 generation) or was
+/// restored from a stale backup: each missing key is pulled once per sweep, and stored only when
+/// two peers return the same material ([`repair_hosted_key`]). The sweep never pushes a key to a
+/// peer: each node pulls for itself. Applies to hosted keys ONLY — a FROST share must never be
+/// copied between nodes, since two nodes holding the same share silently breaks the threshold.
 ///
 /// Tombstones first (audit M2): a peer's tombstone whose delete intent verifies here converts this
 /// node's live copy (or is recorded where the key is absent), so a node that was down during a
-/// delete, or was restored from an old backup, never pushes the deleted key back. A tombstone that
-/// does not verify is refused and counted (`rutli_delete_intent_refusals_total`). Nothing is pushed
-/// to a peer that holds a tombstone for the id, and nothing tombstoned here is pulled.
-pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<(usize, usize)> {
+/// delete, or was restored from an old backup, never pulls the deleted key back. A tombstone that
+/// does not verify is refused and counted (`rutli_delete_intent_refusals_total`). Nothing
+/// tombstoned here is pulled.
+/// Most missing ids one sweep pulls in total, and per listing peer: each pull asks every peer, and a
+/// peer's inventory may list any number of made-up ids. The rest wait for the next sweep.
+pub const SWEEP_MAX_PULLS: usize = 256;
+pub const SWEEP_MAX_PULLS_PER_PEER: usize = 64;
+
+/// The missing ids one sweep pulls, in order, within [`SWEEP_MAX_PULLS`] and
+/// [`SWEEP_MAX_PULLS_PER_PEER`]. Ids more peers list come first: a real key that missed this node
+/// is listed by at least two (only two agreeing copies can be pulled anyway), so one peer listing
+/// made-up ids cannot push it out of the budget. Logs when the bound leaves ids for the next sweep.
+fn sweep_pull_order(missing: BTreeMap<String, Vec<Identifier>>) -> Vec<String> {
+    let mut ids: Vec<(String, Vec<Identifier>)> = missing.into_iter().collect();
+    ids.sort_by(|a, b| b.1.len().cmp(&a.1.len()).then_with(|| a.0.cmp(&b.0)));
+    let mut budget: std::collections::HashMap<Identifier, usize> = std::collections::HashMap::new();
+    let (mut chosen, mut left) = (Vec::new(), 0usize);
+    for (id, listers) in ids {
+        let has_budget = listers.iter().any(|l| budget.get(l).copied().unwrap_or(0) < SWEEP_MAX_PULLS_PER_PEER);
+        if chosen.len() >= SWEEP_MAX_PULLS || !has_budget {
+            left += 1;
+            continue;
+        }
+        for l in &listers {
+            *budget.entry(*l).or_insert(0) += 1;
+        }
+        chosen.push(id);
+    }
+    if left > 0 {
+        tracing::warn!(
+            pulling = chosen.len(),
+            left,
+            "anti-entropy: the pull bound of this sweep is reached — the remaining missing ids wait \
+             for the next sweep (a peer listing many ids this node lacks: check which in its inventory)"
+        );
+    }
+    chosen
+}
+
+/// How long the sweep waits for one peer's inventory (`ListKeys` lists every key, so longer than a
+/// single key's [`PEER_COPY_TIMEOUT`]).
+pub const SWEEP_LIST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<usize> {
     if !node.hosted_enabled() {
-        return Ok((0, 0));
+        return Ok(0);
     }
     // A store that failed its readiness probe is not reconciled against: nothing could be pulled
     // into it, and its listing is not to be trusted.
     node.refuse_if_keystore_down()?;
 
-    // Every peer's inventory first, so tombstones from anyone apply before anything is pushed.
-    let mut inventories: Vec<(&Arc<dyn PeerApi>, Vec<pb::KeyManifest>)> = Vec::new();
-    for p in peers {
-        if p.identifier() == node.identifier {
+    // Every peer's inventory first, so tombstones from anyone apply before anything is pulled.
+    // Asked concurrently, each with SWEEP_LIST_TIMEOUT: one hung peer must not stall repair,
+    // tombstone propagation and the gauges; the sweep goes on with the peers that answered.
+    let mut asked = tokio::task::JoinSet::new();
+    let mut seen = std::collections::HashSet::new();
+    for (i, p) in peers.iter().enumerate() {
+        if p.identifier() == node.identifier || !seen.insert(p.identifier()) {
             continue;
         }
+        let p = p.clone();
+        asked.spawn(async move { (i, tokio::time::timeout(SWEEP_LIST_TIMEOUT, p.list_inventory()).await) });
+    }
+    let mut answers = Vec::new();
+    while let Some(joined) = asked.join_next().await {
+        if let Ok(answer) = joined {
+            answers.push(answer);
+        }
+    }
+    answers.sort_by_key(|(i, _)| *i);
+    let mut inventories: Vec<(&Arc<dyn PeerApi>, Vec<pb::KeyManifest>)> = Vec::new();
+    for (i, answer) in answers {
+        let p = &peers[i];
         // Never skip a peer silently: an unreachable peer — e.g. an mTLS UnknownIssuer while the
         // cluster CA is being rotated (docs/ca-rotation.md) — is exactly what an operator must see.
         // With hosted keys on, every node sweeps every peer each interval, so this line covers
         // every directed mesh link.
-        match p.list_inventory().await {
-            Ok(inv) => inventories.push((p, inv)),
-            Err(e) => tracing::warn!(peer = ?p.identifier(), error = %e, "anti-entropy: cannot list keys on peer"),
+        match answer {
+            Ok(Ok(inv)) => inventories.push((p, inv)),
+            Ok(Err(e)) => tracing::warn!(peer = ?p.identifier(), error = %e, "anti-entropy: cannot list keys on peer"),
+            Err(_) => tracing::warn!(
+                peer = ?p.identifier(),
+                timeout_secs = SWEEP_LIST_TIMEOUT.as_secs(),
+                "anti-entropy: peer did not list its keys in time — going on without it"
+            ),
         }
     }
 
     let mut tombstoned = 0usize;
     for (p, inv) in &inventories {
         for t in inv.iter().filter(|m| m.tombstone) {
-            let intent = match <pb::SignedIntent as prost::Message>::decode(t.delete_intent.as_slice()) {
-                Ok(i) => i,
-                Err(e) => {
-                    crate::intent::refused_delete("malformed", format!("peer tombstone for {}: {e}", t.key_id));
-                    continue;
-                }
-            };
-            let info = crate::node::DeletedKeyInfo { spec: t.spec.clone(), created_at: t.created_at, commitment: t.commitment.clone() };
-            let deleted_at_ms = t.deleted_at_ms;
-            let id = t.key_id.clone();
-            match node
-                .blocking(move |n| {
-                    n.hosted_apply_tombstone(&id, &intent, crate::intent::Expiry::Propagated { deleted_at_ms }, Some(&info))
-                })
-                .await
-            {
+            match apply_peer_tombstone(node, t).await {
                 Ok(crate::node::TombstoneOutcome::Already) => {}
                 Ok(outcome) => {
                     tombstoned += 1;
@@ -1216,17 +2008,18 @@ pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<(usiz
 
     let mine: std::collections::HashSet<String> =
         node.blocking(|n| n.hosted_list()).await?.into_iter().collect();
-    let (mut pulled, mut pushed) = (0usize, 0usize);
     // key_id -> how many cosigners hold it. Seeded with this node's own inventory; each reachable
     // peer adds its own. Published as the min at the end — the signal that a below-`n` write
     // quorum has not healed.
     let mut replicas: std::collections::HashMap<String, usize> =
         mine.iter().map(|k| (k.clone(), 1usize)).collect();
+    // Ids some peer holds live and this node does not: each is pulled once below, however many
+    // peers list it.
+    // Ids some peer lists live and this node lacks, with the peers that list them.
+    let mut missing: BTreeMap<String, Vec<Identifier>> = BTreeMap::new();
 
     for (p, inv) in &inventories {
         let theirs: Vec<&pb::KeyManifest> = inv.iter().filter(|m| !m.tombstone).collect();
-        // Ids the peer holds in any form: never push to it what it holds or deleted.
-        let their_ids: std::collections::HashSet<String> = inv.iter().map(|m| m.key_id.clone()).collect();
         for m in &theirs {
             *replicas.entry(m.key_id.clone()).or_insert(0) += 1;
         }
@@ -1245,32 +2038,27 @@ pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<(usiz
                          under the same key id — refusing to reconcile automatically"
                     );
                 }
-            }
-        }
-
-        for m in &theirs {
-            if !mine.contains(&m.key_id) && repair_hosted_key(node, peers, &m.key_id).await.unwrap_or(false) {
-                pulled += 1;
-            }
-        }
-        for key_id in &mine {
-            if their_ids.contains(key_id) {
-                continue;
-            }
-            let Ok(key) = hosted_load(node, key_id).await else { continue };
-            let public_der =
-                if key.spec.is_asymmetric() { key.public_key_der().unwrap_or_default() } else { Vec::new() };
-            match replicate_to(node, p.as_ref(), &new_id("repair"), key_id, &key, &public_der).await {
-                Ok(()) => {
-                    pushed += 1;
-                    tracing::info!(key_id, to = ?p.identifier(), "pushed missing hosted key to peer");
-                }
-                Err(e) => tracing::warn!(key_id, peer = ?p.identifier(), error = %e, "anti-entropy push failed"),
+            } else if !mine.contains(&m.key_id) {
+                missing.entry(m.key_id.clone()).or_default().push(p.identifier());
             }
         }
     }
-    if pulled + pushed > 0 {
-        metrics::counter!(crate::metrics::ANTI_ENTROPY_REPAIRS).increment((pulled + pushed) as u64);
+
+    let mut pulled = 0usize;
+    for key_id in sweep_pull_order(missing) {
+        // Tombstoned here (just now, by a peer's tombstone, or before): repair_hosted_key answers
+        // false without asking anyone.
+        match repair_hosted_key(node, peers, &key_id).await {
+            Ok(true) => pulled += 1,
+            Ok(false) => {}
+            Err(e) => {
+                metrics::counter!(crate::metrics::ANTI_ENTROPY_PULL_FAILURES).increment(1);
+                tracing::debug!(key_id = %key_id, error = %e, "anti-entropy: a missing hosted key was not pulled");
+            }
+        }
+    }
+    if pulled > 0 {
+        metrics::counter!(crate::metrics::ANTI_ENTROPY_REPAIRS).increment(pulled as u64);
     }
     // The grace period of every tombstone: drop retained material past it.
     if let Err(e) = node.blocking(|n| n.hosted_purge_expired(crate::intent::now_ms())).await {
@@ -1279,11 +2067,18 @@ pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<(usiz
     if tombstoned > 0 {
         tracing::info!(tombstoned, "anti-entropy applied tombstones");
     }
+    report_future_timestamps(node).await;
     // Recount after repair so the gauge reflects the healed state, not the state that triggered it.
     let healed: std::collections::HashSet<String> =
         node.blocking(|n| n.hosted_list()).await?.into_iter().collect();
     for id in &healed {
         replicas.entry(id.clone()).or_insert(1);
+    }
+    // A key pulled in this sweep counts this node too.
+    for id in healed.difference(&mine) {
+        if let Some(n) = replicas.get_mut(id) {
+            *n += 1;
+        }
     }
     // Ids deleted since the sweep began are no longer replicas of anything.
     replicas.retain(|id, _| healed.contains(id) || !mine.contains(id));
@@ -1295,7 +2090,7 @@ pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<(usiz
         metrics::gauge!(crate::metrics::HOSTED_TOMBSTONES, "retained" => "true").set(retained as f64);
         metrics::gauge!(crate::metrics::HOSTED_TOMBSTONES, "retained" => "false").set((ts.len() - retained) as f64);
     }
-    Ok((pulled, pushed))
+    Ok(pulled)
 }
 
 /// [`Node::hosted_load`] off the async workers.
@@ -1313,6 +2108,13 @@ pub(crate) async fn hosted_exists(node: &Arc<Node>, key_id: &str) -> Result<bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_preflight_with_no_answers_is_refused_not_a_panic() {
+        // refresh_preflight used to index views[0]; no answers is an error, never a panic.
+        let peers: Peers = Vec::new();
+        assert!(matches!(refresh_preflight(&peers, "k", &[]).await, Err(DaemonError::CeremonyRefused(_))));
+    }
 
     #[test]
     fn a_peer_rpc_timeout_counts_as_unreachable_but_a_refusal_does_not() {

@@ -45,10 +45,17 @@ impl Ca {
 }
 
 fn config(dir: &std::path::Path, port: u16, data: &str, trust: &str, leaf: &str) -> std::path::PathBuf {
+    // The node's config pins its own TLS key (required with TLS); the operator's client configs
+    // leave the pin out, which a client config may.
+    let mut peer = serde_json::json!({ "identifier": 1, "endpoint": format!("https://127.0.0.1:{port}") });
+    if leaf == "cosigner1" {
+        let pin = rutli_cosigner::tls::spki_sha256_of_pem_file(&dir.join("cosigner1.crt")).unwrap();
+        peer["tls_spki_sha256"] = serde_json::json!([hex::encode(pin)]);
+    }
     let cfg = serde_json::json!({
         "identifier": 1, "listen": format!("127.0.0.1:{port}"), "threshold": 1,
         "data_dir": dir.join(data),
-        "peers": [{ "identifier": 1, "endpoint": format!("https://127.0.0.1:{port}") }],
+        "peers": [peer],
         "tls": {
             "ca_cert": dir.join(trust), "cert": dir.join(format!("{leaf}.crt")),
             "key": dir.join(format!("{leaf}.key")), "domain": "rutli-cosigner"

@@ -2,7 +2,7 @@
 
 > This is the detailed Track B record; the current roadmap is [roadmap.md](roadmap.md).
 
-**Status:** draft, 2026-10-08; milestone statuses updated 2026-11-13. **Owner:** Alex; one engineer, sequential. **Goal:** show that a Splice validator that exists
+**Status:** draft, 2026-10-08; milestone statuses updated 2026-11-13; release and calendar notes updated 2026-11-20 (no milestone changed). **Owner:** Alex; one engineer, sequential. **Goal:** show that a Splice validator that exists
 today, with its keys in Postgres, can move its identity into a Rütli cluster without changing its
 namespace or any party ID.
 
@@ -94,7 +94,7 @@ What C turned up, for the record:
   silent one does not, a majority must answer), and EC operations fail over past a node that says it
   lacks the key (`hosted-keys.md` §2).
 
-**Release: v0.5.0** as planned; C shipped in 0.4.0-rc.1 instead (CHANGELOG). Total **8–11 d** on top of Track B (B1 is reused). Value: an existing node
+**Release: v0.5.0** as planned; C shipped in 0.4.0-rc.1 instead (CHANGELOG). (As of 2026-11-20: v0.5.0 is the audit code freeze, planned for mid-December: v0.4.0 plus the hardening merged since; see [roadmap.md](roadmap.md) and [upgrading-to-0.5.md](upgrading-to-0.5.md).) Total **8–11 d** on top of Track B (B1 is reused). Value: an existing node
 migrates without touching its encryption key, and ECIES is the key type that thresholds later (v2),
 RSA never will.
 
@@ -121,6 +121,8 @@ engineering work is not the long pole; the audit's external lead time is. So:
    0.4.0-rc.1, so it is in the v0.4.0 audit scope; see [roadmap.md](roadmap.md).)
 4. **Splice TestNet validator run** is operations, not development. Start it the day v0.4.0 is
    tagged, in parallel with the audit. Minimum four weeks of clean operation before 1.0.
+   (As of 2026-11-19: the four weeks that count are the ones on the audited release; see
+   [roadmap.md](roadmap.md).)
 5. **Audit fixes → 1.0.**
 
 ## Sequence and timeline (one engineer, sequential)
@@ -138,7 +140,7 @@ wk 11       1.0
 Calendar, if started 2026-10-13: v0.4.0 around **2026-11-14**, v0.5.0 around **2026-12-05**,
 **1.0 around 2026-12-19** if an auditor can start 2026-11-17. If the earliest audit slot is later,
 1.0 moves with it and nothing we do in engineering pulls it back. That is why booking is week 1.
-(As of 2026-11-13: the audit waits for funding and 1.0 follows in 2027; see [roadmap.md](roadmap.md).)
+(As of 2026-11-13: the audit waits for funding and 1.0 follows in 2027; see [roadmap.md](roadmap.md). As of 2026-11-20: v0.4.0 was released on 2026-11-14 and the security patch v0.4.1 on 2026-11-20; v0.5.0 is planned for mid-December as the audit code freeze.)
 
 Soak (Track A) continues in the background and may preempt a day here and there.
 

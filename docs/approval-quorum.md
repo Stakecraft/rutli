@@ -3,8 +3,8 @@
 Hold high-value signing operations until a quorum of humans has cryptographically approved them. This
 is the institutional separation-of-duties control. Even with the node, the driver and the FROST cluster
 all healthy, a gated key does not sign until `M` of `N` named approvers have each authorized that
-specific request. Once `signing_policy.require_intent` is on, **every cosigner checks the approvals
-itself**, not only the driver.
+specific request. With `signing_policy.require_intent` on (the default on a node with TLS since
+0.5.0), **every cosigner checks the approvals itself**, not only the driver.
 
 ## What it can and cannot do
 
@@ -41,13 +41,14 @@ cluster can tell the driver from its key. The point is to bound that (ACLs, rate
 it (journals, `audit-cross-check`), and to require humans for the keys that matter (gated keys).
 Revoke a stolen driver key with a pin (`signer_pins`, below). No CA is needed.
 
-> ⚠️ **Until `require_intent` is on, on every node, approvals are driver-side only.** In the default
-> verify-if-present mode an intent that is present is verified in full, gated keys included, but a
-> request **without** an intent is accepted and counted (`rutli_sign_intent_absent_total`). Anyone
+> ⚠️ **While any node runs with `require_intent: false`, approvals are driver-side only.** In that
+> verify-if-present mode (the opt-out; the default up to 0.4.0) an intent that is present is verified
+> in full, gated keys included, but a request **without** an intent is accepted and counted
+> (`rutli_sign_intent_absent_total`). Anyone
 > who can call the cluster without the driver (the driver key's holder, or a compromised cosigner
 > driving a peer) can still omit the intent. One lenient node is enough: in a 2-of-3 cluster a
 > compromised node needs only one honest peer that does not require intents. Do not describe
-> approvals as cluster-enforced until the switch below is complete.
+> approvals as cluster-enforced until no node carries the opt-out.
 
 ## Model
 
@@ -88,6 +89,8 @@ approval {
   timeout   = 30m
   rules = [
     # Matches the full key id: with `frost.key-prefix = "soak1-"` this must be "soak1-frost-".
+    # A rule for the namespace key alone must name it as it is minted: "frost-namespace" on a Splice
+    # validator, "frost-<node>-namespace" with Canton's own auto-init (docs/architecture.md).
     { key-id-prefix = "frost-", mode = "quorum", threshold = 2 }
   ]
   approvers = [
@@ -97,6 +100,20 @@ approval {
   ]
 }
 ```
+
+Rules are checked in order and the first one whose `key-id-prefix` matches the key id decides. A
+key that matches no rule is signed without approvals. `mode` is `quorum` (the default: wait for
+`threshold` approvals, default 2) or `auto` (no approvals, to carve an exception out of a wider
+quorum rule). Write both in lowercase. Since 0.5.0 the driver refuses to start on anything else,
+for example `quorom` or `Quorum`, with a config error at the rule, such as `approval.rules.0.mode`.
+Up to 0.4.0 such a rule silently meant `auto`. The cosigners already refused it. The driver also
+refuses a quorum rule whose `threshold` is not between 1 and the number of approvers, and a quorum
+rule that an earlier `auto` rule fully covers (an earlier prefix that is a prefix of it, `""`
+included), because that rule could never apply. Put the specific `auto` rule first, then the
+quorum rule.
+
+A driver up to 0.4.0 reads the approver's key only as `public-key-base-64` and stops with
+`Key not found` on the name above. Later releases read both names.
 
 On **every cosigner**, the same rules and approver keys go in `signing_policy` (Helm:
 `signingPolicy`). The values are the same: the approver's `public-key-base64` becomes
@@ -118,12 +135,14 @@ All per node, in `signing_policy`. The defaults are in brackets.
 
 | Setting | Meaning |
 |---|---|
-| `require_intent` [false] | A round without a valid intent is refused. Off: verified if present, accepted and counted if absent |
+| `require_intent` [unset = on with TLS, since 0.5.0] | A sign round without a valid client-signed intent is refused. The split ceremony's sign test needs none. `false` is the explicit opt-out while the driver is older than 0.4.0-rc.3 or runs with `frost.sign-intents = off`: verified if present, accepted and counted if absent (`rutli_sign_intent_absent_total`), with a startup warning. A plaintext node verifies no intents: unset means off there, and `true` is a config error |
 | `require_ceremony_intent` [unset = on with TLS, since 0.4.0-rc.6] | A DKG/refresh fence or part 1 without a valid client-signed ceremony intent is refused (`docs/ceremonies.md`, "Ceremony intents"). `false` is the explicit opt-out while the driver is older than 0.4.0-rc.4 or the refresh job's image predates the cosigners' release: verified if present, accepted and counted if absent (`rutli_ceremony_intent_absent_total`), with a startup warning. A plaintext node verifies no intents: unset means off there, and `true` is a config error |
 | `signer_acl` [none] | Client CN → key-id prefixes it may use (`""` = every key). Checked on every key-scoped Signer RPC and on the intent signer at every node. Give each tenant's driver its own CN and prefix |
 | `signer_acl_required` [false] | A signer CN without an ACL entry is refused |
 | `signer_pins` [none] | Client CN → SHA-256 of the SubjectPublicKeyInfo of each key allowed under that CN: `openssl x509 -in driver.crt -noout -pubkey \| openssl pkey -pubin -outform DER \| sha256sum`. A CA-valid certificate with an unpinned key is refused on the Signer API and as an intent signer. This is **revocation without the CA**: issue a new driver certificate and replace the pin |
 | `signer_may_refresh` [true] | The driver role keeps `Refresh`. Turn it off once the refresh job uses a `refresh_allowlist` certificate (top-level `refresh_allowlist`, Refresh + KeyStatus only; it may be the operator's CN) |
+| `refresh_min_interval_secs` [259200 = 72 h, since 0.5.0] | Each node takes part in at most one refresh of a key per interval, counted from the last refresh it staged (its ceremony records, so a restart does not reset it). Checked by every node at the fence and part 1, and by the leader before it contacts a peer. At most 30 days; `0` turns it off, with a startup warning (`docs/ceremonies.md`, "Refresh interval") |
+| `refresh_interval_waived_at` [unset] | The incident path past the interval: a UTC time (`2026-11-19T14:00:00Z`), set on every node. One refresh of each key is let through after that time, logged and counted (`rutli_refresh_interval_waived_total`); then the interval applies again. Lapses 24 h after its time. Up to `clock_skew_secs` ahead of the node's clock is accepted; further ahead is a config error. Logged at warn at every start while present. Remove it after the refresh |
 | `sign_rate_limit_per_min` / `_per_day` [300 / 20 000] | Per key, per node. Charged once per intent request id: retries, t-subsets and leader failovers of one driver call share a single charge. Rebuilt from the journal after a restart. `rate_limits: [{key_id_prefix, per_min, per_day}]` overrides by prefix. Put a tight rule on namespace keys, e.g. 10/min and 200/day |
 | `max_shares_per_request` [8] | The most shares one request id gets from this node |
 | `intent_max_lifetime_secs` / `clock_skew_secs` [300 / 120] | The driver's intents live 180 s. A node whose clock is off by more than the skew refuses every intent: fail closed, so watch NTP |
@@ -131,27 +150,41 @@ All per node, in `signing_policy`. The defaults are in brackets.
 
 New metrics: `rutli_sign_intent_absent_total`, `rutli_sign_policy_refusals_total{reason}`,
 `rutli_sign_rate_limited_total`, `rutli_signer_acl_absent_total`, `rutli_sign_journal_entries_total`,
-`rutli_sign_journal_errors_total`, and for ceremony intents `rutli_ceremony_intent_absent_total`
-and `rutli_ceremony_intent_refusals_total{reason}` (`docs/observability.md`), with alerts in
+`rutli_sign_journal_errors_total`, for ceremony intents `rutli_ceremony_intent_absent_total`
+and `rutli_ceremony_intent_refusals_total{reason}`, and for the refresh interval
+`rutli_refresh_interval_refusals_total`, `rutli_refresh_interval_waived_total` and
+`rutli_refreshes_6d{key}` (`docs/observability.md`), with alerts in
 `deploy/monitoring/prometheus-rules.yml` (`RutliSignJournalErrors`, `RutliSignPolicyRefusals`,
 `RutliSignIntentAbsent`, `RutliSignRateLimited`, `RutliSignerAclAbsent`,
-`RutliCeremonyIntentAbsent`, `RutliCeremonyIntentRefused`).
+`RutliCeremonyIntentAbsent`, `RutliCeremonyIntentRefused`, `RutliRefreshRefused`,
+`RutliRefreshOffSchedule`).
 
 ## Switching enforcement on
 
-The defaults keep a rolling upgrade, and a driver older than intents, working — except ceremony
-intents, required by default since 0.4.0-rc.6: a cosigner of that release refuses a DKG from a driver
-older than 0.4.0-rc.4, and an intent-less refresh, unless it runs with `require_ceremony_intent:
-false` (step 4). Switch on in this order:
+The production profile ([production-profile.md](production-profile.md)) requires all of the below
+at once, and `rutli-cosigner check-config` lists what a config still lacks. Switch them on in the
+order of this section, then set `"profile": "production"`.
 
-1. **Every cosigner on this release** (0.4.0-rc.2 or later), defaults unchanged. Signing keeps
-   working in both directions. Each node verifies intents when they are present and journals every
-   share. `rutli_sign_intent_absent_total` counts the older driver's signs.
+The defaults require both kinds of intent on a node with TLS: ceremony intents since 0.4.0-rc.6,
+signing intents since 0.5.0. Such a cosigner refuses a DKG from a driver older than
+0.4.0-rc.4 and an intent-less refresh, unless it runs with `require_ceremony_intent: false`, and a
+signature from a driver older than 0.4.0-rc.3 or one with `frost.sign-intents = off`, unless it runs
+with `require_intent: false` (step 4). A driver on 0.4.0-rc.3 or later with the default
+`frost.sign-intents = on` needs neither opt-out: a leader on 0.4.0 forwards the driver's intent to
+its peers, so a rolling upgrade from 0.4.0 keeps signing. The other switches stay lenient by default.
+Switch on in this order:
+
+1. **Every cosigner on this release.** With a driver older than 0.4.0-rc.3 (or `frost.sign-intents =
+   off`), set `require_intent: false` on every node first, and `require_ceremony_intent: false` with
+   a driver older than 0.4.0-rc.4. Signing keeps working in both directions. Each node verifies
+   intents when they are present and journals every share. `rutli_sign_intent_absent_total` counts
+   the signs that carried no intent (only possible under the opt-out).
 2. **The driver release** (participant restart). It signs an intent for every FROST sign and carries
    the approvals. It learns the cluster id from the cosigners (`Capabilities`: the value a majority
    of the endpoints report; learned again if a cosigner refuses an intent for its cluster), or you
    set `frost.cluster-id` (recommended: then no cosigner's answer decides it). `frost.sign-intents =
-   off` stops attaching intents — an emergency switch that works only while `require_intent` is off.
+   off` stops attaching intents — an emergency switch that works only on nodes with
+   `require_intent: false`.
    Check that `rutli_sign_intent_absent_total` stops growing on every node, and
    that the journals show `"purpose":"sign"` entries with request ids
    (`rutli-cosigner audit-cross-check`).
@@ -161,10 +194,12 @@ false` (step 4). Switch on in this order:
    refresh CronJob to the refresher certificate (`refresh_allowlist`, `deploy/k8s/cronjob-refresh.yaml`;
    until a `refresher` certificate exists, the operator certificate with `refresh_allowlist:
    [operator]`).
-4. **Flip on every node**, as a rolling restart: `require_intent: true`, `signer_acl_required: true`,
-   `signer_may_refresh: false` (and `require_epoch_match: true` from batch C phase 2). From the moment
-   the **last** node enforces, a compromised cosigner or a driver-key thief without approvals can no
-   longer sign a gated key, and nothing signs without a journaled intent.
+4. **Flip on every node**, as a rolling restart: remove `require_intent: false` if step 1 set it
+   (unset is on), `signer_acl_required: true`, `signer_may_refresh: false` (and
+   `require_epoch_match: true` from batch C phase 2). First check that
+   `rutli_sign_intent_absent_total` no longer grows. From the moment the **last** node enforces, a
+   compromised cosigner or a driver-key thief without approvals can no longer sign a gated key, and
+   nothing signs without a journaled intent.
    **Ceremony intents** (0.4.0-rc.4; on by default since 0.4.0-rc.6): `require_ceremony_intent`
    unset (or `true`), once the driver release that signs DKG intents (0.4.0-rc.4 or later) runs and
    the refresh CronJob's image is this release (its `rutli-cosigner refresh` signs refresh intents).
@@ -178,12 +213,16 @@ false` (step 4). Switch on in this order:
    release. Without a refresher certificate, use the operator certificate with
    `refresh_allowlist: [operator]` (step 3); a refresh signed with the driver certificate needs
    `signer_may_refresh: true`. That is unchanged by intents.
+   **The refresh interval** (0.5.0) is on by default (72 h) and needs no switch. Turning
+   `signer_may_refresh` off still matters: while it is on, a stolen driver certificate can refresh
+   too, once per interval.
 5. Schedule `rutli-cosigner audit-cross-check` (weekly, and after any incident). From now on, do not
    pass `--allow-no-intent`: an intent-less journal entry is an unexplained signature.
 
-Rollback: turning a flag off is immediate (restart). A driver downgrade needs `require_intent` off
-(and `require_ceremony_intent: false`) first, or every sign (and DKG) is refused. Same for a refresh
-CronJob image older than this release.
+Rollback: turning a flag off is immediate (restart). A driver downgrade to a release older than
+0.4.0-rc.3 needs `require_intent: false` (and, older than 0.4.0-rc.4, `require_ceremony_intent:
+false`) first, or every sign (and DKG) is refused. So does `frost.sign-intents = off`. A refresh
+CronJob image older than this release needs `require_ceremony_intent: false`.
 
 ## Approving hosted-key deletes
 

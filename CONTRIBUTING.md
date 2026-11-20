@@ -18,6 +18,16 @@ is reviewed as security-critical. This page explains how to get a change in.
   [docs/security/threat-model.md](docs/security/threat-model.md) before changing anything on the
   key path.
 
+## Where work is tracked
+
+- **Issues** in the release milestone (now `v0.5.0`) are the plan for the next release.
+- Labels: `area:*` (frost, driver, deploy, ci, docs), `type:*` (bug, hardening, feature, test,
+  chore, quality), `prio:p0` (blocks the release), `prio:p1`, `prio:p2`.
+- `status:in-progress` means someone is working on it; the issue has a comment saying who and on
+  which branch. Check this, and the open pull requests, before you start, so two people do not fix
+  the same thing.
+- Security findings are tracked privately in draft security advisories until the fix is released.
+
 ## Development setup
 
 Prerequisites (details in [QUICKSTART.md](QUICKSTART.md)):
@@ -51,6 +61,12 @@ FROST core, cosigner and dealer (tests and lints):
 ```bash
 cd frost && cargo test --locked && cargo clippy --all-targets -- -D warnings
 ```
+
+This includes property tests (`proptest`, files `prop_*.rs` under each crate's `tests/`): nonce
+single use across restarts, key-file and export formats, fingerprints, the sign rate limit, the epoch
+check and signing intents. Case counts are set per test to keep the run short; for a longer local
+run, raise them with `PROPTEST_CASES=2000 cargo test --test 'prop_*'`. A failing case prints its minimal
+input: add it to the suite as a plain regression test.
 
 Deployment manifests (Helm lint, render, and the policy that forbids `pods/exec` RBAC, seal
 secrets in env and shared secrets):
@@ -86,9 +102,14 @@ CONFORMANCE=1 CANTON_AUTOMATIC_PROTOCOL_VERSION=1 sbt -batch driver/test
   vectors. Never commit a key, certificate private key, seal secret or token, even a "throwaway" one.
 - **Docs kept true.** If behaviour, configuration or a runbook step changes, update the docs in the
   same pull request.
-- **A changelog entry** under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md) for anything a user
-  or operator would notice. Security-relevant changes go under `### Security` and say what an
-  attacker could do before and cannot do after.
+- **A changelog fragment**: one small file `changelog.d/<PR number>.<section>.md` (sections:
+  `security`, `added`, `changed`, `fixed`, `build`, `docs`, `deprecated`, `removed`) for anything a
+  user or operator would notice; do not edit [CHANGELOG.md](CHANGELOG.md), the release step
+  assembles it from the fragments. Security-relevant changes go in a `security` fragment and say what an
+  attacker could do before and cannot do after. A pull request that changes `frost/`, `driver/`,
+  `deploy/` or `scripts/` needs a fragment or the label `no-changelog`; CI checks it. Format and
+  check command: [changelog.d/README.md](changelog.d/README.md). Until 2026-12-18 a direct edit of
+  `CHANGELOG.md` is also accepted, for pull requests opened before the switch.
 - **Compatibility stated.** Say whether the change needs every cosigner upgraded first, changes a
   wire format, a key-file format or a configuration default, and how to roll back.
 - **Third-party notices regenerated** when a dependency is added, removed or upgraded:
@@ -120,6 +141,26 @@ This appends `Signed-off-by: Your Name <you@example.com>`, matching your Git ide
 without sign-offs cannot be merged. To fix the last commit, run `git commit --amend -s`; for a whole
 branch, `git rebase --signoff main`.
 
+## Quality gates
+
+Besides the checks above, CI tracks quality metrics for every language in the repository. New
+checks start as a ratchet: the current state of `main` is recorded as a baseline, and a pull request
+fails only if it makes a metric worse. Old debt does not block a change; new debt does not get in.
+The baseline moves forward when debt is paid off, and at each release.
+
+| Area | Checks |
+|---|---|
+| Rust (`frost/`) | `cargo fmt`, `clippy -D warnings`, tests, `cargo deny`, `cargo audit`, `cargo geiger` (unsafe count), `rustqual` score, coverage (`cargo llvm-cov`) |
+| Scala (`driver/`) | tests, `scalafmt`, compiler warnings, coverage (`scoverage`) |
+| Shell (`scripts/`, `deploy/`) | `shellcheck`, `shfmt` |
+| Python | `ruff` |
+| Helm / k8s | `helm lint`, render + `scripts/check-deploy-policy.sh`, `kubeconform` |
+| Dockerfiles, images | `hadolint`, `trivy` |
+| GitHub Actions | `actionlint`, `zizmor`, pinned actions |
+| Protobuf | `buf lint`, `buf breaking` against the last release |
+| Alert rules | `promtool` |
+| Repository | `gitleaks`, `typos`, link check |
+
 ## Review and merge
 
 - CI for pull requests from forks runs on GitHub-hosted runners, and a maintainer approves the first
@@ -128,6 +169,11 @@ branch, `git rebase --signoff main`.
   intents, ceremonies, key routing, TLS) get a second, independent review and may wait for the next
   audit window.
 - Pull requests are merged by rebase, so keep the branch history clean.
+
+## Releases
+
+Releases follow [docs/release-process.md](docs/release-process.md): feature freeze, release
+candidate, QA, soak, go/no-go, tag.
 
 ## License
 

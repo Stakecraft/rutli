@@ -41,4 +41,34 @@ public interface FetchKeyReplyOrBuilder extends
    * <code>.rutli.cosigner.v1.WrappedKey wrapped = 3;</code>
    */
   com.stakecraft.rutli.grpc.WrappedKeyOrBuilder getWrappedOrBuilder();
+
+  /**
+   * <pre>
+   * The tombstone (as in ListKeys) when the caller set include_tombstone and the key is deleted
+   * here; spec, public_key_der and wrapped are then empty.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.KeyManifest tombstone = 4;</code>
+   * @return Whether the tombstone field is set.
+   */
+  boolean hasTombstone();
+  /**
+   * <pre>
+   * The tombstone (as in ListKeys) when the caller set include_tombstone and the key is deleted
+   * here; spec, public_key_der and wrapped are then empty.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.KeyManifest tombstone = 4;</code>
+   * @return The tombstone.
+   */
+  com.stakecraft.rutli.grpc.KeyManifest getTombstone();
+  /**
+   * <pre>
+   * The tombstone (as in ListKeys) when the caller set include_tombstone and the key is deleted
+   * here; spec, public_key_der and wrapped are then empty.
+   * </pre>
+   *
+   * <code>.rutli.cosigner.v1.KeyManifest tombstone = 4;</code>
+   */
+  com.stakecraft.rutli.grpc.KeyManifestOrBuilder getTombstoneOrBuilder();
 }

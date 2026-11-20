@@ -1,0 +1,106 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+name: Cluster suite (kind)
+
+# Checks that the cluster suite (scripts/perf/k8s-deploy.sh + scripts/perf/cluster.py) runs end to
+# end: a four-node kind cluster on a GitHub-hosted runner, the chart installed on the previous
+# release and upgraded to this commit under load, every suite with the short smoke profile, and the
+# kind example hooks for a node loss and a partition. Its latencies are a shared runner's and mean
+# nothing; real numbers come from running the suite against a real cluster (docs/cluster-suite.md).
+#
+# Only for changes to the suite, the chart or the load generator, and by hand.
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/cluster-suite.yml"
+      - "scripts/perf/**"
+      - "deploy/helm/**"
+      - "frost/loadgen/**"
+      - "frost/Dockerfile.perf"
+  push:
+    # No path filter on a push to main: every commit on main gets the whole set (see main-status.yml).
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A pull request cancels its own earlier run. A push to main never cancels or replaces another:
+# each commit on main gets its own run.
+concurrency:
+  group: cluster-suite-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  kind:
+    name: Cluster suite on kind
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Tests of the scripts
+        run: |
+          python3 -I scripts/perf/test_compare.py
+          python3 -I scripts/perf/test_k8s_loadgen.py
+
+      - name: Tools (checksum-pinned)
+        run: scripts/perf/install-tools.sh kind helm
+
+      - name: Build the image under test
+        run: |
+          diff <(grep '^FROM ' frost/Dockerfile) <(grep '^FROM ' frost/Dockerfile.perf)
+          docker build -f frost/Dockerfile.perf -t rutli-perf:local frost
+
+      - name: Cluster
+        run: |
+          set -euo pipefail
+          cat > "${RUNNER_TEMP}/kind.yaml" <<'EOF'
+          kind: Cluster
+          apiVersion: kind.x-k8s.io/v1alpha4
+          nodes:
+            - role: control-plane
+            - role: worker
+            - role: worker
+            - role: worker
+          EOF
+          kind create cluster --name rutli-perf --config "${RUNNER_TEMP}/kind.yaml" --wait 180s
+          kind load docker-image rutli-perf:local --name rutli-perf
+          kubectl get nodes -o wide
+
+      - name: Install the previous release
+        run: scripts/perf/k8s-deploy.sh install --previous --image rutli-perf:local --work "${RUNNER_TEMP}/work"
+
+      - name: Suites
+        env:
+          HOOK_KILL_NODE: ${{ github.workspace }}/scripts/perf/hooks/kind-kill-node.sh
+          HOOK_PARTITION: ${{ github.workspace }}/scripts/perf/hooks/kind-partition.sh
+          WORK: ${{ runner.temp }}/work
+        run: |
+          python3 -I scripts/perf/cluster.py --namespace rutli-perf --profile scripts/perf/profiles/smoke.json \
+            --env-name kind --out perf-out/cluster.json --upgrade-image rutli-perf:local --work "$WORK" \
+            --disrupt-secs 90 --commit "$GITHUB_SHA"
+
+      - name: Report
+        if: always()
+        run: |
+          mkdir -p perf-out
+          if [ -f perf-out/cluster.json ]; then
+            python3 -I scripts/perf/compare.py --markdown perf-out/report.md perf-out/no-previous.json perf-out/cluster.json \
+              >> "$GITHUB_STEP_SUMMARY" || true
+          fi
+          kubectl -n rutli-perf get pods -o wide > perf-out/pods.txt 2>&1 || true
+          kubectl get events -A --sort-by=.lastTimestamp > perf-out/events.txt 2>&1 || true
+          for i in 1 2 3; do
+            kubectl -n rutli-perf logs "rutli-cosigner-n$i-0" -c cosigner --tail=3000 > "perf-out/cosigner$i.log" 2>&1 || true
+          done
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: cluster-suite-kind
+          path: perf-out/
+          retention-days: 30
+          if-no-files-found: warn
