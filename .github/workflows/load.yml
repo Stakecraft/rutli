@@ -43,9 +43,11 @@ jobs:
   load:
     name: Load scenarios (compose)
     # Weekly and manual runs on the repository's own runner when it is configured: the same
-    # machine every week, so latencies compare. A pull request or a push to main (neither compares
+    # machine every week, so latencies compare. `vars.PERF_RUNNER` names that runner for measured
+    # runs; unset, it follows `vars.CI_RUNNER`. Clearing CI_RUNNER (CI and e2e to hosted runners)
+    # therefore leaves this job on the VM only while PERF_RUNNER is set (docs/ci-cache.md). A pull request or a push to main (neither compares
     # anything) runs on a GitHub-hosted runner and leaves the repository's runners to the per-commit CI.
-    runs-on: ${{ contains(fromJSON('["schedule","workflow_dispatch"]'), github.event_name) && vars.CI_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ contains(fromJSON('["schedule","workflow_dispatch"]'), github.event_name) && (vars.PERF_RUNNER || vars.CI_RUNNER) || 'ubuntu-24.04' }}
     timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 330 || 60 }}
     permissions:
       contents: read
@@ -107,10 +109,15 @@ jobs:
         run: |
           set -euo pipefail
           args=(--steady-secs "$STEADY_SECS" --out perf-out)
-          if [ -f perf-previous/load.json ]; then
+          # A baseline counts only when it was measured on the same kind of machine. Results from before
+          # this file existed all come from the repository's own runner.
+          if [ -f perf-previous/load.json ] && [ "$(cat perf-previous/runner.txt 2>/dev/null || echo self-hosted)" = "$RUNNER_ENVIRONMENT" ]; then
             args+=(--previous perf-previous/load.json)
+          else
+            echo "No comparable baseline (none, or measured on another kind of runner than $RUNNER_ENVIRONMENT)"
           fi
           scripts/perf-load.sh "${args[@]}"
+          printf '%s\n' "$RUNNER_ENVIRONMENT" > perf-out/runner.txt
 
       - name: Summary
         if: always()
