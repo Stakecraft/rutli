@@ -99,8 +99,9 @@ class K8sCluster:
         return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=check)
 
     def loadgen_argv(self, args, timeout_secs, pod="rutli-perf-loadgen", cn=None, flags=None):
-        if self.load_path == "canton" and args and args[0] == "sign":
-            # The entry point for load through a participant (see the module docs).
+        if self.load_path == "canton" and args and args[0] == "sign" and cn is None and flags is None:
+            # The entry point for load through a participant (see the module docs). Not for a load
+            # that names its certificate or deadlines (a tenant's, the key-class spot checks).
             return shlex.split(os.environ["CANTON_LOAD_CMD"]) + args
         # Run detached in the pod and fetched afterwards (k8s_loadgen.py): a stream held open
         # through the API server for a whole run was reset on a real cluster.
@@ -259,6 +260,19 @@ class Suite(base.Runner):
                 loads.append(r)
         return loads
 
+    def wait_for_a_restart(self, within):
+        """True as soon as some cosigner pod is missing or not Ready; False after `within` s."""
+        end = time.time() + within
+        while time.time() < end:
+            for node in NODES:
+                out = self.cluster.kubectl("get", "pod", self.cluster.pod(node), "-o",
+                                           'jsonpath={.status.conditions[?(@.type=="Ready")].status}',
+                                           timeout=30, check=False)
+                if out.returncode != 0 or out.stdout.strip() != "True":
+                    return True
+            time.sleep(2)
+        return False
+
     def key_classes(self):
         """The key classes at rest: one spot check of each, then the namespace-class rate limit:
         twice its per-minute budget plus five, at once, on the first tenant's namespace key. Each
@@ -327,7 +341,16 @@ class Suite(base.Runner):
             # The key classes during the rollout: a topology change or a decryption while
             # cosigners restart one at a time is the case that matters.
             spot_loads = []
-            spotter = threading.Thread(target=lambda: (time.sleep(40), spot_loads.extend(self.spots("upgrade"))))
+
+            def spot_during_rollout():
+                # As soon as a cosigner is seen not ready (the rollout restarts them one at a
+                # time); after five minutes without one, anyway, and the log says so.
+                seen = self.wait_for_a_restart(300)
+                if not seen:
+                    log("  no cosigner seen restarting within 300 s: the key-class checks run anyway")
+                spot_loads.extend(self.spots("upgrade" if seen else "upgrade-unseen"))
+
+            spotter = threading.Thread(target=spot_during_rollout)
             spotter.start()
             time.sleep(10)
             log(f"  helm upgrade to {a.upgrade_image}")
