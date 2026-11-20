@@ -48,7 +48,11 @@ jobs:
           mkdir -p "$HOME/.local/bin"
           install -m 0755 "${tmp}/actionlint" "$HOME/.local/bin/actionlint"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # SC2015 (style note: `A && B || C` is not if-then-else) is excluded: the workflows use that
+      # form on purpose as an assertion that ends the step with `|| { …; exit 1; }`.
       - name: Lint every workflow
+        env:
+          SHELLCHECK_OPTS: -e SC2015
         run: |
           shellcheck --version | head -n 2
           actionlint -color
