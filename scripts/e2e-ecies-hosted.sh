@@ -92,6 +92,7 @@ COSIGNER="$BIN/rutli-cosigner"
 DRIVER_JAR="$REPO/driver/target/scala-2.13/rutli-driver.jar"
 if [ "${SKIP_BUILD:-0}" != 1 ]; then
   step "Build rutli-cosigner and the driver fat jar from the working tree"
+  # shellcheck disable=SC2086  # CARGO_FLAGS is a list of flags, split on purpose
   (cd "$REPO/frost" && cargo build ${CARGO_FLAGS:-} -p rutli-cosigner --bins)
   (cd "$REPO" && sbt -batch driver/assembly >/dev/null)
 fi
@@ -108,7 +109,7 @@ DRIVER_PIN="$(openssl x509 -in "$WORK/certs/driver.crt" -noout -pubkey | openssl
   | openssl dgst -sha256 -hex | awk '{print $NF}')"
 # E: key-file v2 only (one cluster_uuid for the cluster), and the driver on the delete role for this
 # run's prefix.
-CLUSTER_UUID="$( (uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid) | tr 'A-Z' 'a-z')"
+CLUSTER_UUID="$( (uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid) | tr '[:upper:]' '[:lower:]')"
 for i in 1 2 3; do
   jq --arg work "$WORK" --argjson base "$BASE_PORT" --arg cert "cosigner$i" --arg pin "$DRIVER_PIN" \
     --arg v2 "$V2_DELETES" --arg uuid "$CLUSTER_UUID" --arg prefix "$PREFIX" '
@@ -138,7 +139,7 @@ grep -q "ec-p256-ecies" "$WORK/import.out" || fail "import-key did not report an
 step "Start three cosigners"
 for i in 1 2 3; do
   RUST_LOG=info "$COSIGNER" --config "$WORK/c$i.json" serve >>"$WORK/node$i.log" 2>&1 &
-  PIDS[$i]=$!
+  PIDS[i]=$!
 done
 for i in 1 2 3; do
   for _ in $(seq 1 240); do # up to 60 s

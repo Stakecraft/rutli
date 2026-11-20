@@ -91,6 +91,7 @@ DEALER="$BIN/rutli-dealer"
 DRIVER_JAR="$REPO/driver/target/scala-2.13/rutli-driver.jar"
 if [ "${SKIP_BUILD:-0}" != 1 ]; then
   step "Build rutli-cosigner, rutli-dealer and the driver fat jar from the working tree"
+  # shellcheck disable=SC2086  # CARGO_FLAGS is a list of flags, split on purpose
   (cd "$REPO/frost" && cargo build ${CARGO_FLAGS:-} -p rutli-cosigner --bins)
   (cd "$REPO" && sbt -batch driver/assembly >/dev/null)
 fi
