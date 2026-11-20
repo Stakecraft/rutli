@@ -65,7 +65,14 @@ of the same name.
 They run in the order `upgrade`, `scenarios`, `keys`, `ramp`, `disrupt` (disruption last, so that
 what it leaves behind cannot skew the measurements of the others); `--suites` picks a subset.
 Every scenario also checks that no cosigner restarted unless the scenario did it, and that their
-memory and file descriptors stay within bounds.
+memory and file descriptors stay within bounds. A cosigner a disruption restarts on purpose is not
+judged by its health the moment the load ends but by `time_to_healthy_secs`: the seconds from the
+end of the disruption until every cosigner answers Health ok again, which must stay within
+`--settle-secs`.
+
+The load generator runs detached in its pod: `scripts/perf/k8s_loadgen.py` starts each run with a
+short `kubectl exec`, polls for its end, and fetches the report afterwards, retrying each call, so
+no stream to the API server is held open for the length of a run.
 
 ## Provider hooks
 
@@ -162,9 +169,17 @@ the rest of the suite is unchanged. No such command exists yet.
 
 `cluster.json` holds the scenarios (as in `load-testing.md`), `skipped`, `keys` (per key count:
 sign latency, server-side histogram, `ListKeys` per cosigner), `ramp` (per step: rates, p95/p99
-per operation, why it stopped), and two top-level numbers: `headroom_factor`, and
-`recovery_secs`, per disruption the seconds from its end until the cluster signed within the SLO
-again.
+per operation, why it stopped), and these top-level numbers: `headroom_factor`; per
+disruption, `time_to_healthy_secs` (until every cosigner answered Health ok again) and
+`recovery_secs` (until the cluster signed within the SLO again), both from the end of the
+disruption.
+
+`failed` lists what Rütli failed: a check about the cluster's behaviour. `rig_failed` lists what
+only the test rig failed: a load generator that could not be started, reached or read, a hook or
+`kubectl` error; such a scenario says nothing about Rütli and should be run again. `cluster.py`
+exits 1 when Rütli failed something, 3 when only the rig did, 0 otherwise. A rig failure inside
+the ramp stops it without a verdict on that step; its headroom factor is then a lower bound
+(`headroom_is_lower_bound`).
 
 `scripts/perf/compare.py PREVIOUS CURRENT` fails on
 

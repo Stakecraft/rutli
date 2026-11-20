@@ -179,6 +179,16 @@ class Cluster(unittest.TestCase):
         _, problems = self.verdicts(cluster_run(keys_p99=5, profile="soak-2026-11"), cluster_run(keys_p99=50))
         self.assertEqual(problems, [])
 
+    def test_a_rig_failure_is_labelled_and_still_fails(self):
+        current = run()
+        current["scenarios"].append({"name": "ecies", "compare_latency": True, "loads": [{"failed": "x", "rig": True}],
+                                     "checks": [{"check": "the load generator ran", "ok": False,
+                                                 "detail": "the load generator exited 3", "rig": True}]})
+        current["rig_failed"] = ["ecies"]
+        v, problems = self.verdicts(None, current)
+        self.assertEqual(problems, ["rig: ecies: the load generator ran: the load generator exited 3"])
+        self.assertTrue(v[("ecies", "check")].startswith("RIG FAILED"))
+
     def test_a_failed_key_count_fails_on_its_own(self):
         _, problems = self.verdicts(None, cluster_run(keys_ok=False))
         self.assertEqual(len(problems), 1)

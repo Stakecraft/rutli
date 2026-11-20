@@ -570,12 +570,13 @@ async fn health(ctx: &Ctx) -> BTreeMap<String, bool> {
     out
 }
 
-async fn wait_healthy(ctx: &Ctx, within: Duration) -> Result<(), Fail> {
+/// Wait until every cosigner answers Health ok; how long that took.
+async fn wait_healthy(ctx: &Ctx, within: Duration) -> Result<Duration, Fail> {
     let started = Instant::now();
     loop {
         let state = health(ctx).await;
         if state.values().all(|ok| *ok) {
-            return Ok(());
+            return Ok(started.elapsed());
         }
         if started.elapsed() >= within {
             let down: Vec<&String> = state.iter().filter(|(_, ok)| !**ok).map(|(n, _)| n).collect();
@@ -773,7 +774,10 @@ async fn run(cli: Cli) -> Result<(), Fail> {
     let ctx = Arc::new(Ctx::new(&cli)?);
     let ca = cli.ca.clone();
     match cli.command {
-        Command::Wait { within_secs } => wait_healthy(&ctx, Duration::from_secs(within_secs)).await,
+        Command::Wait { within_secs } => {
+            let took = wait_healthy(&ctx, Duration::from_secs(within_secs)).await?;
+            print_json(&serde_json::json!({ "command": "wait", "healthy_after_secs": (took.as_secs_f64() * 10.0).round() / 10.0 }))
+        }
         Command::Setup { frost_keys, ecies_keys } => print_json(&setup(&ctx, &frost_keys, &ecies_keys).await?),
         Command::Sign { keys, load } => {
             let cluster = cluster_id(&ctx).await?;

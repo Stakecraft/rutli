@@ -86,7 +86,9 @@ class K8sCluster:
         if self.load_path == "canton" and args and args[0] == "sign":
             # The entry point for load through a participant (see the module docs).
             return shlex.split(os.environ["CANTON_LOAD_CMD"]) + args
-        argv = ["kubectl", "-n", self.ns, "exec", "rutli-perf-loadgen", "--", "rutli-loadgen",
+        # Run detached in the pod and fetched afterwards (k8s_loadgen.py): a stream held open
+        # through the API server for a whole run was reset on a real cluster.
+        argv = [sys.executable, "-I", os.path.join(HERE, "k8s_loadgen.py"), "--namespace", self.ns, "--",
                 "--ca", "/certs/ca.crt", "--cert", "/certs/driver.crt", "--key", "/certs/driver.key",
                 "--timeout-secs", str(timeout_secs)]
         for i, node in enumerate(NODES, start=1):
@@ -192,6 +194,15 @@ class Suite(base.Runner):
 
     # -- recovery ------------------------------------------------------------------------------
 
+    def time_to_healthy(self, since):
+        """Seconds from `since` until every cosigner answers Health ok again, or None if that
+        does not happen within --settle-secs."""
+        asked = time.time()
+        r = self.loadgen(["wait", "--within-secs", str(self.args.settle_secs)], wall_timeout=self.args.settle_secs + 120)
+        if "failed" in r or "healthy_after_secs" not in r:
+            return None
+        return round(asked - since + float(r["healthy_after_secs"]), 1)
+
     def setup_keys(self, args, wall_timeout):
         """`setup` for a suite's keys, tried three times a minute apart: a DKG needs every cosigner
         reachable, and a suite should not fail on a moment when one was not. Each failed attempt
@@ -231,9 +242,12 @@ class Suite(base.Runner):
         secs = max(60, self.args.disrupt_secs)
 
         def body():
+            # No --restarted for the victims: whether a victim's process restarted before the
+            # load generator's last scrape is not known here, and a counter that went down tells
+            # it reliably (prom.rs).
             proc = self.loadgen_start(
                 ["sign", "--key", base.KEY_STEADY, "--name", name, "--rate", str(self.args.rate), "--clients", "6",
-                 "--duration-secs", str(secs)] + [x for v in victims for x in ("--restarted", v)]
+                 "--duration-secs", str(secs)]
             )
             problems = []
             time.sleep(15)
@@ -241,24 +255,32 @@ class Suite(base.Runner):
                 strike()
                 time.sleep(max(0, secs - 30))
             except (subprocess.SubprocessError, OSError) as e:
-                problems.append({"failed": f"strike: {e}"})
+                problems.append({"failed": f"strike: {e}", "rig": True})
             finally:
+                ended = time.time()
                 try:
                     recover()
                 except (subprocess.SubprocessError, OSError) as e:
-                    problems.append({"failed": f"recover: {e}"})
+                    problems.append({"failed": f"recover: {e}", "rig": True})
+                # A disrupted cosigner restarting is expected; what counts is how long until it
+                # serves again, from the end of the disruption.
+                healthy[0] = self.time_to_healthy(ended)
             report = self.loadgen_finish(proc, secs + 900)
-            if not self.wait_healthy(900):
-                problems.append({"failed": f"{', '.join(victims) or 'a cosigner'} did not become healthy again"})
+            if healthy[0] is None:
+                problems.append({"failed": f"{', '.join(victims) or 'a cosigner'} was not healthy again within "
+                                           f"{self.args.settle_secs} s of the end of the disruption"})
             settled[0] = self.settle()
             if settled[0] is None:
                 problems.append({"failed": f"the cluster did not sign normally again within {self.args.settle_secs} s"})
             return [report] + problems
 
-        settled = [None]
+        settled, healthy = [None], [None]
         r, _ = self.scenario(name, body, restarted=tuple(victims), allowed=allowed)
-        # How long after the disruption ended the cluster took to sign within the SLO again.
+        # How long after the disruption ended the cluster took to sign within the SLO again, and
+        # every cosigner (the disrupted one included) took to answer Health ok again.
         r["recovery_secs"] = settled[0]
+        r["time_to_healthy_secs"] = healthy[0]
+        log(f"  time to healthy {healthy[0]} s, recovery (signing within the SLO) {settled[0]} s")
         # Latency split by the cosigner that answered: which leaders waited on the disruption.
         if r["loads"] and "failed" not in r["loads"][0]:
             for leader, rep in sorted(r["loads"][0].get("client", {}).get("by_leader", {}).items()):
@@ -363,7 +385,7 @@ class Suite(base.Runner):
             log(f"keys: {n}")
             setup = self.setup_keys(["setup"] + [x for k in frost for x in ("--frost-key", k)]
                                     + [x for k in hosted for x in ("--ecies-key", k)], wall_timeout=3600)
-            entry = {"count": n, "setup_failed": setup.get("failed")}
+            entry = {"count": n, "setup_failed": setup.get("failed"), "rig": bool(setup.get("rig"))}
             if "failed" not in setup:
                 load = self.loadgen(["sign", "--name", f"keys-{n}", "--rate", f"{rate:g}", "--clients", "6",
                                      "--duration-secs", str(secs)] + [x for k in frost for x in ("--key", k)],
@@ -375,6 +397,7 @@ class Suite(base.Runner):
                     "sign": {"ok": client.get("ok"), "errors": client.get("errors"), "latency": client.get("latency"),
                              "server": load.get("server", {}).get("sign_duration"), "failed": load.get("failed")},
                     "list_keys": lk.get("targets", {}), "list_keys_failed": lk.get("failed"),
+                    "rig": bool(load.get("rig") or lk.get("rig")),
                 })
             ok = (not entry.get("setup_failed") and not entry.get("list_keys_failed")
                   and not entry.get("sign", {}).get("failed") and not entry.get("sign", {}).get("errors")
@@ -404,8 +427,10 @@ class Suite(base.Runner):
                                 + [x for k in ecdh_keys for x in ("--ecies-key", k)], wall_timeout=1800)
         steps, headroom = [], 0
         if "failed" in setup:
-            self.ramp = {"failed": f"setup: {setup['failed']}", "steps": [], "headroom_factor": 0}
+            self.ramp = {"failed": f"setup: {setup['failed']}", "rig": bool(setup.get("rig")), "steps": [],
+                         "headroom_factor": 0}
             return
+        rig_stop = None
         for factor in p.get("factors", [1, 3, 10, 30, 100]):
             procs = []
             sign_rate = float(base_mix.get("sign_per_sec", 0)) * factor
@@ -428,7 +453,11 @@ class Suite(base.Runner):
             for op, proc in procs:
                 report = self.loadgen_finish(proc, step_secs + 900)
                 if "failed" in report:
-                    reasons.append(f"{op}: {report['failed']}")
+                    if report.get("rig"):
+                        # Not the cluster's limit: the step says nothing about headroom.
+                        rig_stop = f"x{factor:g} {op}: {report['failed']}"
+                    else:
+                        reasons.append(f"{op}: {report['failed']}")
                     continue
                 client = report.get("client", {})
                 o = step["ops"].setdefault(op, {"ok": 0, "errors": {}, "p99_ms": 0.0, "p95_ms": 0.0, "server": None})
@@ -445,6 +474,11 @@ class Suite(base.Runner):
                     reasons.append(f"{op}: errors {o['errors']}")
                 if o["p99_ms"] > slo:
                     reasons.append(f"{op}: p99 {o['p99_ms']:.1f} ms above the SLO of {slo:g} ms")
+            if rig_stop:
+                step["rig_failed"] = rig_stop
+                steps.append(step)
+                log(f"  x{factor:g}: the rig failed ({rig_stop}); the ramp stops without a verdict on this step")
+                break
             step["passed"] = not reasons
             step["reasons"] = reasons
             steps.append(step)
@@ -454,6 +488,9 @@ class Suite(base.Runner):
             headroom = factor
         self.ramp = {"profile": p.get("name"), "slo_p99_ms": slo, "step_secs": step_secs,
                      "steps": steps, "headroom_factor": headroom}
+        if rig_stop:
+            # The headroom factor is then a lower bound: the next step was never judged.
+            self.ramp.update({"failed": f"the rig failed: {rig_stop}", "rig": True, "headroom_is_lower_bound": True})
 
 
 def main():
@@ -513,14 +550,18 @@ def main():
             {"upgrade": suite.upgrade, "scenarios": suite.run, "disrupt": suite.disrupt,
              "keys": suite.key_count, "ramp": suite.scale_ramp}[name]()
 
-    failed = [r["name"] for r in suite.results if not r.get("passed")]
+    # `failed`: Rütli failed a check. `rig_failed`: only the test rig failed (a load generator that
+    # could not be run or reached, a hook or kubectl error): nothing is known about Rütli there.
+    failed = [r["name"] for r in suite.results if r.get("failed_by") == "rutli"]
+    rig_failed = [r["name"] for r in suite.results if r.get("failed_by") == "rig"]
     if "failed" in setup:
-        failed.insert(0, "setup")
+        (rig_failed if setup.get("rig") else failed).insert(0, "setup")
         log(f"setup FAILED: {setup['failed']}\n{setup.get('stderr', '')}")
-    if suite.keys and not all(k.get("passed") for k in suite.keys):
-        failed.append("keys")
+    bad_keys = [k for k in suite.keys or [] if not k.get("passed")]
+    if bad_keys:
+        (rig_failed if all(k.get("rig") for k in bad_keys) else failed).append("keys")
     if suite.ramp and suite.ramp.get("failed"):
-        failed.append("ramp")
+        (rig_failed if suite.ramp.get("rig") else failed).append("ramp")
     doc = {
         "schema": 1,
         "kind": "cluster",
@@ -539,22 +580,30 @@ def main():
         # Per disruption: seconds from its end until the cluster signed within the SLO again;
         # None: it never did within --settle-secs.
         "recovery_secs": {r["name"]: r.get("recovery_secs") for r in suite.results if "recovery_secs" in r},
+        # Per disruption: seconds from its end until every cosigner, the disrupted one included,
+        # answered Health ok again; None: not within --settle-secs.
+        "time_to_healthy_secs": {r["name"]: r.get("time_to_healthy_secs") for r in suite.results
+                                 if "time_to_healthy_secs" in r},
         "setup": setup,
         "scenarios": suite.results,
         "skipped": suite.skipped,
         "keys": suite.keys,
         "ramp": suite.ramp,
         "failed": failed,
+        "rig_failed": rig_failed,
     }
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     with open(args.out, "w") as f:
         json.dump(doc, f, indent=2)
         f.write("\n")
     log(f"wrote {args.out}; headroom factor {doc['headroom_factor']}")
+    if rig_failed:
+        log(f"RIG FAILED (no verdict on Rütli): {', '.join(rig_failed)}")
     if failed:
-        log(f"FAILED: {', '.join(failed)}")
+        log(f"FAILED (Rütli): {', '.join(failed)}")
         return 1
-    return 0
+    # 3: only the rig failed; the run says nothing either way about what it could not do.
+    return 3 if rig_failed else 0
 
 
 if __name__ == "__main__":
