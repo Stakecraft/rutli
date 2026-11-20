@@ -145,6 +145,9 @@ final class RutliDriverFactory extends KmsDriverFactory {
   ): RutliDriver = {
     implicit val ec: ExecutionContext = executionContext
     val logger = loggerFactory(classOf[RutliDriver])
+    // Before anything is opened or dialled: a production driver with an enforcement gap stops here,
+    // naming each setting (docs/production-profile.md).
+    ProductionProfile.enforce(config, logger)
 
     // FROST gRPC calls and approval polling BLOCK. Run them on a dedicated bounded daemon pool so a
     // burst of gated signs or a slow cluster can't starve Canton's shared ExecutionContext. Only

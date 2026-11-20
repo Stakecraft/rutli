@@ -156,7 +156,7 @@ the cluster PKI for B4.
 ### 0.5 Cosigner rollout on the soak cluster: two steps, each its own planned soak event
 
 Use a checkout of **main** for Step A (its chart still pins the 0.3.2 image) and the **`v0.4.0-rc.1`** tag for Step B.
-Rolling with PDB `minAvailable: 2`, signing continues on 2-of-3 (as in the 0.3.2 rollout, soak log 2026-10-09).
+On the soak's single (legacy) StatefulSet a rolling update restarts one pod at a time, so signing continues on 2-of-3 (as in the 0.3.2 rollout, soak log 2026-10-09). The PDB does not do that: it only guards node drains. On a per-node install the chart uses `updateStrategy: OnDelete` and `scripts/upgrade-cosigners.sh` restarts the cosigners one at a time (chart README, "Upgrading: one cosigner at a time").
 
 **Step A: TLS layout `shared` → `perNode`, image unchanged (rev 5).**
 ```sh

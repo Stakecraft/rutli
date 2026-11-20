@@ -34,16 +34,7 @@ on:
     branches: [main]
     # Release candidates (v0.5.0-rc.1, ...). Path filters do not apply to tag pushes.
     tags: ["v*-rc*"]
-    paths:
-      - "frost/**"
-      - "driver/**"
-      - "build.sbt"
-      - "project/**"
-      - "deploy/frost/config-tls/**"
-      - "scripts/e2e-*.sh"
-      - "scripts/gen-frost-certs.sh"
-      - "scripts/publish-canton-deps.sh"
-      - ".github/workflows/e2e.yml"
+    # No path filter on a push to main: every commit on main gets the whole set (see main-status.yml).
   workflow_dispatch:
 
 env:
@@ -249,33 +240,3 @@ jobs:
             ${{ env.E2E_TMP }}/rutli-e2e-*/node*/journal/**
           if-no-files-found: ignore
           retention-days: 7
-
-  # A failure on main (a push, or a manual run on main) opens an issue, type:test + prio:p0, or adds a
-  # comment to the one still open, so a red main is never only a red badge. Hosted runner: it only
-  # calls the GitHub API and needs no self-hosted capacity.
-  report-failure:
-    name: Open an issue for a failure on main
-    needs: e2e
-    if: ${{ failure() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' }}
-    runs-on: ubuntu-latest
-    permissions:
-      issues: write
-    steps:
-      - name: Open or update the e2e failure issue
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          SHA: ${{ github.sha }}
-        run: |
-          set -euo pipefail
-          title="E2E ceremonies fail on main"
-          body="The e2e ceremony workflow failed on main at ${SHA}: ${RUN_URL}
-          The run's summary shows which script failed; its log artifact (7 days) holds the cosigner and Canton logs."
-          open="$(gh issue list --state open --label type:test --search "\"${title}\" in:title" --json number,title \
-            --jq "map(select(.title == \"${title}\")) | .[0].number // empty")"
-          if [ -n "$open" ]; then
-            gh issue comment "$open" --body "$body"
-          else
-            gh issue create --title "$title" --label type:test --label prio:p0 --body "$body"
-          fi

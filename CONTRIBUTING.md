@@ -102,9 +102,14 @@ CONFORMANCE=1 CANTON_AUTOMATIC_PROTOCOL_VERSION=1 sbt -batch driver/test
   vectors. Never commit a key, certificate private key, seal secret or token, even a "throwaway" one.
 - **Docs kept true.** If behaviour, configuration or a runbook step changes, update the docs in the
   same pull request.
-- **A changelog entry** under `## [Unreleased]` in [CHANGELOG.md](CHANGELOG.md) for anything a user
-  or operator would notice. Security-relevant changes go under `### Security` and say what an
-  attacker could do before and cannot do after.
+- **A changelog fragment**: one small file `changelog.d/<PR number>.<section>.md` (sections:
+  `security`, `added`, `changed`, `fixed`, `build`, `docs`, `deprecated`, `removed`) for anything a
+  user or operator would notice; do not edit [CHANGELOG.md](CHANGELOG.md), the release step
+  assembles it from the fragments. Security-relevant changes go in a `security` fragment and say what an
+  attacker could do before and cannot do after. A pull request that changes `frost/`, `driver/`,
+  `deploy/` or `scripts/` needs a fragment or the label `no-changelog`; CI checks it. Format and
+  check command: [changelog.d/README.md](changelog.d/README.md). Until 2026-12-18 a direct edit of
+  `CHANGELOG.md` is also accepted, for pull requests opened before the switch.
 - **Compatibility stated.** Say whether the change needs every cosigner upgraded first, changes a
   wire format, a key-file format or a configuration default, and how to roll back.
 - **Third-party notices regenerated** when a dependency is added, removed or upgraded:

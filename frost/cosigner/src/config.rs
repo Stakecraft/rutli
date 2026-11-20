@@ -9,6 +9,12 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// `"production"` or `"lab"` ([`crate::profile`], docs/production-profile.md). Production: the
+    /// node refuses to start while any enforcement setting is not at its production value, and the
+    /// error names each one. Lab: the gaps are logged at startup. Unset: as lab, with a warning
+    /// (unset becomes production in 0.6). `rutli-cosigner check-config` lists the same findings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<crate::profile::Profile>,
     /// This node's FROST identifier (1..=n).
     pub identifier: u16,
     /// Address this node's gRPC server listens on (host:port).
@@ -1193,6 +1199,12 @@ impl Config {
             }
         }
         self.keyfile.validate(self.share_seal.is_some())?;
+        if self.profile == Some(crate::profile::Profile::Production) {
+            let required = crate::profile::required(self);
+            if !required.is_empty() {
+                return Err(Config(crate::profile::refusal(&required)));
+            }
+        }
         Ok(())
     }
 }
@@ -1203,6 +1215,7 @@ mod tests {
 
     pub(super) fn base(tls: Option<TlsConfig>, allow: Option<Vec<String>>) -> Config {
         Config {
+            profile: None,
             identifier: 1,
             listen: "127.0.0.1:9101".into(),
             threshold: 2,
@@ -1562,6 +1575,7 @@ mod hosted_config_tests {
 
     fn cfg(hosted: Option<HostedKeysConfig>, seal: bool) -> Config {
         Config {
+            profile: None,
             identifier: 1,
             listen: "127.0.0.1:9101".into(),
             threshold: 2,
@@ -1861,12 +1875,13 @@ mod strict_parse_tests {
     fn every_shipped_config_loads() {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let tmp = tempfile::tempdir().unwrap();
-        let mut seen = 0;
+        let (mut seen, mut production) = (0, 0);
         for dir in ["deploy/frost/config", "deploy/frost/config-tls"] {
             for entry in std::fs::read_dir(repo.join(dir)).unwrap() {
                 let path = entry.unwrap().path();
                 if path.extension().is_some_and(|e| e == "json") {
                     let cfg = Config::load(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                    assert_eq!(cfg.profile, Some(crate::profile::Profile::Lab), "{}: compose examples say lab", path.display());
                     // The compose TLS cluster's certificates are made per checkout, so its configs
                     // ship without pins and the node refuses to start until they are added
                     // (deploy/frost/README.md: gen-frost-certs.sh with RUTLI_PIN_CONFIGS).
@@ -1894,7 +1909,28 @@ mod strict_parse_tests {
                     json.push_str(lines.next().unwrap());
                     json.push('\n');
                 }
-                let cfg = load_text(tmp.path(), name, &json).unwrap_or_else(|e| panic!("{file} {name}: {e}"));
+                let parsed: Config = serde_json::from_str(&json).unwrap_or_else(|e| panic!("{file} {name}: {e}"));
+                let cfg = if parsed.profile == Some(crate::profile::Profile::Production) {
+                    // The rendered manifests ship with the production profile on. What is left for
+                    // the operator is only what a checked-in manifest cannot know: the per-cluster
+                    // values (deploy/k8s/values.yaml says which). Everything else must already be on.
+                    let mut as_lab = parsed.clone();
+                    as_lab.profile = Some(crate::profile::Profile::Lab);
+                    as_lab.validate().unwrap_or_else(|e| panic!("{file} {name}: {e}"));
+                    let left: Vec<_> = crate::profile::required(&parsed).iter().map(|f| f.setting).collect();
+                    let per_cluster = [
+                        "cluster_id",
+                        "keyfile.write_version",
+                        "keyfile.cluster_uuid",
+                        "keyfile.accept_v1",
+                        "signing_policy.signer_pins",
+                    ];
+                    assert!(left.iter().all(|s| per_cluster.contains(s)), "{file} {name}: {left:?}");
+                    production += 1;
+                    as_lab
+                } else {
+                    load_text(tmp.path(), name, &json).unwrap_or_else(|e| panic!("{file} {name}: {e}"))
+                };
                 // The rendered node configs carry a pin for every node (placeholders in
                 // deploy/k8s/values.yaml until the operator sets the real ones).
                 if name.starts_with("cosigner-") {
@@ -1905,6 +1941,7 @@ mod strict_parse_tests {
         }
         // 3 + 3 compose configs, 3 client configs, 3 rendered node configs.
         assert_eq!(seen, 12, "a shipped config was not found");
+        assert_eq!(production, 3, "the rendered node configs ship with the production profile");
     }
 
     use super::tests::{base, tls};
