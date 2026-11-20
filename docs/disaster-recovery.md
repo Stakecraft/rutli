@@ -113,6 +113,14 @@ by a rule (`backup.retention`, on by default; `rutli-cosigner backup-retain`):
   never one it cannot read: the directory can therefore exceed `keep` while older epochs are unproven.
   If a retention run keeps failing (`BACKUP_RETENTION_FAILED`), nothing bounds the directory (except
   when the image lacks the binary: then the plain count cap runs): watch the backup volume.
+- **Watching it.** The sidecar exports no metrics; its log is the record (`BACKUP_RETENTION_FAILED`,
+  `BACKUP_RETENTION_SKIPPED`, `BACKUP_RETENTION_DONE archives=N kept=K deleted=D`). Prometheus sees two
+  things: `RutliKeyEpochUnproven` (an epoch unproven for three days keeps the older archives) and
+  `RutliBackupVolumeFilling` (the backup PVC over 80% for an hour, from the kubelet's volume metrics,
+  which catches a retention that keeps failing or skipping). If you collect the sidecar's logs, alert on
+  any `BACKUP_RETENTION_FAILED` line, and on `BACKUP_RETENTION_DONE` with `archives` above
+  `backup.destination.keep` for more than three days (the same window as the proof alert): the
+  directory then holds more than the cap because older epochs are unproven or retention is skipping.
 - **A node that missed a refresh** (stale share, `RutliStaleShare`) holds the old epoch while its peers
   are on the new one. No node can prove the new epoch while a node disagrees on it, so the old
   archives stay everywhere, which is the cluster's way back. Recover that node first (§1: restore a
