@@ -882,7 +882,7 @@ echo "exit $?"
 
 `--min-journals 2` = the threshold, since every node's journal is supplied. Exit 0 = consistent;
 1 = `DISCREPANCY:` lines; 2 = an unreadable file or a broken chain (keep the evidence); 3 = nothing to
-compare (an empty audit log or journal, usually a failed copy: check the files and copy again). Only
+compare (an empty audit log, or all journals empty, usually a failed copy: check the files and copy again). Only
 exit 0 is a pass. A sign still in flight during the copy can show once as a discrepancy: run again.
 
 `--allow-no-intent` is for this first run only: the journals hold the `no-intent` signatures of the

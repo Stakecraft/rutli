@@ -233,10 +233,13 @@ fn an_empty_or_missing_side_is_nothing_to_compare_not_consistent() {
     std::fs::create_dir_all(&j2).unwrap();
     let (code, out) = run(&audit, &[&j2], &[]);
     assert_eq!(code, 3, "{out}");
-    assert!(out.contains("is empty"), "{out}");
-    // And among a full one: still not a pass.
+    assert!(out.contains("every supplied journal is empty"), "{out}");
+    // Among a full one it is a node that signed nothing: a warning; the threshold still applies.
     let (code, out) = run(&audit, &[&j1, &j2], &[]);
-    assert_eq!(code, 3, "{out}");
+    assert_eq!(code, 0, "{out}");
+    assert!(out.contains("WARNING: journal") && out.contains("is empty"), "{out}");
+    let (code, out) = run(&audit, &[&j1, &j2], &["--min-journals", "2"]);
+    assert_eq!(code, 1, "{out}");
 
     // The full pair passes.
     let (code, out) = run(&audit, &[&j1], &[]);

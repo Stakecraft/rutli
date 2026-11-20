@@ -32,9 +32,11 @@
 //! other side's first record (journal retention, a driver audit log started later) are skipped and
 //! counted, not reported.
 //!
-//! An empty side proves nothing: an empty driver audit log, an empty journal, or two sides with no
-//! signature between them to compare give the verdict [`Verdict::NothingToCompare`], never
-//! "consistent". A driver audit log cut down to nothing is the extreme case of a truncated tail.
+//! An empty side proves nothing: an empty driver audit log, journals that are all empty, or two
+//! sides with no signature between them to compare give the verdict [`Verdict::NothingToCompare`],
+//! never "consistent". One empty journal among others is only a warning: with `t < n` a node the
+//! leaders never pick journals nothing, and `--min-journals` holds each audited sign to the
+//! threshold anyway. A driver audit log cut down to nothing is the extreme case of a truncated tail.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -214,7 +216,7 @@ impl Default for Options {
 pub struct Report {
     pub lines: Vec<String>,
     pub discrepancies: usize,
-    /// Why there was nothing to compare (an empty driver audit log, an empty journal, no
+    /// Why there was nothing to compare (an empty driver audit log, only empty journals, no
     /// signature on either side). Each is also a `NOTHING TO COMPARE:` line.
     pub nothing_to_compare: Vec<String>,
 }
@@ -226,8 +228,8 @@ pub enum Verdict {
     Consistent,
     /// At least one `DISCREPANCY:` line.
     Discrepancies,
-    /// No discrepancy, but one side (or a supplied journal) was empty, or no signature was compared
-    /// at all: the check proves nothing.
+    /// No discrepancy, but the driver audit log or every supplied journal was empty, or no
+    /// signature was compared at all: the check proves nothing.
     NothingToCompare,
 }
 
@@ -314,9 +316,11 @@ pub fn cross_check(audit: &DriverAudit, journals: &[(String, Vec<JournalEntry>)]
     let mut compared = 0usize;
     for (label, entries) in journals {
         if entries.is_empty() {
-            r.empty(format!(
-                "journal {label} is empty — check the path (a node's data_dir/journal, one subdirectory \
-                 per key) and copy it in full; an empty journal cannot show which signatures that node made"
+            // Not a failure on its own: with t < n a node the leaders never pick journals nothing.
+            // `--min-journals` still holds every audited sign to the threshold.
+            r.info(format!(
+                "WARNING: journal {label} is empty — that node took part in no signature, or the path is wrong \
+                 (a node's data_dir/journal, one subdirectory per key) or the copy failed"
             ));
         }
         r.info(format!(
@@ -490,8 +494,12 @@ pub fn cross_check(audit: &DriverAudit, journals: &[(String, Vec<JournalEntry>)]
              extreme case of a truncated tail"
                 .into(),
         );
-    } else if journals.is_empty() {
-        r.empty("no journal supplied".into());
+    } else if journals.iter().all(|(_, e)| e.is_empty()) {
+        r.empty(
+            "every supplied journal is empty — check the paths (each node's data_dir/journal) and copy them in \
+             full; empty journals cannot show which signatures the cluster made"
+                .into(),
+        );
     } else if compared == 0 && r.nothing_to_compare.is_empty() {
         r.empty(
             "no signature on either side falls inside the other side's records — nothing was compared \
@@ -690,18 +698,22 @@ mod tests {
         // Both empty.
         let r = cross_check(&DriverAudit::default(), &[("n1".to_string(), vec![])], &Options::default());
         assert_eq!(r.verdict(), Verdict::NothingToCompare, "{:#?}", r.lines);
-        assert_eq!(r.nothing_to_compare.len(), 2, "the empty journal and the empty log: {:#?}", r.lines);
 
-        // A full driver audit log next to an empty journal (the sign is then "for a key no journal
-        // holds", which was skipped and passed).
-        let r = cross_check(&audit, &[("n1".to_string(), vec![])], &Options::default());
+        // A full driver audit log next to only empty journals (the sign is then "for a key no
+        // journal holds", which was skipped and passed).
+        let r = cross_check(&audit, &[("n1".to_string(), vec![]), ("n2".to_string(), vec![])], &Options::default());
         assert_eq!(r.verdict(), Verdict::NothingToCompare, "{:#?}", r.lines);
-        assert!(r.lines.iter().any(|l| l.contains("journal n1 is empty")), "{:#?}", r.lines);
+        assert!(r.lines.iter().any(|l| l.contains("every supplied journal is empty")), "{:#?}", r.lines);
 
-        // One empty journal among full ones: still not a pass.
+        // One empty journal among full ones (a node the leaders never picked): a warning, and the
+        // threshold check still applies.
         let mut one_empty = full.clone();
         one_empty.push(("n2".to_string(), vec![]));
-        assert_eq!(cross_check(&audit, &one_empty, &Options::default()).verdict(), Verdict::NothingToCompare);
+        let r = cross_check(&audit, &one_empty, &Options::default());
+        assert_eq!(r.verdict(), Verdict::Consistent, "{:#?}", r.lines);
+        assert!(r.lines.iter().any(|l| l.starts_with("WARNING: journal n2 is empty")), "{:#?}", r.lines);
+        let r = cross_check(&audit, &one_empty, &Options { min_journals: 2, allow_no_intent: false });
+        assert_eq!(r.verdict(), Verdict::Discrepancies, "{:#?}", r.lines);
 
         // Entries on both sides, but no signature to compare (a deployment that never signed).
         let no_signs = DriverAudit { entries: 3, signs: vec![], first_ts_ms: Some(1_000), torn_tail: false };
@@ -711,7 +723,9 @@ mod tests {
         assert_eq!(r.verdict(), Verdict::NothingToCompare, "{:#?}", r.lines);
         assert!(r.lines.iter().any(|l| l.contains("nothing was compared")), "{:#?}", r.lines);
 
-        // A discrepancy wins over an empty journal.
+        // A discrepancy wins over nothing to compare.
+        let r = cross_check(&DriverAudit::default(), &[("n1".to_string(), vec![journaled(1, &rid, &m1, 2_000)])], &Options::default());
+        assert_eq!(r.verdict(), Verdict::NothingToCompare, "an empty log skips every journal entry: {:#?}", r.lines);
         let r = cross_check(&no_signs, &[("n1".to_string(), vec![journaled(1, &rid, &m1, 2_000)]), ("n2".to_string(), vec![])], &Options::default());
         assert_eq!((r.verdict(), r.verdict().exit_code()), (Verdict::Discrepancies, 1), "{:#?}", r.lines);
     }

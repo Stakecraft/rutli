@@ -582,7 +582,7 @@ and node 2 each `81 signature(s) with key frost-signing without a signing intent
 `DISCREPANCY:` line, or a no-intent range that ends later, is a finding
 (`docs/audit-cross-check.md`). A sign in flight during the copy can show once (`in 1 of the supplied
 journals` for the newest entry): copy again and rerun. Exit 2 means an unreadable file or a broken
-chain: keep the evidence. Exit 3 (`NOTHING TO COMPARE:`) means an empty audit log or journal, usually
+chain: keep the evidence. Exit 3 (`NOTHING TO COMPARE:`) means an empty audit log or all journals empty, usually
 a failed copy: it is not a pass, so check the files and copy again. Record the counts in the soak log. The weekly manual run continues
 unchanged.
 
