@@ -221,7 +221,7 @@ impl Ctx {
     /// A client for target `i`. The connection is made on first use and again after it breaks, so
     /// a cosigner that is down now is no error here.
     fn connect(&self, i: usize) -> Result<SignerClient<Channel>, Fail> {
-        let (name, url) = &self.targets[i];
+        let (name, url) = self.targets.get(i).ok_or_else(|| format!("no target {i}"))?;
         let endpoint = Endpoint::from_shared(url.clone())
             .map_err(|e| format!("bad endpoint {url}: {e}"))?
             .connect_timeout(Duration::from_secs(5))
@@ -313,7 +313,11 @@ impl Client {
         let mut moves = Vec::new();
         let mut at = self.leader.load(Ordering::Relaxed) % n;
         loop {
-            match bounded(limit, call(self.conns[at].clone())).await {
+            // `at` is reduced modulo `n = conns.len()` (one connection per --target, which clap
+            // requires), here and at every step below, so it is in range.
+            #[allow(clippy::indexing_slicing)]
+            let conn = self.conns[at].clone();
+            match bounded(limit, call(conn)).await {
                 Err(status) if failover && not_serving(&status) && moves.len() + 1 < n => {
                     moves.push(code_name(status.code()));
                     at = (at + 1) % n;
@@ -374,6 +378,8 @@ impl Run {
         // (the final answer as "what was wrong with an OK", how it travelled)
         let (answer, moves): (Result<Option<String>, tonic::Status>, Route) = match &self.op {
             Op::Sign { keys } => {
+                // `keys` is not empty (clap: `--key` is required) and the index is reduced modulo its length.
+                #[allow(clippy::indexing_slicing)]
                 let (key_id, group) = &keys[(seq % keys.len() as u64) as usize];
                 // Canton's sign payload: 0x1220 ‖ a SHA-256 digest (docs/wire-contract.md).
                 let mut message = vec![0x12, 0x20];
@@ -473,7 +479,7 @@ impl Run {
             Ok(Some(wrong)) => ("OK", true, Some(wrong)),
             Err(status) => (code_name(status.code()), false, Some(status.message().to_string())),
         };
-        let leader = moves.leader.map(|i| self.ctx.targets[i].0.clone());
+        let leader = moves.leader.and_then(|i| self.ctx.targets.get(i)).map(|t| t.0.clone());
         let outcome = Outcome { at, latency, code, failovers: moves.failovers, bad_answer, leader };
         self.recorder.lock().unwrap_or_else(|p| p.into_inner()).record(outcome, message);
     }
@@ -563,6 +569,8 @@ async fn generate(run: Arc<Run>, load: &Load) -> Result<stats::ClientReport, Fai
             }
             match in_flight.clone().try_acquire_owned() {
                 Ok(permit) => {
+                    // `clients` has `--clients` >= 1 entries (checked above); the index is reduced modulo its length.
+                    #[allow(clippy::indexing_slicing)]
                     let (run, client) = (run.clone(), clients[(seq % clients.len() as u64) as usize].clone());
                     tasks.spawn(async move {
                         run.request(&client, seq).await;
@@ -825,8 +833,8 @@ async fn ecdh_op(ctx: &Ctx, key_id: &str) -> Result<Op, Fail> {
     let hosted_point = spki
         .len()
         .checked_sub(65)
-        .map(|at| &spki[at..])
-        .filter(|point| point[0] == 0x04)
+        .and_then(|at| spki.get(at..))
+        .filter(|point| point.first() == Some(&0x04))
         .ok_or_else(|| format!("{key_id}: unexpected public key encoding ({} bytes)", spki.len()))?;
     let rng = aws_lc_rs::rand::SystemRandom::new();
     let ours = EphemeralPrivateKey::generate(&ECDH_P256, &rng).map_err(|_| "P-256 key generation failed")?;
