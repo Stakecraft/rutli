@@ -86,6 +86,7 @@ canton.participants.participant1.crypto {
     type = driver
     name = "rutli"
     config = {
+      profile = "production"        # refuse to start with an enforcement gap (docs/production-profile.md)
       backend = "frost"
       frost = {
         # One entry per node: its Service, and the certificate name it must present.
@@ -96,8 +97,10 @@ canton.participants.participant1.crypto {
         ]
         delegate = "hsm"            # non-namespace keys; "software" only for testing
         tls = { ca-cert = "/certs/ca.crt", cert = "/certs/driver.crt", key = "/certs/driver.key" }
+        cluster-id = "<the cosigners' cluster_id>"
       }
       audit-log-path = "/var/rutli/audit.jsonl"
+      signing-journal = { dir = "/var/rutli/journal" }
       # tighten to `approval { … }` for the namespace key after the key ceremony (docs/key-ceremony.md)
     }
   }
