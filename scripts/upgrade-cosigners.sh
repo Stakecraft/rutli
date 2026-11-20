@@ -96,7 +96,7 @@ pod_row() {
 IDS=(); NAMES=(); STRATS=(); REVS=(); IMAGES=()
 load_nodes() {
   IDS=(); NAMES=(); STRATS=(); REVS=(); IMAGES=()
-  local id name strat rev seen image
+  local id name strat rev _seen image
   local table tries=0
   # Right after `helm upgrade` the StatefulSet controller may not have caught up: retry for ~30 s.
   while :; do
@@ -106,7 +106,7 @@ load_nodes() {
     [ "$tries" -lt 15 ] || die "no cosigner StatefulSets in namespace $NS (selector: $SEL), or their controller has not observed the latest spec yet; run again in a few seconds"
     sleep 2
   done
-  while IFS='|' read -r id name strat rev seen image; do
+  while IFS='|' read -r id name strat rev _seen image; do
     IDS+=("$id"); NAMES+=("$name"); STRATS+=("$strat"); REVS+=("$rev"); IMAGES+=("$image")
   done <<<"$table"
 }
