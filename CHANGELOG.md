@@ -45,6 +45,54 @@ All notable changes to Rütli are documented here. Format loosely follows
     first. Remove it once the driver signs intents.
   - Clusters that already set `require_intent: true` see no change.
   - Docs: `docs/approval-quorum.md` ("Switching enforcement on"), `docs/security/threat-model.md`.
+- **Cosigners pin each other's TLS keys, and a node with TLS refuses to start without the pins.**
+  Before, a peer was any certificate with CN `cosignerN` under the cluster CA. A replaced node's old
+  certificate stayed a valid peer until it expired, and whoever held the CA key could mint
+  `cosignerN` and, from a position on the network, receive that node's round-2 packages in a DKG or
+  refresh. Each roster entry now lists the SHA-256 of the SubjectPublicKeyInfo of that node's
+  certificate, one or two values (two during a key roll):
+  `"peers": [{ "identifier": 2, "endpoint": "…", "tls_spki_sha256": ["<64 hex>"] }]`. A node checks
+  the key of a peer that calls it (every Peer RPC) and of a peer it dials, before any request.
+  A mismatch is refused with the certificate's CN and the key it saw, logged, and counted in
+  `rutli_peer_pin_refusals_total{direction="inbound"|"outbound"}`. Pins are required for every
+  roster entry when TLS is on: `tls.require_peer_pins` unset is on, `false` is the explicit opt-out,
+  with a startup warning and `rutli_peer_pins_unpinned`. A node also refuses to start when its own
+  certificate's key is not in its own entry. One value under two nodes, an empty list or more than
+  two values are config errors. The offline ceremony commands (`ceremony resolve`, `recover-commit`,
+  `drop-quarantine`, `discard-partial-key`) join the mesh as the node, under the same rules. The
+  operator CLI (`refresh`, `verify-key`, `verify-hosted`, `delete-hosted-key`) is a Signer API
+  client: it checks a node's key when its client config lists pins, and does not require them.
+  New command: `rutli-cosigner tls spki <cert>…` prints a certificate's pin; with `--config` and
+  `tls spki --peers`, it shows the key each running node presents and whether it is pinned.
+  Helm: `peerPins` (node id → values) and `tls.requirePeerPins`; the chart refuses to render while
+  a node has no pins. `scripts/gen-frost-certs.sh` prints the pins of the cosigner certificates it
+  leaves in its output directory and writes them to `peer-pins.json`, a Helm values file;
+  `RUTLI_PIN_CONFIGS=<dir>` writes them into the JSON configs in `<dir>`. Not in this release: the
+  driver does not pin the cosigners, and `signer_pins` stay optional for the client roles.
+
+  **Upgrade note (from 0.4.0), one node at a time:**
+  1. Get the pin of every cosigner's current certificate: `rutli-cosigner tls spki cosigner1.crt …`
+     (this release's binary, on a workstation), or `openssl x509 -in cosigner1.crt -noout -pubkey |
+     openssl pkey -pubin -outform DER | sha256sum`.
+  2. Add the pins to every node's config while every node still runs 0.4.0. 0.4.0 ignores
+     `tls_spki_sha256` and `require_peer_pins`. With Helm, upgrade to this chart with the image still
+     at 0.4.0 and `peerPins` set: only the ConfigMap changes, and no pod restarts. Keep `peerPins` in
+     the saved values.
+  3. Upgrade one node to 0.5.0. It checks that every roster entry has a pin and that its own key is
+     in its own entry, and logs `peer N TLS key pins` for every node. Its peers on 0.4.0 still
+     present the keys you pinned, so it accepts them both ways, and they do not check pins at all.
+     Gate: signatures complete through this node, and `rutli_peer_pin_refusals_total` stays at 0.
+  4. Repeat for every other node. The protection holds once every node runs 0.5.0: a node on 0.4.0
+     still dials whatever answers with a valid certificate for the peer's name.
+  - A rollback of one node to 0.4.0 works with the same config: it ignores the pins, and the other
+    nodes still pin its unchanged key.
+  - Do not swap a certificate during the upgrade. To roll a key later: pins `[old, new]` on every
+    node, swap the certificate, then pins `[new]` (`docs/ca-rotation.md` §10).
+  - To upgrade without pins, set `tls.require_peer_pins: false` (Helm: `tls.requirePeerPins=false`)
+    and add them later. These keys come with this release because 0.5.0 refuses keys it does not
+    know: a key added in a later release would have to reach the binary before the config.
+  - Docs: `docs/security/threat-model.md` ("Holder of the cluster CA key"), `docs/ca-rotation.md`
+    (pins in Phases A and D, §10 key roll and emergency eviction), chart README ("Peer key pins").
 
 ### Security
 

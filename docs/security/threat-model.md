@@ -25,7 +25,10 @@ The statements below hold for a cluster where:
 - the Helm `perNode` topology (one StatefulSet per node, per-node seal and TLS Secrets mounted as
   files, the backup sidecar, no `pods/exec` RBAC — `scripts/check-deploy-policy.sh` passes);
 - hosted-key deletes, if enabled at all, are restricted to a delete role
-  (`hosted_keys.delete_allowlist`) with approvals (`delete_approval_threshold` ≥ 1, decision P8).
+  (`hosted_keys.delete_allowlist`) with approvals (`delete_approval_threshold` ≥ 1, decision P8);
+- every cosigner runs 0.5.0 or later with every roster entry pinned (`peers[].tls_spki_sha256`,
+  required with TLS unless `tls.require_peer_pins: false`). A node on an earlier release checks no
+  pins: it still dials whatever answers with a valid certificate for the peer's name.
 
 The cluster is `t`-of-`n` (2-of-3 in every example). "Signature" means a FROST Ed25519 signature
 under a group key; "hosted key" means a replicated whole key (RSA-2048, EC P-256, AES-256-GCM —
@@ -38,7 +41,7 @@ under a group key; "hosted key" means a replicated whole key (RSA-2048, EC P-256
 | Namespace / protocol FROST keys | One share per node, sealed in `keys/<id>.json` | Existential for the namespace key (non-rotatable). `t` shares = the key |
 | Hosted keys | Whole key on every node, sealed | Retrospective decryption of traffic encrypted to it; rotatable in Canton |
 | Seal bundle (per node) | Per-node Secret, file-mounted into the cosigner container only | That node's current DEK, any previous DEKs kept during a rotation, and its distribution seed: opens that node's sealed files, current and in retained backups (its one share of each FROST key, every hosted key), and any envelope wrapped to that node |
-| Node TLS key | Per-node Secret | Impersonation of that node on the mesh |
+| Node TLS key | Per-node Secret | Impersonation of that node on the mesh, until its pin is replaced on every node; with a network position, that node's round-2 packages in a DKG or refresh |
 | Driver TLS key | The participant | Signer-role requests (bounded below) |
 | Sign journals | `data_dir/journal` per node | The independent record of every share released |
 
@@ -112,7 +115,7 @@ running there.
 ### A single compromised cosigner (its share, DEK, TLS key, memory)
 
 **Cannot:** reconstruct a key (it holds one share), impersonate another node (per-peer TLS server
-names and exact client CNs, M3), make an honest peer release a share without a valid intent, forge
+names, exact client CNs and per-peer key pins), make an honest peer release a share without a valid intent, forge
 a tombstone, roll a peer back to an old epoch, or get a peer to accept a key file it planted (v2
 headers bind cluster, node, key id and kind; plaintext is refused, M4).
 
@@ -243,6 +246,44 @@ without an intent is still accepted and counted (`RutliCeremonyIntentAbsent`), a
 on rc.3. Any peer can then lead a DKG or refresh at will, split it, and hold off other ceremonies for
 60 s with a bare fence or 15 min with a session at a time.
 
+### Holder of the cluster CA key
+
+The CA key signs every certificate the cluster trusts: cosigners, the driver, the operator, the
+refresher, delete roles. It is meant to be escrowed offline (`docs/ca-rotation.md`). Peer key pins
+(`peers[].tls_spki_sha256`) make it no longer enough to be a cosigner.
+
+**With the key alone** it mints a certificate with any CN and a key of its own.
+- A client role works on the Signer API wherever that CN has no `signing_policy.signer_pins` entry:
+  `driver` (sign within its ACL and the rate limits, run a DKG of a new id), `refresher`,
+  `operator`, a delete role. `signer_pins` are optional in 0.5.0; pin every client CN.
+- A minted `cosignerN` is refused by every node that pins node N: it cannot call the Peer API, and
+  no node dials it as a peer.
+
+**With the key and a network position** (it can answer at a node's address: a Service, DNS or ARP
+hijack, or a node on a flat network):
+- It cannot stand in for a cosigner on the mesh. Every node checks the key of the peer it dials
+  before any request (only the handshake, with this node's own certificate, has happened), so a DKG or refresh with an impostor at a node's address fails and
+  delivers it no round-2 package (`tests/peer_pins.rs`).
+- It can stand in for a cosigner **to the driver**, which checks a cosigner's certificate name, not
+  its key. It then sees what the driver sends to that endpoint (digests to sign, data to encrypt or
+  decrypt) and can answer falsely. The driver checks every signature against the group key, so a
+  false signature is a failed request, not a forged one.
+- It can deny service.
+
+**What pins do not change:**
+- A node's *current* TLS key plus a network position is that node on the mesh. Pins name a key, not
+  a host: whoever holds the key receives that node's round-2 packages, one share per ceremony.
+  Replace the key and its pin, then refresh.
+- Pins are read at startup. Removing a key takes a restart of every node.
+- The driver does not pin the cosigners (known gap), and the client roles are pinned only where an
+  operator sets `signer_pins` (known gap).
+
+**One CA per cluster.** A CA that also signs another cluster's certificates (staging and production,
+two tenants) makes that cluster's driver and operator certificates valid here wherever `signer_pins`
+does not pin them. Without a pinned `cluster_id` both clusters also derive the same id from the
+same CA file, so an intent for one is valid on the other. Peer pins keep the other cluster's
+cosigners off this mesh; nothing else separates them. Never reuse a CA.
+
 ### Holder of the driver certificate and key (bypassing the driver)
 
 **Can:** sign with non-gated keys inside its `signer_acl` prefixes, within the per-node rate limits,
@@ -309,7 +350,9 @@ A sidecar proxy that terminates TLS between cosigners (Istio/Linkerd in mTLS-ter
 L7 load balancer) sees every round-2 package of every ceremony and therefore every new share — i.e.
 the keys. **Deploy with no TLS-terminating mesh on the cosigner-to-cosigner path**; exclude the
 cosigner pods from mesh injection, or use pass-through (L4) mode. Hosted-key replication is
-additionally wrapped to the recipient's X25519 key and is not exposed this way.
+additionally wrapped to the recipient's X25519 key and is not exposed this way. Peer key pins stop a
+proxy that presents certificates of its own (the handshake fails); a proxy given the nodes' real
+keys passes them.
 
 ### VM or container memory snapshot, clone or live migration (audit L7, T4)
 
@@ -382,3 +425,7 @@ keys stay test material.
 - One Byzantine cosigner can split a DKG/refresh (n = 3, f = 1): availability, detected and
   operator-recoverable, never the key (F3).
 - Until `keyfile.accept_v1: false`, v1 key files and same-key rollbacks are accepted (F10).
+- A CA-key holder with a network position can impersonate a cosigner to the driver, which does not
+  pin cosigner keys, and can use every client role whose CN `signer_pins` does not pin.
+- A node's current TLS key receives that node's round-2 packages; a revoked key stays usable until
+  every node restarts with the new pins.

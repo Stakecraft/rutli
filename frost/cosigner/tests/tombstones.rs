@@ -705,6 +705,7 @@ async fn serve_mesh(c: &Cluster) -> (Vec<String>, Vec<tokio::task::JoinHandle<()
             key: dir.join(format!("{cn}.key")),
             domain: None,
             allow_expired_ca: false,
+            require_peer_pins: None,
         })
         .unwrap()
     };
@@ -725,7 +726,7 @@ async fn serve_mesh(c: &Cluster) -> (Vec<String>, Vec<tokio::task::JoinHandle<()
                         GrpcPeer::connect_lazy(
                             Identifier::try_from(j as u16 + 1).unwrap(),
                             &endpoints[j],
-                            Some(tls[i].client_for(&format!("cosigner{}", j + 1))),
+                            Some(tls[i].dial_as(&format!("cosigner{}", j + 1), None, 0).unwrap()),
                         )
                         .unwrap(),
                     ) as Arc<dyn PeerApi>
@@ -747,6 +748,7 @@ async fn serve_mesh(c: &Cluster) -> (Vec<String>, Vec<tokio::task::JoinHandle<()
             node: c.nodes[i].clone(),
             allowed_cns: Some(Arc::new((1..=N).map(|k| format!("cosigner{k}")).collect::<HashSet<_>>())),
             peer_ids: Some(Arc::new((1..=N).map(|k| (format!("cosigner{k}"), k)).collect())),
+            peer_pins: None,
         };
         let server = tonic::transport::Server::builder()
             .tls_config(tls[i].server.clone())
