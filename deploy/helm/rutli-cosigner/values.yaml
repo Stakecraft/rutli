@@ -307,9 +307,26 @@ resources:
     cpu: 500m
     memory: 256Mi
 
+# Legacy topology only: the init container that copies this node's TLS files out of the shared
+# source volume. It runs one shell script for a moment.
+tlsSelect:
+  resources:
+    requests:
+      cpu: 5m
+      memory: 16Mi
+    limits:
+      cpu: 100m
+      memory: 64Mi
+
 podDisruptionBudget:
   enabled: true
   minAvailable: 2
+  # What happens to a pod that is running but not ready when a node is drained. AlwaysAllow lets the
+  # drain evict it, so one stuck cosigner cannot block the drain (and the upgrade behind it); the
+  # budget still protects every ready pod, so minAvailable keeps holding for the healthy ones.
+  # IfHealthyBudget is the Kubernetes default (a not-ready pod is evicted only while the budget is
+  # met). "" omits the field.
+  unhealthyPodEvictionPolicy: AlwaysAllow
 
 networkPolicy:
   enabled: true
