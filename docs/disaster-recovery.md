@@ -479,7 +479,8 @@ and routed around. A call fails only when every answering cosigner differs from 
   is refused while its pin exists. Stop the participant, move `<key-id>.pin` to
   `<pin-dir>/retired/` (keep the name; a suffix such as `.2026-11-20` is fine), record why in the
   ceremony record, and start it again. A key id with a file under `retired/` is not treated as a
-  lost pin, so the new DKG can run and pin the new key. The driver never deletes a pin.
+  lost pin, so the new DKG can run and pin the new key. Moving a file there is the operator's
+  statement that the id is retired; the driver does not check the moved file. The driver never deletes a pin.
 - **A pin file that names another key than its audit-log entry** refuses the start: the file was
   rewritten (its checksum catches damage only, the audit log's hash chain catches a rewrite). Keep
   the evidence, restore the file from a backup, and find out who could write the state volume.

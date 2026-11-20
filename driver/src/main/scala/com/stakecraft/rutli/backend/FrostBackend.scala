@@ -912,7 +912,8 @@ class FrostBackend(
       val notes = currentNotes.get
       // A key id whose pin the audit log records but whose file is gone is refused before the
       // ceremony, which cannot be undone (a deliberate re-use moves the pin to retired/ first).
-      if (lostPin(keyId)) return Future.failed(lostPinError(keyId))
+      // Stricter than lostPin: an operator anchor re-establishes an existing key's pin, never a DKG.
+      if (lostPins.contains(keyId) && !pinnedKeys.containsKey(keyId)) return Future.failed(lostPinError(keyId))
       clusterCall("dkg", connectionRefused, connectionRefused)(_.dkg(dkgRequest()))
         .flatMap { reply =>
           // The leader's reply is one cosigner's word: the new key is believed only once a roster
