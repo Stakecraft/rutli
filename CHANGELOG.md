@@ -5,6 +5,8 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ## [Unreleased]
 
+_Upgrading from 0.4.x: [docs/upgrading-to-0.5.md](docs/upgrading-to-0.5.md) gathers the upgrade notes below in the order to do them._
+
 ### Changed (breaking default)
 
 - **The production profile: `"profile": "production"` makes a cosigner refuse to start while any
@@ -148,30 +150,6 @@ All notable changes to Rütli are documented here. Format loosely follows
   - Docs: `docs/ceremonies.md` ("Refresh interval"), `docs/disaster-recovery.md` ("Backups and
     refreshes": restoring a node needs its backup of the current epoch; a cluster rebuild needs `t`
     nodes' backups of one epoch; a refresh does not retire old shares or rotate the seal key).
-
-### Security
-
-- **The cosigner keeps serving when it runs short of file descriptors, and never stops serving
-  without saying so.** At start-up it raises its soft open-file limit to the hard limit and logs
-  both (`rutli_fd_limit`). It accepts gRPC connections in its own loop: an accept error such as
-  running out of descriptors is retried after a short backoff and reported
-  (`rutli_grpc_accept_errors_total`, alert `RutliGrpcAcceptErrors`), where it used to end the
-  server. Open connections are capped below the descriptor limit (the soft limit less 256, or half
-  of it under a limit below 512, at most 4096); past the cap new connections wait in the listen backlog
-  (`rutli_grpc_connections`, `rutli_grpc_connection_limit`, alert `RutliGrpcConnectionsNearLimit`).
-  A new connection gets 5 s to finish its TLS handshake (without TLS: to send its first
-  bytes; `rutli_grpc_handshake_timeouts_total`), and an error during a handshake no longer ends
-  the server. The server sends HTTP/2 keepalive pings
-  (every 60 s, 20 s timeout), so connections to peers that vanished are closed. If the gRPC server
-  ever returns without a shutdown request, the daemon logs it and exits non-zero. Also in 0.4.1.
-- **heapless 0.7.17: nine `unsound` RustSec advisories (RUSTSEC-2026-0574 to -0582) are ignored in
-  `frost/deny.toml`, with the reason recorded per advisory.** heapless comes in only through
-  frost-core 2.2.0 → postcard 1.1.3, and no release of either moves it to the fixed heapless 0.9.4.
-  frost-core calls only postcard's `to_allocvec` and `from_bytes`, which do not touch heapless;
-  postcard itself uses only heapless' `Vec` and `String`, in functions frost-core does not call;
-  and the cosigner and dealer binaries contain no heapless code (checked on their symbol tables).
-  No code change; the same holds for 0.4.0 as released. In the lockfile, spin moves from 0.9.8 to
-  0.9.9, because 0.9.8 was yanked. The ignores are also in 0.4.1, which keeps spin 0.9.8.
 
 ### Changed
 
@@ -379,6 +357,28 @@ All notable changes to Rütli are documented here. Format loosely follows
   script makes the same topology changes from the new participant instead, and the Splice step is left to a LocalNet job.
 
 ### Security
+
+- **The cosigner keeps serving when it runs short of file descriptors, and never stops serving
+  without saying so.** At start-up it raises its soft open-file limit to the hard limit and logs
+  both (`rutli_fd_limit`). It accepts gRPC connections in its own loop: an accept error such as
+  running out of descriptors is retried after a short backoff and reported
+  (`rutli_grpc_accept_errors_total`, alert `RutliGrpcAcceptErrors`), where it used to end the
+  server. Open connections are capped below the descriptor limit (the soft limit less 256, or half
+  of it under a limit below 512, at most 4096); past the cap new connections wait in the listen backlog
+  (`rutli_grpc_connections`, `rutli_grpc_connection_limit`, alert `RutliGrpcConnectionsNearLimit`).
+  A new connection gets 5 s to finish its TLS handshake (without TLS: to send its first
+  bytes; `rutli_grpc_handshake_timeouts_total`), and an error during a handshake no longer ends
+  the server. The server sends HTTP/2 keepalive pings
+  (every 60 s, 20 s timeout), so connections to peers that vanished are closed. If the gRPC server
+  ever returns without a shutdown request, the daemon logs it and exits non-zero. Also in 0.4.1.
+- **heapless 0.7.17: nine `unsound` RustSec advisories (RUSTSEC-2026-0574 to -0582) are ignored in
+  `frost/deny.toml`, with the reason recorded per advisory.** heapless comes in only through
+  frost-core 2.2.0 → postcard 1.1.3, and no release of either moves it to the fixed heapless 0.9.4.
+  frost-core calls only postcard's `to_allocvec` and `from_bytes`, which do not touch heapless;
+  postcard itself uses only heapless' `Vec` and `String`, in functions frost-core does not call;
+  and the cosigner and dealer binaries contain no heapless code (checked on their symbol tables).
+  No code change; the same holds for 0.4.0 as released. In the lockfile, spin moves from 0.9.8 to
+  0.9.9, because 0.9.8 was yanked. The ignores are also in 0.4.1, which keeps spin 0.9.8.
 
 - **Release images are built on GitHub-hosted runners, signed and attested.** `publish-image.yml` no
   longer runs on the self-hosted CI runners (`vars.CI_RUNNER`), where a job is root on the runner's

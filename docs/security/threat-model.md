@@ -14,14 +14,12 @@ The statements below hold for a cluster where:
 - every cosigner and the driver run `0.4.0` (batch C shipped in `0.4.0-rc.3`; later statements name
   the release candidate they hold from), on a cluster uniformly upgraded **before** any DKG or refresh
   (`ceremony_protocol` 2 on every node);
-- the enforcement switches are on, identically, on every node: `signing_policy.require_intent`
-  (on by default with TLS since 0.5.0, unless opted out with `false`),
-  `require_ceremony_intent` (on by default since 0.4.0-rc.6, unless opted out with `false`),
-  `signer_acl_required`, `signer_may_refresh: false`, `require_epoch_match`
-  (`docs/approval-quorum.md`, "Switching enforcement on"). The production profile
-  (`"profile": "production"`) requires every setting this model assumes, and a node refuses to start
-  without them; [production-profile.md](../production-profile.md) has the full table, and
-  `rutli-cosigner check-config` lists what a config is missing;
+- every enforcement setting is on, identically, on every node. The list is the table in
+  [production-profile.md](../production-profile.md), not repeated here. The production profile
+  (`"profile": "production"`) requires every setting in it, and a node refuses to start without them;
+  `rutli-cosigner check-config` lists what a config is missing. How to switch them on in a running
+  cluster: `docs/approval-quorum.md`, "Switching enforcement on". A statement below that depends on
+  one setting names it;
 - key files are written in format v2 (`keyfile.write_version: 2`, `cluster_uuid` set) and the
   legacy shared seal master has been retired: per-node seal bundles, DEKs rotated
   (`seal rotate-dek`), the master escrowed offline and then destroyed (decision P1);

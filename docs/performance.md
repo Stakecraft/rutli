@@ -106,9 +106,91 @@ How to read them:
 - Latency of a whole `Sign` under load, the limits and failover need a running cluster and are
   not measured here.
 
+## Cluster suite on three locations, 2026-11-20
+
+The first run of the [cluster suite](cluster-suite.md) on a real Kubernetes cluster. It is **one
+short run, not a baseline**, and the load profile is a placeholder: read the numbers as what this
+cluster did once, and see "Not measured" below before you quote any of them.
+
+| | |
+|---|---|
+| Date | 2026-11-20, 14:07 UTC start, about an hour in all |
+| Code | commit `95f82903db4a`, the head of the branch of PR #115 (refresh interval) before it merged; the cosigner image was built from that commit for the suite. Not a release |
+| Cluster | Three cosigners, each on its own node in a different location, all three locations in one region. **2 dedicated vCPU per cosigner.** Installed by the suite from the Helm chart, as in [cluster-suite.md](cluster-suite.md). Threshold 2-of-3 |
+| Profile | The chart's `lab` profile, not `production` |
+| Load | `scripts/perf/profiles/placeholder.json`: 20 signatures a second for 60 s as the steady stream, a baseline of 1 signature and 0.2 ECDH a second for the ramp, SLO p99 below 1 s. The generator calls the Signer API directly over gRPC from inside the cluster and signs one intent per request. No Canton participant and no driver in the path |
+| Suites | `upgrade`, `scenarios`, `keys`, `ramp`, `disrupt` |
+
+Latencies are the load generator's, in milliseconds, for 2-of-3 signatures.
+
+| Scenario | What ran | p50 | p99 | Result |
+|---|---|---|---|---|
+| steady | 20 signatures a second for 60 s | 59 | 123 | 1 200 of 1 200 ok |
+| clients | several clients at once | 116 | 183 | 4 056 of 4 056 ok |
+| burst | 200 signatures asked for at the same moment | 5 637 | 10 460 | 200 of 200 ok; |
+| restart | one cosigner killed (SIGKILL) and started again under load | 109 | 9 218 | 800 of 800 ok |
+| cold-cache | one cosigner restarted under load | 473 | 10 467 | 300 of 300 ok |
+| keys: 1, 10, 100 FROST keys (and as many hosted keys) | signing over all of them | 61, 61, 78 | 123, 152, 161 | all ok; the slowest cosigner's mean `ListKeys` time was 167, 181 and 289 ms |
+| ramp, baseline × 1 to × 30 (1 to 30 signatures a second, 300 s each) | signing, plus ECDH at a fifth of the signing rate | 58 to 64 | 123 to 170 | every request ok. ECDH p50 4 to 7 ms, p99 26 to 90 ms |
+| ramp, × 100 (100 signatures and 20 ECDH a second, 300 s) | | 93 | 887 | 29 997 of 29 997 ok, just under the 1 s SLO; ECDH p50 4.4 ms, p99 26 ms |
+| ramp, × 300 (300 signatures a second) | | 24 572 | 85 936 | stopped: 30 731 of 89 985 ok; the rest `CLIENT_SATURATED`, `DEADLINE_EXCEEDED` or `UNAVAILABLE` |
+| DKG | 80 distinct key generations in the ceremony-limit scenario | 4 309 | 7 435 | 80 of 80 ok |
+
+The suite's headroom factor was **100** against the placeholder baseline. With a placeholder
+baseline that number says nothing about a real participant.
+
+Under disruption, with the steady stream running:
+
+| Disruption | p50 | p99 | Requests | Recovery |
+|---|---|---|---|---|
+| a cosigner's node lost | 57 | 30 090 | 2 400 of 2 400 ok | 1.5 s |
+| a cosigner's data volume lost | 108 | 20 178 | 2 400 of 2 400 ok | 1.6 s |
+| partition between two cosigners | 73 | 194 | 2 400 of 2 400 ok | 1.7 s |
+| one cosigner cut off from both others | 53 | 30 076 | 2 400 of 2 400 ok | 22.8 s |
+| 50 ms of delay on every cosigner | 307 | 371 | 2 400 of 2 400 ok | 1.5 s |
+
+Every signature completed, but the p99 of the first, second and fourth rows is 20 to 30 s: a few
+requests wait for a timeout before another cosigner leads. Related open issues:
+[#176](https://github.com/Stakecraft/rutli/issues/176),
+[#174](https://github.com/Stakecraft/rutli/issues/174),
+[#153](https://github.com/Stakecraft/rutli/issues/153). The suite's check "every cosigner is
+healthy afterwards" failed for the node-loss and volume-loss runs (cosigner 3 and cosigner 2); this
+page does not know why.
+
+**Upgrade.** The suite upgraded the chart under a stream of 5 signatures a second, from 0.4.1 to the
+build above. All three cosigners restarted together: 54 of 750 signatures failed with `UNAVAILABLE`,
+every request in seconds 12 to 21 of the run failed (an outage of about 11 s), and the keys were
+unchanged ([issue #173](https://github.com/Stakecraft/rutli/issues/173),
+[upgrading-to-0.5.md](upgrading-to-0.5.md)).
+
+**Limits.** The rate, ceremony, decryption and session limits refused what they should have, with
+`RESOURCE_EXHAUSTED`, `FAILED_PRECONDITION` or `UNAVAILABLE` (for example, 4 816 of 12 000
+decryptions in `limit-decrypt`, and the second refresh of a key within the interval).
+
+### Not measured, and what failed
+
+- **The run failed its own checks.** Exit status 1, three problems: the `ecies` scenario's load
+  generator ended when the connection of the `kubectl` session that ran it was reset (no ECIES
+  figure from that scenario; the ramp's ECDH figures above are separate), and the two health checks
+  above. There was no earlier run to compare with.
+- **Placeholder load profile.** The steady rate and the baseline are not a participant's load. The
+  1 s SLO is the placeholder's. Replace both with numbers from the soak cluster before you read
+  "headroom" as a statement about a real node.
+- **`lab`, not `production`.** The production profile was not on. A production run may differ.
+- **2 dedicated vCPU per cosigner.** A larger node will do more; the ramp's limit is about this
+  size of node, and the × 300 step may have hit the load generator as much as the cosigners
+  (`CLIENT_SATURATED`).
+- **No Canton participant, no driver.** The numbers exclude the JVM driver, its audit log and the
+  participant's own latency.
+- **One short run** (`duration: short`), one cluster, one region. No soak, no repeat, no network
+  outside the region.
+- **The build was a branch head, not a release.**
+
 ## Benchmarks worth publishing next
 
-Add these when you want grant/audit-grade tables (script + freeze a row in this doc per run):
+Add these when you want grant/audit-grade tables (script + freeze a row in this doc per run). The
+2026-11-20 run above covers, once and with a placeholder load, the degraded cluster, cold start,
+sustained rate and the client-side DKG time; none of them is a baseline yet.
 
 | Benchmark | Why it matters |
 |---|---|
