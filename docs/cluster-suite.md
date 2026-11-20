@@ -119,6 +119,18 @@ StatefulSets of that test installation.
 A bigger cosigner node type is the cluster's choice; compare a run on it with one on the smaller
 type: throughput that scales with the cores means CPU, flat means a lock or the volume.
 
+## The client's deadlines
+
+By default the load generator gives every attempt at one cosigner 30 s and has no budget across
+attempts: a cosigner that stops answering costs a request 30 s before it moves on. With
+`--driver-deadlines` it follows the driver's policy instead: 5 s per attempt of a call that fails
+over (signatures, ECDH), on whose deadline it moves to the next cosigner with the same intent, one
+attempt at a time, within 30 s for the whole call (`frost.sign-attempt-timeout`,
+`frost.request-timeout`); `--attempt-timeout-secs` and `--request-timeout-secs` set other values.
+Ceremonies keep one attempt with the full timeout, as the driver runs them. The policy is recorded
+in the result (`client_policy`), and runs under different policies are not compared. Use it when
+the numbers should say what a driver would see, for example in `node-kill` and `partition-isolated`.
+
 ## Provider hooks
 
 What only the infrastructure can do — power a machine off, detach a disk, cut the network — goes

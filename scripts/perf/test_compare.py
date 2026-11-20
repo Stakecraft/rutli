@@ -189,6 +189,14 @@ class Cluster(unittest.TestCase):
         self.assertEqual(problems, ["rig: ecies: the load generator ran: the load generator exited 3"])
         self.assertTrue(v[("ecies", "check")].startswith("RIG FAILED"))
 
+    def test_another_client_deadline_policy_is_not_compared(self):
+        previous = cluster_run(ramp_p99=5)
+        current = cluster_run(ramp_p99=500)
+        current["client_policy"] = {"attempt_timeout_secs": 5.0, "request_timeout_secs": 30.0}
+        v, problems = self.verdicts(previous, current)
+        self.assertEqual(problems, [])
+        self.assertIn("client deadline policy", v[("(all)", "latency")])
+
     def test_a_diagnostic_run_is_never_a_baseline(self):
         previous = cluster_run(headroom=300, ramp_p99=5)
         previous["diagnostic"] = "tmpfs"
