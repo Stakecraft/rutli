@@ -446,6 +446,27 @@ clone, checkpoint or live-migrate a running cosigner VM or container**; stop the
 cold snapshot is safe — the nonces of a stopped process are gone, and its burned-session markers
 are on disk). Disable live migration for cosigner VMs where the platform allows it.
 
+### A network attacker who can delay or drop packets between cosigners
+
+Each leader keeps a liveness view of every peer, fed only by its own pinned mTLS calls to it (no
+gossip; `docs/architecture.md`, "Peer liveness"). Someone who can delay or drop traffic on the
+links between cosigners (a router on the path, a noisy neighbour on the network, a compromised node
+host) can make a leader's calls to a chosen peer miss their deadlines, and so steer **which**
+t-subset of cosigners signs: the delayed peer is excluded from that signature and tried last in
+later ones. That is all it buys. A leader never signs with fewer than t cosigners, every member
+still runs every check on every round (policy, intent, epoch, session binding, nonce marker), and a
+down peer is reordered, never skipped — so the attacker cannot prevent a signature while t
+cosigners are reachable from some leader; with fewer it is the ordinary loss of availability.
+Delays cannot cause a nonce to be used twice: a leader never re-sends a round 2, and a member burns
+its nonce marker before it computes a share, whether or not the leader still waits for the reply.
+
+The load a member reports with its replies (`rutli-load`: rounds in flight and completed, its key
+store state) is **self-reported**. It may keep that member's own breaker shut — a member that
+claims progress it does not make is not marked down — and it never opens the breaker of another
+peer or changes which checks run. A lying member therefore costs each signature that includes it
+one round deadline (2 s in round 1, 5 s in round 2), the same as a member that simply does not
+answer, after which the signature goes on with another member.
+
 ### Clock skew
 
 Intents carry `issued_at`/`not_after`. A node whose clock is off by more than
@@ -503,6 +524,9 @@ keys stay test material.
 - A driver-key thief signs non-gated keys within the ACL and rate limits (bounded and journaled,
   not prevented).
 - No defence against a TLS-terminating mesh (P3) or a memory snapshot of a running cosigner (L7).
+- Someone who can delay mesh traffic chooses which t cosigners sign, and a member that lies about
+  its own progress costs every signature it joins one round deadline; neither can sign with fewer
+  than t, skip a check, or stop signing while t cosigners are reachable.
 - A stolen refresher certificate, or the driver certificate while `signer_may_refresh` is on, can
   refresh each key once per `refresh_min_interval_secs` (72 h). Each refresh makes older backups
   unable to restore a node; back up after every refresh. A compromised cosigner cannot lead past the

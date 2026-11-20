@@ -76,6 +76,10 @@ annotations, NetworkPolicy ingress for pods labelled `rutli.io/scraper: "true"`)
 | `rutli_grpc_accept_errors_total` | counter | — | Failed accepts that needed a backoff, usually the process out of file descriptors; the loop retries (`RutliGrpcAcceptErrors`) |
 | `rutli_grpc_handshake_timeouts_total` | counter | — | Connections cut for not finishing the TLS handshake within 5 s of accept (without TLS: for sending nothing). Clients that open TCP and then send nothing count here; a probe that connects and closes does not |
 | `rutli_lock_poison_recoveries_total` | counter | `lock` | Locks recovered after a panicking request poisoned them (audit L3). The node kept serving; the panic is a bug (`RutliLockPoisonRecovered`) |
+| `rutli_peer_call_duration_seconds` | histogram | `call`=sign_round1\|sign_round2\|abort\|control\|local_share | How long this node's peer calls took, at the caller, whatever their outcome (a call past its deadline records the deadline). `local_share` is this leader's own round 2. Buckets (s): 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.33, 0.5, 0.67, 1, 1.67, 2, 3, 5, 10 — 0.33, 0.67 and 1.67 are a third of the abort, round-1 and round-2 deadlines, so "p99.9 below that edge" reads as a 3× margin (`docs/architecture.md`, "Peer liveness") |
+| `rutli_peer_state` | gauge | `peer` (roster number), `state`=up\|down\|trial | 1 for the liveness state this node holds for that peer, 0 for the others; set for every peer when the node starts. Down peers are tried last in every signature. One node seeing a peer down is a link; every node seeing it down is the peer (`RutliPeerDown`) |
+| `rutli_peer_breaker_transitions_total` | counter | `peer`, `to`=down\|trial\|up, `reason`=unreachable\|stalled\|refusing\|window\|probe\|call | Liveness transitions: to `down` (why), to `trial` (a window passed), to `up` (after a probe or a successful call). Primed at 0 per peer. Zero in steady state and under load; many in a short time is a flapping link (`RutliPeerFlapping`) |
+| `rutli_sign_fast_refusals_total` | counter | `reason`=no-quorum\|overloaded | Sign calls this node refused as leader without a signature, `UNAVAILABLE` with a `rutli-error` trailer: fewer than t cosigners reachable from it, or overloaded (too many signatures in flight, or its own round missed its deadline). Primed at 0. No-quorum on two or more nodes at once is a cluster that cannot sign (`RutliNoQuorum`, critical) |
 | `rutli_background_loop_restarts_total` | counter | `loop` (`anti_entropy`, `ceremony_resolver`, `epoch_check`, `nonce_pruner`) | Background loops restarted 30 s after a panic in a pass (`anti_entropy` then also waits its own interval before the next sweep). The loop runs again; the panic is a bug (`RutliBackgroundLoopRestarted`) |
 
 Leader-side metrics (`sign_*`, `ceremony_*`) appear on whichever node served the driver's request —
@@ -114,6 +118,9 @@ that alert on increases see it (`deploy/monitoring/prometheus-rules.yml`:
 `RutliCeremonyIntentRefused`, `RutliCeremonyIntentAbsent`, `RutliLockPoisonRecovered`,
 `RutliBackgroundLoopRestarted`), and so are `rutli_refresh_interval_refusals_total` and
 `rutli_refresh_interval_waived_total` (`RutliRefreshRefused`).
+`rutli_sign_fast_refusals_total` is primed for both reasons (`RutliNoQuorum`), and
+`rutli_peer_state` / `rutli_peer_breaker_transitions_total` for every peer and label pair when the
+node builds its mesh (`RutliPeerDown`, `RutliPeerFlapping`).
 `rutli_sign_round2_unknown_session_total` is primed too (`RutliSignUnknownSessions`), and so are
 the sign-session refusal counters for every `call` and `cap` (`RutliSignSessionOwnerRefused`,
 `RutliSignSessionCapReached`).
@@ -166,7 +173,9 @@ sum(rate(rutli_sign_duration_seconds_sum{result="ok"}[1h]))
   conflict (critical), hosted key material refused (`RutliHostedReplicationRefused`: unfenced,
   invalid, timestamp, unverifiable, throttled), a held hosted key with a time in the future
   (`RutliHostedKeyFutureTimestamp`), an aborted generation's rollback that missed a node
-  (`RutliHostedRollbackIncomplete`). CI runs `promtool check rules` (pinned `prom/prometheus` image) on this file
+  (`RutliHostedRollbackIncomplete`), a peer held down for 5 minutes (`RutliPeerDown`), a peer
+  marked down again and again (`RutliPeerFlapping`), no-quorum refusals on two or more nodes
+  (`RutliNoQuorum`, critical). CI runs `promtool check rules` (pinned `prom/prometheus` image) on this file
   and on the rendered PrometheusRule, and fails if the render is stale:
   `scripts/ci-prometheus-rules.sh` (set `PROMTOOL=` to use a local binary instead of docker).
 - Dashboard: import
@@ -189,7 +198,9 @@ sum(rate(rutli_sign_duration_seconds_sum{result="ok"}[1h]))
 1. **`up` on every cosigner** — one down cosigner still signs, but with zero margin. Treat as an
    incident, not a warning.
 2. **`rutli_sign_round1_skips_total` increasing** — same signal one layer up: a peer is
-   unreachable or refusing (e.g. mid-ceremony) while signing continues.
+   unreachable or refusing (e.g. mid-ceremony) while signing continues. `rutli_peer_state` on each
+   instance says which peer and why (`rutli_peer_breaker_transitions_total{reason}`), and whether
+   it is one link or the peer itself.
 3. **Any `rutli_ceremony_requests_total{result="error"}`** — a failed DKG/refresh never corrupts
    shares (it fails closed), but do not blindly retry: read the logs of all nodes first.
 4. **`rutli_pending_sign_sessions` climbing** — sessions are being opened faster than

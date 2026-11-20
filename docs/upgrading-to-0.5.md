@@ -109,8 +109,16 @@ Re-apply the alert rules (`deploy/monitoring/prometheus-rules.yml`, or the rende
 `deploy/monitoring/k8s/prometheusrule.yaml`). The alerts added since 0.4.0 include
 `RutliGrpcAcceptErrors` and `RutliGrpcConnectionsNearLimit` (both already in 0.4.1), `RutliSignSessionCapReached`,
 `RutliSignSessionOwnerRefused`, `RutliSignUnknownSessions`, `RutliRefreshRefused`,
-`RutliRefreshOffSchedule` and `RutliBackgroundLoopRestarted`. A sign round 2 for a session a node no
-longer holds now answers `ABORTED`, not `INTERNAL`.
+`RutliRefreshOffSchedule`, `RutliBackgroundLoopRestarted`, and for peer liveness `RutliPeerDown`,
+`RutliPeerFlapping` and `RutliNoQuorum`. A sign round 2 for a session a node no longer holds now
+answers `ABORTED`, not `INTERNAL`.
+
+Peer calls now have short deadlines (sign round 1 2 s, round 2 5 s) and every leader keeps a
+liveness state per peer (`docs/architecture.md`, "Peer liveness"). Nothing to configure. During
+the rolling upgrade a 0.4.x member's key-store refusal reaches a 0.5.0 leader as a plain
+`UNAVAILABLE` (read as unreachable until its next probe answers, within a second), and a 0.4.x
+member reports no load, so a 0.5.0 leader cannot tell it busy from stalled: a round deadline on it
+marks it stalled until a trial succeeds. Both only reorder subsets and end with the upgrade.
 
 ## 6. Upgrade one cosigner at a time
 

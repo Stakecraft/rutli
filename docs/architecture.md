@@ -151,6 +151,81 @@ messages. The trade-off is that the session key's private half sits in the parti
 for its validity (5 minutes by default). Whether that is acceptable is the operator's decision;
 Rütli does not set it either way.
 
+### Peer liveness (between cosigners)
+
+The same problem one layer down: a leader whose call to a peer hangs must not hold the driver's
+5 s sign attempt. Since 0.5.0 each cosigner bounds and watches its own peer calls; nothing here is
+configurable (the constants live in `frost/cosigner/src/peer.rs`).
+
+**Channels.** Every peer channel runs HTTP/2 keepalive, also while idle: a PING after 5 s without
+traffic, the connection closed when its PONG does not come within 3 s. A dead connection (a
+partition, a pod replaced under a new address, a paused container whose kernel still answers TCP)
+is gone at most 8 s after its last read, and the next call dials afresh. Below that, TCP keepalive
+(10 s idle, 3 probes 3 s apart) and on Linux `TCP_USER_TIMEOUT` (10 s); a connection and its TLS
+handshake must complete within 3 s.
+
+**Deadlines.** Each peer call has a deadline on the leader's own clock, around the whole call
+(queue, connect, RPC), sent to the peer as the call's `grpc-timeout` so it drops a handler nobody
+waits for:
+
+| Call | Deadline |
+|---|---|
+| Sign round 1 | 2 s |
+| Sign round 2 | 5 s |
+| Sign abort | 1 s |
+| `NodeInfo`, `KeyEpoch`, `CeremonyStatus` | 3 s |
+| Liveness probe (`NodeInfo`) | 2 s |
+| Ceremony parts, fences, commits, hosted-key writes and reads | 10 s (unchanged) |
+
+When the Sign call carries a deadline (the driver's 5 s attempt does), the rounds fit inside it:
+round 1 gets min(2 s, time left − 1 s), round 2 min(5 s, time left − 1 s), and no new subset
+starts with less than 1 s left (the last attempt keeps no reserve). A deadline under 1 s is refused
+at once with `DEADLINE_EXCEEDED`, before any round. Without one, a signature has 20 s. The client's
+deadline only ever shortens the leader's work. A member that misses its deadline is excluded from
+that signature; its session is aborted without waiting for it, the other members' in parallel, and
+the leader tries one more subset — at most two attempts per signature.
+
+**Breaker.** Each leader keeps a state per peer: up, down (unreachable, stalled or refusing), or on
+trial. It is fed only by the leader's own calls:
+
+- *unreachable*: a connection that failed or closed under a call, a plain `UNAVAILABLE`, a control
+  call past its deadline. A `NodeInfo` probe every second brings it back.
+- *stalled*: a sign round past its deadline while the peer's counters did not move. Every member
+  reports `rutli-load: inflight=…; r1done=…; r2done=…; store=ok|down` on its sign and `NodeInfo`
+  replies; a member that keeps completing rounds for anyone is busy, not stalled, and stays up.
+  Round 1 does not touch the key store, so only completed round 2s count against a round-2 deadline.
+- *refusing*: the peer answered with the `rutli-error: keystore-down` trailer.
+
+A stalled or refusing peer gets a trial after a window of 2 s, doubling up to 30 s on every failed
+trial: one signature may include it, and a successful round closes it. A probe whose self-reported
+load shows round 2s completing again (or the store back) closes it too. Answered refusals (policy,
+epoch, an unknown session, `sessions-full`, an invalid share) never open a breaker.
+
+The breaker only orders: subsets are sorted by their worst member (up, trial, down), and a down
+peer is tried last, never skipped, so a false open costs latency, never a signature. Signing and
+the anti-entropy sweep (which does not wait for an unreachable peer) consult it; DKG, refresh and
+hosted-key writes do not. `rutli_peer_state`, `rutli_peer_breaker_transitions_total` and the
+`RutliPeerDown` / `RutliPeerFlapping` alerts show it (`docs/observability.md`).
+
+**Fast refusals.** A leader answers `UNAVAILABLE` at once, without contacting a member, when:
+
+- fewer than t cosigners (itself included) are reachable from it — only unreachable peers count as
+  missing, each asked once more within 1.5 s — with the `rutli-error: no-quorum` trailer. The
+  message names the missing peers to an authenticated (mTLS) client only. An isolated leader
+  refuses its first signature after two round-1 deadlines (about 4 s), then within the probe's
+  answer, then at once;
+- it leads more than 512 signatures at once, or its own round misses its deadline, with
+  `rutli-error: overloaded`. It never excludes itself: the client moves to another leader.
+
+Both count in `rutli_sign_fast_refusals_total{reason}`. The driver fails over on `UNAVAILABLE`
+whatever the trailer.
+
+**Member side.** A definite I/O error in a member's round-2 store work (EROFS, EIO, ENOSPC,
+EACCES) marks its key store down at once instead of at the next probe; it then refuses with the
+`keystore-down` trailer. Round-2 store work still running after 3 s starts a key-store probe at once,
+so a hung volume is refused about 9 s after it hung instead of up to 21 s. The mark is not sticky:
+the next readiness probe that finds the store working clears it, with no restart.
+
 ## Phase 2 MPC cluster — two Horcrux-informed decisions
 
 **1. DKG by default; sharding only to migrate.** Horcrux shards an *existing*
