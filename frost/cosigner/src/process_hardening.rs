@@ -55,13 +55,19 @@ pub fn disable_core_dumps() -> CoreDumps {
 }
 
 impl CoreDumps {
-    /// Whether a crash of this process could still be dumped, as far as this process can tell:
-    /// not dumpable stops every dump on Linux, including one piped to a handler; `suid_dumpable =
-    /// 2` is counted as a risk anyway (conservative). Without `PR_SET_DUMPABLE` (it failed, or not
-    /// Linux) a piped `core_pattern` ignores `RLIMIT_CORE`.
+    /// Whether a crash of this process could still be dumped, as far as this process can tell. A
+    /// process that cleared `PR_SET_DUMPABLE` itself is never dumped on Linux, whatever
+    /// `core_pattern` or `suid_dumpable` say (`suid_dumpable` applies to processes made
+    /// non-dumpable by a credential change, not by prctl). Without it (it failed, or not Linux), a
+    /// piped `core_pattern` ignores `RLIMIT_CORE`.
     pub fn may_dump(&self) -> bool {
         let piped = self.core_pattern.as_deref().is_some_and(|p| p.starts_with('|'));
-        self.suid_dumpable == Some(2) || (!self.not_dumpable && (piped || !self.core_limit_zero))
+        !self.not_dumpable && (piped || !self.core_limit_zero)
+    }
+
+    /// Every requested setting took effect: `RLIMIT_CORE = 0`, and on Linux not dumpable.
+    pub fn all_applied(&self) -> bool {
+        self.core_limit_zero && (self.not_dumpable || !cfg!(target_os = "linux"))
     }
 }
 
@@ -82,8 +88,11 @@ pub fn is_dumpable() -> Option<bool> {
     #[cfg(target_os = "linux")]
     {
         // SAFETY: PR_GET_DUMPABLE takes no pointer arguments.
-        let r = unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0 as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong) };
-        Some(r != 0)
+        let r = unsafe {
+            libc::prctl(libc::PR_GET_DUMPABLE, 0 as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong, 0 as libc::c_ulong)
+        };
+        // -1 is an error, not "dumpable".
+        (r >= 0).then_some(r != 0)
     }
     #[cfg(not(target_os = "linux"))]
     None
@@ -102,7 +111,7 @@ mod tests {
     }
 
     #[test]
-    fn not_dumpable_covers_a_piped_handler_but_suid_dumpable_2_still_counts() {
+    fn not_dumpable_covers_a_piped_handler_and_suid_dumpable() {
         let d = |limit, nd, pat: &str, suid| CoreDumps {
             core_limit_zero: limit,
             not_dumpable: nd,
@@ -112,7 +121,7 @@ mod tests {
         };
         assert!(!d(true, true, "|/usr/lib/systemd/systemd-coredump %P", 0).may_dump());
         assert!(!d(true, true, "core", 0).may_dump());
-        assert!(d(true, true, "core", 2).may_dump());
+        assert!(!d(true, true, "core", 2).may_dump(), "suid_dumpable does not undo prctl(0)");
         assert!(d(true, false, "|/bin/handler", 0).may_dump());
         assert!(d(false, false, "core", 0).may_dump());
         assert!(!d(true, false, "core", 0).may_dump(), "off Linux: RLIMIT_CORE=0 and a file pattern");

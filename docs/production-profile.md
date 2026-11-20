@@ -119,11 +119,14 @@ processes and are not affected. One start-up line says what took effect:
 INFO core dumps off: RLIMIT_CORE=0, not dumpable rlimit_core_zero=true not_dumpable=true core_pattern=… suid_dumpable=0
 ```
 
-A `WARN core dumps may still capture this process's memory: …` line names what did not take effect.
-A host with `fs.suid_dumpable = 2` is reported as a risk.
+If a setting does not take effect, a `WARN core dumps not fully off: …` line names it. A process
+that made itself non-dumpable is not dumped on Linux, whatever `kernel.core_pattern` and
+`fs.suid_dumpable` say. Off Linux only `RLIMIT_CORE` applies.
 
 Key shares are also wiped from memory when the process drops them: the share loaded from a key
 file, the signing cache's copy (on eviction, refresh, shutdown) and the shares a ceremony builds.
+One copy is not: during a refresh the FROST library consumes the old share and drops it without
+wiping it, which needs an upstream change.
 
 ## Upgrading
 

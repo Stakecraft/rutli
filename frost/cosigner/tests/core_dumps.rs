@@ -37,7 +37,7 @@ fn the_daemon_turns_core_dumps_off_before_it_opens_a_key_store() {
     assert!(!out.status.success(), "{log}");
     let line = log
         .lines()
-        .find(|l| l.contains("core dumps off") || l.contains("core dumps may still capture"))
+        .find(|l| l.contains("core dumps off") || l.contains("core dumps not fully off"))
         .unwrap_or_else(|| panic!("no core-dump line in the start-up log:\n{log}"));
     assert!(line.contains("rlimit_core_zero=true"), "{line}");
     if cfg!(target_os = "linux") {
