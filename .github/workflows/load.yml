@@ -43,15 +43,17 @@ jobs:
   load:
     name: Load scenarios (compose)
     # Weekly and manual runs on the repository's own runner when it is configured: the same
-    # machine every week, so latencies compare. A pull request or a push to main (neither compares
+    # machine every week, so latencies compare. `vars.PERF_RUNNER` names that runner for measured
+    # runs; unset, it follows `vars.CI_RUNNER`. Clearing CI_RUNNER (CI and e2e to hosted runners)
+    # therefore leaves this job on the VM only while PERF_RUNNER is set (docs/ci-cache.md). A pull request or a push to main (neither compares
     # anything) runs on a GitHub-hosted runner and leaves the repository's runners to the per-commit CI.
-    runs-on: ${{ contains(fromJSON('["schedule","workflow_dispatch"]'), github.event_name) && vars.CI_RUNNER || 'ubuntu-24.04' }}
+    runs-on: ${{ contains(fromJSON('["schedule","workflow_dispatch"]'), github.event_name) && (vars.PERF_RUNNER || vars.CI_RUNNER) || 'ubuntu-24.04' }}
     timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 330 || 60 }}
     permissions:
       contents: read
       actions: read # the previous run's result
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -94,7 +96,7 @@ jobs:
         if: steps.previous.outputs.run_id != ''
         # An expired artifact is a first run again, not a failure.
         continue-on-error: true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: load-result
           path: perf-previous
@@ -107,17 +109,22 @@ jobs:
         run: |
           set -euo pipefail
           args=(--steady-secs "$STEADY_SECS" --out perf-out)
-          if [ -f perf-previous/load.json ]; then
+          # A baseline counts only when it was measured on the same kind of machine. Results from before
+          # this file existed all come from the repository's own runner.
+          if [ -f perf-previous/load.json ] && [ "$(cat perf-previous/runner.txt 2>/dev/null || echo self-hosted)" = "$RUNNER_ENVIRONMENT" ]; then
             args+=(--previous perf-previous/load.json)
+          else
+            echo "No comparable baseline (none, or measured on another kind of runner than $RUNNER_ENVIRONMENT)"
           fi
           scripts/perf-load.sh "${args[@]}"
+          printf '%s\n' "$RUNNER_ENVIRONMENT" > perf-out/runner.txt
 
       - name: Summary
         if: always()
         run: |
           if [ -f perf-out/compare.md ]; then cat perf-out/compare.md >> "$GITHUB_STEP_SUMMARY"; fi
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: load-result
@@ -137,10 +144,10 @@ jobs:
       actions: read
       issues: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         continue-on-error: true
         with:
           name: load-result

@@ -132,6 +132,12 @@ enum Command {
         prefix: String,
         #[arg(long)]
         same_key: bool,
+        /// Retry a DKG answered ABORTED (another ceremony holds the key) up to this many times,
+        /// with jittered exponential backoff (0.5 s doubling to 4 s), each with a fresh ceremony
+        /// intent: what a client such as Canton does with a retryable failure. A leader that passes
+        /// a member's ABORTED on as INTERNAL ("already in progress", #146) is retried the same way.
+        #[arg(long, default_value_t = 0)]
+        retry_aborted: u32,
         #[command(flatten)]
         load: Load,
     },
@@ -346,6 +352,19 @@ fn attempt_deadline(limit: Duration, budget: Option<Duration>, elapsed: Duration
     }
 }
 
+/// A ceremony answer a client retries: ABORTED (another ceremony holds the key), or a leader's
+/// INTERNAL that carries a member's "already in progress" (#146).
+fn contended(s: &tonic::Status) -> bool {
+    s.code() == tonic::Code::Aborted || (s.code() == tonic::Code::Internal && s.message().contains("already in progress"))
+}
+
+/// The pause before retry `attempt` (1, 2, ...): 0.5 s doubling to at most 4 s, a random half to
+/// all of it, so that colliding clients spread out.
+fn backoff(attempt: u32) -> Duration {
+    let full = (0.5 * 2f64.powi(attempt.saturating_sub(1).min(3) as i32)).min(4.0);
+    Duration::from_secs_f64(full * (0.5 + 0.5 * rand::random::<f64>()))
+}
+
 impl Client {
     /// Run `call` against the leader; while the answer is [`not_serving`] and `failover` is on,
     /// move to the next cosigner and stay there. One attempt at a time, each with the deadline
@@ -375,7 +394,11 @@ impl Client {
                 ));
                 return (Err(spent), Route { failovers: moves, leader: Some(at) });
             };
-            match bounded(deadline, call(self.conns[at].clone())).await {
+            // `at` is reduced modulo `n = conns.len()` (one connection per --target, which clap
+            // requires), here and at every step below, so it is in range.
+            #[allow(clippy::indexing_slicing)]
+            let conn = self.conns[at].clone();
+            match bounded(deadline, call(conn)).await {
                 Err(status) if failover && not_serving(&status) && moves.len() + 1 < n => {
                     moves.push(code_name(status.code()));
                     at = (at + 1) % n;
@@ -393,7 +416,7 @@ enum Op {
     Ecdh { key_id: String, peer_point: Vec<u8>, expected: Vec<u8> },
     /// `first_key`: with `same_key`, the group key of the first OK answer. Every later OK must
     /// carry the same one, or two ceremonies each believe they generated the key.
-    Dkg { prefix: String, same_key: bool, first_key: Mutex<Option<Vec<u8>>> },
+    Dkg { prefix: String, same_key: bool, first_key: Mutex<Option<Vec<u8>>>, retry_aborted: u32 },
     Refresh { key_id: String, group_key: Vec<u8> },
 }
 
@@ -442,6 +465,8 @@ impl Run {
         // (the final answer as "what was wrong with an OK", how it travelled)
         let (answer, moves): (Result<Option<String>, tonic::Status>, Route) = match &self.op {
             Op::Sign { keys } => {
+                // `keys` is not empty (clap: `--key` is required) and the index is reduced modulo its length.
+                #[allow(clippy::indexing_slicing)]
                 let (key_id, group) = &keys[(seq % keys.len() as u64) as usize];
                 // Canton's sign payload: 0x1220 ‖ a SHA-256 digest (docs/wire-contract.md).
                 let mut message = vec![0x12, 0x20];
@@ -489,32 +514,61 @@ impl Run {
                 };
                 (answer.map(check), moves)
             }
-            Op::Dkg { prefix, same_key, first_key } => {
+            Op::Dkg { prefix, same_key, first_key, retry_aborted } => {
                 let key_id = if *same_key { prefix.clone() } else { format!("{prefix}-{seq}") };
-                match self.ceremony_intent(CeremonyKind::Dkg, &key_id) {
-                    Err(status) => (Err(status), Route::default()),
-                    Ok(signed) => {
-                        let request = pb::DkgRequest { key_id, intent: Some(signed) };
-                        let (answer, moves) = client
-                            .call(false, limit, budget, |mut c| {
-                                let request = request.clone();
-                                async move { c.dkg(request).await }
-                            })
-                            .await;
-                        let check = |reply: pb::DkgReply| {
-                            let key = reply.group_verifying_key;
-                            if key.len() != 32 {
-                                return Some(format!("a group key of {} bytes", key.len()));
-                            }
-                            if *same_key {
-                                let mut first = first_key.lock().unwrap_or_else(|p| p.into_inner());
-                                if first.get_or_insert_with(|| key.clone()) != &key {
-                                    return Some("two DKGs of one key id answered different group keys".to_string());
+                // The first group key any request learned for the contested key id: every later
+                // answer, and every key an ALREADY_EXISTS points at, must be the same one.
+                let same_as_first = |key: &[u8]| -> Option<String> {
+                    if key.len() != 32 {
+                        return Some(format!("a group key of {} bytes", key.len()));
+                    }
+                    if *same_key {
+                        let mut first = first_key.lock().unwrap_or_else(|p| p.into_inner());
+                        if first.get_or_insert_with(|| key.to_vec()).as_slice() != key {
+                            return Some("two DKGs of one key id answered different group keys".to_string());
+                        }
+                    }
+                    None
+                };
+                let mut attempt = 0u32;
+                loop {
+                    // A fresh ceremony intent per attempt: a ceremony id is used once per node.
+                    let signed = match self.ceremony_intent(CeremonyKind::Dkg, &key_id) {
+                        Ok(s) => s,
+                        Err(status) => break (Err(status), Route::default()),
+                    };
+                    let request = pb::DkgRequest { key_id: key_id.clone(), intent: Some(signed) };
+                    let (answer, moves) = client
+                        .call(false, limit, budget, |mut c| {
+                            let request = request.clone();
+                            async move { c.dkg(request).await }
+                        })
+                        .await;
+                    match answer {
+                        Err(s) if attempt < *retry_aborted && contended(&s) => {
+                            attempt += 1;
+                            tokio::time::sleep(backoff(attempt)).await;
+                        }
+                        Err(s) if s.code() == tonic::Code::AlreadyExists && *same_key => {
+                            // Another request generated it: the key it points at must be the one
+                            // the winners answered.
+                            let at = moves.leader.unwrap_or(0);
+                            let wrong = match client.conns.get(at).cloned() {
+                                None => Some(format!("GroupKey after ALREADY_EXISTS: no connection {at}")),
+                                Some(mut c) => {
+                                    let req = pb::GroupKeyRequest { key_id: key_id.clone() };
+                                    match bounded(limit, c.group_key(req)).await {
+                                        Ok(reply) => same_as_first(&reply.group_verifying_key),
+                                        Err(e) => Some(format!("GroupKey after ALREADY_EXISTS: {}: {}", code_name(e.code()), e.message())),
+                                    }
                                 }
+                            };
+                            match wrong {
+                                None => break (Err(s), moves),
+                                Some(w) => break (Ok(Some(w)), moves),
                             }
-                            None
-                        };
-                        (answer.map(check), moves)
+                        }
+                        answer => break (answer.map(|reply| same_as_first(&reply.group_verifying_key)), moves),
                     }
                 }
             }
@@ -541,7 +595,7 @@ impl Run {
             Ok(Some(wrong)) => ("OK", true, Some(wrong)),
             Err(status) => (code_name(status.code()), false, Some(status.message().to_string())),
         };
-        let leader = moves.leader.map(|i| self.ctx.targets[i].0.clone());
+        let leader = moves.leader.and_then(|i| self.ctx.targets.get(i)).map(|t| t.0.clone());
         let outcome = Outcome { at, latency, code, failovers: moves.failovers, bad_answer, leader };
         self.recorder.lock().unwrap_or_else(|p| p.into_inner()).record(outcome, message);
     }
@@ -619,6 +673,19 @@ async fn generate(run: Arc<Run>, load: &Load) -> Result<stats::ClientReport, Fai
         (count > 0 && seq >= count) || deadline.is_some_and(|d| started.elapsed() >= d)
     };
     let started = run.started;
+    // This process's open descriptors, sampled while the load runs (Linux /proc).
+    let fd_peak = Arc::new(AtomicU64::new(0));
+    let sampler = {
+        let peak = fd_peak.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Some(n) = open_fds() {
+                    peak.fetch_max(n, Ordering::Relaxed);
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+        })
+    };
 
     if load.rate > 0.0 {
         // Open loop: a request starts every 1/rate seconds, answered or not.
@@ -634,6 +701,8 @@ async fn generate(run: Arc<Run>, load: &Load) -> Result<stats::ClientReport, Fai
             }
             match in_flight.clone().try_acquire_owned() {
                 Ok(permit) => {
+                    // `clients` has `--clients` >= 1 entries (checked above); the index is reduced modulo its length.
+                    #[allow(clippy::indexing_slicing)]
                     let (run, client) = (run.clone(), clients[(seq % clients.len() as u64) as usize].clone());
                     tasks.spawn(async move {
                         run.request(&client, seq).await;
@@ -669,7 +738,27 @@ async fn generate(run: Arc<Run>, load: &Load) -> Result<stats::ClientReport, Fai
     let recorder = std::mem::take(&mut *run.recorder.lock().unwrap_or_else(|p| p.into_inner()));
     let mut report = recorder.report(wall);
     report.connect = connect_report;
+    sampler.abort();
+    if let Some(n) = open_fds() {
+        fd_peak.fetch_max(n, Ordering::Relaxed);
+    }
+    report.fd_peak = Some(fd_peak.load(Ordering::Relaxed)).filter(|n| *n > 0);
+    report.fd_limit = fd_soft_limit();
     Ok(report)
+}
+
+/// How many file descriptors this process holds now (Linux; None elsewhere).
+fn open_fds() -> Option<u64> {
+    std::fs::read_dir("/proc/self/fd").ok().map(|d| d.count() as u64)
+}
+
+/// This process's soft limit on open files, from /proc/self/limits (Linux; None elsewhere).
+fn fd_soft_limit() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/self/limits").ok()?;
+    text.lines()
+        .find(|l| l.starts_with("Max open files"))
+        .and_then(|l| l.split_whitespace().nth(3))
+        .and_then(|v| v.parse().ok())
 }
 
 /// Every metrics page, by target name; and the scrapes that failed, in words.
@@ -903,8 +992,8 @@ async fn ecdh_op(ctx: &Ctx, key_id: &str) -> Result<Op, Fail> {
     let hosted_point = spki
         .len()
         .checked_sub(65)
-        .map(|at| &spki[at..])
-        .filter(|point| point[0] == 0x04)
+        .and_then(|at| spki.get(at..))
+        .filter(|point| point.first() == Some(&0x04))
         .ok_or_else(|| format!("{key_id}: unexpected public key encoding ({} bytes)", spki.len()))?;
     let rng = aws_lc_rs::rand::SystemRandom::new();
     let ours = EphemeralPrivateKey::generate(&ECDH_P256, &rng).map_err(|_| "P-256 key generation failed")?;
@@ -945,9 +1034,9 @@ async fn run(cli: Cli) -> Result<(), Fail> {
             let op = ecdh_op(&ctx, &key).await?;
             print_json(&load_command(ctx, "ecdh", op, cluster, load).await?)
         }
-        Command::Dkg { prefix, same_key, load } => {
+        Command::Dkg { prefix, same_key, retry_aborted, load } => {
             let cluster = cluster_id(&ctx).await?;
-            print_json(&load_command(ctx, "dkg", Op::Dkg { prefix, same_key, first_key: Mutex::new(None) }, cluster, load).await?)
+            print_json(&load_command(ctx, "dkg", Op::Dkg { prefix, same_key, first_key: Mutex::new(None), retry_aborted }, cluster, load).await?)
         }
         Command::ListKeys { repeat, peer_cert, peer_key } => {
             print_json(&list_keys(&ctx, &peer_cert, &peer_key, repeat, &ca).await?)
@@ -1066,6 +1155,18 @@ mod tests {
         assert!(positive_secs(Some(-1.0), "--x").is_err());
         assert_eq!(positive_secs(Some(0.5), "--x").unwrap(), Some(Duration::from_millis(500)));
         assert_eq!(positive_secs(None, "--x").unwrap(), None);
+    }
+
+    #[test]
+    fn contended_ceremonies_are_retried_with_jittered_backoff() {
+        assert!(contended(&tonic::Status::aborted("a dkg ceremony (id dkg-x) is already in progress")));
+        assert!(contended(&tonic::Status::internal("rpc status: Aborted, message: \"a dkg ceremony … is already in progress\"")));
+        assert!(!contended(&tonic::Status::internal("something else")));
+        assert!(!contended(&tonic::Status::already_exists("key exists")));
+        for (attempt, full) in [(1, 0.5), (2, 1.0), (3, 2.0), (4, 4.0), (9, 4.0)] {
+            let b = backoff(attempt).as_secs_f64();
+            assert!(b >= full / 2.0 - 1e-9 && b <= full + 1e-9, "attempt {attempt}: {b}");
+        }
     }
 
     #[test]

@@ -138,6 +138,21 @@ spec:
           \ a restore from an old backup or a volume snapshot rollback. Fix: restore a current backup\
           \ of this node (daemon stopped) or re-enrol it; the mark clears by itself once the share is\
           \ current (docs/ceremonies.md, Signing across epochs). Never copy another node's share file."
+    - alert: RutliKeyEpochUnproven
+      expr: rutli_key_epoch_proven == 0 and rutli_key_epoch_age_seconds > 259200
+      for: 1h
+      labels:
+        severity: warning
+      annotations:
+        summary: "R\xFCtli key {{ $labels.key }} has run its current epoch on {{ $labels.instance }} for\
+          \ over 3 days without a proof"
+        description: 'The key file of {{ $labels.key }} on {{ $labels.instance }} is more than 3 days
+          old and its live epoch has no proof: nobody has recorded that the shares of this epoch sign
+          together. Run `rutli-cosigner verify-key --sign-test --json` for the key, then `rutli-cosigner
+          keyfile prove --key-id <key> --epoch <epoch> --report <file>` on every node (docs/ceremonies.md,
+          Proving an epoch). Expect this alert for every key after upgrading to the release that adds
+          the command. A node whose share is stale (RutliStaleShare) cannot prove the epoch: bring it
+          back first. Not an outage.'
     - alert: RutliEpochMismatch
       expr: increase(rutli_epoch_mismatch_total[15m]) > 0
       for: 0m
@@ -522,12 +537,61 @@ spec:
         severity: critical
       annotations:
         summary: "R\xFCtli hosted key conflict detected on {{ $labels.instance }}"
-        description: "{{ $labels.instance }} found a peer holding DIFFERENT material under a key id it\
-          \ also holds. Hosted keys are create-once-immutable, so this is an invariant violation \u2014\
-          \ not replication lag \u2014 and anti-entropy deliberately refuses to reconcile it: picking\
-          \ a side automatically could destroy the only copy that can decrypt already-recorded traffic.\
-          \ Find the conflicting key id in the cosigner logs (logged at error level), stop rotating that\
-          \ key, and resolve by hand."
+        description: "{{ $labels.instance }} saw two different materials under one hosted key id: a peer\
+          \ holds other material than this node (anti-entropy), peers that it would pull from disagree,\
+          \ it refused a push over another copy, or a GenerateKey it led was aborted and rolled back.\
+          \ Hosted keys are create-once-immutable, so this is an invariant violation \u2014 not replication\
+          \ lag \u2014 and nothing reconciles it automatically: picking a side could destroy the only\
+          \ copy that can decrypt already-recorded traffic. A node that lacks the key answers UNAVAILABLE\
+          \ for it while the copies disagree. Find the key id and the peers in the cosigner logs (error\
+          \ level, \"CONFLICT\" or \"ABORTED\"), stop rotating that key, run verify-hosted, and resolve\
+          \ by hand (docs/hosted-keys.md, section 4: When rutli_anti_entropy_conflicts_total increases)."
+    - alert: RutliHostedReplicationRefused
+      expr: sum by (instance, reason) (increase(rutli_hosted_replication_refusals_total{reason=~"unfenced|invalid|timestamp|unverifiable|throttled"}[15m]))
+        > 0
+      for: 0m
+      labels:
+        severity: warning
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }} refused hosted key material ({{ $labels.reason\
+          \ }})"
+        description: "{{ $labels.instance }} refused hosted key material from a peer (reason {{ $labels.reason\
+          \ }}). unfenced: a peer pushed a key this node does not hold without holding this node's generation\
+          \ fence for it. During a rolling upgrade from 0.4.0 this is a 0.4.0 node's anti-entropy push\
+          \ and stops once this node has pulled the key itself; otherwise suspect the peer named in the\
+          \ log. invalid: the material does not open or validate (an RSA or EC key whose public half is\
+          \ not its own). timestamp: a creation or undelete time in the future beyond signing_policy.clock_skew_secs\
+          \ \u2014 check that node's clock. unverifiable: a push refused because another cosigner answered\
+          \ with a copy this node cannot check (see invalid / timestamp for that cosigner). throttled:\
+          \ read-repair lookups for keys this node lacks exceed 20 a second \u2014 a client flooding made-up\
+          \ key ids; the requests got UNAVAILABLE and the driver failed over. Nothing was stored. The\
+          \ cosigner log names the key and the peer."
+    - alert: RutliHostedRollbackIncomplete
+      expr: increase(rutli_hosted_rollback_incomplete_total[1h]) > 0
+      for: 0m
+      labels:
+        severity: warning
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }} could not roll back an aborted hosted-key generation\
+          \ everywhere"
+        description: 'A GenerateKey led by {{ $labels.instance }} was aborted, and its rollback did not
+          reach at least one cosigner (log: "did not reach this cosigner", with the node and the key).
+          That node may keep, and serve, a copy of a key no client was given; if it is down when the client
+          retries, the retry can create a second key under the id. Run verify-hosted for the key; if the
+          copy is still there and no client uses the key, quarantine that file by hand (docs/hosted-keys.md,
+          section 3, "A leader that dies mid-generation").'
+    - alert: RutliHostedKeyFutureTimestamp
+      expr: max by (instance) (rutli_hosted_keys_future_timestamp) > 0
+      for: 0m
+      labels:
+        severity: warning
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }} holds a hosted key with a time in the future"
+        description: '{{ $labels.instance }} holds hosted keys whose creation or undelete time lies in
+          the future beyond the clock skew allowance (written before 0.5.0, which refuses such keys from
+          peers). The key still serves, but every delete of it is refused as stale until that time, and
+          other nodes will not pull this copy. The cosigner log names the key ("hosted key with a time
+          in the future"). Check the clocks of the cosigners; see docs/hosted-keys.md.'
     - alert: RutliHostedKeyUnderReplicated
       expr: rutli_key_replicas < 3
       for: 30m
@@ -536,9 +600,10 @@ spec:
       annotations:
         summary: "R\xFCtli hosted key under-replicated on {{ $labels.instance }}"
         description: At least one cluster-hosted key is held by fewer than 3 cosigners and has not healed
-          within 30 minutes. A key written at the 2-of-3 write quorum is expected to be repaired by the
-          next anti-entropy sweep (default 300s), so a sustained shortfall means a cosigner is down or
-          sweeps are failing. Check that every cosigner is up and reachable on the mesh.
+          within 30 minutes. A key written at the 2-of-3 write quorum is pulled by the missing node's
+          next anti-entropy sweep (default 300s) once two other nodes hold it, so a sustained shortfall
+          means a cosigner is down, sweeps are failing, or only one node holds the key (rutli_hosted_replication_refusals_total{reason="unconfirmed"}
+          on the node that lacks it). Check that every cosigner is up and reachable on the mesh.
     - alert: RutliHostedKeyCriticallyUnderReplicated
       expr: rutli_key_replicas < 2
       for: 10m
@@ -546,10 +611,12 @@ spec:
         severity: critical
       annotations:
         summary: "R\xFCtli hosted key has a single copy on {{ $labels.instance }}"
-        description: At least one cluster-hosted key is held by only ONE cosigner. Losing that node loses
+        description: 'At least one cluster-hosted key is held by only ONE cosigner. Losing that node loses
           the key, and because Canton peers encrypt to the published public key, the loss is unrecoverable
-          for already-recorded traffic (see docs/disaster-recovery.md 3b). Restore the missing cosigners
-          immediately; do not rotate or delete keys until replication recovers.
+          for already-recorded traffic (see docs/disaster-recovery.md 3b). A key on one node is not copied
+          automatically: another node pulls only what two peers hold. Restore the missing cosigners immediately;
+          if they are gone, copy the key by hand (export-key on the holder, import-key on another node,
+          docs/disaster-recovery.md). Do not rotate or delete keys until replication recovers.'
     - alert: RutliHostedKeyErrors
       expr: rate(rutli_hosted_key_ops_total{result="error"}[5m]) > 0
       for: 5m
@@ -571,11 +638,11 @@ spec:
         summary: "R\xFCtli hosted keys are unevenly replicated across job {{ $labels.job }}"
         description: "Cosigners in job {{ $labels.job }} report different hosted-key counts, meaning at\
           \ least one key exists on fewer nodes than the cluster has. Writes commit at write_quorum (default\
-          \ 2 of 3), so a node that was down during a GenerateKey lags legitimately until the anti-entropy\
-          \ sweep heals it (default every 300s; the gauge itself only refreshes at the end of a node's\
-          \ own sweep or when a peer lists its keys). Divergence sustained for 20 minutes means healing\
-          \ is failing \u2014 check rutli_anti_entropy_repairs_total and the sweep logs. Two replicas\
-          \ survive one node loss; one survives none."
+          \ 2 of 3), so a node that was down during a GenerateKey lags legitimately until its own anti-entropy\
+          \ sweep pulls the key from two peers (default every 300s; the gauge itself only refreshes at\
+          \ the end of a node's own sweep or when a peer lists its keys). Divergence sustained for 20\
+          \ minutes means healing is failing \u2014 check rutli_anti_entropy_repairs_total and the sweep\
+          \ logs. Two replicas survive one node loss; one survives none."
     - alert: RutliUnreadableKeyFiles
       expr: increase(rutli_unreadable_key_files_total[30m]) > 0
       for: 15m
@@ -586,14 +653,14 @@ spec:
         description: "{{ $labels.instance }} has a key file on disk it cannot open, and has been unable\
           \ to open it for at least 15 minutes. Such a file is logged, counted and SKIPPED from the hosted-key\
           \ inventory \u2014 failing the whole listing would stop anti-entropy for every healthy key too\
-          \ \u2014 so the damaged key is invisible to replication: it is neither pushed to peers nor pulled\
-          \ back from them, while rutli_hosted_keys can still look even across the cluster. Usual causes\
-          \ are a seal master secret rotated without re-sealing the existing files, a partial or foreign\
-          \ restore, or disk corruption. It does not self-heal. Take the key id from the cosigner's error\
-          \ log, then restore the seal secret that file was written under, restore a good copy (rutli-cosigner\
-          \ restore, or import-key from an export \u2014 see docs/disaster-recovery.md 3d), or, after\
-          \ confirming a readable copy on another cosigner, delete the file so anti-entropy can replace\
-          \ it."
+          \ \u2014 so the damaged key is invisible to replication: peers do not see this node's copy,\
+          \ and this node does not pull the key back, while rutli_hosted_keys can still look even across\
+          \ the cluster. Usual causes are a seal master secret rotated without re-sealing the existing\
+          \ files, a partial or foreign restore, or disk corruption. It does not self-heal. Take the key\
+          \ id from the cosigner's error log, then restore the seal secret that file was written under,\
+          \ restore a good copy (rutli-cosigner restore, or import-key from an export \u2014 see docs/disaster-recovery.md\
+          \ 3d), or, after confirming a readable copy on another cosigner, delete the file so anti-entropy\
+          \ can replace it."
     - alert: RutliDecryptRateLimited
       expr: increase(rutli_decrypt_rate_limited_total[10m]) > 0
       for: 5m

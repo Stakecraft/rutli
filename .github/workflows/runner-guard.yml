@@ -1,0 +1,50 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# The job-started guard installed on the self-hosted runner that keeps the measured runs must be the
+# one in the repository (deploy/ci-runner/job-started-guard.sh): it is what keeps fork and Dependabot
+# jobs off that runner. CI itself runs on hosted runners, so this is its own small job on the
+# measured-runs runner (vars.PERF_RUNNER). It lands on whichever runner carries that label: give the
+# label to every runner that should be checked, or run the workflow once per runner.
+name: Runner guard
+
+on:
+  schedule:
+    - cron: "30 6 * * *" # daily 06:30 UTC
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - deploy/ci-runner/job-started-guard.sh
+      - scripts/check-runner-guard.sh
+      - .github/workflows/runner-guard.yml
+  push:
+    branches: [main]
+    paths:
+      - deploy/ci-runner/job-started-guard.sh
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runner-guard-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  guard:
+    name: Installed guard matches the repository's
+    runs-on: ${{ vars.PERF_RUNNER || vars.CI_RUNNER || 'ubuntu-24.04' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # A pull request that changes the guard only gets a warning (the runners are reinstalled after
+      # the merge); a guard that is not installed or not visible to the job fails everywhere.
+      - name: Runner guard matches deploy/ci-runner/job-started-guard.sh
+        if: runner.environment == 'self-hosted'
+        env:
+          RUNNER_GUARD_WARN_ONLY: ${{ github.event_name == 'pull_request' && '1' || '0' }}
+        run: scripts/check-runner-guard.sh
+      - name: No self-hosted runner for this run
+        if: runner.environment != 'self-hosted'
+        run: echo "::notice::this run landed on a hosted runner (PERF_RUNNER and CI_RUNNER are not set): no installed guard to check"

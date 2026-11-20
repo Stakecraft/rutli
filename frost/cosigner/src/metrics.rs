@@ -64,6 +64,11 @@ pub const EPOCH_CHECK_SKIPPED: &str = "rutli_epoch_check_skipped_total";
 /// sharing this node never voted for — typically a restore from an old backup), else 0. A stale
 /// node refuses to sign or lead for the key. Labels: `key`. Alert on any 1.
 pub const STALE_SHARE: &str = "rutli_stale_share";
+/// Per FROST key (label `key`): 1 when the live epoch has a `keyfile prove` marker for the live
+/// sharing, else 0 (`proof::refresh_gauges`).
+pub const KEY_EPOCH_PROVEN: &str = "rutli_key_epoch_proven";
+/// Per FROST key (label `key`): seconds since the live key file was written.
+pub const KEY_EPOCH_AGE_SECONDS: &str = "rutli_key_epoch_age_seconds";
 /// Sign attempts beyond the first within one Sign request: a t-subset failed and the leader
 /// retried with another (fresh session, fresh commitments).
 /// Sign rounds this node took part in without a signing intent (a driver or leader older than
@@ -144,11 +149,20 @@ pub const GRPC_HANDSHAKE_TIMEOUTS: &str = "rutli_grpc_handshake_timeouts_total";
 /// Background loops restarted after a panic in a pass ([`crate::supervise`]), by `loop`. The node
 /// kept going; the panic itself is a bug — alert on any increase and report it.
 pub const BACKGROUND_LOOP_RESTARTS: &str = "rutli_background_loop_restarts_total";
-/// Hosted keys repaired by anti-entropy (pulled here or pushed to a peer).
+/// Hosted keys anti-entropy pulled to this node (each confirmed by two peers). The sweep no longer
+/// pushes keys to peers.
 pub const ANTI_ENTROPY_REPAIRS: &str = "rutli_anti_entropy_repairs_total";
-/// Hosted keys found with *different* material on two nodes under one id. Any increase is a
-/// page-worthy invariant violation, not a transient.
+/// Hosted keys found with *different* material on two nodes under one id: by the sweep, by a pull
+/// that met two materials, by a push refused over another copy, by a generation aborted on one.
+/// Any increase is a page-worthy invariant violation, not a transient.
 pub const ANTI_ENTROPY_CONFLICTS: &str = "rutli_anti_entropy_conflicts_total";
+/// Counter, label `reason`: hosted key material this node refused to store, or a generation it
+/// aborted (see [`HOSTED_REFUSAL_REASONS`]). The log line names the key and the peer.
+pub const HOSTED_REPLICATION_REFUSALS: &str = "rutli_hosted_replication_refusals_total";
+/// Gauge: hosted keys held here whose creation or undelete time lies in the future beyond the
+/// clock skew allowance (set at start-up and by every sweep). Such a key refuses every delete until
+/// that time.
+pub const HOSTED_FUTURE_TIMESTAMPS: &str = "rutli_hosted_keys_future_timestamp";
 /// Hosted keys held by this node.
 pub const HOSTED_KEYS: &str = "rutli_hosted_keys";
 /// Key files present on disk that could not be opened (wrong seal secret, corruption). Skipped
@@ -272,6 +286,35 @@ pub const SESSION_CAPS: &[&str] = &["key", "opener", "request"];
 /// The `loop` names of `rutli_background_loop_restarts_total`: the first argument of every
 /// `supervise::spawn_supervised` call (`RutliBackgroundLoopRestarted`); a test checks the call sites.
 pub const BACKGROUND_LOOPS: &[&str] = &["anti_entropy", "ceremony_resolver", "epoch_check", "nonce_pruner"];
+/// Every `reason` of `rutli_hosted_replication_refusals_total` (`hosted_refusal(..)` call sites in
+/// `orchestrator.rs`):
+/// - `unfenced`: a push into an id this node lacks from a caller without its generation fence;
+/// - `conflict`: a push refused because this node or another peer holds different material;
+/// - `disagreement`: a pull refused because peers hold different material;
+/// - `unconfirmed`: a pull refused because fewer than two peers returned the same material;
+/// - `invalid`: material that does not open, parse or validate (an RSA or EC key whose public half
+///   is not its own);
+/// - `timestamp`: material whose creation or undelete time lies in the future;
+/// - `generate-conflict`: a generation this node led, aborted because a peer holds other material;
+/// - `unverifiable`: a push refused because another peer answered with a copy this node cannot check;
+/// - `throttled`: a read-repair refused because this node's fan-out ceiling is reached.
+pub const HOSTED_REFUSAL_REASONS: &[&str] = &[
+    "unfenced",
+    "conflict",
+    "disagreement",
+    "unconfirmed",
+    "invalid",
+    "timestamp",
+    "generate-conflict",
+    "unverifiable",
+    "throttled",
+];
+/// Counter: nodes the rollback of an aborted hosted-key generation did not reach (each may keep a
+/// copy the generation wrote). The log line names the node and the key.
+pub const HOSTED_ROLLBACK_INCOMPLETE: &str = "rutli_hosted_rollback_incomplete_total";
+/// Counter: missing hosted keys a sweep tried to pull and did not (unconfirmed, conflicting, or an
+/// error); each is logged with its key id at debug level, refusals also by reason.
+pub const ANTI_ENTROPY_PULL_FAILURES: &str = "rutli_anti_entropy_pull_failures_total";
 /// The `op` values of `rutli_hosted_key_ops_total` (`record_hosted_op` call sites in `service.rs`);
 /// `result` is "ok" | "error" (`RutliHostedKeyErrors`).
 pub const HOSTED_KEY_OPS_NAMES: &[&str] =
@@ -344,6 +387,12 @@ fn prime() {
     metrics::counter!(GRPC_ACCEPT_ERRORS).absolute(0);
     metrics::counter!(GRPC_HANDSHAKE_TIMEOUTS).absolute(0);
     metrics::counter!(ANTI_ENTROPY_CONFLICTS).absolute(0);
+    for reason in HOSTED_REFUSAL_REASONS {
+        metrics::counter!(HOSTED_REPLICATION_REFUSALS, "reason" => *reason).absolute(0);
+    }
+    metrics::gauge!(HOSTED_FUTURE_TIMESTAMPS).set(0.0);
+    metrics::counter!(HOSTED_ROLLBACK_INCOMPLETE).absolute(0);
+    metrics::counter!(ANTI_ENTROPY_PULL_FAILURES).absolute(0);
     metrics::gauge!(HOSTED_KEYS).set(0.0);
     metrics::counter!(UNREADABLE_KEY_FILES).absolute(0);
     metrics::counter!(DECRYPT_RATE_LIMITED).absolute(0);
@@ -433,6 +482,11 @@ pub fn describe() {
     describe_counter!(EPOCH_MISMATCH, "Sign round-1 refusals: the leader signed with another sharing (epoch)");
     describe_counter!(EPOCH_CHECK_SKIPPED, "Sign round-1 requests without the leader's sharing (pre-epoch leader)");
     describe_gauge!(STALE_SHARE, "1 while this node's share of the key is stale (refuses to sign), else 0");
+    describe_gauge!(
+        KEY_EPOCH_PROVEN,
+        "1 while the live epoch of the key has a `keyfile prove` marker for the live sharing, else 0"
+    );
+    describe_gauge!(KEY_EPOCH_AGE_SECONDS, "Seconds since the live key file of the key was written (the epoch installed)");
     describe_counter!(SIGN_RETRIES, "Sign attempts beyond the first (a t-subset failed; retried with another)");
     describe_counter!(INVALID_SIGNATURE_SHARES, "Signature shares that failed verification at aggregation");
     describe_counter!(NONCE_MARKERS_PRUNED, "Burned-session nonce markers removed past their retention");
@@ -451,8 +505,21 @@ pub fn describe() {
     );
     describe_counter!(SIGN_SESSIONS_REFUSED, "Sign round 1s refused by a cap on sessions waiting for round 2, by cap");
     describe_gauge!(PENDING_SIGN_SESSIONS, "In-flight round-1 sign sessions held on this node");
-    describe_counter!(ANTI_ENTROPY_REPAIRS, "Hosted keys repaired by anti-entropy");
+    describe_counter!(ANTI_ENTROPY_REPAIRS, "Hosted keys anti-entropy pulled to this node (confirmed by two peers)");
     describe_counter!(ANTI_ENTROPY_CONFLICTS, "Hosted keys with divergent material across nodes");
+    describe_counter!(
+        HOSTED_REPLICATION_REFUSALS,
+        "Hosted key material refused or generations aborted on this node, by reason"
+    );
+    describe_counter!(ANTI_ENTROPY_PULL_FAILURES, "Missing hosted keys a sweep tried to pull and did not");
+    describe_counter!(
+        HOSTED_ROLLBACK_INCOMPLETE,
+        "Nodes an aborted hosted-key generation's rollback did not reach"
+    );
+    describe_gauge!(
+        HOSTED_FUTURE_TIMESTAMPS,
+        "Hosted keys held here with a creation or undelete time in the future"
+    );
     describe_gauge!(HOSTED_KEYS, "Cluster-hosted keys held by this node");
     describe_counter!(HOSTED_KEY_OPS, "Hosted-key operations, by op and result");
     describe_counter!(UNREADABLE_KEY_FILES, "Key files that could not be opened and were skipped");
@@ -562,6 +629,7 @@ mod tests {
             (SIGN_SESSION_OWNER_REFUSALS, one("call", SESSION_OWNER_CALLS)),
             (SIGN_SESSIONS_REFUSED, one("cap", SESSION_CAPS)),
             (BACKGROUND_LOOP_RESTARTS, one("loop", BACKGROUND_LOOPS)),
+            (HOSTED_REPLICATION_REFUSALS, one("reason", HOSTED_REFUSAL_REASONS)),
         ];
         let mut ops = Vec::new();
         for op in HOSTED_KEY_OPS_NAMES {
@@ -721,6 +789,7 @@ mod tests {
             }),
         );
         each("record_hosted_op", Box::new(|lit, what| assert!(HOSTED_KEY_OPS_NAMES.contains(&lit), "{what}: {lit:?}")));
+        each("hosted_refusal", Box::new(|lit, what| assert!(HOSTED_REFUSAL_REASONS.contains(&lit), "{what}: {lit:?}")));
     }
 
     /// The lock names behind `rutli_lock_poison_recoveries_total{lock}`: `sync::recover(&l, "x")`,

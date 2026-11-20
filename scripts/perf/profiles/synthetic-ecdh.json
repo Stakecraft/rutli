@@ -1,6 +1,6 @@
 {
-  "name": "placeholder",
-  "note": "Placeholder numbers, not a measurement. Replace the baseline with the load of a real participant (signatures and ECIES decryptions per second, keys in use) taken from the soak cluster's metrics, and the SLO with the agreed one.",
+  "name": "synthetic-ecdh",
+  "note": "Synthetic, not a measurement: signing plus hosted-key ECDH (0.2/s at x1). A validator that keeps its encryption key elsewhere sends no ECDH (devnet-validator.json is the measured load); this profile is for clusters that host encryption keys.",
   "slo": { "p99_ms": 1000 },
   "steady": { "sign_per_sec": 20, "secs": 60 },
   "baseline": {

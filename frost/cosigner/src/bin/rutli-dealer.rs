@@ -278,7 +278,7 @@ fn split_key(a: SplitKey) -> Result<()> {
     };
     let requests = read_recipients(&a.recipients, &ca_pem, &cluster_id)?;
     confirm_sas(&requests, a.confirm_sas.as_deref())?;
-    let first = &requests[0];
+    let first = requests.first().ok_or_else(|| refuse("no --recipient given".into()))?;
     if first.key_id != a.key_id {
         return Err(refuse(format!(
             "recipients were made for key id {}, not {}",
@@ -390,8 +390,9 @@ fn split_key(a: SplitKey) -> Result<()> {
                 signer_chain: r.signer_chain.clone(),
             })
             .collect(),
-        bundles: outputs[..bundles.len()]
+        bundles: outputs
             .iter()
+            .take(bundles.len())
             .map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned())
             .collect(),
         dealer_binary_sha256: self_sha256(),
@@ -505,7 +506,7 @@ fn read_recipients(paths: &[PathBuf], ca_pem: &[u8], cluster_id: &str) -> Result
         requests.push(verified);
     }
     let first = requests.first().ok_or_else(|| refuse("no --recipient given".into()))?.clone();
-    for r in &requests[1..] {
+    for r in requests.iter().skip(1) {
         if r.ceremony_params() != first.ceremony_params() {
             return Err(refuse(format!(
                 "recipients disagree: node {} expects (ceremony, key, cluster, t, n, roster) = \

@@ -36,11 +36,14 @@ the cluster while preparing it. Commands marked `# [MUTATES]` change the cluster
 - A maintenance window: step 5 has a **full signing gap** of roughly 30–90 s while the volumes
   re-attach. Topology signs are rare; Canton retries. Avoid the backup minute (03:17 UTC).
 
-Work in a private, short-lived directory (tmpfs if you have one) and keep it off shared storage:
+Work only in a place you can destroy as a whole: a memory disk or an encrypted image
+(`RUTLI_WORK` is its mount point; see [key-material-handling.md](key-material-handling.md)). Never in
+your home or `$TMPDIR`: the seal bundles and the key tars you handle here are all you need to read
+every node's key files.
 
 ```sh
 umask 077
-D=$(mktemp -d /dev/shm/rutli-pernode.XXXXXX 2>/dev/null || mktemp -d)
+D=$(mktemp -d "${RUTLI_WORK:?mount the memory disk first}/rutli-pernode.XXXXXX")
 cd <repo>   # this repository, at the release you are deploying
 ```
 
@@ -96,7 +99,7 @@ kill %1 %2 %3
 ```
 
 Take a last copy of each node's **sealed** key files, off-cluster, in a different place from the
-master (it is useless without it, and the master is useless without it):
+master and the per-node bundles (either opens them):
 
 ```sh
 for o in 0 1 2; do
@@ -166,7 +169,7 @@ Create one Secret per node from its own bundle, then destroy the local bundle fi
 for i in 1 2 3; do
   kubectl -n rutli create secret generic rutli-seal-node-$i --from-file=node.json=$D/bundles/node-$i.json   # [MUTATES]
 done
-shred -u $D/bundles/node-*.json 2>/dev/null || rm -f $D/bundles/node-*.json
+rm -f $D/bundles/node-*.json   # the working place is destroyed at the end, step 7.4
 ```
 
 ## 3. Values
@@ -272,13 +275,23 @@ Only after step 6 passed (ideally after a day of clean soak-check):
    ```sh
    kubectl -n rutli delete secret rutli-seal                                # [MUTATES]
    ```
-   The master can still derive every node's DEK, so it still opens every backup ever taken with it.
+   The master can still derive every node's DEK, so it still opens every backup ever taken with it,
+   and every copy of any sealed file written before the node's DEK is rotated (step 7.2a).
    **Product decision P1 (yours):** escrow it offline (sealed envelope / offline HSM, two-person
    access, never on a networked host) for as long as backups taken under it are kept, then destroy
    it — or destroy it now and accept that pre-migration backups are only restorable through the
    per-node bundles (which they are: same DEKs). Record which, and when. A later DEK rotation (the
-   key-file v2 work) moves each node to a fresh random DEK, after which the master protects nothing
-   new.
+   key-file v2 work) moves each node to a fresh random DEK, after which the master no longer opens
+   new key files (it still derives each node's distribution key until the bundles are replaced).
+   **7.2a Rotate every node's sealing key (required).** `seal split-legacy` gave each node the same
+   DEK the master derives, so until a node rotates, the master and the node's bundle open the same
+   files, old and new. Do this on every node, one at a time, right after moving to per-node
+   bundles, and again after the first refresh of any imported key (`rutli-cosigner seal rotate-dek`,
+   replace the Secret, restart, check `keyfile status`, back up, `seal drop-previous`; the steps,
+   with the destruction they depend on, are in [disaster-recovery.md](disaster-recovery.md) §3h and
+   [key-material-handling.md](key-material-handling.md)). Dropping the previous DEK from the bundle
+   erases nothing until the master, its escrow, the pre-migration bundle values and the old key
+   tars are destroyed too.
 3. **Old on-volume backups.** The exec backup left up to seven `/data/backup-<weekday>` copies on
    each node's volume — older share epochs next to the live one (audit M1). The sidecar mounts the
    volume read-only, so remove them through the cosigner container:
@@ -287,9 +300,13 @@ Only after step 6 passed (ideally after a day of clean soak-check):
      kubectl -n rutli exec rutli-cosigner-n$i-0 -c cosigner -- sh -c 'ls -d /data/backup-* 2>/dev/null; rm -rf /data/backup-*'   # [MUTATES]
    done
    ```
-   (`/data/retired-2026-07/` holds the July validator's dead shares; delete it too unless the soak
-   log says otherwise.)
-4. Delete `$D` (`rm -rf "$D"`), after moving the pre-migration key tars to their off-cluster home.
+   (`/data/retired-2026-07/` holds the July validator's retired shares (sensitive while the old DEK exists); delete it too unless the soak
+   log says otherwise.) Deleting unlinks: the files stay readable in free blocks and snapshots of the
+   volume, sealed under the node's old DEK. They stop being readable when that DEK is destroyed
+   (7.2a) or the volume and its snapshots are.
+4. Move the pre-migration key tars to their off-cluster home (they hold every node's files of one
+   epoch: they are complete key escrows while the master or the old bundles exist), then unmount
+   and delete the working place ([key-material-handling.md](key-material-handling.md)).
 
 ## Afterwards
 

@@ -448,7 +448,7 @@ pub fn verify_chain(
     }
 
     // The leaf: an end-entity TLS certificate, not a CA, usable for signatures.
-    let leaf = &chain[0];
+    let leaf = chain.first().ok_or_else(|| "signer_chain is empty".to_string())?;
     if crate::trust::ca_flag(leaf).map_err(|e| format!("a certificate {e}"))? {
         return Err("the signing certificate is a CA certificate, not a cosigner's".into());
     }

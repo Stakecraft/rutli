@@ -14,14 +14,12 @@ The statements below hold for a cluster where:
 - every cosigner and the driver run `0.4.0` (batch C shipped in `0.4.0-rc.3`; later statements name
   the release candidate they hold from), on a cluster uniformly upgraded **before** any DKG or refresh
   (`ceremony_protocol` 2 on every node);
-- the enforcement switches are on, identically, on every node: `signing_policy.require_intent`
-  (on by default with TLS since 0.5.0, unless opted out with `false`),
-  `require_ceremony_intent` (on by default since 0.4.0-rc.6, unless opted out with `false`),
-  `signer_acl_required`, `signer_may_refresh: false`, `require_epoch_match`
-  (`docs/approval-quorum.md`, "Switching enforcement on"). The production profile
-  (`"profile": "production"`) requires every setting this model assumes, and a node refuses to start
-  without them; [production-profile.md](../production-profile.md) has the full table, and
-  `rutli-cosigner check-config` lists what a config is missing;
+- every enforcement setting is on, identically, on every node. The list is the table in
+  [production-profile.md](../production-profile.md), not repeated here. The production profile
+  (`"profile": "production"`) requires every setting in it, and a node refuses to start without them;
+  `rutli-cosigner check-config` lists what a config is missing. How to switch them on in a running
+  cluster: `docs/approval-quorum.md`, "Switching enforcement on". A statement below that depends on
+  one setting names it;
 - key files are written in format v2 (`keyfile.write_version: 2`, `cluster_uuid` set) and the
   legacy shared seal master has been retired: per-node seal bundles, DEKs rotated
   (`seal rotate-dek`), the master escrowed offline and then destroyed (decision P1);
@@ -118,9 +116,67 @@ running there.
 ### A single compromised cosigner (its share, DEK, TLS key, memory)
 
 **Cannot:** reconstruct a key (it holds one share), impersonate another node (per-peer TLS server
-names, exact client CNs and per-peer key pins), make an honest peer release a share without a valid intent, forge
-a tombstone, roll a peer back to an old epoch, or get a peer to accept a key file it planted (v2
-headers bind cluster, node, key id and kind; plaintext is refused, M4).
+names, exact client CNs and per-peer key pins, M3), make an honest peer release a share without a valid intent, forge
+a tombstone, or roll a peer back to an old epoch. A key file carried onto another volume does not
+load there (v2 headers bind cluster, node, key id and kind; plaintext is refused, M4).
+
+Since 0.5.0 it **cannot get an honest node to store hosted key material that another node the
+honest node can reach contradicts**. A node stores a hosted key it does not hold in two ways only:
+
+- it pulls it (read-repair, the anti-entropy sweep, a leader that finds the key already on its
+  peers), and only when two peers return the same material, every other peer answers, and none
+  returns other material, a copy it cannot check, or a valid tombstone (which it applies); with one
+  copy, copies that disagree, or a silent peer, it stores nothing and answers UNAVAILABLE;
+- it accepts a push from the caller that holds its generation fence for that id under that ceremony
+  id, and only after it has asked the other peers and none that answers holds different material,
+  a copy it cannot check, or a valid tombstone. A silent peer does not block a push, or one node
+  down would stop every generation.
+
+Only an answer counts: a silent peer (down, or slower than 3 s) is unknown, never "does not hold
+it", and an answer the node cannot use is unknown, never agreement. A node answers NOT_FOUND only
+when `n - write_quorum + 1` nodes, itself included, answered that they hold nothing under the id.
+One consequence is a veto it already has: by answering with garbage for an id nobody holds, a
+compromised cosigner turns NOT_FOUND into UNAVAILABLE for that id on the nodes that ask it. Honest
+nodes give an unusable answer only when something is wrong: a copy whose creation or undelete time
+lies beyond the asking node's clock plus `clock_skew_secs` (a skewed clock on either side), or one
+that does not open (a wrong seal bundle or pin). The asking node logs it with the peer and counts it
+(`reason="timestamp"` or `"invalid"`).
+
+The sweep no longer pushes. A generation that meets other material on any node is aborted and
+rolled back instead of counting the nodes that agree. Material whose creation or undelete time lies
+in the future (beyond `clock_skew_secs`) is refused, and an RSA or EC key whose public half is not
+its own is refused. Every refusal is logged with the peer and the key and counted
+(`rutli_hosted_replication_refusals_total`, `rutli_anti_entropy_conflicts_total`).
+
+What stays open, plainly:
+
+- **An id nobody has created yet.** Genkey fences carry no client intent, so it can fence such an id
+  on an honest node, store its own material there, and keep the same material itself. It is then
+  the second agreeing peer: the material spreads to the other nodes by pull, and a later generation
+  of the id adopts it. The cluster then agrees on material the attacker chose. It reads every hosted
+  key anyway; what it gains is a key that outlives its eviction. The next change closes this: a
+  client-signed intent for creating a hosted key, without which a genkey fence is refused.
+- **Every other holder unreachable.** The receiving node checks only the peers it can reach. If
+  every other node that holds the key is unreachable from it at that moment, a fenced push lands; it
+  is reported as a conflict (`RutliHostedKeyConflict`) once they are reachable again, and nothing
+  reconciles it automatically.
+- **One of the two write-quorum holders.** With `write_quorum: 2` it can acknowledge a replica it
+  does not keep (or drop it later). If the third node was down, one honest copy then exists, and no
+  node pulls from a single copy. `write_quorum: 3` closes this, at the cost of no generation while a
+  node is down.
+- **Honest nodes, a leader that dies mid-generation.** A replica a leader wrote before it died is
+  served by the node that holds it, though the client never got an answer. If that node is down when
+  the client retries, the retry mints a second key, and when the node returns the id is forked
+  (paged as a conflict). The same holds for a copy that a rollback could not reach. The leader
+  writes its own copy last, so a leader that dies before any replica leaves nothing behind.
+  Closing the rest needs replicas that are not served until the generation is confirmed
+  (`docs/hosted-keys.md`, "A leader that dies mid-generation").
+- **A 0.4.0 node** in a mixed cluster still accepts any push into an id it lacks, pulls from the
+  first peer that answers, accepts future timestamps, writes its own copy first as a leader and
+  counts a conflicting replica as a failed one; it answers NOT_FOUND for a deleted key, so a
+  deleted key can be pulled back from two old replicas until a sweep applies the tombstone. The
+  protection is per receiving node, from its upgrade on. Do not create or delete hosted keys while
+  the cluster is mixed (`docs/hosted-keys.md`, "Upgrading from 0.4.0").
 
 It also **cannot park a hosted key on a FROST key's id** (since 0.4.0-rc.6). FROST ids are
 deterministic (`<prefix>frost-<name>`), and a peer's `ReplicateKey` needs no client authorization,
@@ -237,7 +293,8 @@ the per-asker and total caps (F2). What remains:
 - like any participant, it can veto every ceremony, onboarding DKGs included, by refusing to take
   part (n-of-n);
 - hosted-key genkey/delkey fences are not intent-gated: it can block a hosted id's generation or
-  deletion, as it can by refusing;
+  deletion, as it can by refusing, and for an id no node holds yet it can create the key on an
+  honest node (above);
 - a ceremony it binds to itself on an honest node by racing the leader's fence (above) stays on that
   node until it gives it up or the orphan timeout (15 min) passes: the leader's abort cannot end
   another leader's ceremony. That blocks only the key's ceremonies, which it can veto anyway.
@@ -353,8 +410,9 @@ make a deleted id reusable (break-glass on every node only).
 The backup runs as a sidecar in the cosigner's own pod with the data volume mounted read-only, no
 seal bundle and no TLS key (enforced by `check-deploy-policy.sh`). A destination holds one node's
 sealed key files and its sign journals — below threshold, unreadable without that node's DEK.
-Destination **plus** that node's DEK = that node's shares for every retained backup epoch (still one
-share per key). Retention of old epochs in backups is an operator decision (P2b); a restore never rolls a
+Destination **plus** that node's DEK = that node's shares for every retained backup epoch. That is
+one share per key and epoch, but one node's retained epoch-e copy and another node's live epoch-e
+share are two shares of one sharing. A hosted key is a whole key in each file. Retention of old epochs in backups is an operator decision (P2b); a restore never rolls a
 live share back (below).
 
 ### Kubernetes cluster-admin / a reader of every Secret in the namespace (P10)
@@ -432,11 +490,65 @@ key but cannot repair a DKG key whose secret was exposed: the secret does not ch
 split keys that matter only on a release with C1, on a uniformly upgraded cluster.** DevNet soak
 keys stay test material.
 
+## Key material at rest and its lifetime
+
+A sealed key file is protected by the sealing key (the node's DEK), not by being deleted. Rütli
+removes files with `unlink` and replaces them with `rename`; it never overwrites, and on flash,
+network, copy-on-write and snapshotted storage an overwrite would not erase either. So old copies
+of a key file exist wherever it was ever stored: the data volume's free blocks, retained backups
+(the chart keeps the newest 14 tars with the pvc destination, and a tar is taken on every key-file change; an off-cluster destination keeps what its retention keeps),
+volume snapshots, the Kubernetes node's disk (the backup sidecar's staging copies, the pod's `/tmp`),
+quarantined staged files of an aborted refresh (up to 7 days, or until the operator acts if a split was detected), and any `backup-*` or `retired-*`
+directory left on a volume.
+
+**The precondition for using an old copy is the copy and the sealing key that sealed it.** What
+that gives, per key:
+
+- **A FROST key** (namespace, signing): `t` shares of one sharing, that is the same epoch and the
+  same public-key-package digest, from `t` distinct nodes, each with its node's DEK, whenever and
+  wherever the copies were made: a refresh keeps the group secret. A refresh does not retire
+  older copies, does not change any DEK, and does not turn a stolen share into a harmless one while
+  `t` nodes' old copies and DEKs survive.
+- **A dealt share** (a key brought in by the split ceremony): `t` dealt shares, from the bundles or
+  from any backup taken before the first refresh, each with its node's DEK, are the key, whatever
+  was refreshed since. The bundle, the node's recipient file (unlinked after install, not erased) and
+  the DEK together reopen a dealt share.
+- **A hosted key**: one copy from one node and that node's DEK. A hosted key has no threshold at
+  rest, and a delete keeps the material in the tombstone for the grace period, so backups taken
+  in that time hold it too.
+- **With the legacy shared master**: the master alone replaces every node's DEK, for every file
+  written before the node rotated, and for split-legacy bundles that were never rotated.
+
+What does not give a share: a journal, a nonce marker, a ceremony record or a `.cleared` marker
+(none holds secret material), fewer than `t` shares of one sharing, shares of different epochs, a
+sealed file without a DEK that sealed it.
+
+**What closes it.** Rotate the node's sealing key and destroy the old one: `seal rotate-dek`,
+restart (the node re-seals its key files), `seal drop-previous`, then destroy every other copy of
+the old DEK: earlier values of the seal Secret (etcd, its snapshots, GitOps and secret-manager
+history), the escrowed previous bundle, the legacy master and its escrow, operator files. A dropped
+DEK is not a destroyed DEK. Do it after the first refresh of an imported key, after leaving the
+legacy master, and after any suspected exposure of a bundle. Keep the retention of old-epoch
+backups short and in step with the rotation, and keep material that ever leaves a node off disks
+you cannot destroy. Method and inventory: [../key-material-handling.md](../key-material-handling.md).
+
+**Not covered.** Rotation does not reach files outside the key directories (an old `backup-*` or
+`retired-*` directory), plaintext residue from before sealing, an `export-key` artifact (protected
+by its own passphrase), core dumps and memory (a cosigner does not switch core dumps off), or the
+participant's database where the whole key lived before a split. Rotation tied to the refresh
+schedule, so that it needs no operator step, is planned for 0.6.
+
 ## Residual risks, stated plainly
 
 - Single trust domain under one Kubernetes administration (P10).
 - Hosted keys are whole keys on every node: one compromised node reads them all, and rotation
   protects future traffic only.
+- A compromised cosigner can still create a hosted key under an id nobody has created yet and,
+  keeping a copy itself, have the cluster adopt it; plant over a key whose other holders the
+  receiving node cannot reach; or be the second of two write-quorum holders without keeping a copy.
+  Hosted-key generation is not yet bound to a client intent.
+- A leader that dies after writing a replica, with that replica's node down at the retry, can leave
+  an id forked between honest nodes (detected as a conflict, resolved by hand).
 - A driver-key thief signs non-gated keys within the ACL and rate limits (bounded and journaled,
   not prevented).
 - No defence against a TLS-terminating mesh (P3) or a memory snapshot of a running cosigner (L7).
@@ -450,7 +562,8 @@ keys stay test material.
   onboarding DKGs included (n-of-n). Not bound into a refresh intent yet: the expected
   `(epoch, PKP digest)` (follow-up).
 - Deletion is not erasure: tombstones retain material for the grace period by design, and old
-  backups keep every key they captured until the DEK that sealed them is dropped.
+  backups keep every key they captured until the DEK that sealed them is destroyed (dropped from
+  the bundle and every other copy gone: "Key material at rest and its lifetime", below).
 - Keys from earlier releases are leader-exposed (P9).
 - One Byzantine cosigner can split a DKG/refresh (n = 3, f = 1): availability, detected and
   operator-recoverable, never the key (F3).
