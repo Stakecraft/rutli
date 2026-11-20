@@ -117,7 +117,8 @@ digest to the current release ([deploy/frost/README.md](deploy/frost/README.md))
 (add `--build` to build from the working tree instead):
 
 ```sh
-scripts/gen-frost-certs.sh 3 deploy/frost/certs
+RUTLI_PIN_CONFIGS=deploy/frost/config-tls \
+  scripts/gen-frost-certs.sh 3 deploy/frost/certs   # certs, and their TLS key pins in the configs
 export RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
 docker compose -f deploy/frost/docker-compose.tls.yml up -d
 
