@@ -156,6 +156,64 @@ class RutliConfigParsingSpec extends AnyWordSpec with Matchers {
     }
   }
 
+  "an approval rule" should {
+    val alice = """{ id = "alice", public-key-base64 = "MCowBQYDK2VwAyEA" }"""
+    def approval(rules: String, approvers: String = alice): String =
+      s"""approval { inbox-dir = "/var/rutli/approvals", rules = [ $rules ], approvers = [ $approvers ] }"""
+
+    /** Parse a config that must be refused for its approval rules: (path, message) of each failure. */
+    def refusedRules(hocon: String): List[(String, String)] =
+      ConfigSource.string(hocon).load[RutliConfig] match {
+        case Right(c) => fail(s"approval rules parsed: $c")
+        case Left(err) =>
+          err.toList.collect { case ConvertFailure(r: RutliDriverFactory.InvalidApprovalRule, _, p) =>
+            (dotted(p), r.description)
+          }
+      }
+
+    "refuse a misspelt mode at the rule's mode key, naming the rule and the value, never auto-approving" in {
+      val failures = refusedRules(approval("""{ key-id-prefix = "frost-", mode = "quorom", threshold = 1 }"""))
+      failures.map(_._1) shouldBe List("approval.rules.0.mode")
+      failures.head._2 should include("\"frost-\"")
+      failures.head._2 should include("\"quorom\"")
+    }
+
+    "refuse a mode in another letter case, as the cosigners do" in {
+      val failures = refusedRules(
+        approval("""{ key-id-prefix = "frost-import-sig-", mode = "auto" }, { key-id-prefix = "frost-", mode = "Quorum", threshold = 1 }""")
+      )
+      failures.map(_._1) shouldBe List("approval.rules.1.mode")
+      failures.head._2 should include("\"Quorum\"")
+    }
+
+    "read quorum and auto, with quorum the default" in {
+      val c = parse(approval("""{ key-id-prefix = "frost-import-sig-", mode = "auto" }, { key-id-prefix = "frost-", threshold = 1 }"""))
+      c.approval.map(_.rules.map(_.mode)) shouldBe Some(List("auto", "quorum"))
+      c.approval.flatMap(_.thresholdFor("frost-ns")) shouldBe Some(1)
+      c.approval.flatMap(_.thresholdFor("frost-import-sig-1")) shouldBe None
+    }
+
+    "refuse a quorum rule with no approvers configured as a config error, not a stack trace" in {
+      val failures = refusedRules(approval("""{ key-id-prefix = "frost-", mode = "quorum", threshold = 1 }""", approvers = ""))
+      failures.map(_._1) shouldBe List("approval.rules")
+      failures.head._2 should include("threshold 1")
+      failures.head._2 should include("(0)")
+    }
+
+    "refuse a quorum rule that an earlier auto rule with an empty prefix covers" in {
+      val failures = refusedRules(
+        approval("""{ key-id-prefix = "", mode = "auto" }, { key-id-prefix = "frost-", mode = "quorum", threshold = 1 }""")
+      )
+      failures.map(_._1) shouldBe List("approval.rules")
+      failures.head._2 should include("never applies")
+    }
+
+    "accept an empty prefix on a quorum rule: it holds every key" in {
+      parse(approval("""{ key-id-prefix = "", mode = "quorum", threshold = 1 }""")).approval.flatMap(_.thresholdFor("any")) shouldBe
+        Some(1)
+    }
+  }
+
   "a config with every block set" should {
     lazy val full = parse("""
       backend = "frost"

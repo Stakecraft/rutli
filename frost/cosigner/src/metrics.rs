@@ -41,6 +41,14 @@ pub const SIGN_ROUND1_SKIPS: &str = "rutli_sign_round1_skips_total";
 /// Sign round 2 requests for a session this node holds no round-1 nonces for (it restarted or
 /// committed a ceremony since round 1, or the session expired). The leader retries without it.
 pub const SIGN_ROUND2_UNKNOWN_SESSION: &str = "rutli_sign_round2_unknown_session_total";
+/// Sign round 2s and aborts this node refused because another caller opened the session, label
+/// `call` (round2|abort). The session stays with its opener. A correct cosigner never sends one:
+/// alert on any increase.
+pub const SIGN_SESSION_OWNER_REFUSALS: &str = "rutli_sign_session_owner_refusals_total";
+/// Sign round 1s this node refused because a cap on sessions waiting for round 2 was reached, label
+/// `cap` (key|opener|request): the key's total from all openers, one opener's share of it, or one
+/// opener's sessions for one signing request. An honest leader stays below each.
+pub const SIGN_SESSIONS_REFUSED: &str = "rutli_sign_sessions_refused_total";
 /// Leader-issued aborts of in-flight sign sessions (one per given-up signature).
 pub const SIGN_ABORTS: &str = "rutli_sign_aborts_total";
 /// In-flight (round-1, not yet round-2) sign sessions currently held on this node.
@@ -109,6 +117,20 @@ pub const NONCE_MARKERS: &str = "rutli_nonce_markers";
 /// Locks recovered after a panicking request poisoned them (audit L3), by `lock`. The node kept
 /// serving; the panic itself is a bug — alert on any increase and report it.
 pub const LOCK_POISON_RECOVERIES: &str = "rutli_lock_poison_recoveries_total";
+/// The soft open-file limit after the start-up raise ([`crate::fdlimit`]).
+pub const FD_LIMIT: &str = "rutli_fd_limit";
+/// Open gRPC connections (accepted, TLS handshake done or under way) ([`crate::accept`]).
+pub const GRPC_CONNECTIONS: &str = "rutli_grpc_connections";
+/// The most gRPC connections served at once; past it new ones wait in the listen backlog.
+pub const GRPC_CONNECTION_LIMIT: &str = "rutli_grpc_connection_limit";
+/// Failed accepts of a gRPC connection that needed a backoff (not a client that gave up before the
+/// accept); the loop retries. Usually the process is out of file descriptors.
+pub const GRPC_ACCEPT_ERRORS: &str = "rutli_grpc_accept_errors_total";
+/// gRPC connections cut because their TLS handshake did not finish in time.
+pub const GRPC_HANDSHAKE_TIMEOUTS: &str = "rutli_grpc_handshake_timeouts_total";
+/// Background loops restarted after a panic in a pass ([`crate::supervise`]), by `loop`. The node
+/// kept going; the panic itself is a bug — alert on any increase and report it.
+pub const BACKGROUND_LOOP_RESTARTS: &str = "rutli_background_loop_restarts_total";
 /// Hosted keys repaired by anti-entropy (pulled here or pushed to a peer).
 pub const ANTI_ENTROPY_REPAIRS: &str = "rutli_anti_entropy_repairs_total";
 /// Hosted keys found with *different* material on two nodes under one id. Any increase is a
@@ -229,6 +251,14 @@ pub const LOCK_NAMES: &[&str] = &[
     "sign_sessions",
     "stale_marks",
 ];
+/// The `call` values of `rutli_sign_session_owner_refusals_total` (`not_session_owner` call sites in
+/// `node.rs`).
+pub const SESSION_OWNER_CALLS: &[&str] = &["round2", "abort"];
+/// The `cap` values of `rutli_sign_sessions_refused_total` (`PendingCap::as_str`).
+pub const SESSION_CAPS: &[&str] = &["key", "opener", "request"];
+/// The `loop` names of `rutli_background_loop_restarts_total`: the first argument of every
+/// `supervise::spawn_supervised` call (`RutliBackgroundLoopRestarted`); a test checks the call sites.
+pub const BACKGROUND_LOOPS: &[&str] = &["anti_entropy", "ceremony_resolver", "epoch_check", "nonce_pruner"];
 /// The `op` values of `rutli_hosted_key_ops_total` (`record_hosted_op` call sites in `service.rs`);
 /// `result` is "ok" | "error" (`RutliHostedKeyErrors`).
 pub const HOSTED_KEY_OPS_NAMES: &[&str] =
@@ -298,6 +328,8 @@ fn prime() {
     metrics::counter!(INVALID_SIGNATURE_SHARES).absolute(0);
     metrics::counter!(NONCE_MARKERS_PRUNED).absolute(0);
     metrics::counter!(ANTI_ENTROPY_REPAIRS).absolute(0);
+    metrics::counter!(GRPC_ACCEPT_ERRORS).absolute(0);
+    metrics::counter!(GRPC_HANDSHAKE_TIMEOUTS).absolute(0);
     metrics::counter!(ANTI_ENTROPY_CONFLICTS).absolute(0);
     metrics::gauge!(HOSTED_KEYS).set(0.0);
     metrics::counter!(UNREADABLE_KEY_FILES).absolute(0);
@@ -323,6 +355,15 @@ fn prime() {
     }
     for lock in LOCK_NAMES {
         metrics::counter!(LOCK_POISON_RECOVERIES, "lock" => *lock).absolute(0);
+    }
+    for call in SESSION_OWNER_CALLS {
+        metrics::counter!(SIGN_SESSION_OWNER_REFUSALS, "call" => *call).absolute(0);
+    }
+    for cap in SESSION_CAPS {
+        metrics::counter!(SIGN_SESSIONS_REFUSED, "cap" => *cap).absolute(0);
+    }
+    for name in BACKGROUND_LOOPS {
+        metrics::counter!(BACKGROUND_LOOP_RESTARTS, "loop" => *name).absolute(0);
     }
     for op in HOSTED_KEY_OPS_NAMES {
         for result in ["ok", "error"] {
@@ -373,7 +414,18 @@ pub fn describe() {
     describe_counter!(NONCE_MARKERS_PRUNED, "Burned-session nonce markers removed past their retention");
     describe_gauge!(NONCE_MARKERS, "Burned-session nonce markers on this node after the last prune pass");
     describe_counter!(LOCK_POISON_RECOVERIES, "Locks recovered after a panicking request poisoned them, by lock");
+    describe_gauge!(FD_LIMIT, "Soft open-file limit after the start-up raise");
+    describe_gauge!(GRPC_CONNECTIONS, "Open gRPC connections");
+    describe_gauge!(GRPC_CONNECTION_LIMIT, "Most gRPC connections served at once");
+    describe_counter!(GRPC_ACCEPT_ERRORS, "Failed accepts of a gRPC connection (retried)");
+    describe_counter!(GRPC_HANDSHAKE_TIMEOUTS, "gRPC connections cut for not finishing the TLS handshake in time");
+    describe_counter!(BACKGROUND_LOOP_RESTARTS, "Background loops restarted after a panic in a pass, by loop");
     describe_counter!(SIGN_ABORTS, "Aborted in-flight sign sessions (one per given-up signature)");
+    describe_counter!(
+        SIGN_SESSION_OWNER_REFUSALS,
+        "Sign round 2s and aborts refused because another caller opened the session, by call"
+    );
+    describe_counter!(SIGN_SESSIONS_REFUSED, "Sign round 1s refused by a cap on sessions waiting for round 2, by cap");
     describe_gauge!(PENDING_SIGN_SESSIONS, "In-flight round-1 sign sessions held on this node");
     describe_counter!(ANTI_ENTROPY_REPAIRS, "Hosted keys repaired by anti-entropy");
     describe_counter!(ANTI_ENTROPY_CONFLICTS, "Hosted keys with divergent material across nodes");
@@ -483,6 +535,9 @@ mod tests {
             (DELETE_INTENT_REFUSALS, one("reason", DELETE_INTENT_REASONS)),
             (HOSTED_TOMBSTONES_WRITTEN, one("how", TOMBSTONE_HOWS)),
             (LOCK_POISON_RECOVERIES, one("lock", LOCK_NAMES)),
+            (SIGN_SESSION_OWNER_REFUSALS, one("call", SESSION_OWNER_CALLS)),
+            (SIGN_SESSIONS_REFUSED, one("cap", SESSION_CAPS)),
+            (BACKGROUND_LOOP_RESTARTS, one("loop", BACKGROUND_LOOPS)),
         ];
         let mut ops = Vec::new();
         for op in HOSTED_KEY_OPS_NAMES {
@@ -692,6 +747,38 @@ mod tests {
             }
         }
         assert!(direct > 0, "no direct LOCK_POISON_RECOVERIES increment found: the scan is stale");
+    }
+
+    /// The primed label values of the sign-session refusal counters are the ones the code emits:
+    /// every `PendingCap`, and every `call` literal passed to `not_session_owner`.
+    #[test]
+    fn session_refusal_labels_match_the_code() {
+        use rutli_frost_core::session::PendingCap;
+        let caps: Vec<&str> = [PendingCap::Key, PendingCap::Opener, PendingCap::Request].map(PendingCap::as_str).into();
+        assert_eq!(caps, SESSION_CAPS);
+        let mut emitted = std::collections::BTreeSet::new();
+        for (file, src) in &crate_sources() {
+            for args in calls(src, "self.not_session_owner") {
+                emitted.insert(literal(args.first(), file).to_owned());
+            }
+        }
+        let listed: std::collections::BTreeSet<String> = SESSION_OWNER_CALLS.iter().map(|c| (*c).to_owned()).collect();
+        assert_eq!(emitted, listed, "not_session_owner call sites vs SESSION_OWNER_CALLS");
+    }
+
+    /// `BACKGROUND_LOOPS` (what `prime()` starts at 0) is exactly the set of names the background
+    /// loops are spawned under, so every loop's restart series exists before its first restart.
+    #[test]
+    fn background_loops_match_the_supervised_call_sites() {
+        let mut spawned = std::collections::BTreeSet::new();
+        for (file, src) in &crate_sources() {
+            for args in calls(src, "spawn_supervised") {
+                let what = format!("{file}: spawn_supervised(..)");
+                assert!(spawned.insert(literal(args.first(), &what).to_owned()), "{what}: a loop name is used twice");
+            }
+        }
+        let listed: std::collections::BTreeSet<String> = BACKGROUND_LOOPS.iter().map(|n| (*n).to_owned()).collect();
+        assert_eq!(spawned, listed, "rutli_background_loop_restarts_total: call sites vs BACKGROUND_LOOPS");
     }
 
     /// `TOMBSTONE_HOWS` (what `prime()` starts at 0) is exactly the set of `how` values the

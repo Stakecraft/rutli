@@ -100,6 +100,7 @@ echo "==> Building and starting TLS cosigner cluster"
 # gRPC via the compose network — avoids relying on host port binds for the assertions.
 # Proto is mounted (no gRPC reflection on the cosigner).
 GRPC_IMG=fullstorydev/grpcurl:v1.9.3
+# shellcheck disable=SC2016  # the {{ }} is a docker template, not a shell expansion
 NETWORK="$("${COMPOSE[@]}" ps -q cosigner1 | xargs docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}')"
 PROTO_ABS="$(cd frost/cosigner/proto && pwd)"
 grpc() {

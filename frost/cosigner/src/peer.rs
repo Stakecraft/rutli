@@ -215,6 +215,16 @@ impl LocalPeer {
     fn asker(&self) -> Option<String> {
         self.caller.as_ref().and_then(|c| c.index().ok()).map(|i| format!("cosigner{i}"))
     }
+
+    /// Who opens and owns the sign sessions this handle starts: the in-process leader
+    /// ([`crate::node::SessionOwner::Local`], which no remote caller can be), or the node it acts
+    /// for, by the CN the serving node would see over gRPC.
+    fn session_owner(&self) -> crate::node::SessionOwner {
+        match self.asker() {
+            Some(cn) => crate::node::SessionOwner::Peer(cn),
+            None => crate::node::SessionOwner::Local,
+        }
+    }
 }
 
 /// Wire an in-process cluster's mesh: each node reaches every other through a [`LocalPeer`]
@@ -242,7 +252,8 @@ impl PeerApi for LocalPeer {
     }
     async fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &Round1Ctx) -> Result<SigningCommitments> {
         let (key_id, session_id, ctx) = (key_id.to_owned(), session_id.to_owned(), ctx.clone());
-        self.node.blocking(move |n| n.sign_round1(&key_id, &session_id, &ctx)).await
+        let owner = self.session_owner();
+        self.node.blocking(move |n| n.sign_round1_as(&key_id, &session_id, &ctx, &owner)).await
     }
     async fn sign_round2(
         &self,
@@ -254,13 +265,13 @@ impl PeerApi for LocalPeer {
     ) -> Result<SignatureShare> {
         let (key_id, session_id) = (key_id.to_owned(), session_id.to_owned());
         let (message, commitments, digest) = (message.to_vec(), commitments.clone(), intent_digest.copied());
+        let owner = self.session_owner();
         self.node
-            .blocking(move |n| n.sign_round2_with(&key_id, &session_id, &message, &commitments, digest))
+            .blocking(move |n| n.sign_round2_as(&key_id, &session_id, &message, &commitments, digest, &owner))
             .await
     }
     async fn abort_sign(&self, key_id: &str, session_id: &str) -> Result<()> {
-        self.node.abort_sign(key_id, session_id);
-        Ok(())
+        self.node.abort_sign_as(key_id, session_id, &self.session_owner())
     }
     async fn ceremony_fence(&self, ceremony_id: &str, key_id: &str, kind: &'static str) -> Result<()> {
         self.node.ceremony_fence_from(ceremony_id, key_id, kind, self.asker().as_deref())

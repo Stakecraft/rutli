@@ -75,8 +75,41 @@ substitute for that.
   node verifies; a rollback purge removes only a key the peer created in the same still-fenced
   generation, and (since 0.4.0-rc.6) only at the request of that generation's leader (M2).
 
-**Can:** abort ceremonies and signatures it leads (the driver fails over), burn round-1 nonces,
-and refuse to forward. Availability, not integrity.
+**Can:** abort ceremonies and signatures it leads, burn round-1 nonces, and refuse to forward.
+Availability, not integrity.
+
+How the driver limits this for a signature:
+
+- The driver verifies every signature against the pinned group key. One that does not verify is
+  withheld, never released, and the driver asks the next cosigner in the same call.
+- It also asks the next cosigner when the leader is unreachable or answers any error except
+  `PERMISSION_DENIED`, `UNAUTHENTICATED`, `RESOURCE_EXHAUSTED` or `INVALID_ARGUMENT`. Those four go
+  back to Canton at once. A cosigner sends every signing-policy refusal as `PERMISSION_DENIED` and
+  a rate limit as `RESOURCE_EXHAUSTED`, so a refusal is never retried on another node.
+- Only a verified signature makes a cosigner the driver's preferred leader. A leader that fails,
+  or returns a bad signature, loses that place.
+- A leader that refuses a sign carrying a signing intent also loses that place, so the next call
+  starts at the next cosigner. This does not weaken the policy: a signature needs a quorum, and
+  each cosigner checks the intent on its own share (signer allowlist, pin, cluster, key ACL,
+  validity, approvals) and charges its own rate limit. Which node leads does not change what can
+  be signed. Keeping the lead on a refusing node would let one compromised cosigner stop every
+  sign, from startup when it is the first endpoint.
+- Two exceptions keep the lead where it is. A refusal because the intent names another cluster
+  makes the driver learn the cluster id again and retry on the same node. A refusal of a sign
+  without an intent (`frost.sign-intents = off`, no TLS, or no cluster id known) keeps the lead,
+  because then the other cosigners cannot see who asks: only the leader checks the Signer
+  allowlist, the pin and the key ACL. In that mode one compromised leader can stop signing until
+  it fails in another way.
+- Each leader that one call tries can make a node release one more signature share for that
+  intent request id, up to `max_shares_per_request` (8 by default). The rate limit is charged
+  once per request id.
+
+For other operations the driver cannot check the answer. A refusal (`RESOURCE_EXHAUSTED`,
+`PERMISSION_DENIED`, `NOT_FOUND`, ...) goes back to Canton and the node keeps the lead; only an
+unreachable or failing node (`UNAVAILABLE`, `DEADLINE_EXCEEDED`, `INTERNAL`, `UNKNOWN`) loses it. A
+DKG fails over, and loses the lead, only on `UNAVAILABLE`. After a timeout or `INTERNAL` it is not
+re-run elsewhere and the next DKG starts on the same node, because the ceremony may still be
+running there.
 
 ### A single compromised cosigner (its share, DEK, TLS key, memory)
 
@@ -109,6 +142,15 @@ refuse or corrupt its own contributions (routed around by t-subset retry, flagge
 digest within its validity (harmless, capped by `max_shares_per_request`), and refuse to propagate
 tombstones (its own copy of a deleted key stays readable to it — it already had it).
 
+It can also **lie in `KeyEpoch`**, which is unsigned. Claiming a newer epoch of a key benches an
+honest node only while no peer that holds the node's exact sharing answers (the others restarting,
+or a refresh still committing on them): the stale reason says the claim is unconfirmed, and the
+mark clears on the next pass that reaches such a peer, at most 30 s later, even if that peer was
+benched the same way. Echoing a rolled-back node's old sharing keeps that node from being marked
+stale, unless the node's own ceremony record survived the rollback; the node still cannot sign
+with honest peers on the newer epoch (round 1 refuses another epoch). Claiming to be stale by its
+own record only withdraws its own vouching, which it can do anyway by not answering.
+
 It can also **split a DKG or refresh it takes part in** (audit F3): ceremony votes are reported
 unsigned, so it can tell one honest node STAGED and the other ABORTED; one commits, the other aborts,
 and every signature then needs the liar (a refresh meant to evict it does not). With n = 3, f = 1
@@ -117,8 +159,26 @@ availability attack, never a key compromise**. It is detected (`rutli_ceremony_e
 `RutliCeremonySplit`) and recoverable: the aborted node's staged share is quarantined, and
 `ceremony recover-commit` commits it once a peer proves the sharing committed and live
 (`docs/ceremonies.md`). It can make each peer write at most a bounded number of no-vote records by
-asking about made-up ceremony ids (F2), and open at most 1024 waiting sign sessions per key (round 1
-is refused beyond). It **cannot pause signing** by fencing a key for a ceremony (since 0.4.0-rc.4: a
+asking about made-up ceremony ids (F2). It can open at most 256 sign sessions per key on each peer
+that wait for round 2 (and 20 for one signing request); beyond that, round 1 is refused for it
+alone. The key's total is 1024, so the other leaders keep at least 768 and keep signing. Up to
+0.4.0 there was only the total: with one intent it had seen, it could fill all 1024 on every node and
+stop that key's signing for 5 minutes at a time. The caps do not stop it from filling its own 256 (a
+little memory on each peer until the sessions expire), and on a plaintext mesh, where no peer is
+identified, all remote leaders share one opener's room, so one filler takes all of it. As a member of a signature it **cannot
+abort, use up or occupy another member's session** (since 0.5.0). The leader gives each member,
+its own share included, a separate random session id (122 bits from the OS CSPRNG), so the id a
+member learns names nothing on any other node: it cannot open that session there first (the
+leader's round 1 would meet a duplicate), abort it or send its round 2. Behind that, a session
+belongs to the CN of the client certificate that opened it (two certificates with one CN are one
+owner; a certificate without exactly one CN is refused at the allowlist), or to the node's own leader; a round 2 or abort
+from anyone else is refused, takes nothing and is counted (`RutliSignSessionOwnerRefused`). Up to
+0.4.0 a member could do all three, and the leader then excluded the honest node and blamed it; in
+3-of-5 that stopped every signature. What a member can still do to an attempt is fail or delay its
+own part (no answer, a refusal, a round 2 error, a bad share or commitment). The leader then
+excludes that member, and frost's share verification names it, since the commitment map is keyed
+by identifier, not by session. A 0.4.0 leader still uses one id for all members until it is
+upgraded. It **cannot pause signing** by fencing a key for a ceremony (since 0.4.0-rc.4: a
 DKG/refresh guard no longer blocks sign round 1, see `docs/ceremonies.md`, "Signing during a
 ceremony"). Up to rc.3 it could, and with no time limit: a fence that was never followed by part 1
 stopped that key's signing on the fenced nodes until they restarted. That was earlier documented as
@@ -323,6 +383,11 @@ epoch, another sharing, or a hosted key over its tombstone even with `--force`, 
 break-glass. A key file renamed to another id, copied from another node or cluster, or of another
 kind fails its v2 header check; a plaintext file under sealing stops the daemon. A genuine older
 file of the same key and node (a rollback) passes the AEAD — the epoch checks are what catch it.
+
+What stays true by design: t nodes restored to the same old sharing without their ceremony records
+(two nodes in 2-of-3) vouch for each other in the stale-share check and can sign with it, because t
+shares of any sharing are the key. A node whose record survived marks itself stale and does not
+vouch for the others (from 0.5.0; a 0.4.0 peer does not say why it is stale and still vouches).
 
 **M4 is closed only once `keyfile.accept_v1: false` on every node** (audit F10). Until then any v1
 file sealed under the node's DEK is accepted (only its in-plaintext key id and the FROST identifier

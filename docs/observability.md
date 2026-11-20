@@ -31,11 +31,13 @@ annotations, NetworkPolicy ingress for pods labelled `rutli.io/scraper: "true"`)
 | `rutli_ceremony_unknown_no_votes` | gauge | — | No-votes held for ceremony ids peers asked about that this node never knew (capped, garbage-collected after 30 days) |
 | `rutli_epoch_mismatch_total` | counter | — | Sign round-1 refusals because the leader signs with another sharing (epoch, PKP digest) of the key than this node committed (audit H1/M1): two nodes hold different epochs of one key |
 | `rutli_epoch_check_skipped_total` | counter | — | Sign round-1 requests from a leader that sent no sharing (a release before epochs), so the epoch check was skipped. Expected only during a rolling upgrade |
-| `rutli_stale_share` | gauge | `key` | `1` while this node's share of `key` is older than a committed sharing a peer holds (typically a restore from an old backup); the node refuses to sign or lead for that key. Else `0` |
+| `rutli_stale_share` | gauge | `key` | `1` while this node's share of `key` is older than a committed sharing a peer holds (typically a restore from an old backup); the node refuses to sign or lead for that key. One cosigner's claim alone can set it while no peer holding this node's sharing answers; the log's stale reason then says "unconfirmed" and the mark clears on the next pass that reaches such a peer, at most 30 s later. Else `0` |
 | `rutli_nonce_markers` | gauge | — | Burned-session nonce markers on this node after the last prune pass (audit L4); each costs an inode on the key volume, bounded by the sign rate over the retention window |
 | `rutli_nonce_markers_pruned_total` | counter | — | Burned-session nonce markers removed past their retention |
 | `rutli_sign_round1_skips_total` | counter | — | Peers skipped in sign round 1 — the quorum-margin canary: skips mean you are signing with less headroom than you deployed |
 | `rutli_sign_round2_unknown_session_total` | counter | — | Sign round 2 requests refused as an unknown signing session: the node holds no round-1 nonces for it, because it restarted or committed a ceremony between the two rounds, or the session outlived its 5-minute TTL. The peer answers `ABORTED` and the leader signs with the others. One or two at a restart or a refresh are expected; a steady rate is not (`RutliSignUnknownSessions`: more than 3 in 15 minutes). The same with a signing policy: a session the node holds no nonces for is counted here, not as a policy refusal |
+| `rutli_sign_session_owner_refusals_total` | counter | `call`=round2\|abort | Sign round 2s and aborts this node refused because another caller opened the session (since 0.5.0 a session belongs to the peer whose certificate CN opened it, or to this node's own leader). No other peer can abort or advance the session. A correct cosigner never does this: any increase names a peer to investigate (`RutliSignSessionOwnerRefused`); the log line names the caller and the owner |
+| `rutli_sign_sessions_refused_total` | counter | `cap`=key\|opener\|request | Sign round 1s refused because too many sessions wait for round 2: `opener` = one opener holds 256 for the key, `request` = one opener holds 20 for one signing request, `key` = all openers together hold 1024. Answered `UNAVAILABLE`. Only `key` stops other leaders, and it needs four openers at their caps. An honest leader holds about as many as it has signs in flight (normally a few, up to about 128 on a large participant host) and aborts the sessions of calls the driver gave up on. A leader that hears this answer tries other cosigners and does not exclude this one. Without TLS no peer is identified: all remote leaders share one opener's room, so one filler takes it all (`RutliSignSessionCapReached`); the log line names the opener |
 | `rutli_sign_aborts_total` | counter | — | Given-up signatures (leader aborted the in-flight session on the quorum) |
 | `rutli_sign_retries_total` | counter | — | Sign attempts beyond the first within one `Signer.Sign`: a t-subset failed and the leader retried with another |
 | `rutli_invalid_signature_shares_total` | counter | — | Signature shares that failed verification at aggregation (attributed to a cosigner and routed around). Any increase means a cosigner returned a bad share (`RutliInvalidSignatureShare`) |
@@ -61,7 +63,13 @@ annotations, NetworkPolicy ingress for pods labelled `rutli.io/scraper: "true"`)
 | `rutli_hosted_tombstones_written_total` | counter | `how`=converted\|recorded | Tombstones this node wrote: a live copy deleted (directly or from a peer's tombstone), or a tombstone recorded for a key it did not hold |
 | `rutli_hosted_tombstones` | gauge | `retained`=true\|false | Deleted hosted keys on this node, split by whether the tombstone still retains the material (grace period) — refreshed by the anti-entropy sweep |
 | `rutli_keyfiles` | gauge | `format`=v1\|v2\|plaintext, `dek`=current\|previous\|unknown\|none | This node's key files at start-up (audit M4): a v2 migration watches `format="v1"` reach 0, a DEK rotation watches `dek="previous"` reach 0 before the previous DEK leaves the seal bundle; `dek="unknown"` files do not open on this node |
+| `rutli_fd_limit` | gauge | — | Soft open-file limit after the start-up raise to the hard limit |
+| `rutli_grpc_connections` | gauge | — | Open gRPC connections, TLS handshake done or under way |
+| `rutli_grpc_connection_limit` | gauge | — | Most gRPC connections served at once (soft open-file limit less 256, or half of it under a limit below 512, at most 4096); past it new connections wait in the listen backlog (`RutliGrpcConnectionsNearLimit`) |
+| `rutli_grpc_accept_errors_total` | counter | — | Failed accepts that needed a backoff, usually the process out of file descriptors; the loop retries (`RutliGrpcAcceptErrors`) |
+| `rutli_grpc_handshake_timeouts_total` | counter | — | Connections cut for not finishing the TLS handshake within 5 s of accept (without TLS: for sending nothing). Clients that open TCP and then send nothing count here; a probe that connects and closes does not |
 | `rutli_lock_poison_recoveries_total` | counter | `lock` | Locks recovered after a panicking request poisoned them (audit L3). The node kept serving; the panic is a bug (`RutliLockPoisonRecovered`) |
+| `rutli_background_loop_restarts_total` | counter | `loop` (`anti_entropy`, `ceremony_resolver`, `epoch_check`, `nonce_pruner`) | Background loops restarted 30 s after a panic in a pass (`anti_entropy` then also waits its own interval before the next sweep). The loop runs again; the panic is a bug (`RutliBackgroundLoopRestarted`) |
 
 Leader-side metrics (`sign_*`, `ceremony_*`) appear on whichever node served the driver's request —
 with driver failover that can be any of them, so always aggregate across instances (`sum(...)`).
@@ -95,10 +103,21 @@ for every label value they can carry, so the first event moves a series from 0 t
 that alert on increases see it (`deploy/monitoring/prometheus-rules.yml`:
 `RutliSignPolicyRefusals`, `RutliSignIntentAbsent`, `RutliSignRateLimited`, `RutliSignerAclAbsent`,
 `RutliSignJournalErrors`, `RutliDeleteIntentRefused`, `RutliHostedKeyDeleted`,
-`RutliCeremonyIntentRefused`, `RutliCeremonyIntentAbsent`, `RutliLockPoisonRecovered`).
-`rutli_sign_round2_unknown_session_total` is primed too (`RutliSignUnknownSessions`).
+`RutliCeremonyIntentRefused`, `RutliCeremonyIntentAbsent`, `RutliLockPoisonRecovered`,
+`RutliBackgroundLoopRestarted`).
+`rutli_sign_round2_unknown_session_total` is primed too (`RutliSignUnknownSessions`), and so are
+the sign-session refusal counters for every `call` and `cap` (`RutliSignSessionOwnerRefused`,
+`RutliSignSessionCapReached`).
 `rutli_stale_share` carries a key id and cannot be primed. `rutli_keyfiles` is set
 once per start (`RutliKeyFilesUnopenable`, `RutliKeyFileMigrationPending`).
+
+Since 0.5.0 each member of a sign attempt gets its own session id, so the same signature shows a
+different session id in each node's log and journal. To follow one attempt across nodes, run the
+leader at `debug`: its `sign attempt: one session id per member` line gives an attempt id and the
+members' identifiers, and its round failure lines name the attempt and the member. It does not log
+the members' session ids (each member's id is kept from the others), and the attempt id is never
+sent to a peer. The journals and
+`audit-cross-check` match signatures by key, request id and digest, not by session id.
 
 Published latency snapshots and how to reproduce them: [`performance.md`](performance.md).
 

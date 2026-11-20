@@ -88,6 +88,7 @@ for c in $CERTS; do
     *) die "RUTLI_CERTS: unknown cert '$c' (choose among: $ALL_CERTS)" ;;
   esac
 done
+# shellcheck disable=SC2116,SC2086  # the echo collapses whitespace in the cert list
 [ -n "$(echo $CERTS)" ] || die "RUTLI_CERTS is empty"
 
 if [ -n "$PIN_CONFIGS" ]; then
@@ -173,6 +174,7 @@ gen_cert() { # name  SAN-config  extendedKeyUsage
 }
 
 wanted() { # name — is it in RUTLI_CERTS?
+  # shellcheck disable=SC2116,SC2086  # the echo collapses whitespace in the cert list
   case " $(echo $CERTS) " in *" $1 "*) return 0 ;; *) return 1 ;; esac
 }
 
@@ -278,8 +280,10 @@ fi
 CA_SHA256="$(openssl dgst -sha256 -r ca.crt | cut -c1-64)"
 echo
 if [ -n "$CA_DIR" ]; then
+  # shellcheck disable=SC2116,SC2086  # the echo collapses whitespace in the cert list
   echo "Wrote $(echo $CERTS) to $OUT, signed by the reused CA (ca.crt copied; ca.key stays in $CA_DIR)"
 else
+  # shellcheck disable=SC2116,SC2086  # the echo collapses whitespace in the cert list
   echo "Wrote a new CA + $(echo $CERTS) to $OUT"
   echo "ca.key is the root of this trust domain: escrow it offline and remove it from this machine."
 fi

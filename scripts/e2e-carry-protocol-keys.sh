@@ -37,12 +37,12 @@
 #      cosigner journals consistent (every ok sign journaled on at least two nodes).
 #
 # Requires: cargo, sbt, jq, openssl, an OpenJDK 17+ (Oracle's JDK refuses Canton's unsigned
-# BouncyCastle for Cipher; set CANTON_JAVA_HOME, default: Homebrew's openjdk).
+# BouncyCastle for Cipher; set CANTON_JAVA_HOME, otherwise JAVA_HOME, otherwise Homebrew's openjdk).
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${CANTON_HOME:?Set CANTON_HOME to an extracted Canton 3.6.1 release}"
-JAVA_HOME="${CANTON_JAVA_HOME:-/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home}"
+JAVA_HOME="${CANTON_JAVA_HOME:-${JAVA_HOME:-/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home}}"
 export JAVA_HOME
 BASE_PORT="${E2E_BASE_PORT:-19600}"
 CANTON_PORT="${E2E_CANTON_PORT:-15600}"
@@ -91,6 +91,7 @@ DEALER="$BIN/rutli-dealer"
 DRIVER_JAR="$REPO/driver/target/scala-2.13/rutli-driver.jar"
 if [ "${SKIP_BUILD:-0}" != 1 ]; then
   step "Build rutli-cosigner, rutli-dealer and the driver fat jar from the working tree"
+  # shellcheck disable=SC2086  # CARGO_FLAGS is a list of flags, split on purpose
   (cd "$REPO/frost" && cargo build ${CARGO_FLAGS:-} -p rutli-cosigner --bins)
   (cd "$REPO" && sbt -batch driver/assembly >/dev/null)
 fi
@@ -129,8 +130,8 @@ start() {
   RUST_LOG=info "$COSIGNER" --config "$WORK/c$1.json" serve >>"$WORK/node$1.log" 2>&1 &
   PIDS[$1]=$!
 }
-wait_healthy() {
-  for _ in $(seq 1 120); do
+wait_healthy() { # up to 60 s; a cold debug build on a busy runner can take a while
+  for _ in $(seq 1 240); do
     "$COSIGNER" --config "$WORK/c$1.json" health >/dev/null 2>&1 && return 0
     sleep 0.25
   done
@@ -215,7 +216,7 @@ first="$(cli --config "$WORK/operator.json" verify-hosted --key-id "$ENC_ID" --e
 echo "verify-hosted right after the import: ok=$(jq .ok <<<"$first"), $(jq -c '[.nodes[] | {identifier, present}]' <<<"$first")"
 step "   verify-hosted (operator cert) until anti-entropy has put it on every node"
 ok=""
-for _ in $(seq 1 30); do
+for _ in $(seq 1 60); do # up to 2 min; anti-entropy runs every 10 s
   rep="$(cli --config "$WORK/operator.json" verify-hosted --key-id "$ENC_ID" --expect-fingerprint "$ENC_FP" --json 2>/dev/null || true)"
   if jq -e '.ok' <<<"$rep" >/dev/null; then ok=1; break; fi
   sleep 2
@@ -233,6 +234,9 @@ P=$CANTON_PORT
 cat >"$WORK/canton.conf" <<EOF
 canton {
   parameters.non-standard-config = yes
+  // Console waits (retry_until_true, admin commands, pings) default to 1 min and 30 s. A loaded CI
+  // runner can be slower than that without anything being wrong; a real failure still fails.
+  parameters.timeouts.console { bounded = 3.minutes, ledger-command = 3.minutes, ping = 2.minutes }
   features.enable-preview-commands = yes
   sequencers.sequencer1 {
     storage.type = memory

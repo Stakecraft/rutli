@@ -65,7 +65,8 @@ enum Command {
         /// The hosted key to export (a `rutli-…` key id).
         #[arg(long)]
         key_id: String,
-        /// File to write the export artifact to.
+        /// File to write the export artifact to. It must not exist yet: the export refuses to
+        /// overwrite a file or follow a symlink.
         #[arg(long)]
         out: std::path::PathBuf,
         /// Env var holding the passphrase that protects the artifact (Argon2id + AES-256-GCM).
@@ -582,6 +583,27 @@ async fn main() -> Result<()> {
     cfg.check_peer_pins_required()?;
     cfg.check_own_peer_pin()?;
 
+    // Every connection, key file and peer channel holds a descriptor; container runtimes often
+    // start a process with a soft limit far below its hard one. Raise it, and size the gRPC
+    // connection cap from the result.
+    let fd_limit = rutli_cosigner::fdlimit::raise_nofile();
+    match fd_limit {
+        Some(l) if l.short_of_target() => tracing::warn!(
+            soft_before = l.soft_before,
+            soft = l.soft,
+            hard = l.hard,
+            target = l.target,
+            "could not raise the open-file limit to its hard limit"
+        ),
+        Some(l) if l.soft < 1024 => tracing::warn!(
+            soft = l.soft,
+            hard = l.hard,
+            "the open-file limit is low; raise the container's nofile limit (the gRPC connection cap follows it)"
+        ),
+        Some(l) => tracing::info!(soft_before = l.soft_before, soft = l.soft, hard = l.hard, "open-file limit"),
+        None => tracing::warn!("open-file limit unknown on this platform"),
+    }
+
     // One daemon per data directory, for the life of the process (released by the kernel on exit).
     // Taken first, so a second instance fails with this error rather than a port clash. The
     // offline subcommands above deliberately skip it: import-share and import-key are safe to run
@@ -592,6 +614,9 @@ async fn main() -> Result<()> {
     if let Some(metrics_listen) = &cfg.metrics_listen {
         rutli_cosigner::metrics::install(metrics_listen)?;
         tracing::info!(listen = %metrics_listen, "Prometheus metrics endpoint serving /metrics");
+    }
+    if let Some(l) = fd_limit {
+        metrics::gauge!(rutli_cosigner::metrics::FD_LIMIT).set(l.soft as f64);
     }
 
     let identifier = ident(cfg.identifier)?;
@@ -969,11 +994,11 @@ async fn main() -> Result<()> {
 
     // Anti-entropy: pull hosted keys this node lacks and push ones a peer lacks. This is what
     // heals an under-quorum write and a node restored from a stale backup, so the 2-of-3 write
-    // quorum is only safe with it running.
+    // quorum is only safe with it running, so a panic in a sweep restarts the loop.
     if let Some(h) = cfg.hosted_keys.as_ref().filter(|h| h.enabled) {
-        let (sweep_node, sweep_peers) = (node.clone(), peers.clone());
+        let sweep = (node.clone(), peers.clone());
         let interval = std::time::Duration::from_secs(h.anti_entropy_interval_secs.max(10));
-        tokio::spawn(async move {
+        rutli_cosigner::supervise::spawn_supervised("anti_entropy", sweep, move |(sweep_node, sweep_peers)| async move {
             loop {
                 tokio::time::sleep(interval).await;
                 match rutli_cosigner::orchestrator::anti_entropy_sweep(&sweep_node, &sweep_peers).await {
@@ -1034,22 +1059,66 @@ async fn main() -> Result<()> {
     let peer_pins = tls.as_ref().map(|_| PeerPins::from_config(&cfg)).transpose()?.map(Arc::new);
     let peer = PeerSvc { node, allowed_cns: peer_cns, peer_ids: Some(Arc::new(cfg.peer_identities())), peer_pins };
 
-    let addr = cfg
+    let addr: std::net::SocketAddr = cfg
         .listen
         .parse()
         .map_err(|e| DaemonError::Config(format!("bad listen addr {}: {e}", cfg.listen)))?;
-    tracing::info!(%addr, "gRPC serving Signer + Peer");
+    // Own accept loop (rutli_cosigner::accept): it never ends on an accept error, caps open
+    // connections below the descriptor limit, and gives a new connection a deadline to finish its
+    // TLS handshake (without TLS: to send its first bytes).
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .map_err(|e| DaemonError::Config(format!("cannot listen on {addr}: {e}")))?;
+    let connection_limit =
+        rutli_cosigner::accept::connection_limit(fd_limit.map_or(1024, |l| l.soft));
+    let incoming = rutli_cosigner::accept::incoming(
+        listener,
+        connection_limit,
+        rutli_cosigner::accept::Deadline::new(rutli_cosigner::accept::HANDSHAKE_TIMEOUT, tls.is_some()),
+    );
+    tracing::info!(%addr, connection_limit, "gRPC serving Signer + Peer");
 
-    let mut server = tonic::transport::Server::builder();
+    let mut server = tonic::transport::Server::builder()
+        // A peer that vanished without closing (host down, a dropped NAT entry) is found by the
+        // pings and its connection closed, instead of holding a descriptor and a slot for good.
+        .http2_keepalive_interval(Some(std::time::Duration::from_secs(60)))
+        .http2_keepalive_timeout(Some(std::time::Duration::from_secs(20)));
     if let Some(t) = &tls {
         server = server.tls_config(t.server.clone())?;
     }
-    server
+    let shutdown_requested = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let signal = {
+        // Called here, not inside the block: it installs the SIGTERM handler before serving starts.
+        let stop = shutdown();
+        let requested = Arc::clone(&shutdown_requested);
+        async move {
+            stop.await;
+            requested.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    };
+    let served = server
         .add_service(SignerServer::new(signer))
         .add_service(PeerServer::new(peer))
-        .serve_with_shutdown(addr, shutdown())
-        .await?;
-    Ok(())
+        .serve_with_incoming_shutdown(incoming, signal)
+        .await;
+    serve_outcome(served, shutdown_requested.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// How the gRPC server ended. It returns on its own only after the shutdown signal; returning
+/// without one means it stopped serving, and the process exits non-zero so the orchestrator
+/// restarts it and the stop is visible.
+fn serve_outcome(served: std::result::Result<(), tonic::transport::Error>, shutdown_requested: bool) -> Result<()> {
+    match served {
+        Ok(()) if shutdown_requested => Ok(()),
+        Ok(()) => {
+            tracing::error!("the gRPC server stopped without a shutdown request; exiting non-zero");
+            Err(DaemonError::Io(std::io::Error::other("the gRPC server stopped without a shutdown request")))
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "the gRPC server failed");
+            Err(e.into())
+        }
+    }
 }
 
 fn audit_cross_check_command(
@@ -2257,8 +2326,13 @@ fn write_new_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     let mut f = rutli_cosigner::share_delivery::private_create_new(path).map_err(|e| {
         DaemonError::Config(format!("cannot create {} (refusing to overwrite): {e}", path.display()))
     })?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
+    if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
+        // The file is ours (create_new): remove the partial copy, so a retry with the same path is
+        // not refused as an overwrite.
+        drop(f);
+        let _ = std::fs::remove_file(path);
+        return Err(e.into());
+    }
     Ok(())
 }
 
@@ -2434,14 +2508,17 @@ fn export_key_command(
                     .into(),
             )
         })?;
-        let passphrase = std::env::var(env_name).map_err(|_| {
+        // Wiped on drop, like the import path's passphrase.
+        let passphrase = zeroize::Zeroizing::new(std::env::var(env_name).map_err(|_| {
             DaemonError::Config(format!("export passphrase: env var {env_name} is not set"))
-        })?;
+        })?);
         rutli_cosigner::export::export_encrypted(key_id, &key, &passphrase)?
     };
 
-    // 0600 before any bytes land: an export must never be briefly world-readable.
-    write_private_file(out, &serde_json::to_vec_pretty(&envelope)?)?;
+    // A new file, 0600 before any bytes land: an export must never be briefly world-readable. The
+    // mode only applies to a file this call creates, so an existing path (with whatever mode it
+    // has) or a symlink is refused, never written through.
+    write_new_private_file(out, &serde_json::to_vec_pretty(&envelope)?)?;
     // Deliberately audible in the node's log: an export is a privileged, rare event, and the log is
     // often the only record that a portable copy of a key now exists.
     tracing::warn!(
@@ -2541,23 +2618,6 @@ fn import_key_command(
     Ok(())
 }
 
-/// Create `path` with owner-only permissions BEFORE writing, so the contents are never briefly
-/// readable by other users on the host.
-fn write_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        opts.mode(0o600);
-    }
-    let mut f = opts.open(path)?;
-    f.write_all(bytes)?;
-    f.sync_all()?;
-    Ok(())
-}
-
 /// Copy regular files from `src` to `dst`. When `!overwrite`, existing destination files are an
 /// error (so a restore never clobbers a live share by accident).
 ///
@@ -2619,14 +2679,62 @@ fn identifier_index(id: Identifier) -> Vec<u8> {
     id.serialize()
 }
 
-async fn shutdown() {
-    let _ = tokio::signal::ctrl_c().await;
-    tracing::info!("shutdown signal received");
+/// Resolves on SIGINT or SIGTERM. SIGTERM matters most: Kubernetes stops a pod with it, and the
+/// cosigner runs as PID 1 in its image, where the kernel ignores a signal that has no handler, so
+/// without this every pod stop waited out the grace period and ended in SIGKILL with no drain.
+/// A signal that cannot be registered is logged and never resolves: it must not stop the server.
+///
+/// The SIGTERM handler is installed when this is called (inside the runtime), not on first poll, so
+/// from that point on a SIGTERM is caught rather than fatal.
+fn shutdown() -> impl std::future::Future<Output = ()> {
+    #[cfg(unix)]
+    let term = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(term) => Some(term),
+        Err(e) => {
+            tracing::error!(error = %e, "cannot listen for SIGTERM");
+            None
+        }
+    };
+    async move {
+        let interrupt = async {
+            match tokio::signal::ctrl_c().await {
+                Ok(()) => "SIGINT",
+                Err(e) => {
+                    tracing::error!(error = %e, "cannot listen for SIGINT");
+                    std::future::pending().await
+                }
+            }
+        };
+        #[cfg(unix)]
+        let terminate = async move {
+            match term {
+                Some(mut term) => {
+                    term.recv().await;
+                    "SIGTERM"
+                }
+                None => std::future::pending().await,
+            }
+        };
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<&str>();
+        let signal = tokio::select! {
+            s = interrupt => s,
+            s = terminate => s,
+        };
+        tracing::info!(signal, "shutdown signal received, draining in-flight requests");
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_server_that_returns_without_a_shutdown_request_is_an_error() {
+        assert!(serve_outcome(Ok(()), true).is_ok(), "after the signal: a clean stop");
+        let e = serve_outcome(Ok(()), false).expect_err("without the signal: an error, so a non-zero exit");
+        assert!(e.to_string().contains("without a shutdown request"), "{e}");
+    }
 
     #[test]
     fn ansi_only_on_a_terminal_and_without_no_color() {
@@ -2661,5 +2769,25 @@ mod tests {
         assert_eq!(copy_journal(&src, &dst).unwrap(), 1);
         assert!(dst.join("frost-k").join("00000000000000000001.jsonl").exists());
         assert!(!dst.join("frost-k").join("not-a-segment.tmp").exists());
+    }
+
+    /// Kubernetes stops a pod with SIGTERM, and the cosigner is PID 1 in its image: without a
+    /// handler the signal is ignored and the pod is SIGKILLed after the grace period.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn sigterm_starts_a_graceful_shutdown() {
+        // `shutdown()` installs the SIGTERM handler before it returns, so the signal below is
+        // caught, not fatal to the test process. The signal is process-wide; it is safe here
+        // because no other test in this binary installs or expects a signal handler.
+        let stopped = tokio::spawn(shutdown());
+        let kill = std::process::Command::new("kill")
+            .args(["-TERM", &std::process::id().to_string()])
+            .status()
+            .unwrap();
+        assert!(kill.success());
+        tokio::time::timeout(std::time::Duration::from_secs(10), stopped)
+            .await
+            .expect("SIGTERM must resolve the shutdown future")
+            .unwrap();
     }
 }

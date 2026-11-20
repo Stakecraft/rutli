@@ -44,12 +44,12 @@
 #      every node (the tombstone included) is v2, and the audit cross-check still agrees.
 #
 # Requires: cargo, sbt, jq, openssl, an OpenJDK 17+ (Oracle's JDK refuses Canton's unsigned
-# BouncyCastle for Cipher; set CANTON_JAVA_HOME, default: Homebrew's openjdk).
+# BouncyCastle for Cipher; set CANTON_JAVA_HOME, otherwise JAVA_HOME, otherwise Homebrew's openjdk).
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${CANTON_HOME:?Set CANTON_HOME to an extracted Canton 3.6.1 release}"
-JAVA_HOME="${CANTON_JAVA_HOME:-/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home}"
+JAVA_HOME="${CANTON_JAVA_HOME:-${JAVA_HOME:-/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home}}"
 export JAVA_HOME
 BASE_PORT="${E2E_BASE_PORT:-19300}"
 CANTON_PORT="${E2E_CANTON_PORT:-15300}"
@@ -92,6 +92,7 @@ COSIGNER="$BIN/rutli-cosigner"
 DRIVER_JAR="$REPO/driver/target/scala-2.13/rutli-driver.jar"
 if [ "${SKIP_BUILD:-0}" != 1 ]; then
   step "Build rutli-cosigner and the driver fat jar from the working tree"
+  # shellcheck disable=SC2086  # CARGO_FLAGS is a list of flags, split on purpose
   (cd "$REPO/frost" && cargo build ${CARGO_FLAGS:-} -p rutli-cosigner --bins)
   (cd "$REPO" && sbt -batch driver/assembly >/dev/null)
 fi
@@ -108,7 +109,7 @@ DRIVER_PIN="$(openssl x509 -in "$WORK/certs/driver.crt" -noout -pubkey | openssl
   | openssl dgst -sha256 -hex | awk '{print $NF}')"
 # E: key-file v2 only (one cluster_uuid for the cluster), and the driver on the delete role for this
 # run's prefix.
-CLUSTER_UUID="$(uuidgen | tr 'A-Z' 'a-z')"
+CLUSTER_UUID="$( (uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid) | tr '[:upper:]' '[:lower:]')"
 for i in 1 2 3; do
   jq --arg work "$WORK" --argjson base "$BASE_PORT" --arg cert "cosigner$i" --arg pin "$DRIVER_PIN" \
     --arg v2 "$V2_DELETES" --arg uuid "$CLUSTER_UUID" --arg prefix "$PREFIX" '
@@ -138,10 +139,10 @@ grep -q "ec-p256-ecies" "$WORK/import.out" || fail "import-key did not report an
 step "Start three cosigners"
 for i in 1 2 3; do
   RUST_LOG=info "$COSIGNER" --config "$WORK/c$i.json" serve >>"$WORK/node$i.log" 2>&1 &
-  PIDS[$i]=$!
+  PIDS[i]=$!
 done
 for i in 1 2 3; do
-  for _ in $(seq 1 120); do
+  for _ in $(seq 1 240); do # up to 60 s
     "$COSIGNER" --config "$WORK/c$i.json" health >/dev/null 2>&1 && break
     sleep 0.25
   done
@@ -153,6 +154,9 @@ P=$CANTON_PORT
 cat >"$WORK/canton.conf" <<EOF
 canton {
   parameters.non-standard-config = yes
+  // Console waits (retry_until_true, admin commands, pings) default to 1 min and 30 s. A loaded CI
+  // runner can be slower than that without anything being wrong; a real failure still fails.
+  parameters.timeouts.console { bounded = 3.minutes, ledger-command = 3.minutes, ping = 2.minutes }
   features.enable-preview-commands = yes
   sequencers.sequencer1 {
     storage.type = memory
@@ -316,7 +320,7 @@ if [ "$V2_DELETES" = 1 ]; then
     tombstoned() {
       grep -F "$DELETED" "$WORK/node$i.log" | grep -q -e "replaced by a tombstone" -e "applied a peer's tombstone"
     }
-    for _ in $(seq 1 60); do tombstoned && break; sleep 0.5; done
+    for _ in $(seq 1 120); do tombstoned && break; sleep 0.5; done
     tombstoned || fail "node $i never tombstoned $DELETED"
     "$COSIGNER" --config "$WORK/c$i.json" keyfile status >"$WORK/keyfile$i.txt" 2>&1 || fail "keyfile status on node $i: $(cat "$WORK/keyfile$i.txt")"
     grep -q "writes v2" "$WORK/keyfile$i.txt" || fail "node $i does not write v2"
@@ -344,7 +348,7 @@ if [ "${SKIP_DOWN:-0}" != 1 ]; then
   ) &
   DOWN_PID=$!
   verdict=""
-  for _ in $(seq 1 240); do
+  for _ in $(seq 1 600); do # up to 5 min for a JVM start and Canton's init; ends at the first verdict
     if grep -qh "not supported by the KMS" "$WORK"/down*.log "$WORK/down.out" 2>/dev/null; then verdict=refused; break; fi
     if grep -qh "initiating distributed key generation for e2e2-" "$WORK"/down*.log 2>/dev/null; then verdict=past-crypto-init; break; fi
     kill -0 "$DOWN_PID" 2>/dev/null || { verdict=exited; break; }

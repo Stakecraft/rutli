@@ -412,7 +412,7 @@ fn in_flight_sign_sessions_are_freed_on_completion_and_abort() {
     assert_eq!(c.pending_count(), 3);
 
     // Aborting a session frees its RAM nonces (leader gave up / timed out).
-    c.abort("s2");
+    c.abort_as("s2", &rutli_frost_core::session::SessionOwner::Local).unwrap();
     assert_eq!(c.pending_count(), 2);
 
     // A completed 2-of-3 signature consumes the leader's pending session (round2 removes it).
