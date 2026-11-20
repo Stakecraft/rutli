@@ -26,6 +26,7 @@ WATCHED = [
     "Load test",
     "Cluster suite (kind)",
     "Image build check",
+    "Generated code",
 ]
 
 TITLE = "main is red"

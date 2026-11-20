@@ -26,6 +26,7 @@ on:
       - Load test
       - Cluster suite (kind)
       - Image build check
+      - Generated code
     types: [completed]
     branches: [main]
   # Only to run the script's tests when it or the workflows change.
