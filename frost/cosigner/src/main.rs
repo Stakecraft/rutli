@@ -120,6 +120,26 @@ enum Command {
     /// Exit 0: no required finding; 1: required findings; 2: the config does not load. Works under
     /// any `profile`, so run it against the live config before an upgrade.
     CheckConfig,
+    /// Read-only inventory of key material on this node's volume and in the given backups that is
+    /// not its live, current state (docs/residue-scan.md): plaintext files, files under a DEK other
+    /// than the current one, older epochs, key ids that are not live, orphaned staged shares,
+    /// ceremony material, hosted-key and tombstone copies, temps and unknown directories. Safe next
+    /// to a running daemon: takes no lock and writes nothing. It reports what is found on the paths
+    /// given, never that a key is destroyed. Exit 0: nothing found on the paths given; 1: findings;
+    /// 2: a path could not be read, or the config or seal keys do not load.
+    ResidueScan {
+        /// A backup to read as well: a directory, a plain (uncompressed) tar, or one key file.
+        /// Repeat for more.
+        #[arg(long, value_name = "DIR|TAR")]
+        backup: Vec<std::path::PathBuf>,
+        /// Env var holding the legacy shared master: report whether this node's DEK (or a previous
+        /// one) is still the master's derivation. Refuses an unset, empty or short value.
+        #[arg(long, value_name = "VAR")]
+        legacy_master_env: Option<String>,
+        /// Print the report as JSON (docs/residue-scan.md has the schema).
+        #[arg(long)]
+        json: bool,
+    },
     /// Restore this node's key files from a backup directory (audit M1). Run with the daemon
     /// STOPPED (the instance lock is taken). Every file is verified first — sealed, bound to this
     /// cluster/node/key (key-file v2), consistent — and one refusal writes nothing. Never rolls a
@@ -507,6 +527,9 @@ async fn main() -> Result<()> {
     })?;
     if let Some(Command::CheckConfig) = args.command {
         check_config_command(&config_path);
+    }
+    if let Some(Command::ResidueScan { backup, legacy_master_env, json }) = &args.command {
+        residue_scan_command(&config_path, backup, legacy_master_env.as_deref(), *json);
     }
     // Printed with Display, not as main's `Error: Config("…")` debug dump: an operator reading a
     // crash loop must see which file and which key in one plain line.
@@ -1872,6 +1895,53 @@ fn append_sources(out: &mut String, mut source: Option<&(dyn std::error::Error +
         }
         source = e.source();
     }
+}
+
+/// `residue-scan`: see [`Command::ResidueScan`] and [`rutli_cosigner::residue`]. Exits the process.
+fn residue_scan_command(
+    config_path: &std::path::Path,
+    backups: &[std::path::PathBuf],
+    legacy_master_env: Option<&str>,
+    json: bool,
+) -> ! {
+    let fail = |msg: String| -> ! {
+        eprintln!("rutli-cosigner residue-scan: {msg}");
+        std::process::exit(2)
+    };
+    let cfg = Config::load(config_path).unwrap_or_else(|e| fail(e.to_string()));
+    let sealer = match &cfg.share_seal {
+        Some(seal_cfg) => match rutli_cosigner::seal::SealKeys::load(seal_cfg, cfg.identifier) {
+            Ok(keys) => Some(keys.sealer(cfg.identifier).with_keyfile(&cfg.keyfile)),
+            Err(e) => fail(format!("the seal keys do not load: {e}")),
+        },
+        None => None,
+    };
+    // The master is read, derived and dropped here; only this node's derived DEK goes on, in a
+    // wiped buffer, and it is compared in constant time.
+    let legacy_dek = legacy_master_env.map(|var| {
+        let master = rutli_cosigner::seal::read_master_env(var)
+            .unwrap_or_else(|e| fail(format!("--legacy-master-env: {e}")));
+        rutli_cosigner::seal::derive_share_dek(master.as_bytes(), cfg.identifier)
+    });
+    let input = rutli_cosigner::residue::ScanInput {
+        data_dir: &cfg.data_dir,
+        node: cfg.identifier,
+        cluster_uuid: cfg.keyfile.cluster_uuid.as_deref(),
+        sealer: sealer.as_ref(),
+        backups,
+        legacy_dek,
+        config_names_secret_env: cfg.share_seal.as_ref().is_some_and(|s| s.secret_env.is_some()),
+    };
+    let report = rutli_cosigner::residue::scan(&input);
+    if json {
+        match serde_json::to_string_pretty(&report) {
+            Ok(s) => println!("{s}"),
+            Err(e) => fail(e.to_string()),
+        }
+    } else {
+        print!("{}", report.text());
+    }
+    std::process::exit(report.exit_code())
 }
 
 /// Back up the (sealed) key-share files from data_dir/keys to `out`. Shares are encrypted at rest

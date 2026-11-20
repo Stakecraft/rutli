@@ -77,6 +77,20 @@ struct Cli {
     /// Longest wait for one answer from one cosigner.
     #[arg(long, default_value_t = 30)]
     timeout_secs: u64,
+    /// The driver's policy for calls that fail over other than signatures (ECDH): each attempt at
+    /// one cosigner gets this deadline, and on it the call moves to the next cosigner. Default:
+    /// --timeout-secs. The driver uses 10 s (frost.attempt-timeout).
+    #[arg(long)]
+    attempt_timeout_secs: Option<f64>,
+    /// The same for signatures, which move on with the same intent. Default:
+    /// --attempt-timeout-secs. The driver uses 5 s (frost.sign-attempt-timeout).
+    #[arg(long)]
+    sign_attempt_timeout_secs: Option<f64>,
+    /// The driver's budget for one call across all its attempts: each attempt's deadline is cut
+    /// to what is left of it, and no attempt starts with less than 50 ms left (the call then ends
+    /// with DEADLINE_EXCEEDED). Default: none. The driver uses 30 s (frost.request-timeout).
+    #[arg(long)]
+    request_timeout_secs: Option<f64>,
     #[command(subcommand)]
     command: Command,
 }
@@ -206,11 +220,18 @@ struct Ctx {
     signer: NodeSigner,
     metrics: Vec<(String, String)>,
     timeout: Duration,
+    /// The deadline of one attempt of a call that fails over (signatures, and other calls), and
+    /// the call's budget across its attempts (None: no budget).
+    sign_attempt: Duration,
+    attempt: Duration,
+    budget: Option<Duration>,
 }
 
 impl Ctx {
     fn new(cli: &Cli) -> Result<Self, Fail> {
         let read = |p: &PathBuf| std::fs::read(p).map_err(|e| format!("cannot read {}: {e}", p.display()));
+        let attempt = positive_secs(cli.attempt_timeout_secs, "--attempt-timeout-secs")?
+            .unwrap_or(Duration::from_secs(cli.timeout_secs.max(1)));
         let tls = ClientTlsConfig::new()
             .ca_certificate(Certificate::from_pem(read(&cli.ca)?))
             .identity(Identity::from_pem(read(&cli.cert)?, read(&cli.key)?));
@@ -221,6 +242,9 @@ impl Ctx {
             signer,
             metrics: cli.metrics.clone(),
             timeout: Duration::from_secs(cli.timeout_secs.max(1)),
+            attempt,
+            sign_attempt: positive_secs(cli.sign_attempt_timeout_secs, "--sign-attempt-timeout-secs")?.unwrap_or(attempt),
+            budget: positive_secs(cli.request_timeout_secs, "--request-timeout-secs")?,
         })
     }
 
@@ -238,8 +262,10 @@ impl Ctx {
     /// A client for target `i`, connected now: how long the connection (TCP and TLS) took, or why
     /// it failed.
     async fn connect_now(&self, i: usize) -> (Result<SignerClient<Channel>, String>, Duration) {
-        let (name, url) = &self.targets[i];
         let begun = Instant::now();
+        let Some((name, url)) = self.targets.get(i) else {
+            return (Err(format!("no target {i}")), begun.elapsed());
+        };
         let endpoint = match Endpoint::from_shared(url.clone())
             .map_err(|e| e.to_string())
             .and_then(|e| e.connect_timeout(self.timeout).tls_config(self.tls.clone().domain_name(name.clone())).map_err(|e| e.to_string()))
@@ -303,6 +329,29 @@ struct Route {
     leader: Option<usize>,
 }
 
+/// A seconds flag as a Duration; it must be positive.
+fn positive_secs(value: Option<f64>, flag: &str) -> Result<Option<Duration>, Fail> {
+    match value {
+        None => Ok(None),
+        Some(v) if v.is_finite() && v > 0.0 => Ok(Some(Duration::from_secs_f64(v))),
+        Some(v) => Err(format!("{flag} must be a positive number of seconds, got {v}").into()),
+    }
+}
+
+/// No attempt starts with less than this left of the call's budget (the driver's MinAttempt).
+const MIN_ATTEMPT: Duration = Duration::from_millis(50);
+
+/// The deadline of the next attempt: `limit`, cut to what is left of `budget` after `elapsed`;
+/// `None` when the budget is spent (less than [`MIN_ATTEMPT`] left) after at least one attempt.
+/// The first attempt always runs.
+fn attempt_deadline(limit: Duration, budget: Option<Duration>, elapsed: Duration, tried: usize) -> Option<Duration> {
+    match budget.map(|b| b.saturating_sub(elapsed)) {
+        None => Some(limit),
+        Some(left) if tried > 0 && left < MIN_ATTEMPT => None,
+        Some(left) => Some(limit.min(left)),
+    }
+}
+
 /// A ceremony answer a client retries: ABORTED (another ceremony holds the key), or a leader's
 /// INTERNAL that carries a member's "already in progress" (#146).
 fn contended(s: &tonic::Status) -> bool {
@@ -318,11 +367,15 @@ fn backoff(attempt: u32) -> Duration {
 
 impl Client {
     /// Run `call` against the leader; while the answer is [`not_serving`] and `failover` is on,
-    /// move to the next cosigner and stay there. Returns the final answer and its [`Route`].
+    /// move to the next cosigner and stay there. One attempt at a time, each with the deadline
+    /// `limit`, cut to what is left of `budget` (the whole call's, across attempts) if there is
+    /// one: the driver's policy (`FrostBackend.withCheckedFailover`). Returns the final answer and
+    /// its [`Route`].
     async fn call<T, Fut>(
         &self,
         failover: bool,
         limit: Duration,
+        budget: Option<Duration>,
         call: impl Fn(SignerClient<Channel>) -> Fut,
     ) -> (Result<T, tonic::Status>, Route)
     where
@@ -331,12 +384,21 @@ impl Client {
         let n = self.conns.len();
         let mut moves = Vec::new();
         let mut at = self.leader.load(Ordering::Relaxed) % n;
+        let began = Instant::now();
         loop {
+            let Some(deadline) = attempt_deadline(limit, budget, began.elapsed(), moves.len()) else {
+                let spent = tonic::Status::deadline_exceeded(format!(
+                    "request timeout {} s spent after {} cosigner(s)",
+                    budget.unwrap_or_default().as_secs_f64(),
+                    moves.len()
+                ));
+                return (Err(spent), Route { failovers: moves, leader: Some(at) });
+            };
             // `at` is reduced modulo `n = conns.len()` (one connection per --target, which clap
             // requires), here and at every step below, so it is in range.
             #[allow(clippy::indexing_slicing)]
             let conn = self.conns[at].clone();
-            match bounded(limit, call(conn)).await {
+            match bounded(deadline, call(conn)).await {
                 Err(status) if failover && not_serving(&status) && moves.len() + 1 < n => {
                     moves.push(code_name(status.code()));
                     at = (at + 1) % n;
@@ -390,7 +452,13 @@ impl Run {
 
     /// One request, number `seq` of the run, through `client`. Recorded when it returns.
     async fn request(&self, client: &Client, seq: u64) {
-        let limit = self.ctx.timeout;
+        // Calls that fail over get the driver's per-attempt deadline and budget; a ceremony gets
+        // one attempt with the whole timeout, as the driver gives it.
+        let (limit, budget) = match self.op {
+            Op::Sign { .. } => (self.ctx.sign_attempt, self.ctx.budget),
+            _ if self.op.may_fail_over() => (self.ctx.attempt, self.ctx.budget),
+            _ => (self.ctx.timeout, None),
+        };
         let failover = self.failover && self.op.may_fail_over();
         let at = self.started.elapsed();
         let begun = Instant::now();
@@ -425,7 +493,7 @@ impl Run {
                         let request =
                             pb::SignRequest { key_id: key_id.clone(), message: message.clone(), intent: Some(signed) };
                         let (answer, moves) = client
-                            .call(failover, limit, |mut c| {
+                            .call(failover, limit, budget, |mut c| {
                                 let request = request.clone();
                                 async move { c.sign(request).await }
                             })
@@ -437,7 +505,7 @@ impl Run {
             Op::Ecdh { key_id, peer_point, expected } => {
                 let request = pb::EcdhDeriveRequest { key_id: key_id.clone(), peer_point: peer_point.clone() };
                 let (answer, moves) = client
-                    .call(failover, limit, |mut c| {
+                    .call(failover, limit, budget, |mut c| {
                         let request = request.clone();
                         async move { c.ecdh_derive(request).await }
                     })
@@ -472,7 +540,7 @@ impl Run {
                     };
                     let request = pb::DkgRequest { key_id: key_id.clone(), intent: Some(signed) };
                     let (answer, moves) = client
-                        .call(false, limit, |mut c| {
+                        .call(false, limit, budget, |mut c| {
                             let request = request.clone();
                             async move { c.dkg(request).await }
                         })
@@ -510,7 +578,7 @@ impl Run {
                 Ok(signed) => {
                     let request = pb::RefreshRequest { key_id: key_id.clone(), intent: Some(signed) };
                     let (answer, moves) = client
-                        .call(false, limit, |mut c| {
+                        .call(false, limit, budget, |mut c| {
                             let request = request.clone();
                             async move { c.refresh(request).await }
                         })
@@ -593,7 +661,10 @@ async fn generate(run: Arc<Run>, load: &Load) -> Result<stats::ClientReport, Fai
             }
         }
         for (i, first, conn) in connected {
-            Arc::get_mut(&mut clients[i]).expect("not shared yet").conns[first] = conn;
+            let client = clients.get_mut(i).and_then(Arc::get_mut).expect("one client per index, not shared yet");
+            if let Some(slot) = client.conns.get_mut(first) {
+                *slot = conn;
+            }
         }
         connect_report = Some(stats::ConnectReport { latency: stats::latency_of(&mut micros), errors, error_sample: sample });
     }
@@ -778,6 +849,10 @@ struct LoadReport {
     rate: f64,
     clients: usize,
     failover: bool,
+    /// The client's deadline policy for calls that fail over (seconds; budget null: none).
+    sign_attempt_timeout_secs: f64,
+    attempt_timeout_secs: f64,
+    request_timeout_secs: Option<f64>,
     client: stats::ClientReport,
     server: prom::ServerReport,
     /// Health of every cosigner right after the run.
@@ -821,6 +896,9 @@ async fn load_command(ctx: Arc<Ctx>, command: &'static str, op: Op, cluster: Str
         rate: load.rate,
         clients: load.clients,
         failover,
+        sign_attempt_timeout_secs: ctx.sign_attempt.as_secs_f64(),
+        attempt_timeout_secs: ctx.attempt.as_secs_f64(),
+        request_timeout_secs: ctx.budget.map(|b| b.as_secs_f64()),
         client,
         server,
         health: health(&ctx).await,
@@ -1090,6 +1168,25 @@ mod tests {
         assert!(name_value("https://cosigner1:9101").is_err());
         assert!(name_value("=url").is_err());
         assert!(name_value("name=").is_err());
+    }
+
+    #[test]
+    fn attempts_follow_the_drivers_deadline_policy() {
+        let s = Duration::from_secs;
+        // No budget: every attempt gets the full attempt deadline.
+        assert_eq!(attempt_deadline(s(5), None, s(100), 2), Some(s(5)));
+        // 30 s budget: 5 s attempts until less than 5 s is left, then what is left.
+        assert_eq!(attempt_deadline(s(5), Some(s(30)), s(0), 0), Some(s(5)));
+        assert_eq!(attempt_deadline(s(5), Some(s(30)), s(27), 2), Some(s(3)));
+        // Spent (under 50 ms left) after an attempt: no further attempt.
+        assert_eq!(attempt_deadline(s(5), Some(s(30)), Duration::from_millis(29_960), 1), None);
+        assert_eq!(attempt_deadline(s(5), Some(s(30)), s(31), 1), None);
+        // The first attempt always runs, even on a spent budget (with what is left: nothing).
+        assert_eq!(attempt_deadline(s(5), Some(s(30)), s(31), 0), Some(Duration::ZERO));
+        assert!(positive_secs(Some(0.0), "--x").is_err());
+        assert!(positive_secs(Some(-1.0), "--x").is_err());
+        assert_eq!(positive_secs(Some(0.5), "--x").unwrap(), Some(Duration::from_millis(500)));
+        assert_eq!(positive_secs(None, "--x").unwrap(), None);
     }
 
     #[test]
