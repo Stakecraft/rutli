@@ -96,6 +96,8 @@ groups:
         # The chart's per-node StatefulSets use updateStrategy OnDelete: `helm upgrade` changes the
         # pod template but restarts nothing, so a cosigner runs the old image until
         # scripts/upgrade-cosigners.sh rolls it. updated < replicas is that gap (kube-state-metrics).
+        # The selector matches the default StatefulSet names (<release>-rutli-cosigner-n<id>); with a
+        # fullnameOverride or nameOverride, change it.
         expr: |
           kube_statefulset_status_replicas_updated{statefulset=~".*rutli-cosigner.*"}
             < kube_statefulset_replicas{statefulset=~".*rutli-cosigner.*"}

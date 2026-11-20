@@ -112,14 +112,13 @@ same command again after a stop. `--only 2` rolls one node.
   and the gRPC port accepts connections. It does not prove that the peer connections are back, so the
   script also waits `--settle` (default 120 s). The mesh was measured back within 2 s of a restart, so
   120 s is a wide margin on 0.5. On 0.4.x, where a freshly restarted cosigner can drop one sign
-  session (fixed in 0.5), use `--settle 300`, as `docs/runbook-migration-inplace.md` does.
+  session (fixed in 0.5), use `--settle 300` (the in-place migration runbook, `docs/runbook-migration-inplace.md`, waits five minutes between nodes for the same reason).
 - **A node that is not Ready** (an upgrade is sometimes the repair): the script refuses unless every
   node is Ready. `--allow-degraded` rolls that one node first and still never takes a second node
   down. With two nodes not Ready it refuses in every case: one more restart would leave no quorum.
 - **PodDisruptionBudget.** `minAvailable: 2` over all three pods guards voluntary evictions, that is
   node drains: a drain can take at most one cosigner. It does not gate StatefulSet updates or
-  `kubectl delete pod`; the script's own checks do. `podDisruptionBudget.unhealthyPodEvictionPolicy:
-  AlwaysAllow` lets a drain evict a pod that is not Ready, so one stuck cosigner cannot block a drain.
+  `kubectl delete pod`; the script's own checks do.
 - **Legacy topology.** The single StatefulSet already rolls its pods one at a time and does not get
   `updateStrategy` from the chart.
 - **`updateStrategy.type=RollingUpdate`** restores the old behaviour (all three at once, signing stops

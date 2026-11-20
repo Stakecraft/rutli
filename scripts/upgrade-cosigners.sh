@@ -72,7 +72,7 @@ k() { "$KUBECTL" -n "$NS" "$@"; }
 SEL="app.kubernetes.io/part-of=rutli,rutli.io/node"
 [ -z "$RELEASE" ] || SEL="app.kubernetes.io/instance=$RELEASE,$SEL"
 
-# One line per node, ordered by id: id, statefulset, updateStrategy, target revision,
+# One line per node, ordered by id, fields joined by "|": id, statefulset, updateStrategy, target revision,
 # "controller has observed the latest spec", target image.
 sts_table() {
   k get sts -l "$SEL" -o json | jq -r '
@@ -80,28 +80,35 @@ sts_table() {
                  strat: .spec.updateStrategy.type, rev: (.status.updateRevision // ""),
                  seen: ((.status.observedGeneration // 0) == .metadata.generation),
                  image: ([.spec.template.spec.containers[] | select(.name == "cosigner") | .image][0] // "")}]
-    | sort_by(.id)[] | [.id, .name, .strat, .rev, .seen, .image] | @tsv'
+    | sort_by(.id)[] | [.id, .name, .strat, .rev, .seen, .image] | map(tostring) | join("|")'
 }
 
-# For one pod: uid, revision, ready, running image. Empty when the pod does not exist.
+# For one pod ("|"-joined): uid, revision, ready, running image. Empty when the pod does not exist.
 pod_row() {
   local json
   json="$(k get pod "$1-0" -o json --ignore-not-found)" || return 0
   [ -n "$json" ] || return 0
   jq -r '[.metadata.uid, (.metadata.labels["controller-revision-hash"] // ""),
           (([.status.conditions[]? | select(.type == "Ready") | .status == "True"][0]) // false),
-          ([.spec.containers[] | select(.name == "cosigner") | .image][0] // "")] | @tsv' <<<"$json"
+          ([.spec.containers[] | select(.name == "cosigner") | .image][0] // "")] | map(tostring) | join("|")' <<<"$json"
 }
 
 IDS=(); NAMES=(); STRATS=(); REVS=(); IMAGES=()
 load_nodes() {
   IDS=(); NAMES=(); STRATS=(); REVS=(); IMAGES=()
   local id name strat rev seen image
-  while IFS=$'\t' read -r id name strat rev seen image; do
-    [ "$seen" = true ] || die "StatefulSet $name has not been observed by its controller yet; run again in a few seconds"
+  local table tries=0
+  # Right after `helm upgrade` the StatefulSet controller may not have caught up: retry for ~30 s.
+  while :; do
+    table="$(sts_table)"
+    if [ -n "$table" ] && ! grep -q '|false|' <<<"$table"; then break; fi
+    tries=$((tries + 1))
+    [ "$tries" -lt 15 ] || die "no cosigner StatefulSets in namespace $NS (selector: $SEL), or their controller has not observed the latest spec yet; run again in a few seconds"
+    sleep 2
+  done
+  while IFS='|' read -r id name strat rev seen image; do
     IDS+=("$id"); NAMES+=("$name"); STRATS+=("$strat"); REVS+=("$rev"); IMAGES+=("$image")
-  done < <(sts_table)
-  [ "${#IDS[@]}" -gt 0 ] || die "no cosigner StatefulSets found in namespace $NS (selector: $SEL)"
+  done <<<"$table"
 }
 
 # State of node index $1: sets P_UID P_REV P_READY P_IMAGE.
@@ -109,7 +116,7 @@ read_pod() {
   P_UID=""; P_REV=""; P_READY=false; P_IMAGE=""
   local row
   row="$(pod_row "${NAMES[$1]}")"
-  [ -z "$row" ] || IFS=$'\t' read -r P_UID P_REV P_READY P_IMAGE <<<"$row"
+  [ -z "$row" ] || IFS='|' read -r P_UID P_REV P_READY P_IMAGE <<<"$row"
 }
 
 is_current() { [ -n "$P_UID" ] && [ "$P_REV" = "${REVS[$1]}" ]; }
@@ -201,7 +208,7 @@ for i in "${PLAN[@]}"; do
   read_pod "$i"
   old_uid="$P_UID"
   log "node ${IDS[$i]}: deleting ${name}-0 (target revision ${REVS[$i]})"
-  k delete pod "${name}-0" --wait=false >/dev/null
+  k delete pod "${name}-0" --wait=false --ignore-not-found >/dev/null
   deadline=$((SECONDS + TIMEOUT))
   while :; do
     read_pod "$i"
