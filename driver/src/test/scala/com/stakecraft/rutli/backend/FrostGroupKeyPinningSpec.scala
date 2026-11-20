@@ -40,14 +40,18 @@ class FrostGroupKeyPinningSpec extends AnyWordSpec with Matchers {
   private final class Fake(var groupKey: Array[Byte], honest: KeyPair) extends SignerGrpc.SignerImplBase {
     val name: String = s"cosigner-${InProcessServerBuilder.generateName()}"
     @volatile var down = false
+    @volatile var notFound = false
+    val dkgCalls = new java.util.concurrent.atomic.AtomicInteger
     @volatile var dkgKey: Array[Byte] = groupKey
     @volatile var signer: Array[Byte] => Array[Byte] = signWith(honest, _)
 
     override def groupKey(req: GroupKeyRequest, obs: StreamObserver[GroupKeyReply]): Unit =
       if (down) obs.onError(Status.UNAVAILABLE.asRuntimeException())
+      else if (notFound) obs.onError(Status.NOT_FOUND.asRuntimeException())
       else { obs.onNext(GroupKeyReply.newBuilder().setGroupVerifyingKey(ByteString.copyFrom(groupKey)).build()); obs.onCompleted() }
 
     override def dkg(req: DkgRequest, obs: StreamObserver[DkgReply]): Unit = {
+      dkgCalls.incrementAndGet()
       obs.onNext(DkgReply.newBuilder().setGroupVerifyingKey(ByteString.copyFrom(dkgKey)).build()); obs.onCompleted()
     }
 
@@ -305,7 +309,8 @@ class FrostGroupKeyPinningSpec extends AnyWordSpec with Matchers {
       fakes(2).groupKey = raw(keyPair())
       val dir = tempDir()
       withCluster(fakes, pinDir = Some(dir), named = true) { b =>
-        the[KmsDriverException] thrownBy await(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")))
+        val ex = the[KmsDriverException] thrownBy await(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")))
+        chain(ex) should include("disagree")
       }
       java.nio.file.Files.exists(dir.resolve("frost-ns.pin")) shouldBe false
     }
@@ -349,9 +354,9 @@ class FrostGroupKeyPinningSpec extends AnyWordSpec with Matchers {
       val kp = keyPair()
       withCluster(honestCluster(3, kp), pinDir = Some(dir)) { b =>
         dir.toFile.setWritable(false)
-        // A runner with root ignores directory permissions: nothing to show there.
-        assume(!java.nio.file.Files.isWritable(dir), "directory permissions are not enforced for this user")
         try {
+          // A runner with root ignores directory permissions: nothing to show there.
+          assume(!java.nio.file.Files.isWritable(dir), "directory permissions are not enforced for this user")
           val ex = the[KmsDriverException] thrownBy await(b.getPublicKey("frost-ns"))
           ex.retryable shouldBe true
         } finally { dir.toFile.setWritable(true); () }
@@ -371,11 +376,52 @@ class FrostGroupKeyPinningSpec extends AnyWordSpec with Matchers {
         await(b.getPublicKey("frost-ns"))
         fakes.head.groupKey = raw(keyPair())
         noException should be thrownBy await(b.keyExistsAndIsActive("frost-ns"))
+        fakes.head.notFound = true
+        noException should be thrownBy await(b.keyExistsAndIsActive("frost-ns"))
+        fakes.head.notFound = false
         val other = raw(keyPair())
         fakes.foreach(_.groupKey = other)
         val ex = the[KmsDriverException] thrownBy await(b.keyExistsAndIsActive("frost-ns"))
         ex.retryable shouldBe false
       }
+    }
+  }
+
+  "the first pin of an existing key" should {
+
+    "tolerate one dissenter, never two, even with distinct TLS names" in {
+      val kp = keyPair()
+      val fakes = honestCluster(5, kp)
+      fakes(3).groupKey = raw(keyPair()); fakes(4).groupKey = raw(keyPair())
+      withCluster(fakes, named = true) { b =>
+        val ex = the[KmsDriverException] thrownBy await(b.getPublicKey("frost-ns"))
+        ex.retryable shouldBe false
+        chain(ex) should include("disagree")
+      }
+    }
+
+    "not be used when its audit entry cannot be written, and be recorded by the next call" in {
+      val kp = keyPair()
+      var fail = true
+      var audited = 0
+      withCluster(honestCluster(3, kp), pinDir = Some(tempDir()), pinned = _ => { if (fail) throw new java.io.IOException("disk full"); audited += 1 }) { b =>
+        val ex = the[KmsDriverException] thrownBy await(b.getPublicKey("frost-ns"))
+        ex.retryable shouldBe true
+        b.pinnedGroupKeyHex("frost-ns") shouldBe None
+        fail = false
+        await(b.getPublicKey("frost-ns")).key.takeRight(32) shouldBe raw(kp)
+        audited shouldBe 1
+      }
+    }
+
+    "be refused before a DKG when the audit log records a pin whose file is gone" in {
+      val fakes = honestCluster(3)
+      withCluster(fakes, pinDir = Some(tempDir()), lostPins = Set("frost-ns")) { b =>
+        val ex = the[KmsDriverException] thrownBy await(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns")))
+        chain(ex) should include("pin file is missing")
+        an[KmsDriverException] should be thrownBy await(b.keyExistsAndIsActive("frost-ns"))
+      }
+      fakes.map(_.dkgCalls.get).sum shouldBe 0 // the ceremony was never started
     }
   }
 }

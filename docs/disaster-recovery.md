@@ -476,9 +476,15 @@ and routed around. A call fails only when every answering cosigner differs from 
   audit log looks like a first use: the key is adopted again by a roster majority. Set
   `frost.expected-group-keys` before that start to check it.
 - **Re-using a key id on purpose** (after a key was destroyed and its id is to be minted again)
-  is refused while its pin exists. Move `<key-id>.pin` to `<pin-dir>/retired/` (the driver ignores
-  subdirectories), record why in the ceremony record, then run the new DKG. The driver never
-  deletes a pin.
+  is refused while its pin exists. Stop the participant, move `<key-id>.pin` to
+  `<pin-dir>/retired/` (keep the name; a suffix such as `.2026-11-20` is fine), record why in the
+  ceremony record, and start it again. A key id with a file under `retired/` is not treated as a
+  lost pin, so the new DKG can run and pin the new key. The driver never deletes a pin.
+- **A pin file that names another key than its audit-log entry** refuses the start: the file was
+  rewritten (its checksum catches damage only, the audit log's hash chain catches a rewrite). Keep
+  the evidence, restore the file from a backup, and find out who could write the state volume.
+- **A pin with no audit entry** (the driver stopped between writing the pin and its entry) is
+  recorded at the next start, with `recovered=startup`.
 - A refresh keeps the group key, so it never touches a pin. A new key id gets a new pin.
 
 ## §4 What you MUST have in place before go-live

@@ -57,6 +57,23 @@ class GroupKeyPinStoreSpec extends AnyWordSpec with Matchers {
       done.count(_.failed.toOption.exists(_.isInstanceOf[GroupKeyPinStore.Conflict])) shouldBe 1
     }
 
+    "let exactly one of two store instances on one directory win (no shared lock)" in {
+      val d = dir()
+      val (s1, s2) = (new GroupKeyPinStore(d, logger), new GroupKeyPinStore(d, logger))
+      val pool = Executors.newFixedThreadPool(2)
+      implicit val ec: ExecutionContext = ExecutionContext.fromExecutor(pool)
+      val go = new CountDownLatch(1)
+      val results = Seq(s1 -> K1, s2 -> K2).map { case (s, k) =>
+        Future { go.await(5, TimeUnit.SECONDS); scala.util.Try(s.create(pin("frost-namespace", k))) }
+      }
+      go.countDown()
+      val done = results.map(f => Await.result(f, 10.seconds))
+      pool.shutdown()
+      done.count(_.isSuccess) shouldBe 1
+      done.count(_.failed.toOption.exists(_.isInstanceOf[GroupKeyPinStore.Conflict])) shouldBe 1
+      new GroupKeyPinStore(d, logger).get("frost-namespace").map(_.groupKeyHex) shouldBe done.collectFirst { case scala.util.Success(p) => p.groupKeyHex }
+    }
+
     "refuse to start on a damaged pin file, naming it" in {
       val cases: Seq[(String, String => String)] = Seq(
         "checksum" -> (_.replace(K1, K2)),

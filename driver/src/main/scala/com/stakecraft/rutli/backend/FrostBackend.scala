@@ -271,12 +271,12 @@ class FrostBackend(
   /** Settle `keyId`'s group key from the endpoints' answers.
     *
     * Pinned: the pin is the answer. A cosigner that answers another key is reported and demoted;
-    * the call fails, non-retryably, only when every answering cosigner differs from the pin, and is
-    * served from the pin when nobody answers (availability is not trust).
+    * the call fails, non-retryably, only when every endpoint answered and each differs from the pin,
+    * and is served from the pin otherwise, also when nobody answers (availability is not trust).
     *
     * Not pinned: a roster majority of identical answers ([[groupKeyAgreement]]). For a DKG's new
-    * key (`fresh`) any disagreeing answer fails the call; for an existing key a dissenter is
-    * tolerated, reported and demoted, when [[distinctCosigners]]. A configured
+    * key (`fresh`) any disagreeing answer fails the call; for an existing key one dissenter (never
+    * more) is tolerated, reported and demoted, when [[distinctCosigners]]. A configured
     * `frost.expected-group-keys` value must be the agreed key. Too few answers is retryable; when
     * none came, the endpoints' own error is rethrown (e.g. NOT_FOUND for an unknown key). */
   private def agreeOnGroupKey(
@@ -290,7 +290,9 @@ class FrostBackend(
     Option(pinnedKeys.get(keyId)) match {
       case Some(p) =>
         val (matching, wrong) = answers.partition(_._2 == p)
-        if (answers.nonEmpty && matching.isEmpty) {
+        // Only when every endpoint answered, and each answered another key: some endpoints silent
+        // and the rest wrong is served from the pin (with the dissent reported), not a final error.
+        if (answers.nonEmpty && matching.isEmpty && errors.isEmpty) {
           logger.error(s"FROST: every answering cosigner differs from the pinned group key ${hexOf(p)} of $keyId: ${detail(wrong)}")
           throw KmsDriverException(
             new SecurityException(s"group key for $keyId differs from the pinned ${hexOf(p)} at every answering cosigner: ${detail(wrong)}"),
@@ -300,21 +302,14 @@ class FrostBackend(
         wrong.foreach(w => reportDissent(keyId, w, s"the pinned ${hexOf(p)}", notes))
         Agreed(p, matching.map(_._1), wrong)
       case None =>
-        if (lostPins.contains(keyId) && !expectedKeys.contains(keyId))
-          throw KmsDriverException(
-            new SecurityException(
-              s"the audit log records a group-key pin for $keyId but its pin file is missing; restore it, or set " +
-                s"frost.expected-group-keys.$keyId from the key ceremony record (docs/production-profile.md)"
-            ),
-            retryable = false,
-          )
+        if (lostPin(keyId)) throw lostPinError(keyId)
         if (answers.isEmpty && errors.nonEmpty) throw errors.last
         val byKey = answers.groupBy(_._2).toSeq.sortBy { case (_, as) => -as.size }
         val (top, topAnswers) = byKey.headOption.getOrElse(
           throw KmsDriverException(new IllegalStateException(s"no cosigner answered for the group key of $keyId"), retryable = true)
         )
         val dissent = answers.filter(_._2 != top)
-        val tolerated = !fresh && distinctCosigners && topAnswers.size >= groupKeyAgreement
+        val tolerated = !fresh && distinctCosigners && dissent.size <= 1 && topAnswers.size >= groupKeyAgreement
         if (dissent.nonEmpty && !tolerated) {
           logger.error(s"FROST: cosigners DISAGREE on the group key of $keyId: ${detail(answers)}")
           throw KmsDriverException(
@@ -364,6 +359,19 @@ class FrostBackend(
       (0 until channels.size).map(k => (start + k) % channels.size).find(i => !bad.contains(Integer.valueOf(i))).getOrElse(start)
     }
 
+  /** The audit log records a pin for `keyId` whose file is gone, and no operator anchor replaces it. */
+  private def lostPin(keyId: String): Boolean =
+    lostPins.contains(keyId) && !expectedKeys.contains(keyId) && !pinnedKeys.containsKey(keyId)
+
+  private def lostPinError(keyId: String): KmsDriverException =
+    KmsDriverException(
+      new SecurityException(
+        s"the audit log records a group-key pin for $keyId but its pin file is missing; restore it, or set " +
+          s"frost.expected-group-keys.$keyId from the key ceremony record (docs/disaster-recovery.md §3i)"
+      ),
+      retryable = false,
+    )
+
   /** How a first pin of `keyId` came about, when it is not a DKG. */
   private def adoptSource(keyId: String): String = if (expectedKeys.contains(keyId)) "operator" else "adopted"
 
@@ -409,12 +417,21 @@ class FrostBackend(
                 )
             }
         }
+        // The audit entry before the pin is used: an append that fails leaves the pin out of memory
+        // (the call fails, retryably, and the next one records it); a crash between the pin file and
+        // this entry is recorded at the next start (PinAudit.reconcile).
+        try onPin(stored)
+        catch {
+          case e: Exception =>
+            throw KmsDriverException(
+              new IllegalStateException(s"cannot record the group-key pin for $keyId in the audit log: ${e.getMessage}", e),
+              retryable = true,
+            )
+        }
         val prior = pinnedKeys.putIfAbsent(keyId, key)
         if (prior != null && prior != key) changed(prior)
-        if (prior == null) {
+        if (prior == null)
           logger.info(s"FROST: pinned group key for $keyId = ${hexOf(key)} (${stored.source}, agreed by ${stored.agreedBy.mkString(", ")})")
-          onPin(stored)
-        }
         key
     }
   }
@@ -893,6 +910,9 @@ class FrostBackend(
         b.build()
       }
       val notes = currentNotes.get
+      // A key id whose pin the audit log records but whose file is gone is refused before the
+      // ceremony, which cannot be undone (a deliberate re-use moves the pin to retired/ first).
+      if (lostPin(keyId)) return Future.failed(lostPinError(keyId))
       clusterCall("dkg", connectionRefused, connectionRefused)(_.dkg(dkgRequest()))
         .flatMap { reply =>
           // The leader's reply is one cosigner's word: the new key is believed only once a roster
@@ -1297,6 +1317,7 @@ class FrostBackend(
     if (ids.isFrost(keyId)) {
       val req = GroupKeyRequest.newBuilder().setKeyId(keyId).build()
       Option(pinnedKeys.get(keyId)) match {
+        case None if lostPin(keyId) => Future.failed(lostPinError(keyId))
         // groupKey returns NOT_FOUND if the cluster has no such key.
         case None => clusterCall("groupKey", isLeaderSick, isLeaderSick)(_.groupKey(req)).map(_ => ())
         case Some(p) =>

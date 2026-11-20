@@ -235,16 +235,31 @@ final class RutliDriverFactory extends KmsDriverFactory {
           logger.info(s"FROST: group-key pins at $d")
           new com.stakecraft.rutli.backend.GroupKeyPinStore(java.nio.file.Paths.get(d), logger)
         }
-        // Key ids the audit log records as pinned (`group-key-pin keyId=<id> ...`) whose pin file is
-        // gone: a lost file must not turn into a silent first pin.
+        // The pin store against the audit log, which records every pin: a pin file that names another
+        // key than its audit entry refuses the start; a pin the log records whose file is gone (and
+        // not retired) is refused until re-anchored; a pin the log lacks (a crash between the two
+        // writes) is recorded now.
+        import com.stakecraft.rutli.backend.PinAudit
         val lostPins: Set[String] = (for {
           store <- pinStore
           path <- config.auditLogPath
-        } yield com.stakecraft.rutli.audit.HashChainedAuditLog
-          .details(path, RutliDriverFactory.PinAuditOp)
-          .flatMap(_.split(" ").collectFirst { case t if t.startsWith("keyId=") => t.stripPrefix("keyId=") })
-          .toSet
-          .filterNot(store.all.contains)).getOrElse(Set.empty)
+        } yield {
+          val r = PinAudit.reconcile(
+            store.all,
+            PinAudit.recorded(com.stakecraft.rutli.audit.HashChainedAuditLog.details(path, PinAudit.Op)),
+            store.dir,
+          )
+          if (r.mismatched.nonEmpty)
+            throw new IllegalStateException(
+              s"group-key pin file(s) for ${r.mismatched.mkString(", ")} in ${store.dir} name another key than the audit " +
+                "log records for them: a pin file was rewritten. The driver refuses to start (docs/disaster-recovery.md §3i)"
+            )
+          r.unrecorded.foreach { p =>
+            logger.warn(s"FROST: the audit log has no entry for the group-key pin of ${p.keyId}; recording it now")
+            auditLog.foreach(_.append(PinAudit.Op, PinAudit.detail(p, recovered = true)))
+          }
+          r.lost
+        }).getOrElse(Set.empty)
         new FrostBackend(
           eps.map(_.url),
           buildBackend(frost.delegate),
@@ -259,13 +274,7 @@ final class RutliDriverFactory extends KmsDriverFactory {
           expectedGroupKeys = frost.expectedGroupKeys,
           lostPins = lostPins,
           onPin = (p: com.stakecraft.rutli.backend.GroupKeyPin) =>
-            auditLog.foreach(
-              _.append(
-                RutliDriverFactory.PinAuditOp,
-                s"keyId=${p.keyId} groupKey=${p.groupKeyHex} source=${p.source} agreedBy=${p.agreedBy.mkString(",")}" +
-                  (if (p.dissent.isEmpty) "" else s" dissent=${p.dissent.mkString(",")}")
-              )
-            ),
+            auditLog.foreach(_.append(com.stakecraft.rutli.backend.PinAudit.Op, com.stakecraft.rutli.backend.PinAudit.detail(p))),
         )(blockingEc)
       case other =>
         throw new IllegalArgumentException(
@@ -312,9 +321,6 @@ object RutliDriverFactory {
 
   /** The driver name referenced by the Canton node config: `crypto.kms.name = "rutli"`. */
   val driverName: String = "rutli"
-
-  /** The audit-log operation of a new group-key pin. */
-  val PinAuditOp: String = "group-key-pin"
 
   /** An `approval.rules` entry the driver refuses (see [[com.stakecraft.rutli.policy.ApprovalPolicy.ruleProblems]]). */
   final case class InvalidApprovalRule(override val description: String) extends pureconfig.error.FailureReason

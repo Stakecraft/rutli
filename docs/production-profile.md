@@ -93,7 +93,7 @@ Its exit codes are those of `check-config` above.
 | `frost.delegate` | `hsm` | `hsm`, or `none` with `hosted-keys` | `software` keeps keys in the participant's memory or a local file. |
 | `frost.tls` | optional | present | No mTLS, no intents, no roles. |
 | `frost.tls.allow-expired-ca` | `false` | `false` | An emergency setting for a CA rotation. |
-| `frost.endpoints` | a bare url is allowed | at least 2, each with its own, distinct `tls-name` | A group key is believed on two agreeing answers. Without a per-endpoint name, one cosigner certificate can answer for every address. |
+| `frost.endpoints` | a bare url is allowed | at least 2, each with its own, distinct `tls-name` | A group key is believed on a roster majority of agreeing answers. Without a per-endpoint name, one cosigner certificate can answer for every address, and count more than once. |
 | `frost.sign-intents` | `on` | `on` | `off` is an emergency switch. |
 | `frost.cluster-id` | learned from the cluster | set | A learned value follows a majority of the cosigners; a set one cannot be steered. |
 | `frost.pin-dir` | unset | set, on the participant's durable volume | Group-key pins that survive a restart. Without them, one cosigner answering another key blocks the first pin after every restart ([disaster-recovery.md](disaster-recovery.md#3i-the-drivers-group-key-pins-frostpin-dir)). |
