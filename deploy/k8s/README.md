@@ -89,7 +89,8 @@ restarts it in a loop (CrashLoopBackOff): the config still holds the placeholder
 other certificates. Fix `peerPins` (§2), re-render and apply.
 
 No key exists yet — DKG runs when the key is first requested (§4). Other `t`-of-`n`: set
-`replicaCount`/`threshold` in `values.yaml`, re-render, and add certs and bundles.
+`replicaCount`/`threshold` in `values.yaml`, add certs, bundles and every node's pin under
+`peerPins`, and re-render.
 
 ## 4. Point the Canton driver at the cluster
 
@@ -192,7 +193,8 @@ seal bundle, so one node must not be able to act as, or decrypt for, another.
   releases under `data_dir/journal` (`rutli-cosigner audit-cross-check`, docs/audit-cross-check.md).
 - Each node verifies each peer under the peer's own TLS name (`cosigner<id>`) and identifies a mesh
   caller by its exact client CN (audit M3); the driver does the same per endpoint (§4).
-- Certificates and bundles are read at startup: after rotating a Secret, restart that pod.
+- Certificates and bundles are read at startup: after rotating a Secret, restart that pod. A new
+  certificate has a new key: roll its pin through `peerPins` first (`docs/ca-rotation.md` §10).
 
 ### Migrating an earlier install
 
@@ -202,7 +204,8 @@ its shares follows the same steps as the Helm migration in
 [`docs/runbook-per-node-seal.md`](../../docs/runbook-per-node-seal.md): split the master offline
 with `rutli-cosigner seal split-legacy` (each node keeps its DEK — nothing is re-sealed), create the
 per-node Secrets, and render `values.yaml` with `nodes[].existingClaim` set to the old claims
-(`data-cosigner-0..2`). Then delete the old StatefulSet `cosigner` (its claims stay: a StatefulSet
+(`data-cosigner-0..2`) and the pins of the existing certificates under `peerPins` (§2). Then
+delete the old StatefulSet `cosigner` (its claims stay: a StatefulSet
 does not delete its claims by default), so the old pods release the volumes, and apply. Expect a
 short full signing gap while the volumes re-attach.
 
@@ -220,11 +223,13 @@ for i in 1 2 3; do
   kubectl -n rutli get secret rutli-cosigner-tls -o jsonpath="{.data.cosigner$i\.crt}" | base64 -d > $d/c.crt
   kubectl -n rutli get secret rutli-cosigner-tls -o jsonpath="{.data.cosigner$i\.key}" | base64 -d > $d/c.key
   kubectl -n rutli create secret tls rutli-cosigner-tls-$i --cert=$d/c.crt --key=$d/c.key
+  echo "node $i: $(rutli-cosigner tls spki $d/c.crt)"   # its pin, for peerPins (§2)
 done
 rm -rf $d
 ```
 
-Then, once every pod is Ready and signing, delete `rutli-cosigner-tls`. If you run the refresh
+Put the printed pins under `peerPins` in `values.yaml` before you render (§2). Then, once every pod
+is Ready and signing, delete `rutli-cosigner-tls`. If you run the refresh
 CronJob, create `rutli-refresher-tls` from the refresher's cert first (or the operator's, see the
 CronJob's header). The `ca.crt` bytes must not change
 (the split ceremony's cluster id is a hash of them), which copying it as above guarantees.
