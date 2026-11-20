@@ -65,6 +65,7 @@ class ProductionProfileSpec extends AnyWordSpec with Matchers {
       val breaks: List[(String, Level, RutliConfig)] = List(
         ("backend", Required, enforced.copy(backend = "hsm")),
         ("frost.delegate", Required, frost(enforced)(_.copy(delegate = "software"))),
+        ("frost.delegate", Required, frost(enforced)(_.copy(delegate = "none"))),
         ("frost.tls", Required, frost(enforced)(_.copy(tls = None))),
         ("frost.tls.allow-expired-ca", Required, frost(enforced)(_.copy(tls = Some(tls.copy(allowExpiredCa = true))))),
         ("frost.endpoints", Required, frost(enforced)(_.copy(endpoints = endpoints.take(1)))),
@@ -75,6 +76,8 @@ class ProductionProfileSpec extends AnyWordSpec with Matchers {
         ("audit-log-path", Required, enforced.copy(auditLogPath = None)),
         ("signing-journal", Required, enforced.copy(signingJournal = None)),
         ("hsm.pin", Required, enforced.copy(hsm = enforced.hsm.map(_.copy(pin = Some("1234"), pinEnv = None)))),
+        ("hsm.pin", Required, enforced.copy(hsm = enforced.hsm.map(_.copy(pin = Some("1234"))))),
+        ("hsm.pin", Required, enforced.copy(hsm = enforced.hsm.map(_.copy(pinEnv = None)))),
         ("approval", Advisory, enforced.copy(approval = None)),
         (
           "approval",
@@ -87,6 +90,10 @@ class ProductionProfileSpec extends AnyWordSpec with Matchers {
           findings(cfg).map(f => (f.setting, f.level)) shouldBe List((setting, level))
         }
       }
+    }
+
+    "accept delegate none with hosted keys" in {
+      findings(frost(enforced)(_.copy(delegate = "none", hostedKeys = true))) shouldBe Nil
     }
 
     "follow the key prefix for the namespace-key approval rule" in {
@@ -160,6 +167,7 @@ class ProductionProfileSpec extends AnyWordSpec with Matchers {
     "exit 2 for an unknown key, an unknown profile, or bad usage" in {
       check(block + "\naudit-log-paht = \"/x\"\n")._1 shouldBe 2
       check(block.replace("\"production\"", "\"staging\""))._1 shouldBe 2
+      check(block.replace("cluster-id =", "sign-intents = \"maybe\"\n  cluster-id ="))._1 shouldBe 2
       ConfigCheck.run(Array("--nope"), _ => (), _ => ()) shouldBe 2
     }
   }

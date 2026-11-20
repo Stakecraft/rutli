@@ -51,8 +51,12 @@ object ProductionProfile {
       case None =>
         if (cfg.backend == "frost") req("frost", "missing", "a frost { ... } block")
       case Some(f) =>
-        if (f.delegate == "software")
-          req("frost.delegate", "\"software\" (keys in the participant's memory or a local file)", "\"hsm\" or \"none\" (with hosted-keys)")
+        if (!(f.delegate == "hsm" || (f.delegate == "none" && f.hostedKeys)))
+          req(
+            "frost.delegate",
+            if (f.delegate == "none") "\"none\" without hosted-keys" else s"\"${f.delegate}\"",
+            "\"hsm\", or \"none\" with hosted-keys = true (never \"software\": keys in the participant)",
+          )
         f.tls match {
           case None => req("frost.tls", "missing (plaintext)", "mutual TLS")
           case Some(t) if t.allowExpiredCa => req("frost.tls.allow-expired-ca", "true", "false")
@@ -73,8 +77,12 @@ object ProductionProfile {
     if (cfg.auditLogPath.forall(_.trim.isEmpty)) req("audit-log-path", "missing", "a path on the participant's durable volume")
     if (cfg.signingJournal.isEmpty) req("signing-journal", "missing", "signing-journal { dir = ... }")
     val usesHsm = cfg.backend == "hsm" || cfg.frost.exists(f => cfg.backend == "frost" && f.delegate == "hsm")
-    if (usesHsm && cfg.hsm.exists(h => h.pin.nonEmpty && h.pinEnv.isEmpty))
-      req("hsm.pin", "inline in the config", "hsm.pin-env (the PIN from the environment, not the config file)")
+    if (usesHsm && cfg.hsm.exists(h => h.pin.nonEmpty || h.pinEnv.forall(_.trim.isEmpty)))
+      req(
+        "hsm.pin",
+        cfg.hsm.filter(_.pin.nonEmpty).fold("no hsm.pin-env")(_ => "inline in the config (it is used whenever pin-env is unset)"),
+        "hsm.pin-env only (the PIN from the environment), no inline hsm.pin",
+      )
 
     // Advisory: human approval of namespace-key signatures.
     val namespaceKey = FrostKeyIds(cfg.frost.map(_.keyPrefix).getOrElse("")).frost(Some("namespace"))

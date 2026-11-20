@@ -49,22 +49,28 @@ object ConfigCheck {
         err(s"ConfigCheck: ${f.getPath} does not load: ${failures.prettyPrint()}")
         2
       case Right(cfg) =>
-        val profile =
-          try ProductionProfile.of(cfg)
-          catch {
-            case e: IllegalArgumentException =>
-              err(s"ConfigCheck: ${e.getMessage}")
-              return 2
-          }
-        val findings = ProductionProfile.findings(cfg)
-        val required = findings.count(_.level == ProductionProfile.Required)
-        out(
-          s"${f.getPath}: profile ${profile.getOrElse("unset (lab until 0.6)")}, $required required and " +
-            s"${findings.size - required} advisory finding(s) (${ProductionProfile.Doc})"
-        )
-        findings.foreach(fd => out(fd.toString))
-        if (required == 0) out("meets the production profile")
-        if (required == 0) 0 else 1
+        // A value the driver itself would refuse at startup (an unknown profile, sign-intents
+        // "maybe", a key-prefix outside its alphabet) is a config that does not load: exit 2.
+        val checked: Either[String, (Option[String], List[ProductionProfile.Finding])] =
+          try Right((ProductionProfile.of(cfg), ProductionProfile.findings(cfg)))
+          catch { case e: IllegalArgumentException => Left(e.getMessage) }
+        checked match {
+          case Left(msg) =>
+            err(s"ConfigCheck: ${f.getPath}: $msg")
+            2
+          case Right((profile, findings)) => report(f, profile, findings, out)
+        }
     }
+  }
+
+  private def report(f: File, profile: Option[String], findings: List[ProductionProfile.Finding], out: String => Unit): Int = {
+    val required = findings.count(_.level == ProductionProfile.Required)
+    out(
+      s"${f.getPath}: profile ${profile.getOrElse("unset (lab until 0.6)")}, $required required and " +
+        s"${findings.size - required} advisory finding(s) (${ProductionProfile.Doc})"
+    )
+    findings.foreach(fd => out(fd.toString))
+    if (required == 0) out("meets the production profile")
+    if (required == 0) 0 else 1
   }
 }
