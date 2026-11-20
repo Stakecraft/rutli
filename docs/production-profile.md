@@ -63,7 +63,7 @@ live config. It works under any `profile`.
 | `hosted_keys.decrypt_rate_limit_per_min` (hosted keys on) | 6000 | above 0 | Bounds what a stolen driver certificate can decrypt. |
 | `hosted_keys.delete_approval_threshold` (with `delete_allowlist`) | 0 | at least 1 | A delete needs a human approval. |
 | `hosted_keys.commitment_key` (hosted keys on) | derived on the legacy master | set | The per-node seal bundle needs it. |
-| `signing_policy.rules` | empty | **advisory**: a `quorum` rule whose prefix covers a namespace key (`<prefix>frost-namespace`) | Human approval of namespace-key signatures ([approval-quorum.md](approval-quorum.md)). A deployment decision, so it is reported and never refuses. |
+| `signing_policy.rules` | empty | **advisory**: a `quorum` rule whose prefix covers a namespace key (`<prefix>frost-namespace` from a Splice validator, `<prefix>frost-<node>-namespace` from Canton's auto-init) | Human approval of namespace-key signatures ([approval-quorum.md](approval-quorum.md)). A deployment decision, so it is reported and never refuses. |
 
 The intent rows are not listed separately for a node without TLS: the `tls` row covers them.
 

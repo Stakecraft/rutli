@@ -201,6 +201,12 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Fixed
 
+- **The production profile's namespace-key advisory recognises Canton's own key name.** Canton's
+  auto-init names the namespace key `<node>-namespace`, so its FROST id is
+  `<prefix>frost-<node>-namespace`. A Splice validator names it `namespace`. The cosigner's advisory
+  looked for the Splice form only and flagged a correct rule for the other. The docs and the Helm
+  values example now say which form applies and where to read the real id, because a rule written
+  for the wrong form never matches.
 - **`rutli-cosigner audit-cross-check` no longer reports an empty side as consistent.** An empty
   driver audit log passed with exit 0, and every journaled signature was skipped as "older than the
   driver audit log". Empty journal directories passed the same way, their audited signatures skipped as

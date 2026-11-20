@@ -89,6 +89,8 @@ approval {
   timeout   = 30m
   rules = [
     # Matches the full key id: with `frost.key-prefix = "soak1-"` this must be "soak1-frost-".
+    # A rule for the namespace key alone must name it as it is minted: "frost-namespace" on a Splice
+    # validator, "frost-<node>-namespace" with Canton's own auto-init (docs/architecture.md).
     { key-id-prefix = "frost-", mode = "quorum", threshold = 2 }
   ]
   approvers = [
