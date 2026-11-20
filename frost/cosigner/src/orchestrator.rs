@@ -1520,7 +1520,7 @@ impl Tally {
         (self.holders.len() > 1).then(|| {
             self.holders
                 .iter()
-                .flat_map(|(c, holders)| holders.iter().map(move |(p, _)| (*p, hex::encode(&c[..6]))))
+                .flat_map(|(c, holders)| holders.iter().map(move |(p, _)| (*p, hex::encode(c.get(..6).unwrap_or(c.as_slice())))))
                 .collect()
         })
     }
@@ -1544,7 +1544,7 @@ impl Tally {
         if holders.len() < PULL_AGREEMENT {
             return None;
         }
-        let mut key = holders[0].1.clone();
+        let mut key = holders.first()?.1.clone();
         key.created_at = holders.iter().map(|(_, k)| k.created_at).max().unwrap_or(key.created_at);
         key.undeleted_at_ms = holders.iter().filter_map(|(_, k)| k.undeleted_at_ms).max();
         Some((key, holders.iter().map(|(p, _)| *p).collect()))
@@ -2052,7 +2052,8 @@ pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<usize
     answers.sort_by_key(|(i, _)| *i);
     let mut inventories: Vec<(&Arc<dyn PeerApi>, Vec<pb::KeyManifest>)> = Vec::new();
     for (i, answer) in answers {
-        let p = &peers[i];
+        // `i` is an index into `peers` from the loop above, so it is always present.
+        let Some(p) = peers.get(i) else { continue };
         // Never skip a peer silently: an unreachable peer — e.g. an mTLS UnknownIssuer while the
         // cluster CA is being rotated (docs/ca-rotation.md) — is exactly what an operator must see.
         // With hosted keys on, every node sweeps every peer each interval, so this line covers
