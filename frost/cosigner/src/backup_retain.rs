@@ -65,11 +65,22 @@ pub struct KeyInfo {
     pub digest: String,
     pub cluster: String,
     pub node: u16,
+    /// The id of the DEK that sealed the file: two files of one state sealed under different DEKs
+    /// are not copies of each other.
+    pub dek_id: String,
 }
 
 impl From<KeyFileHeader> for KeyInfo {
     fn from(h: KeyFileHeader) -> Self {
-        KeyInfo { key_id: h.key_id, kind: h.kind, epoch: h.epoch, digest: h.digest, cluster: h.cluster, node: h.node }
+        KeyInfo {
+            key_id: h.key_id,
+            kind: h.kind,
+            epoch: h.epoch,
+            digest: h.digest,
+            cluster: h.cluster,
+            node: h.node,
+            dek_id: h.dek_id,
+        }
     }
 }
 
@@ -253,8 +264,8 @@ pub fn plan(archives: &[Archive], live: &BTreeMap<String, Option<KeyInfo>>, proo
     let holds_proven = |a: &Archive| -> bool {
         verified(a, s)
             && live.iter().all(|(k, l)| match proven.get(*k) {
-                Some((e, d)) => info(a, k).is_some_and(|i| i.epoch == *e && &i.digest == *d),
-                None => !is_frost(l) && info(a, k).is_some_and(|i| i.kind == l.kind && i.digest == l.digest),
+                Some((e, d)) => info(a, k).is_some_and(|i| is_frost(i) && i.epoch == *e && &i.digest == *d),
+                None => !is_frost(l) && info(a, k).is_some_and(|i| i.kind == l.kind && i.epoch == l.epoch && i.digest == l.digest),
             })
     };
     let proven_archive: Option<&Archive> =
@@ -306,12 +317,14 @@ pub fn plan(archives: &[Archive], live: &BTreeMap<String, Option<KeyInfo>>, proo
     // duplicates and never the last copy of anything; and never the newest or the proven archive,
     // nor one it cannot read.
     if s.keep_count > 0 {
-        let holders = |state: &(String, String, u64, String), verdicts: &[(String, Verdict)], except: &str| -> bool {
+        let holders = |state: &(String, String, u64, String, String), verdicts: &[(String, Verdict)], except: &str| -> bool {
             sorted.iter().any(|b| {
                 b.name != except
                     && verified(b, s)
                     && verdicts.iter().any(|(n, v)| *n == b.name && matches!(v, Verdict::Keep(_)))
-                    && info(b, &state.0).is_some_and(|i| i.kind == state.1 && i.epoch == state.2 && i.digest == state.3)
+                    && info(b, &state.0).is_some_and(|i| {
+                        i.kind == state.1 && i.epoch == state.2 && i.digest == state.3 && i.dek_id == state.4
+                    })
             })
         };
         let mut remaining = verdicts.iter().filter(|(_, v)| matches!(v, Verdict::Keep(_))).count();
@@ -324,12 +337,12 @@ pub fn plan(archives: &[Archive], live: &BTreeMap<String, Option<KeyInfo>>, proo
             if protected.contains(&a.name) || !verified(a, s) || *why == Why::EpochUnreadable {
                 continue;
             }
-            let states: Vec<(String, String, u64, String)> = a
+            let states: Vec<(String, String, u64, String, String)> = a
                 .files
                 .as_ref()
                 .expect("verified")
                 .iter()
-                .filter_map(|(k, i)| i.as_ref().map(|i| (k.clone(), i.kind.clone(), i.epoch, i.digest.clone())))
+                .filter_map(|(k, i)| i.as_ref().map(|i| (k.clone(), i.kind.clone(), i.epoch, i.digest.clone(), i.dek_id.clone())))
                 .collect();
             let snapshot = verdicts.clone();
             if states.iter().all(|st| holders(st, &snapshot, &a.name)) {
@@ -396,7 +409,7 @@ fn classify(
             } else if !(i.epoch == *p && &i.digest == *d) {
                 return Verdict::Keep(Why::AtOrAfterProvenEpoch);
             }
-        } else if info(f, k).is_none_or(|fi| fi.kind != i.kind || fi.digest != i.digest) {
+        } else if info(f, k).is_none_or(|fi| fi.kind != i.kind || fi.epoch != i.epoch || fi.digest != i.digest) {
             // A key of another kind that `f` does not hold in this state.
             return Verdict::Keep(Why::AtOrAfterProvenEpoch);
         }
@@ -620,7 +633,7 @@ mod tests {
     }
 
     fn ki(key: &str, epoch: u64, digest: &str) -> KeyInfo {
-        KeyInfo { key_id: key.into(), kind: "frost-share".into(), epoch, digest: digest.into(), cluster: CLUSTER.into(), node: 1 }
+        KeyInfo { key_id: key.into(), kind: "frost-share".into(), epoch, digest: digest.into(), cluster: CLUSTER.into(), node: 1, dek_id: "00".into() }
     }
 
     /// An archive of single-key sharings: `(key, epoch, digest)`.
@@ -842,11 +855,26 @@ mod tests {
     }
 
     #[test]
+    fn two_files_of_one_state_under_different_deks_are_not_copies_for_the_cap() {
+        let l = live(&[("k", 3, "d3")]);
+        let mut old_dek = arch("a1", &[("k", 3, "d3")]);
+        if let Some(Some(i)) = old_dek.files.as_mut().unwrap().get_mut("k") {
+            i.dek_id = "old".into();
+        }
+        let archives = vec![old_dek, arch("a2", &[("k", 3, "d3")]), arch("a3", &[("k", 3, "d3")])];
+        let mut s = settings();
+        s.keep_count = 1;
+        let p = plan(&archives, &l, &proofs(&[]), &s);
+        assert_eq!(verdict(&p, "a1"), &Verdict::Keep(Why::UnprovenEpoch), "the only copy sealed under the old DEK stays");
+        assert_eq!(verdict(&p, "a2"), &Verdict::DeleteCountCap);
+    }
+
+    #[test]
     fn a_hosted_key_does_not_stop_older_frost_epochs_from_going() {
         // Review input B and finding 2: a live hosted key (no epoch to prove) in every archive.
         let hosted = |epoch_unused: u64| {
             let _ = epoch_unused;
-            KeyInfo { key_id: "h".into(), kind: "hosted-key".into(), epoch: 0, digest: "hd".into(), cluster: CLUSTER.into(), node: 1 }
+            KeyInfo { key_id: "h".into(), kind: "hosted-key".into(), epoch: 0, digest: "hd".into(), cluster: CLUSTER.into(), node: 1, dek_id: "00".into() }
         };
         let with_hosted = |name: &str, e: u64, d: &str| {
             let mut a = arch(name, &[("k", e, d)]);
