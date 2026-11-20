@@ -459,15 +459,20 @@ impl Client {
             #[allow(clippy::indexing_slicing)]
             let conn = self.conns[at].clone();
             match bounded(deadline, call(conn)).await {
+                // A cosigner that did not serve is demoted, the last one asked too; the sticky
+                // leader moves only through `demote`'s compare-and-set, so a slower call never
+                // moves it back to a cosigner another call has just demoted.
                 Err(status) if failover && not_serving(&status) && moves.len() + 1 < n => {
                     moves.push(code_name(status.code()));
                     self.demote(at);
                     at = (at + 1) % n;
-                    if start.is_none() {
-                        self.leader.store(at, Ordering::Relaxed);
-                    }
                 }
-                answer => return (answer, Route { failovers: moves, leader: Some(at) }),
+                answer => {
+                    if failover && matches!(&answer, Err(status) if not_serving(status)) {
+                        self.demote(at);
+                    }
+                    return (answer, Route { failovers: moves, leader: Some(at) });
+                }
             }
         }
     }
