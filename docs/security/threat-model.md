@@ -14,18 +14,22 @@ The statements below hold for a cluster where:
 - every cosigner and the driver run `0.4.0` (batch C shipped in `0.4.0-rc.3`; later statements name
   the release candidate they hold from), on a cluster uniformly upgraded **before** any DKG or refresh
   (`ceremony_protocol` 2 on every node);
-- the enforcement switches are on, identically, on every node: `signing_policy.require_intent`
-  (on by default with TLS since 0.5.0, unless opted out with `false`),
-  `require_ceremony_intent` (on by default since 0.4.0-rc.6, unless opted out with `false`),
-  `signer_acl_required`, `signer_may_refresh: false`, `require_epoch_match`
-  (`docs/approval-quorum.md`, "Switching enforcement on");
+- every enforcement setting is on, identically, on every node. The list is the table in
+  [production-profile.md](../production-profile.md), not repeated here. The production profile
+  (`"profile": "production"`) requires every setting in it, and a node refuses to start without them;
+  `rutli-cosigner check-config` lists what a config is missing. How to switch them on in a running
+  cluster: `docs/approval-quorum.md`, "Switching enforcement on". A statement below that depends on
+  one setting names it;
 - key files are written in format v2 (`keyfile.write_version: 2`, `cluster_uuid` set) and the
   legacy shared seal master has been retired: per-node seal bundles, DEKs rotated
   (`seal rotate-dek`), the master escrowed offline and then destroyed (decision P1);
 - the Helm `perNode` topology (one StatefulSet per node, per-node seal and TLS Secrets mounted as
   files, the backup sidecar, no `pods/exec` RBAC — `scripts/check-deploy-policy.sh` passes);
 - hosted-key deletes, if enabled at all, are restricted to a delete role
-  (`hosted_keys.delete_allowlist`) with approvals (`delete_approval_threshold` ≥ 1, decision P8).
+  (`hosted_keys.delete_allowlist`) with approvals (`delete_approval_threshold` ≥ 1, decision P8);
+- every cosigner runs 0.5.0 or later with every roster entry pinned (`peers[].tls_spki_sha256`,
+  required with TLS unless `tls.require_peer_pins: false`). A node on an earlier release checks no
+  pins: it still dials whatever answers with a valid certificate for the peer's name.
 
 The cluster is `t`-of-`n` (2-of-3 in every example). "Signature" means a FROST Ed25519 signature
 under a group key; "hosted key" means a replicated whole key (RSA-2048, EC P-256, AES-256-GCM —
@@ -38,7 +42,7 @@ under a group key; "hosted key" means a replicated whole key (RSA-2048, EC P-256
 | Namespace / protocol FROST keys | One share per node, sealed in `keys/<id>.json` | Existential for the namespace key (non-rotatable). `t` shares = the key |
 | Hosted keys | Whole key on every node, sealed | Retrospective decryption of traffic encrypted to it; rotatable in Canton |
 | Seal bundle (per node) | Per-node Secret, file-mounted into the cosigner container only | That node's current DEK, any previous DEKs kept during a rotation, and its distribution seed: opens that node's sealed files, current and in retained backups (its one share of each FROST key, every hosted key), and any envelope wrapped to that node |
-| Node TLS key | Per-node Secret | Impersonation of that node on the mesh |
+| Node TLS key | Per-node Secret | Impersonation of that node on the mesh, until its pin is replaced on every node; with a network position, that node's round-2 packages in a DKG or refresh |
 | Driver TLS key | The participant | Signer-role requests (bounded below) |
 | Sign journals | `data_dir/journal` per node | The independent record of every share released |
 
@@ -51,7 +55,8 @@ the *routine* principals that used to collapse the domains — the shared seal S
 exec-capable backup job — but anyone who can read every Secret in the namespace, exec into every
 pod or read every node's volume holds `n` shares and every DEK. For mainnet, put the cosigners in
 separate clusters or cloud accounts administered by different people; nothing in Rütli can
-substitute for that.
+substitute for that. It is a go-live gate, and what counts as separate (control plane, account,
+credentials, operator) is listed in [audit-prep.md](../audit-prep.md#what-counts-as-a-separate-trust-domain).
 
 ## Adversaries
 
@@ -72,15 +77,106 @@ substitute for that.
   node verifies; a rollback purge removes only a key the peer created in the same still-fenced
   generation, and (since 0.4.0-rc.6) only at the request of that generation's leader (M2).
 
-**Can:** abort ceremonies and signatures it leads (the driver fails over), burn round-1 nonces,
-and refuse to forward. Availability, not integrity.
+**Can:** abort ceremonies and signatures it leads, burn round-1 nonces, and refuse to forward.
+Availability, not integrity.
+
+How the driver limits this for a signature:
+
+- The driver verifies every signature against the pinned group key. One that does not verify is
+  withheld, never released, and the driver asks the next cosigner in the same call.
+- It also asks the next cosigner when the leader is unreachable or answers any error except
+  `PERMISSION_DENIED`, `UNAUTHENTICATED`, `RESOURCE_EXHAUSTED` or `INVALID_ARGUMENT`. Those four go
+  back to Canton at once. A cosigner sends every signing-policy refusal as `PERMISSION_DENIED` and
+  a rate limit as `RESOURCE_EXHAUSTED`, so a refusal is never retried on another node.
+- Only a verified signature makes a cosigner the driver's preferred leader. A leader that fails,
+  or returns a bad signature, loses that place.
+- A leader that refuses a sign carrying a signing intent also loses that place, so the next call
+  starts at the next cosigner. This does not weaken the policy: a signature needs a quorum, and
+  each cosigner checks the intent on its own share (signer allowlist, pin, cluster, key ACL,
+  validity, approvals) and charges its own rate limit. Which node leads does not change what can
+  be signed. Keeping the lead on a refusing node would let one compromised cosigner stop every
+  sign, from startup when it is the first endpoint.
+- Two exceptions keep the lead where it is. A refusal because the intent names another cluster
+  makes the driver learn the cluster id again and retry on the same node. A refusal of a sign
+  without an intent (`frost.sign-intents = off`, no TLS, or no cluster id known) keeps the lead,
+  because then the other cosigners cannot see who asks: only the leader checks the Signer
+  allowlist, the pin and the key ACL. In that mode one compromised leader can stop signing until
+  it fails in another way.
+- Each leader that one call tries can make a node release one more signature share for that
+  intent request id, up to `max_shares_per_request` (8 by default). The rate limit is charged
+  once per request id.
+
+For other operations the driver cannot check the answer. A refusal (`RESOURCE_EXHAUSTED`,
+`PERMISSION_DENIED`, `NOT_FOUND`, ...) goes back to Canton and the node keeps the lead; only an
+unreachable or failing node (`UNAVAILABLE`, `DEADLINE_EXCEEDED`, `INTERNAL`, `UNKNOWN`) loses it. A
+DKG fails over, and loses the lead, only on `UNAVAILABLE`. After a timeout or `INTERNAL` it is not
+re-run elsewhere and the next DKG starts on the same node, because the ceremony may still be
+running there.
 
 ### A single compromised cosigner (its share, DEK, TLS key, memory)
 
 **Cannot:** reconstruct a key (it holds one share), impersonate another node (per-peer TLS server
-names and exact client CNs, M3), make an honest peer release a share without a valid intent, forge
-a tombstone, roll a peer back to an old epoch, or get a peer to accept a key file it planted (v2
-headers bind cluster, node, key id and kind; plaintext is refused, M4).
+names, exact client CNs and per-peer key pins, M3), make an honest peer release a share without a valid intent, forge
+a tombstone, or roll a peer back to an old epoch. A key file carried onto another volume does not
+load there (v2 headers bind cluster, node, key id and kind; plaintext is refused, M4).
+
+Since 0.5.0 it **cannot get an honest node to store hosted key material that another node the
+honest node can reach contradicts**. A node stores a hosted key it does not hold in two ways only:
+
+- it pulls it (read-repair, the anti-entropy sweep, a leader that finds the key already on its
+  peers), and only when two peers return the same material, every other peer answers, and none
+  returns other material, a copy it cannot check, or a valid tombstone (which it applies); with one
+  copy, copies that disagree, or a silent peer, it stores nothing and answers UNAVAILABLE;
+- it accepts a push from the caller that holds its generation fence for that id under that ceremony
+  id, and only after it has asked the other peers and none that answers holds different material,
+  a copy it cannot check, or a valid tombstone. A silent peer does not block a push, or one node
+  down would stop every generation.
+
+Only an answer counts: a silent peer (down, or slower than 3 s) is unknown, never "does not hold
+it", and an answer the node cannot use is unknown, never agreement. A node answers NOT_FOUND only
+when `n - write_quorum + 1` nodes, itself included, answered that they hold nothing under the id.
+One consequence is a veto it already has: by answering with garbage for an id nobody holds, a
+compromised cosigner turns NOT_FOUND into UNAVAILABLE for that id on the nodes that ask it. Honest
+nodes give an unusable answer only when something is wrong: a copy whose creation or undelete time
+lies beyond the asking node's clock plus `clock_skew_secs` (a skewed clock on either side), or one
+that does not open (a wrong seal bundle or pin). The asking node logs it with the peer and counts it
+(`reason="timestamp"` or `"invalid"`).
+
+The sweep no longer pushes. A generation that meets other material on any node is aborted and
+rolled back instead of counting the nodes that agree. Material whose creation or undelete time lies
+in the future (beyond `clock_skew_secs`) is refused, and an RSA or EC key whose public half is not
+its own is refused. Every refusal is logged with the peer and the key and counted
+(`rutli_hosted_replication_refusals_total`, `rutli_anti_entropy_conflicts_total`).
+
+What stays open, plainly:
+
+- **An id nobody has created yet.** Genkey fences carry no client intent, so it can fence such an id
+  on an honest node, store its own material there, and keep the same material itself. It is then
+  the second agreeing peer: the material spreads to the other nodes by pull, and a later generation
+  of the id adopts it. The cluster then agrees on material the attacker chose. It reads every hosted
+  key anyway; what it gains is a key that outlives its eviction. The next change closes this: a
+  client-signed intent for creating a hosted key, without which a genkey fence is refused.
+- **Every other holder unreachable.** The receiving node checks only the peers it can reach. If
+  every other node that holds the key is unreachable from it at that moment, a fenced push lands; it
+  is reported as a conflict (`RutliHostedKeyConflict`) once they are reachable again, and nothing
+  reconciles it automatically.
+- **One of the two write-quorum holders.** With `write_quorum: 2` it can acknowledge a replica it
+  does not keep (or drop it later). If the third node was down, one honest copy then exists, and no
+  node pulls from a single copy. `write_quorum: 3` closes this, at the cost of no generation while a
+  node is down.
+- **Honest nodes, a leader that dies mid-generation.** A replica a leader wrote before it died is
+  served by the node that holds it, though the client never got an answer. If that node is down when
+  the client retries, the retry mints a second key, and when the node returns the id is forked
+  (paged as a conflict). The same holds for a copy that a rollback could not reach. The leader
+  writes its own copy last, so a leader that dies before any replica leaves nothing behind.
+  Closing the rest needs replicas that are not served until the generation is confirmed
+  (`docs/hosted-keys.md`, "A leader that dies mid-generation").
+- **A 0.4.0 node** in a mixed cluster still accepts any push into an id it lacks, pulls from the
+  first peer that answers, accepts future timestamps, writes its own copy first as a leader and
+  counts a conflicting replica as a failed one; it answers NOT_FOUND for a deleted key, so a
+  deleted key can be pulled back from two old replicas until a sweep applies the tombstone. The
+  protection is per receiving node, from its upgrade on. Do not create or delete hosted keys while
+  the cluster is mixed (`docs/hosted-keys.md`, "Upgrading from 0.4.0").
 
 It also **cannot park a hosted key on a FROST key's id** (since 0.4.0-rc.6). FROST ids are
 deterministic (`<prefix>frost-<name>`), and a peer's `ReplicateKey` needs no client authorization,
@@ -106,6 +202,15 @@ refuse or corrupt its own contributions (routed around by t-subset retry, flagge
 digest within its validity (harmless, capped by `max_shares_per_request`), and refuse to propagate
 tombstones (its own copy of a deleted key stays readable to it — it already had it).
 
+It can also **lie in `KeyEpoch`**, which is unsigned. Claiming a newer epoch of a key benches an
+honest node only while no peer that holds the node's exact sharing answers (the others restarting,
+or a refresh still committing on them): the stale reason says the claim is unconfirmed, and the
+mark clears on the next pass that reaches such a peer, at most 30 s later, even if that peer was
+benched the same way. Echoing a rolled-back node's old sharing keeps that node from being marked
+stale, unless the node's own ceremony record survived the rollback; the node still cannot sign
+with honest peers on the newer epoch (round 1 refuses another epoch). Claiming to be stale by its
+own record only withdraws its own vouching, which it can do anyway by not answering.
+
 It can also **split a DKG or refresh it takes part in** (audit F3): ceremony votes are reported
 unsigned, so it can tell one honest node STAGED and the other ABORTED; one commits, the other aborts,
 and every signature then needs the liar (a refresh meant to evict it does not). With n = 3, f = 1
@@ -114,8 +219,26 @@ availability attack, never a key compromise**. It is detected (`rutli_ceremony_e
 `RutliCeremonySplit`) and recoverable: the aborted node's staged share is quarantined, and
 `ceremony recover-commit` commits it once a peer proves the sharing committed and live
 (`docs/ceremonies.md`). It can make each peer write at most a bounded number of no-vote records by
-asking about made-up ceremony ids (F2), and open at most 1024 waiting sign sessions per key (round 1
-is refused beyond). It **cannot pause signing** by fencing a key for a ceremony (since 0.4.0-rc.4: a
+asking about made-up ceremony ids (F2). It can open at most 256 sign sessions per key on each peer
+that wait for round 2 (and 20 for one signing request); beyond that, round 1 is refused for it
+alone. The key's total is 1024, so the other leaders keep at least 768 and keep signing. Up to
+0.4.0 there was only the total: with one intent it had seen, it could fill all 1024 on every node and
+stop that key's signing for 5 minutes at a time. The caps do not stop it from filling its own 256 (a
+little memory on each peer until the sessions expire), and on a plaintext mesh, where no peer is
+identified, all remote leaders share one opener's room, so one filler takes all of it. As a member of a signature it **cannot
+abort, use up or occupy another member's session** (since 0.5.0). The leader gives each member,
+its own share included, a separate random session id (122 bits from the OS CSPRNG), so the id a
+member learns names nothing on any other node: it cannot open that session there first (the
+leader's round 1 would meet a duplicate), abort it or send its round 2. Behind that, a session
+belongs to the CN of the client certificate that opened it (two certificates with one CN are one
+owner; a certificate without exactly one CN is refused at the allowlist), or to the node's own leader; a round 2 or abort
+from anyone else is refused, takes nothing and is counted (`RutliSignSessionOwnerRefused`). Up to
+0.4.0 a member could do all three, and the leader then excluded the honest node and blamed it; in
+3-of-5 that stopped every signature. What a member can still do to an attempt is fail or delay its
+own part (no answer, a refusal, a round 2 error, a bad share or commitment). The leader then
+excludes that member, and frost's share verification names it, since the commitment map is keyed
+by identifier, not by session. A 0.4.0 leader still uses one id for all members until it is
+upgraded. It **cannot pause signing** by fencing a key for a ceremony (since 0.4.0-rc.4: a
 DKG/refresh guard no longer blocks sign round 1, see `docs/ceremonies.md`, "Signing during a
 ceremony"). Up to rc.3 it could, and with no time limit: a fence that was never followed by part 1
 stopped that key's signing on the fenced nodes until they restarted. That was earlier documented as
@@ -136,6 +259,12 @@ the per-asker and total caps (F2). What remains:
 - it can split (above) a DKG or refresh that a client **did** ask for and that it takes part in;
 - it can stop a requested ceremony: by refusing (n-of-n), or by presenting its intent as a second
   leader, which fails and spends the id;
+- it cannot refresh a key more often than `refresh_min_interval_secs` (0.5.0), even with a refresh
+  intent from a stolen refresher certificate: every honest node checks the interval at its own fence
+  and part 1, from its own ceremony records. Setting `refresh_interval_waived_at` on itself, or
+  dropping the limit from its own config, changes nothing on the honest nodes. By voting no after
+  the others staged it can make a requested refresh abort late; that refresh still counts on the
+  honest nodes, which only spends a slot it could block anyway;
 - it cannot take a requested ceremony over (since 0.4.0-rc.6). Every node binds the ceremony to the
   leader whose fence took its guard (the caller's certificate CN, or the node itself) and accepts
   parts 1–3, a second fence, an abort of the live ceremony and the release of that fence only from
@@ -164,7 +293,8 @@ the per-asker and total caps (F2). What remains:
 - like any participant, it can veto every ceremony, onboarding DKGs included, by refusing to take
   part (n-of-n);
 - hosted-key genkey/delkey fences are not intent-gated: it can block a hosted id's generation or
-  deletion, as it can by refusing;
+  deletion, as it can by refusing, and for an id no node holds yet it can create the key on an
+  honest node (above);
 - a ceremony it binds to itself on an honest node by racing the leader's fence (above) stays on that
   node until it gives it up or the orphan timeout (15 min) passes: the leader's abort cannot end
   another leader's ceremony. That blocks only the key's ceremonies, which it can veto anyway.
@@ -182,6 +312,44 @@ without an intent is still accepted and counted (`RutliCeremonyIntentAbsent`), a
 on rc.3. Any peer can then lead a DKG or refresh at will, split it, and hold off other ceremonies for
 60 s with a bare fence or 15 min with a session at a time.
 
+### Holder of the cluster CA key
+
+The CA key signs every certificate the cluster trusts: cosigners, the driver, the operator, the
+refresher, delete roles. It is meant to be escrowed offline (`docs/ca-rotation.md`). Peer key pins
+(`peers[].tls_spki_sha256`) make it no longer enough to be a cosigner.
+
+**With the key alone** it mints a certificate with any CN and a key of its own.
+- A client role works on the Signer API wherever that CN has no `signing_policy.signer_pins` entry:
+  `driver` (sign within its ACL and the rate limits, run a DKG of a new id), `refresher`,
+  `operator`, a delete role. `signer_pins` are optional in 0.5.0; pin every client CN.
+- A minted `cosignerN` is refused by every node that pins node N: it cannot call the Peer API, and
+  no node dials it as a peer.
+
+**With the key and a network position** (it can answer at a node's address: a Service, DNS or ARP
+hijack, or a node on a flat network):
+- It cannot stand in for a cosigner on the mesh. Every node checks the key of the peer it dials
+  before any request (only the handshake, with this node's own certificate, has happened), so a DKG or refresh with an impostor at a node's address fails and
+  delivers it no round-2 package (`tests/peer_pins.rs`).
+- It can stand in for a cosigner **to the driver**, which checks a cosigner's certificate name, not
+  its key. It then sees what the driver sends to that endpoint (digests to sign, data to encrypt or
+  decrypt) and can answer falsely. The driver checks every signature against the group key, so a
+  false signature is a failed request, not a forged one.
+- It can deny service.
+
+**What pins do not change:**
+- A node's *current* TLS key plus a network position is that node on the mesh. Pins name a key, not
+  a host: whoever holds the key receives that node's round-2 packages, one share per ceremony.
+  Replace the key and its pin, then refresh.
+- Pins are read at startup. Removing a key takes a restart of every node.
+- The driver does not pin the cosigners (known gap), and the client roles are pinned only where an
+  operator sets `signer_pins` (known gap).
+
+**One CA per cluster.** A CA that also signs another cluster's certificates (staging and production,
+two tenants) makes that cluster's driver and operator certificates valid here wherever `signer_pins`
+does not pin them. Without a pinned `cluster_id` both clusters also derive the same id from the
+same CA file, so an intent for one is valid on the other. Peer pins keep the other cluster's
+cosigners off this mesh; nothing else separates them. Never reuse a CA.
+
 ### Holder of the driver certificate and key (bypassing the driver)
 
 **Can:** sign with non-gated keys inside its `signer_acl` prefixes, within the per-node rate limits,
@@ -189,10 +357,14 @@ with every share journaled on every participating node (`audit-cross-check` expo
 driver audit log lacks); decrypt with hosted keys within `decrypt_rate_limit_per_min` per node.
 
 **Can also** run a DKG of a new id inside its `signer_acl` prefixes (it signs the ceremony intent
-every node verifies).
+every node verifies). There is no cap on how many: each new key is a set of files on every node and
+in every backup (disk growth, no key knowledge). And while `signer_may_refresh` is on (the default,
+kept for rollout compatibility), it can refresh keys inside its ACL like the refresher below, once
+per `refresh_min_interval_secs`. Turn `signer_may_refresh` off.
 
-**Cannot:** sign a gated key without `M` approver signatures; refresh (`signer_may_refresh: false`,
-checked by every node on the ceremony intent);
+**Cannot:** sign a gated key without `M` approver signatures; refresh once `signer_may_refresh` is
+off (checked by every node on the ceremony intent); refresh a key more than once per interval, or
+lift the interval;
 use another tenant's prefixes; delete hosted keys (unless an operator put the driver CN on
 `hosted_keys.delete_allowlist`, which is off by default — and then only recoverably, within the
 grace period, and with approvals if `delete_approval_threshold` is set). Revocation without the CA:
@@ -207,6 +379,18 @@ be used to cause load or to abort, not to learn anything or change the key. Toge
 compromised cosigner, every refresh it requests is a split opportunity (DS-CR4). Cannot sign, cannot
 run a DKG. Revoked by replacing its SPKI pin or removing its CN from `refresh_allowlist`. There is no
 per-key refresh ACL (follow-up).
+
+**Refresh rate (0.5.0).** Every refresh moves every node to a new epoch, and a node's backups of an
+older epoch no longer restore it. Before 0.5.0 this certificate could refresh a key continuously, so
+the nodes' backups never shared an epoch and a later loss of nodes could lose the key for good. Now
+every node takes part in at most one refresh of a key per `signing_policy.refresh_min_interval_secs`
+(default 72 h), counted from its own ceremony records and checked at its own fence, so no leader can
+get around it. What stays: one refresh per key per interval, each still a split opportunity with a
+compromised cosigner, and it can use up the slot before the weekly CronJob (that run is then refused
+and alerts; a refresh did happen). It cannot lift the interval: the incident waiver
+(`refresh_interval_waived_at`) is node config. While a waiver is set, it can take the one refresh the
+waiver allows; that refresh still moves the key to a fresh epoch after the operator's decision.
+Backups must follow every refresh (disaster-recovery.md).
 
 ### Holder of the operator certificate
 
@@ -248,7 +432,9 @@ A sidecar proxy that terminates TLS between cosigners (Istio/Linkerd in mTLS-ter
 L7 load balancer) sees every round-2 package of every ceremony and therefore every new share — i.e.
 the keys. **Deploy with no TLS-terminating mesh on the cosigner-to-cosigner path**; exclude the
 cosigner pods from mesh injection, or use pass-through (L4) mode. Hosted-key replication is
-additionally wrapped to the recipient's X25519 key and is not exposed this way.
+additionally wrapped to the recipient's X25519 key and is not exposed this way. Peer key pins stop a
+proxy that presents certificates of its own (the handshake fails); a proxy given the nodes' real
+keys passes them.
 
 ### VM or container memory snapshot, clone or live migration (audit L7, T4)
 
@@ -281,6 +467,11 @@ break-glass. A key file renamed to another id, copied from another node or clust
 kind fails its v2 header check; a plaintext file under sealing stops the daemon. A genuine older
 file of the same key and node (a rollback) passes the AEAD — the epoch checks are what catch it.
 
+What stays true by design: t nodes restored to the same old sharing without their ceremony records
+(two nodes in 2-of-3) vouch for each other in the stale-share check and can sign with it, because t
+shares of any sharing are the key. A node whose record survived marks itself stale and does not
+vouch for the others (from 0.5.0; a 0.4.0 peer does not say why it is stale and still vouches).
+
 **M4 is closed only once `keyfile.accept_v1: false` on every node** (audit F10). Until then any v1
 file sealed under the node's DEK is accepted (only its in-plaintext key id and the FROST identifier
 check limit swaps), and even with v2 a rollback to an older genuine file of the same key and node is
@@ -303,9 +494,20 @@ keys stay test material.
 - Single trust domain under one Kubernetes administration (P10).
 - Hosted keys are whole keys on every node: one compromised node reads them all, and rotation
   protects future traffic only.
+- A compromised cosigner can still create a hosted key under an id nobody has created yet and,
+  keeping a copy itself, have the cluster adopt it; plant over a key whose other holders the
+  receiving node cannot reach; or be the second of two write-quorum holders without keeping a copy.
+  Hosted-key generation is not yet bound to a client intent.
+- A leader that dies after writing a replica, with that replica's node down at the retry, can leave
+  an id forked between honest nodes (detected as a conflict, resolved by hand).
 - A driver-key thief signs non-gated keys within the ACL and rate limits (bounded and journaled,
   not prevented).
 - No defence against a TLS-terminating mesh (P3) or a memory snapshot of a running cosigner (L7).
+- A stolen refresher certificate, or the driver certificate while `signer_may_refresh` is on, can
+  refresh each key once per `refresh_min_interval_secs` (72 h). Each refresh makes older backups
+  unable to restore a node; back up after every refresh. A compromised cosigner cannot lead past the
+  interval (every honest node checks it) and cannot start a refresh without a client intent. A
+  stolen driver certificate can still mint new FROST keys inside its ACL without a cap (disk growth).
 - With n = 3, a compromised cosigner can split (DS-CR4) any DKG or refresh it takes part in, but
   with `require_ceremony_intent` on only one a client asked for. It can veto every ceremony,
   onboarding DKGs included (n-of-n). Not bound into a refresh intent yet: the expected
@@ -316,3 +518,7 @@ keys stay test material.
 - One Byzantine cosigner can split a DKG/refresh (n = 3, f = 1): availability, detected and
   operator-recoverable, never the key (F3).
 - Until `keyfile.accept_v1: false`, v1 key files and same-key rollbacks are accepted (F10).
+- A CA-key holder with a network position can impersonate a cosigner to the driver, which does not
+  pin cosigner keys, and can use every client role whose CN `signer_pins` does not pin.
+- A node's current TLS key receives that node's round-2 packages; a revoked key stays usable until
+  every node restarts with the new pins.

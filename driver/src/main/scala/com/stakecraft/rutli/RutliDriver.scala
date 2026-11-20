@@ -155,7 +155,11 @@ final class RutliDriver(
       (try f(notes)
        catch { case NonFatal(e) => Future.failed(e) }).recoverWith {
         case e: KmsDriverException => Future.failed(e)
-        case NonFatal(e)           => Future.failed(KmsDriverException(e, retryable = false))
+        // The cluster could not be reached in time (every cosigner tried was down, or the call's
+        // budget ran out): transient, so Canton retries the call (Kms.withRetries, with backoff).
+        case e: io.grpc.StatusRuntimeException if RutliDriver.transient(e.getStatus) =>
+          Future.failed(KmsDriverException(e, retryable = true))
+        case NonFatal(e) => Future.failed(KmsDriverException(e, retryable = false))
       }
     if (!auditing) base
     else
@@ -202,6 +206,18 @@ final class RutliDriver(
 }
 
 object RutliDriver {
+
+  /** gRPC statuses that reach Canton as RETRYABLE. Canton retries a retryable KMS error forever
+    * (`Kms.withRetries`, `KmsConfig.retries.failures`: backoff to 10 s, no limit), so only a
+    * condition that clears by itself belongs here: a cosigner or the network down, a deadline.
+    * Everything a node decided — a policy refusal (PERMISSION_DENIED, RESOURCE_EXHAUSTED), a bad
+    * request, an unknown key, a failed precondition, an internal error — stays non-retryable, as
+    * do the driver's own verdicts (a bad signature, a pin mismatch, cosigners disagreeing), which
+    * the backend raises as non-retryable [[KmsDriverException]]s. */
+  def transient(status: io.grpc.Status): Boolean = status.getCode match {
+    case io.grpc.Status.Code.UNAVAILABLE | io.grpc.Status.Code.DEADLINE_EXCEEDED => true
+    case _                                                                       => false
+  }
 
   /** Lower-case hex SHA-256 of `data` — the `msg=` field of a sign's audit entry. */
   def sha256Hex(data: Array[Byte]): String =

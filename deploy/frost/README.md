@@ -4,7 +4,7 @@ A 2-of-3 [`rutli-cosigner`](../../frost/cosigner) cluster. Each node holds one k
 ever holds the whole namespace key. The Canton KMS driver's `FrostBackend` connects to any node's
 `Signer` API to run DKG and to sign.
 
-Two compose files (default image `ghcr.io/stakecraft/rutli-cosigner:0.4.0`, pinned by digest; override with
+Two compose files (default image `ghcr.io/stakecraft/rutli-cosigner:0.4.1`, pinned by digest; override with
 `RUTLI_COSIGNER_IMAGE` or `--build` from `frost/`; from 0.5.0 on, verify a release digest as
 [SECURITY.md, "Verify the image"](../../SECURITY.md#verify-the-image) shows):
 - `docker-compose.yml` — **dev**: plaintext gRPC, unsealed shares. Fastest to try.
@@ -24,7 +24,8 @@ docker compose -f deploy/frost/docker-compose.yml up -d          # pulls publish
 ## Run (mTLS + sealed shares)
 
 ```sh
-scripts/gen-frost-certs.sh 3 deploy/frost/certs                   # CA + per-node certs
+RUTLI_PIN_CONFIGS=deploy/frost/config-tls \
+  scripts/gen-frost-certs.sh 3 deploy/frost/certs                 # CA + per-node certs, pinned
 export RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"                # from a secret manager in prod
 RUTLI_SEAL_SECRET=$RUTLI_SEAL_SECRET \
   docker compose -f deploy/frost/docker-compose.tls.yml up -d
@@ -69,8 +70,16 @@ endpoints; the server then **requires** a client cert signed by the cluster CA (
 mesh and the driver both authenticate). Generate a dev trust domain:
 
 ```sh
-scripts/gen-frost-certs.sh 3 deploy/frost/certs   # cluster CA + 3 cosigner certs + a driver cert
+RUTLI_PIN_CONFIGS=deploy/frost/config-tls \
+  scripts/gen-frost-certs.sh 3 deploy/frost/certs # cluster CA + 3 cosigner certs + a driver cert
 ```
+
+Each node also pins the TLS key of every cosigner (`peers[].tls_spki_sha256`): a certificate with
+the right name under the cluster CA but another key is refused, both ways. A node with TLS refuses
+to start until every roster entry has a pin (or `tls.require_peer_pins` is `false`). The example
+configs ship without pins, because the keys are made per checkout: `RUTLI_PIN_CONFIGS=<dir>` makes
+`gen-frost-certs.sh` write the pins of the certificates it leaves in its output directory into the
+configs in `<dir>` (do not commit them). `rutli-cosigner tls spki certs/cosigner1.crt` prints one pin.
 
 Example TLS configs are in `config-tls/` (mount `certs/` at `/certs`). The driver enables TLS via
 `frost.tls { ca-cert, cert, key }` in its Canton config, pointing at the CA + `driver.{crt,key}`, and
@@ -96,7 +105,8 @@ the cosigner cannot read them and exits with `cannot read TLS material … Permi
 the container user:
 
 ```sh
-sudo RUTLI_CERT_UID=10001 scripts/gen-frost-certs.sh 3 deploy/frost/certs
+sudo RUTLI_CERT_UID=10001 RUTLI_PIN_CONFIGS=deploy/frost/config-tls \
+  scripts/gen-frost-certs.sh 3 deploy/frost/certs
 ```
 
 or `sudo chown -R 10001:10001 deploy/frost/certs` after generating. On Kubernetes this is handled

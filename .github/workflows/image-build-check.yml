@@ -17,12 +17,8 @@ on:
       - ".github/workflows/**"
       - ".github/dependabot.yml"
   push:
+    # No path filter on a push to main: every commit on main gets the whole set (see main-status.yml).
     branches: [main]
-    paths:
-      # The whole Rust workspace: the Dockerfile, the toolchain file, the lockfile and the sources
-      # the image compiles, so a green check means this commit's cosigner builds in the image.
-      - "frost/**"
-      - ".github/workflows/**"
   # Weekly: catches a change on the hosted runners or in an action before tag day, not on it.
   schedule:
     - cron: "0 5 * * 3"
@@ -30,6 +26,14 @@ on:
 
 permissions:
   contents: read
+
+# A new push to a pull request cancels that pull request's earlier, still queued or running CI: the
+# self-hosted runners are the bottleneck and a superseded run only delays the others. Never on a
+# push to main, a schedule or a manual run: those get their own group (the run id), so none is
+# cancelled or replaced by a later one.
+concurrency:
+  group: image-build-check-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   pins:

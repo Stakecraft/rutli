@@ -151,8 +151,8 @@ pub fn sign_test_plan(roster: &[u16], t: u16) -> Vec<(u16, Vec<u16>)> {
             out.push(cur.clone());
             return;
         }
-        for i in start..roster.len() {
-            cur.push(roster[i]);
+        for (i, id) in roster.iter().enumerate().skip(start) {
+            cur.push(*id);
             go(i + 1, roster, k, cur, out);
             cur.pop();
         }
@@ -162,7 +162,11 @@ pub fn sign_test_plan(roster: &[u16], t: u16) -> Vec<(u16, Vec<u16>)> {
         return Vec::new();
     }
     go(0, roster, usize::from(t), &mut Vec::new(), &mut subsets);
-    subsets.into_iter().enumerate().map(|(k, s)| (roster[k % roster.len()], s)).collect()
+    subsets
+        .into_iter()
+        .enumerate()
+        .filter_map(|(k, s)| roster.get(k % roster.len()).map(|&leader| (leader, s)))
+        .collect()
 }
 
 /// The `--sign-test` message for a key: `0x1220 ‖ SHA-256("rutli-verify-key/" ‖ ceremony_id ‖
@@ -367,6 +371,16 @@ mod tests {
     use super::*;
 
     const KEY: &str = "frost-import-x";
+
+    #[test]
+    fn the_sign_test_plan_covers_every_subset_and_never_panics_on_odd_input() {
+        let plan = sign_test_plan(&[1, 2, 3], 2);
+        let subsets: Vec<Vec<u16>> = plan.iter().map(|(_, s)| s.clone()).collect();
+        assert_eq!(subsets, vec![vec![1, 2], vec![1, 3], vec![2, 3]]);
+        assert_eq!(plan.iter().map(|(l, _)| *l).collect::<Vec<_>>(), vec![1, 2, 3], "the leader rotates");
+        assert!(sign_test_plan(&[], 2).is_empty());
+        assert!(sign_test_plan(&[1, 2], 3).is_empty(), "a threshold above the roster has no subset");
+    }
 
     /// Statuses as three healthy nodes holding a 2-of-3 split of `seed` would report them.
     fn views(seed: [u8; 32]) -> (Vec<NodeView>, String) {

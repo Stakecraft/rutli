@@ -44,7 +44,20 @@ final class RutliDriverFactory extends KmsDriverFactory {
     implicit val frostEndpointReader: ConfigReader[FrostEndpoint] =
       ConfigReader[String].map(FrostEndpoint(_)).orElse(deriveReader[FrostEndpoint])
     implicit val frostReader: ConfigReader[FrostConfig] = deriveReader[FrostConfig]
-    implicit val ruleReader: ConfigReader[ApprovalRule] = deriveReader[ApprovalRule]
+    // A rule's mode is `quorum` or `auto`, exactly; anything else fails here, at its own key.
+    implicit val ruleReader: ConfigReader[ApprovalRule] = {
+      val derived = deriveReader[ApprovalRule]
+      ConfigReader.fromCursor[ApprovalRule] { cur =>
+        derived.from(cur).flatMap { rule =>
+          ApprovalPolicy.modeProblem(rule) match {
+            case None => Right(rule)
+            case Some(problem) =>
+              val at: pureconfig.ConfigCursor = cur.asObjectCursor.flatMap(_.atKey("mode")).getOrElse(cur)
+              Left(pureconfig.error.ConfigReaderFailures(at.failureFor(RutliDriverFactory.InvalidApprovalRule(problem))))
+          }
+        }
+      }
+    }
     // An approver's key has two names. `public-key-base64` is what the docs and `approve keygen`
     // print. `public-key-base-64` is what pureconfig derives from the field `publicKeyBase64` (a
     // digit run is its own word) and the only name releases up to 0.4.0 read, so a config copied
@@ -72,7 +85,30 @@ final class RutliDriverFactory extends KmsDriverFactory {
         }
       }
     }
-    implicit val policyReader: ConfigReader[ApprovalPolicy] = deriveReader[ApprovalPolicy]
+    // The rules are checked while the config is read, not left to the ApprovalPolicy constructor:
+    // an exception out of this reader reaches the operator as a stack trace (Canton's DriverLoader
+    // catches none here), not as a config error with its path. A misspelt mode (`quorom`,
+    // `Quorum`) once meant auto-approve; it is refused at the rule's `mode`, e.g.
+    // `approval.rules.0.mode`. What needs the whole policy (a threshold against the approvers, a
+    // quorum rule an earlier auto rule shadows) is refused at `approval.rules`, naming the rule.
+    implicit val policyReader: ConfigReader[ApprovalPolicy] = {
+      val derived = deriveReader[ApprovalPolicy]
+      ConfigReader.fromCursor[ApprovalPolicy] { cur =>
+        for {
+          obj <- cur.asObjectCursor
+          rulesCur <- obj.atKey("rules")
+          rules <- ConfigReader[List[ApprovalRule]].from(rulesCur)
+          approvers <- obj.atKey("approvers").flatMap(c => ConfigReader[List[Approver]].from(c))
+          _ <- ApprovalPolicy.ruleProblems(rules, approvers.size) match {
+            case Nil => Right(())
+            case problems =>
+              val failures = problems.map(p => rulesCur.failureFor(RutliDriverFactory.InvalidApprovalRule(p.message)))
+              Left(pureconfig.error.ConfigReaderFailures(failures.head, failures.tail: _*))
+          }
+          policy <- derived.from(cur)
+        } yield policy
+      }
+    }
     implicit val journalReader: ConfigReader[SigningJournalConfig] = deriveReader[SigningJournalConfig]
     implicit val softwareReader: ConfigReader[SoftwareConfig] = deriveReader[SoftwareConfig]
     deriveReader[RutliConfig]
@@ -109,6 +145,9 @@ final class RutliDriverFactory extends KmsDriverFactory {
   ): RutliDriver = {
     implicit val ec: ExecutionContext = executionContext
     val logger = loggerFactory(classOf[RutliDriver])
+    // Before anything is opened or dialled: a production driver with an enforcement gap stops here,
+    // naming each setting (docs/production-profile.md).
+    ProductionProfile.enforce(config, logger)
 
     // FROST gRPC calls and approval polling BLOCK. Run them on a dedicated bounded daemon pool so a
     // burst of gated signs or a slow cluster can't starve Canton's shared ExecutionContext. Only
@@ -162,6 +201,12 @@ final class RutliDriverFactory extends KmsDriverFactory {
         )
     }
 
+    // Opened before the backend: a new group-key pin is written to it.
+    val auditLog = config.auditLogPath.map { p =>
+      logger.info(s"Hash-chained audit log at $p")
+      com.stakecraft.rutli.audit.HashChainedAuditLog.open(p)
+    }
+
     val backend: KmsBackend = config.backend match {
       case "software" | "hsm" => buildBackend(config.backend)
       case "frost" =>
@@ -186,26 +231,68 @@ final class RutliDriverFactory extends KmsDriverFactory {
                 "endpoints = [{ url = \"…\", tls-name = \"cosigner<id>\" }, …]"
             )
           }
+        val pinStore = frost.pinDir.map { d =>
+          logger.info(s"FROST: group-key pins at $d")
+          new com.stakecraft.rutli.backend.GroupKeyPinStore(java.nio.file.Paths.get(d), logger)
+        }
+        // The pin store against the audit log, which records every pin: a pin file that names another
+        // key than its audit entry refuses the start; a pin the log records whose file is gone (and
+        // not retired) is refused until re-anchored; a pin the log lacks (a crash between the two
+        // writes) is recorded now.
+        import com.stakecraft.rutli.backend.PinAudit
+        val lostPins: Set[String] = (for {
+          store <- pinStore
+          path <- config.auditLogPath
+        } yield {
+          val r = PinAudit.reconcile(
+            store.all,
+            PinAudit.recorded(com.stakecraft.rutli.audit.HashChainedAuditLog.details(path, PinAudit.Op)),
+            store.dir,
+          )
+          if (r.mismatched.nonEmpty)
+            throw new IllegalStateException(
+              s"group-key pin file(s) for ${r.mismatched.mkString(", ")} in ${store.dir} name another key than the audit " +
+                "log records for them: a pin file was rewritten. The driver refuses to start (docs/disaster-recovery.md §3i)"
+            )
+          r.unrecorded.foreach { p =>
+            logger.warn(s"FROST: the audit log has no entry for the group-key pin of ${p.keyId}; recording it now")
+            auditLog.foreach(_.append(PinAudit.Op, PinAudit.detail(p, recovered = true)))
+          }
+          r.lost
+        }).getOrElse(Set.empty)
+        if (frost.signAttemptTimeout > frost.requestTimeout || frost.attemptTimeout > frost.requestTimeout)
+          throw new IllegalArgumentException(
+            s"frost.sign-attempt-timeout (${frost.signAttemptTimeout}) and frost.attempt-timeout (${frost.attemptTimeout}) " +
+              s"must not exceed frost.request-timeout (${frost.requestTimeout})"
+          )
         new FrostBackend(
           eps.map(_.url),
           buildBackend(frost.delegate),
           logger,
           frost.tls,
+          requestTimeout = frost.requestTimeout,
           hostedKeys = frost.hostedKeys,
           keyPrefix = frost.keyPrefix,
           endpointTlsNames = eps.flatMap(e => e.tlsName.map(e.url -> _)).toMap,
           clusterId = frost.clusterId,
           signIntents = frost.signIntentsEnabled,
+          pinStore = pinStore,
+          expectedGroupKeys = frost.expectedGroupKeys,
+          lostPins = lostPins,
+          onPin = (p: com.stakecraft.rutli.backend.GroupKeyPin) =>
+            auditLog.foreach(_.append(com.stakecraft.rutli.backend.PinAudit.Op, com.stakecraft.rutli.backend.PinAudit.detail(p))),
+          adoptExistingKeys = frost.adoptExistingKeys.toSet,
+          attemptTimeout = frost.attemptTimeout,
+          signAttemptTimeout = frost.signAttemptTimeout,
+          keepaliveTime = frost.keepaliveTime,
+          keepaliveTimeout = frost.keepaliveTimeout,
+          leaderRecovery = frost.leaderRecovery,
+          rotateSigns = frost.rotateSigns,
         )(blockingEc)
       case other =>
         throw new IllegalArgumentException(
           s"unsupported backend '$other'; supported: software, hsm, frost"
         )
-    }
-
-    val auditLog = config.auditLogPath.map { p =>
-      logger.info(s"Hash-chained audit log at $p")
-      com.stakecraft.rutli.audit.HashChainedAuditLog.open(p)
     }
 
     val approvalGate: com.stakecraft.rutli.policy.ApprovalGate = config.approval match {
@@ -247,6 +334,9 @@ object RutliDriverFactory {
 
   /** The driver name referenced by the Canton node config: `crypto.kms.name = "rutli"`. */
   val driverName: String = "rutli"
+
+  /** An `approval.rules` entry the driver refuses (see [[com.stakecraft.rutli.policy.ApprovalPolicy.ruleProblems]]). */
+  final case class InvalidApprovalRule(override val description: String) extends pureconfig.error.FailureReason
 
   /** A bounded pool of daemon threads for blocking work (FROST RPCs, approval polling). Daemon so
     * it never blocks JVM shutdown; bounded so it can't spawn unboundedly under load. */

@@ -30,6 +30,7 @@ private static final long serialVersionUID = 0L;
     keyId_ = "";
     spec_ = "";
     publicKeyDer_ = com.google.protobuf.ByteString.EMPTY;
+    commitment_ = com.google.protobuf.ByteString.EMPTY;
   }
 
   public static final com.google.protobuf.Descriptors.Descriptor
@@ -168,6 +169,22 @@ private static final long serialVersionUID = 0L;
     return replicas_;
   }
 
+  public static final int COMMITMENT_FIELD_NUMBER = 6;
+  private com.google.protobuf.ByteString commitment_ = com.google.protobuf.ByteString.EMPTY;
+  /**
+   * <pre>
+   * The leader's keyed commitment to the key material (as in KeyManifest.commitment). Empty from a
+   * cosigner older than 0.5.0. A client compares it with every node's KeyInfo(local_only).
+   * </pre>
+   *
+   * <code>bytes commitment = 6;</code>
+   * @return The commitment.
+   */
+  @java.lang.Override
+  public com.google.protobuf.ByteString getCommitment() {
+    return commitment_;
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -197,6 +214,9 @@ private static final long serialVersionUID = 0L;
     if (replicas_ != 0) {
       output.writeUInt32(5, replicas_);
     }
+    if (!commitment_.isEmpty()) {
+      output.writeBytes(6, commitment_);
+    }
     getUnknownFields().writeTo(output);
   }
 
@@ -224,6 +244,10 @@ private static final long serialVersionUID = 0L;
       size += com.google.protobuf.CodedOutputStream
         .computeUInt32Size(5, replicas_);
     }
+    if (!commitment_.isEmpty()) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeBytesSize(6, commitment_);
+    }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
     return size;
@@ -249,6 +273,8 @@ private static final long serialVersionUID = 0L;
         != other.getCreated()) return false;
     if (getReplicas()
         != other.getReplicas()) return false;
+    if (!getCommitment()
+        .equals(other.getCommitment())) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -271,6 +297,8 @@ private static final long serialVersionUID = 0L;
         getCreated());
     hash = (37 * hash) + REPLICAS_FIELD_NUMBER;
     hash = (53 * hash) + getReplicas();
+    hash = (37 * hash) + COMMITMENT_FIELD_NUMBER;
+    hash = (53 * hash) + getCommitment().hashCode();
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -407,6 +435,7 @@ private static final long serialVersionUID = 0L;
       publicKeyDer_ = com.google.protobuf.ByteString.EMPTY;
       created_ = false;
       replicas_ = 0;
+      commitment_ = com.google.protobuf.ByteString.EMPTY;
       return this;
     }
 
@@ -455,6 +484,9 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000010) != 0)) {
         result.replicas_ = replicas_;
       }
+      if (((from_bitField0_ & 0x00000020) != 0)) {
+        result.commitment_ = commitment_;
+      }
     }
 
     @java.lang.Override
@@ -487,6 +519,9 @@ private static final long serialVersionUID = 0L;
       }
       if (other.getReplicas() != 0) {
         setReplicas(other.getReplicas());
+      }
+      if (other.getCommitment() != com.google.protobuf.ByteString.EMPTY) {
+        setCommitment(other.getCommitment());
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -539,6 +574,11 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000010;
               break;
             } // case 40
+            case 50: {
+              commitment_ = input.readBytes();
+              bitField0_ |= 0x00000020;
+              break;
+            } // case 50
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -828,6 +868,53 @@ private static final long serialVersionUID = 0L;
     public Builder clearReplicas() {
       bitField0_ = (bitField0_ & ~0x00000010);
       replicas_ = 0;
+      onChanged();
+      return this;
+    }
+
+    private com.google.protobuf.ByteString commitment_ = com.google.protobuf.ByteString.EMPTY;
+    /**
+     * <pre>
+     * The leader's keyed commitment to the key material (as in KeyManifest.commitment). Empty from a
+     * cosigner older than 0.5.0. A client compares it with every node's KeyInfo(local_only).
+     * </pre>
+     *
+     * <code>bytes commitment = 6;</code>
+     * @return The commitment.
+     */
+    @java.lang.Override
+    public com.google.protobuf.ByteString getCommitment() {
+      return commitment_;
+    }
+    /**
+     * <pre>
+     * The leader's keyed commitment to the key material (as in KeyManifest.commitment). Empty from a
+     * cosigner older than 0.5.0. A client compares it with every node's KeyInfo(local_only).
+     * </pre>
+     *
+     * <code>bytes commitment = 6;</code>
+     * @param value The commitment to set.
+     * @return This builder for chaining.
+     */
+    public Builder setCommitment(com.google.protobuf.ByteString value) {
+      if (value == null) { throw new NullPointerException(); }
+      commitment_ = value;
+      bitField0_ |= 0x00000020;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * The leader's keyed commitment to the key material (as in KeyManifest.commitment). Empty from a
+     * cosigner older than 0.5.0. A client compares it with every node's KeyInfo(local_only).
+     * </pre>
+     *
+     * <code>bytes commitment = 6;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearCommitment() {
+      bitField0_ = (bitField0_ & ~0x00000020);
+      commitment_ = getDefaultInstance().getCommitment();
       onChanged();
       return this;
     }

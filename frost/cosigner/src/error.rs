@@ -126,6 +126,13 @@ pub enum DaemonError {
     #[error("{0}")]
     PolicyRefused(String),
 
+    /// A refresh this node refuses to take part in because it took part in a refresh of the same
+    /// key less than `signing_policy.refresh_min_interval_secs` ago. FAILED_PRECONDITION with the
+    /// `rutli-error: refresh-too-soon` trailer, so a leader passes a peer's refusal on as this
+    /// error; counted in `rutli_refresh_interval_refusals_total`.
+    #[error("{0}")]
+    RefreshTooSoon(String),
+
     /// This node's sign journal for a key cannot be read or appended to; it refuses to release a
     /// share it cannot journal.
     #[error("sign journal: {0}")]
@@ -146,6 +153,29 @@ pub enum DaemonError {
          (the first of \"frost-\" / \"rutli-\" in the id must be \"rutli-\"); FROST ids are never hosted"
     )]
     NotHostedKeyId(String),
+
+    /// Two nodes hold different material under one hosted key id, or a push would make it so.
+    /// ABORTED with the `rutli-error: hosted-conflict` trailer: a generation that meets one is
+    /// rolled back, and retrying elsewhere does not help — an operator must look.
+    #[error("hosted key conflict for {key_id}: {detail}")]
+    HostedConflict { key_id: String, detail: String },
+
+    /// This node does not hold the hosted key and could not confirm a copy: fewer than two peers
+    /// returned the same material, or peers returned different material. UNAVAILABLE with the
+    /// `rutli-error: hosted-unconfirmed` trailer, never NOT_FOUND, so the driver fails over to a
+    /// node that holds the key.
+    #[error("hosted key {key_id} is not confirmed on this node: {detail}")]
+    HostedUnconfirmed { key_id: String, detail: String },
+
+    /// A peer's push this node refuses: the id is absent here and the caller does not hold this
+    /// node's generation fence for it under that ceremony id. FAILED_PRECONDITION.
+    #[error("hosted key push refused: {0}")]
+    HostedPushRefused(String),
+
+    /// Hosted material from a peer whose timestamps lie in the future beyond the clock skew.
+    /// INVALID_ARGUMENT.
+    #[error("hosted key refused: {0}")]
+    HostedInvalid(String),
 }
 
 /// A sharing of a FROST key as nodes compare it: (epoch, PKP digest). Same as
@@ -156,15 +186,27 @@ fn short(digest: &[u8; 32]) -> String {
     hex::encode(&digest[..6])
 }
 
-/// Trailer naming a machine-readable refusal reason on a Peer RPC error (`epoch-mismatch`,
-/// `stale-share`), with the refusing node's own sharing in [`EPOCH_TRAILER`] and
-/// [`PKP_DIGEST_TRAILER`].
+/// Trailer naming a machine-readable refusal reason on an RPC error (`epoch-mismatch`,
+/// `stale-share`, with the refusing node's own sharing in [`EPOCH_TRAILER`] and
+/// [`PKP_DIGEST_TRAILER`]; `policy-refused`; `hosted-conflict`, `hosted-unconfirmed`).
 pub const ERROR_TRAILER: &str = "rutli-error";
 pub const EPOCH_TRAILER: &str = "rutli-epoch";
 pub const PKP_DIGEST_TRAILER: &str = "rutli-pkp-digest";
 const EPOCH_MISMATCH: &str = "epoch-mismatch";
 const STALE_SHARE: &str = "stale-share";
 const POLICY_REFUSED: &str = "policy-refused";
+/// [`ERROR_TRAILER`] value of a sign round 1 refused by a cap on waiting sessions: the member has
+/// no room for this caller's sessions, which a leader does not treat as that member failing.
+pub const SESSIONS_FULL: &str = "sessions-full";
+const REFRESH_TOO_SOON: &str = "refresh-too-soon";
+const HOSTED_CONFLICT: &str = "hosted-conflict";
+const HOSTED_UNCONFIRMED: &str = "hosted-unconfirmed";
+
+fn with_reason(code: tonic::Code, message: String, reason: &'static str) -> tonic::Status {
+    let mut md = tonic::metadata::MetadataMap::new();
+    md.insert(ERROR_TRAILER, tonic::metadata::MetadataValue::from_static(reason));
+    tonic::Status::with_metadata(code, message, md)
+}
 
 fn with_view(code: tonic::Code, message: String, reason: &'static str, view: &KeyVersion) -> tonic::Status {
     let mut md = tonic::metadata::MetadataMap::new();
@@ -205,11 +247,31 @@ impl DaemonError {
                 reason: status.message().to_owned(),
             },
             (Some(POLICY_REFUSED), _) => DaemonError::PolicyRefused(status.message().to_owned()),
+            (Some(REFRESH_TOO_SOON), _) => DaemonError::RefreshTooSoon(status.message().to_owned()),
+            (Some(HOSTED_CONFLICT), _) => DaemonError::HostedConflict {
+                key_id: key_id.to_owned(),
+                detail: status.message().to_owned(),
+            },
+            (Some(HOSTED_UNCONFIRMED), _) => DaemonError::HostedUnconfirmed {
+                key_id: key_id.to_owned(),
+                detail: status.message().to_owned(),
+            },
             _ if status.code() == tonic::Code::ResourceExhausted => {
                 DaemonError::RateLimited(status.message().to_owned())
             }
             _ => DaemonError::Status(status),
         }
+    }
+}
+
+/// A peer's refusal of a ceremony fence: [`DaemonError::RefreshTooSoon`] when the status carries
+/// that trailer, else the plain status (as before).
+pub fn from_fence_status(status: tonic::Status) -> DaemonError {
+    let too_soon = status.metadata().get(ERROR_TRAILER).and_then(|v| v.to_str().ok()) == Some(REFRESH_TOO_SOON);
+    if too_soon {
+        DaemonError::RefreshTooSoon(status.message().to_owned())
+    } else {
+        DaemonError::Status(status)
     }
 }
 
@@ -227,6 +289,17 @@ impl From<DaemonError> for tonic::Status {
                 md.insert(ERROR_TRAILER, tonic::metadata::MetadataValue::from_static(POLICY_REFUSED));
                 tonic::Status::with_metadata(tonic::Code::PermissionDenied, e.to_string(), md)
             }
+            DaemonError::RefreshTooSoon(_) => {
+                let mut md = tonic::metadata::MetadataMap::new();
+                md.insert(ERROR_TRAILER, tonic::metadata::MetadataValue::from_static(REFRESH_TOO_SOON));
+                tonic::Status::with_metadata(tonic::Code::FailedPrecondition, e.to_string(), md)
+            }
+            DaemonError::HostedConflict { .. } => with_reason(tonic::Code::Aborted, e.to_string(), HOSTED_CONFLICT),
+            DaemonError::HostedUnconfirmed { .. } => {
+                with_reason(tonic::Code::Unavailable, e.to_string(), HOSTED_UNCONFIRMED)
+            }
+            DaemonError::HostedPushRefused(_) => tonic::Status::failed_precondition(e.to_string()),
+            DaemonError::HostedInvalid(_) => tonic::Status::invalid_argument(e.to_string()),
             DaemonError::Journal(_) => tonic::Status::unavailable(e.to_string()),
             DaemonError::UnknownKey(_) | DaemonError::UnknownDkg(_) => {
                 tonic::Status::not_found(e.to_string())
@@ -246,6 +319,18 @@ impl From<DaemonError> for tonic::Status {
             // a ceremony commit replaced the share, the session outlived its TTL). The node and the
             // key are fine and the request was not wrong: a new session will do.
             DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_)) => tonic::Status::aborted(e.to_string()),
+            // permission_denied: the session is live and belongs to the caller that opened it; this
+            // caller may not use it up or drop it.
+            DaemonError::Core(rutli_frost_core::CoreError::NotSessionOwner { .. }) => {
+                tonic::Status::permission_denied(e.to_string())
+            }
+            // unavailable, as a full key always was: the leader signs with other members, and if it
+            // cannot, the driver fails over to another leader, which has its own room here.
+            DaemonError::Core(rutli_frost_core::CoreError::SessionsFull { .. }) => {
+                let mut md = tonic::metadata::MetadataMap::new();
+                md.insert(ERROR_TRAILER, tonic::metadata::MetadataValue::from_static(SESSIONS_FULL));
+                tonic::Status::with_metadata(tonic::Code::Unavailable, e.to_string(), md)
+            }
             // ALREADY_EXISTS, like a DKG over an existing key: the id is taken — by the import
             // mechanism, whether or not the share has been installed yet.
             DaemonError::ReservedKeyId(_) => tonic::Status::already_exists(e.to_string()),
@@ -302,6 +387,42 @@ mod tests {
         // A round 2 for a session this node no longer holds: ABORTED, not INTERNAL.
         let lost = DaemonError::Core(rutli_frost_core::CoreError::UnknownSession("sign-1".into()));
         assert_eq!(tonic::Status::from(lost).code(), tonic::Code::Aborted);
+
+        // Another caller's session: PERMISSION_DENIED, not ABORTED like an unknown one. A cap on
+        // waiting sessions: UNAVAILABLE, whichever cap.
+        let foreign = DaemonError::Core(rutli_frost_core::CoreError::NotSessionOwner {
+            session: "sign-1".into(),
+            owner: "peer 'cosigner2'".into(),
+            caller: "peer 'cosigner3'".into(),
+        });
+        assert_eq!(tonic::Status::from(foreign).code(), tonic::Code::PermissionDenied);
+        for cap_kind in [
+            rutli_frost_core::session::PendingCap::Key,
+            rutli_frost_core::session::PendingCap::Opener,
+            rutli_frost_core::session::PendingCap::Request,
+        ] {
+            let full = DaemonError::Core(rutli_frost_core::CoreError::SessionsFull { cap_kind, open: 1, cap: 1 });
+            let status = tonic::Status::from(full);
+            assert_eq!(status.code(), tonic::Code::Unavailable);
+            assert_eq!(status.metadata().get(ERROR_TRAILER).unwrap(), SESSIONS_FULL);
+        }
+        // A refresh refused for coming too soon keeps its kind across the mesh.
+        let status = tonic::Status::from(DaemonError::RefreshTooSoon("refresh of k refused".into()));
+        assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+        assert!(matches!(from_fence_status(status.clone()), DaemonError::RefreshTooSoon(m) if m == "refresh of k refused"));
+        assert!(matches!(DaemonError::from_peer_status(status, "k", None), DaemonError::RefreshTooSoon(_)));
+        assert!(matches!(from_fence_status(tonic::Status::failed_precondition("x")), DaemonError::Status(_)));
+        // A hosted-key conflict and an unconfirmed copy keep their meaning across the mesh.
+        let conflict = tonic::Status::from(DaemonError::HostedConflict { key_id: "k".into(), detail: "x".into() });
+        assert_eq!(conflict.code(), tonic::Code::Aborted);
+        assert!(matches!(DaemonError::from_peer_status(conflict, "k", None), DaemonError::HostedConflict { .. }));
+        let unconfirmed =
+            tonic::Status::from(DaemonError::HostedUnconfirmed { key_id: "k".into(), detail: "x".into() });
+        assert_eq!(unconfirmed.code(), tonic::Code::Unavailable);
+        assert!(matches!(
+            DaemonError::from_peer_status(unconfirmed, "k", None),
+            DaemonError::HostedUnconfirmed { .. }
+        ));
 
         // Any other refusal stays a plain status (an older peer, another reason).
         let plain = tonic::Status::failed_precondition("something else");

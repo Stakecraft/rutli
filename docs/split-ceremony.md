@@ -116,9 +116,12 @@ are the key).
       `share sealing DISABLED` / `running WITHOUT TLS` in any log).
 - [ ] `KEY_ID` absent on every node, and no DKG for it was ever attempted.
 - [ ] **No cosigner backup in the ceremony window**, so no backup captures dealt shares. The
-      `backup` sidecar runs daily at `backup.dailyAtUtc` and at pod start (`backup.runOnStart`):
-      keep Steps 4–6 clear of the daily run and restart no cosigner in between; a backup that runs
-      anyway goes on the destruction list. Suspend any refresh CronJob on this key id.
+      `backup` sidecar runs daily at `backup.dailyAtUtc`, at pod start (`backup.runOnStart`), and
+      within `backup.checkEverySecs` of any change to the key files — which `import-share` is.
+      Before Step 4 put `backup.checkEverySecs: 0` in the values and roll out (the pods restart, and
+      their startup backup holds no dealt share yet), keep Steps 4–6 clear of the daily run, restart
+      no cosigner in between, and restore the setting after the refresh. A backup that runs anyway
+      goes on the destruction list. Suspend any refresh CronJob on this key id.
 - [ ] Dealer host: an air-gapped machine booted from a live medium, **no swap** (`swapon --show`
       empty), no core handler (`sysctl kernel.core_pattern` not starting with `|`,
       `fs.suid_dumpable` ≠ 2), running as root (so `rutli-dealer` can `mlockall`). The
@@ -422,4 +425,6 @@ DESTRUCTION RECORD — key FP 1220______________________  (after cutover go on _
 wrong SAS refused, the operator certificate refused on `Sign` and `Refresh`, restarts, a node down)
 on a local 3-node mTLS cluster from the working tree, with B1's throwaway Canton 3.6.1 namespace key.
 The cluster tests in `frost/cosigner/tests/split_ceremony.rs` and `dealer_cli.rs` are the automated
-analogue.
+analogue. `scripts/e2e-migration.sh` runs Steps 1–7 inside the whole migration ([migration.md](migration.md)), on a key
+a running Canton 3.6.1 participant has just exported with a random password, against cosigners with the full signing
+policy, and then uses the key from a new participant.

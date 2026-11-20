@@ -124,4 +124,16 @@ public interface KeyEpochReplyOrBuilder extends
    */
   com.google.protobuf.ByteString
       getStaleReasonBytes();
+
+  /**
+   * <pre>
+   * The stale mark comes from this node's own COMMITTED ceremony record (its share is older than an
+   * epoch it committed), not from peers' answers. Such a node does not vouch for the sharing it
+   * holds. Unset by nodes before 0.5.0.
+   * </pre>
+   *
+   * <code>bool stale_by_own_record = 12;</code>
+   * @return The staleByOwnRecord.
+   */
+  boolean getStaleByOwnRecord();
 }
