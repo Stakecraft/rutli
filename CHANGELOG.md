@@ -141,7 +141,11 @@ All notable changes to Rütli are documented here. Format loosely follows
   - a damaged pin file stops the start, naming the file, and so does a pin file that names another
     key than its audit-log entry; a pin file that is lost while the audit log records it refuses
     that key. Recovery is in `docs/disaster-recovery.md` §3i;
-  - `StateCheck --pin-dir` checks a copy read-only, and the production profile requires `pin-dir`.
+  - `StateCheck --pin-dir` checks a copy read-only, and the production profile requires `pin-dir`;
+  - the DKG ceremony ids the driver sends intents for are written to `pin-dir` (`<key-id>.dkg`,
+    fsynced) before each request goes out. A driver killed between a DKG request and its reply (a
+    pod restart during a bootstrap) takes the key as its own on the next start. Without this, the
+    DKG fix below would refuse it.
 
   Without `pin-dir` the driver warns and behaves as before. **Upgrade:** add `pin-dir` on the
   participant's state volume, ideally with `expected-group-keys` for the namespace key. The next
@@ -156,10 +160,11 @@ All notable changes to Rütli are documented here. Format loosely follows
   retry of a ceremony it started itself. Otherwise the DKG fails with a message naming
   `frost.key-prefix` and the new `frost.adopt-existing-keys`, for deliberately adopting a key after
   checking it.
-  - **Restart gap.** The driver remembers its ceremony ids in memory only, until a follow-up keeps
-    them durably. A driver that restarts in the middle of a bootstrap is therefore refused too.
-    Adopt the key with `frost.adopt-existing-keys` after checking it, and remove the entry once
-    the key is in use.
+  - **Restart.** With `frost.pin-dir` the driver keeps its ceremony ids durably (above), so a
+    restart in the middle of a bootstrap adopts the key. Without `pin-dir` they live in memory,
+    and such a restart is refused. The message then says what to do: adopt the key with
+    `frost.adopt-existing-keys` once it is clear that no other participant uses the key prefix,
+    and remove the entry once the key is registered.
   - **Rolling upgrade.** A 0.4.x driver ignores the new fields and behaves as before. A 0.5.0
     driver with a leader older than 0.5.0 cannot tell and accepts the key with a warning, as before.
     The DKG request is unchanged. The cosigners talk to each other as before (no peer message

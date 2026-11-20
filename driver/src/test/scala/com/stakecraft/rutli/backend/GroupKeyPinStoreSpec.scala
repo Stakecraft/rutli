@@ -107,6 +107,22 @@ class GroupKeyPinStoreSpec extends AnyWordSpec with Matchers {
       Files.exists(d.resolve("frost-namespace.pin.tmp.123")) shouldBe false
     }
 
+    "record DKG ceremony ids durably, per key id, ignoring a torn last line" in {
+      val d = dir()
+      val s = new GroupKeyPinStore(d, logger)
+      val (c1, c2) = ("dkg-" + "a" * 32, "dkg-" + "b" * 32)
+      s.recordCeremony("frost-namespace", c1)
+      s.recordCeremony("frost-namespace", c2)
+      s.recordCeremony("frost-signing", c1)
+      Files.write(d.resolve("frost-namespace.dkg"), ("dkg-" + "c" * 10).getBytes(UTF_8), java.nio.file.StandardOpenOption.APPEND)
+      val again = new GroupKeyPinStore(d, logger)
+      again.ceremonies("frost-namespace") shouldBe Set(c1, c2)
+      again.ceremonies("frost-signing") shouldBe Set(c1)
+      again.ceremonies("frost-other") shouldBe Set.empty
+      again.all shouldBe Map.empty // a .dkg file is not a pin
+      an[IllegalArgumentException] should be thrownBy s.recordCeremony("frost-namespace", "not-a-ceremony")
+    }
+
     "refuse a key id that cannot name a file" in {
       an[IllegalArgumentException] should be thrownBy new GroupKeyPinStore(dir(), logger).create(pin("../x", K1))
     }

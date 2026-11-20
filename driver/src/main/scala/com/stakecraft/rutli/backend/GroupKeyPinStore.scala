@@ -30,7 +30,8 @@ final case class GroupKeyPin(
 }
 
 /** The driver's durable group-key pins (`frost.pin-dir`): one create-once file per key id,
-  * `<keyId>.pin`, next to the signing journal on the participant's state volume.
+  * `<keyId>.pin`, next to the signing journal on the participant's state volume. Beside them,
+  * `<keyId>.dkg` lists the DKG ceremony ids this driver sent intents for ([[recordCeremony]]).
   *
   * A pin is written once and never replaced. The write is a temp file (fsynced), then a hard link
   * to the final name (link(2) refuses an existing name, so two writers cannot both win and nothing
@@ -76,6 +77,47 @@ final class GroupKeyPinStore(val dir: Path, logger: Logger) {
 
   /** Every pin on disk, by key id. */
   def all: Map[String, GroupKeyPin] = pins.asScala.toMap
+
+  /** The DKG ceremony ids this driver sent intents for, per key id (`<keyId>.dkg`, one id per line,
+    * appended and fsynced BEFORE the request goes out). A DKG reply for a key that already existed
+    * is this driver's own when it names one of them, also after a restart between the request and
+    * the reply. An id for a ceremony that never committed is harmless: no cosigner ever names it. */
+  private val ceremonyIds = new java.util.concurrent.ConcurrentHashMap[String, java.util.Set[String]]()
+
+  Using.resource(Files.list(dir)) { s =>
+    s.iterator().asScala.filter(p => p.getFileName.toString.endsWith(CeremonySuffix) && Files.isRegularFile(p)).toList
+  }.foreach { p =>
+    val keyId = p.getFileName.toString.stripSuffix(CeremonySuffix)
+    val text = new String(Files.readAllBytes(p), UTF_8)
+    // A torn last line is a crash before its fsync: that request was never sent.
+    val complete = if (text.endsWith("\n")) text else text.substring(0, text.lastIndexOf('\n') + 1)
+    val ids = complete.split("\n").toList.filter(_.nonEmpty)
+    val (good, bad) = ids.partition(_.matches(CeremonyIdPattern))
+    if (bad.nonEmpty) logger.warn(s"FROST: ignoring ${bad.size} malformed line(s) in $p")
+    val set = java.util.concurrent.ConcurrentHashMap.newKeySet[String]()
+    good.foreach(set.add)
+    ceremonyIds.put(keyId, set)
+  }
+
+  /** The DKG ceremony ids recorded for `keyId`. */
+  def ceremonies(keyId: String): Set[String] = Option(ceremonyIds.get(keyId)).fold(Set.empty[String])(_.asScala.toSet)
+
+  /** Record, durably, that this driver is about to send a DKG intent naming `ceremonyId` for
+    * `keyId`. Returns once the line is fsynced (and, for a new file, the directory). Throws an
+    * [[IOException]] when it cannot be made durable: the request must not be sent then. */
+  def recordCeremony(keyId: String, ceremonyId: String): Unit = synchronized {
+    checkKeyId(keyId)
+    if (!ceremonyId.matches(CeremonyIdPattern)) throw new IllegalArgumentException(s"not a DKG ceremony id: $ceremonyId")
+    val f = dir.resolve(keyId + CeremonySuffix)
+    val created = !Files.exists(f)
+    Using.resource(FileChannel.open(f, StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND)) { ch =>
+      com.stakecraft.rutli.util.WriteFully(ch, java.nio.ByteBuffer.wrap((ceremonyId + "\n").getBytes(UTF_8)))
+      ch.force(true)
+    }
+    if (created) DirSync.fsync(dir)
+    ceremonyIds.computeIfAbsent(keyId, _ => java.util.concurrent.ConcurrentHashMap.newKeySet[String]()).add(ceremonyId)
+    ()
+  }
 
   def get(keyId: String): Option[GroupKeyPin] = Option(pins.get(keyId))
 
@@ -147,6 +189,8 @@ object GroupKeyPinStore {
   val Suffix = ".pin"
   private val TmpMarker = ".pin.tmp."
   val Sources: Set[String] = Set("dkg", "adopted", "operator")
+  val CeremonySuffix = ".dkg"
+  private val CeremonyIdPattern = "dkg-[0-9a-f]{32}"
 
   /** Read and check one pin file; throws [[IllegalStateException]] naming the file when it is damaged. */
   def readFile(p: Path): GroupKeyPin = {

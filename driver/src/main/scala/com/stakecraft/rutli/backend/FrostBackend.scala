@@ -189,7 +189,8 @@ class FrostBackend(
       "FROST: frost.sign-intents = off — signs carry NO signing intent; cosigners that require intents " +
         "refuse them. An emergency setting: turn it back on once the incident is over."
     )
-  /** The DKG ceremony ids this driver's own intents named, per FROST key id, for this process. A
+  /** The DKG ceremony ids this driver's own intents named, per FROST key id, in this process (and,
+    * with `frost.pin-dir`, durably in the pin store, which survives a restart). A
     * DKG reply for a key that already existed is accepted only when it names one of them: a retry
     * of this driver's own ceremony, never another client's key under the same id. */
   private val ownDkgCeremonies = new java.util.concurrent.ConcurrentHashMap[String, java.util.Set[String]]()
@@ -908,12 +909,26 @@ class FrostBackend(
         val b = DkgRequest.newBuilder().setKeyId(keyId)
         for (signer <- intentSigner; c <- cluster) {
           val requestId = FrostIntentSigner.newRequestId()
+          val ceremony = FrostIntentSigner.ceremonyId(FrostIntentSigner.PurposeDkg, requestId)
+          // Durable BEFORE the request goes out: a driver that dies between the request and the
+          // reply still knows the ceremony as its own after the restart. If it cannot be recorded,
+          // nothing is sent.
+          pinStore.foreach { store =>
+            try store.recordCeremony(keyId, ceremony)
+            catch {
+              case e: java.io.IOException =>
+                throw KmsDriverException(
+                  new IllegalStateException(s"cannot record DKG ceremony $ceremony for $keyId in ${store.dir}: ${e.getMessage}", e),
+                  retryable = true,
+                )
+            }
+          }
           b.setIntent(
             signer.signCeremony(c, FrostIntentSigner.PurposeDkg, keyId, requestId, System.currentTimeMillis(), intentLifetime.toMillis)
           )
           ownDkgCeremonies
             .computeIfAbsent(keyId, _ => java.util.concurrent.ConcurrentHashMap.newKeySet[String]())
-            .add(FrostIntentSigner.ceremonyId(FrostIntentSigner.PurposeDkg, requestId))
+            .add(ceremony)
           logger.info(
             s"FROST: DKG for $keyId carries ceremony intent " +
               s"(ceremony ${FrostIntentSigner.ceremonyId(FrostIntentSigner.PurposeDkg, requestId)})"
@@ -966,7 +981,9 @@ class FrostBackend(
     * started the ceremony that created the key. */
   private def acceptDkgReply(keyId: String, reply: DkgReply, withIntent: Boolean, intentExpected: Boolean): DkgReply = {
     val origin = reply.getOriginCeremonyId
-    def ours: Boolean = origin.nonEmpty && Option(ownDkgCeremonies.get(keyId)).exists(_.contains(origin))
+    def ours: Boolean =
+      origin.nonEmpty &&
+        (Option(ownDkgCeremonies.get(keyId)).exists(_.contains(origin)) || pinStore.exists(_.ceremonies(keyId).contains(origin)))
     if (!reply.hasExisting)
       logger.warn(
         s"FROST: the DKG leader for $keyId is older than 0.5.0 and cannot say whether the key already existed; " +
@@ -1006,11 +1023,14 @@ class FrostBackend(
         )
       else {
         val originText = if (origin.isEmpty) "an unknown ceremony" else s"ceremony $origin"
+        val scope =
+          if (pinStore.isEmpty) " in this process (frost.pin-dir is not set, so its ceremony ids do not survive a restart)"
+          else s" (no ceremony id recorded for it in ${pinStore.get.dir})"
         logger.error(s"FROST: DKG for $keyId: the cluster already holds this key from $originText, not from this driver")
         throw KmsDriverException(
           new SecurityException(
             s"FROST key $keyId already exists on the cosigner cluster, created by $originText, which this driver did not " +
-              "start in this process. What to do: (1) if any other participant uses this cluster with the same " +
+              s"start$scope. What to do: (1) if any other participant uses this cluster with the same " +
               "frost.key-prefix, do NOT adopt it: it is that participant's key; give this participant its own " +
               "frost.key-prefix (and driver certificate) and start again. (2) Otherwise the key is the one an earlier " +
               s"DKG of this participant created before the driver restarted: set frost.adopt-existing-keys = [\"$keyId\"], " +

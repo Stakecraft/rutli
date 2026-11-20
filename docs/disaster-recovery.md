@@ -487,6 +487,9 @@ and routed around. A call fails only when every answering cosigner differs from 
 - **A pin with no audit entry** (the driver stopped between writing the pin and its entry) is
   recorded at the next start, with `recovered=startup`.
 - A refresh keeps the group key, so it never touches a pin. A new key id gets a new pin.
+- `<key-id>.dkg` beside the pins lists the DKG ceremony ids the driver sent intents for, each
+  written before its request. It is what lets a driver that died during a bootstrap take its own
+  key after the restart. An id for a ceremony that never committed is harmless; do not edit it.
 
 ## §4 What you MUST have in place before go-live
 
