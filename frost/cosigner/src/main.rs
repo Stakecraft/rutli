@@ -1496,9 +1496,13 @@ async fn verify_key_command(
             let endpoints: std::collections::BTreeMap<u16, (&str, String)> =
                 peers.iter().map(|p| (p.identifier, (p.endpoint.as_str(), p.server_name()))).collect();
             for (leader, signers) in sign_test_plan(&roster, cfg.threshold) {
-                let (endpoint, server_name) = &endpoints[&leader];
+                let (Some((endpoint, server_name)), Some(client)) = (endpoints.get(&leader), clients.get(&leader))
+                else {
+                    report.problems.push(format!("sign test: node {leader} is not in the roster"));
+                    continue;
+                };
                 let endpoint = *endpoint;
-                let result = match &clients[&leader] {
+                let result = match client {
                     Ok(c) => match c
                         .clone()
                         .ceremony_sign_test(CeremonySignTestRequest {
@@ -2224,7 +2228,11 @@ fn collect_delete_approvals(
                 continue;
             }
             let Ok(v) = serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path)?) else { continue };
-            let (Some(id), Some(rid), Some(sig)) = (v["approverId"].as_str(), v["requestId"].as_str(), v["signature"].as_str())
+            let (Some(id), Some(rid), Some(sig)) = (
+                v.get("approverId").and_then(serde_json::Value::as_str),
+                v.get("requestId").and_then(serde_json::Value::as_str),
+                v.get("signature").and_then(serde_json::Value::as_str),
+            )
             else {
                 continue;
             };
@@ -2387,7 +2395,7 @@ fn keyfile_command(cfg: &Config, command: KeyfileCommand) -> Result<()> {
             if rutli_cosigner::seal::Sealer::is_sealed(&bytes) {
                 return Err(DaemonError::Config(format!("{} is already sealed", path.display())));
             }
-            let code = hex::encode(&sha2::Sha256::digest(&bytes)[..8]);
+            let code = hex::encode(sha2::Sha256::digest(&bytes).iter().copied().take(8).collect::<Vec<u8>>());
             let what = match keystore.inspect_plaintext(&key_id) {
                 Ok(rutli_cosigner::keystore::Record::Frost(share)) => format!(
                     "FROST share, group key {}, epoch {}",
