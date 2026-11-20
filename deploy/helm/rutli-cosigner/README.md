@@ -43,6 +43,7 @@ kubectl -n rutli label namespace rutli \
   pod-security.kubernetes.io/warn=restricted --overwrite
 
 kubectl -n rutli create secret generic rutli-cosigner-ca --from-file=ca.crt=certs/ca.crt
+cd "${RUTLI_WORK:?mount the memory disk first}"   # docs/key-material-handling.md
 for i in 1 2 3; do        # one kubernetes.io/tls Secret per cosigner (cert-manager can write these)
   kubectl -n rutli create secret tls rutli-cosigner-tls-$i --cert=certs/cosigner$i.crt --key=certs/cosigner$i.key
 done
@@ -51,7 +52,7 @@ done
 for i in 1 2 3; do
   rutli-cosigner seal new-node --node $i --out node-$i.json        # prints its dist_public_key
   kubectl -n rutli create secret generic rutli-seal-node-$i --from-file=node.json=node-$i.json
-  shred -u node-$i.json 2>/dev/null || rm -f node-$i.json
+  rm -f node-$i.json     # run this in a memory disk or encrypted image you destroy afterwards: docs/key-material-handling.md
 done
 
 # 3. Install (values already pin the image digest). peer-pins.json, written by gen-frost-certs.sh,
@@ -240,6 +241,30 @@ Legacy topology only. Two options; neither changes a certificate.
 into per-node bundles offline (`rutli-cosigner seal split-legacy`, which keeps every node's existing
 DEK so nothing is re-sealed), create the per-node Secrets, and `helm upgrade` with
 `topology: perNode` and `nodes[].existingClaim` pointing at the legacy claims.
+
+## Scratch space: memory-backed, bounded
+
+Two places receive files that are not meant to outlive their use: the cosigner's `/tmp` (share
+bundles, request files and key exports copied in for a ceremony, an extracted backup for `restore`)
+and the backup sidecar's `/work` (the tar of the sealed key files and journals of each run). Both
+are `emptyDir`s with `medium: Memory` and a `sizeLimit`, so their contents never reach the Kubernetes
+node's disk, and are gone with the pod. In every topology, the legacy one included.
+
+| Value | Default | Counted in |
+|---|---|---|
+| `tmp.sizeLimit` | `64Mi` | `resources.limits.memory` of the cosigner container (default `320Mi`) |
+| `backup.workSizeLimit` | `128Mi` | `backup.resources.limits.memory` of the sidecar (default `192Mi`) |
+
+Memory-backed pages are charged to the container that writes them, so a limit smaller than the
+working set plus the size limit lets a full scratch directory get the container OOM-killed. Change
+the pair together. `/tmp` is sized for ceremony files (kilobytes) and for the key files of one node's
+backup when restoring (`docs/disaster-recovery.md` extracts the backup with `--exclude=./journal`: the
+journals are evidence that `restore` does not copy back, and can be up to 64 MiB per key); a write
+beyond it fails with `no space left on device`. The sidecar links the files into `/work` and tars them there, so `/work`
+holds one tar: a run that does not fit logs `BACKUP_FAILED reason=work-dir-full`. Raise
+`backup.workSizeLimit` (and the sidecar's memory limit) for a node with many keys or a long journal
+retention. `scripts/check-deploy-policy.sh` refuses an `emptyDir` in a cosigner pod that is not
+memory-backed with a size limit.
 
 ## Probes
 

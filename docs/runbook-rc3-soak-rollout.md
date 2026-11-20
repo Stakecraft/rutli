@@ -113,7 +113,7 @@ Work in a private, short-lived directory, and set the shared variables in every 
 
 ```bash
 umask 077
-D=$(mktemp -d /dev/shm/rutli-rc3.XXXXXX 2>/dev/null || mktemp -d)
+D=$(mktemp -d "${RUTLI_WORK:?mount the memory disk first, docs/key-material-handling.md}/rutli-rc3.XXXXXX")
 PNS=stakecraft-devnet-rutli-01
 cd <repo>                                   # at the v0.4.0-rc.3 release commit
 echo "D=$D"                                 # keep it: later phases reuse files in $D
@@ -140,9 +140,10 @@ jq -n --arg d "$D" '{
 ```
 
 `$D/tls/driver.key` is the **live driver private key** (it signs on the soak). Keep it in `$D` only
-for this session, never commit or copy it elsewhere, and delete it securely when you are done (and
-before leaving the workstation): `rm -P $D/tls/driver.key` on macOS, `shred -u $D/tls/driver.key` on
-Linux, then remove `$D`. `$D/client-driver.json` holds only paths and endpoints. The field names are
+for this session, never commit or copy it elsewhere, and destroy it when you are done (and
+before leaving the workstation): unmount and delete the memory disk or image that holds `$D`
+(`docs/key-material-handling.md`; `rm -P` and `shred` do not erase on current macOS or on
+journaling and flash storage). `$D/client-driver.json` holds only paths and endpoints. The field names are
 those of `Config` in `frost/cosigner/src/config.rs` (same template as `docs/ca-rotation.md`
 `client_cfg`).
 
@@ -1070,7 +1071,7 @@ kubectl -n rutli exec rutli-cosigner-n$i-0 -c cosigner -- rutli-cosigner --confi
 
 From here this node's backups from before 7.3 no longer open on it. Escrow `$D/node-$i.json` (the
 pre-rotation bundle) offline for as long as those backups are kept, or record that they are given up
-(P1); then `shred -u $D/node-$i*.json`. Repeat 7.1–7.4 for the next node.
+(P1); then remove `$D/node-$i*.json` (gone for good only when the working place is destroyed and every other copy of the old DEK is, `docs/key-material-handling.md`). Repeat 7.1–7.4 for the next node.
 
 **Retiring the legacy master** (CHANGELOG step 8): it stays escrowed offline until all three nodes
 passed 7.4 **and** every backup sealed under a master-derived DEK (every tar before 7.1, including

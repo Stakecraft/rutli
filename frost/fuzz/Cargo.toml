@@ -1,0 +1,87 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "rutli-fuzz"
+description = "cargo-fuzz targets for the Rütli cosigner: key-file and seal-bundle parsers, share bundles, Canton key imports, the export-key file, signing and ceremony intents, and gRPC requests into the handlers. Not part of the frost workspace; see README.md."
+version = "0.0.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# A workspace of its own: the frost workspace, its Cargo.lock and its license checks stay as they
+# are, and `cargo test` in frost/ never builds libFuzzer.
+[workspace]
+members = ["."]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+libfuzzer-sys = "0.4"
+rutli-cosigner = { path = "../cosigner" }
+rutli-canton-key = { path = "../canton-key" }
+rutli-frost-core = { path = "../core" }
+frost-ed25519 = "2"
+prost = "0.13"
+tonic = "0.12"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+serde_json = "1"
+zeroize = "1"
+rcgen = "0.13"
+tempfile = "3"
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "key_file"
+path = "fuzz_targets/key_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "seal_bundle"
+path = "fuzz_targets/seal_bundle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "share_bundle"
+path = "fuzz_targets/share_bundle.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "canton_key"
+path = "fuzz_targets/canton_key.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "export_file"
+path = "fuzz_targets/export_file.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "intent"
+path = "fuzz_targets/intent.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc"
+path = "fuzz_targets/grpc.rs"
+test = false
+doc = false
+bench = false

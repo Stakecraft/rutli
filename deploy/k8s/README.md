@@ -41,6 +41,7 @@ kubectl create namespace rutli
 scripts/gen-frost-certs.sh 3 ./certs          # CA + per-cosigner certs (CN/SAN cosigner<id>)
 
 kubectl -n rutli create secret generic rutli-cosigner-ca --from-file=ca.crt=certs/ca.crt
+cd "${RUTLI_WORK:?mount the memory disk first}"   # docs/key-material-handling.md
 for i in 1 2 3; do                            # one kubernetes.io/tls Secret per cosigner
   kubectl -n rutli create secret tls rutli-cosigner-tls-$i \
     --cert=certs/cosigner$i.crt --key=certs/cosigner$i.key
@@ -49,7 +50,7 @@ done
 for i in 1 2 3; do                            # one seal bundle per node, on a workstation
   rutli-cosigner seal new-node --node $i --out node-$i.json
   kubectl -n rutli create secret generic rutli-seal-node-$i --from-file=node.json=node-$i.json
-  shred -u node-$i.json 2>/dev/null || rm -f node-$i.json
+  rm -f node-$i.json     # run this in a memory disk or encrypted image you destroy afterwards: docs/key-material-handling.md
 done
 ```
 
@@ -230,7 +231,7 @@ into every pod. The per-node layout needs one `kubernetes.io/tls` Secret per nod
 the old Secret without changing any certificate:
 
 ```sh
-umask 077; d=$(mktemp -d)                    # tmpfs if you have one; delete afterwards
+umask 077; d=$(mktemp -d "${RUTLI_WORK:?mount the memory disk first}/k8s.XXXXXX")   # docs/key-material-handling.md; destroy it afterwards
 kubectl -n rutli get secret rutli-cosigner-tls -o jsonpath='{.data.ca\.crt}' | base64 -d > $d/ca.crt
 kubectl -n rutli create secret generic rutli-cosigner-ca --from-file=ca.crt=$d/ca.crt
 for i in 1 2 3; do

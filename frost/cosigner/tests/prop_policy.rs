@@ -423,6 +423,7 @@ fn sign_intent(digest: &[u8], request_id: [u8; 16], issued: u64, not_after: u64)
         not_after_ms: not_after,
         approval_nonce: Vec::new(),
         approvals: Vec::new(),
+        ..Default::default()
     };
     intent::sign_intent(&fixture().driver, &intent).unwrap()
 }

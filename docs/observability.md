@@ -31,6 +31,8 @@ annotations, NetworkPolicy ingress for pods labelled `rutli.io/scraper: "true"`)
 | `rutli_ceremony_unknown_no_votes` | gauge | — | No-votes held for ceremony ids peers asked about that this node never knew (capped, garbage-collected after 30 days) |
 | `rutli_epoch_mismatch_total` | counter | — | Sign round-1 refusals because the leader signs with another sharing (epoch, PKP digest) of the key than this node committed (audit H1/M1): two nodes hold different epochs of one key |
 | `rutli_epoch_check_skipped_total` | counter | — | Sign round-1 requests from a leader that sent no sharing (a release before epochs), so the epoch check was skipped. Expected only during a rolling upgrade |
+| `rutli_key_epoch_proven` | gauge | `key` | `1` while the live epoch of the FROST key has a `keyfile prove` marker for the live sharing (an operator's statement that `verify-key --sign-test` passed, `docs/ceremonies.md#proving-an-epoch`), else `0`. Only keys with a v2 key file |
+| `rutli_key_epoch_age_seconds` | gauge | `key` | Seconds since the live key file of `key` was written: since the epoch was installed, or the file was last re-sealed |
 | `rutli_stale_share` | gauge | `key` | `1` while this node's share of `key` is older than a committed sharing a peer holds (typically a restore from an old backup); the node refuses to sign or lead for that key. One cosigner's claim alone can set it while no peer holding this node's sharing answers; the log's stale reason then says "unconfirmed" and the mark clears on the next pass that reaches such a peer, at most 30 s later. Else `0` |
 | `rutli_nonce_markers` | gauge | — | Burned-session nonce markers on this node after the last prune pass (audit L4); each costs an inode on the key volume, bounded by the sign rate over the retention window |
 | `rutli_nonce_markers_pruned_total` | counter | — | Burned-session nonce markers removed past their retention |
@@ -51,13 +53,13 @@ annotations, NetworkPolicy ingress for pods labelled `rutli.io/scraper: "true"`)
 | `rutli_anti_entropy_repairs_total` | counter | — | Hosted keys a sweep pulled to this node, each confirmed by two peers (since 0.5.0 the sweep pushes nothing; up to 0.4.0 it also counted pushes) |
 | `rutli_key_replicas` | gauge | — | Fewest cosigners holding any one hosted key, as of the last anti-entropy sweep (`NaN` until a sweep sees a hosted key, so comparisons never fire on an idle cluster). Below the cluster size means a write has not healed yet |
 | `rutli_anti_entropy_conflicts_total` | counter | — | *Different* material seen under one hosted key id: this node and a peer (the sweep), peers this node would pull from, a push refused over another copy, or a generation this node led aborted — an invariant violation, never auto-reconciled |
-| `rutli_hosted_replication_refusals_total` | counter | `reason`=unfenced\|conflict\|disagreement\|unconfirmed\|invalid\|timestamp\|generate-conflict\|unverifiable\|throttled | Hosted key material this node refused to store, or a generation it aborted (0.5.0; reasons in `docs/hosted-keys.md`, section 4, "Pushes a node refuses"). `unconfirmed` is normal while a node is down |
+| `rutli_hosted_replication_refusals_total` | counter | `reason`=unfenced\|conflict\|disagreement\|unconfirmed\|invalid\|timestamp\|generate-conflict\|unverifiable\|throttled\|spec\|intent\|mixed-version | Hosted key material this node refused to store, or a generation it aborted or refused (0.5.0; reasons in `docs/hosted-keys.md`, section 4, "Pushes a node refuses"). `unconfirmed` is normal while a node is down; `mixed-version` while the cluster is being upgraded from 0.4.0 |
 | `rutli_anti_entropy_pull_failures_total` | counter | — | Missing hosted keys a sweep tried to pull and did not (unconfirmed, conflicting, or an error); the key id is in the debug log, refusals also by reason |
 | `rutli_hosted_rollback_incomplete_total` | counter | — | Nodes the rollback of an aborted hosted-key generation did not reach; each may keep a copy nobody was given (0.5.0) |
 | `rutli_hosted_keys_future_timestamp` | gauge | — | Hosted keys held here whose creation or undelete time lies in the future beyond the clock skew allowance (they refuse every delete until then); set at startup and by every sweep |
 | `rutli_sign_intent_absent_total` | counter | — | Signatures this node took part in without a client-signed intent (accepted only where `signing_policy.require_intent` is off: set to false, or a node without TLS; on by default with TLS). Must stop growing once the driver signs intents; never moves on an enforcing cluster |
-| `rutli_ceremony_intent_absent_total` | counter | — | DKG/refresh fences and part 1s this node accepted without a client-signed ceremony intent (accepted only while `signing_policy.require_ceremony_intent` is off) |
-| `rutli_ceremony_intent_refusals_total` | counter | `reason`=missing\|malformed\|certificate\|signer\|pin\|signature\|cluster\|purpose\|key\|expiry\|acl\|ceremony-id | DKG/refresh ceremony intents this node refused: at the fence or part 1 of a ceremony a peer leads, or as leader on `Signer.Dkg`/`Signer.Refresh`. A refusal on the peer path means a leader asked for a ceremony no authorized client requested |
+| `rutli_ceremony_intent_absent_total` | counter | — | DKG/refresh fences and part 1s, and hosted-key generation fences (0.5.0), this node accepted without a client-signed intent (accepted only while `signing_policy.require_ceremony_intent` is off) |
+| `rutli_ceremony_intent_refusals_total` | counter | `reason`=missing\|malformed\|certificate\|signer\|pin\|signature\|cluster\|purpose\|key\|spec\|leader\|expiry\|acl\|ceremony-id | DKG/refresh ceremony intents and hosted-key generate intents (0.5.0) this node refused: at the fence or part 1 of a ceremony a peer leads, at the fence of a generation, or as leader on `Signer.Dkg`/`Signer.Refresh`/`Signer.GenerateKey`. A refusal on the peer path means a leader asked for a ceremony or a key no authorized client requested; `leader` means a cosigner presented a generate intent the client signed for another cosigner |
 | `rutli_refresh_interval_refusals_total` | counter | — | Refreshes this node refused because it took part in a refresh of the same key less than `signing_policy.refresh_min_interval_secs` ago (as leader before contacting a peer, at a fence, or at part 1). Outside a documented incident nobody refreshes that often: check who holds the refresher (and, while `signer_may_refresh` is on, the driver) certificate (`RutliRefreshRefused`; docs/ceremonies.md, "Refresh interval") |
 | `rutli_refresh_interval_waived_total` | counter | — | Refreshes this node let through the interval because of `signing_policy.refresh_interval_waived_at`, the operator's incident path: one per key after the waiver time |
 | `rutli_refreshes_6d` | gauge | `key` | Refreshes of the FROST key this node committed in the last 6 days (by commit time), read from its ceremony records (survives a restart). The shipped schedule is weekly and the window a day shorter, so scheduler jitter never puts two weekly runs in it: above 1 means a refresh outside the schedule (`RutliRefreshOffSchedule`) |
@@ -85,7 +87,7 @@ Hosted-key metrics appear on every node, because hosted keys are **replicated wh
 shares**: each node holds the same material, serves its own decrypts, and counts them locally. (The
 FROST share itself is never listed, replicated or counted per-key — two nodes holding one share
 would silently break the threshold.) No hosted-key id is ever used as a label (only
-`rutli_stale_share` and `rutli_refreshes_6d` carry a key id: a FROST key, a handful per cluster); the label sets above are
+`rutli_stale_share`, `rutli_key_epoch_proven`, `rutli_key_epoch_age_seconds` and `rutli_refreshes_6d` carry a key id: a FROST key, a handful per cluster); the label sets above are
 exhaustive. Three collection details matter when writing rules:
 
 - `rutli_hosted_keys` is refreshed at the end of this node's own anti-entropy sweep and whenever a
@@ -117,7 +119,7 @@ that alert on increases see it (`deploy/monitoring/prometheus-rules.yml`:
 `rutli_sign_round2_unknown_session_total` is primed too (`RutliSignUnknownSessions`), and so are
 the sign-session refusal counters for every `call` and `cap` (`RutliSignSessionOwnerRefused`,
 `RutliSignSessionCapReached`).
-`rutli_stale_share` carries a key id and cannot be primed; `rutli_refreshes_6d` is set from the
+`rutli_stale_share`, `rutli_key_epoch_proven` and `rutli_key_epoch_age_seconds` carry a key id and cannot be primed; `rutli_refreshes_6d` is set from the
 ceremony records every resolver pass (30 s), for every key with a refresh record. `rutli_keyfiles` is set
 once per start (`RutliKeyFilesUnopenable`, `RutliKeyFileMigrationPending`).
 
@@ -164,7 +166,7 @@ sum(rate(rutli_sign_duration_seconds_sum{result="ok"}[1h]))
   hosted key under-replicated (below the cluster size) or critically under-replicated (a single
   copy — critical), hosted-key counts diverging across the job, unreadable key files, hosted-key
   conflict (critical), hosted key material refused (`RutliHostedReplicationRefused`: unfenced,
-  invalid, timestamp, unverifiable, throttled), a held hosted key with a time in the future
+  invalid, timestamp, unverifiable, throttled, spec, intent, mixed-version), a held hosted key with a time in the future
   (`RutliHostedKeyFutureTimestamp`), an aborted generation's rollback that missed a node
   (`RutliHostedRollbackIncomplete`). CI runs `promtool check rules` (pinned `prom/prometheus` image) on this file
   and on the rendered PrometheusRule, and fails if the render is stale:
@@ -219,6 +221,18 @@ sum(rate(rutli_sign_duration_seconds_sum{result="ok"}[1h]))
    replica) — investigate it as for `rutli_anti_entropy_conflicts_total`. On a decrypt that failed
    anyway (`ecies-failure=after-ecdh`), every node's secret was refused: the ciphertext is the
    suspect, and it cost one `EcdhDerive` per cosigner.
+   **A hosted key the driver did not accept** (0.5.0): after `GenerateKey` the driver asks every
+   cosigner for its own copy and gives the key id to Canton only when at least two hold the
+   material the leader reported and none reports other material. If it is short only because
+   cosigners were silent, it asks the next cosigner to lead the same id (WARN `not confirmed`,
+   `hosted-check=unconfirmed`); when none is left, Canton gets a non-retryable error naming the
+   silent endpoints. Otherwise it logs an ERROR `hosted key <id> from <endpoint> REFUSED: …` with
+   every node's answer, the audit entry carries `hosted-check=failed`, and Canton gets a
+   non-retryable error. That is the leader or another cosigner holding material nobody confirmed,
+   or a cosigner falsely claiming so (its statement is not checked): page, compare the nodes with
+   `rutli-cosigner verify-hosted --key-id <id>`, and treat a node that disagrees as for
+   `rutli_anti_entropy_conflicts_total`. Loki:
+   `sum(count_over_time({app="canton-participant"} |= "hosted-check=failed" [10m])) > 0`.
 6. **`rutli_key_replicas` below the cluster size** (or `rutli_hosted_keys` differing across
    instances, the same signal seen sideways) — a key exists on fewer nodes than the cluster is
    configured for. Writes commit at `write_quorum` (default 2 of 3) and roll back below it, so a

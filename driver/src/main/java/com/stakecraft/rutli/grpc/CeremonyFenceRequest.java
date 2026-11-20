@@ -31,6 +31,7 @@ private static final long serialVersionUID = 0L;
     keyId_ = "";
     kind_ = "";
     expectedPkpDigest_ = com.google.protobuf.ByteString.EMPTY;
+    spec_ = "";
   }
 
   public static final com.google.protobuf.Descriptors.Descriptor
@@ -222,9 +223,13 @@ private static final long serialVersionUID = 0L;
    * forwarded unchanged. This node verifies it itself — signature, chain to the cluster CA, the
    * signer's role (dkg: signer_allowlist + signer_acl; refresh: refresh_allowlist, or the signer
    * role while signer_may_refresh) and SPKI pin, cluster, purpose == kind, key, validity — and that
-   * ceremony_id is the one the intent names, before it takes the guard. Refused on genkey/delkey.
-   * Absent (a leader that predates ceremony intents): accepted, counted, unless the node sets
-   * signing_policy.require_ceremony_intent. No protocol bump: an older node ignores the field.
+   * ceremony_id is the one the intent names, before it takes the guard.
+   * genkey (since 0.5.0): the client's generate intent (GenerateKeyRequest.intent), verified the
+   * same way (signer role, signer_acl, purpose "generate-key", key, spec == `spec`, and leader == the
+   * roster identifier of the calling cosigner). A 0.4.0 node refuses a genkey fence that carries one
+   * (INVALID_ARGUMENT). Refused on delkey (deletes carry delete intents).
+   * Absent (a leader or client that predates these intents): accepted, counted, unless the node
+   * sets signing_policy.require_ceremony_intent (on by default with TLS).
    * </pre>
    *
    * <code>.rutli.cosigner.v1.SignedIntent intent = 7;</code>
@@ -240,9 +245,13 @@ private static final long serialVersionUID = 0L;
    * forwarded unchanged. This node verifies it itself — signature, chain to the cluster CA, the
    * signer's role (dkg: signer_allowlist + signer_acl; refresh: refresh_allowlist, or the signer
    * role while signer_may_refresh) and SPKI pin, cluster, purpose == kind, key, validity — and that
-   * ceremony_id is the one the intent names, before it takes the guard. Refused on genkey/delkey.
-   * Absent (a leader that predates ceremony intents): accepted, counted, unless the node sets
-   * signing_policy.require_ceremony_intent. No protocol bump: an older node ignores the field.
+   * ceremony_id is the one the intent names, before it takes the guard.
+   * genkey (since 0.5.0): the client's generate intent (GenerateKeyRequest.intent), verified the
+   * same way (signer role, signer_acl, purpose "generate-key", key, spec == `spec`, and leader == the
+   * roster identifier of the calling cosigner). A 0.4.0 node refuses a genkey fence that carries one
+   * (INVALID_ARGUMENT). Refused on delkey (deletes carry delete intents).
+   * Absent (a leader or client that predates these intents): accepted, counted, unless the node
+   * sets signing_policy.require_ceremony_intent (on by default with TLS).
    * </pre>
    *
    * <code>.rutli.cosigner.v1.SignedIntent intent = 7;</code>
@@ -258,9 +267,13 @@ private static final long serialVersionUID = 0L;
    * forwarded unchanged. This node verifies it itself — signature, chain to the cluster CA, the
    * signer's role (dkg: signer_allowlist + signer_acl; refresh: refresh_allowlist, or the signer
    * role while signer_may_refresh) and SPKI pin, cluster, purpose == kind, key, validity — and that
-   * ceremony_id is the one the intent names, before it takes the guard. Refused on genkey/delkey.
-   * Absent (a leader that predates ceremony intents): accepted, counted, unless the node sets
-   * signing_policy.require_ceremony_intent. No protocol bump: an older node ignores the field.
+   * ceremony_id is the one the intent names, before it takes the guard.
+   * genkey (since 0.5.0): the client's generate intent (GenerateKeyRequest.intent), verified the
+   * same way (signer role, signer_acl, purpose "generate-key", key, spec == `spec`, and leader == the
+   * roster identifier of the calling cosigner). A 0.4.0 node refuses a genkey fence that carries one
+   * (INVALID_ARGUMENT). Refused on delkey (deletes carry delete intents).
+   * Absent (a leader or client that predates these intents): accepted, counted, unless the node
+   * sets signing_policy.require_ceremony_intent (on by default with TLS).
    * </pre>
    *
    * <code>.rutli.cosigner.v1.SignedIntent intent = 7;</code>
@@ -268,6 +281,55 @@ private static final long serialVersionUID = 0L;
   @java.lang.Override
   public com.stakecraft.rutli.grpc.SignedIntentOrBuilder getIntentOrBuilder() {
     return intent_ == null ? com.stakecraft.rutli.grpc.SignedIntent.getDefaultInstance() : intent_;
+  }
+
+  public static final int SPEC_FIELD_NUMBER = 8;
+  @SuppressWarnings("serial")
+  private volatile java.lang.Object spec_ = "";
+  /**
+   * <pre>
+   * genkey: the spec the leader generates. The guard keeps it, and a push of another spec under
+   * this fence is refused. Empty from a 0.4.0 leader.
+   * </pre>
+   *
+   * <code>string spec = 8;</code>
+   * @return The spec.
+   */
+  @java.lang.Override
+  public java.lang.String getSpec() {
+    java.lang.Object ref = spec_;
+    if (ref instanceof java.lang.String) {
+      return (java.lang.String) ref;
+    } else {
+      com.google.protobuf.ByteString bs = 
+          (com.google.protobuf.ByteString) ref;
+      java.lang.String s = bs.toStringUtf8();
+      spec_ = s;
+      return s;
+    }
+  }
+  /**
+   * <pre>
+   * genkey: the spec the leader generates. The guard keeps it, and a push of another spec under
+   * this fence is refused. Empty from a 0.4.0 leader.
+   * </pre>
+   *
+   * <code>string spec = 8;</code>
+   * @return The bytes for spec.
+   */
+  @java.lang.Override
+  public com.google.protobuf.ByteString
+      getSpecBytes() {
+    java.lang.Object ref = spec_;
+    if (ref instanceof java.lang.String) {
+      com.google.protobuf.ByteString b = 
+          com.google.protobuf.ByteString.copyFromUtf8(
+              (java.lang.String) ref);
+      spec_ = b;
+      return b;
+    } else {
+      return (com.google.protobuf.ByteString) ref;
+    }
   }
 
   private byte memoizedIsInitialized = -1;
@@ -305,6 +367,9 @@ private static final long serialVersionUID = 0L;
     if (((bitField0_ & 0x00000001) != 0)) {
       output.writeMessage(7, getIntent());
     }
+    if (!com.google.protobuf.GeneratedMessage.isStringEmpty(spec_)) {
+      com.google.protobuf.GeneratedMessage.writeString(output, 8, spec_);
+    }
     getUnknownFields().writeTo(output);
   }
 
@@ -339,6 +404,9 @@ private static final long serialVersionUID = 0L;
       size += com.google.protobuf.CodedOutputStream
         .computeMessageSize(7, getIntent());
     }
+    if (!com.google.protobuf.GeneratedMessage.isStringEmpty(spec_)) {
+      size += com.google.protobuf.GeneratedMessage.computeStringSize(8, spec_);
+    }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
     return size;
@@ -371,6 +439,8 @@ private static final long serialVersionUID = 0L;
       if (!getIntent()
           .equals(other.getIntent())) return false;
     }
+    if (!getSpec()
+        .equals(other.getSpec())) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -399,6 +469,8 @@ private static final long serialVersionUID = 0L;
       hash = (37 * hash) + INTENT_FIELD_NUMBER;
       hash = (53 * hash) + getIntent().hashCode();
     }
+    hash = (37 * hash) + SPEC_FIELD_NUMBER;
+    hash = (53 * hash) + getSpec().hashCode();
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -547,6 +619,7 @@ private static final long serialVersionUID = 0L;
         intentBuilder_.dispose();
         intentBuilder_ = null;
       }
+      spec_ = "";
       return this;
     }
 
@@ -605,6 +678,9 @@ private static final long serialVersionUID = 0L;
             : intentBuilder_.build();
         to_bitField0_ |= 0x00000001;
       }
+      if (((from_bitField0_ & 0x00000080) != 0)) {
+        result.spec_ = spec_;
+      }
       result.bitField0_ |= to_bitField0_;
     }
 
@@ -646,6 +722,11 @@ private static final long serialVersionUID = 0L;
       }
       if (other.hasIntent()) {
         mergeIntent(other.getIntent());
+      }
+      if (!other.getSpec().isEmpty()) {
+        spec_ = other.spec_;
+        bitField0_ |= 0x00000080;
+        onChanged();
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -710,6 +791,11 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000040;
               break;
             } // case 58
+            case 66: {
+              spec_ = input.readStringRequireUtf8();
+              bitField0_ |= 0x00000080;
+              break;
+            } // case 66
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -1095,9 +1181,13 @@ private static final long serialVersionUID = 0L;
      * forwarded unchanged. This node verifies it itself — signature, chain to the cluster CA, the
      * signer's role (dkg: signer_allowlist + signer_acl; refresh: refresh_allowlist, or the signer
      * role while signer_may_refresh) and SPKI pin, cluster, purpose == kind, key, validity — and that
-     * ceremony_id is the one the intent names, before it takes the guard. Refused on genkey/delkey.
-     * Absent (a leader that predates ceremony intents): accepted, counted, unless the node sets
-     * signing_policy.require_ceremony_intent. No protocol bump: an older node ignores the field.
+     * ceremony_id is the one the intent names, before it takes the guard.
+     * genkey (since 0.5.0): the client's generate intent (GenerateKeyRequest.intent), verified the
+     * same way (signer role, signer_acl, purpose "generate-key", key, spec == `spec`, and leader == the
+     * roster identifier of the calling cosigner). A 0.4.0 node refuses a genkey fence that carries one
+     * (INVALID_ARGUMENT). Refused on delkey (deletes carry delete intents).
+     * Absent (a leader or client that predates these intents): accepted, counted, unless the node
+     * sets signing_policy.require_ceremony_intent (on by default with TLS).
      * </pre>
      *
      * <code>.rutli.cosigner.v1.SignedIntent intent = 7;</code>
@@ -1112,9 +1202,13 @@ private static final long serialVersionUID = 0L;
      * forwarded unchanged. This node verifies it itself — signature, chain to the cluster CA, the
      * signer's role (dkg: signer_allowlist + signer_acl; refresh: refresh_allowlist, or the signer
      * role while signer_may_refresh) and SPKI pin, cluster, purpose == kind, key, validity — and that
-     * ceremony_id is the one the intent names, before it takes the guard. Refused on genkey/delkey.
-     * Absent (a leader that predates ceremony intents): accepted, counted, unless the node sets
-     * signing_policy.require_ceremony_intent. No protocol bump: an older node ignores the field.
+     * ceremony_id is the one the intent names, before it takes the guard.
+     * genkey (since 0.5.0): the client's generate intent (GenerateKeyRequest.intent), verified the
+     * same way (signer role, signer_acl, purpose "generate-key", key, spec == `spec`, and leader == the
+     * roster identifier of the calling cosigner). A 0.4.0 node refuses a genkey fence that carries one
+     * (INVALID_ARGUMENT). Refused on delkey (deletes carry delete intents).
+     * Absent (a leader or client that predates these intents): accepted, counted, unless the node
+     * sets signing_policy.require_ceremony_intent (on by default with TLS).
      * </pre>
      *
      * <code>.rutli.cosigner.v1.SignedIntent intent = 7;</code>
@@ -1133,9 +1227,13 @@ private static final long serialVersionUID = 0L;
      * forwarded unchanged. This node verifies it itself — signature, chain to the cluster CA, the
      * signer's role (dkg: signer_allowlist + signer_acl; refresh: refresh_allowlist, or the signer
      * role while signer_may_refresh) and SPKI pin, cluster, purpose == kind, key, validity — and that
-     * ceremony_id is the one the intent names, before it takes the guard. Refused on genkey/delkey.
-     * Absent (a leader that predates ceremony intents): accepted, counted, unless the node sets
-     * signing_policy.require_ceremony_intent. No protocol bump: an older node ignores the field.
+     * ceremony_id is the one the intent names, before it takes the guard.
+     * genkey (since 0.5.0): the client's generate intent (GenerateKeyRequest.intent), verified the
+     * same way (signer role, signer_acl, purpose "generate-key", key, spec == `spec`, and leader == the
+     * roster identifier of the calling cosigner). A 0.4.0 node refuses a genkey fence that carries one
+     * (INVALID_ARGUMENT). Refused on delkey (deletes carry delete intents).
+     * Absent (a leader or client that predates these intents): accepted, counted, unless the node
+     * sets signing_policy.require_ceremony_intent (on by default with TLS).
      * </pre>
      *
      * <code>.rutli.cosigner.v1.SignedIntent intent = 7;</code>
@@ -1159,9 +1257,13 @@ private static final long serialVersionUID = 0L;
      * forwarded unchanged. This node verifies it itself — signature, chain to the cluster CA, the
      * signer's role (dkg: signer_allowlist + signer_acl; refresh: refresh_allowlist, or the signer
      * role while signer_may_refresh) and SPKI pin, cluster, purpose == kind, key, validity — and that
-     * ceremony_id is the one the intent names, before it takes the guard. Refused on genkey/delkey.
-     * Absent (a leader that predates ceremony intents): accepted, counted, unless the node sets
-     * signing_policy.require_ceremony_intent. No protocol bump: an older node ignores the field.
+     * ceremony_id is the one the intent names, before it takes the guard.
+     * genkey (since 0.5.0): the client's generate intent (GenerateKeyRequest.intent), verified the
+     * same way (signer role, signer_acl, purpose "generate-key", key, spec == `spec`, and leader == the
+     * roster identifier of the calling cosigner). A 0.4.0 node refuses a genkey fence that carries one
+     * (INVALID_ARGUMENT). Refused on delkey (deletes carry delete intents).
+     * Absent (a leader or client that predates these intents): accepted, counted, unless the node
+     * sets signing_policy.require_ceremony_intent (on by default with TLS).
      * </pre>
      *
      * <code>.rutli.cosigner.v1.SignedIntent intent = 7;</code>
@@ -1183,9 +1285,13 @@ private static final long serialVersionUID = 0L;
      * forwarded unchanged. This node verifies it itself — signature, chain to the cluster CA, the
      * signer's role (dkg: signer_allowlist + signer_acl; refresh: refresh_allowlist, or the signer
      * role while signer_may_refresh) and SPKI pin, cluster, purpose == kind, key, validity — and that
-     * ceremony_id is the one the intent names, before it takes the guard. Refused on genkey/delkey.
-     * Absent (a leader that predates ceremony intents): accepted, counted, unless the node sets
-     * signing_policy.require_ceremony_intent. No protocol bump: an older node ignores the field.
+     * ceremony_id is the one the intent names, before it takes the guard.
+     * genkey (since 0.5.0): the client's generate intent (GenerateKeyRequest.intent), verified the
+     * same way (signer role, signer_acl, purpose "generate-key", key, spec == `spec`, and leader == the
+     * roster identifier of the calling cosigner). A 0.4.0 node refuses a genkey fence that carries one
+     * (INVALID_ARGUMENT). Refused on delkey (deletes carry delete intents).
+     * Absent (a leader or client that predates these intents): accepted, counted, unless the node
+     * sets signing_policy.require_ceremony_intent (on by default with TLS).
      * </pre>
      *
      * <code>.rutli.cosigner.v1.SignedIntent intent = 7;</code>
@@ -1214,9 +1320,13 @@ private static final long serialVersionUID = 0L;
      * forwarded unchanged. This node verifies it itself — signature, chain to the cluster CA, the
      * signer's role (dkg: signer_allowlist + signer_acl; refresh: refresh_allowlist, or the signer
      * role while signer_may_refresh) and SPKI pin, cluster, purpose == kind, key, validity — and that
-     * ceremony_id is the one the intent names, before it takes the guard. Refused on genkey/delkey.
-     * Absent (a leader that predates ceremony intents): accepted, counted, unless the node sets
-     * signing_policy.require_ceremony_intent. No protocol bump: an older node ignores the field.
+     * ceremony_id is the one the intent names, before it takes the guard.
+     * genkey (since 0.5.0): the client's generate intent (GenerateKeyRequest.intent), verified the
+     * same way (signer role, signer_acl, purpose "generate-key", key, spec == `spec`, and leader == the
+     * roster identifier of the calling cosigner). A 0.4.0 node refuses a genkey fence that carries one
+     * (INVALID_ARGUMENT). Refused on delkey (deletes carry delete intents).
+     * Absent (a leader or client that predates these intents): accepted, counted, unless the node
+     * sets signing_policy.require_ceremony_intent (on by default with TLS).
      * </pre>
      *
      * <code>.rutli.cosigner.v1.SignedIntent intent = 7;</code>
@@ -1237,9 +1347,13 @@ private static final long serialVersionUID = 0L;
      * forwarded unchanged. This node verifies it itself — signature, chain to the cluster CA, the
      * signer's role (dkg: signer_allowlist + signer_acl; refresh: refresh_allowlist, or the signer
      * role while signer_may_refresh) and SPKI pin, cluster, purpose == kind, key, validity — and that
-     * ceremony_id is the one the intent names, before it takes the guard. Refused on genkey/delkey.
-     * Absent (a leader that predates ceremony intents): accepted, counted, unless the node sets
-     * signing_policy.require_ceremony_intent. No protocol bump: an older node ignores the field.
+     * ceremony_id is the one the intent names, before it takes the guard.
+     * genkey (since 0.5.0): the client's generate intent (GenerateKeyRequest.intent), verified the
+     * same way (signer role, signer_acl, purpose "generate-key", key, spec == `spec`, and leader == the
+     * roster identifier of the calling cosigner). A 0.4.0 node refuses a genkey fence that carries one
+     * (INVALID_ARGUMENT). Refused on delkey (deletes carry delete intents).
+     * Absent (a leader or client that predates these intents): accepted, counted, unless the node
+     * sets signing_policy.require_ceremony_intent (on by default with TLS).
      * </pre>
      *
      * <code>.rutli.cosigner.v1.SignedIntent intent = 7;</code>
@@ -1255,9 +1369,13 @@ private static final long serialVersionUID = 0L;
      * forwarded unchanged. This node verifies it itself — signature, chain to the cluster CA, the
      * signer's role (dkg: signer_allowlist + signer_acl; refresh: refresh_allowlist, or the signer
      * role while signer_may_refresh) and SPKI pin, cluster, purpose == kind, key, validity — and that
-     * ceremony_id is the one the intent names, before it takes the guard. Refused on genkey/delkey.
-     * Absent (a leader that predates ceremony intents): accepted, counted, unless the node sets
-     * signing_policy.require_ceremony_intent. No protocol bump: an older node ignores the field.
+     * ceremony_id is the one the intent names, before it takes the guard.
+     * genkey (since 0.5.0): the client's generate intent (GenerateKeyRequest.intent), verified the
+     * same way (signer role, signer_acl, purpose "generate-key", key, spec == `spec`, and leader == the
+     * roster identifier of the calling cosigner). A 0.4.0 node refuses a genkey fence that carries one
+     * (INVALID_ARGUMENT). Refused on delkey (deletes carry delete intents).
+     * Absent (a leader or client that predates these intents): accepted, counted, unless the node
+     * sets signing_policy.require_ceremony_intent (on by default with TLS).
      * </pre>
      *
      * <code>.rutli.cosigner.v1.SignedIntent intent = 7;</code>
@@ -1276,9 +1394,13 @@ private static final long serialVersionUID = 0L;
      * forwarded unchanged. This node verifies it itself — signature, chain to the cluster CA, the
      * signer's role (dkg: signer_allowlist + signer_acl; refresh: refresh_allowlist, or the signer
      * role while signer_may_refresh) and SPKI pin, cluster, purpose == kind, key, validity — and that
-     * ceremony_id is the one the intent names, before it takes the guard. Refused on genkey/delkey.
-     * Absent (a leader that predates ceremony intents): accepted, counted, unless the node sets
-     * signing_policy.require_ceremony_intent. No protocol bump: an older node ignores the field.
+     * ceremony_id is the one the intent names, before it takes the guard.
+     * genkey (since 0.5.0): the client's generate intent (GenerateKeyRequest.intent), verified the
+     * same way (signer role, signer_acl, purpose "generate-key", key, spec == `spec`, and leader == the
+     * roster identifier of the calling cosigner). A 0.4.0 node refuses a genkey fence that carries one
+     * (INVALID_ARGUMENT). Refused on delkey (deletes carry delete intents).
+     * Absent (a leader or client that predates these intents): accepted, counted, unless the node
+     * sets signing_policy.require_ceremony_intent (on by default with TLS).
      * </pre>
      *
      * <code>.rutli.cosigner.v1.SignedIntent intent = 7;</code>
@@ -1295,6 +1417,103 @@ private static final long serialVersionUID = 0L;
         intent_ = null;
       }
       return intentBuilder_;
+    }
+
+    private java.lang.Object spec_ = "";
+    /**
+     * <pre>
+     * genkey: the spec the leader generates. The guard keeps it, and a push of another spec under
+     * this fence is refused. Empty from a 0.4.0 leader.
+     * </pre>
+     *
+     * <code>string spec = 8;</code>
+     * @return The spec.
+     */
+    public java.lang.String getSpec() {
+      java.lang.Object ref = spec_;
+      if (!(ref instanceof java.lang.String)) {
+        com.google.protobuf.ByteString bs =
+            (com.google.protobuf.ByteString) ref;
+        java.lang.String s = bs.toStringUtf8();
+        spec_ = s;
+        return s;
+      } else {
+        return (java.lang.String) ref;
+      }
+    }
+    /**
+     * <pre>
+     * genkey: the spec the leader generates. The guard keeps it, and a push of another spec under
+     * this fence is refused. Empty from a 0.4.0 leader.
+     * </pre>
+     *
+     * <code>string spec = 8;</code>
+     * @return The bytes for spec.
+     */
+    public com.google.protobuf.ByteString
+        getSpecBytes() {
+      java.lang.Object ref = spec_;
+      if (ref instanceof String) {
+        com.google.protobuf.ByteString b = 
+            com.google.protobuf.ByteString.copyFromUtf8(
+                (java.lang.String) ref);
+        spec_ = b;
+        return b;
+      } else {
+        return (com.google.protobuf.ByteString) ref;
+      }
+    }
+    /**
+     * <pre>
+     * genkey: the spec the leader generates. The guard keeps it, and a push of another spec under
+     * this fence is refused. Empty from a 0.4.0 leader.
+     * </pre>
+     *
+     * <code>string spec = 8;</code>
+     * @param value The spec to set.
+     * @return This builder for chaining.
+     */
+    public Builder setSpec(
+        java.lang.String value) {
+      if (value == null) { throw new NullPointerException(); }
+      spec_ = value;
+      bitField0_ |= 0x00000080;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * genkey: the spec the leader generates. The guard keeps it, and a push of another spec under
+     * this fence is refused. Empty from a 0.4.0 leader.
+     * </pre>
+     *
+     * <code>string spec = 8;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearSpec() {
+      spec_ = getDefaultInstance().getSpec();
+      bitField0_ = (bitField0_ & ~0x00000080);
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * genkey: the spec the leader generates. The guard keeps it, and a push of another spec under
+     * this fence is refused. Empty from a 0.4.0 leader.
+     * </pre>
+     *
+     * <code>string spec = 8;</code>
+     * @param value The bytes for spec to set.
+     * @return This builder for chaining.
+     */
+    public Builder setSpecBytes(
+        com.google.protobuf.ByteString value) {
+      if (value == null) { throw new NullPointerException(); }
+      checkByteStringIsUtf8(value);
+      spec_ = value;
+      bitField0_ |= 0x00000080;
+      onChanged();
+      return this;
     }
 
     // @@protoc_insertion_point(builder_scope:rutli.cosigner.v1.CeremonyFenceRequest)

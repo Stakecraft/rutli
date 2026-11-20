@@ -23,7 +23,7 @@ import sys
 import time
 import uuid
 
-POD = "rutli-perf-loadgen"
+POD = "rutli-perf-loadgen"  # the first generator; --pod names another
 RIG_FAILED = 3
 
 
@@ -31,12 +31,12 @@ def log(msg):
     print(f"k8s_loadgen: {msg}", file=sys.stderr, flush=True)
 
 
-def kexec(ns, script, attempts=5, timeout=60):
-    """`sh -c script` in the pod, retried; (returncode, stdout, stderr) of the last attempt."""
+def kexec(ns, script, attempts=5, timeout=60, pod=POD):
+    """`sh -c script` in `pod`, retried; (returncode, stdout, stderr) of the last attempt."""
     last = (255, "", "")
     for attempt in range(attempts):
         try:
-            out = subprocess.run(["kubectl", "-n", ns, "exec", POD, "--", "sh", "-c", script],
+            out = subprocess.run(["kubectl", "-n", ns, "exec", pod, "--", "sh", "-c", script],
                                  capture_output=True, text=True, timeout=timeout, check=False)
             last = (out.returncode, out.stdout, out.stderr)
             # 0 or the script's own answer; kubectl reports its own failures as 1 with an
@@ -56,6 +56,7 @@ def main(argv=None):
                    help="longest pause between two polls; the first polls come sooner (0.5 s, doubling)")
     p.add_argument("--max-secs", type=float, default=6 * 3600, help="give up waiting after this long")
     p.add_argument("--dir", default="/tmp/lg", help="where in the pod the run's files go (an emptyDir)")
+    p.add_argument("--pod", default=POD, help="the load generator pod (default: the first)")
     p.add_argument("args", nargs=argparse.REMAINDER)
     a = p.parse_args(argv)
     args = a.args[1:] if a.args[:1] == ["--"] else a.args
@@ -71,7 +72,7 @@ def main(argv=None):
     start = (f"mkdir -p {q(a.dir)} && if mkdir {claim} 2>/dev/null; then "
              f"( {cmd} >{out_f} 2>{err_f}; echo $? >{rc_f} ) </dev/null >/dev/null 2>&1 & "
              f"echo $! >{pid_f}; fi")
-    rc, _, err = kexec(ns, start)
+    rc, _, err = kexec(ns, start, pod=a.pod)
     if rc != 0:
         log(f"could not start the load generator: {err.strip()[-500:]}")
         return RIG_FAILED
@@ -85,7 +86,7 @@ def main(argv=None):
         time.sleep(pause)
         pause = min(pause * 2, a.poll_secs)
         rc, out, _ = kexec(ns, f"if [ -e {rc_f} ]; then cat {rc_f}; elif [ -d {claim} ]; then echo running; "
-                               f"else echo lost; fi", attempts=3, timeout=30)
+                               f"else echo lost; fi", attempts=3, timeout=30, pod=a.pod)
         answer = out.strip()
         if rc == 0 and answer.isdigit():
             code = int(answer)
@@ -96,12 +97,12 @@ def main(argv=None):
             return RIG_FAILED
     if code is None:
         log(f"the load generator did not finish within {a.max_secs:g} s, or its end could not be observed")
-        kexec(ns, f"kill $(cat {pid_f}) 2>/dev/null || true", attempts=2)
+        kexec(ns, f"kill $(cat {pid_f}) 2>/dev/null || true", attempts=2, pod=a.pod)
         return RIG_FAILED
 
-    rc_err, err, _ = kexec(ns, f"cat {err_f}")
-    rc_out, out, _ = kexec(ns, f"cat {out_f}")
-    kexec(ns, f"rm -f {out_f} {err_f} {rc_f} {pid_f}; rmdir {claim}", attempts=2)
+    rc_err, err, _ = kexec(ns, f"cat {err_f}", pod=a.pod)
+    rc_out, out, _ = kexec(ns, f"cat {out_f}", pod=a.pod)
+    kexec(ns, f"rm -f {out_f} {err_f} {rc_f} {pid_f}; rmdir {claim}", attempts=2, pod=a.pod)
     if rc_out != 0 or rc_err != 0:
         log("the load generator finished, but its output could not be fetched")
         return RIG_FAILED
