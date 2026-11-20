@@ -5,3 +5,8 @@
 topology: legacy
 # The legacy topology cannot meet the production profile (one shared seal secret).
 profile: lab
+# Placeholder TLS key pins: every render needs them (tls.requirePeerPins unset = on).
+peerPins:
+  "1": ["1111111111111111111111111111111111111111111111111111111111111111"]
+  "2": ["2222222222222222222222222222222222222222222222222222222222222222"]
+  "3": ["3333333333333333333333333333333333333333333333333333333333333333"]

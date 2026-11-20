@@ -80,7 +80,9 @@ and answer nothing wrong.
 The cluster runs the example configs of `deploy/frost/config-tls` with one change: the sign rate
 limit (300 a minute per key by default, below what the scenarios send) is lifted, except for keys
 named `perf-limited*`, which get 120 a minute. The session caps, the ceremony limits and the
-decryption limit are the defaults.
+decryption limit are the defaults. Like any TLS cluster, each node pins the TLS key of every
+cosigner: `gen-frost-certs.sh` writes the pins of the certificates of the run into the copies
+(`RUTLI_PIN_CONFIGS`).
 
 ## The result
 

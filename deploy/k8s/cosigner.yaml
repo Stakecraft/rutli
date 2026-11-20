@@ -217,9 +217,9 @@ data:
       "threshold": 2,
       "data_dir": "/data",
       "peers": [
-        { "identifier": 1, "endpoint": "https://rutli-node-1.rutli.svc:9101" },
-        { "identifier": 2, "endpoint": "https://rutli-node-2.rutli.svc:9101" },
-        { "identifier": 3, "endpoint": "https://rutli-node-3.rutli.svc:9101" }
+        { "identifier": 1, "endpoint": "https://rutli-node-1.rutli.svc:9101", "tls_spki_sha256": ["0000000000000000000000000000000000000000000000000000000000000001"] },
+        { "identifier": 2, "endpoint": "https://rutli-node-2.rutli.svc:9101", "tls_spki_sha256": ["0000000000000000000000000000000000000000000000000000000000000002"] },
+        { "identifier": 3, "endpoint": "https://rutli-node-3.rutli.svc:9101", "tls_spki_sha256": ["0000000000000000000000000000000000000000000000000000000000000003"] }
       ],
       "tls": {
         "ca_cert": "/certs/ca.crt",
@@ -242,9 +242,9 @@ data:
       "threshold": 2,
       "data_dir": "/data",
       "peers": [
-        { "identifier": 1, "endpoint": "https://rutli-node-1.rutli.svc:9101" },
-        { "identifier": 2, "endpoint": "https://rutli-node-2.rutli.svc:9101" },
-        { "identifier": 3, "endpoint": "https://rutli-node-3.rutli.svc:9101" }
+        { "identifier": 1, "endpoint": "https://rutli-node-1.rutli.svc:9101", "tls_spki_sha256": ["0000000000000000000000000000000000000000000000000000000000000001"] },
+        { "identifier": 2, "endpoint": "https://rutli-node-2.rutli.svc:9101", "tls_spki_sha256": ["0000000000000000000000000000000000000000000000000000000000000002"] },
+        { "identifier": 3, "endpoint": "https://rutli-node-3.rutli.svc:9101", "tls_spki_sha256": ["0000000000000000000000000000000000000000000000000000000000000003"] }
       ],
       "tls": {
         "ca_cert": "/certs/ca.crt",
@@ -267,9 +267,9 @@ data:
       "threshold": 2,
       "data_dir": "/data",
       "peers": [
-        { "identifier": 1, "endpoint": "https://rutli-node-1.rutli.svc:9101" },
-        { "identifier": 2, "endpoint": "https://rutli-node-2.rutli.svc:9101" },
-        { "identifier": 3, "endpoint": "https://rutli-node-3.rutli.svc:9101" }
+        { "identifier": 1, "endpoint": "https://rutli-node-1.rutli.svc:9101", "tls_spki_sha256": ["0000000000000000000000000000000000000000000000000000000000000001"] },
+        { "identifier": 2, "endpoint": "https://rutli-node-2.rutli.svc:9101", "tls_spki_sha256": ["0000000000000000000000000000000000000000000000000000000000000002"] },
+        { "identifier": 3, "endpoint": "https://rutli-node-3.rutli.svc:9101", "tls_spki_sha256": ["0000000000000000000000000000000000000000000000000000000000000003"] }
       ],
       "tls": {
         "ca_cert": "/certs/ca.crt",

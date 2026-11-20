@@ -3,7 +3,9 @@
 
 //! The accept loop (`rutli_cosigner::accept`) under real mutual TLS on 127.0.0.1: a connection
 //! that never starts its handshake is cut at the deadline while the server keeps serving, and a
-//! connection whose handshake is done is not cut, however long it then stays idle.
+//! connection whose handshake is done is not cut, however long it then stays idle. The caller's
+//! certificate reaches the Peer API through the loop: its CN allowlist and its key pins
+//! (`peers[].tls_spki_sha256`) both read it.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -15,13 +17,14 @@ use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose,
 };
-use rutli_cosigner::config::TlsConfig;
+use rutli_cosigner::config::{PeerConfig, TlsConfig};
 use rutli_cosigner::keystore::KeyStore;
 use rutli_cosigner::node::Node;
 use rutli_cosigner::pb::peer_server::PeerServer;
 use rutli_cosigner::peer::{GrpcPeer, PeerApi};
 use rutli_cosigner::seal::Sealer;
-use rutli_cosigner::service::PeerSvc;
+use rutli_cosigner::service::{PeerPins, PeerSvc};
+use rutli_cosigner::tls::spki_sha256_of_pem_file;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_rustls::rustls;
@@ -73,6 +76,7 @@ impl Ca {
             key: key_path,
             domain: None,
             allow_expired_ca: false,
+            require_peer_pins: None,
         }
     }
 }
@@ -82,6 +86,7 @@ impl Ca {
 async fn serve(
     dir: &Path,
     server: &TlsConfig,
+    pins: Arc<PeerPins>,
 ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
     let sealer = Arc::new(Sealer::from_master_secret(MASTER, 1));
     let ks = KeyStore::open_with_sealer(dir.join("node-1"), Some(sealer)).unwrap();
@@ -97,6 +102,7 @@ async fn serve(
         node,
         allowed_cns: Some(peer_cns),
         peer_ids: Some(peer_ids),
+        peer_pins: Some(pins),
     };
     let server_tls = rutli_cosigner::tls::load(server).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -117,12 +123,36 @@ async fn serve(
     (addr, serving)
 }
 
+/// The roster's pins as the daemon builds them for `PeerSvc`: `pinned` peers under their key's
+/// pin, the other cosigners unpinned.
+fn pins(pinned: &[(u16, [u8; 32])]) -> Arc<PeerPins> {
+    let mut cfg: rutli_cosigner::config::Config = serde_json::from_str(
+        r#"{"identifier":1,"listen":"127.0.0.1:0","threshold":2,"data_dir":"/tmp","peers":[]}"#,
+    )
+    .unwrap();
+    cfg.peers = (1..=3u16)
+        .map(|id| {
+            let mut p = PeerConfig::new(id, format!("https://cosigner{id}:9100"));
+            p.tls_spki_sha256 = pinned
+                .iter()
+                .find(|(i, _)| *i == id)
+                .map(|(_, pin)| vec![hex::encode(pin)]);
+            p
+        })
+        .collect();
+    Arc::new(PeerPins::from_config(&cfg).unwrap())
+}
+
+fn pin(cfg: &TlsConfig) -> [u8; 32] {
+    spki_sha256_of_pem_file(&cfg.cert).unwrap()
+}
+
 async fn node_info(addr: std::net::SocketAddr, client: &TlsConfig) -> Result<u16, String> {
     let client_tls = rutli_cosigner::tls::load(client).unwrap();
     let peer = GrpcPeer::connect_lazy(
         Identifier::try_from(1u16).unwrap(),
         &format!("https://{addr}"),
-        Some(client_tls.client_for("cosigner1")),
+        Some(client_tls.dial_as("cosigner1", None, 1).unwrap()),
     )
     .unwrap();
     peer.node_info()
@@ -163,7 +193,7 @@ async fn a_connection_that_never_starts_its_handshake_is_cut_and_the_server_keep
         ca.tls_files(tmp.path(), "cosigner1"),
         ca.tls_files(tmp.path(), "cosigner2"),
     );
-    let (addr, serving) = serve(tmp.path(), &server).await;
+    let (addr, serving) = serve(tmp.path(), &server, pins(&[(2, pin(&client))])).await;
 
     let mut silent = tokio::net::TcpStream::connect(addr).await.unwrap();
     let start = Instant::now();
@@ -224,7 +254,7 @@ async fn a_connection_past_its_handshake_is_not_cut_while_idle() {
         ca.tls_files(tmp.path(), "cosigner1"),
         ca.tls_files(tmp.path(), "cosigner2"),
     );
-    let (addr, serving) = serve(tmp.path(), &server).await;
+    let (addr, serving) = serve(tmp.path(), &server, pins(&[(2, pin(&client))])).await;
 
     let mut tls = tls_handshake(addr, &client).await;
     tokio::time::sleep(DEADLINE * 3).await;
@@ -268,7 +298,7 @@ async fn a_failed_handshake_does_not_stop_the_server() {
     std::fs::create_dir_all(&foreign_dir).unwrap();
     let mut foreign = stranger.tls_files(&foreign_dir, "cosigner3");
     foreign.ca_cert = client.ca_cert.clone(); // trusts the server, but the server does not trust it
-    let (addr, serving) = serve(tmp.path(), &server).await;
+    let (addr, serving) = serve(tmp.path(), &server, pins(&[(2, pin(&client))])).await;
 
     for _ in 0..3 {
         assert!(
@@ -280,6 +310,24 @@ async fn a_failed_handshake_does_not_stop_the_server() {
         node_info(addr, &client).await,
         Ok(1),
         "the server still serves after refused handshakes"
+    );
+    serving.abort();
+}
+
+/// A caller whose certificate the CA signed, with a roster CN, but whose key is not that peer's
+/// pin is refused through the accept loop: the pin check sees the certificate the handshake took.
+#[tokio::test]
+async fn a_peer_key_that_is_not_its_pin_is_refused_through_the_accept_loop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ca = Ca::new();
+    let server = ca.tls_files(tmp.path(), "cosigner1");
+    let client = ca.tls_files(tmp.path(), "cosigner2");
+    let (addr, serving) = serve(tmp.path(), &server, pins(&[(2, [9; 32])])).await;
+
+    let refused = node_info(addr, &client).await;
+    assert!(
+        refused.as_ref().is_err_and(|e| e.contains("PermissionDenied") || e.contains("permission")),
+        "a key that is not the peer's pin is refused, got {refused:?}"
     );
     serving.abort();
 }

@@ -57,20 +57,22 @@ impl Node {
     }
 
     /// Write the config (`pin`: the `cluster_id` value, `None` = dropped) and return its path.
-    fn config(&self, pin: Option<&str>, change_allowed: bool) -> PathBuf {
+    fn config(&self, cluster_pin: Option<&str>, change_allowed: bool) -> PathBuf {
         let d = self.dir.path();
+        // The node's own TLS key pin: it refuses to start with TLS and an unpinned roster.
+        let pin = hex::encode(rutli_cosigner::tls::spki_sha256_of_pem_file(&d.join("cosigner1.crt")).unwrap());
         let mut cfg = serde_json::json!({
             "identifier": 1, "listen": "127.0.0.1:0", "threshold": 1,
             "data_dir": self.data_dir(),
-            "peers": [{ "identifier": 1, "endpoint": "https://127.0.0.1:1" }],
+            "peers": [{ "identifier": 1, "endpoint": "https://127.0.0.1:1", "tls_spki_sha256": [pin] }],
             "tls": {
                 "ca_cert": d.join("ca.crt"), "cert": d.join("cosigner1.crt"),
                 "key": d.join("cosigner1.key"), "domain": "rutli-cosigner"
             },
             "signer_allowlist": ["driver"], "peer_allowlist": ["cosigner1"]
         });
-        if let Some(pin) = pin {
-            cfg["cluster_id"] = pin.into();
+        if let Some(cluster) = cluster_pin {
+            cfg["cluster_id"] = cluster.into();
         }
         if change_allowed {
             cfg["cluster_id_change_allowed"] = true.into();

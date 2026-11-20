@@ -55,6 +55,12 @@ The report goes with the release notes, so each release shows what improved and 
 
 ## 7. Go/no-go
 
+This decides whether the software is released. It does not put an authority key into production.
+Before a key goes live, the operator's own gates in
+[audit-prep.md](audit-prep.md#operator-go-live-gates-post-audit) apply, among them one cosigner per
+separate cluster or cloud account. The DevNet soak runs in one cluster, which is fine for a release
+candidate and is not a production topology.
+
 All of these hold, or the release waits:
 
 - [ ] No open `prio:p0`; every `release:qa` issue triaged
@@ -64,6 +70,8 @@ All of these hold, or the release waits:
 - [ ] `CHANGELOG.md` complete; upgrade notes for any config or wire change
 - [ ] SECURITY.md supported-versions table updated
 - [ ] Third-party license files regenerated
+- [ ] Release notes, chart defaults and examples do not present a single-cluster deployment as a
+  production setup; the go-live gates in `audit-prep.md` match what the release can enforce
 
 ## 8. Tag and publish
 

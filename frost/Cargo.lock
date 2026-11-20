@@ -2080,6 +2080,7 @@ dependencies = [
  "frost-ed25519",
  "hex",
  "hkdf",
+ "hyper-util",
  "libc",
  "metrics",
  "metrics-exporter-prometheus",
