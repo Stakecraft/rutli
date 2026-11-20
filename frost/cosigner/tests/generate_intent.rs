@@ -371,7 +371,7 @@ async fn the_services_answer_permission_denied() {
         assert_eq!(caps.node_identifier, i as u32 + 1);
     }
 
-    let peer = PeerSvc { node: c.nodes[2].clone(), allowed_cns: None, peer_ids: None };
+    let peer = PeerSvc { node: c.nodes[2].clone(), allowed_cns: None, peer_ids: None, peer_pins: None };
     let fence = |intent: Option<pb::SignedIntent>| pb::CeremonyFenceRequest {
         ceremony_id: cid(6),
         key_id: "rutli-sym-svc-2".into(),
