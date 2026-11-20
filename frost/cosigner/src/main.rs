@@ -120,6 +120,26 @@ enum Command {
     /// Exit 0: no required finding; 1: required findings; 2: the config does not load. Works under
     /// any `profile`, so run it against the live config before an upgrade.
     CheckConfig,
+    /// Read-only inventory of key material on this node's volume and in the given backups that is
+    /// not its live, current state (docs/residue-scan.md): plaintext files, files under a DEK other
+    /// than the current one, older epochs, key ids that are not live, orphaned staged shares,
+    /// ceremony material, hosted-key and tombstone copies, temps and unknown directories. Safe next
+    /// to a running daemon: takes no lock and writes nothing. It reports what is found on the paths
+    /// given, never that a key is destroyed. Exit 0: nothing found on the paths given; 1: findings;
+    /// 2: a path could not be read, or the config or seal keys do not load.
+    ResidueScan {
+        /// A backup to read as well: a directory, a plain (uncompressed) tar, or one key file.
+        /// Repeat for more.
+        #[arg(long, value_name = "DIR|TAR")]
+        backup: Vec<std::path::PathBuf>,
+        /// Env var holding the legacy shared master: report whether this node's DEK (or a previous
+        /// one) is still the master's derivation. Refuses an unset, empty or short value.
+        #[arg(long, value_name = "VAR")]
+        legacy_master_env: Option<String>,
+        /// Print the report as JSON (docs/residue-scan.md has the schema).
+        #[arg(long)]
+        json: bool,
+    },
     /// Restore this node's key files from a backup directory (audit M1). Run with the daemon
     /// STOPPED (the instance lock is taken). Every file is verified first — sealed, bound to this
     /// cluster/node/key (key-file v2), consistent — and one refusal writes nothing. Never rolls a
@@ -372,6 +392,22 @@ enum KeyfileCommand {
         #[arg(long)]
         confirm: Option<String>,
     },
+    /// Record that an epoch of a FROST key is PROVEN: take the JSON of
+    /// `verify-key --sign-test --json` (every quorum signed, every node on one epoch and sharing),
+    /// check it against this node's live key, and write a clear marker `keys/.proven/<key>.<epoch>.json`.
+    /// The report is the OPERATOR'S statement: this node cannot check who produced it, only that it is
+    /// consistent and agrees with its own epoch, sharing and group key. Runs beside the daemon (it
+    /// only reads the key files). Backup retention keeps older epochs until the next one is proven.
+    Prove {
+        #[arg(long)]
+        key_id: String,
+        /// The epoch being proven; must be this node's live epoch.
+        #[arg(long)]
+        epoch: u64,
+        /// The report file written by `verify-key --sign-test --json`.
+        #[arg(long)]
+        report: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -493,6 +529,9 @@ async fn main() -> Result<()> {
     })?;
     if let Some(Command::CheckConfig) = args.command {
         check_config_command(&config_path);
+    }
+    if let Some(Command::ResidueScan { backup, legacy_master_env, json }) = &args.command {
+        residue_scan_command(&config_path, backup, legacy_master_env.as_deref(), *json);
     }
     // Printed with Display, not as main's `Error: Config("…")` debug dump: an operator reading a
     // crash loop must see which file and which key in one plain line.
@@ -887,8 +926,8 @@ async fn main() -> Result<()> {
         let tls = cfg.tls.is_some();
         if !tls {
             tracing::warn!(
-                "this node runs without TLS, so it verifies no intents: a signature, a DKG or a \
-                 refresh without a client-signed intent is accepted (counted in \
+                "this node runs without TLS, so it verifies no intents: a signature, a DKG, a refresh \
+                 or a hosted-key generation without a client-signed intent is accepted (counted in \
                  rutli_sign_intent_absent_total and rutli_ceremony_intent_absent_total) — plaintext \
                  is for development only"
             );
@@ -904,11 +943,11 @@ async fn main() -> Result<()> {
         }
         if tls && !policy.ceremony_intent_required(tls) {
             tracing::warn!(
-                "signing_policy.require_ceremony_intent is off (set to false): a DKG or refresh without a \
-                 client-signed ceremony intent is accepted (counted in \
+                "signing_policy.require_ceremony_intent is off (set to false): a DKG, a refresh or a \
+                 hosted-key generation without a client-signed intent is accepted (counted in \
                  rutli_ceremony_intent_absent_total), so a compromised cosigner can start one on this \
-                 node — remove the opt-out, on every node, once the driver (0.4.0-rc.4 or later) and \
-                 the refresh job sign ceremony intents (docs/approval-quorum.md)"
+                 node, or create a hosted key nobody asked for — remove the opt-out, on every node, once \
+                 the driver (0.5.0 or later) and the refresh job sign their intents (docs/approval-quorum.md)"
             );
         }
         if policy.signer_may_refresh {
@@ -974,6 +1013,8 @@ async fn main() -> Result<()> {
     // transition log and the refusal gate stay current even when nobody calls Health. A dedicated
     // OS thread, not a tokio task: on a stalled volume it must keep going when the runtime cannot.
     rutli_cosigner::health::spawn_monitor(node.clone(), rutli_cosigner::health::MONITOR_INTERVAL);
+    // `rutli_key_epoch_proven` / `rutli_key_epoch_age_seconds`: read-only, its own thread.
+    rutli_cosigner::proof::spawn_gauge_updater(cfg.data_dir.join("keys"), std::time::Duration::from_secs(60));
 
     // Build the peer roster: this node as a local peer, every other as a lazy gRPC client.
     let mut peers: Vec<Arc<dyn PeerApi>> = Vec::new();
@@ -1896,6 +1937,53 @@ fn append_sources(out: &mut String, mut source: Option<&(dyn std::error::Error +
     }
 }
 
+/// `residue-scan`: see [`Command::ResidueScan`] and [`rutli_cosigner::residue`]. Exits the process.
+fn residue_scan_command(
+    config_path: &std::path::Path,
+    backups: &[std::path::PathBuf],
+    legacy_master_env: Option<&str>,
+    json: bool,
+) -> ! {
+    let fail = |msg: String| -> ! {
+        eprintln!("rutli-cosigner residue-scan: {msg}");
+        std::process::exit(2)
+    };
+    let cfg = Config::load(config_path).unwrap_or_else(|e| fail(e.to_string()));
+    let sealer = match &cfg.share_seal {
+        Some(seal_cfg) => match rutli_cosigner::seal::SealKeys::load(seal_cfg, cfg.identifier) {
+            Ok(keys) => Some(keys.sealer(cfg.identifier).with_keyfile(&cfg.keyfile)),
+            Err(e) => fail(format!("the seal keys do not load: {e}")),
+        },
+        None => None,
+    };
+    // The master is read, derived and dropped here; only this node's derived DEK goes on, in a
+    // wiped buffer, and it is compared in constant time.
+    let legacy_dek = legacy_master_env.map(|var| {
+        let master = rutli_cosigner::seal::read_master_env(var)
+            .unwrap_or_else(|e| fail(format!("--legacy-master-env: {e}")));
+        rutli_cosigner::seal::derive_share_dek(master.as_bytes(), cfg.identifier)
+    });
+    let input = rutli_cosigner::residue::ScanInput {
+        data_dir: &cfg.data_dir,
+        node: cfg.identifier,
+        cluster_uuid: cfg.keyfile.cluster_uuid.as_deref(),
+        sealer: sealer.as_ref(),
+        backups,
+        legacy_dek,
+        config_names_secret_env: cfg.share_seal.as_ref().is_some_and(|s| s.secret_env.is_some()),
+    };
+    let report = rutli_cosigner::residue::scan(&input);
+    if json {
+        match serde_json::to_string_pretty(&report) {
+            Ok(s) => println!("{s}"),
+            Err(e) => fail(e.to_string()),
+        }
+    } else {
+        print!("{}", report.text());
+    }
+    std::process::exit(report.exit_code())
+}
+
 /// Back up the (sealed) key-share files from data_dir/keys to `out`. Shares are encrypted at rest
 /// when sealing is enabled, so the backup carries no plaintext key material.
 fn backup_command(cfg: &Config, out: &std::path::Path) -> Result<()> {
@@ -2227,6 +2315,7 @@ async fn delete_hosted_key_command(
         not_after_ms: now + 120_000,
         approval_nonce: nonce,
         approvals: collected,
+        ..Default::default()
     };
     let signed = rutli_cosigner::intent::sign_intent(&signer, &intent)?;
     let reply = client
@@ -2361,7 +2450,7 @@ fn keyfile_command(cfg: &Config, command: KeyfileCommand) -> Result<()> {
     use rutli_cosigner::seal::DekUse;
     let sealer = offline_sealer(cfg)?;
     let lock = match command {
-        KeyfileCommand::Status => None,
+        KeyfileCommand::Status | KeyfileCommand::Prove { .. } => None,
         _ => Some(rutli_cosigner::instance_lock::InstanceLock::acquire(&cfg.data_dir)?),
     };
     let keystore = KeyStore::open_with_sealer(cfg.data_dir.join("keys"), Some(sealer.clone()))?;
@@ -2448,6 +2537,50 @@ fn keyfile_command(cfg: &Config, command: KeyfileCommand) -> Result<()> {
                      again, or it migrates the files back to v2 at start"
                 );
             }
+        }
+        KeyfileCommand::Prove { key_id, epoch, report } => {
+            let share = keystore.load(&key_id)?;
+            if share.epoch != epoch {
+                return Err(DaemonError::Config(format!(
+                    "keyfile prove: this node's live share of {key_id} is at epoch {}, not {epoch}",
+                    share.epoch
+                )));
+            }
+            let live = rutli_cosigner::proof::Live {
+                key_id: key_id.clone(),
+                epoch,
+                group_key: rutli_frost_core::dkg::group_verifying_key_bytes(&share.public_key_package)?,
+                pkp_digest: share.pkp_digest()?,
+                threshold: *share.key_package.min_signers(),
+                roster: share
+                    .public_key_package
+                    .verifying_shares()
+                    .keys()
+                    .map(|id| rutli_cosigner::hosted::identifier_index(*id))
+                    .collect::<std::result::Result<Vec<u16>, _>>()?,
+            };
+            let roster: Vec<u16> = cfg.peers.iter().map(|p| p.identifier).collect();
+            let (marker, wrote) = rutli_cosigner::proof::prove(
+                &cfg.data_dir.join("keys"),
+                &live,
+                &roster,
+                cfg.threshold,
+                &std::fs::read(&report)?,
+                rutli_cosigner::intent::now_ms(),
+            )?;
+            println!(
+                "{} {} epoch {} (group key {}, report sha256 {})",
+                if wrote { "recorded: proven" } else { "already recorded: proven" },
+                marker.key_id,
+                marker.epoch,
+                marker.group_key,
+                marker.report_sha256
+            );
+            println!(
+                "NOTE: this marker is YOUR statement. This node checked that the report is consistent \
+                 and agrees with its own epoch, sharing and group key; it cannot check who produced the \
+                 report. Backups of older epochs are kept until this epoch is proven and old enough."
+            );
         }
         KeyfileCommand::MigratePlaintext { key_id, confirm } => {
             use sha2::Digest;

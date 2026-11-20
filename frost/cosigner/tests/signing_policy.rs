@@ -136,6 +136,7 @@ fn unsigned(key: &str, msg: &[u8], request: u8, issued: u64, not_after: u64) -> 
         not_after_ms: not_after,
         approval_nonce: Vec::new(),
         approvals: Vec::new(),
+        ..Default::default()
     }
 }
 
@@ -1152,6 +1153,7 @@ async fn a_cosigner_cannot_fence_an_honest_peer_without_a_client_intent() {
         expected_pkp_digest: e.pkp_digest.clone(),
         protocol: rutli_cosigner::ceremony::CEREMONY_PROTOCOL,
         intent,
+        ..Default::default()
     };
     denied(attacker.ceremony_fence(fence(None, "refresh-attacker")).await, "carries no ceremony intent");
     // Its own certificate cannot sign one either.
@@ -1183,7 +1185,9 @@ async fn a_cosigner_cannot_fence_an_honest_peer_without_a_client_intent() {
         })
         .await
         .unwrap_err();
-    assert_eq!(hosted.code(), tonic::Code::InvalidArgument, "{hosted:?}");
+    // Since 0.5.0 a genkey fence carries a generate intent, verified like any other: a cosigner's
+    // own certificate is on no signer role.
+    assert_eq!(hosted.code(), tonic::Code::PermissionDenied, "{hosted:?}");
     // Nothing was fenced: the refresher's real refresh runs at once.
     let ok = ceremony_by(&c.ids, "refresher", rutli_cosigner::node::CeremonyKind::Refresh, KEY, 6);
     c.signer("refresher", 0).await.refresh(pb::RefreshRequest { key_id: KEY.into(), intent: Some(ok) }).await.unwrap();
@@ -1210,6 +1214,7 @@ async fn only_the_fencing_cosigner_runs_parts_over_grpc() {
             expected_pkp_digest: e.pkp_digest.clone(),
             protocol,
             intent: Some(x.clone()),
+            ..Default::default()
         })
         .await
         .unwrap();

@@ -207,7 +207,8 @@ async fn an_imported_canton_key_signs_verifies_refreshes_and_signs_again() {
     let msg = rutli_frost_core::dealer::canton_test_message(b"after refresh");
     assert!(verifies(&public, &msg, &sign(&nodes[2], &peers, KEY, &msg).await.unwrap()));
 
-    // A copy of a bundle is dead: install deleted the recipient secret. (That a dealt share no
+    // A copy of a bundle cannot be opened with the node's live store: install deleted the recipient
+    // secret (unlinked: its sealed bytes can survive in freed blocks). (That a dealt share no
     // longer combines with refreshed ones is pinned in rutli-frost-core's dealer tests.)
     let state_gone = share_delivery::load_recipient(&sites[0].data_dir, &sites[0].sealer(), KEY);
     assert!(state_gone.is_err(), "install deleted the recipient secret: the bundle cannot be opened");

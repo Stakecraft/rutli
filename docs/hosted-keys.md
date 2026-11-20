@@ -254,9 +254,34 @@ You rarely drive these RPCs by hand: Canton mints keys through the driver's
 
 ### Generate
 
-`GenerateKey(key_id, spec)` on any cosigner. That node leads:
+`GenerateKey(key_id, spec, intent)` on any cosigner. That node leads.
 
-1. Fences the key id on every peer, so two concurrent generates for the same id serialize.
+**The client's generate intent** (since 0.5.0). The request carries a `SignedIntent` with purpose
+`generate-key`: the cluster id, the key id, the spec (`hosted_spec`), the roster identifier of the
+cosigner asked to lead (`leader`, which the driver reads from that endpoint's
+`Capabilities.node_identifier`), a 16-byte request id and a validity of at most
+`intent_max_lifetime_secs`. The driver signs it with its mTLS key, a fresh one for every endpoint it
+tries. The generation's ceremony id is `genkey-<hex(request_id)>`. Every node checks the intent at
+its fence, before it takes the guard, with the same rules as a DKG intent (`docs/ceremonies.md`,
+"Ceremony intents"): the signer on `signer_allowlist` and within its `signer_acl`, its pin, the
+cluster, the key, the spec, and that the cosigner fencing it is the leader the intent names. The
+leader checks it first on `GenerateKey` (the signer must be the caller) and fences its own node
+first, so it is verified there before anything is minted. A fence marks the ceremony id durably
+(`keys/.ceremonies/.fenced/`, 24 h): the request id is spent on every node the fence reached, for any
+leader. A push that would create a copy the node lacks is accepted only under the guard that fence
+took, for the spec it declared; a push of the identical key the node already holds is a no-op and
+succeeds without that check. Without a valid intent the leader answers `PERMISSION_DENIED`, and a
+peer refuses the fence and any push that would create a copy.
+Refusals count in `rutli_ceremony_intent_refusals_total{reason}` (`RutliCeremonyIntentRefused`) and
+are logged with the asking peer and the key. The switch is `signing_policy.require_ceremony_intent`
+(on by default with TLS); with it off, a generation without an intent is accepted, counted in
+`rutli_ceremony_intent_absent_total` and warned about, and an intent that is present is still
+verified in full.
+
+Then:
+
+1. Fences the key id on every peer, its own node first, so two concurrent generates for the same id
+   serialize.
 2. If it does not hold the id, asks its peers. Two that hold the same copy: it adopts that key
    (`created = false`) instead of minting a second one. One copy only, or copies that disagree: it
    refuses (`UNAVAILABLE` or `ABORTED`, below) and mints nothing.
@@ -270,6 +295,34 @@ You rarely drive these RPCs by hand: Canton mints keys through the driver's
    holds different material.
 4. Verifies each peer's commitment to the stored material matches its own.
 5. Reports `created`, `replicas` and its own `commitment` to the material (since 0.5.0).
+
+**The driver checks the reply** (since 0.5.0). The leader's answer is one cosigner's word. Before
+the key id goes to Canton, the driver asks every endpoint for its own copy (`KeyInfo` with
+`local_only`, no read-repair). It accepts the key only when at least two cosigners hold a copy with
+the reply's commitment, spec and public key, and no cosigner reports other material under the id
+(one for a single-endpoint dev roster). Silent endpoints (an error, a timeout, a call that never
+completed), nodes without a copy, and nodes too old to send a commitment count neither way. Then:
+
+- Too few confirmations only because endpoints were silent (they could have confirmed): the driver
+  asks the next endpoint to lead the same id, under a fresh intent. That leader holds the key,
+  adopts it from agreeing peers, or refuses; it never mints over a copy. Its reply is checked the
+  same way. Each endpoint leads at most once per call. The log line is `hosted key <id> from
+  <endpoint> not confirmed: … silent: <endpoints>`, the audit entry carries `hosted-check=unconfirmed`
+  and a `failover=… reason=UNCONFIRMED` note. When no endpoint is left, the call fails, not
+  retryable, with that message. The check uses what is left of the driver's `request-timeout`,
+  keeping room for one more attempt; when no attempt could follow in time, the call also fails with
+  that message, never with a spent request timeout.
+- Anything else (absent copies where the leader reported a key, a wrong spec, an endpoint reporting
+  other material): the call fails at once, not retryable. One endpoint that reports other material
+  is enough. That is the endpoint's own statement and the driver cannot check it: a faulty or
+  compromised node can make it falsely and so veto the generation, which it could also do at the
+  cosigner level. The driver fails closed, as a cosigner does on a conflict (below).
+
+Either way the key id never reaches Canton and the leader that answered loses the lead (the driver
+log line is `hosted key <id> from <endpoint> REFUSED`, naming the endpoint that reported other
+material; the audit entry carries `hosted-check=failed`). The same check applies when `GenerateKey`
+returns an existing key. Leave such an id alone and compare the nodes with `verify-hosted`; Canton
+generates its next key under a new id.
 
 **A conflict aborts the generation** (since 0.5.0). A peer that holds other material under the id,
 or answers with a commitment to other material, or refuses because another peer holds other
@@ -418,9 +471,11 @@ deletes disabled refuses peers' tombstones too.
 **Do not claim secure erasure.** The tombstone keeps the material for the grace period by design;
 after it, on copy-on-write filesystems, wear-levelled SSDs and snapshotted volumes, the bytes may
 survive, and any backup taken while the key existed still contains it. The honest statement is:
-delete stops the key being served, cluster-wide and durably. Backups stop opening once the node's DEK
-that sealed them is dropped (`seal rotate-dek`, then `seal drop-previous` — `disaster-recovery.md`
-§3h).
+delete stops the key being served, cluster-wide and durably. Backups stop opening only once the DEK that
+sealed them is destroyed, not merely dropped from the bundle: `seal rotate-dek`, `seal drop-previous`,
+and destroy every other copy of the old DEK (`disaster-recovery.md` §3h,
+[key-material-handling.md](key-material-handling.md)). A hosted key is one whole key in one file:
+a copy of the file from any node and that node's DEK are the key, so it has no threshold at rest.
 
 ## 4. Operations
 
@@ -515,6 +570,9 @@ and counted in `rutli_hosted_replication_refusals_total{reason}`:
 | `generate-conflict` | a generation this node led, aborted | as `conflict` |
 | `unverifiable` | a push, while another peer answers with a copy this node cannot check | as `invalid` or `timestamp` for that peer |
 | `throttled` | a read-repair, or a push's peer check, past this node's fan-out ceiling ("try again", never a conflict) | a client flooding lookups for keys this node lacks (check the driver certificate's use), or a peer fencing and pushing made-up ids (check the peer in the log) |
+| `spec` | a push of another spec than the generation's fence declared on this node (0.5.0) | suspect the peer in the log |
+| `intent` | a push under a fence taken without a generate intent, on a node that now requires one (0.5.0) | only after turning `require_ceremony_intent` back on mid-generation; otherwise suspect the peer |
+| `mixed-version` | a generation this node led with a client intent, refused before fencing: a reachable cosigner is older than 0.5.0 (0.5.0) | finish the upgrade (below) |
 
 A rollback that cannot reach a node it fenced is logged (`did not reach this cosigner`) and counted
 in `rutli_hosted_rollback_incomplete_total` (`RutliHostedRollbackIncomplete`): that node may keep
@@ -531,7 +589,54 @@ as a divergent replica (section 4).
 
 Upgrade one cosigner at a time. **Do not create or delete hosted keys while the cluster is
 mixed**; serving keys that exist keeps working. Upgraded nodes enforce the new rules on what *they*
-accept and nothing more:
+accept and nothing more.
+
+**Generate intents.** A 0.5.0 cosigner refuses a generation without a client generate intent, and
+a 0.4.0 driver signs none. A 0.4.0 cosigner cannot verify one (it refuses a genkey fence that
+carries an intent) and does not report its roster identifier. Two orders work:
+
+*Driver first (recommended).*
+
+1. Upgrade the driver (participant restart). Against 0.4.0 cosigners, signing, DKG, decryption and
+   symmetric crypto are unchanged. Generating a hosted key is refused by the driver
+   (`FAILED_PRECONDITION`, "does not report its roster identifier"): pause key creation (onboarding,
+   rotation) from here.
+2. Upgrade the cosigners one at a time, with the default `require_ceremony_intent`. While mixed,
+   the driver refuses to generate through a 0.4.0 cosigner (above), and does not fail over on that.
+   A 0.5.0 leader refuses while any cosigner it **can reach** is older (`FAILED_PRECONDITION`,
+   message `ceremony refused: cosigner N speaks hosted-key protocol 0; a hosted-key generation with
+   a client intent needs protocol 2 on every reachable cosigner …`, counted as
+   `reason="mixed-version"`). A cosigner it cannot reach is skipped, as by the fence: with the 0.4.0
+   node down (for example while it is being upgraded), a generation through a 0.5.0 leader
+   completes on the upgraded nodes at the write quorum. That key was authorized by the client's
+   intent; the old node pulls it later. So "do not create keys while mixed" is an operating rule,
+   not something the cluster enforces. A 0.4.0 leader would send no intent; its 0.5.0 peers refuse
+   that fence (`PERMISSION_DENIED`) and it aborts before writing anything.
+3. Every cosigner on 0.5.0: generation works, with the intent.
+
+*Cosigners first (the 0.4.0 driver stays for a while).*
+
+1. Add `signing_policy.require_ceremony_intent: false` to each cosigner's config as you upgrade it
+   (leave the 0.4.0 nodes' configs alone: on them the switch only governs DKG and refresh). The cost:
+   that node accepts a DKG, refresh or hosted-key generation without a client intent, counted in
+   `rutli_ceremony_intent_absent_total` (`RutliCeremonyIntentAbsent`), and a compromised cosigner
+   can again create a hosted key nobody asked for (`docs/security/threat-model.md`). This is a
+   cluster-wide matter, not a per-node one: one node with the opt-out and one compromised holder
+   make two copies, which is the write quorum with `write_quorum: 2`, and the enforcing nodes then
+   pull that key by the normal agreement rule. Treat the opt-out as a temporary state of the whole
+   rollout, on every node or none, and end it (step 4) as soon as the driver is upgraded.
+2. Upgrade the cosigners. Generations from the 0.4.0 driver work through either release of leader,
+   as in 0.4.0.
+3. Upgrade the driver. It signs generate intents from now on; a 0.5.0 leader refuses one while a
+   reachable cosigner is 0.4.0, so finish step 2 first.
+4. Remove the opt-out on every node (rolling restart). Check first that
+   `rutli_ceremony_intent_absent_total` no longer grows after a key creation.
+
+Without the opt-out in this order, the 0.4.0 driver's `GenerateKey` is refused (`PERMISSION_DENIED`)
+by a 0.5.0 leader, and by a 0.5.0 peer at a 0.4.0 leader's fence. To roll the driver back below
+0.5.0, set `require_ceremony_intent: false` on every cosigner first.
+
+The other replication rules:
 
 - **A 0.4.0 node** still accepts a push into an id it lacks from any peer, pulls the first copy
   that opens, accepts future timestamps and an RSA key whose public half is not its own, and, as a
@@ -541,10 +646,12 @@ accept and nothing more:
   until every node is upgraded, a node that lacks a deleted key can pull it back from two old
   replicas that still hold it, and serves it until its next sweep applies the tombstone from the
   inventory.
-- **A 0.5.0 leader with 0.4.0 peers** fences and pushes as before (`ReplicateKey` and `FetchKey`
-  are unchanged); a 0.4.0 peer's create-once refusal ("different material") aborts the generation.
-- **A 0.4.0 leader with a 0.5.0 peer:** the 0.5.0 peer accepts its fenced push after its own peer
-  check; a 0.5.0 refusal is a failed replica to the 0.4.0 leader.
+- **A 0.5.0 leader with 0.4.0 peers**, for a generation without an intent (the opt-out above),
+  fences and pushes as before (`ReplicateKey` and `FetchKey` are unchanged); a 0.4.0 peer's
+  create-once refusal ("different material") aborts the generation. With an intent it refuses
+  before fencing.
+- **A 0.4.0 leader with a 0.5.0 peer:** only with the opt-out on that peer, which then accepts its
+  fenced push after its own peer check; a 0.5.0 refusal is a failed replica to the 0.4.0 leader.
 - **A 0.4.0 node's sweep** still pushes keys a peer lacks. A 0.5.0 node refuses the push
   (`unfenced`, `RutliHostedReplicationRefused`, and an `anti-entropy push failed` warning on the
   0.4.0 node) and pulls the key itself once its peers confirm it. Expect a few during the roll.
@@ -653,7 +760,8 @@ A node moving into the cluster ([roadmap-migration.md](roadmap-migration.md)) ca
 encryption key instead of rotating it — discouraged, see [migration.md](migration.md), "Carrying
 the signing and encryption keys". Export it on the old node (`keys.secret.download`, preview
 commands enabled, and on Canton 3.7 `canton.parameters.enable-key-download = yes`; preferably with a password), then on every cosigner (on two, the third pulls it). A daemon may be running
-(`kubectl exec` into the pod, the export copied onto a tmpfs and deleted afterwards) or stopped:
+(`kubectl exec -i` into the pod, the export passed in through stdin with `--in /dev/stdin`: the
+chart's `/tmp` is a disk-backed `emptyDir`, so a copy there stays on the Kubernetes node's disk) or stopped:
 
 ```sh
 read -rs CANTON_EXPORT_PASSWORD && export CANTON_EXPORT_PASSWORD
@@ -766,7 +874,7 @@ What hosted keys are, stated without varnish:
   real reduction in exposure. It is not "MPC for all key types", and Rütli should never claim it is.
 - **A single compromised cosigner yields the hosted keys.** All n nodes hold the same material; the
   attacker needs one, plus the seal secret that node's process has. The same attacker does **not**
-  get the namespace key: that still requires breaching `t` cosigners within one refresh epoch.
+  get the namespace key: that still requires `t` shares of one epoch (old copies and their DEKs count, whenever they were taken).
 - **The cost that must not be buried: retrospective decryption.** Canton's encryption keys protect
   per-view session keys. An attacker who extracts one gains *retrospective* read access to any
   recorded traffic encrypted to it. Rotation fixes the future, not the past — there is no forward
@@ -817,11 +925,15 @@ Properties to understand before you rely on hosted keys in production.
   plaintext is a session key whose use fails authenticated decryption if it was altered. An upstream
   property, recorded so nobody rediscovers it as a Rütli bug.
 
-- **Replication integrity rests on agreement between nodes** (since 0.5.0, section 4): a node stores
-  a key it lacks only when two peers agree, or from the generation leader that fenced it and no
-  other reachable peer contradicts. One compromised node can still create a key under an id nobody
-  has created yet, and is not caught when every other holder is unreachable from the receiving node
-  (`docs/security/threat-model.md`). A later release binds generation to a client intent.
+- **Replication integrity rests on agreement between nodes and a client intent** (since 0.5.0,
+  section 4): a node stores a key it lacks only when two peers agree, or from the generation leader
+  that fenced it under a client generate intent naming that leader, and no other reachable peer
+  contradicts. A compromised node can no longer create a key under an id nobody asked for. The
+  leader the client asked still chooses the material and can refuse to finish; and a fenced push
+  is not caught when every other holder is unreachable from the receiving node
+  (`docs/security/threat-model.md`). With `require_ceremony_intent: false` the first point is open
+  again. A replica written by a generation whose leader died is still served (section 3, "A leader
+  that dies mid-generation").
 
 Operational consequences worth writing into your runbook:
 

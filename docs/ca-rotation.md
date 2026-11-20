@@ -194,7 +194,7 @@ export LAYOUT=shared                      # or perNode — see 4.6
 export PIN=453bb4aea2088bb5               # the current derived id; never changes from here on
 export KEY_ID=frost-namespace             # the soak's FROST namespace key
 export NS_FP=12203286ffe27c94c35ee0aa24a359d41e73f4df6e88d2aab2b72860df79ce8f22ea
-export R=~/ca-rotation                    # outside the repo
+export R="${RUTLI_WORK:?mount the memory disk first}/ca-rotation"   # docs/key-material-handling.md; never in your home
 mkdir -p $R/old $R/new $R/client && chmod 700 $R $R/old $R/new $R/client
 kc() { kubectl --context "$KUBECONTEXT" "$@"; }
 
@@ -373,7 +373,7 @@ the pin logs `(derived from tls.ca_cert)`. Do **not** go on to Phase A until all
 
 The driver leaf is **not** issued here. It can sign with the namespace key (CN `driver`, Signer
 API) as soon as Phase A trusts the new CA, and Phase B may be days away, so it is issued from
-escrow in Phase B and shredded minutes later.
+escrow in Phase B and removed minutes later.
 
 ```sh
 cd <rutli checkout at the release tag>
@@ -393,7 +393,7 @@ Compare with
 `kc -n $NS get secret rutli-cosigner-tls -o jsonpath='{.data.cosigner1\.crt}' | base64 -d | openssl x509 -noout -ext subjectAltName`.
 The new CA has a **different CN** from the old one, so the two are easy to tell apart in the bundle.
 
-**Escrow the new CA key now**, before it touches any cluster, then **shred the plaintext**:
+**Escrow the new CA key now**, before it touches any cluster, then **remove the plaintext**:
 
 ```sh
 # PKCS#8 v2, AES-256-CBC, PBKDF2 with 600 000 iterations (a bare `pkey -aes256` is a far weaker KDF).
@@ -401,13 +401,13 @@ The new CA has a **different CN** from the old one, so the two are easy to tell 
 openssl pkcs8 -topk8 -v2 aes-256-cbc -iter 600000 -in $R/new/ca.key -out $R/new/ca.key.enc
 # copy ca.key.enc + ca.crt to the two escrow locations (4.3), then prove a restore works from EACH:
 openssl pkey -in <escrow copy>/ca.key.enc -pubout | diff - <(openssl x509 -in $R/new/ca.crt -pubkey -noout) && echo ESCROW-OK
-shred -u $R/new/ca.key 2>/dev/null || rm -P $R/new/ca.key; ls $R/new/ca.key 2>/dev/null && echo "STOP: ca.key still there"
+rm -f $R/new/ca.key; ls $R/new/ca.key 2>/dev/null && echo "STOP: ca.key still there"   # $R is destroyed as a whole at the end
 ```
 
 Record in the soak log: new CA subject, `shasum -a 256 $R/new/ca.crt`, notAfter, the escrow
-locations, `ESCROW-OK` for each, and the shred. From here on the CA key exists only encrypted.
+locations, `ESCROW-OK` for each, and the removal. From here on the CA key exists only encrypted.
 Whenever a later step needs it (the driver leaf in Phase B, a re-issue for rollback, a later
-operator cert), restore it into a temporary 0700 directory for that one command and shred it
+operator cert), restore it into a temporary 0700 directory for that one command and remove it
 right after:
 
 ```sh
@@ -415,7 +415,7 @@ ca_restore() { # ca_restore <dir> — decrypt the escrowed CA key next to its ce
   mkdir -m 700 "$1" && cp $R/new/ca.crt "$1/" \
     && ( umask 077; openssl pkcs8 -in <escrow copy>/ca.key.enc -out "$1/ca.key" )
 }
-ca_shred() { shred -u "$1/ca.key" 2>/dev/null || rm -P "$1/ca.key"; rm -rf "$1"; }
+ca_remove() { rm -rf "$1"; }   # $1 is under $R, on the memory disk
 ```
 
 Build the trust bundle, old CA first. `printf` guarantees a newline between the two PEM blocks
@@ -439,7 +439,7 @@ the old leaves are saved:
 for i in 1 2 3; do rutli-cosigner tls spki $R/new/cosigner$i.crt; done | tee $R/new/pins.txt
 ```
 
-Keep the old leaves for rollback (sensitive: 0600 in `$R/old`, shredded at the end):
+Keep the old leaves for rollback (sensitive: 0600 in `$R/old`, destroyed with `$R` at the end):
 
 ```sh
 ( umask 077; for i in 1 2 3; do
@@ -484,7 +484,7 @@ plaintext only until the end of this phase's copy:
 
 ```sh
 ca_restore $R/ca-tmp && RUTLI_CA_DIR=$R/ca-tmp RUTLI_CERTS=driver <rutli checkout>/scripts/gen-frost-certs.sh 3 $R/new
-ca_shred $R/ca-tmp
+ca_remove $R/ca-tmp
 openssl verify -CAfile $R/new/ca.crt $R/new/driver.crt                                       # OK
 client_cfg drv-bundle $R/bundle.crt $R/new/driver.crt $R/new/driver.key && vk drv-bundle     # OK: accepted by all 3
 ```
@@ -521,11 +521,11 @@ CronJob carries the refresher leaf, not the driver's: issue it from escrow the s
 (`RUTLI_CERTS=refresher`) and replace its Secret (`kc -n $NS create secret tls rutli-refresher-tls
 --cert=$R/new/refresher.crt --key=$R/new/refresher.key --dry-run=client -o yaml | kc apply -f -`)
 before Phase D. If `refreshAllowlist` lists only `operator` (no refresher certificate), put the new
-operator leaf there instead, or add `refresher` to `refreshAllowlist` first. Then shred the
+operator leaf there instead, or add `refresher` to `refreshAllowlist` first. Then remove the
 plaintext key; a rollback or a later client re-issues one from escrow:
 
 ```sh
-shred -u $R/new/driver.key 2>/dev/null || rm -P $R/new/driver.key; rm -rf $R/client/drv-bundle.json $R/client/data-drv-bundle
+rm -f $R/new/driver.key; rm -rf $R/client/drv-bundle.json $R/client/data-drv-bundle
 ```
 
 The files are now in place for the **next** participant start. An unplanned restart in between is
@@ -614,9 +614,10 @@ harmless only if the old key is truly gone; if it may be exposed, do E right aft
 
 ### Close-out
 
-- `shred -u`/`rm -P` `$R/old/*.key`, `$R/new/*.key` and `$R/client` (the CA key and the new
-  driver key were shredded in Phase 1 and Phase B; check they are gone). On APFS/SSD this is not
-  provable erasure; record it like the B4 destruction list.
+- Unmount and delete the place that holds `$R` (the memory disk, or the encrypted image and its
+  passphrase), after checking that the CA key and the new driver key were removed in Phase 1 and
+  Phase B ([key-material-handling.md](key-material-handling.md)). This is not provable erasure;
+  record it like the B4 destruction list.
 - Remove `tls.allowExpiredCa` / `allow-expired-ca` if the rotation needed them (§2).
 - Keep `operator.crt/.key` only where verify-key runs, or re-issue a short-lived one per use from
   escrow (`RUTLI_CA_DIR=<escrow restore dir> RUTLI_CERTS=operator scripts/gen-frost-certs.sh 3 <out>`).
@@ -645,7 +646,7 @@ window as an incident.
 
 Always in reverse order, one phase at a time. Undo the later phase before the earlier one. The
 material for every earlier state is in `$R/old` (old CA, old cosigner and driver leaves) and, until
-Phase E, in the PVC `*.pre-ca-rotation` files. After the close-out shreds `$R/old`, there is no way
+Phase E, in the PVC `*.pre-ca-rotation` files. After the close-out destroys `$R/old`, there is no way
 back past Phase D. That is intended: the old CA cannot be re-trusted for leaves nobody can renew.
 
 | Undo | Commands | Precondition |

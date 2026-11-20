@@ -6,8 +6,8 @@
 //! This is deliberately **not** the same thing as `backup`, and the two solve different problems:
 //!
 //! - `backup` copies the sealed files as they sit on disk. The artifact is ciphertext under the
-//!   cluster's seal master secret, and it restores only onto the node it came from (the DEK is
-//!   derived from the master secret salted by node id). It is the routine durability path.
+//!   node's seal key (its DEK, from the node's seal bundle; with the legacy shared master, derived
+//!   from it salted by node id), and it restores only onto the node it came from. It is the routine durability path.
 //! - **export** produces a *portable* artifact that does not depend on the cluster's seal secret or
 //!   node identity at all. That is the point: it covers the two cases `backup` cannot — restoring
 //!   into a different cluster, and recovering after the seal master secret is lost.

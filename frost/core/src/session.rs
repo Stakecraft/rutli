@@ -628,6 +628,57 @@ mod tests {
         assert_eq!(c.pending_count(), 0);
     }
 
+    /// A session opened under a verified intent signs only when round 2 presents the same intent
+    /// digest; a missing or different one is a binding mismatch, refused before the burn.
+    #[test]
+    fn round2_must_present_the_intent_digest_round1_was_bound_to() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = cosigner(tmp.path());
+        let msg = [7u8; 34];
+        let binding = SessionBinding::new("k").with_intent_digest([1; 32]);
+        assert_eq!(binding.intent_digest, Some([1; 32]));
+        for presented in [None, Some(&[2u8; 32])] {
+            let mine = c.round1("s", binding.clone()).unwrap();
+            let commitments = BTreeMap::from([(c.identifier(), mine)]);
+            let err = c.round2("s", "k", &msg, &commitments, presented).unwrap_err();
+            assert!(
+                matches!(err, CoreError::BindingMismatch { what: "another signing intent", .. }),
+                "{presented:?}: {err:?}"
+            );
+            assert!(!c.nonce_store.is_consumed("s").unwrap());
+        }
+    }
+
+    /// The sweep drops exactly the sessions past the TTL, burns nothing, and says how many.
+    #[test]
+    fn prune_expired_drops_only_expired_sessions_and_counts_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let c = cosigner(tmp.path());
+        for s in ["old-1", "old-2", "live"] {
+            c.round1(s, SessionBinding::new("k")).unwrap();
+        }
+        assert_eq!(c.prune_expired(), 0, "nothing is old yet");
+        let Some(long_ago) = Instant::now().checked_sub(PENDING_TTL + Duration::from_secs(1)) else {
+            return; // monotonic clock too close to its origin to backdate
+        };
+        for s in ["old-1", "old-2"] {
+            c.pending.lock().unwrap().get_mut(s).unwrap().started = long_ago;
+        }
+        assert_eq!(c.prune_expired(), 2);
+        assert_eq!(c.pending_count(), 1);
+        assert!(c.holds_session("live"));
+        assert_eq!(c.prune_expired(), 0);
+        assert!(!c.nonce_store.is_consumed("old-1").unwrap(), "a sweep burns nothing");
+    }
+
+    /// The marker-pruning proof (`NonceStore::prune_older_than`) needs markers kept at least three
+    /// pending TTLs; the TTL itself is the documented five minutes.
+    #[test]
+    fn marker_retention_is_three_pending_ttls() {
+        assert_eq!(PENDING_TTL, Duration::from_secs(300));
+        assert_eq!(MARKER_RETENTION, PENDING_TTL * 3);
+    }
+
     /// Audit L3: a panic while the session map is held must not take the cosigner down with it.
     #[test]
     fn a_panicking_holder_of_the_session_map_drops_in_flight_sessions_and_the_cosigner_serves_on() {

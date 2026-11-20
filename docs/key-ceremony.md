@@ -120,7 +120,9 @@ Record where each backup and each seal secret live.
 - Confirm the signing journal (`signing-journal`) and hash-chained audit log (`audit-log-path`) are
   active.
 - Set the proactive-refresh schedule (cron/systemd timer running `rutli-cosigner refresh --key-id
-  frost-<participant>-namespace`), so any share exposed later has a bounded lifetime. Its client
+  frost-<participant>-namespace`), so a share exposed later stops combining with the live ones after the next refresh (old copies
+  and the sealing keys that open them are a separate matter:
+  [key-material-handling.md](key-material-handling.md)). Its client
   config uses the refresher certificate, whose CN is on every node's `refresh_allowlist` (the driver
   certificate can refresh only while `signing_policy.signer_may_refresh` is on): the command signs a
   ceremony intent with it ([ceremonies.md](ceremonies.md#ceremony-intents)).

@@ -117,6 +117,24 @@ final class FrostIntentSigner private (
   ): SignedIntent =
     signBytes(ceremonyIntent(clusterId, purpose, keyId, requestId, nowMillis, lifetimeMillis).toByteArray)
 
+  /** Sign a generate intent (purpose `generate-key`) for hosted key `keyId` of `spec`, to be led by
+    * the cosigner whose roster identifier is `leader` (its `Capabilities.node_identifier`). Every
+    * cosigner verifies it at the generation's fence before it takes the guard — role and ACL as for
+    * a DKG, the key, the spec, and that the cosigner leading the generation is `leader` — and spends
+    * the request id: the ceremony id is `genkey-hex(requestId)` ([[FrostIntentSigner.generateCeremonyId]]).
+    * So an intent is good for one generation through one leader; a failover to another endpoint
+    * needs a fresh one. */
+  def signGenerate(
+      clusterId: String,
+      keyId: String,
+      spec: String,
+      leader: Int,
+      requestId: Array[Byte],
+      nowMillis: Long,
+      lifetimeMillis: Long,
+  ): SignedIntent =
+    signBytes(generateIntent(clusterId, keyId, spec, leader, requestId, nowMillis, lifetimeMillis).toByteArray)
+
   private def signBytes(intent: Array[Byte]): SignedIntent = {
     val s = Signature.getInstance(jcaAlg)
     s.initSign(key)
@@ -142,6 +160,7 @@ object FrostIntentSigner {
   val PurposeDeleteKey = "delete-key"
   val PurposeDkg = "dkg"
   val PurposeRefresh = "refresh"
+  val PurposeGenerateKey = "generate-key"
 
   /** A ceremony intent (`dkg` / `refresh`), as the cosigners verify it (`intent.rs`): only version,
     * cluster, purpose, key, request id and validity are set — digest and approvals stay empty. */
@@ -166,6 +185,40 @@ object FrostIntentSigner {
       .setNotAfterMs(nowMillis + lifetimeMillis)
       .build()
   }
+
+  /** A generate intent, as the cosigners verify it (`intent.rs`, `generate_intent`): version,
+    * cluster, purpose `generate-key`, key, request id, validity, the hosted spec and the leader's
+    * roster identifier — digest and approvals stay empty. */
+  def generateIntent(
+      clusterId: String,
+      keyId: String,
+      spec: String,
+      leader: Int,
+      requestId: Array[Byte],
+      nowMillis: Long,
+      lifetimeMillis: Long,
+  ): SignIntent = {
+    require(leader > 0, s"a generate intent names the leading cosigner's roster identifier, got $leader")
+    require(spec.nonEmpty, "a generate intent names the key's spec")
+    require(requestId.length == RequestIdBytes, s"request id must be $RequestIdBytes bytes")
+    SignIntent
+      .newBuilder()
+      .setVersion(Version)
+      .setClusterId(clusterId)
+      .setPurpose(PurposeGenerateKey)
+      .setKeyId(keyId)
+      .setRequestId(ByteString.copyFrom(requestId))
+      .setIssuedAtMs(nowMillis)
+      .setNotAfterMs(nowMillis + lifetimeMillis)
+      .setHostedSpec(spec)
+      .setLeader(leader)
+      .build()
+  }
+
+  /** The ceremony id the cosigners derive from a generate intent: `genkey-` + lowercase hex of the
+    * request id. */
+  def generateCeremonyId(requestId: Array[Byte]): String =
+    "genkey-" + requestId.map("%02x".format(_)).mkString
 
   /** The ceremony id the cosigners derive from a ceremony intent: `purpose-` + lowercase hex of
     * the request id. */

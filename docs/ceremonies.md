@@ -89,7 +89,8 @@ one. The leader also checks the intent on `Signer.Dkg`/`Refresh` and requires th
 (CN and certificate key) to be the caller on that connection. This gives the client a clear refusal,
 and an intent cannot be replayed through another client's connection.
 
-**Enforcement:** `signing_policy.require_ceremony_intent`. It is **on by default since 0.4.0-rc.6**
+**Enforcement:** `signing_policy.require_ceremony_intent` (since 0.5.0 it also covers hosted-key
+generation, below). It is **on by default since 0.4.0-rc.6**
 on every node with TLS (a plaintext dev node verifies no intents and leaves it off; setting it there
 is a config error). `require_ceremony_intent: false` is the explicit opt-out, for an upgrade while
 the driver is older than 0.4.0-rc.4 or the refresh job's image predates the cosigners' release: the
@@ -117,9 +118,19 @@ What an intent does **not** bind, and why:
   driver refresh uses its `signer_acl`. `refresh_acl` is not introduced (follow-up if a
   multi-tenant cluster needs per-tenant refreshers).
 
-Hosted-key genkey/delkey fences are not intent-gated. A cosigner can block a hosted id's
-generation or deletion anyway, by refusing. An intent on such a fence is a protocol error. What a
-compromised cosigner keeps is listed in the [threat model](security/threat-model.md): the n-of-n
+**Hosted-key generation** (since 0.5.0) takes a **generate intent** the same way: purpose
+`generate-key`, the key, its spec (`hosted_spec`) and the roster identifier of the cosigner the
+client asked to lead (`leader`). The driver signs a fresh one for every endpoint it tries. Every
+node verifies it at the genkey fence, before the guard, with the DKG rules (`signer_allowlist`,
+`signer_acl`, pins), and also checks the spec and that the cosigner fencing it is the leader it
+names. The ceremony id is `genkey-<hex(request_id)>` and the fence marks it, as above. Binding the
+leader matters here because a genkey fence has no part 1: a peer that was shown the intent cannot
+lead the generation anywhere. Same switch (`require_ceremony_intent`), same counters, with the
+reasons `spec` and `leader` added. Details: [hosted-keys.md](hosted-keys.md), "Generate".
+
+Hosted-key delete (`delkey`) fences take no ceremony intent: every node verifies the client's
+delete intent itself when it tombstones the key. An intent on such a fence is a protocol error. What
+a compromised cosigner keeps is listed in the [threat model](security/threat-model.md): the n-of-n
 veto, and the split (DS-CR4) of a ceremony a client **did** ask for.
 
 ### Refresh interval
@@ -288,6 +299,32 @@ Every share records its `epoch`: 1 after DKG, +1 per committed refresh. A share 
 epochs existed, or installed by the split ceremony, reads as 0. `verify-key` reports each node's
 epoch and flags a mix. A refresh is refused unless every node reports the same epoch and PKP
 digest (`Peer.KeyEpoch`).
+
+### Proving an epoch
+
+A committed refresh shows that every node staged and voted for one outcome, and each node checked that
+the new verifying shares interpolate to the group key. It does not show that the shares **sign
+together**. `verify-key --sign-test` does: every `t`-subset of the roster signs, every signature
+verifies under the group key, and every node reports the same epoch and sharing. It runs from a
+workstation, so no node knows its result. To record it, run on **every** node, beside its daemon:
+
+```sh
+rutli-cosigner --config C1 verify-key --key-id "$KEY" --expect-fingerprint "$FP" --sign-test --json > verify.json
+rutli-cosigner --config C<i> keyfile prove --key-id "$KEY" --epoch "$EPOCH" --report verify.json
+```
+
+`keyfile prove` checks the report against this node's own live key and writes the clear marker
+`keys/.proven/<key>.<epoch>.json` (no lock, nothing on the signing path touched). It refuses when the
+report is not clean, does not cover the whole roster and every quorum, names another epoch, group key
+or sharing than this node's live ones, or when this node's live epoch is not the one named: a node
+that missed the refresh cannot stamp it. **The report is the operator's statement**: the node cannot
+check who produced it, so the marker records the report's SHA-256 and this node's clock. A marker
+dated in the future is ignored (and replaced when stamped again); stamping again otherwise keeps the
+first time. `rutli_key_epoch_proven{key}` is `1` while the live epoch has a marker for the live
+sharing; `RutliKeyEpochUnproven` fires when it is `0` and the live key file is more than three days old
+(the file's age is the time since the epoch was installed, or since the file was last re-sealed).
+After upgrading to a release that has this command, every key whose file is older than three days
+alerts until `keyfile prove` has been run for its live epoch.
 
 ### Signing across epochs
 
@@ -488,6 +525,12 @@ remove it once both sign them. To roll the driver or the refresh job back, set i
 The refresh interval (0.5.0) needs no protocol change either: each 0.5.0 node refuses a refresh
 inside the interval at its own fence, and a 0.4.0 leader passes that refusal on as an error before
 any node stages a share ("Refresh interval" above).
+
+Generate intents (0.5.0) work the same way, with one difference: a 0.4.0 node refuses a genkey
+fence that carries an intent, so a 0.5.0 leader refuses a generation with an intent while a
+reachable node is older (`NodeInfo.hosted_protocol` < 2). The driver must be 0.5.0 before cosigners
+run with the default, or they need `require_ceremony_intent: false` while it is older
+([hosted-keys.md](hosted-keys.md), "Upgrading from 0.4.0").
 
 Every key generated or refreshed on a release before ceremony protocol 2 must be treated as
 exposed to that ceremony's leader (audit C1). A post-upgrade refresh re-isolates the shares of a
