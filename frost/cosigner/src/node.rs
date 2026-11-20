@@ -185,9 +185,9 @@ pub const MAX_PENDING_SIGN_SESSIONS_PER_OPENER: usize = MAX_PENDING_SIGN_SESSION
 ///
 /// One leader's run of one request opens one session per attempt on each member and, when an
 /// attempt fails, aborts it on every member ([`crate::orchestrator`]): normally at most one is open
-/// here; if no abort arrives, at most one per attempt — [`crate::orchestrator::MAX_SIGN_ATTEMPTS`]
-/// (2) from this release, ten from leaders up to 0.4.x, which this cap still serves during a
-/// rolling upgrade. The driver sends one request through the same leader at most twice (one retry
+/// here; if no abort arrives, at most one per attempt — [`crate::orchestrator::max_sign_attempts`]
+/// (`n − t + 1`: 2 in 2-of-3, 3 in 3-of-5) from this release, ten from leaders up to 0.4.x, which
+/// this cap still serves during a rolling upgrade. The driver sends one request through the same leader at most twice (one retry
 /// after learning the cluster id again), hence twice ten. A leader the
 /// driver fails over to is another opener with its own count. `max_shares_per_request` (default 8)
 /// counts shares released for the request over its life, not sessions open at once (a failed

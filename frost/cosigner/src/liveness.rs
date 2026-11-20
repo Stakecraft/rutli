@@ -10,21 +10,25 @@
 //!
 //! - `Up`.
 //! - `Down { Unreachable }`: a hard transport failure (connect, TLS, keepalive close, a plain
-//!   UNAVAILABLE), or a control call past its deadline. Closed by a single-flight `NodeInfo` probe
-//!   every [`crate::peer::PROBE_EVERY`] (or by any answer from the peer).
+//!   UNAVAILABLE), or a `NodeInfo` call or probe past its deadline (`KeyEpoch` and
+//!   `CeremonyStatus` read the store: past their deadline they open nothing). Closed by a
+//!   single-flight `NodeInfo` probe every [`crate::peer::PROBE_EVERY`] (or by any answer from the
+//!   peer).
 //! - `Down { Stalled }`: a sign round past its deadline while the peer's member-wide progress
 //!   counter ([`Load`], the `rutli-load` reply metadata) did not move during the wait — a busy
-//!   member keeps completing rounds for someone and is never opened. `Down { Refusing }`: the peer
-//!   answered with the `keystore-down` trailer. Both are closed by a real sign round that succeeds
-//!   (a *trial*: after a window of [`crate::peer::BREAKER_WINDOW`], doubling up to
-//!   [`crate::peer::BREAKER_WINDOW_CAP`], one signature may include the peer as a trial), or by a
-//!   probe whose self-reported load shows the store working again.
+//!   member keeps completing rounds for someone and is never opened. A peer that reports no load
+//!   (0.4.x) is never opened Stalled: nothing tells its queue from a stall. `Down { Refusing }`:
+//!   the peer answered with the `keystore-down` trailer. Both are closed by a real sign round that
+//!   succeeds (a *trial*: after a window of [`crate::peer::BREAKER_WINDOW`], doubling up to
+//!   [`crate::peer::BREAKER_WINDOW_CAP`], one signature per window puts a subset with the peer
+//!   first — [`PeerHealth::take_trial`]), or by a probe whose self-reported load shows the store
+//!   working again.
 //!
 //! What it does with that: the sign path sorts its candidate subsets by their worst member
-//! ([`Tier`]: Up, Trial, Down) — a Down peer is tried last, never skipped, so a false open costs
-//! latency and never a signature. A leader also refuses at once when fewer than `t` cosigners are
-//! visible, counting only `Unreachable` peers as missing. DKG, refresh and hosted-key writes do not
-//! look at it.
+//! ([`Tier`]: Up, Trial, Down) — a Down peer is tried last, never skipped, within the signature's
+//! attempts and time. A leader also refuses at once when fewer than `t` cosigners are visible,
+//! counting only `Unreachable` peers as missing. DKG, refresh and hosted-key writes do not look at
+//! it.
 //!
 //! What never opens a breaker: an answered refusal (policy, epoch, sessions-full, an unknown
 //! session, an invalid share — those keep today's per-signature exclusion), and UNAVAILABLE that
@@ -198,7 +202,7 @@ impl SignLoad {
 /// Why a peer is down.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DownReason {
-    /// No transport to it (connect, TLS, keepalive), or a control call past its deadline.
+    /// No transport to it (connect, TLS, keepalive), or a `NodeInfo` call past its deadline.
     Unreachable,
     /// Reachable, but a sign round passed its deadline with no progress anywhere on the peer.
     Stalled,
@@ -435,53 +439,69 @@ impl PeerHealth {
         self.transitions.load(Ordering::Acquire)
     }
 
-    /// The tier of this peer for one signature's subset order. A Stalled or Refusing peer whose
-    /// window has passed is taken as that signature's trial (one signature per window): `Trial`.
-    /// An up peer whose deadline is being judged sorts as a trial too, without taking one.
+    /// The tier of this peer for one signature's subset order. Read only: an up peer whose deadline
+    /// is being judged sorts as a trial; a down peer sorts as down, its trial included (that is
+    /// taken apart, [`PeerHealth::take_trial`], so it is never used up by a signature that does not
+    /// contact the peer).
     pub fn sign_tier(&self) -> Tier {
-        let mut s = self.lock();
-        match *s {
-            State::Up if self.is_suspect() => Tier::Trial,
-            State::Up => Tier::Up,
-            State::Down {
-                reason: DownReason::Unreachable,
-                ..
-            } => Tier::Down,
-            State::Down {
-                reason,
-                until,
-                backoff,
-                trial,
-                r2_mark,
-            } => {
-                let now = Instant::now();
-                if now < until {
-                    return Tier::Down;
-                }
-                let next = State::Down {
-                    reason,
-                    until: now + self.timing.trial_hold(),
-                    backoff,
-                    trial: true,
-                    r2_mark,
-                };
-                if !trial {
-                    self.transition(&s, &next, "window");
-                }
-                *s = next;
-                Tier::Trial
-            }
-        }
-    }
-
-    /// The tier without taking a trial (for logs and tests).
-    pub fn tier(&self) -> Tier {
         match *self.lock() {
             State::Up if self.is_suspect() => Tier::Trial,
             State::Up => Tier::Up,
-            State::Down { trial: true, .. } => Tier::Trial,
             State::Down { .. } => Tier::Down,
         }
+    }
+
+    /// A Stalled or Refusing peer whose window has passed (and whose trial, if one was taken, is
+    /// over): the next signature may take it as a trial. Read only. An unreachable peer gets no
+    /// trial; its prober decides.
+    pub fn trial_due(&self) -> bool {
+        Self::due(&self.lock(), Instant::now())
+    }
+
+    fn due(s: &State, now: Instant) -> bool {
+        match *s {
+            State::Down {
+                reason: DownReason::Stalled | DownReason::Refusing,
+                until,
+                ..
+            } => now >= until,
+            _ => false,
+        }
+    }
+
+    /// Take the trial for the current window: `true` for exactly one caller per window (checked
+    /// and set under the state lock), which must then send the peer a sign round. Called by the
+    /// sign path only when an attempt whose members include the peer starts. The trial is held for
+    /// one round 1 plus one round 2 ([`crate::peer::Liveness::trial_hold`]); one that ends with no
+    /// verdict (the attempt failed at another member first) may be taken again after that.
+    pub fn take_trial(&self) -> bool {
+        let mut s = self.lock();
+        let now = Instant::now();
+        if !Self::due(&s, now) {
+            return false;
+        }
+        let State::Down {
+            reason,
+            backoff,
+            trial,
+            r2_mark,
+            ..
+        } = *s
+        else {
+            return false;
+        };
+        let next = State::Down {
+            reason,
+            until: now + self.timing.trial_hold(),
+            backoff,
+            trial: true,
+            r2_mark,
+        };
+        if !trial {
+            self.transition(&s, &next, "window");
+        }
+        *s = next;
+        true
     }
 
     /// What this leader has seen from the peer so far.
@@ -681,15 +701,18 @@ impl PeerHealth {
     }
 
     /// The progress test's probe (whose answer, recorded by [`PeerHealth::note_reply`], is the last
-    /// sample): `None` = busy (progress shown, or nothing to compare with — the peer reported no
-    /// load to this leader before the call, so a stall cannot be told from a queue it has not seen
-    /// moving; the next deadline has a baseline), else why to open.
+    /// sample): `None` = not opened, else why to open. Not opened when the peer shows progress, when
+    /// it reported no load to this leader before the call (a stall cannot be told from a queue it
+    /// has not seen moving; the next deadline has a baseline), or when its answer carries no load at
+    /// all — a 0.4.x member, whose breaker only `Unreachable` (no answer) or the `keystore-down`
+    /// trailer may open, never `Stalled`.
     pub fn judge_probe(&self, round: Round, start: &Mark, probed: Probed) -> Option<DownReason> {
         match probed {
             Probed::Failed => Some(DownReason::Unreachable),
-            Probed::Answered(_) if self.progressed_since(round, start.at) => None,
+            Probed::Answered(None) => None,
+            Probed::Answered(Some(_)) if self.progressed_since(round, start.at) => None,
             Probed::Answered(Some(_)) if !start.baseline => None,
-            Probed::Answered(_) => Some(DownReason::Stalled),
+            Probed::Answered(Some(_)) => Some(DownReason::Stalled),
         }
     }
 
@@ -711,7 +734,9 @@ impl PeerHealth {
             (_, Probed::Failed) => {
                 self.open(DownReason::Unreachable);
             }
-            // An old peer reports no load: nothing to go on, a trial decides.
+            // No load in the answer (a refusal before the handler, or a peer that stopped reporting
+            // one): nothing to go on, a trial decides. A 0.4.x member never gets here: it is never
+            // opened Stalled or Refusing (`judge_probe`).
             (_, Probed::Answered(None)) => {}
             (_, Probed::Answered(Some(load))) if !load.store_ok => {
                 self.extend(Some(DownReason::Refusing))
@@ -797,19 +822,68 @@ mod tests {
         // A round 1 success does not prove the store: still down.
         h.on_success(CallClass::Round1);
         assert_eq!(h.down_reason(), Some(DownReason::Stalled));
+        assert!(!h.trial_due() && !h.take_trial(), "inside the window");
         tokio::time::advance(Duration::from_secs(2)).await;
-        // The window passed: exactly one signature gets the trial.
-        assert_eq!(h.sign_tier(), Tier::Trial);
+        // The window passed. Looking does not use the trial up: only an attempt that includes the
+        // peer takes it, and exactly one does.
+        for _ in 0..3 {
+            assert_eq!(h.sign_tier(), Tier::Down);
+            assert!(h.trial_due());
+        }
+        assert_eq!(h.state_name(), "down");
+        assert!(h.take_trial());
         assert_eq!(h.state_name(), "trial");
-        assert_eq!(h.sign_tier(), Tier::Down, "one trial per window");
+        assert!(!h.trial_due() && !h.take_trial(), "one trial per window");
         // The trial failed: down again for twice the window.
         h.open(DownReason::Stalled);
         tokio::time::advance(Duration::from_secs(3)).await;
-        assert_eq!(h.sign_tier(), Tier::Down, "the window doubled to 4 s");
+        assert!(!h.trial_due(), "the window doubled to 4 s");
         tokio::time::advance(Duration::from_secs(1)).await;
-        assert_eq!(h.sign_tier(), Tier::Trial);
+        assert!(h.take_trial());
         h.on_success(CallClass::Round2);
         assert_eq!((h.state_name(), h.sign_tier()), ("up", Tier::Up));
+    }
+
+    /// A trial taken by an attempt that failed at another member before reaching the peer gives
+    /// no verdict: after its hold (one round 1 plus one round 2) the next attempt may take it again,
+    /// with no transition and no doubled window.
+    #[tokio::test(start_paused = true)]
+    async fn a_trial_with_no_verdict_can_be_taken_again_after_its_hold() {
+        let h = PeerHealth::new(2, Liveness::default());
+        h.open(DownReason::Refusing);
+        tokio::time::advance(Duration::from_secs(2)).await;
+        assert!(h.take_trial());
+        let after_take = h.transitions();
+        tokio::time::advance(Liveness::default().trial_hold() - Duration::from_millis(1)).await;
+        assert!(!h.take_trial(), "still held");
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(h.take_trial());
+        assert_eq!(h.transitions(), after_take);
+        // An unreachable peer gets no trial at all: its prober decides.
+        let u = PeerHealth::new(3, Liveness::default());
+        u.open(DownReason::Unreachable);
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert!(!u.trial_due() && !u.take_trial());
+    }
+
+    /// A 0.4.x member reports no load: a round deadline on it never opens it Stalled, however
+    /// often; only no answer at all (Unreachable) does.
+    #[tokio::test(start_paused = true)]
+    async fn a_member_that_reports_no_load_is_never_opened_stalled() {
+        let h = PeerHealth::new(2, Liveness::default());
+        for _ in 0..3 {
+            let start = h.mark();
+            tokio::time::advance(Duration::from_secs(5)).await;
+            h.note_reply(None);
+            assert_eq!(h.judge(Round::Two, &start), Judged::Probe);
+            assert_eq!(h.judge_probe(Round::Two, &start, Probed::Answered(None)), None);
+            assert_eq!(h.judge_probe(Round::One, &start, Probed::Answered(None)), None);
+        }
+        let start = h.mark();
+        assert_eq!(
+            h.judge_probe(Round::Two, &start, Probed::Failed),
+            Some(DownReason::Unreachable)
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -818,11 +892,11 @@ mod tests {
         h.open(DownReason::Refusing);
         for _ in 0..10 {
             tokio::time::advance(Duration::from_secs(31)).await;
-            assert_eq!(h.sign_tier(), Tier::Trial);
+            assert!(h.take_trial());
             h.open(DownReason::Refusing);
         }
         tokio::time::advance(Duration::from_secs(30)).await;
-        assert_eq!(h.sign_tier(), Tier::Trial, "never more than 30 s");
+        assert!(h.take_trial(), "never more than 30 s");
     }
 
     #[tokio::test(start_paused = true)]

@@ -11,7 +11,9 @@
 //! - the breaker: one hit per blackholed member, not one per signature (T3); a stalled round 2 costs
 //!   one deadline, never a second one for the abort (T4); a busy member that keeps making progress
 //!   is never opened, a frozen one is (T5); refusals do not open, a falsely opened peer is still
-//!   used, DKG ignores it (T7, T8, T9);
+//!   used, DKG ignores it (T7, T8, T9); a member stalled once is back within one window through
+//!   its trial while another member is up (T17); a control call that reads the store opens nothing
+//!   past its deadline, `NodeInfo` does (T18);
 //! - fast refusal: an isolated leader refuses within a few seconds, then at once, and signs again
 //!   right after the heal (T6);
 //! - hosted writes: a member past its deadline is skipped as unreachable, never read as a conflict
@@ -19,8 +21,8 @@
 //! - the member side: a definite I/O error in round 2 marks the store down at once, and a probe that
 //!   finds it working brings it back with no restart (T11, T15);
 //! - the client's deadline: it only shortens the leader's work (T12, T13, T4b);
-//! - saturation: slow but progressing members open no breaker, and no signature makes more than two
-//!   attempts (T14).
+//! - saturation: slow but progressing members open no breaker, and no signature makes more than
+//!   `n − t + 1` attempts (T14).
 //!
 //! Nonce and intent safety under abandoned attempts (T16) is in `signing_policy.rs`, next to the
 //! journal helpers it needs.
@@ -49,7 +51,10 @@ use rutli_cosigner::pb;
 use rutli_cosigner::pb::peer_server::PeerServer;
 use rutli_cosigner::pb::signer_client::SignerClient;
 use rutli_cosigner::pb::signer_server::SignerServer;
-use rutli_cosigner::peer::{GrpcPeer, LocalPeer, PeerApi, ROUND1_DEADLINE, ROUND2_DEADLINE};
+use rutli_cosigner::peer::{
+    GrpcPeer, LocalPeer, PeerApi, BREAKER_WINDOW, CONTROL_DEADLINE, ROUND1_DEADLINE,
+    ROUND2_DEADLINE,
+};
 use rutli_cosigner::ratelimit::DecryptRateLimiter;
 use rutli_cosigner::service::{PeerSvc, SignerSvc};
 use rutli_cosigner::tls::Tls;
@@ -579,7 +584,7 @@ async fn t03_a_blackholed_member_costs_one_signature_one_deadline_not_every_sign
 /// T4. A member whose round 2 stalls (and which does not answer the abort either): the signature
 /// pays one round-2 deadline and signs with the other member — the abort to the stalled member is
 /// detached, never a second wait. The member is then marked stalled (its progress counter did not
-/// move), and only its own entry changes.
+/// move), and only its own entry changes. One signature per window pays a deadline for its trial.
 #[tokio::test(start_paused = true)]
 async fn t04_a_stalled_round_2_costs_one_deadline_and_the_abort_is_not_waited_for() {
     let m = Mesh::new().await;
@@ -592,14 +597,33 @@ async fn t04_a_stalled_round_2_costs_one_deadline_and_the_abort_is_not_waited_fo
         took >= ROUND2_DEADLINE && took < ROUND2_DEADLINE + Duration::from_millis(200),
         "took {took:?}"
     );
-    settle(2.0).await;
+    settle(1.0).await;
     assert_eq!(m.health(1, 2).down_reason(), Some(DownReason::Stalled));
     assert_eq!(m.health(1, 3).state_name(), "up");
     assert_eq!(m.health(1, 3).transitions(), 0);
-    // The next signatures go around it at once.
+    // Inside its window the next signatures go around it at once.
     let t1 = Instant::now();
     m.sign(1, "t4-next").await.unwrap();
     assert!(t1.elapsed() < Duration::from_millis(100));
+    // After the window one signature tries it first (its trial) and pays one round-2 deadline; the
+    // window doubles, and the signatures after that go around it at once again.
+    settle(1.5).await;
+    let t2 = Instant::now();
+    m.sign(1, "t4-trial").await.unwrap();
+    assert!(
+        t2.elapsed() >= ROUND2_DEADLINE
+            && t2.elapsed() < ROUND2_DEADLINE + Duration::from_millis(200),
+        "{:?}",
+        t2.elapsed()
+    );
+    settle(1.0).await;
+    assert_eq!(m.health(1, 2).down_reason(), Some(DownReason::Stalled));
+    for i in 0..5 {
+        let t = Instant::now();
+        m.sign(1, &format!("t4-after-{i}")).await.unwrap();
+        assert!(t.elapsed() < Duration::from_millis(100), "{:?}", t.elapsed());
+        settle(0.5).await;
+    }
 }
 
 /// T5. A member slow for this leader but busy completing rounds for another leader is excluded
@@ -648,6 +672,98 @@ async fn t05_a_busy_member_is_not_marked_down_and_a_frozen_one_is() {
         .unwrap_err();
     settle(2.0).await;
     assert_eq!(m.health(1, 3).down_reason(), Some(DownReason::Stalled));
+}
+
+/// T17. A member whose round 2 stalls once and then answers again is back up within one window
+/// while the other member is up: the first signature after the window tries a subset with it first
+/// (its trial), and that signature pays no deadline since the member answers. A trial is used up
+/// only by an attempt that contacts the member.
+#[tokio::test(start_paused = true)]
+async fn t17_a_member_stalled_once_is_back_within_one_window_while_another_member_is_up() {
+    let m = Mesh::new().await;
+    m.sign(1, "t17-warm").await.unwrap();
+    m.control(2).set("SignRound2", None, delay(600));
+    m.sign(1, "t17-stall").await.unwrap();
+    let opened = Instant::now();
+    settle(0.1).await; // the deadline's probe
+    assert_eq!(m.health(1, 2).down_reason(), Some(DownReason::Stalled));
+    assert_eq!(m.health(1, 3).state_name(), "up");
+    m.control(2).clear();
+    let round2s = m.control(2).seen("SignRound2");
+
+    let mut back = None;
+    for i in 0..40 {
+        let t = Instant::now();
+        m.sign(1, &format!("t17-{i}")).await.unwrap();
+        assert!(
+            t.elapsed() < Duration::from_millis(100),
+            "no signature pays a deadline: {:?}",
+            t.elapsed()
+        );
+        if m.health(1, 2).state_name() == "up" {
+            back = Some(opened.elapsed());
+            break;
+        }
+        assert_eq!(
+            m.control(2).seen("SignRound2"),
+            round2s,
+            "inside the window node 2 is not asked"
+        );
+        settle(0.2).await;
+    }
+    let back = back.expect("node 2 came back through its trial");
+    assert!(
+        back <= BREAKER_WINDOW + Duration::from_millis(500),
+        "back after {back:?}"
+    );
+    assert_eq!(
+        m.control(2).seen("SignRound2"),
+        round2s + 1,
+        "exactly one signature tried it"
+    );
+    assert_eq!(m.health(1, 3).transitions(), 0);
+}
+
+/// T18. A `KeyEpoch` or `CeremonyStatus` past its deadline (a slow store on the peer) opens no
+/// breaker and signing goes on with that peer; a `NodeInfo` past its deadline opens it as
+/// unreachable, and the prober brings it back once it answers.
+#[tokio::test(start_paused = true)]
+async fn t18_a_store_reading_control_call_past_its_deadline_opens_nothing_and_node_info_does() {
+    let m = Mesh::new().await;
+    let to2 = m.peers[0][1].clone();
+    m.control(2).set("KeyEpoch", None, delay(600));
+    m.control(2).set("CeremonyStatus", None, delay(600));
+    let t = Instant::now();
+    let err = to2.key_epoch(KEY).await.unwrap_err();
+    assert!(
+        matches!(err, DaemonError::PeerDeadline { peer: 2, .. }),
+        "{err:?}"
+    );
+    assert!(close(t.elapsed(), CONTROL_DEADLINE, 50), "{:?}", t.elapsed());
+    let err = to2.ceremony_status("t18").await.unwrap_err();
+    assert!(
+        matches!(err, DaemonError::PeerDeadline { peer: 2, .. }),
+        "{err:?}"
+    );
+    settle(1.5).await;
+    assert_eq!(
+        (m.health(1, 2).state_name(), m.health(1, 2).transitions()),
+        ("up", 0)
+    );
+    sign(m.node(1), &m.view(1, &[1, 2]), KEY, &msg("t18"))
+        .await
+        .expect("node 2 still signs");
+
+    m.control(2).set("NodeInfo", None, delay(600));
+    let err = to2.node_info().await.unwrap_err();
+    assert!(
+        matches!(err, DaemonError::PeerDeadline { peer: 2, .. }),
+        "{err:?}"
+    );
+    assert!(m.health(1, 2).is_unreachable());
+    m.control(2).clear();
+    settle(1.5).await;
+    assert_eq!(m.health(1, 2).state_name(), "up", "its probe answers again");
 }
 
 // ── T6: fast refusal ──────────────────────────────────────────────────────────────────────────

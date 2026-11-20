@@ -577,7 +577,17 @@ pub const PROBE_FRESH: Duration = Duration::from_secs(3);
 /// client's time left minus this, and no new subset starts with less than this left.
 pub const ROUND_RESERVE: Duration = Duration::from_secs(1);
 /// Signatures this node may lead at once before it answers `overloaded` without contacting a
-/// member (its blocking pool has 512 threads; each signature holds at most one of them here).
+/// member. Provisional: perf's ramp run (the knee) decides the number. Why 512 for now:
+///
+/// - the blocking pool is tokio's default, 512 threads (`main.rs` does not change it). A signature
+///   led here holds at most one of them at a time on this node (its own round, then the
+///   aggregation), so up to 512 led signatures cannot queue this leader's own work behind itself;
+///   rounds it serves for other leaders share the same pool, which is what its own round deadline
+///   ([`Overloaded`](crate::DaemonError::Overloaded) when it misses it) catches;
+/// - the per-key session caps on each member bound what one key can hold anyway: at most 256
+///   waiting sessions from one opener ([`crate::node::MAX_PENDING_SIGN_SESSIONS_PER_OPENER`]), and
+///   this leader opens one per member per attempt, so on one key the members answer `sessions-full`
+///   well before 512; the limit here is the bound across keys.
 pub const MAX_LEADER_SIGNS_IN_FLIGHT: usize = 512;
 
 /// What a peer call is: its deadline, and what its failure tells the breaker.
@@ -586,7 +596,12 @@ pub enum CallClass {
     Round1,
     Round2,
     Abort,
+    /// `NodeInfo` and other calls answered from memory: past its deadline the peer is unreachable.
     Control,
+    /// `KeyEpoch`, `CeremonyStatus`: control calls that read the peer's key store. Their deadline is
+    /// [`CONTROL_DEADLINE`] too, but past it the breaker is not opened — a slow store is not an
+    /// unreachable peer (its own readiness probe and the sign rounds judge the store).
+    StoreRead,
     Probe,
     /// Ceremony parts and hosted-key writes and reads: [`PEER_RPC_TIMEOUT`], ignored by the breaker.
     Ceremony,
@@ -599,7 +614,7 @@ impl CallClass {
             CallClass::Round1 => "sign round 1",
             CallClass::Round2 => "sign round 2",
             CallClass::Abort => "sign abort",
-            CallClass::Control => "a control call",
+            CallClass::Control | CallClass::StoreRead => "a control call",
             CallClass::Probe => "a probe",
             CallClass::Ceremony => "a ceremony or hosted-key call",
         }
@@ -611,7 +626,7 @@ impl CallClass {
             CallClass::Round1 => Some("sign_round1"),
             CallClass::Round2 => Some("sign_round2"),
             CallClass::Abort => Some("abort"),
-            CallClass::Control | CallClass::Probe => Some("control"),
+            CallClass::Control | CallClass::StoreRead | CallClass::Probe => Some("control"),
             CallClass::Ceremony => None,
         }
     }
@@ -635,8 +650,6 @@ pub struct Liveness {
     pub probe_fresh: Duration,
     pub round_reserve: Duration,
     pub leader_inflight_limit: usize,
-    /// Subset attempts per signature ([`crate::orchestrator::MAX_SIGN_ATTEMPTS`]).
-    pub max_attempts: usize,
     /// A signature's budget without a client deadline ([`crate::orchestrator::SIGN_BUDGET`]).
     pub sign_budget: Duration,
 }
@@ -658,7 +671,6 @@ impl Default for Liveness {
             probe_fresh: PROBE_FRESH,
             round_reserve: ROUND_RESERVE,
             leader_inflight_limit: MAX_LEADER_SIGNS_IN_FLIGHT,
-            max_attempts: crate::orchestrator::MAX_SIGN_ATTEMPTS,
             sign_budget: crate::orchestrator::SIGN_BUDGET,
         }
     }
@@ -671,7 +683,7 @@ impl Liveness {
             CallClass::Round1 => self.round1,
             CallClass::Round2 => self.round2,
             CallClass::Abort => self.abort,
-            CallClass::Control => self.control,
+            CallClass::Control | CallClass::StoreRead => self.control,
             CallClass::Probe => self.probe,
             CallClass::Ceremony => self.ceremony,
         }
@@ -907,15 +919,16 @@ impl GrpcInner {
     }
 
     /// A call passed its deadline. A sign round is judged by the progress test in the background
-    /// (the member is excluded from its signature either way); a control call or probe is an
-    /// unreachable peer; an abort or a ceremony call says nothing to the breaker.
+    /// (the member is excluded from its signature either way); a memory-only control call or a
+    /// probe is an unreachable peer; a control call that reads the store, an abort or a ceremony
+    /// call says nothing to the breaker.
     fn on_deadline(self: &Arc<Self>, class: CallClass, mark: crate::liveness::Mark) {
         use crate::liveness::{Judged, Round};
         let round = match class {
             CallClass::Round1 => Round::One,
             CallClass::Round2 => Round::Two,
             CallClass::Control | CallClass::Probe => return self.open(crate::liveness::DownReason::Unreachable),
-            CallClass::Abort | CallClass::Ceremony => return,
+            CallClass::StoreRead | CallClass::Abort | CallClass::Ceremony => return,
         };
         let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
         // Sorted after up peers until the verdict, so the next signatures do not walk into the same
@@ -1303,10 +1316,10 @@ impl PeerApi for GrpcPeer {
     }
 
     async fn key_epoch(&self, key_id: &str) -> Result<pb::KeyEpochReply> {
-        let d = self.inner.deadline(CallClass::Control);
+        let d = self.inner.deadline(CallClass::StoreRead);
         let msg = pb::KeyEpochRequest { key_id: key_id.into() };
         self.inner
-            .call(CallClass::Control, d, crate::DaemonError::Status, |mut c| async move {
+            .call(CallClass::StoreRead, d, crate::DaemonError::Status, |mut c| async move {
                 c.key_epoch(timed(msg, d)).await
             })
             .await
@@ -1351,11 +1364,11 @@ impl PeerApi for GrpcPeer {
     }
 
     async fn ceremony_status(&self, ceremony_id: &str) -> Result<StatusInfo> {
-        let d = self.inner.deadline(CallClass::Control);
+        let d = self.inner.deadline(CallClass::StoreRead);
         let msg = pb::CeremonyStatusRequest { ceremony_id: ceremony_id.into() };
         let reply = self
             .inner
-            .call(CallClass::Control, d, crate::DaemonError::Status, |mut c| async move {
+            .call(CallClass::StoreRead, d, crate::DaemonError::Status, |mut c| async move {
                 c.ceremony_status(timed(msg, d)).await
             })
             .await?;

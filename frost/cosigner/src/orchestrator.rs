@@ -386,15 +386,25 @@ async fn commit_everywhere(peers: &Peers, ceremony_id: &str, key_id: &str) -> Re
     )))
 }
 
-/// Most t-subsets one Sign tries. Two: a member that fails (or misses its round deadline) is
-/// excluded and one more subset is tried; a leader that still cannot sign answers, and the client
-/// moves to another leader rather than wait here. Down peers ([`crate::liveness`]) are already
-/// sorted last, so the second attempt rarely meets a known-bad member.
-pub const MAX_SIGN_ATTEMPTS: usize = 2;
+/// Most t-subsets one Sign tries over a roster of `n` with threshold `t`: `n − t + 1` (2 in 2-of-3,
+/// 3 in 3-of-5). Each failed attempt excludes one member, so this is every attempt that can still
+/// reach a subset of `t` usable members: two members that refuse (or a link attacker that stalls
+/// a different member each attempt) cannot stop a leader before the subset that works. Slow
+/// attempts are stopped by the sign clock instead ([`SIGN_BUDGET`] or the client's deadline, the
+/// round deadlines, no subset started with less than [`crate::peer::ROUND_RESERVE`] left).
+///
+/// Shares: a member releases at most one share per attempt it is in (each attempt is a fresh
+/// session on it, and a session signs once), late shares of abandoned attempts included, so one
+/// Sign call costs a member at most `n − t + 1` of the request's `max_shares_per_request` (8 by
+/// default).
+pub fn max_sign_attempts(n: usize, t: usize) -> usize {
+    n.saturating_sub(t) + 1
+}
 
 /// Wall-clock budget for one Sign's attempts when the client sends no deadline (`grpc-timeout`).
 /// With one, the budget is the smaller of the two: the client's deadline only ever shortens it.
-/// 20 s covers the worst case of two attempts (2 × (2 s round 1 + 5 s round 2)) with room left.
+/// 20 s covers two attempts that each run to both round deadlines (2 × (2 s + 5 s)) with room left;
+/// a third (3-of-5) starts only if time is left.
 pub const SIGN_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Coordinate one signature (audit H1: epoch-matched quorums with retry).
@@ -405,7 +415,10 @@ pub const SIGN_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 ///   fails over).
 /// * Candidate t-subsets are the roster's combinations over [`base_order`] (leader first, then by
 ///   identifier), stable-sorted by their worst member's liveness tier ([`crate::liveness::Tier`]:
-///   up, trial, down) — a peer this leader knows to be down is tried last, never skipped. Each
+///   up, trial, down) — a peer this leader knows to be down is tried last, never skipped. A
+///   stalled or refusing peer whose window has passed gets a trial: this signature tries a subset
+///   with it first, if it takes the trial when that attempt starts
+///   ([`crate::liveness::PeerHealth::take_trial`], one signature per window). Each
 ///   attempt is a fresh session (a new random session id per member, fresh round-1 commitments from
 ///   every member — commitments are never reused across subsets). A member that fails round 1 or
 ///   round 2, misses its round deadline, or whose share fails verification at aggregation (frost's
@@ -415,7 +428,8 @@ pub const SIGN_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 /// * If `t` peers report one sharing that is not older than the leader's, the leader is the odd
 ///   one out: it stops and answers UNAVAILABLE so the driver fails over to a node on the cluster's
 ///   sharing (and nudges its own resolver if it has a ceremony for the key staged).
-/// * At most [`MAX_SIGN_ATTEMPTS`] attempts within [`SIGN_BUDGET`] or the client's deadline.
+/// * At most [`max_sign_attempts`] (`n − t + 1`) attempts within [`SIGN_BUDGET`] or the client's
+///   deadline.
 /// * Fast refusals, before any member is contacted: fewer than `t` cosigners reachable
 ///   ([`DaemonError::NoQuorum`]), or this leader overloaded ([`DaemonError::Overloaded`], also when
 ///   its own round misses its deadline). Both UNAVAILABLE with a trailer; the driver fails over.
@@ -493,7 +507,11 @@ pub async fn sign_within(
     let request_id = intent.and_then(request_id_of);
     let ordered = base_order(node.identifier, request_id.as_deref(), peers);
     let tiers: Vec<crate::liveness::Tier> = ordered.iter().map(|p| sign_tier(p)).collect();
-    let subsets = order_subsets(ordered.len(), threshold, &tiers);
+    // A stalled or refusing peer whose window has passed: a subset with it goes first. The trial is
+    // taken only when that attempt starts; a signature that finds it taken skips that subset.
+    let mut trial = ordered.iter().position(|p| trial_due(p));
+    let subsets = order_subsets(ordered.len(), threshold, &tiers, trial);
+    let max_attempts = max_sign_attempts(ordered.len(), threshold);
 
     let mut excluded: BTreeMap<Identifier, String> = BTreeMap::new();
     // The first signing-policy refusal by a member: the answer if no subset can sign.
@@ -513,12 +531,19 @@ pub async fn sign_within(
             if members.iter().any(|p| excluded.contains_key(&p.identifier()) || busy.contains(&p.identifier())) {
                 continue;
             }
-            if attempts >= timing.max_attempts {
+            if attempts >= max_attempts {
                 break 'passes;
             }
             if !clock.room_for_subset() {
                 out_of_time = true;
                 break 'passes;
+            }
+            if let Some(i) = trial.take() {
+                // The first attempt is the trial subset (nothing is excluded or busy yet).
+                if subset.contains(&i) && !ordered.get(i).is_some_and(|p| take_trial(p)) {
+                    // Another signature took it first: it pays the deadline, not this one.
+                    continue;
+                }
             }
             attempts += 1;
             if attempts > 1 {
@@ -527,7 +552,7 @@ pub async fn sign_within(
             let ctx =
                 crate::node::Round1Ctx { leader_view: Some(me.view), intent: intent.cloned(), ..Default::default() };
             // The last attempt keeps no reserve for a further subset.
-            let reserve = attempts < timing.max_attempts;
+            let reserve = attempts < max_attempts;
             match attempt(node, &members, key_id, message, &ctx, "sign", &clock.for_attempt(reserve)).await {
                 Ok(signature) => return Ok(signature),
                 Err(Attempt::Fatal(e)) => return Err(e),
@@ -571,7 +596,7 @@ pub async fn sign_within(
                 }
             }
         }
-        if !busy.is_empty() && !busy_retried && attempts < timing.max_attempts {
+        if !busy.is_empty() && !busy_retried && attempts < max_attempts {
             busy_retried = true;
             busy.clear();
             continue 'passes;
@@ -716,6 +741,16 @@ fn sign_tier(p: &Arc<dyn PeerApi>) -> crate::liveness::Tier {
     }
 }
 
+/// Whether a candidate member's trial is due ([`crate::liveness::PeerHealth::trial_due`]).
+fn trial_due(p: &Arc<dyn PeerApi>) -> bool {
+    !p.is_local() && p.health().is_some_and(|h| h.trial_due())
+}
+
+/// Take a candidate member's trial ([`crate::liveness::PeerHealth::take_trial`]).
+fn take_trial(p: &Arc<dyn PeerApi>) -> bool {
+    !p.is_local() && p.health().is_some_and(|h| h.take_trial())
+}
+
 /// The request id a signing intent names (the same for every attempt and failover leader of one
 /// driver call), or `None`.
 fn request_id_of(intent: &crate::pb::SignedIntent) -> Option<Vec<u8>> {
@@ -739,10 +774,26 @@ pub fn base_order<'a>(
 
 /// Every `threshold`-subset of `0..n` (indices into the base order), in [`combinations`] order,
 /// then stable-sorted by its worst member's tier: subsets with a down member last, subsets with a
-/// trial before those, the base order kept within each tier.
-pub fn order_subsets(n: usize, threshold: usize, tiers: &[crate::liveness::Tier]) -> Vec<Vec<usize>> {
+/// trial before those, the base order kept within each tier. With `trial` (the index of a peer
+/// whose trial is due), the subset with it whose other members are best (then the base order)
+/// moves to the front; its other subsets stay where their tier puts them.
+pub fn order_subsets(
+    n: usize,
+    threshold: usize,
+    tiers: &[crate::liveness::Tier],
+    trial: Option<usize>,
+) -> Vec<Vec<usize>> {
+    let tier = |i: usize| tiers.get(i).copied().unwrap_or(crate::liveness::Tier::Up);
     let mut subsets = combinations(n, threshold);
-    subsets.sort_by_key(|s| s.iter().map(|&i| tiers.get(i).copied().unwrap_or(crate::liveness::Tier::Up)).max());
+    subsets.sort_by_key(|s| s.iter().map(|&i| tier(i)).max());
+    if let Some(t) = trial {
+        let others = |s: &[usize]| s.iter().filter(|&&i| i != t).map(|&i| tier(i)).max();
+        let front = subsets.iter().enumerate().filter(|(_, s)| s.contains(&t)).min_by_key(|(pos, s)| (others(s), *pos));
+        if let Some(pos) = front.map(|(pos, _)| pos) {
+            let s = subsets.remove(pos);
+            subsets.insert(0, s);
+        }
+    }
     subsets
 }
 
@@ -2393,13 +2444,13 @@ mod tests {
     fn subsets_stable_sort_by_their_worst_member_over_any_base_order() {
         use crate::liveness::Tier::{Down, Trial, Up};
         // 2-of-3, member at base index 1 down: {0,2} first, then the two with it, in base order.
-        assert_eq!(order_subsets(3, 2, &[Up, Down, Up]), vec![vec![0, 2], vec![0, 1], vec![1, 2]]);
+        assert_eq!(order_subsets(3, 2, &[Up, Down, Up], None), vec![vec![0, 2], vec![0, 1], vec![1, 2]]);
         // All up: exactly the base order.
-        assert_eq!(order_subsets(3, 2, &[Up, Up, Up]), combinations(3, 2));
+        assert_eq!(order_subsets(3, 2, &[Up, Up, Up], None), combinations(3, 2));
         // 3-of-5 with one trial and one down member: every subset kept, tiers ascending, and the
         // base (lexicographic) order inside each tier.
         let tiers = [Up, Up, Trial, Down, Up];
-        let ordered = order_subsets(5, 3, &tiers);
+        let ordered = order_subsets(5, 3, &tiers, None);
         assert_eq!(ordered.len(), 10);
         let worst: Vec<_> = ordered.iter().map(|s| s.iter().map(|&i| tiers[i]).max().unwrap()).collect();
         assert!(worst.windows(2).all(|w| w[0] <= w[1]), "{worst:?}");
@@ -2410,5 +2461,31 @@ mod tests {
             assert_eq!(within, sorted, "base order kept within {tier:?}");
         }
         assert_eq!(ordered[0], vec![0, 1, 4]);
+    }
+
+    /// A due trial puts one subset with that peer first — the one whose other members are best —
+    /// and leaves the rest of the order as the tiers put it.
+    #[test]
+    fn a_due_trial_puts_one_subset_with_its_peer_first() {
+        use crate::liveness::Tier::{Down, Up};
+        // 2-of-3, base index 1 stalled with its window passed: {0,1} first, then {0,2}, then {1,2}.
+        assert_eq!(order_subsets(3, 2, &[Up, Down, Up], Some(1)), vec![vec![0, 1], vec![0, 2], vec![1, 2]]);
+        // 3-of-5, index 3 due and index 1 down: the trial subset avoids the other down peer.
+        let tiers = [Up, Down, Up, Down, Up];
+        let ordered = order_subsets(5, 3, &tiers, Some(3));
+        assert_eq!(ordered[0], vec![0, 2, 3]);
+        assert_eq!(ordered[1], vec![0, 2, 4], "then the all-up subset");
+        assert_eq!(ordered.len(), 10);
+        let mut all = ordered.clone();
+        all.sort();
+        assert_eq!(all, combinations(5, 3), "nothing dropped, nothing doubled");
+    }
+
+    #[test]
+    fn the_attempt_cap_is_n_minus_t_plus_one() {
+        assert_eq!(max_sign_attempts(3, 2), 2);
+        assert_eq!(max_sign_attempts(5, 3), 3);
+        assert_eq!(max_sign_attempts(2, 2), 1);
+        assert_eq!(max_sign_attempts(1, 2), 1);
     }
 }
