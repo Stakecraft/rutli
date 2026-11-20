@@ -243,6 +243,12 @@ fi
 pull_values="[]"
 [ -z "$pull_secret" ] || pull_values="[{ name: \"$pull_secret\" }]"
 cat >"$work/values.yaml" <<EOF
+# A load-test rig, not an authority-key deployment: the sign rate limits are off on purpose (to
+# measure throughput), and the per-cluster production values (signer pins, key-file v2, a pinned
+# cluster id) are not set. So the production profile (the chart's default) is turned off
+# explicitly; the cosigners log what production would refuse (docs/production-profile.md). Not the
+# end state: a second pass of the functional scenarios under the production profile is #172.
+profile: lab
 replicaCount: 3
 threshold: 2
 nodes:
