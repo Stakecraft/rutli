@@ -656,7 +656,7 @@ async fn t05_a_busy_member_is_not_marked_down_and_a_frozen_one_is() {
         t0.elapsed()
     );
     assert!(
-        matches!(err, DaemonError::ThresholdNotMet { .. }),
+        matches!(err, DaemonError::AttemptsExhausted { usable: 1, .. }),
         "excluded from this signature: {err:?}"
     );
     settle(2.0).await;
@@ -1165,6 +1165,65 @@ async fn t13_the_client_deadline_only_ever_shortens_the_leaders_work() {
         "{:?}",
         t.elapsed()
     );
+}
+
+// ── T19: a round that waited past its caller's deadline ───────────────────────────────────────
+
+/// T19. A sign round 1 queued behind a jammed blocking pool until its caller's deadline passed
+/// opens no session when a thread frees up: the caller is gone and its abort may already have come
+/// and gone, so nonces opened now would wait for the TTL. The same round within its deadline opens
+/// one (the check is not vacuous).
+#[test]
+fn t19_a_round_1_queued_past_its_callers_deadline_opens_no_session() {
+    use rutli_cosigner::pb::peer_server::Peer;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .start_paused(true)
+        .max_blocking_threads(1)
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let m = Mesh::new().await;
+        let node = m.node(2).clone();
+        let svc = Arc::new(PeerSvc {
+            node: node.clone(),
+            allowed_cns: None,
+            peer_ids: None,
+            peer_pins: None,
+        });
+        let round1 = |session: &str| {
+            let mut req = tonic::Request::new(pb::SignRound1Request {
+                key_id: KEY.into(),
+                session_id: session.into(),
+                ..Default::default()
+            });
+            req.metadata_mut()
+                .insert("grpc-timeout", "2000m".parse().unwrap());
+            req
+        };
+
+        // The pool's one thread is busy (a hung store elsewhere); the round queues behind it.
+        let (release, jammed) = std::sync::mpsc::channel::<()>();
+        let jam = tokio::task::spawn_blocking(move || {
+            let _ = jammed.recv();
+        });
+        let call = {
+            let (svc, req) = (svc.clone(), round1("t19-late"));
+            tokio::spawn(async move { svc.sign_round1(req).await })
+        };
+        while node.load_now().inflight == 0 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_secs(3)).await;
+        release.send(()).unwrap();
+        jam.await.unwrap();
+        let err = call.await.unwrap().unwrap_err();
+        assert_eq!(err.code(), tonic::Code::DeadlineExceeded, "{err:?}");
+        assert_eq!(node.pending_sign_count(KEY), 0, "no session opened");
+
+        svc.sign_round1(round1("t19-in-time")).await.unwrap();
+        assert_eq!(node.pending_sign_count(KEY), 1);
+    });
 }
 
 // ── T14: saturation ───────────────────────────────────────────────────────────────────────────

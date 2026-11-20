@@ -603,7 +603,7 @@ pub async fn sign_within(
         }
         break;
     }
-    let usable = ordered.len() - excluded.len();
+    let usable = ordered.len().saturating_sub(excluded.len());
     tracing::warn!(key_id, attempts, ?excluded, ?busy, out_of_time, "sign gave up: no t-subset of cosigners could sign");
     if let Some(refusal) = policy_refusal {
         return Err(refusal);
@@ -615,19 +615,18 @@ pub async fn sign_within(
              (and no subset without them could sign) — another cosigner can lead"
         )));
     }
-    if usable < threshold {
-        // Not the no-quorum refusal: members excluded here answered or timed out for this
-        // signature, for any reason (an invalid share, a refusal) — reachability is the quorum
-        // check's business, before round 1.
-        Err(DaemonError::ThresholdNotMet { needed: threshold, got: usable })
-    } else {
-        Err(DaemonError::NotServing(format!(
-            "sign for {key_id} gave up after {attempts} attempt(s) in {:?} ({} cosigner(s) excluded{})",
-            clock.elapsed(),
-            excluded.len(),
-            if out_of_time { ", out of time" } else { "" }
-        )))
-    }
+    // Not the no-quorum refusal: members excluded here answered or timed out for this signature,
+    // for any reason (an invalid share, a refusal) — reachability is the quorum check's business,
+    // before round 1. UNAVAILABLE either way (below the threshold, or attempts or time used up
+    // with enough cosigners left), with its own trailer.
+    tracing::debug!(key_id, elapsed = ?clock.elapsed(), "sign attempts exhausted");
+    Err(DaemonError::AttemptsExhausted {
+        needed: threshold,
+        usable,
+        attempts,
+        excluded: excluded.keys().map(|id| crate::hosted::identifier_index(*id).unwrap_or(0)).collect(),
+        out_of_time,
+    })
 }
 
 /// Count one fast refusal in `rutli_sign_fast_refusals_total{reason}` (the reasons are listed in

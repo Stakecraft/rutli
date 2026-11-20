@@ -4473,7 +4473,7 @@ mod sign_across_commit_tests {
     ///
     /// The leader does retry in the same call, with a fresh session on another subset, but that
     /// round 1 is refused by the epoch check — the leader's view of the sharing predates the
-    /// commit — so the call gives up (`ThresholdNotMet`: one member excluded at round 2, the other
+    /// commit — so the call gives up (`AttemptsExhausted`: one member excluded at round 2, the other
     /// at the retry's round 1). The next sign, with fresh sessions on the new sharing, succeeds.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_mixed_round2_across_a_refresh_commit_fails_cleanly_and_a_fresh_sign_succeeds() {
@@ -4494,7 +4494,7 @@ mod sign_across_commit_tests {
         gate.open();
 
         let err = leading.await.unwrap().unwrap_err();
-        assert!(matches!(err, DaemonError::ThresholdNotMet { needed: 2, got: 1 }), "{err:?}");
+        assert!(matches!(err, DaemonError::AttemptsExhausted { needed: 2, usable: 1, .. }), "{err:?}");
         // Node 1 (the leader) released its old share; node 2's round 2 found no session on its new
         // cosigner and burned nothing; its old nonces went with the evicted cosigner.
         assert_burned_once(&nodes[0], &session);

@@ -375,12 +375,7 @@ impl Signer for SignerSvc {
             }
             Err(e) => Err(e),
         };
-        let result = match result {
-            Err(crate::DaemonError::NoQuorum { needed, visible, .. }) if !authenticated => {
-                Err(crate::DaemonError::NoQuorum { needed, visible, missing: Vec::new() })
-            }
-            other => other,
-        };
+        let result = result.map_err(|e| redact_cosigners(e, authenticated));
         let outcome = if result.is_ok() { "ok" } else { "error" };
         metrics::counter!(crate::metrics::SIGN_REQUESTS, "result" => outcome).increment(1);
         metrics::histogram!(crate::metrics::SIGN_DURATION, "result" => outcome)
@@ -799,6 +794,39 @@ impl SignerSvc {
 /// The `grpc-timeout` request header (the client's deadline), which tonic leaves in the metadata.
 const GRPC_TIMEOUT_HEADER: &str = "grpc-timeout";
 
+/// A Sign refusal as the client may see it: which cosigners this leader could not reach
+/// (`no-quorum`) or excluded (`attempts-exhausted`) only for an authenticated (mTLS) client.
+pub fn redact_cosigners(e: crate::DaemonError, authenticated: bool) -> crate::DaemonError {
+    use crate::DaemonError::{AttemptsExhausted, NoQuorum};
+    match e {
+        _ if authenticated => e,
+        NoQuorum { needed, visible, .. } => NoQuorum { needed, visible, missing: Vec::new() },
+        AttemptsExhausted { needed, usable, attempts, out_of_time, .. } => {
+            AttemptsExhausted { needed, usable, attempts, excluded: Vec::new(), out_of_time }
+        }
+        other => other,
+    }
+}
+
+/// When the caller of a Peer call stops waiting: now plus its `grpc-timeout`, on this node's clock;
+/// `None` without one (or one too large to add).
+fn caller_deadline<T>(req: &Request<T>) -> Option<tokio::time::Instant> {
+    let left = req.metadata().get(GRPC_TIMEOUT_HEADER).and_then(|v| v.to_str().ok()).and_then(parse_grpc_timeout)?;
+    tokio::time::Instant::now().checked_add(left)
+}
+
+/// Refuse a sign round whose caller's deadline passed while it waited for a blocking thread: the
+/// caller is gone (tonic dropped the handler, not this queued work), and its abort may have come
+/// and gone already — a round 1 opened now would hold nonces nobody frees before the TTL, a round
+/// 2 would release a share for an attempt the leader abandoned. Checked on the blocking thread,
+/// before the session is opened or taken.
+fn refuse_if_caller_gone(not_after: Option<tokio::time::Instant>, round: &'static str) -> crate::Result<()> {
+    match not_after {
+        Some(at) if tokio::time::Instant::now() >= at => Err(crate::DaemonError::CallerGone(round)),
+        _ => Ok(()),
+    }
+}
+
 /// A `grpc-timeout` value: at most 8 digits and a unit (`H`, `M`, `S`, `m`, `u`, `n`), per the gRPC
 /// HTTP/2 protocol. `None` for anything else.
 pub fn parse_grpc_timeout(value: &str) -> Option<std::time::Duration> {
@@ -1052,6 +1080,7 @@ impl Peer for PeerSvc {
     ) -> Result<Response<pb::SignRound1Reply>, Status> {
         // The caller opens the session: only it may send its round 2 or abort it.
         let opener = self.session_owner(&req)?;
+        let not_after = caller_deadline(&req);
         let r = req.into_inner();
         // An empty digest is a leader from before epochs: no sharing declared (see the proto).
         let leader_view = match r.pkp_digest.len() {
@@ -1079,7 +1108,10 @@ impl Peer for PeerSvc {
         };
         let result = self
             .node
-            .sign_op(crate::liveness::Round::One, move |n| n.sign_round1_as(&r.key_id, &r.session_id, &ctx, &opener))
+            .sign_op(crate::liveness::Round::One, move |n| {
+                refuse_if_caller_gone(not_after, "round 1")?;
+                n.sign_round1_as(&r.key_id, &r.session_id, &ctx, &opener)
+            })
             .await;
         with_load(&self.node, result.and_then(|c| Ok(pb::SignRound1Reply { commitments: serde_json::to_vec(&c)? })))
     }
@@ -1089,6 +1121,7 @@ impl Peer for PeerSvc {
         req: Request<pb::SignRound2Request>,
     ) -> Result<Response<pb::SignRound2Reply>, Status> {
         let caller = self.session_owner(&req)?;
+        let not_after = caller_deadline(&req);
         let r = req.into_inner();
         let commitments: BTreeMap<_, _> = de(&r.commitments_map)?;
         // One blocking call, so burn-before-sign stays exactly as it is inline: round 2 creates
@@ -1102,6 +1135,7 @@ impl Peer for PeerSvc {
         let result = self
             .node
             .sign_op(crate::liveness::Round::Two, move |n| {
+                refuse_if_caller_gone(not_after, "round 2")?;
                 n.sign_round2_as(&r.key_id, &r.session_id, &r.message, &commitments, intent_digest, &caller)
             })
             .await;
@@ -1522,6 +1556,21 @@ fn de<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Status> {
 #[cfg(test)]
 mod tests {
     use super::cn_of;
+
+    #[test]
+    fn only_an_authenticated_client_sees_which_cosigners_were_missing_or_excluded() {
+        use crate::DaemonError::{AttemptsExhausted, NoQuorum};
+        let nq = || NoQuorum { needed: 2, visible: 1, missing: vec![2, 3] };
+        let ex = || AttemptsExhausted { needed: 2, usable: 1, attempts: 2, excluded: vec![2, 3], out_of_time: false };
+        for e in [nq(), ex()] {
+            assert!(super::redact_cosigners(e, true).to_string().contains("[2, 3]"));
+        }
+        for e in [nq(), ex()] {
+            let shown = super::redact_cosigners(e, false);
+            assert!(!shown.to_string().contains('3'), "{shown}");
+            assert!(tonic::Status::from(shown).metadata().get(crate::error::ERROR_TRAILER).is_some());
+        }
+    }
 
     #[test]
     fn grpc_timeout_values_parse_per_the_protocol_and_nothing_else_does() {

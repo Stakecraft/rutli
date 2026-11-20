@@ -78,6 +78,20 @@ pub enum DaemonError {
     #[error("overloaded: {0}")]
     Overloaded(String),
 
+    /// A Sign gave up after `attempts` subset attempts: `usable` of the `needed` cosigners were
+    /// still usable for it (not excluded), `out_of_time` if the sign clock stopped it, `excluded`
+    /// the members it excluded for this signature (the Signer API passes them only to an
+    /// authenticated client). UNAVAILABLE, as before, with the `rutli-error: attempts-exhausted`
+    /// trailer so the cause shows: retryable, another leader may sign. Below the threshold the
+    /// message reads as before ("could not reach signing threshold").
+    #[error("{}", attempts_exhausted(*needed, *usable, *attempts, excluded, *out_of_time))]
+    AttemptsExhausted { needed: usize, usable: usize, attempts: usize, excluded: Vec<u16>, out_of_time: bool },
+
+    /// A sign round (`0`: "round 1" | "round 2") whose caller's deadline passed while it waited for
+    /// a blocking thread: not started. DEADLINE_EXCEEDED (the caller has stopped waiting anyway).
+    #[error("sign {0}: the caller's deadline passed while it waited for a blocking thread — not started")]
+    CallerGone(&'static str),
+
     /// The client's deadline (`grpc-timeout`) leaves less time than one signature needs.
     /// DEADLINE_EXCEEDED; no round was started.
     #[error("the client's deadline leaves {left:?}, less than the {needed:?} a signature needs — no round started")]
@@ -239,6 +253,21 @@ pub const KEYSTORE_DOWN: &str = "keystore-down";
 pub const NO_QUORUM: &str = "no-quorum";
 /// [`ERROR_TRAILER`] value of a Sign refused by an overloaded leader ([`DaemonError::Overloaded`]).
 pub const OVERLOADED: &str = "overloaded";
+/// [`ERROR_TRAILER`] value of a Sign that gave up after its subset attempts
+/// ([`DaemonError::AttemptsExhausted`]).
+pub const ATTEMPTS_EXHAUSTED: &str = "attempts-exhausted";
+
+/// [`DaemonError::AttemptsExhausted`]'s message.
+fn attempts_exhausted(needed: usize, usable: usize, attempts: usize, excluded: &[u16], out_of_time: bool) -> String {
+    let head = if usable < needed {
+        format!("could not reach signing threshold: needed {needed}, got {usable}")
+    } else {
+        format!("sign gave up with {usable} of the {needed} cosigners needed still usable")
+    };
+    let clock = if out_of_time { ", out of time" } else { "" };
+    let who = if excluded.is_empty() { String::new() } else { format!(" (excluded: {excluded:?})") };
+    format!("{head} after {attempts} attempt(s){clock}{who}")
+}
 
 fn with_reason(code: tonic::Code, message: String, reason: &'static str) -> tonic::Status {
     let mut md = tonic::metadata::MetadataMap::new();
@@ -343,9 +372,14 @@ impl From<DaemonError> for tonic::Status {
             DaemonError::KeystoreDown(_) => with_reason(tonic::Code::Unavailable, e.to_string(), KEYSTORE_DOWN),
             DaemonError::NoQuorum { .. } => with_reason(tonic::Code::Unavailable, e.to_string(), NO_QUORUM),
             DaemonError::Overloaded(_) => with_reason(tonic::Code::Unavailable, e.to_string(), OVERLOADED),
+            DaemonError::AttemptsExhausted { .. } => {
+                with_reason(tonic::Code::Unavailable, e.to_string(), ATTEMPTS_EXHAUSTED)
+            }
             // A peer that did not answer in time: as good as unreachable, and retryable elsewhere.
             DaemonError::PeerDeadline { .. } => tonic::Status::unavailable(e.to_string()),
-            DaemonError::ClientDeadline { .. } => tonic::Status::deadline_exceeded(e.to_string()),
+            DaemonError::ClientDeadline { .. } | DaemonError::CallerGone(_) => {
+                tonic::Status::deadline_exceeded(e.to_string())
+            }
             DaemonError::UnknownKey(_) | DaemonError::UnknownDkg(_) => {
                 tonic::Status::not_found(e.to_string())
             }
@@ -479,6 +513,23 @@ mod tests {
         assert_eq!((nq.code(), nq.metadata().get(ERROR_TRAILER).unwrap().to_str().unwrap()), (tonic::Code::Unavailable, NO_QUORUM));
         let ov = tonic::Status::from(DaemonError::Overloaded("x".into()));
         assert_eq!((ov.code(), ov.metadata().get(ERROR_TRAILER).unwrap().to_str().unwrap()), (tonic::Code::Unavailable, OVERLOADED));
+        let gave_up = |usable, out_of_time| DaemonError::AttemptsExhausted {
+            needed: 2,
+            usable,
+            attempts: 2,
+            excluded: vec![2, 3],
+            out_of_time,
+        };
+        for (usable, out_of_time) in [(1, false), (3, true)] {
+            let s = tonic::Status::from(gave_up(usable, out_of_time));
+            assert_eq!(
+                (s.code(), s.metadata().get(ERROR_TRAILER).unwrap().to_str().unwrap()),
+                (tonic::Code::Unavailable, ATTEMPTS_EXHAUSTED)
+            );
+            assert!(s.message().contains("after 2 attempt(s)") && s.message().contains("[2, 3]"), "{s:?}");
+        }
+        assert!(gave_up(1, false).to_string().starts_with("could not reach signing threshold: needed 2, got 1"));
+        assert!(gave_up(3, true).to_string().contains("out of time"));
         let late = DaemonError::PeerDeadline { peer: 2, call: "sign_round1", after: std::time::Duration::from_secs(2) };
         assert_eq!(tonic::Status::from(late).code(), tonic::Code::Unavailable);
 

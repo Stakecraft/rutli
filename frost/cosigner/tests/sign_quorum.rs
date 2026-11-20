@@ -390,7 +390,7 @@ async fn an_invalid_signature_share_is_attributed_and_routed_around() {
     // returning a bad signature.
     let pair: Peers = vec![peers[0].clone(), peers[1].clone()];
     let err = sign(&nodes[0], &pair, KEY, &digest(b"no way around")).await.unwrap_err();
-    assert!(matches!(err, DaemonError::ThresholdNotMet { needed: 2, got: 1 }), "{err:?}");
+    assert!(matches!(err, DaemonError::AttemptsExhausted { needed: 2, usable: 1, .. }), "{err:?}");
 }
 
 #[tokio::test]
@@ -424,8 +424,13 @@ async fn three_of_five_retries_through_subsets_until_one_works() {
     // Three faulty nodes of five leave two: below threshold, after trying what it could.
     let (peers, log) = spied(&nodes, &[Fault::None, Fault::Round1, Fault::Round2, Fault::BadShare, Fault::None]);
     let err = sign(&nodes[0], &peers, KEY, &digest(b"too few")).await.unwrap_err();
-    assert!(matches!(err, DaemonError::ThresholdNotMet { needed: 3, got: 2 }), "{err:?}");
-    assert_eq!(tonic::Status::from(err).code(), tonic::Code::Unavailable);
+    assert!(
+        matches!(err, DaemonError::AttemptsExhausted { needed: 3, usable: 2, attempts: 3, ref excluded, out_of_time: false } if excluded == &vec![2, 3, 4]),
+        "{err:?}"
+    );
+    let status = tonic::Status::from(err);
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+    assert_eq!(status.metadata().get(rutli_cosigner::error::ERROR_TRAILER).unwrap(), rutli_cosigner::error::ATTEMPTS_EXHAUSTED);
     assert_eq!(attempts(&log).len(), max_sign_attempts(5, 3));
     for n in &nodes {
         assert_eq!(n.pending_sign_count(KEY), 0);

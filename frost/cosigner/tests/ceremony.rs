@@ -634,7 +634,7 @@ async fn refresh_refuses_nodes_on_mixed_epochs() {
         let pair: Peers = vec![rig.peers[a].clone(), rig.peers[b].clone()];
         let msg = rutli_frost_core::dealer::canton_test_message(b"mixed");
         let err = sign(&rig.nodes[a], &pair, KEY, &msg).await.unwrap_err();
-        assert!(matches!(err, DaemonError::ThresholdNotMet { needed: 2, got: 1 }), "{a}{b}: {err:?}");
+        assert!(matches!(err, DaemonError::AttemptsExhausted { needed: 2, usable: 1, .. }), "{a}{b}: {err:?}");
     }
     let pair: Peers = vec![rig.peers[0].clone(), rig.peers[2].clone()];
     let msg = rutli_frost_core::dealer::canton_test_message(b"same sharing");
