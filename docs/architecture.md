@@ -127,6 +127,36 @@ fails, it loses the lead again, at the cost of one attempt. Each change of leade
 with the new leader order (`FROST: leader is now … ; leader order a > b > c`). The driver has no
 metrics endpoint: that line and the `failover=` notes in the audit log show the order.
 
+**Which cosigner leads a sign (`frost.sign-leader`).**
+
+| Value | Where each sign starts | Load for 2-of-3 |
+|---|---|---|
+| `rotate` (default) | The next endpoint in turn, among the healthy ones: not demoted within `leader-recovery`, and not a cosigner that answered another group key for that key. | Each node leads 1/3 of the signs. With the cosigners picking the second member by the request id, each node releases a share for 2/3 of them. |
+| `sticky` | The preferred leader, as before 0.5.0. | One node leads every sign and releases a share for all of them; the other two release one for half each. |
+
+Rotation changes only where a sign starts. One Canton call still has one attempt in flight, keeps
+its one signing intent across failovers and stays within its budget. The retryable and final
+errors above are the same in both modes. Ceremonies (DKG) and every hosted-key call stay on the
+preferred leader in both modes: a ceremony is bound to the leader that fenced it, a hosted-key
+write is orchestrated by its leader, and the per-node decrypt limit assumes one leader.
+
+Rotation exercises every node's leader path all the time, so a node that cannot lead shows up at
+once instead of on the day a failover needs it. The cost: a node that is slow but still answers
+inside the sign attempt deadline takes part in about 2/3 of the signs under `rotate`, against 1/2
+under `sticky` with a healthy leader. A node slower than the deadline is demoted and skipped for
+`leader-recovery` in both modes.
+
+**Per-node sign rate limits.** `signing_policy.sign_rate_limit_per_min` / `_per_day` and the
+`rate_limits` rules are counted on each node, once per request id, for every signature the node
+takes part in. Under `sticky` one node takes part in every signature. Under `rotate` each node
+takes part in about 2/3. A limit sized for the total rate of one key therefore still holds on every
+node: no node's count goes up when you switch to `rotate`.
+
+**The default.** `rotate` is the default in this release only if it has run on the two test stands
+for at least two weeks before the feature freeze without a finding. If it has not, the default goes
+back to `sticky` for 0.5.0, with `rotate` documented as recommended and made the default in 0.6.
+Operators who want the pre-0.5.0 behaviour set `sign-leader = sticky`.
+
 **What Canton waits for.** Canton puts no deadline on a KMS driver call. It retries a *retryable*
 failure forever, with a backoff up to 10 s (`KmsConfig.retries.failures`, Canton 3.6/3.7). The
 driver reports only "the cluster could not be reached in time" as retryable (`UNAVAILABLE`,
