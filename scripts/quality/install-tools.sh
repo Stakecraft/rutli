@@ -9,8 +9,8 @@
 # Crates without release binaries are built with `cargo install --locked` (needs cargo); Python
 # tools go into a virtualenv from a hash-pinned requirements file (needs python3 >= 3.10); rule
 # sets are fetched from git at a pinned commit.
-# DIR can be cached between runs: downloads, pip's cache and cargo builds are reused, and binaries
-# are checked again on each run (see the functions below).
+# DIR/downloads, DIR/pip-cache, DIR/crates and the rule sets can be cached between runs; DIR/bin and
+# DIR/venvs are rebuilt from them on every run, and binaries are checked again (see below).
 # With TOOL arguments only those tools are installed. PYTHON overrides the python3 used for venvs.
 set -euo pipefail
 
@@ -23,7 +23,7 @@ LIST="$HERE/tools.txt"
 }
 DIR="$(mkdir -p "$1" && cd "$1" && pwd)"
 shift
-mkdir -p "$DIR/bin" "$DIR/stamps" "$DIR/downloads" "$DIR/venvs"
+mkdir -p "$DIR/bin" "$DIR/downloads" "$DIR/venvs" "$DIR/crates"
 
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64) PLATFORM=linux-x86_64 ;;
@@ -87,14 +87,15 @@ install_binary() {
 # this repository's own workflow runs).
 install_crate() {
   local tool="$1" version="$2" crate="$3"
-  local stamp="$DIR/stamps/$tool"
-  if [ -x "$DIR/bin/$tool" ] && [ "$(cat "$stamp" 2>/dev/null)" = "crate $version" ]; then
+  local stamp="$DIR/crates/$tool.version"
+  if [ -x "$DIR/crates/bin/$tool" ] && [ "$(cat "$stamp" 2>/dev/null)" = "$version" ]; then
     echo "$tool $version (cargo install, cached)"
-    return 0
+  else
+    cargo install --locked --quiet --force --root "$DIR/crates" --version "$version" "$crate"
+    echo "$version" >"$stamp"
+    echo "$tool $version (cargo install)"
   fi
-  cargo install --locked --quiet --force --root "$DIR" --version "$version" "$crate"
-  echo "crate $version" >"$stamp"
-  echo "$tool $version (cargo install)"
+  install -m 0755 "$DIR/crates/bin/$tool" "$DIR/bin/$tool"
 }
 
 # Python tools: the virtualenv is rebuilt on every run; pip checks every distribution, downloaded

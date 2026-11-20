@@ -2,8 +2,8 @@
 # Copyright 2026 StakeCraft
 # SPDX-License-Identifier: Apache-2.0
 # Helm / Kubernetes metrics: kubeconform on the rendered manifests. Renders what
-# scripts/ci-deploy-policy.sh renders (the chart with its default values, every ci/*.yaml and the
-# soak values) plus every tracked kustomization. Schemas come from a pinned commit of
+# scripts/ci-deploy-policy.sh renders (the chart's defaults with placeholder peer pins, every
+# ci/*.yaml and the soak values) plus every tracked kustomization. Schemas come from a pinned commit of
 # yannh/kubernetes-json-schema; kinds without a schema there (CRDs such as PrometheusRule) are
 # skipped and counted separately. kube-linter runs its default checks on the same manifests.
 # Needs helm and kubectl (for kustomize). Run by collect.sh.
@@ -25,20 +25,32 @@ q_need kubectl "${KEYS[@]}" || exit 0
 q_tool kubeconform kubeconform -v
 q_tool helm helm version --short
 
+# render NAME ARGS...: one helm template run into $R/helm-NAME.yaml.
+render() {
+  local name="$1"
+  shift
+  helm template rutli "$@" -n rutli >"$R/helm-$name.yaml" 2>>"$W/helm.err" || failed+=("$*")
+}
+
 failed=()
 for chart in deploy/helm/*/; do
   [ -f "$chart/Chart.yaml" ] || continue
   name="$(basename "$chart")"
-  values=("")
-  for v in "$chart"ci/*.yaml deploy/soak/cosigner-values.yaml; do [ -f "$v" ] && values+=("$v"); done
-  for v in "${values[@]}"; do
-    out="$R/helm-$name-$(basename "${v:-default}" .yaml).yaml"
-    if [ -z "$v" ]; then
-      helm template rutli "$chart" -n rutli >"$out" 2>"$W/helm.err" || failed+=("$chart")
-    else
-      helm template rutli "$chart" -n rutli -f "$v" >"$out" 2>"$W/helm.err" || failed+=("$chart -f $v")
-    fi
+  # Since peer pins became mandatory the bare defaults no longer render: ci/peer-pins-values.yaml is
+  # the defaults plus placeholder pins (as in ci-deploy-policy.sh). Older trees render bare.
+  pins="${chart}ci/peer-pins-values.yaml"
+  [ -f "$pins" ] || render "$name-default" "$chart"
+  for v in "$chart"ci/*.yaml; do
+    [ -f "$v" ] && render "$name-$(basename "$v" .yaml)" "$chart" -f "$v"
   done
+  # The soak's legacy values, as ci-deploy-policy.sh renders them (pins, profile lab) where the
+  # chart has those, plain before.
+  soak=deploy/soak/cosigner-values.yaml
+  if [ -f "$soak" ] && [ -f "$pins" ]; then
+    render "$name-soak" "$chart" -f "$soak" -f "$pins" --set profile=lab
+  elif [ -f "$soak" ]; then
+    render "$name-soak" "$chart" -f "$soak"
+  fi
 done
 while read -r k; do
   d="$(dirname "$k")"
@@ -53,7 +65,8 @@ fi
 if q_need kube-linter k8s.kubelinter.findings; then
   q_tool kube-linter kube-linter version
   kube-linter lint --format json "$R" >"$W/kube-linter.json" 2>"$W/kube-linter.err" || true
-  if jq -e '.Reports' "$W/kube-linter.json" >/dev/null 2>&1; then
+  # "Reports" is null, not [], when nothing is found.
+  if jq -e '.Summary' "$W/kube-linter.json" >/dev/null 2>&1; then
     q_metric k8s.kubelinter.findings "$(jq '.Reports // [] | length' "$W/kube-linter.json")"
   else
     tail -5 "$W/kube-linter.err" >&2

@@ -6,9 +6,12 @@
 # debt does. See quality/README.md and docs/release-process.md ("Test schedule").
 #
 #   pull request      the areas the change touches (scripts/quality/changed-areas.sh), no
-#                     coverage; fails on a regression
-#   push to main      every area with coverage; a regression opens (or updates) an issue
-#   nightly 02:00     cargo audit and a trivy scan of the released image; same, an issue
+#                     coverage; fails on a regression. A pull request that changes
+#                     quality/baseline.json is measured in full (every area, coverage, advisories).
+#   push to main      every area with coverage, unfiltered; a red run is reported by main-status.yml
+#                     ("main is red"), which watches this workflow
+#   nightly 02:00     cargo audit and a trivy scan of the released image; a regression opens (or
+#                     comments on) the issue "Quality: new advisories"
 #   Monday 06:00      quality report: last release tag against main (artifact and job summary)
 #   manual            with base and head: that report for any two refs; without: as a push to main
 name: Quality
@@ -34,9 +37,10 @@ on:
 permissions:
   contents: read
 
-# A new push to a pull request cancels its older run; runs on main and scheduled runs finish.
+# As in ci.yml: a new push to a pull request cancels its older run; a push to main, a schedule or a
+# manual run has its own group (the run id) and is never cancelled.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  group: quality-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
@@ -52,9 +56,10 @@ env:
 jobs:
   quality:
     name: Quality ratchet
-    # Runner choice as in ci.yml: `vars.CI_RUNNER` for this repository's own branches, GitHub's
-    # `ubuntu-latest` for pull requests from forks.
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    # Runner choice as in ci.yml (docs/ci-cache.md): `vars.CI_RUNNER` for this repository's own
+    # branches when set, otherwise, and always for forks and Dependabot, GitHub's `ubuntu-latest`.
+    # Nothing here is a timing measurement, so PERF_RUNNER does not apply.
+    runs-on: ${{ github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) && vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 240
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
@@ -77,9 +82,15 @@ jobs:
           INPUT_HEAD: ${{ inputs.head }}
         run: |
           all=rust,scala,shell,python,docker,actions,k8s,proto,semgrep,repo
-          base="" head=""
+          base="" head="" coverage=true
           case "$EVENT" in
-            pull_request) mode=pr areas="$(scripts/quality/changed-areas.sh "$PR_BASE" HEAD)" ;;
+            pull_request)
+              mode=pr coverage=false areas="$(scripts/quality/changed-areas.sh "$PR_BASE" HEAD)"
+              # A change of the baseline is checked against every number it records.
+              if [ -n "$(git diff --name-only "$PR_BASE...HEAD" -- quality/baseline.json)" ]; then
+                coverage=true areas="$all,audit,image"
+              fi
+              ;;
             schedule)
               if [ "$SCHEDULE" = "0 2 * * *" ]; then
                 mode=nightly areas=audit,image
@@ -105,6 +116,7 @@ jobs:
             echo "areas=$areas"
             echo "base=$base"
             echo "head=$head"
+            echo "coverage=$coverage"
             # Toolchains are set up only for the areas that run.
             echo "rust=$([[ ",$areas," == *,rust,* ]] && echo true || echo false)"
             echo "scala=$([[ ",$areas," == *,scala,* ]] && echo true || echo false)"
@@ -159,13 +171,21 @@ jobs:
         if: steps.plan.outputs.rust == 'true'
         with:
           workspaces: frost
+          # As in ci.yml: only main saves (docs/ci-cache.md); pull requests restore main's entry.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Binaries are checked against the sha256 in scripts/quality/tools.txt on every run; the
-      # cache only saves downloads and the cargo-install builds.
-      - name: Cache quality tools
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      # cache only saves downloads and the cargo-install builds. Restored everywhere, saved by main
+      # only (docs/ci-cache.md).
+      - name: Restore quality tools
+        id: tools-cache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
-          path: ~/.cache/rutli-quality-tools
+          path: |
+            ~/.cache/rutli-quality-tools/downloads
+            ~/.cache/rutli-quality-tools/pip-cache
+            ~/.cache/rutli-quality-tools/crates
+            ~/.cache/rutli-quality-tools/semgrep-rules
           key: quality-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/quality/tools.txt', 'scripts/quality/semgrep-requirements.txt') }}
 
       - name: Install quality tools (pinned)
@@ -180,15 +200,28 @@ jobs:
           fi
           echo "QUALITY_TOOLS_DIR=$dir" >>"$GITHUB_ENV"
 
+      - name: Save quality tools
+        if: github.ref == 'refs/heads/main' && steps.plan.outputs.mode == 'main' && steps.tools-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cache/rutli-quality-tools/downloads
+            ~/.cache/rutli-quality-tools/pip-cache
+            ~/.cache/rutli-quality-tools/crates
+            ~/.cache/rutli-quality-tools/semgrep-rules
+          key: ${{ steps.tools-cache.outputs.cache-primary-key }}
+
       - name: Collect metrics
         if: steps.plan.outputs.mode != 'report'
         env:
           MODE: ${{ steps.plan.outputs.mode }}
           AREAS: ${{ steps.plan.outputs.areas }}
+          COVERAGE: ${{ steps.plan.outputs.coverage }}
         run: |
           mkdir -p "$RUNNER_TEMP/quality"
-          # Coverage runs on main only; pull requests are compared without it.
-          if [ "$MODE" = pr ]; then export QUALITY_COVERAGE=0; fi
+          # Coverage runs on main (and for a baseline change) only; pull requests are compared
+          # without it.
+          if [ "$COVERAGE" != true ]; then export QUALITY_COVERAGE=0; fi
           scripts/quality/collect.sh --only "$AREAS" --ref "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" \
             --out "$RUNNER_TEMP/quality/current.json"
           scripts/quality/render.sh quality/baseline.json "$RUNNER_TEMP/quality/current.json" \
@@ -227,14 +260,14 @@ jobs:
           path: ${{ runner.temp }}/quality/
           retention-days: 30
 
-  # On main and nightly a regression cannot be blocked any more: open an issue, or comment on the
-  # open one, with the ratchet output. The only job with write access, and it runs no repository
-  # code.
+  # The nightly advisory scan cannot block anything: on a regression, open the issue, or comment on
+  # the open one, with the ratchet output. A red push to main is main-status.yml's business. The
+  # only job with write access, and it runs no repository code.
   issue:
-    name: Report regression
+    name: Report new advisories
     needs: quality
-    if: always() && needs.quality.outputs.regressed == 'true' && github.event_name != 'pull_request'
-    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    if: always() && needs.quality.outputs.regressed == 'true' && needs.quality.outputs.mode == 'nightly'
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -248,15 +281,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
-          MODE: ${{ needs.quality.outputs.mode }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           SHA: ${{ github.sha }}
         run: |
-          if [ "$MODE" = nightly ]; then
-            title="Quality: new advisories (nightly cargo audit / image scan)"
-          else
-            title="Quality: regression on main"
-          fi
+          title="Quality: new advisories (nightly cargo audit / image scan)"
           details="$(grep -v '^ok' quality/ratchet.txt 2>/dev/null || echo 'ratchet output missing, see the run')"
           body="$(printf 'The quality ratchet found a metric worse than quality/baseline.json at %s.\n\nRun: %s\n\n~~~\n%s\n~~~\n' \
             "$SHA" "$RUN_URL" "$details")"
