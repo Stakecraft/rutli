@@ -425,6 +425,19 @@ async fn the_ceremony_sign_test_signs_only_its_own_digest_with_exactly_the_quoru
     let (msg, sig) = ceremony_sign_test(&nodes[0], &peers, KEY, &[2, 3]).await.unwrap();
     assert_eq!(msg, rutli_cosigner::verify_key::verify_message(CEREMONY, KEY));
     assert!(verifies(&public, &msg, &sig));
+    // As the daemon wires it, the other members see the leader as `cosigner1`, which then owns the
+    // sign-test sessions there; its own share is in process. The test signs the same.
+    let as_leader: Peers = nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let p = LocalPeer::new(n.clone());
+            Arc::new(if i == 0 { p } else { p.on_behalf_of(nodes[0].clone()) }) as Arc<dyn PeerApi>
+        })
+        .collect();
+    let (msg, sig) = ceremony_sign_test(&nodes[0], &as_leader, KEY, &[1, 3]).await.unwrap();
+    assert!(verifies(&public, &msg, &sig));
+    assert!(nodes.iter().all(|n| n.pending_sign_count(KEY) == 0));
 
     // Wrong quorum sizes, duplicates and strangers are refused, not "fixed up".
     for bad in [&[1u16][..], &[1, 2, 3], &[2, 2], &[1, 4]] {

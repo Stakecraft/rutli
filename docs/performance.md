@@ -16,7 +16,8 @@ Numbers below are **operator evidence**, not a marketing SLA — always re-run o
 Leader-side metrics live on whichever cosigner the driver dialed. Aggregate across pods
 (`sum by (…)`) when scraping all three.
 
-How to scrape: see [`observability.md`](observability.md).
+How to scrape: see [`observability.md`](observability.md). Load tests on one machine (latency
+under load, a cosigner killed under load, the limits): see [`load-testing.md`](load-testing.md).
 
 ## DevNet reference (multi-region k8s)
 
@@ -66,6 +67,44 @@ Participant-side confirmation:
 kubectl -n <validator-ns> logs deploy/participant --tail=5000 \
   | grep -E 'Loaded driver rutli|AUDIT sign keyId=frost'
 ```
+
+## Micro-benchmarks
+
+The DevNet numbers above measure a whole `Sign` RPC on 0.2.1. Since then every share a cosigner
+releases also costs an intent verification, a sign-journal entry and the checks around them. The
+micro-benchmarks time those steps one by one, in process, with no network:
+
+```sh
+scripts/bench.sh                    # a few minutes; writes frost/target/bench/bench.json
+scripts/bench.sh --quick            # a smoke run, too noisy to compare
+RUTLI_BENCH_DIR=/var/lib/rutli-bench scripts/bench.sh --out bench-$(git rev-parse --short HEAD).json
+```
+
+| Metric | What one operation is | Paid |
+|---|---|---|
+| `frost/round1` | `Cosigner::round1`: marker lookup, nonces and commitments (and dropping the session again, one map removal) | per cosigner, per signature |
+| `frost/round2` | `Cosigner::round2`: binding checks, the nonce marker (file fsync + directory fsync), the share | per cosigner, per signature |
+| `frost/nonce_marker_burn` | the nonce marker alone | part of `frost/round2` |
+| `frost/aggregate` | the leader combines two shares and verifies the signature | once per signature |
+| `intent/verify_p256` | certificate chain, ECDSA P-256 signature and fields of a signing intent | per cosigner, per signature |
+| `journal/append_fsync` | one hash-chained sign-journal line, fsynced, and the rate-limit ledger | per cosigner, per signature |
+| `seal/seal_v1`, `seal/unseal_v1`, `seal/seal_v2`, `seal/unseal_v2` | AES-256-GCM over a FROST share record, both key-file formats | first use of a key after a restart; ceremonies |
+
+The output file maps each metric to its mean in nanoseconds per operation (`metrics`), with the
+median and the confidence interval next to it (`detail`), the commit and the compiler.
+
+How to read them:
+
+- `frost/round2`, `frost/nonce_marker_burn` and `journal/append_fsync` each wait for the disk.
+  They measure the volume under `RUTLI_BENCH_DIR` (default: the system temporary directory) far
+  more than the code, and they are the largest part of a cosigner's work for one signature: two
+  file fsyncs and one directory fsync per released share. Point `RUTLI_BENCH_DIR` at the volume
+  type the cosigners run on; a laptop SSD, a network volume and a local NVMe disk differ by an
+  order of magnitude here.
+- Compare two runs only on the same machine and the same volume. There is no CI gate on these
+  numbers yet.
+- Latency of a whole `Sign` under load, the limits and failover need a running cluster and are
+  not measured here.
 
 ## Benchmarks worth publishing next
 

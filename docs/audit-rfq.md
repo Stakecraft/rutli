@@ -203,7 +203,7 @@ Where we would like attention, in order:
 
 After the first engagement, four features are planned for Rütli 1.0. They are new code on the key
 path, so we want them reviewed by the same team before 1.0 is tagged, as a second, smaller phase once
-they are code-complete (expected in the first half of 2027):
+they are code-complete (expected in mid-2027):
 
 | Feature | What it does | Where we want attention |
 |---|---|---|

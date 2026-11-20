@@ -549,134 +549,135 @@ public final class CosignerProto {
       "ntifier\030\001 \001(\r\022\027\n\017dist_public_key\030\002 \001(\014\022\030" +
       "\n\020hosted_key_specs\030\003 \003(\t\022\031\n\021ceremony_pro" +
       "tocol\030\004 \001(\r\022\027\n\017hosted_protocol\030\005 \001(\r\"!\n\017" +
-      "KeyEpochRequest\022\016\n\006key_id\030\001 \001(\t\"\372\001\n\rKeyE" +
+      "KeyEpochRequest\022\016\n\006key_id\030\001 \001(\t\"\227\002\n\rKeyE" +
       "pochReply\022\017\n\007present\030\001 \001(\010\022\r\n\005epoch\030\002 \001(" +
       "\004\022\022\n\npkp_digest\030\003 \001(\014\022\033\n\023group_verifying" +
       "_key\030\004 \001(\014\022\016\n\006origin\030\005 \001(\t\022\016\n\006staged\030\006 \001" +
       "(\010\022\032\n\022staged_ceremony_id\030\007 \001(\t\022\030\n\020staged" +
       "_new_epoch\030\010 \001(\004\022\035\n\025staged_new_pkp_diges" +
       "t\030\t \001(\014\022\r\n\005stale\030\n \001(\010\022\024\n\014stale_reason\030\013" +
-      " \001(\t\",\n\025CeremonyCommitRequest\022\023\n\013ceremon" +
-      "y_id\030\001 \001(\t\",\n\025CeremonyStatusRequest\022\023\n\013c" +
-      "eremony_id\030\001 \001(\t\"+\n\024CeremonyAbortRequest" +
-      "\022\023\n\013ceremony_id\030\001 \001(\t\"\246\001\n\023CeremonyStatus" +
-      "Reply\022/\n\005state\030\001 \001(\0162 .rutli.cosigner.v1" +
-      ".CeremonyState\022\016\n\006key_id\030\002 \001(\t\022\014\n\004kind\030\003" +
-      " \001(\t\022\021\n\tnew_epoch\030\004 \001(\004\022\026\n\016new_pkp_diges" +
-      "t\030\005 \001(\014\022\025\n\rround1_digest\030\006 \001(\014\"\234\001\n\024Cerem" +
-      "onyPart1Request\022\023\n\013ceremony_id\030\001 \001(\t\022\016\n\006" +
-      "key_id\030\002 \001(\t\022\014\n\004kind\030\003 \001(\t\022\016\n\006roster\030\004 \003" +
-      "(\r\022\020\n\010protocol\030\005 \001(\r\022/\n\006intent\030\006 \001(\0132\037.r" +
-      "utli.cosigner.v1.SignedIntent\",\n\022Ceremon" +
-      "yPart1Reply\022\026\n\016round1_package\030\001 \001(\014\"?\n\024C" +
-      "eremonyPart2Request\022\023\n\013ceremony_id\030\001 \001(\t" +
-      "\022\022\n\nround1_map\030\002 \001(\014\"A\n\022CeremonyPart2Rep" +
-      "ly\022\025\n\rround1_digest\030\001 \001(\014\022\024\n\014delivered_t" +
-      "o\030\002 \003(\r\"v\n\026CeremonyDeliverRequest\022\023\n\013cer" +
-      "emony_id\030\001 \001(\t\022\014\n\004from\030\002 \001(\r\022\n\n\002to\030\003 \001(\r" +
-      "\022\025\n\rround1_digest\030\004 \001(\014\022\026\n\016round2_packag" +
-      "e\030\005 \001(\014\"\026\n\024CeremonyDeliverReply\"B\n\024Cerem" +
-      "onyPart3Request\022\023\n\013ceremony_id\030\001 \001(\t\022\025\n\r" +
-      "round1_digest\030\002 \001(\014\"\\\n\022CeremonyPart3Repl" +
-      "y\022\021\n\tnew_epoch\030\001 \001(\004\022\026\n\016new_pkp_digest\030\002" +
-      " \001(\014\022\033\n\023group_verifying_key\030\003 \001(\014*\244\001\n\rCe" +
-      "remonyState\022\036\n\032CEREMONY_STATE_UNSPECIFIE" +
-      "D\020\000\022\036\n\032CEREMONY_STATE_IN_PROGRESS\020\001\022\031\n\025C" +
-      "EREMONY_STATE_STAGED\020\002\022\034\n\030CEREMONY_STATE" +
-      "_COMMITTED\020\003\022\032\n\026CEREMONY_STATE_ABORTED\020\004" +
-      "2\265\013\n\006Signer\022J\n\006Health\022 .rutli.cosigner.v" +
-      "1.HealthRequest\032\036.rutli.cosigner.v1.Heal" +
-      "thReply\022P\n\010GroupKey\022\".rutli.cosigner.v1." +
-      "GroupKeyRequest\032 .rutli.cosigner.v1.Grou" +
-      "pKeyReply\022A\n\003Dkg\022\035.rutli.cosigner.v1.Dkg" +
-      "Request\032\033.rutli.cosigner.v1.DkgReply\022D\n\004" +
-      "Sign\022\036.rutli.cosigner.v1.SignRequest\032\034.r" +
-      "utli.cosigner.v1.SignReply\022M\n\007Refresh\022!." +
-      "rutli.cosigner.v1.RefreshRequest\032\037.rutli" +
-      ".cosigner.v1.RefreshReply\022S\n\tKeyStatus\022#" +
-      ".rutli.cosigner.v1.KeyStatusRequest\032!.ru" +
-      "tli.cosigner.v1.KeyStatusReply\022h\n\020Ceremo" +
-      "nySignTest\022*.rutli.cosigner.v1.CeremonyS" +
-      "ignTestRequest\032(.rutli.cosigner.v1.Cerem" +
-      "onySignTestReply\022\\\n\014Capabilities\022&.rutli" +
-      ".cosigner.v1.CapabilitiesRequest\032$.rutli" +
-      ".cosigner.v1.CapabilitiesReply\022Y\n\013Genera" +
-      "teKey\022%.rutli.cosigner.v1.GenerateKeyReq" +
-      "uest\032#.rutli.cosigner.v1.GenerateKeyRepl" +
-      "y\022S\n\tPublicKey\022#.rutli.cosigner.v1.Publi" +
-      "cKeyRequest\032!.rutli.cosigner.v1.PublicKe" +
-      "yReply\022M\n\007KeyInfo\022!.rutli.cosigner.v1.Ke" +
-      "yInfoRequest\032\037.rutli.cosigner.v1.KeyInfo" +
-      "Reply\022S\n\tDeleteKey\022#.rutli.cosigner.v1.D" +
-      "eleteKeyRequest\032!.rutli.cosigner.v1.Dele" +
-      "teKeyReply\022M\n\007Decrypt\022!.rutli.cosigner.v" +
-      "1.DecryptRequest\032\037.rutli.cosigner.v1.Dec" +
-      "ryptReply\022V\n\nEcdhDerive\022$.rutli.cosigner" +
-      ".v1.EcdhDeriveRequest\032\".rutli.cosigner.v" +
-      "1.EcdhDeriveReply\022Z\n\020SymmetricEncrypt\022#." +
-      "rutli.cosigner.v1.SymmetricRequest\032!.rut" +
-      "li.cosigner.v1.SymmetricReply\022Z\n\020Symmetr" +
-      "icDecrypt\022#.rutli.cosigner.v1.SymmetricR" +
-      "equest\032!.rutli.cosigner.v1.SymmetricRepl" +
-      "y\022e\n\017HostedKeyStatus\022).rutli.cosigner.v1" +
-      ".HostedKeyStatusRequest\032\'.rutli.cosigner" +
-      ".v1.HostedKeyStatusReply2\373\020\n\004Peer\022V\n\nSig" +
-      "nRound1\022$.rutli.cosigner.v1.SignRound1Re" +
-      "quest\032\".rutli.cosigner.v1.SignRound1Repl" +
-      "y\022V\n\nSignRound2\022$.rutli.cosigner.v1.Sign" +
-      "Round2Request\032\".rutli.cosigner.v1.SignRo" +
-      "und2Reply\022P\n\010DkgPart1\022\".rutli.cosigner.v" +
-      "1.DkgPart1Request\032 .rutli.cosigner.v1.Dk" +
-      "gPart1Reply\022P\n\010DkgPart2\022\".rutli.cosigner" +
-      ".v1.DkgPart2Request\032 .rutli.cosigner.v1." +
-      "DkgPart2Reply\022P\n\010DkgPart3\022\".rutli.cosign" +
-      "er.v1.DkgPart3Request\032 .rutli.cosigner.v" +
-      "1.DkgPart3Reply\022X\n\014RefreshPart1\022&.rutli." +
-      "cosigner.v1.RefreshPart1Request\032 .rutli." +
-      "cosigner.v1.DkgPart1Reply\022T\n\014RefreshPart" +
-      "2\022\".rutli.cosigner.v1.DkgPart2Request\032 ." +
-      "rutli.cosigner.v1.DkgPart2Reply\022T\n\014Refre" +
-      "shPart3\022\".rutli.cosigner.v1.DkgPart3Requ" +
-      "est\032 .rutli.cosigner.v1.DkgPart3Reply\022_\n" +
-      "\rCeremonyPart1\022\'.rutli.cosigner.v1.Cerem" +
-      "onyPart1Request\032%.rutli.cosigner.v1.Cere" +
-      "monyPart1Reply\022_\n\rCeremonyPart2\022\'.rutli." +
-      "cosigner.v1.CeremonyPart2Request\032%.rutli" +
-      ".cosigner.v1.CeremonyPart2Reply\022e\n\017Cerem" +
-      "onyDeliver\022).rutli.cosigner.v1.CeremonyD" +
-      "eliverRequest\032\'.rutli.cosigner.v1.Ceremo" +
-      "nyDeliverReply\022_\n\rCeremonyPart3\022\'.rutli." +
-      "cosigner.v1.CeremonyPart3Request\032%.rutli" +
-      ".cosigner.v1.CeremonyPart3Reply\022S\n\tAbort" +
-      "Sign\022#.rutli.cosigner.v1.AbortSignReques" +
-      "t\032!.rutli.cosigner.v1.AbortSignReply\022_\n\r" +
-      "CeremonyFence\022\'.rutli.cosigner.v1.Ceremo" +
-      "nyFenceRequest\032%.rutli.cosigner.v1.Cerem" +
-      "onyFenceReply\022e\n\017CeremonyRelease\022).rutli" +
-      ".cosigner.v1.CeremonyReleaseRequest\032\'.ru" +
-      "tli.cosigner.v1.CeremonyReleaseReply\022\\\n\014" +
-      "ReplicateKey\022&.rutli.cosigner.v1.Replica" +
-      "teKeyRequest\032$.rutli.cosigner.v1.Replica" +
-      "teKeyReply\022P\n\010FetchKey\022\".rutli.cosigner." +
-      "v1.FetchKeyRequest\032 .rutli.cosigner.v1.F" +
-      "etchKeyReply\022P\n\010ListKeys\022\".rutli.cosigne" +
-      "r.v1.ListKeysRequest\032 .rutli.cosigner.v1" +
-      ".ListKeysReply\022P\n\010PurgeKey\022\".rutli.cosig" +
-      "ner.v1.PurgeKeyRequest\032 .rutli.cosigner." +
-      "v1.PurgeKeyReply\022P\n\010NodeInfo\022\".rutli.cos" +
-      "igner.v1.NodeInfoRequest\032 .rutli.cosigne" +
-      "r.v1.NodeInfoReply\022P\n\010KeyEpoch\022\".rutli.c" +
-      "osigner.v1.KeyEpochRequest\032 .rutli.cosig" +
-      "ner.v1.KeyEpochReply\022b\n\016CeremonyCommit\022(" +
-      ".rutli.cosigner.v1.CeremonyCommitRequest" +
-      "\032&.rutli.cosigner.v1.CeremonyStatusReply" +
-      "\022b\n\016CeremonyStatus\022(.rutli.cosigner.v1.C" +
-      "eremonyStatusRequest\032&.rutli.cosigner.v1" +
-      ".CeremonyStatusReply\022`\n\rCeremonyAbort\022\'." +
-      "rutli.cosigner.v1.CeremonyAbortRequest\032&" +
-      ".rutli.cosigner.v1.CeremonyStatusReplyB," +
-      "\n\031com.stakecraft.rutli.grpcB\rCosignerPro" +
-      "toP\001b\006proto3"
+      " \001(\t\022\033\n\023stale_by_own_record\030\014 \001(\010\",\n\025Cer" +
+      "emonyCommitRequest\022\023\n\013ceremony_id\030\001 \001(\t\"" +
+      ",\n\025CeremonyStatusRequest\022\023\n\013ceremony_id\030" +
+      "\001 \001(\t\"+\n\024CeremonyAbortRequest\022\023\n\013ceremon" +
+      "y_id\030\001 \001(\t\"\246\001\n\023CeremonyStatusReply\022/\n\005st" +
+      "ate\030\001 \001(\0162 .rutli.cosigner.v1.CeremonySt" +
+      "ate\022\016\n\006key_id\030\002 \001(\t\022\014\n\004kind\030\003 \001(\t\022\021\n\tnew" +
+      "_epoch\030\004 \001(\004\022\026\n\016new_pkp_digest\030\005 \001(\014\022\025\n\r" +
+      "round1_digest\030\006 \001(\014\"\234\001\n\024CeremonyPart1Req" +
+      "uest\022\023\n\013ceremony_id\030\001 \001(\t\022\016\n\006key_id\030\002 \001(" +
+      "\t\022\014\n\004kind\030\003 \001(\t\022\016\n\006roster\030\004 \003(\r\022\020\n\010proto" +
+      "col\030\005 \001(\r\022/\n\006intent\030\006 \001(\0132\037.rutli.cosign" +
+      "er.v1.SignedIntent\",\n\022CeremonyPart1Reply" +
+      "\022\026\n\016round1_package\030\001 \001(\014\"?\n\024CeremonyPart" +
+      "2Request\022\023\n\013ceremony_id\030\001 \001(\t\022\022\n\nround1_" +
+      "map\030\002 \001(\014\"A\n\022CeremonyPart2Reply\022\025\n\rround" +
+      "1_digest\030\001 \001(\014\022\024\n\014delivered_to\030\002 \003(\r\"v\n\026" +
+      "CeremonyDeliverRequest\022\023\n\013ceremony_id\030\001 " +
+      "\001(\t\022\014\n\004from\030\002 \001(\r\022\n\n\002to\030\003 \001(\r\022\025\n\rround1_" +
+      "digest\030\004 \001(\014\022\026\n\016round2_package\030\005 \001(\014\"\026\n\024" +
+      "CeremonyDeliverReply\"B\n\024CeremonyPart3Req" +
+      "uest\022\023\n\013ceremony_id\030\001 \001(\t\022\025\n\rround1_dige" +
+      "st\030\002 \001(\014\"\\\n\022CeremonyPart3Reply\022\021\n\tnew_ep" +
+      "och\030\001 \001(\004\022\026\n\016new_pkp_digest\030\002 \001(\014\022\033\n\023gro" +
+      "up_verifying_key\030\003 \001(\014*\244\001\n\rCeremonyState" +
+      "\022\036\n\032CEREMONY_STATE_UNSPECIFIED\020\000\022\036\n\032CERE" +
+      "MONY_STATE_IN_PROGRESS\020\001\022\031\n\025CEREMONY_STA" +
+      "TE_STAGED\020\002\022\034\n\030CEREMONY_STATE_COMMITTED\020" +
+      "\003\022\032\n\026CEREMONY_STATE_ABORTED\020\0042\265\013\n\006Signer" +
+      "\022J\n\006Health\022 .rutli.cosigner.v1.HealthReq" +
+      "uest\032\036.rutli.cosigner.v1.HealthReply\022P\n\010" +
+      "GroupKey\022\".rutli.cosigner.v1.GroupKeyReq" +
+      "uest\032 .rutli.cosigner.v1.GroupKeyReply\022A" +
+      "\n\003Dkg\022\035.rutli.cosigner.v1.DkgRequest\032\033.r" +
+      "utli.cosigner.v1.DkgReply\022D\n\004Sign\022\036.rutl" +
+      "i.cosigner.v1.SignRequest\032\034.rutli.cosign" +
+      "er.v1.SignReply\022M\n\007Refresh\022!.rutli.cosig" +
+      "ner.v1.RefreshRequest\032\037.rutli.cosigner.v" +
+      "1.RefreshReply\022S\n\tKeyStatus\022#.rutli.cosi" +
+      "gner.v1.KeyStatusRequest\032!.rutli.cosigne" +
+      "r.v1.KeyStatusReply\022h\n\020CeremonySignTest\022" +
+      "*.rutli.cosigner.v1.CeremonySignTestRequ" +
+      "est\032(.rutli.cosigner.v1.CeremonySignTest" +
+      "Reply\022\\\n\014Capabilities\022&.rutli.cosigner.v" +
+      "1.CapabilitiesRequest\032$.rutli.cosigner.v" +
+      "1.CapabilitiesReply\022Y\n\013GenerateKey\022%.rut" +
+      "li.cosigner.v1.GenerateKeyRequest\032#.rutl" +
+      "i.cosigner.v1.GenerateKeyReply\022S\n\tPublic" +
+      "Key\022#.rutli.cosigner.v1.PublicKeyRequest" +
+      "\032!.rutli.cosigner.v1.PublicKeyReply\022M\n\007K" +
+      "eyInfo\022!.rutli.cosigner.v1.KeyInfoReques" +
+      "t\032\037.rutli.cosigner.v1.KeyInfoReply\022S\n\tDe" +
+      "leteKey\022#.rutli.cosigner.v1.DeleteKeyReq" +
+      "uest\032!.rutli.cosigner.v1.DeleteKeyReply\022" +
+      "M\n\007Decrypt\022!.rutli.cosigner.v1.DecryptRe" +
+      "quest\032\037.rutli.cosigner.v1.DecryptReply\022V" +
+      "\n\nEcdhDerive\022$.rutli.cosigner.v1.EcdhDer" +
+      "iveRequest\032\".rutli.cosigner.v1.EcdhDeriv" +
+      "eReply\022Z\n\020SymmetricEncrypt\022#.rutli.cosig" +
+      "ner.v1.SymmetricRequest\032!.rutli.cosigner" +
+      ".v1.SymmetricReply\022Z\n\020SymmetricDecrypt\022#" +
+      ".rutli.cosigner.v1.SymmetricRequest\032!.ru" +
+      "tli.cosigner.v1.SymmetricReply\022e\n\017Hosted" +
+      "KeyStatus\022).rutli.cosigner.v1.HostedKeyS" +
+      "tatusRequest\032\'.rutli.cosigner.v1.HostedK" +
+      "eyStatusReply2\373\020\n\004Peer\022V\n\nSignRound1\022$.r" +
+      "utli.cosigner.v1.SignRound1Request\032\".rut" +
+      "li.cosigner.v1.SignRound1Reply\022V\n\nSignRo" +
+      "und2\022$.rutli.cosigner.v1.SignRound2Reque" +
+      "st\032\".rutli.cosigner.v1.SignRound2Reply\022P" +
+      "\n\010DkgPart1\022\".rutli.cosigner.v1.DkgPart1R" +
+      "equest\032 .rutli.cosigner.v1.DkgPart1Reply" +
+      "\022P\n\010DkgPart2\022\".rutli.cosigner.v1.DkgPart" +
+      "2Request\032 .rutli.cosigner.v1.DkgPart2Rep" +
+      "ly\022P\n\010DkgPart3\022\".rutli.cosigner.v1.DkgPa" +
+      "rt3Request\032 .rutli.cosigner.v1.DkgPart3R" +
+      "eply\022X\n\014RefreshPart1\022&.rutli.cosigner.v1" +
+      ".RefreshPart1Request\032 .rutli.cosigner.v1" +
+      ".DkgPart1Reply\022T\n\014RefreshPart2\022\".rutli.c" +
+      "osigner.v1.DkgPart2Request\032 .rutli.cosig" +
+      "ner.v1.DkgPart2Reply\022T\n\014RefreshPart3\022\".r" +
+      "utli.cosigner.v1.DkgPart3Request\032 .rutli" +
+      ".cosigner.v1.DkgPart3Reply\022_\n\rCeremonyPa" +
+      "rt1\022\'.rutli.cosigner.v1.CeremonyPart1Req" +
+      "uest\032%.rutli.cosigner.v1.CeremonyPart1Re" +
+      "ply\022_\n\rCeremonyPart2\022\'.rutli.cosigner.v1" +
+      ".CeremonyPart2Request\032%.rutli.cosigner.v" +
+      "1.CeremonyPart2Reply\022e\n\017CeremonyDeliver\022" +
+      ").rutli.cosigner.v1.CeremonyDeliverReque" +
+      "st\032\'.rutli.cosigner.v1.CeremonyDeliverRe" +
+      "ply\022_\n\rCeremonyPart3\022\'.rutli.cosigner.v1" +
+      ".CeremonyPart3Request\032%.rutli.cosigner.v" +
+      "1.CeremonyPart3Reply\022S\n\tAbortSign\022#.rutl" +
+      "i.cosigner.v1.AbortSignRequest\032!.rutli.c" +
+      "osigner.v1.AbortSignReply\022_\n\rCeremonyFen" +
+      "ce\022\'.rutli.cosigner.v1.CeremonyFenceRequ" +
+      "est\032%.rutli.cosigner.v1.CeremonyFenceRep" +
+      "ly\022e\n\017CeremonyRelease\022).rutli.cosigner.v" +
+      "1.CeremonyReleaseRequest\032\'.rutli.cosigne" +
+      "r.v1.CeremonyReleaseReply\022\\\n\014ReplicateKe" +
+      "y\022&.rutli.cosigner.v1.ReplicateKeyReques" +
+      "t\032$.rutli.cosigner.v1.ReplicateKeyReply\022" +
+      "P\n\010FetchKey\022\".rutli.cosigner.v1.FetchKey" +
+      "Request\032 .rutli.cosigner.v1.FetchKeyRepl" +
+      "y\022P\n\010ListKeys\022\".rutli.cosigner.v1.ListKe" +
+      "ysRequest\032 .rutli.cosigner.v1.ListKeysRe" +
+      "ply\022P\n\010PurgeKey\022\".rutli.cosigner.v1.Purg" +
+      "eKeyRequest\032 .rutli.cosigner.v1.PurgeKey" +
+      "Reply\022P\n\010NodeInfo\022\".rutli.cosigner.v1.No" +
+      "deInfoRequest\032 .rutli.cosigner.v1.NodeIn" +
+      "foReply\022P\n\010KeyEpoch\022\".rutli.cosigner.v1." +
+      "KeyEpochRequest\032 .rutli.cosigner.v1.KeyE" +
+      "pochReply\022b\n\016CeremonyCommit\022(.rutli.cosi" +
+      "gner.v1.CeremonyCommitRequest\032&.rutli.co" +
+      "signer.v1.CeremonyStatusReply\022b\n\016Ceremon" +
+      "yStatus\022(.rutli.cosigner.v1.CeremonyStat" +
+      "usRequest\032&.rutli.cosigner.v1.CeremonySt" +
+      "atusReply\022`\n\rCeremonyAbort\022\'.rutli.cosig" +
+      "ner.v1.CeremonyAbortRequest\032&.rutli.cosi" +
+      "gner.v1.CeremonyStatusReplyB,\n\031com.stake" +
+      "craft.rutli.grpcB\rCosignerProtoP\001b\006proto" +
+      "3"
     };
     descriptor = com.google.protobuf.Descriptors.FileDescriptor
       .internalBuildGeneratedFileFrom(descriptorData,
@@ -1077,7 +1078,7 @@ public final class CosignerProto {
     internal_static_rutli_cosigner_v1_KeyEpochReply_fieldAccessorTable = new
       com.google.protobuf.GeneratedMessage.FieldAccessorTable(
         internal_static_rutli_cosigner_v1_KeyEpochReply_descriptor,
-        new java.lang.String[] { "Present", "Epoch", "PkpDigest", "GroupVerifyingKey", "Origin", "Staged", "StagedCeremonyId", "StagedNewEpoch", "StagedNewPkpDigest", "Stale", "StaleReason", });
+        new java.lang.String[] { "Present", "Epoch", "PkpDigest", "GroupVerifyingKey", "Origin", "Staged", "StagedCeremonyId", "StagedNewEpoch", "StagedNewPkpDigest", "Stale", "StaleReason", "StaleByOwnRecord", });
     internal_static_rutli_cosigner_v1_CeremonyCommitRequest_descriptor =
       getDescriptor().getMessageTypes().get(66);
     internal_static_rutli_cosigner_v1_CeremonyCommitRequest_fieldAccessorTable = new

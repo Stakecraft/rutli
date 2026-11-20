@@ -59,3 +59,29 @@ Status: **pre-production, not yet audited**. Use this as the engagement brief an
 - [ ] Key ceremony witnessed (`docs/key-ceremony.md`)
 - [ ] DR drill completed (backup + restore of one share)
 - [ ] Production deploy: digest-pinned image, required anti-affinity, PDB, TLS + allowlist + sealing
+- [ ] **Each cosigner in a separate cluster or cloud account**, administered by different people
+  (below). One cluster under one administration is one trust domain, and its administrator holds
+  every share ([threat model](security/threat-model.md#trust-domains), decision P10). No authority
+  key goes live with two cosigners in one trust domain.
+
+### What counts as a separate trust domain
+
+The test: no one person, team, credential or automation can get at the shares of two cosigners
+without a second party. With 2-of-3, two cosigners in one domain hold the threshold, so the rule is
+one cosigner per domain, not "fewer than `t` per domain". For each cosigner, check:
+
+| Dimension | Separate | Not separate |
+|---|---|---|
+| Control plane | Its own Kubernetes cluster (own API server, etcd and cluster-admin), or its own host outside any shared orchestrator | Namespaces, node pools, dedicated nodes, taints or anti-affinity in one cluster; virtual clusters on one host cluster; one cluster spread over several zones or regions |
+| Cloud account | Its own account, project or subscription, whose admins are not the other cosigners' admins | Separate clusters in one account or project; an organisation-level admin or break-glass role that can take over every account without a second party (restrict and alert on it, or count it as one domain) |
+| Credentials | Its own kubeconfig and cloud credentials, seal bundle, node TLS key, secret store, and backup destination with its own write and read credentials | A CI/CD pipeline, GitOps controller or deploy key with cluster-admin (or Secret read) on several clusters; one secret manager or vault path readable by one principal; one backup bucket or one backup credential for several nodes |
+| Operator | Different people administer each cosigner; nobody holds admin on two (as in [key-ceremony.md](key-ceremony.md), "No operator controls two shares") | One person or one on-call group with admin rights on several clusters or accounts, even if they are separate clusters |
+
+Shared on purpose, and fine: the participant (driver), which talks to every cosigner with the signer
+role only; the digest-pinned image; read-only monitoring that scrapes metrics without exec or Secret
+access. The mesh CA key can impersonate any node on the mesh: keep it offline under the ceremony
+lead's custody, never with one cosigner's operator.
+
+Regions and zones are for availability, not trust. Cluster-hosted keys (ECIES, RSA, AES) are whole
+replicas on every node ([hosted-keys.md](hosted-keys.md)), so separation protects the FROST shares,
+not those keys: one node's compromise exposes them wherever it sits.

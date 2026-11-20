@@ -18,8 +18,9 @@
 #      `<prefix>frost-import-seqauth-<fp8>`; a pre-B6-shaped bundle is refused by import-share;
 #      import-share, verify-key --sign-test (operator cert, provenance says "protocol"), refresh,
 #      verify-key again. The dealer refuses the signing key in namespace mode first.
-#   2. `encryption` (ECIES P-256): import-key into node 1 with its daemon RUNNING, then
-#      verify-hosted (operator cert) until anti-entropy has put it on every node.
+#   2. `encryption` (ECIES P-256): import-key into nodes 1 and 2 with their daemons RUNNING (a
+#      node pulls a hosted key only from two peers that hold the same copy), then verify-hosted
+#      (operator cert) until anti-entropy has put it on node 3 too.
 #   3. Canton 3.6.1, one process: sequencer, mediator, participant1 (rutli KMS, frost backend,
 #      hosted ECIES keys, no delegate, key-prefix "e2e6-") and participant2 (JCE). participant1
 #      registers the three carried keys by KMS id — signing as `ProtocolWithProofOfOwnership`,
@@ -37,12 +38,12 @@
 #      cosigner journals consistent (every ok sign journaled on at least two nodes).
 #
 # Requires: cargo, sbt, jq, openssl, an OpenJDK 17+ (Oracle's JDK refuses Canton's unsigned
-# BouncyCastle for Cipher; set CANTON_JAVA_HOME, default: Homebrew's openjdk).
+# BouncyCastle for Cipher; set CANTON_JAVA_HOME, otherwise JAVA_HOME, otherwise Homebrew's openjdk).
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${CANTON_HOME:?Set CANTON_HOME to an extracted Canton 3.6.1 release}"
-JAVA_HOME="${CANTON_JAVA_HOME:-/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home}"
+JAVA_HOME="${CANTON_JAVA_HOME:-${JAVA_HOME:-/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home}}"
 export JAVA_HOME
 BASE_PORT="${E2E_BASE_PORT:-19600}"
 CANTON_PORT="${E2E_CANTON_PORT:-15600}"
@@ -91,6 +92,7 @@ DEALER="$BIN/rutli-dealer"
 DRIVER_JAR="$REPO/driver/target/scala-2.13/rutli-driver.jar"
 if [ "${SKIP_BUILD:-0}" != 1 ]; then
   step "Build rutli-cosigner, rutli-dealer and the driver fat jar from the working tree"
+  # shellcheck disable=SC2086  # CARGO_FLAGS is a list of flags, split on purpose
   (cd "$REPO/frost" && cargo build ${CARGO_FLAGS:-} -p rutli-cosigner --bins)
   (cd "$REPO" && sbt -batch driver/assembly >/dev/null)
 fi
@@ -98,6 +100,8 @@ for f in "$COSIGNER" "$DEALER"; do [ -x "$f" ] || fail "no $f"; done
 [ -f "$DRIVER_JAR" ] || fail "no $DRIVER_JAR"
 
 step "mTLS trust domain, seal secret, configs (127.0.0.1:$((BASE_PORT + 1))..$((BASE_PORT + 3)))"
+# Every node pins the TLS key of every cosigner (peers[].tls_spki_sha256, required with TLS): the
+# configs take the pins of the certificates just made from certs/peer-pins.json.
 "$REPO/scripts/gen-frost-certs.sh" 3 "$WORK/certs" >/dev/null
 export RUTLI_SEAL_SECRET
 RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
@@ -106,10 +110,12 @@ RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
 DRIVER_PIN="$(openssl x509 -in "$WORK/certs/driver.crt" -noout -pubkey | openssl pkey -pubin -outform DER \
   | openssl dgst -sha256 -hex | awk '{print $NF}')"
 mkconfig() { # node-config-name  cert-name  out
-  jq --arg work "$WORK" --arg cert "$2" --argjson base "$BASE_PORT" --arg prefix "$PREFIX" --arg pin "$DRIVER_PIN" '
+  jq --arg work "$WORK" --arg cert "$2" --argjson base "$BASE_PORT" --arg prefix "$PREFIX" --arg pin "$DRIVER_PIN" \
+    --slurpfile peerpins "$WORK/certs/peer-pins.json" '
       .listen = "127.0.0.1:\($base + .identifier)"
     | .data_dir = "\($work)/node\(.identifier)"
-    | .peers |= map(.endpoint = "https://127.0.0.1:\($base + .identifier)")
+    | .peers |= map(.endpoint = "https://127.0.0.1:\($base + .identifier)"
+        | .tls_spki_sha256 = ($peerpins[0].peerPins[.identifier | tostring] // error("no TLS key pin for cosigner\(.identifier)")))
     | .tls.ca_cert = "\($work)/certs/ca.crt"
     | .tls.cert = "\($work)/certs/\($cert).crt"
     | .tls.key = "\($work)/certs/\($cert).key"
@@ -129,8 +135,8 @@ start() {
   RUST_LOG=info "$COSIGNER" --config "$WORK/c$1.json" serve >>"$WORK/node$1.log" 2>&1 &
   PIDS[$1]=$!
 }
-wait_healthy() {
-  for _ in $(seq 1 120); do
+wait_healthy() { # up to 60 s; a cold debug build on a busy runner can take a while
+  for _ in $(seq 1 240); do
     "$COSIGNER" --config "$WORK/c$1.json" health >/dev/null 2>&1 && return 0
     sleep 0.25
   done
@@ -208,14 +214,16 @@ carry() { # vector-name  key-id  fingerprint  recorded-usage-json
 carry signing "$SIG_ID" "$SIG_FP" '["proof-of-ownership","signing"]'
 carry sequencer-auth "$SEQ_ID" "$SEQ_FP" '["proof-of-ownership","sequencer-auth"]'
 
-step "2. import-key: the ECIES encryption key into node 1, its daemon running"
-cli --config "$WORK/c1.json" import-key --in "$VEC/encryption.export-pw.bin" \
-  --passphrase-env E2E_EXPORT_PASSWORD --key-id "$ENC_ID" --key-prefix "$PREFIX" --expect-fingerprint "$ENC_FP"
+step "2. import-key: the ECIES encryption key into nodes 1 and 2, their daemons running"
+for i in 1 2; do
+  cli --config "$WORK/c$i.json" import-key --in "$VEC/encryption.export-pw.bin" \
+    --passphrase-env E2E_EXPORT_PASSWORD --key-id "$ENC_ID" --key-prefix "$PREFIX" --expect-fingerprint "$ENC_FP"
+done
 first="$(cli --config "$WORK/operator.json" verify-hosted --key-id "$ENC_ID" --expect-fingerprint "$ENC_FP" --json 2>/dev/null || true)"
 echo "verify-hosted right after the import: ok=$(jq .ok <<<"$first"), $(jq -c '[.nodes[] | {identifier, present}]' <<<"$first")"
-step "   verify-hosted (operator cert) until anti-entropy has put it on every node"
+step "   verify-hosted (operator cert) until anti-entropy has put it on node 3 too"
 ok=""
-for _ in $(seq 1 30); do
+for _ in $(seq 1 60); do # up to 2 min; anti-entropy runs every 10 s
   rep="$(cli --config "$WORK/operator.json" verify-hosted --key-id "$ENC_ID" --expect-fingerprint "$ENC_FP" --json 2>/dev/null || true)"
   if jq -e '.ok' <<<"$rep" >/dev/null; then ok=1; break; fi
   sleep 2
@@ -233,6 +241,9 @@ P=$CANTON_PORT
 cat >"$WORK/canton.conf" <<EOF
 canton {
   parameters.non-standard-config = yes
+  // Console waits (retry_until_true, admin commands, pings) default to 1 min and 30 s. A loaded CI
+  // runner can be slower than that without anything being wrong; a real failure still fails.
+  parameters.timeouts.console { bounded = 3.minutes, ledger-command = 3.minutes, ping = 2.minutes }
   features.enable-preview-commands = yes
   sequencers.sequencer1 {
     storage.type = memory

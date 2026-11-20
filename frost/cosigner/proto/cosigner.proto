@@ -585,6 +585,10 @@ message KeyEpochReply {
   // This node found its own share stale (see KeyStatusReply.stale) and refuses to sign with it.
   bool stale = 10;
   string stale_reason = 11;
+  // The stale mark comes from this node's own COMMITTED ceremony record (its share is older than an
+  // epoch it committed), not from peers' answers. Such a node does not vouch for the sharing it
+  // holds. Unset by nodes before 0.5.0.
+  bool stale_by_own_record = 12;
 }
 
 enum CeremonyState {

@@ -1,0 +1,11 @@
+{
+  "name": "smoke",
+  "note": "A short profile that checks the suite runs end to end (CI on kind). Its numbers mean nothing.",
+  "slo": { "p99_ms": 2000 },
+  "steady": { "sign_per_sec": 10, "secs": 30 },
+  "baseline": { "sign_per_sec": 2, "sign_keys": 2, "ecdh_per_sec": 1, "ecdh_keys": 1 },
+  "step_secs": 30,
+  "factors": [1, 3],
+  "keys": { "counts": [1, 10], "sign_per_sec": 5, "secs": 20 },
+  "max_rss_mib": 256
+}

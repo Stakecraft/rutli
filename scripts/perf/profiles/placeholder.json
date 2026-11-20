@@ -1,0 +1,16 @@
+{
+  "name": "placeholder",
+  "note": "Placeholder numbers, not a measurement. Replace the baseline with the load of a real participant (signatures and ECIES decryptions per second, keys in use) taken from the soak cluster's metrics, and the SLO with the agreed one.",
+  "slo": { "p99_ms": 1000 },
+  "steady": { "sign_per_sec": 20, "secs": 60 },
+  "baseline": {
+    "sign_per_sec": 1,
+    "sign_keys": 2,
+    "ecdh_per_sec": 0.2,
+    "ecdh_keys": 1
+  },
+  "step_secs": 300,
+  "factors": [1, 3, 10, 30, 100, 300],
+  "keys": { "counts": [1, 10, 100], "sign_per_sec": 5, "secs": 60 },
+  "max_rss_mib": 256
+}

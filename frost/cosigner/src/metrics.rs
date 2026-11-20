@@ -41,6 +41,14 @@ pub const SIGN_ROUND1_SKIPS: &str = "rutli_sign_round1_skips_total";
 /// Sign round 2 requests for a session this node holds no round-1 nonces for (it restarted or
 /// committed a ceremony since round 1, or the session expired). The leader retries without it.
 pub const SIGN_ROUND2_UNKNOWN_SESSION: &str = "rutli_sign_round2_unknown_session_total";
+/// Sign round 2s and aborts this node refused because another caller opened the session, label
+/// `call` (round2|abort). The session stays with its opener. A correct cosigner never sends one:
+/// alert on any increase.
+pub const SIGN_SESSION_OWNER_REFUSALS: &str = "rutli_sign_session_owner_refusals_total";
+/// Sign round 1s this node refused because a cap on sessions waiting for round 2 was reached, label
+/// `cap` (key|opener|request): the key's total from all openers, one opener's share of it, or one
+/// opener's sessions for one signing request. An honest leader stays below each.
+pub const SIGN_SESSIONS_REFUSED: &str = "rutli_sign_sessions_refused_total";
 /// Leader-issued aborts of in-flight sign sessions (one per given-up signature).
 pub const SIGN_ABORTS: &str = "rutli_sign_aborts_total";
 /// In-flight (round-1, not yet round-2) sign sessions currently held on this node.
@@ -80,6 +88,19 @@ pub const SIGN_JOURNAL_ERRORS: &str = "rutli_sign_journal_errors_total";
 /// key, spec, leader, expiry, acl, malformed, ceremony-id, missing). A refusal on the mesh path
 /// means a leader asked for a ceremony or a key no authorized client requested: alert on it.
 pub const CEREMONY_INTENT_REFUSALS: &str = "rutli_ceremony_intent_refusals_total";
+/// Counter: refreshes this node refused to take part in (as leader, at a fence or at part 1)
+/// because it took part in a refresh of the same key less than
+/// `signing_policy.refresh_min_interval_secs` ago. Outside a documented incident nobody should
+/// refresh that often: alert on it.
+pub const REFRESH_INTERVAL_REFUSALS: &str = "rutli_refresh_interval_refusals_total";
+/// Counter: refreshes this node let through the interval because of
+/// `signing_policy.refresh_interval_waived_at` (the operator's incident path).
+pub const REFRESH_INTERVAL_WAIVED: &str = "rutli_refresh_interval_waived_total";
+/// Gauge, label `key`: refreshes of the key this node committed in the last 6 days (by commit
+/// time), from its ceremony records (so it survives a restart). The shipped schedule is weekly; the
+/// window is a day shorter so a weekly run that lands a little early is not two in the window.
+/// Above 1 means a refresh outside the schedule.
+pub const REFRESHES_6D: &str = "rutli_refreshes_6d";
 /// Counter: DKG/refresh fences and part 1s, and hosted-key generation fences, this node accepted
 /// without a ceremony or generate intent (a leader or client that predates them), because
 /// `signing_policy.require_ceremony_intent` is off.
@@ -111,6 +132,20 @@ pub const NONCE_MARKERS: &str = "rutli_nonce_markers";
 /// Locks recovered after a panicking request poisoned them (audit L3), by `lock`. The node kept
 /// serving; the panic itself is a bug — alert on any increase and report it.
 pub const LOCK_POISON_RECOVERIES: &str = "rutli_lock_poison_recoveries_total";
+/// The soft open-file limit after the start-up raise ([`crate::fdlimit`]).
+pub const FD_LIMIT: &str = "rutli_fd_limit";
+/// Open gRPC connections (accepted, TLS handshake done or under way) ([`crate::accept`]).
+pub const GRPC_CONNECTIONS: &str = "rutli_grpc_connections";
+/// The most gRPC connections served at once; past it new ones wait in the listen backlog.
+pub const GRPC_CONNECTION_LIMIT: &str = "rutli_grpc_connection_limit";
+/// Failed accepts of a gRPC connection that needed a backoff (not a client that gave up before the
+/// accept); the loop retries. Usually the process is out of file descriptors.
+pub const GRPC_ACCEPT_ERRORS: &str = "rutli_grpc_accept_errors_total";
+/// gRPC connections cut because their TLS handshake did not finish in time.
+pub const GRPC_HANDSHAKE_TIMEOUTS: &str = "rutli_grpc_handshake_timeouts_total";
+/// Background loops restarted after a panic in a pass ([`crate::supervise`]), by `loop`. The node
+/// kept going; the panic itself is a bug — alert on any increase and report it.
+pub const BACKGROUND_LOOP_RESTARTS: &str = "rutli_background_loop_restarts_total";
 /// Hosted keys anti-entropy pulled to this node (each confirmed by two peers). The sweep no longer
 /// pushes keys to peers.
 pub const ANTI_ENTROPY_REPAIRS: &str = "rutli_anti_entropy_repairs_total";
@@ -155,6 +190,17 @@ pub const KEY_REPLICAS: &str = "rutli_key_replicas";
 /// that state, so alert on it (critical). Refreshed by the daemon's own probe loop and by every
 /// `Signer.Health` call; not the same as [`UNREADABLE_KEY_FILES`] (one file failing to unseal).
 pub const KEYSTORE_UNREADABLE: &str = "rutli_keystore_unreadable";
+
+/// Mesh connections refused because the peer's TLS certificate carries a key not pinned in its
+/// `peers[].tls_spki_sha256`. Labels: `direction` = "inbound" (a peer called this node) |
+/// "outbound" (this node dialled a peer). A stale pin after a key roll, or a certificate that is
+/// not that node's: alert on any increase.
+pub const PEER_PIN_REFUSALS: &str = "rutli_peer_pin_refusals_total";
+/// Roster peers this node accepts by certificate name alone (no `tls_spki_sha256`), possible only
+/// with `tls.require_peer_pins: false`. 0 on a fully pinned node.
+pub const PEER_PINS_UNPINNED: &str = "rutli_peer_pins_unpinned";
+/// The `direction` values of `rutli_peer_pin_refusals_total`.
+pub const PEER_PIN_DIRECTIONS: &[&str] = &["inbound", "outbound"];
 
 /// Every `reason` label value `rutli_sign_policy_refusals_total` can carry (the string literals the
 /// `refused(..)` call sites in `intent.rs`, `sign_policy.rs`, `service.rs` and `node.rs` pass).
@@ -231,6 +277,14 @@ pub const LOCK_NAMES: &[&str] = &[
     "sign_sessions",
     "stale_marks",
 ];
+/// The `call` values of `rutli_sign_session_owner_refusals_total` (`not_session_owner` call sites in
+/// `node.rs`).
+pub const SESSION_OWNER_CALLS: &[&str] = &["round2", "abort"];
+/// The `cap` values of `rutli_sign_sessions_refused_total` (`PendingCap::as_str`).
+pub const SESSION_CAPS: &[&str] = &["key", "opener", "request"];
+/// The `loop` names of `rutli_background_loop_restarts_total`: the first argument of every
+/// `supervise::spawn_supervised` call (`RutliBackgroundLoopRestarted`); a test checks the call sites.
+pub const BACKGROUND_LOOPS: &[&str] = &["anti_entropy", "ceremony_resolver", "epoch_check", "nonce_pruner"];
 /// Every `reason` of `rutli_hosted_replication_refusals_total` (`hosted_refusal(..)` call sites in
 /// `orchestrator.rs`):
 /// - `unfenced`: a push into an id this node lacks from a caller without its generation fence;
@@ -337,6 +391,8 @@ fn prime() {
     metrics::counter!(INVALID_SIGNATURE_SHARES).absolute(0);
     metrics::counter!(NONCE_MARKERS_PRUNED).absolute(0);
     metrics::counter!(ANTI_ENTROPY_REPAIRS).absolute(0);
+    metrics::counter!(GRPC_ACCEPT_ERRORS).absolute(0);
+    metrics::counter!(GRPC_HANDSHAKE_TIMEOUTS).absolute(0);
     metrics::counter!(ANTI_ENTROPY_CONFLICTS).absolute(0);
     for reason in HOSTED_REFUSAL_REASONS {
         metrics::counter!(HOSTED_REPLICATION_REFUSALS, "reason" => *reason).absolute(0);
@@ -350,6 +406,8 @@ fn prime() {
     metrics::counter!(CEREMONY_SIGN_TEST_RATE_LIMITED).absolute(0);
     metrics::counter!(SIGN_INTENT_ABSENT).absolute(0);
     metrics::counter!(CEREMONY_INTENT_ABSENT).absolute(0);
+    metrics::counter!(REFRESH_INTERVAL_REFUSALS).absolute(0);
+    metrics::counter!(REFRESH_INTERVAL_WAIVED).absolute(0);
     metrics::counter!(SIGN_RATE_LIMITED).absolute(0);
     metrics::counter!(SIGNER_ACL_ABSENT).absolute(0);
     metrics::counter!(SIGN_JOURNAL_ENTRIES).absolute(0);
@@ -369,6 +427,15 @@ fn prime() {
     for lock in LOCK_NAMES {
         metrics::counter!(LOCK_POISON_RECOVERIES, "lock" => *lock).absolute(0);
     }
+    for call in SESSION_OWNER_CALLS {
+        metrics::counter!(SIGN_SESSION_OWNER_REFUSALS, "call" => *call).absolute(0);
+    }
+    for cap in SESSION_CAPS {
+        metrics::counter!(SIGN_SESSIONS_REFUSED, "cap" => *cap).absolute(0);
+    }
+    for name in BACKGROUND_LOOPS {
+        metrics::counter!(BACKGROUND_LOOP_RESTARTS, "loop" => *name).absolute(0);
+    }
     for op in HOSTED_KEY_OPS_NAMES {
         for result in ["ok", "error"] {
             metrics::counter!(HOSTED_KEY_OPS, "op" => *op, "result" => result).absolute(0);
@@ -379,11 +446,16 @@ fn prime() {
     metrics::counter!(SIGN_ABORTS).absolute(0);
     metrics::gauge!(PENDING_SIGN_SESSIONS).set(0.0);
     metrics::gauge!(KEYSTORE_UNREADABLE).set(0.0);
+    for direction in PEER_PIN_DIRECTIONS {
+        metrics::counter!(PEER_PIN_REFUSALS, "direction" => *direction).absolute(0);
+    }
 }
 
 /// Register help texts (shown in the Prometheus exposition; harmless without a recorder).
 pub fn describe() {
     describe_counter!(SIGN_REQUESTS, "Leader-side Sign RPC outcomes, by result");
+    describe_counter!(PEER_PIN_REFUSALS, "Mesh connections refused for a TLS key not pinned in peers[].tls_spki_sha256, by direction");
+    describe_gauge!(PEER_PINS_UNPINNED, "Roster peers accepted by certificate name alone (tls.require_peer_pins: false)");
     describe_histogram!(SIGN_DURATION, Unit::Seconds, "Leader-side Sign RPC latency, by result");
     describe_counter!(CEREMONY_REQUESTS, "DKG/refresh ceremony outcomes, by kind and result");
     describe_counter!(CEREMONY_RESOLUTIONS, "Two-phase ceremonies resolved on this node, by result");
@@ -401,6 +473,15 @@ pub fn describe() {
         "DKG/refresh ceremony intents and hosted-key generate intents refused at this node, by reason"
     );
     describe_counter!(
+        REFRESH_INTERVAL_REFUSALS,
+        "Refreshes refused at this node because the key was refreshed less than refresh_min_interval_secs ago"
+    );
+    describe_counter!(
+        REFRESH_INTERVAL_WAIVED,
+        "Refreshes let through the interval at this node by refresh_interval_waived_at"
+    );
+    describe_gauge!(REFRESHES_6D, "Refreshes of the key this node committed in the last 6 days");
+    describe_counter!(
         CEREMONY_INTENT_ABSENT,
         "DKG/refresh fences, part 1s and hosted-key generation fences accepted without a client intent (require_ceremony_intent off)"
     );
@@ -416,7 +497,18 @@ pub fn describe() {
     describe_counter!(NONCE_MARKERS_PRUNED, "Burned-session nonce markers removed past their retention");
     describe_gauge!(NONCE_MARKERS, "Burned-session nonce markers on this node after the last prune pass");
     describe_counter!(LOCK_POISON_RECOVERIES, "Locks recovered after a panicking request poisoned them, by lock");
+    describe_gauge!(FD_LIMIT, "Soft open-file limit after the start-up raise");
+    describe_gauge!(GRPC_CONNECTIONS, "Open gRPC connections");
+    describe_gauge!(GRPC_CONNECTION_LIMIT, "Most gRPC connections served at once");
+    describe_counter!(GRPC_ACCEPT_ERRORS, "Failed accepts of a gRPC connection (retried)");
+    describe_counter!(GRPC_HANDSHAKE_TIMEOUTS, "gRPC connections cut for not finishing the TLS handshake in time");
+    describe_counter!(BACKGROUND_LOOP_RESTARTS, "Background loops restarted after a panic in a pass, by loop");
     describe_counter!(SIGN_ABORTS, "Aborted in-flight sign sessions (one per given-up signature)");
+    describe_counter!(
+        SIGN_SESSION_OWNER_REFUSALS,
+        "Sign round 2s and aborts refused because another caller opened the session, by call"
+    );
+    describe_counter!(SIGN_SESSIONS_REFUSED, "Sign round 1s refused by a cap on sessions waiting for round 2, by cap");
     describe_gauge!(PENDING_SIGN_SESSIONS, "In-flight round-1 sign sessions held on this node");
     describe_counter!(ANTI_ENTROPY_REPAIRS, "Hosted keys anti-entropy pulled to this node (confirmed by two peers)");
     describe_counter!(ANTI_ENTROPY_CONFLICTS, "Hosted keys with divergent material across nodes");
@@ -539,6 +631,9 @@ mod tests {
             (DELETE_INTENT_REFUSALS, one("reason", DELETE_INTENT_REASONS)),
             (HOSTED_TOMBSTONES_WRITTEN, one("how", TOMBSTONE_HOWS)),
             (LOCK_POISON_RECOVERIES, one("lock", LOCK_NAMES)),
+            (SIGN_SESSION_OWNER_REFUSALS, one("call", SESSION_OWNER_CALLS)),
+            (SIGN_SESSIONS_REFUSED, one("cap", SESSION_CAPS)),
+            (BACKGROUND_LOOP_RESTARTS, one("loop", BACKGROUND_LOOPS)),
             (HOSTED_REPLICATION_REFUSALS, one("reason", HOSTED_REFUSAL_REASONS)),
         ];
         let mut ops = Vec::new();
@@ -750,6 +845,38 @@ mod tests {
             }
         }
         assert!(direct > 0, "no direct LOCK_POISON_RECOVERIES increment found: the scan is stale");
+    }
+
+    /// The primed label values of the sign-session refusal counters are the ones the code emits:
+    /// every `PendingCap`, and every `call` literal passed to `not_session_owner`.
+    #[test]
+    fn session_refusal_labels_match_the_code() {
+        use rutli_frost_core::session::PendingCap;
+        let caps: Vec<&str> = [PendingCap::Key, PendingCap::Opener, PendingCap::Request].map(PendingCap::as_str).into();
+        assert_eq!(caps, SESSION_CAPS);
+        let mut emitted = std::collections::BTreeSet::new();
+        for (file, src) in &crate_sources() {
+            for args in calls(src, "self.not_session_owner") {
+                emitted.insert(literal(args.first(), file).to_owned());
+            }
+        }
+        let listed: std::collections::BTreeSet<String> = SESSION_OWNER_CALLS.iter().map(|c| (*c).to_owned()).collect();
+        assert_eq!(emitted, listed, "not_session_owner call sites vs SESSION_OWNER_CALLS");
+    }
+
+    /// `BACKGROUND_LOOPS` (what `prime()` starts at 0) is exactly the set of names the background
+    /// loops are spawned under, so every loop's restart series exists before its first restart.
+    #[test]
+    fn background_loops_match_the_supervised_call_sites() {
+        let mut spawned = std::collections::BTreeSet::new();
+        for (file, src) in &crate_sources() {
+            for args in calls(src, "spawn_supervised") {
+                let what = format!("{file}: spawn_supervised(..)");
+                assert!(spawned.insert(literal(args.first(), &what).to_owned()), "{what}: a loop name is used twice");
+            }
+        }
+        let listed: std::collections::BTreeSet<String> = BACKGROUND_LOOPS.iter().map(|n| (*n).to_owned()).collect();
+        assert_eq!(spawned, listed, "rutli_background_loop_restarts_total: call sites vs BACKGROUND_LOOPS");
     }
 
     /// `TOMBSTONE_HOWS` (what `prime()` starts at 0) is exactly the set of `how` values the

@@ -113,6 +113,7 @@ impl Ids {
             key: kp,
             domain: None,
             allow_expired_ca: false,
+            require_peer_pins: None,
         }
     }
 }
@@ -230,7 +231,7 @@ async fn cluster_with(policy: impl Fn(&Ids, u16) -> SigningPolicyConfig, refresh
                         GrpcPeer::connect_lazy(
                             Identifier::try_from(j as u16 + 1).unwrap(),
                             &endpoints[j],
-                            Some(tls[i].client_for(&format!("cosigner{}", j + 1))),
+                            Some(tls[i].dial_as(&format!("cosigner{}", j + 1), None, 0).unwrap()),
                         )
                         .unwrap(),
                     )
@@ -252,6 +253,7 @@ async fn cluster_with(policy: impl Fn(&Ids, u16) -> SigningPolicyConfig, refresh
             node: nodes[i].clone(),
             allowed_cns: Some(peer_cns.clone()),
             peer_ids: Some(Arc::new((1..=N).map(|k| (format!("cosigner{k}"), k)).collect())),
+            peer_pins: None,
         };
         let server = tonic::transport::Server::builder()
             .tls_config(tls[i].server.clone())
@@ -893,7 +895,9 @@ async fn a_round2_without_its_round1_authorization_is_refused_while_the_nonces_a
     ]);
     let markers = || std::fs::read_dir(tmp.path().join(format!("node-1/keys/{KEY}.nonces"))).map(|d| d.count()).unwrap_or(0);
     let burned = markers();
-    assert!(nodes[0].sign_guard().unwrap().take(KEY, "no-auth").is_some());
+    // Lose the authorization (as a restart or a poisoned map would), keep the nonces.
+    let owner = rutli_cosigner::node::SessionOwner::Local;
+    assert!(nodes[0].sign_guard().unwrap().take_as(KEY, "no-auth", &owner).unwrap().is_some());
     assert_eq!(nodes[0].pending_sign_count(KEY), 1);
 
     let err = nodes[0].sign_round2_with(KEY, "no-auth", &msg, &cs, Some(intent::intent_digest(&i1))).unwrap_err();
@@ -940,7 +944,7 @@ async fn a_round2_after_a_commit_is_an_unknown_session_even_with_a_lapsed_intent
     let out = handle.render();
     assert!(out.lines().any(|l| l == "rutli_sign_round2_unknown_session_total 1"), "{out}");
     assert!(!out.contains("rutli_sign_policy_refusals_total"), "not counted as a policy refusal:\n{out}");
-    assert!(nodes[0].sign_guard().unwrap().take(KEY, "committed").is_none(), "the authorization was taken");
+    assert!(!nodes[0].sign_guard().unwrap().holds(KEY, "committed"), "the authorization was taken");
 }
 
 /// A round 2 that arrives after the session was aborted (a leader that gave up on this node and
@@ -956,9 +960,9 @@ async fn a_round2_after_an_abort_is_an_unknown_session() {
         (Identifier::try_from(1u16).unwrap(), nodes[0].sign_round1(KEY, "aborted", &ctx).unwrap()),
         (Identifier::try_from(2u16).unwrap(), nodes[1].sign_round1(KEY, "aborted", &ctx).unwrap()),
     ]);
-    nodes[0].abort_sign(KEY, "aborted");
+    nodes[0].abort_sign_as(KEY, "aborted", &rutli_cosigner::node::SessionOwner::Local).unwrap();
     assert_eq!(nodes[0].pending_sign_count(KEY), 0);
-    assert!(nodes[0].sign_guard().unwrap().take(KEY, "aborted").is_none(), "the abort forgot the authorization");
+    assert!(!nodes[0].sign_guard().unwrap().holds(KEY, "aborted"), "the abort forgot the authorization");
 
     let err = nodes[0].sign_round2_with(KEY, "aborted", &msg, &cs, Some(intent::intent_digest(&i1))).unwrap_err();
     assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))), "{err:?}");
@@ -1021,7 +1025,14 @@ async fn a_sign_test_round_for_another_message_is_refused_at_the_peer() {
 #[tokio::test]
 async fn signer_dkg_and_refresh_need_the_callers_own_ceremony_intent() {
     use rutli_cosigner::node::CeremonyKind::{Dkg, Refresh};
-    let policy = SigningPolicyConfig { require_ceremony_intent: Some(true), signer_may_refresh: false, ..Default::default() };
+    // The replay below is a second refresh right after the first: no refresh interval here
+    // (`a_refresh_inside_the_interval_is_refused_at_the_leader_over_grpc` covers it).
+    let policy = SigningPolicyConfig {
+        require_ceremony_intent: Some(true),
+        signer_may_refresh: false,
+        refresh_min_interval_secs: 0,
+        ..Default::default()
+    };
     let c = cluster(|_| policy.clone(), Some(vec!["refresher".into()])).await;
     let group = c.group_key().to_vec();
     let refresh = |intent| pb::RefreshRequest { key_id: KEY.into(), intent };
@@ -1056,6 +1067,50 @@ async fn signer_dkg_and_refresh_need_the_callers_own_ceremony_intent() {
     );
     c.signer("driver", 0).await.dkg(dkg(Some(ceremony_by(&c.ids, "driver", Dkg, key, 4)))).await.unwrap();
     assert!(c.nodes[2].key_epoch(key).unwrap().present);
+}
+
+/// The refresh interval over mTLS: a second refresh is refused whichever node the client calls —
+/// FAILED_PRECONDITION with the `rutli-error: refresh-too-soon` trailer — and when the leader
+/// itself has no interval (a node on 0.4.0, or one whose config was changed), an honest peer's
+/// refusal at its fence comes back to the client the same way. No node moves.
+#[tokio::test]
+async fn a_refresh_inside_the_interval_is_refused_at_the_leader_over_grpc() {
+    use rutli_cosigner::node::CeremonyKind::Refresh;
+    let policy = SigningPolicyConfig { require_ceremony_intent: Some(true), signer_may_refresh: false, ..Default::default() };
+    let refresh = |intent| pb::RefreshRequest { key_id: KEY.into(), intent };
+    #[track_caller]
+    fn too_soon(r: std::result::Result<impl std::fmt::Debug, tonic::Status>) -> tonic::Status {
+        let err = r.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition, "{err:?}");
+        assert_eq!(err.metadata().get("rutli-error").and_then(|v| v.to_str().ok()), Some("refresh-too-soon"), "{err:?}");
+        assert!(err.message().contains("refresh_min_interval_secs"), "{err:?}");
+        err
+    }
+
+    let c = cluster(|_| policy.clone(), Some(vec!["refresher".into()])).await;
+    c.signer("refresher", 0).await.refresh(refresh(Some(ceremony_by(&c.ids, "refresher", Refresh, KEY, 1)))).await.unwrap();
+    let epoch = c.nodes[0].key_epoch(KEY).unwrap().epoch;
+    for leader in 0..N as usize {
+        let x = ceremony_by(&c.ids, "refresher", Refresh, KEY, 2 + leader as u8);
+        too_soon(c.signer("refresher", leader).await.refresh(refresh(Some(x))).await);
+    }
+    for n in &c.nodes {
+        assert_eq!(n.key_epoch(KEY).unwrap().epoch, epoch);
+        assert!(n.staged_records().is_empty());
+    }
+
+    // Node 1 (endpoint 0) without the interval leads: its own pre-check and fence pass, and node 2,
+    // the first peer it fences, refuses over the mesh; the refusal names node 2.
+    let no_interval = SigningPolicyConfig { refresh_min_interval_secs: 0, ..policy.clone() };
+    let c = cluster(|i| if i == 1 { no_interval.clone() } else { policy.clone() }, Some(vec!["refresher".into()])).await;
+    c.signer("refresher", 1).await.refresh(refresh(Some(ceremony_by(&c.ids, "refresher", Refresh, KEY, 1)))).await.unwrap();
+    let epoch = c.nodes[0].key_epoch(KEY).unwrap().epoch;
+    let err = too_soon(c.signer("refresher", 0).await.refresh(refresh(Some(ceremony_by(&c.ids, "refresher", Refresh, KEY, 2)))).await);
+    assert!(err.message().contains("refused by node 2"), "the refusal comes from a peer's fence: {err:?}");
+    for n in &c.nodes {
+        assert_eq!(n.key_epoch(KEY).unwrap().epoch, epoch);
+        assert!(n.staged_records().is_empty());
+    }
 }
 
 /// A compromised cosigner on the mesh: a DKG/refresh fence or part 1 without a valid client intent

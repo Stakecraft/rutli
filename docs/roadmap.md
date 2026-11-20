@@ -1,6 +1,6 @@
 # Rütli roadmap
 
-**Status:** 2026-10-15; audit timing updated 2026-10-27; post-0.4.0 plan added 2026-11-01; milestone and release status updated 2026-11-02; B8 completed 2026-11-12; v0.4.0 tagged 2026-11-14; audit target moved to v0.5.0 on 2026-11-18. **Scope:** where Rütli stands, the two ways a Canton/Splice validator ends up on it, and the
+**Status:** 2026-10-15; audit timing updated 2026-10-27; post-0.4.0 plan added 2026-11-01; milestone and release status updated 2026-11-02; B8 completed 2026-11-12; v0.4.0 tagged 2026-11-14; v0.4.1 (security fixes) tagged 2026-11-20; audit target moved to v0.5.0 on 2026-11-18. **Scope:** where Rütli stands, the two ways a Canton/Splice validator ends up on it, and the
 path to 1.0. Facts are stated as established only where a rehearsal or a source check backs them; everything else
 is marked **unproven**. The detailed Track B record (migration spike, milestones, findings) is
 [roadmap-migration.md](roadmap-migration.md).
@@ -63,7 +63,7 @@ its database, and the safety dump and the key exports were destroyed. Still open
 validator. Runbook: [runbook-migration-inplace.md](runbook-migration-inplace.md). Decided 2026-10-15: 2a
 ships in v0.4.0, before the audit, so the auditors review it.
 
-*Mechanics.* Independently checked against the Canton 3.6.1 source by two reviewers (Opus and Codex), who agree:
+*Mechanics.* Checked against the Canton 3.6.1 source by two independent reviewers, who agree:
 
 - `crypto.provider` is configuration only; it is not persisted.
 - With `provider = kms` the node builds the KMS private store and **ignores** the JCE rows in
@@ -164,14 +164,14 @@ namespace and signing keys are threshold keys; the encryption key is not.
 |---|---|---|
 | B0 | Cutover spike on the soak validator | Done: **GO** 2026-10-09 |
 | B1 | Canton key parser | Done |
-| B2 | Split ceremony ([split-ceremony.md](split-ceremony.md)) | Done; Codex adversarial review: nothing above low |
+| B2 | Split ceremony ([split-ceremony.md](split-ceremony.md)) | Done; independent adversarial review: nothing above low |
 | B3 | RSA import | Dropped (not needed) |
 | B4 | Cutover rehearsal on a scratch JCE validator | Done: cutover and verification 2026-10-14, GO and destruction 2026-10-15, teardown 2026-10-16 |
 | B5 | Docs fix (stale "unsupported" claims, exposure caveat) | Done |
-| B6 | Optional carry of signing and ECIES keys | Done: PR #23, merged 2026-10-15 (Opus and Codex reviews addressed) |
+| B6 | Optional carry of signing and ECIES keys | Done: PR #23, merged 2026-10-15 (both independent reviews addressed) |
 | B7 | 2b rehearsal with wallet end-users: verify re-onboarding keeps their parties and balances | New, proposed |
 | B8 | In-place rehearsal (2a), carry-first sequence, on a fresh scratch JCE validator on DevNet | Phases 0–4 + 5.1 **passed 2026-10-26**; rotation **passed 2026-11-01** (cosigners on `v0.4.0-rc.6`); observation, SQL cleanup and destruction **passed 2026-11-12**. Open: teardown. Runbook [runbook-migration-inplace.md](runbook-migration-inplace.md) |
-| C1 to C3 | ECIES hosted keys | Done; shipped in v0.4.0-rc.1. The two availability fixes from Codex's review are merged |
+| C1 to C3 | ECIES hosted keys | Done; shipped in v0.4.0-rc.1. The two availability fixes from the second review are merged |
 | CA rotation | Pin plus runbook | Done; shipped in v0.4.0-rc.2 |
 
 Track A (soak and hardening) continues on `stakecraft-devnet-rutli-01`; exit criteria are in
@@ -187,14 +187,15 @@ Track A (soak and hardening) continues on `stakecraft-devnet-rutli-01`; exit cri
 | 2026-10-28 | v0.4.0-rc.6: ceremony leader binding and durable fence marks, disjoint FROST and hosted key ids, TLS crate advisories closed; ceremony intents required by default with TLS |
 | 2026-11-14 | **v0.4.0 tagged** (planned as the audit code freeze; the audit now reviews v0.5.0): Flow 1, Flow 2a (after B8), Flow 2b, B2, B6, ECIES, C2 fixes, CA rotation |
 | Later | Pre-rotate alternative for 2a (research), if B8 shows it is worth it |
-| 2026-11-19 (planned) | Splice TestNet validator run starts; at least 4 weeks clean before 1.0 |
+| 2026-11-19 (planned) | Splice TestNet validator run starts. The four clean weeks required for 1.0 are counted later, on the audited release |
 | Mid-December 2026 (planned) | **v0.5.0 = audit code freeze:** v0.4.0 plus hardening from the November pre-audit review, the fixes made since v0.4.0 and the shared-cluster guard |
-| After the audit | **1.0**: the audit's fixes and retest, at least 4 clean weeks on TestNet, and the 1.0 features below |
+| After the audit | **1.0**: the audit's fixes and retest, at least 4 clean weeks on TestNet on the audited release, and the 1.0 features below |
 
 - **The audit is the critical path.** Auditor: **Cure53** (chosen 2026-10-27). The RFQ
   ([audit-rfq.md](audit-rfq.md), brief [audit-prep.md](audit-prep.md)) covers ECIES and B6, excludes `HsmBackend`, and
   replaces live access with an evidence pack. It reviews v0.5.0; v0.4.0 is the pre-read. The audit starts once its funding is confirmed, expected December 2026
-  to January 2027, so 1.0 follows in the first quarter of 2027 rather than in December.
+  to January 2027. 1.0 follows about 34 weeks after that, in the second half of 2027: the audit and its fixes, the 1.0
+  features with threshold ECIES, the second audit phase and four clean weeks on TestNet.
 - **External deadline:** Splice's `splice-postgres` chart is unsupported after 2026-11-12 (PostgreSQL 14 end of life).
   As of 2026-11-13 the soak validator still runs on that chart; its move to another PostgreSQL deployment is planned
   for after the freeze.
