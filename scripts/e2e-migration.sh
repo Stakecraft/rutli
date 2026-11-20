@@ -359,7 +359,8 @@ step_8_destroy() {
   env_canton_out | grep -q "^E2E-DONE" || fail "the bootstrap script did not finish"
   env_canton_out | grep "^E2E-AFTER-DESTRUCTION"
   local bad errs
-  bad="$(cat "$(env_driver_audit newp2)" | grep -c "outcome=failed" || true)"
+  # §6's refused DKG under the rolled-back attempt's name is expected; nothing else may fail.
+  bad="$(grep "outcome=failed" "$(env_driver_audit newp2)" | grep -v -e '"op":"generateSigningKeyPair".* name=signing ' -c || true)"
   [ "$bad" -eq 0 ] || fail "$bad driver operations failed after the destruction"
   errs="$(commitment_errors)"
   [ -z "$errs" ] || fail "ACS commitment errors: $(head -n 3 <<<"$errs")"
