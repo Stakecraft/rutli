@@ -55,7 +55,9 @@ class FrostGroupKeyPinningSpec extends AnyWordSpec with Matchers {
       obs.onNext(DkgReply.newBuilder().setGroupVerifyingKey(ByteString.copyFrom(dkgKey)).build()); obs.onCompleted()
     }
 
+    val signCalls = new java.util.concurrent.atomic.AtomicInteger
     override def sign(req: SignRequest, obs: StreamObserver[SignReply]): Unit = {
+      signCalls.incrementAndGet()
       obs.onNext(SignReply.newBuilder().setSignature(ByteString.copyFrom(signer(req.getMessage.toByteArray))).build())
       obs.onCompleted()
     }
@@ -68,6 +70,7 @@ class FrostGroupKeyPinningSpec extends AnyWordSpec with Matchers {
       expected: Map[String, String] = Map.empty,
       lostPins: Set[String] = Set.empty,
       pinned: GroupKeyPin => Unit = _ => (),
+      rotate: Boolean = false,
   )(body: FrostBackend => A): A = {
     val servers = fakes.map(f => InProcessServerBuilder.forName(f.name).directExecutor().addService(f).build().start())
     val names: Map[String, String] = if (named) fakes.zipWithIndex.map { case (f, i) => f.name -> s"cosigner${i + 1}" }.toMap else Map.empty
@@ -85,6 +88,7 @@ class FrostGroupKeyPinningSpec extends AnyWordSpec with Matchers {
           expectedGroupKeys = expected,
           lostPins = lostPins,
           onPin = pinned,
+          rotateSigns = rotate,
         ) {
           override protected def buildChannel(endpoint: String): io.grpc.ManagedChannel =
             InProcessChannelBuilder.forName(endpoint).directExecutor().build()
@@ -422,6 +426,21 @@ class FrostGroupKeyPinningSpec extends AnyWordSpec with Matchers {
         an[KmsDriverException] should be thrownBy await(b.keyExistsAndIsActive("frost-ns"))
       }
       fakes.map(_.dkgCalls.get).sum shouldBe 0 // the ceremony was never started
+    }
+  }
+
+  "frost.sign-leader = rotate" should {
+    "never start a sign at a cosigner that answered another group key for that key" in {
+      val kp = keyPair()
+      val fakes = honestCluster(3, kp)
+      withCluster(fakes, rotate = true) { b =>
+        await(b.getPublicKey("frost-ns"))
+        fakes(1).groupKey = raw(keyPair())
+        await(b.getPublicKey("frost-ns")) // reported as a dissenter for frost-ns
+        (1 to 6).foreach(_ => await(b.sign(Msg, "frost-ns", SigningAlgoSpec.Ed25519)) shouldBe signWith(kp, Msg))
+        fakes(1).signCalls.get shouldBe 0
+        (fakes(0).signCalls.get + fakes(2).signCalls.get) shouldBe 6
+      }
     }
   }
 }

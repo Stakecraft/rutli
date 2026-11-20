@@ -69,6 +69,9 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
     /** Refuse every Sign with this status (a policy refusal, say). */
     @volatile var refuse: Option[Status] = None
     val signs = new ConcurrentLinkedQueue[SignRequest]()
+    /** Sign calls in flight at this cosigner right now, and the most seen at once. */
+    val inFlight = new AtomicInteger(0)
+    val maxInFlight = new AtomicInteger(0)
     val deletes = new ConcurrentLinkedQueue[DeleteKeyRequest]()
     val dkgs = new ConcurrentLinkedQueue[DkgRequest]()
     /** Fail this many DKGs with UNAVAILABLE (a leader the driver fails over from). */
@@ -98,6 +101,12 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
       obs.onNext(GroupKeyReply.newBuilder().setGroupVerifyingKey(ByteString.copyFrom(GroupRaw)).build()); obs.onCompleted()
     }
     override def sign(req: SignRequest, obs: StreamObserver[SignReply]): Unit = {
+      val now = inFlight.incrementAndGet()
+      maxInFlight.accumulateAndGet(now, (a: Int, b: Int) => math.max(a, b))
+      try signImpl(req, obs)
+      finally { inFlight.decrementAndGet(); () }
+    }
+    private def signImpl(req: SignRequest, obs: StreamObserver[SignReply]): Unit = {
       signs.add(req)
       val named = if (req.hasIntent) Some(SignIntent.parseFrom(req.getIntent.getIntent).getClusterId) else None
       if (refuse.isDefined) obs.onError(refuse.get.asRuntimeException())
@@ -139,10 +148,11 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
       signIntents: Boolean = true,
       adopt: Set[String] = Set.empty,
       pinDir: Option[java.nio.file.Path] = None,
+      rotate: Boolean = false,
   ) =
     new FrostBackend(eps.map(_._1), new NoDelegateBackend, logger, Some(tls), 10.seconds,
       endpointTlsNames = eps.toMap, clusterId = clusterId, signIntents = signIntents, adoptExistingKeys = adopt,
-      pinStore = pinDir.map(d => new GroupKeyPinStore(d, logger)))
+      pinStore = pinDir.map(d => new GroupKeyPinStore(d, logger)), rotateSigns = rotate)
 
   /** The DKG ceremony id a request's intent names, as the cosigners derive it. */
   private def ceremonyOf(req: DkgRequest): String =
@@ -235,6 +245,23 @@ class FrostSigningIntentSpec extends AnyWordSpec with Matchers with BeforeAndAft
         Await.result(pinned.sign(Digest, Key, SigningAlgoSpec.Ed25519), 20.seconds)
         decode(rec2.signs.asScala.toList.loneElement.getIntent).getClusterId shouldBe "pinnedcluster000"
       } finally pinned.close()
+    }
+  }
+
+  "FrostBackend.sign with frost.sign-leader = rotate" should {
+    "still give one Canton call one attempt in flight and one intent, across failovers" in {
+      // The first two cosigners fail their first sign, the third answers.
+      val recs = Seq(new Recorder(Cluster, failSigns = 1), new Recorder(Cluster, failSigns = 1), new Recorder(Cluster))
+      val b = backend(recs.zipWithIndex.map { case (r, i) => serve(s"cosigner${i + 1}", r) -> s"cosigner${i + 1}" }, rotate = true)
+      try {
+        // One call walks the ring from its start until a cosigner answers.
+        Await.result(b.sign(Array.fill(34)(3.toByte), "frost-ns", SigningAlgoSpec.Ed25519), 20.seconds)
+        val all = recs.flatMap(_.signs.asScala)
+        all.size should be >= 2
+        all.map(_.getIntent.getIntent).distinct.size shouldBe 1 // the same intent bytes at every leader
+        recs.map(_.maxInFlight.get).sum should be <= all.size
+        recs.foreach(_.maxInFlight.get should be <= 1)
+      } finally b.close()
     }
   }
 
