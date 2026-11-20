@@ -75,10 +75,15 @@ scripts/render-k8s.sh
 
 ```sh
 kubectl apply -k deploy/k8s
-for i in 1 2 3; do kubectl -n rutli rollout status statefulset/rutli-cosigner-n$i; done
+for i in 1 2 3; do kubectl -n rutli wait --for=condition=Ready pod/rutli-cosigner-n$i-0 --timeout=600s; done
 kubectl -n rutli get pods -l app.kubernetes.io/name=rutli-cosigner   # rutli-cosigner-n{1,2,3}-0 Running
 kubectl -n rutli logs rutli-cosigner-n1-0 -c cosigner | grep -E 'mutual TLS enabled|share sealing enabled \(bundle node=1\)|TLS key pins'
 ```
+
+The StatefulSets use `updateStrategy: OnDelete`: a later `kubectl apply -k deploy/k8s` that changes the
+pod template restarts nothing. Roll the cosigners one at a time with
+`scripts/upgrade-cosigners.sh -n rutli` (never all three at once: with threshold 2 of 3 nothing can
+sign until two are back); see the chart README, "Upgrading: one cosigner at a time".
 
 `values.yaml` sets the production profile (`docs/production-profile.md`): the cosigners refuse
 to start until the per-cluster values are filled in (`clusterId`, `keyfile`, `signingPolicy.signer_pins`)

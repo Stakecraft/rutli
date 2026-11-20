@@ -33,6 +33,12 @@ spec:
   serviceName: {{ $fullname }}
   replicas: 1
   podManagementPolicy: Parallel
+  # OnDelete: `helm upgrade` changes the three StatefulSets in one apply, and a RollingUpdate would
+  # then restart all three single-replica pods at once, with no cosigner left to sign (2-of-3 needs
+  # two). OnDelete restarts nothing by itself; scripts/upgrade-cosigners.sh rolls the pods one at a
+  # time and waits for each. See the README, "Upgrading".
+  updateStrategy:
+    type: {{ include "rutli-cosigner.updateStrategy" $ }}
   selector:
     matchLabels:
       {{- include "rutli-cosigner.selectorLabels" $ | nindent 6 }}

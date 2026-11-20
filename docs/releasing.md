@@ -27,6 +27,13 @@ release by the maintainer.
 6. The "Image build check" workflow is green on `main` (it builds both platforms the way the release
    does, without pushing; run it by hand if its last run is old).
 
+## Upgrading a cluster to a release
+
+A per-node install does not restart its cosigners on `helm upgrade` (`updateStrategy: OnDelete`):
+run `scripts/upgrade-cosigners.sh` afterwards, which restarts them one at a time and waits for each.
+Never restart all three at once; with threshold 2 of 3 nothing can sign until two are back. See the
+chart README, "Upgrading: one cosigner at a time".
+
 ## After the image is built: pin it by digest
 
 The tag commit still points the deploy files at the previous image. Once `publish-image.yml` has

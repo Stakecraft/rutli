@@ -82,6 +82,55 @@ If the GHCR package is private, create a pull secret and set `imagePullSecrets`.
 Package visibility is managed in GitHub → Packages → `rutli-cosigner` (org API may require
 `admin:org` / packages admin to flip public).
 
+## Upgrading: one cosigner at a time
+
+With threshold 2 of 3, signing needs two cosigners up. The per-node topology runs three
+single-replica StatefulSets, and one `helm upgrade` changes all three in one apply, so a
+`RollingUpdate` would restart all three pods at once and nothing could sign until two were back
+(measured on a real cluster: about 11 s without a cosigner, 54 of 750 signatures `UNAVAILABLE`).
+Helm cannot order the resources of a release or wait for one before the next, so the chart does not
+pretend to: the StatefulSets use `updateStrategy.type: OnDelete` (the default), `helm upgrade` changes
+the spec and restarts **no pod**, and a script restarts the cosigners one by one.
+
+```sh
+helm upgrade rutli deploy/helm/rutli-cosigner -n rutli -f values.yaml -f certs/peer-pins.json --set image.tag=…
+scripts/upgrade-cosigners.sh -n rutli --release rutli --dry-run   # the plan
+scripts/upgrade-cosigners.sh -n rutli --release rutli             # roll node 1, 2, 3, one at a time
+scripts/upgrade-cosigners.sh -n rutli --release rutli --status    # running vs target revision and image
+```
+
+Until the script has run, the pods keep the old image and settings; `--status` shows it (exit 3 =
+a roll is pending) and the `RutliCosignerRolloutPending` alert fires after 30 minutes.
+
+What the script does, per node: refuses unless all other cosigners are Ready, deletes the pod, waits
+until the replacement runs the **target** revision and is Ready, waits `--settle` seconds, checks all
+three are Ready again, then moves on. It stops at the first timeout (`--timeout`, 600 s) and touches
+nothing else. It is resumable: a node already on the target revision and Ready is skipped, so run the
+same command again after a stop. `--only 2` rolls one node. `--force` restarts nodes that already run
+the target revision, for a change the pod template does not carry (a changed ConfigMap or pins, a rotated
+certificate): the chart has no config checksum annotation, so such a change never restarted pods, with or
+without OnDelete.
+
+- **What Ready proves.** The probe is `rutli-cosigner health` (see "Probes"): the key store is usable
+  and the gRPC port accepts connections. It does not prove that the peer connections are back, so the
+  script also waits `--settle` (default 120 s). The mesh was measured back within 2 s of a restart, so
+  120 s is a wide margin on 0.5. On 0.4.x, where a freshly restarted cosigner can drop one sign
+  session (fixed in 0.5), use `--settle 300` (the in-place migration runbook, `docs/runbook-migration-inplace.md`, waits five minutes between nodes for the same reason).
+- **A node that is not Ready** (an upgrade is sometimes the repair): the script refuses unless every
+  node is Ready. `--allow-degraded` rolls that one node first and still never takes a second node
+  down. With two nodes not Ready it refuses in every case: one more restart would leave no quorum.
+- **PodDisruptionBudget.** `minAvailable: 2` over all three pods guards voluntary evictions, that is
+  node drains: a drain can take at most one cosigner. It does not gate StatefulSet updates or
+  `kubectl delete pod`; the script's own checks do.
+- **Legacy topology.** The single StatefulSet already rolls its pods one at a time and does not get
+  `updateStrategy` from the chart.
+- **`updateStrategy.type=RollingUpdate`** restores the old behaviour (all three at once, signing stops
+  for the restart). Only for a cluster that may stop signing.
+- **Moving to this chart version** from one with `RollingUpdate`: the same `helm upgrade` switches the
+  StatefulSets to `OnDelete`, so that upgrade itself restarts nothing; run the script after it.
+- `scripts/perf/cluster.py --suites upgrade` (docs/cluster-suite.md) upgrades a real cluster this way
+  under a stream of signatures and requires zero failed signatures.
+
 ## Values (highlights)
 
 | Key | Default | Notes |
