@@ -80,11 +80,15 @@ The guarantees in [docs/security/threat-model.md](docs/security/threat-model.md)
 cluster where:
 
 - every cosigner and the driver run the same release, upgraded **before** any DKG or refresh;
-- the enforcement switches are on, identically, on every node: `signing_policy.require_intent`,
-  `require_ceremony_intent`, `signer_acl_required`, `require_epoch_match`, with
-  `signer_may_refresh: false`. `require_ceremony_intent` is on by default on a TLS cosigner since
-  0.4.0-rc.6 (opt out with `false` only during an upgrade); the others default to off so that a
-  rolling upgrade keeps working ([docs/approval-quorum.md](docs/approval-quorum.md), "Switching enforcement on");
+- the enforcement settings are on, identically, on every node. The list is the table in
+  [docs/production-profile.md](docs/production-profile.md): `"profile": "production"` requires all
+  of them and a cosigner refuses to start without them, and `rutli-cosigner check-config` shows what
+  a config lacks. The Helm chart and `deploy/k8s` set it. Unset behaves as `lab` in 0.5 and becomes
+  `production` in 0.6. How to switch the settings on in a running cluster:
+  [docs/approval-quorum.md](docs/approval-quorum.md), "Switching enforcement on";
+- from 0.5.0 every cosigner with TLS pins its peers' TLS keys (`peers[].tls_spki_sha256`), and
+  signing intents are required by default. Upgrading from 0.4.x:
+  [docs/upgrading-to-0.5.md](docs/upgrading-to-0.5.md);
 - key files are written in format v2 (`keyfile.write_version: 2`, `cluster_uuid` set), and
   `accept_v1: false` once every file is v2;
 - the Helm `perNode` topology is used: per-node seal and TLS secrets, no `pods/exec` RBAC (CI

@@ -1,6 +1,6 @@
 # Rütli roadmap
 
-**Status:** 2026-10-15; audit timing updated 2026-10-27; post-0.4.0 plan added 2026-11-01; milestone and release status updated 2026-11-02; B8 completed 2026-11-12; v0.4.0 tagged 2026-11-14; v0.4.1 (security fixes) tagged 2026-11-20; audit target moved to v0.5.0 on 2026-11-18. **Scope:** where Rütli stands, the two ways a Canton/Splice validator ends up on it, and the
+**Status:** 2026-10-15; audit timing updated 2026-10-27; post-0.4.0 plan added 2026-11-01; milestone and release status updated 2026-11-02; B8 completed 2026-11-12; v0.4.0 tagged 2026-11-14; v0.4.1 (security fixes) tagged and released 2026-11-20; audit target moved to v0.5.0 on 2026-11-18; v0.5.0 hardening merged 2026-11-19 to 2026-11-20 listed 2026-11-20. **Scope:** where Rütli stands, the two ways a Canton/Splice validator ends up on it, and the
 path to 1.0. Facts are stated as established only where a rehearsal or a source check backs them; everything else
 is marked **unproven**. The detailed Track B record (migration spike, milestones, findings) is
 [roadmap-migration.md](roadmap-migration.md).
@@ -186,10 +186,26 @@ Track A (soak and hardening) continues on `stakecraft-devnet-rutli-01`; exit cri
 | 2026-10-09 | v0.4.0-rc.1 tagged |
 | 2026-10-28 | v0.4.0-rc.6: ceremony leader binding and durable fence marks, disjoint FROST and hosted key ids, TLS crate advisories closed; ceremony intents required by default with TLS |
 | 2026-11-14 | **v0.4.0 tagged** (planned as the audit code freeze; the audit now reviews v0.5.0): Flow 1, Flow 2a (after B8), Flow 2b, B2, B6, ECIES, C2 fixes, CA rotation |
+| 2026-11-20 | **v0.4.1 released** (PRs #152, #154, #160): the cosigner keeps serving under a low file-descriptor limit and reports an ended accept loop, stops on SIGTERM, and `export-key` refuses an existing output file. No wire, key-file or config change; the driver is unchanged |
 | Later | Pre-rotate alternative for 2a (research), if B8 shows it is worth it |
 | 2026-11-19 (planned) | Splice TestNet validator run starts. The four clean weeks required for 1.0 are counted later, on the audited release |
 | Mid-December 2026 (planned) | **v0.5.0 = audit code freeze:** v0.4.0 plus hardening from the November pre-audit review, the fixes made since v0.4.0 and the shared-cluster guard |
 | After the audit | **1.0**: the audit's fixes and retest, at least 4 clean weeks on TestNet on the audited release, and the 1.0 features below |
+
+- **Merged for v0.5.0 since 2026-11-19** (on `main`, not released; how to upgrade: [upgrading-to-0.5.md](upgrading-to-0.5.md)):
+
+  | Area | PRs |
+  |---|---|
+  | Config and defaults | #101: a cosigner and the driver refuse an unknown config key; `require_intent` on by default with TLS |
+  | Production profile | #166: `profile` and `rutli-cosigner check-config` on the cosigner; #167: the same for the driver (`ConfigCheck`) |
+  | Peer and session hardening | #109: peer TLS key pins, required with TLS; #105: one lying peer cannot bench both honest nodes; #106: a sign session belongs to the peer that opened it, per-opener caps; #115: a minimum interval between refreshes, backups follow refreshes |
+  | Driver | #103: failover past a bad signature, a misspelt approval mode is refused |
+  | Cosigner robustness | #148: a background loop restarts after a panic; #112, #114: smaller fixes (see the changelog) |
+  | Release pipeline | #107: images built on hosted runners, signed and attested, every action pinned |
+  | Tests | #135 property tests; #137 the three e2e ceremony scripts in CI; #142 micro-benchmarks; #145 load generator; #149 the whole migration procedure; #150 the cluster suite; #171 the suite installs the chart with peer pins |
+  | Chart and process | #185: the chart rolls cosigners one at a time (`scripts/upgrade-cosigners.sh`); #118, #119, #189: work tracking, quality gates, release process, changelog fragments |
+
+  Still open for v0.5.0 (not merged): the shared-cluster guard (#169), group-key pins across restarts (#168), the admin CLI's read-only `key show` (issue #117), hosted-key generation intents (#113, #136). The Helm chart rolls the cosigners one at a time since #185 (issue #173, closed).
 
 - **The audit is the critical path.** Auditor: **Cure53** (chosen 2026-10-27). The RFQ
   ([audit-rfq.md](audit-rfq.md), brief [audit-prep.md](audit-prep.md)) covers ECIES and B6, excludes `HsmBackend`, and
@@ -209,8 +225,8 @@ v0.4.0.
 | Release | Item | What and why |
 |---|---|---|
 | **Now** (docs) | Supported keys and algorithms, Canton compatibility matrix | In the README: which key is threshold, which is hosted, which Canton and Splice versions are tested. Done (#77) |
-| **v0.5.0** | Unified admin CLI | One tool for generate, import, public key and Canton fingerprint (`1220…`), and a documented rotation recipe (`rotate_kms_node_key`, `owner_to_key_mappings.rotate_key`). Today these are spread across `rutli-cosigner` and `rutli-dealer` |
-| **v0.5.0** | Shared-cluster guard | A DKG that returns an existing key says so, and the driver refuses a key it did not create unless the operator allows it. Today two participants with the same `frost.key-prefix` end up on the same Ed25519 keys without an error; only a `signer_acl` per driver certificate prevents it ([architecture.md](architecture.md), "One cluster, several participants") |
+| **v0.5.0** | Unified admin CLI (first part, read-only `key show`: issue #117, open) | One tool for generate, import, public key and Canton fingerprint (`1220…`), and a documented rotation recipe (`rotate_kms_node_key`, `owner_to_key_mappings.rotate_key`). Today these are spread across `rutli-cosigner` and `rutli-dealer` |
+| **v0.5.0** | Shared-cluster guard (in review: PR #169) | A DKG that returns an existing key says so, and the driver refuses a key it did not create unless the operator allows it. Today two participants with the same `frost.key-prefix` end up on the same Ed25519 keys without an error; only a `signer_acl` per driver certificate prevents it ([architecture.md](architecture.md), "One cluster, several participants") |
 | **v0.5.0** | Canton LocalNet quickstart | Rütli next to Splice's LocalNet, all in local containers, so an operator can try it in minutes without touching a real node |
 | **1.0** | Driver published to a Maven repository | Operators consume the driver as a normal dependency instead of a jar from a GitHub release |
 | **1.0** | Signed audit log, exported off the host | The hash chain is periodically signed and shipped to append-only storage (for example S3 Object Lock or syslog), so a host administrator can no longer rewrite it unnoticed |

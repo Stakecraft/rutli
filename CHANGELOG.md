@@ -3,6 +3,8 @@
 All notable changes to Rütli are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow [SemVer](https://semver.org/).
 
+Upgrading a 0.4.x cluster to 0.5.0: [docs/upgrading-to-0.5.md](docs/upgrading-to-0.5.md).
+
 ## [Unreleased]
 
 ### Changed (operators must act)
@@ -42,8 +44,10 @@ All notable changes to Rütli are documented here. Format loosely follows
     refuses `production` with `topology: legacy` at render time. `deploy/k8s` ships with
     `production` and the enforcement that needs no per-cluster value. Fill in `clusterId`,
     `keyfile` and `signingPolicy.signer_pins` before the first apply. The compose examples set
-    `lab`. A cosigner older than this release refuses a config with `profile` (unknown key), so
-    roll back the chart and the image together.
+    `lab`. A cosigner on 0.4.0 or 0.4.1 ignores `profile` and the peer pin keys (it rejects unknown
+    keys only in `keyfile`), so a config written for this release gives none of those guarantees
+    on such a binary: check the running version (`--version`, or the image digest) before relying
+    on them.
 - **The driver has the same profile: `profile = production` in `crypto.kms.config`.** It stops the
   participant at startup while any enforcement setting is off, and names each one. The settings
   are: backend `frost`; a delegate other than `software`; mTLS without `allow-expired-ca`; at least
@@ -51,8 +55,8 @@ All notable changes to Rütli are documented here. Format loosely follows
   and the signing journal; an HSM PIN from `pin-env`. A missing approval rule for the namespace key
   is advisory. `lab` logs the same list. Unset behaves as `lab` with a warning and becomes
   `production` in 0.6, so an existing driver config starts unchanged until then.
-  `com.stakecraft.rutli.tools.ConfigCheck` lists the findings offline. A driver older than this
-  release refuses a config with `profile` (unknown key).
+  `com.stakecraft.rutli.tools.ConfigCheck` lists the findings offline. A driver on 0.4.x ignores `profile`
+  (it ignored every unknown key), so check the running version before relying on it.
 
 - **A cosigner refuses to start on a config key it does not know.** Until now only the `keyfile`
   block was parsed strictly. A misspelt key such as `require_intnet`, or `requireIntent` in
