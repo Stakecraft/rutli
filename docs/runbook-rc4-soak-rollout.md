@@ -614,7 +614,7 @@ unchanged.
 - [ ] `verify-key` ok for both FROST keys; sign errors, policy refusals and `rate_limited` flat; `rutli_ceremony_intent_absent_total` 0.
 - [ ] `audit-cross-check`: only the pre-T2 rollout-window lines.
 - [ ] `deploy/soak/cosigner-values-batch-c.yaml` (`require_ceremony_intent: true`) committed with the soak-log entry.
-- [ ] soak-check PASS on the next scheduled run; `$D` cleaned up (`driver.key` securely deleted).
+- [ ] soak-check PASS on the next scheduled run; `$D` workspace destroyed.
 
 ## Next: B8 under ceremony intents
 

@@ -194,7 +194,7 @@ export LAYOUT=shared                      # or perNode — see 4.6
 export PIN=453bb4aea2088bb5               # the current derived id; never changes from here on
 export KEY_ID=frost-namespace             # the soak's FROST namespace key
 export NS_FP=12203286ffe27c94c35ee0aa24a359d41e73f4df6e88d2aab2b72860df79ce8f22ea
-export R=/Volumes/rutli-work/ca-rotation   # on the memory disk or encrypted image of key-material-handling.md, never in your home
+export R="${RUTLI_WORK:?mount the memory disk first}/ca-rotation"   # docs/key-material-handling.md; never in your home
 mkdir -p $R/old $R/new $R/client && chmod 700 $R $R/old $R/new $R/client
 kc() { kubectl --context "$KUBECONTEXT" "$@"; }
 

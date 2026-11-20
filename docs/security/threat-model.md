@@ -496,18 +496,17 @@ A sealed key file is protected by the sealing key (the node's DEK), not by being
 removes files with `unlink` and replaces them with `rename`; it never overwrites, and on flash,
 network, copy-on-write and snapshotted storage an overwrite would not erase either. So old copies
 of a key file exist wherever it was ever stored: the data volume's free blocks, retained backups
-(the chart keeps 14 by default, and an off-cluster destination keeps what its retention keeps),
+(the chart keeps the newest 14 tars with the pvc destination, and a tar is taken on every key-file change; an off-cluster destination keeps what its retention keeps),
 volume snapshots, the Kubernetes node's disk (the backup sidecar's staging copies, the pod's `/tmp`),
-quarantined staged files of an aborted refresh (up to 7 days), and any `backup-*` or `retired-*`
+quarantined staged files of an aborted refresh (up to 7 days, or until the operator acts if a split was detected), and any `backup-*` or `retired-*`
 directory left on a volume.
 
 **The precondition for using an old copy is the copy and the sealing key that sealed it.** What
 that gives, per key:
 
 - **A FROST key** (namespace, signing): `t` shares of one sharing, that is the same epoch and the
-  same public-key-package digest, from `t` distinct nodes, each with its node's DEK. The sources
-  can be of different ages and places: a refresh keeps the group secret, so a complete
-  same-sharing set from any point in the key's history is the key. A refresh does not retire
+  same public-key-package digest, from `t` distinct nodes, each with its node's DEK, whenever and
+  wherever the copies were made: a refresh keeps the group secret. A refresh does not retire
   older copies, does not change any DEK, and does not turn a stolen share into a harmless one while
   `t` nodes' old copies and DEKs survive.
 - **A dealt share** (a key brought in by the split ceremony): `t` dealt shares, from the bundles or

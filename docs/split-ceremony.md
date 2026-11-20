@@ -314,10 +314,10 @@ per item in the destruction record (§8):
 | L4 S3 | delete **every version and delete marker** (`list-object-versions`), not just current objects; if object lock is on, record the retention end date — the copy exists until then | version listings before/after |
 | L5 snapshots | delete every snapshot taken while the key was in the DB | provider listing |
 | L6 identities dumps | delete every copy | listing |
-| L7/L8 exports, laptops | keep them only on an encrypted memory disk or image and destroy that place ([key-material-handling.md](key-material-handling.md)); note where erasure is impossible (SSD, cloud sync, backups) | operator statement |
+| L7/L8 exports, laptops | keep them only on a memory disk or encrypted image and destroy that place ([key-material-handling.md](key-material-handling.md)); note where erasure is impossible (SSD, cloud sync, backups) | operator statement |
 | L9 dealer media | destroy the boot medium and transfer media physically (overwriting flash media proves nothing) | operator statement |
 | Bundles, pod `/tmp` copies (and the Kubernetes node's disk under them) | destroy. A bundle is not dead after install: with a copy of the node's pending recipient file and its seal key it reopens the dealt share | listing |
-| Each cosigner's data volume, backup volume and their snapshots | rotate the node's sealing key and destroy the old one (they hold the recipient files and the pre-refresh shares in free blocks) | `keyfile status`, the Secret history |
+| Each cosigner's data volume, backup volume and their snapshots | rotate the node's sealing key and destroy the old one (the data volume holds the recipient files in free blocks, the backup volume the pre-refresh shares as tars) | `keyfile status`, the Secret history |
 | Pre-refresh cosigner backups | delete any backup taken between Step 4 and Step 6 | listing |
 
 **Residual exposure, stated plainly.** Deletion on SSDs, copy-on-write filesystems, cloud storage

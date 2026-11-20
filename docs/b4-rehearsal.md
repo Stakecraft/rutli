@@ -463,7 +463,7 @@ kubectl cp <rutli>/driver/target/scala-2.13/rutli-driver.jar $NS/rutli-kms-popul
 for f in ca.crt driver.crt driver.key; do kubectl cp $D/tls/$f $NS/rutli-kms-populate:/bundle/certs/$f; done
 kubectl -n $NS exec rutli-kms-populate -- sh -c 'sha256sum /bundle/rutli-driver.jar /bundle/certs/*'    # = JAR_SHA, CA 453bb4ae…
 kubectl -n $NS delete pod rutli-kms-populate
-rm -f $D/tls/driver.key       # $D is on the encrypted memory disk you destroy at the end (docs/key-material-handling.md); not provable erasure; the driver key also lives in rutli-cosigner-tls and both bundles
+rm -P $D/tls/driver.key       # as run in the rehearsal; `rm -P` unlinks only on current macOS: today, work on a memory disk or image and destroy it (docs/key-material-handling.md). Not provable erasure; the driver key also lives in rutli-cosigner-tls and both bundles
 ```
 
 ### 4.1 Console inventory on the old participant (read-only, keep this session open until 4.10)
@@ -588,8 +588,8 @@ Every row: the "before" listing, the action, the "after" listing, saved under `$
 | L6 | identities dumps | **none were made** (D8): no call to `/admin/participant/identities`. `dump-keyfree.json` has no keys (delete it as hygiene). `/domain-upgrade-dump` empty | `jq` check output (4.11); `ls` |
 | L7 | export file: laptop `$D/b4/namespace.export` + the transfer copy | `rm`; note "APFS/SSD, not provable erasure" | `ls` |
 | L8 | operator laptop: `$D/` (excluded from Time Machine in Phase 0), shell history (the password was never typed on a command line), the console container (`--rm`), clipboard | delete `$D/b4/*` except evidence; `docker ps -a` shows no console container | statement |
-| L9 | dealer media | delete the VM and its disk, or wipe the USB | statement |
-| — | ceremony artefacts | `out/` bundles (dead after install), `r<i>.json` (public), pod `/tmp` (removed in S4) | `ls` in pods: no `/tmp/share.json` |
+| L9 | dealer media | delete the VM and its disk, or destroy the USB | statement |
+| — | ceremony artefacts | `out/` bundles (sensitive until destroyed, not dead after install: see docs/split-ceremony.md), `r<i>.json` (public), pod `/tmp` (removed in S4) | `ls` in pods: no `/tmp/share.json` |
 | — | pre-refresh cosigner backups | none expected (CronJob suspended S0–S7). Check `kubectl -n rutli exec rutli-cosigner-<o> -c cosigner -- ls -la --time-style=full-iso /data/` (no `backup-*` modified between S4 and S6) | listing |
 
 State the residue plainly in the record. Volume deletion at the provider, S3 deletion and SSD `rm` are not provable erasure, and the key existed

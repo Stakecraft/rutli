@@ -41,6 +41,7 @@ kubectl create namespace rutli
 scripts/gen-frost-certs.sh 3 ./certs          # CA + per-cosigner certs (CN/SAN cosigner<id>)
 
 kubectl -n rutli create secret generic rutli-cosigner-ca --from-file=ca.crt=certs/ca.crt
+cd "${RUTLI_WORK:?mount the memory disk first}"   # docs/key-material-handling.md
 for i in 1 2 3; do                            # one kubernetes.io/tls Secret per cosigner
   kubectl -n rutli create secret tls rutli-cosigner-tls-$i \
     --cert=certs/cosigner$i.crt --key=certs/cosigner$i.key

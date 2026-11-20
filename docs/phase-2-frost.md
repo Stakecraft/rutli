@@ -60,7 +60,7 @@
 >   that node's DEK and hosted-key distribution seed only; `rutli-cosigner seal new-node` /
 >   `seal split-legacy`), with peers' distribution keys pinned in config. The legacy shared master
 >   (`share_seal.secret_env`, per-node keys via HKDF) still works but lets whoever reads it derive
->   every node's key (audit C3; docs/runbook-per-node-seal.md). Closes the at-rest exposure;
+>   every node's key (audit C3; docs/runbook-per-node-seal.md). Closes the at-rest exposure while the node's seal bundle is not also obtained;
 >   enclave/HSM sealing (which also protects share memory during signing) plugs into the same seam.
 >
 > - **Proactive share refresh (done):** `Signer.Refresh` RPC / `rutli-cosigner refresh` — dealer-free
@@ -352,8 +352,9 @@ wear-levelled SSDs and snapshotted volumes, removing a file does not destroy the
 replaces the key with a tombstone that keeps the material sealed for
 `hosted_keys.delete_grace_secs` (default 7 days, for `hosted-undelete`), then drops it; real
 destruction means rotating the seal key (`seal rotate-dek`, `keyfile migrate`, `seal
-drop-previous`) and destroying the old one, so every old sealed blob — including the ones sitting in
-backups — becomes undecryptable.
+drop-previous`) and destroying the old one, so that every old sealed blob — including the ones sitting in
+backups — becomes undecryptable once every copy of the old DEK is destroyed (and, after a delete,
+once the grace period is over: rotate after it, not during it).
 
 ### Replication wrapping, and why mTLS alone was judged insufficient
 

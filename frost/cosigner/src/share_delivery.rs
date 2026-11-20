@@ -20,8 +20,8 @@
 //!    clear so it can be checked before anything is decrypted.
 //! 3. **Install** (`rutli-cosigner import-share`) opens the bundle with the stored secret
 //!    ([`ShareBundle::open`]) and deletes the secret once the share is installed. The secret is
-//!    unlinked, not erased: its sealed bytes can survive in freed blocks, snapshots and old
-//!    backups, and open with the node's seal key. The bundle stays sensitive until it is
+//!    unlinked, not erased: its sealed bytes can survive in freed blocks, volume snapshots and
+//!    volume-level backups, and open with the node's seal key. The bundle stays sensitive until it is
 //!    destroyed and that seal key is rotated and the old one destroyed.
 //!
 //! # Why ephemeral recipient keys, not the hosted-key `DistKey`

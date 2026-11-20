@@ -655,7 +655,7 @@ A node moving into the cluster ([roadmap-migration.md](roadmap-migration.md)) ca
 encryption key instead of rotating it — discouraged, see [migration.md](migration.md), "Carrying
 the signing and encryption keys". Export it on the old node (`keys.secret.download`, preview
 commands enabled, and on Canton 3.7 `canton.parameters.enable-key-download = yes`; preferably with a password), then on every cosigner (on two, the third pulls it). A daemon may be running
-(`kubectl exec` into the pod, the export copied in through stdin or onto a memory-backed volume: the
+(`kubectl exec -i` into the pod, the export passed in through stdin with `--in /dev/stdin`: the
 chart's `/tmp` is a disk-backed `emptyDir`, so a copy there stays on the Kubernetes node's disk) or stopped:
 
 ```sh
@@ -769,7 +769,7 @@ What hosted keys are, stated without varnish:
   real reduction in exposure. It is not "MPC for all key types", and Rütli should never claim it is.
 - **A single compromised cosigner yields the hosted keys.** All n nodes hold the same material; the
   attacker needs one, plus the seal secret that node's process has. The same attacker does **not**
-  get the namespace key: that still requires breaching `t` cosigners within one refresh epoch.
+  get the namespace key: that still requires `t` shares of one epoch (old copies and their DEKs count, whenever they were taken).
 - **The cost that must not be buried: retrospective decryption.** Canton's encryption keys protect
   per-view session keys. An attacker who extracts one gains *retrospective* read access to any
   recorded traffic encrypted to it. Rotation fixes the future, not the past — there is no forward

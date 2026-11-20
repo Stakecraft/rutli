@@ -43,6 +43,7 @@ kubectl -n rutli label namespace rutli \
   pod-security.kubernetes.io/warn=restricted --overwrite
 
 kubectl -n rutli create secret generic rutli-cosigner-ca --from-file=ca.crt=certs/ca.crt
+cd "${RUTLI_WORK:?mount the memory disk first}"   # docs/key-material-handling.md
 for i in 1 2 3; do        # one kubernetes.io/tls Secret per cosigner (cert-manager can write these)
   kubectl -n rutli create secret tls rutli-cosigner-tls-$i --cert=certs/cosigner$i.crt --key=certs/cosigner$i.key
 done
