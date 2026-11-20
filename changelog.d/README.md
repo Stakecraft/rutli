@@ -42,10 +42,11 @@ python3 scripts/changelog.py check
 CI (workflow "Changelog") runs this, and requires a fragment on every pull request that changes
 `frost/`, `driver/`, `deploy/` or `scripts/`, unless the pull request carries the label
 `no-changelog`. Until 2026-12-18 an edit of `CHANGELOG.md` itself also passes, for pull requests
-opened before the switch; the exception is removed with the first release after that date.
+opened before the switch; the exception is removed with the first release on or after that date.
 
 ## Release
 
 `scripts/changelog.py assemble <version> <date>` (see `docs/releasing.md`). It merges the fragments
 with whatever is still under `[Unreleased]`, writes `## [<version>] — <date>` above the previous
-release and deletes the fragments.
+release and deletes the fragments. For a release candidate use `--keep`: the section is written and the
+fragments stay for the final release.

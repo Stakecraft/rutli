@@ -82,6 +82,9 @@ class CheckTests(unittest.TestCase):
         self.assertTrue(self.problems("1.fixed.md", "- x"))  # no trailing newline
         self.assertTrue(self.problems("1.fixed.md", "- x\n\n"))
         self.assertTrue(self.problems("1.fixed.md", "text first\n"))
+        self.assertTrue(self.problems("1.fixed.md", "**bold** first\n"))
+        self.assertTrue(self.problems("1.fixed.md", "---\n"))
+        self.assertTrue(self.problems("1.fixed.md", "- x\n~~~\ncode\n"))
         self.assertTrue(self.problems("1.fixed.md", "- x\n### Heading\n"))
         self.assertTrue(self.problems("1.fixed.md", "- x \n"))
         self.assertTrue(self.problems("1.fixed.md", "- x\r\n"))
@@ -138,7 +141,17 @@ class RequireTests(unittest.TestCase):
 
     def test_rename_uses_new_path(self):
         self.assertEqual(cl.parse_name_status("R100\told.md\tchangelog.d/1.added.md\n"),
-                         [("R", "changelog.d/1.added.md")])
+                         [("R", "changelog.d/1.added.md"), ("D", "old.md")])
+
+    def test_rename_out_of_code_path_counts_as_code_change(self):
+        self.assertFalse(self.ev("R100\tfrost/x.rs\tdocs/x.rs\n")[0])
+
+    def test_modified_old_fragment_does_not_count(self):
+        self.assertFalse(self.ev("M\tfrost/a.rs\nM\tchangelog.d/9.fixed.md\n")[0])
+
+    def test_empty_diff_is_an_error(self):
+        r = subprocess.run([sys.executable, str(Path(cl.__file__)), "require"], input="", capture_output=True, text=True)
+        self.assertEqual(r.returncode, 1)
 
 
 class AssembleTests(unittest.TestCase):
@@ -194,6 +207,13 @@ class AssembleTests(unittest.TestCase):
             self.assertEqual(sorted(p.name for p in (root / "changelog.d").iterdir()), ["README.md"])
             self.assertIn("## [0.5.0] — 2026-12-18", (root / "CHANGELOG.md").read_text())
             self.assertEqual(cl.cmd_assemble(root, "0.5.0", "2026-12-18"), 1)
+
+    def test_prerelease_needs_keep_and_keeps_fragments(self):
+        d, root = make_root({"5.fixed.md": "- F.\n"})
+        with d:
+            self.assertEqual(cl.cmd_assemble(root, "0.5.0-rc.1", "2026-12-01"), 1)
+            self.assertEqual(cl.cmd_assemble(root, "0.5.0-rc.1", "2026-12-01", keep=True), 0)
+            self.assertTrue((root / "changelog.d" / "5.fixed.md").exists())
 
     def test_command_refuses_malformed_fragment_and_keeps_files(self):
         d, root = make_root({"5.fixed.md": "no list\n"})

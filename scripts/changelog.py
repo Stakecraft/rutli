@@ -9,7 +9,7 @@ release section.
 
     scripts/changelog.py check
     scripts/changelog.py require [--pr N] [--labels JSON] < `git diff --name-status BASE...HEAD`
-    scripts/changelog.py assemble VERSION DATE
+    scripts/changelog.py assemble [--keep] VERSION DATE
 
 Fragment name: `<PR number>.<section>.md`, section one of SECTIONS below. Standard library only.
 """
@@ -23,7 +23,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# section key -> (heading in CHANGELOG.md, order in a release). Security first, as in every
+# section key -> heading in CHANGELOG.md; the dict order is the order in a release. Security first, as in every
 # release so far, then Keep a Changelog order, then the two repository-specific sections.
 SECTIONS = {
     "security": "Security",
@@ -42,7 +42,7 @@ SKIP_LABEL = "no-changelog"
 
 # Until this date (inclusive) a pull request that edits CHANGELOG.md directly also satisfies
 # `require`: pull requests opened before the switch keep passing. After it, only fragments count.
-# Remove LEGACY_EDIT_UNTIL (and the branch in `require`) once v0.5.0 is released.
+# Remove LEGACY_EDIT_UNTIL (and the branch in `require`) with the first release on or after this date.
 LEGACY_EDIT_UNTIL = datetime.date(2026, 12, 18)
 
 FRAGMENT_RE = re.compile(r"^(\d+)\.([a-z]+)\.md$")
@@ -92,11 +92,11 @@ def problems_in_fragment(path):
         out.append(f"{path.name}: must end with a newline")
     if text.endswith("\n\n"):
         out.append(f"{path.name}: remove the blank line at the end")
-    if not text.lstrip().startswith(("-", "*")):
+    if not re.match(r"[-*] ", text):
         out.append(f"{path.name}: start with a list item ('- **What changed.** Why it matters.')")
     in_fence = False
     for n, line in enumerate(text.split("\n"), 1):
-        if line.lstrip().startswith("```"):
+        if line.lstrip().startswith(("```", "~~~")):
             in_fence = not in_fence
         elif not in_fence and re.match(r"^#{1,6}\s", line):
             out.append(f"{path.name}:{n}: no headings in a fragment; the section comes from the file name")
@@ -125,6 +125,8 @@ def parse_name_status(text):
         parts = line.split("\t")
         if len(parts) >= 2 and parts[0]:
             out.append((parts[0][0], parts[-1]))
+            if parts[0][0] in "RC" and len(parts) >= 3:
+                out.append(("D", parts[1]))  # the old path counts as touched (not as added)
     return out
 
 
@@ -138,7 +140,7 @@ def evaluate_require(changes, labels, pr_number, today):
         return True, [f"label '{SKIP_LABEL}' set: no changelog entry needed"]
     frags = [
         p for s, p in changes
-        if s in "AMR" and p.startswith("changelog.d/") and FRAGMENT_RE.match(p.split("/", 1)[1])
+        if s in "AR" and p.startswith("changelog.d/") and FRAGMENT_RE.match(p.split("/", 1)[1])
     ]
     if frags:
         if pr_number is not None:
@@ -164,7 +166,11 @@ def evaluate_require(changes, labels, pr_number, today):
 def cmd_require(args):
     labels = json.loads(args.labels) if args.labels else []
     labels = [l["name"] if isinstance(l, dict) else l for l in labels]
-    ok, msgs = evaluate_require(parse_name_status(sys.stdin.read()), labels, args.pr, datetime.date.today())
+    changes = parse_name_status(sys.stdin.read())
+    if not changes:
+        print("error: no changed files on stdin (did `git diff --name-status` fail?)", file=sys.stderr)
+        return 1
+    ok, msgs = evaluate_require(changes, labels, args.pr, datetime.date.today())
     for m in msgs:
         if m.startswith("warning:"):
             print(f"::warning::{m[len('warning: '):]}")
@@ -178,7 +184,7 @@ def split_blocks(body):
     preamble, blocks, cur = [], [], None
     in_fence = False
     for line in body.split("\n"):
-        if line.lstrip().startswith("```"):
+        if line.lstrip().startswith(("```", "~~~")):
             in_fence = not in_fence
         if not in_fence and line.startswith("### "):
             cur = [line[4:].strip(), []]
@@ -245,12 +251,15 @@ def assemble_text(changelog, fragments, version, date):
     return out
 
 
-def cmd_assemble(root, version, date):
+def cmd_assemble(root, version, date, keep=False):
     frags = list_fragments(root)
     problems = [p for f in frags for p in problems_in_fragment(f)]
     if problems:
         for p in problems:
             print(f"error: {p}", file=sys.stderr)
+        return 1
+    if "-" in version and not keep:
+        print("error: a pre-release keeps the fragments for the final release: pass --keep", file=sys.stderr)
         return 1
     parts = [(FRAGMENT_RE.match(f.name).group(2), f.read_text(encoding="utf-8")) for f in frags]
     path = Path(root) / "CHANGELOG.md"
@@ -260,9 +269,11 @@ def cmd_assemble(root, version, date):
         print(f"error: {e}", file=sys.stderr)
         return 1
     path.write_text(new, encoding="utf-8")
-    for f in frags:
-        f.unlink()
-    print(f"CHANGELOG.md: [{version}] — {date} written from {len(frags)} fragment(s), fragments removed")
+    if not keep:
+        for f in frags:
+            f.unlink()
+    print(f"CHANGELOG.md: [{version}] — {date} written from {len(frags)} fragment(s), "
+          + ("fragments kept" if keep else "fragments removed"))
     return 0
 
 
@@ -275,14 +286,15 @@ def main(argv=None):
     rq.add_argument("--pr", type=int, help="pull request number")
     rq.add_argument("--labels", help="JSON list of label names or label objects")
     asm = sub.add_parser("assemble", help="write the release section and delete the fragments")
-    asm.add_argument("version", help="X.Y.Z (no leading v)")
+    asm.add_argument("--keep", action="store_true", help="keep the fragments (for a release candidate)")
+    asm.add_argument("version", help="X.Y.Z or X.Y.Z-rc.N (no leading v)")
     asm.add_argument("date", help="YYYY-MM-DD")
     a = ap.parse_args(argv)
     if a.cmd == "check":
         return cmd_check(a.root)
     if a.cmd == "require":
         return cmd_require(a)
-    return cmd_assemble(a.root, a.version, a.date)
+    return cmd_assemble(a.root, a.version, a.date, a.keep)
 
 
 if __name__ == "__main__":
