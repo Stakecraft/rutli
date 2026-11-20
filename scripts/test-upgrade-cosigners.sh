@@ -122,6 +122,13 @@ run --only 2
 chk "exit 0" test "$RC" -eq 0
 chk "only node 2 deleted" test "$(deleted)" = "2"
 
+echo "==> --force restarts nodes already on the target revision (config-only change)"
+new_state new new new
+run --force
+chk "exit 0" test "$RC" -eq 0
+chk "deleted 1,2,3 in order" test "$(deleted)" = "1,2,3"
+chk "never with another down" never_with_other_down
+
 echo "==> a node is not Ready: refused without --allow-degraded"
 new_state old old old 2
 run

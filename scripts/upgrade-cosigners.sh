@@ -18,6 +18,9 @@
 #                     pending, 1 when a node is not Ready.
 #   --dry-run         print what would be rolled, in order; change nothing.
 #   --only NODE       roll only that node id (1, 2, 3).
+#   --force           restart the selected nodes even when they already run the target revision: for a
+#                     change the pod template does not carry (a changed ConfigMap, pins, a rotated
+#                     certificate). Not resumable by itself: after a stop, continue with --only.
 #   --allow-degraded  an upgrade as the repair of ONE node that is not Ready: that node is rolled first,
 #                     and the script still never takes a second node down. Without the flag the script
 #                     refuses unless every node is Ready. With two nodes not Ready it always refuses:
@@ -40,6 +43,7 @@ RELEASE=""
 MODE=roll
 ONLY=""
 DEGRADED=0
+FORCE=0
 SETTLE=120
 TIMEOUT=600
 POLL="${UPGRADE_POLL_SECONDS:-3}"
@@ -55,9 +59,10 @@ while [ $# -gt 0 ]; do
     --dry-run) MODE=dry; shift ;;
     --only) ONLY="${2:?}"; shift 2 ;;
     --allow-degraded) DEGRADED=1; shift ;;
+    --force) FORCE=1; shift ;;
     --settle) SETTLE="${2:?}"; shift 2 ;;
     --timeout) TIMEOUT="${2:?}"; shift 2 ;;
-    -h | --help) sed -n '5,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h | --help) sed -n '5,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) die "unknown argument: $1 (see --help)" ;;
   esac
 done
@@ -185,7 +190,7 @@ fi
 for i in "${!IDS[@]}"; do
   [ "$i" != "$BROKEN" ] || continue
   read_pod "$i"
-  is_current "$i" || PLAN+=("$i")
+  if [ "$FORCE" = 1 ] || ! is_current "$i"; then PLAN+=("$i"); fi
 done
 if [ -n "$ONLY" ]; then
   want="$(index_of "$ONLY")" || die "no node $ONLY"

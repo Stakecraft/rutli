@@ -15,7 +15,8 @@ All notable changes to Rütli are documented here. Format loosely follows
   `UNAVAILABLE`. Now Helm changes the spec and restarts nothing; the script deletes one pod, waits
   until the replacement runs the new revision and is Ready, waits `--settle` seconds (default 120;
   use 300 on 0.4.x), checks all three are Ready, and takes the next. It is resumable, has `--only`,
-  `--dry-run`, `--status` (running vs target revision and image per node) and `--allow-degraded` (the
+  `--dry-run`, `--force` (restart nodes already on the target revision, for config-only changes),
+  `--status` (running vs target revision and image per node) and `--allow-degraded` (the
   repair of one node that is not Ready, never a second node down). **Upgrade note:** after every
   `helm upgrade` that changes the pod template (image, resources, probes), run the script; until then
   the pods keep the old image, which `--status` and the new `RutliCosignerRolloutPending` alert

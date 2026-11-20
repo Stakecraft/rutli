@@ -106,7 +106,10 @@ What the script does, per node: refuses unless all other cosigners are Ready, de
 until the replacement runs the **target** revision and is Ready, waits `--settle` seconds, checks all
 three are Ready again, then moves on. It stops at the first timeout (`--timeout`, 600 s) and touches
 nothing else. It is resumable: a node already on the target revision and Ready is skipped, so run the
-same command again after a stop. `--only 2` rolls one node.
+same command again after a stop. `--only 2` rolls one node. `--force` restarts nodes that already run
+the target revision, for a change the pod template does not carry (a changed ConfigMap or pins, a rotated
+certificate): the chart has no config checksum annotation, so such a change never restarted pods, with or
+without OnDelete.
 
 - **What Ready proves.** The probe is `rutli-cosigner health` (see "Probes"): the key store is usable
   and the gRPC port accepts connections. It does not prove that the peer connections are back, so the
