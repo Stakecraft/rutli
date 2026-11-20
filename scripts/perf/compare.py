@@ -138,7 +138,7 @@ def compare(previous, current, threshold, floor_ms):
             problems.append(f"{prefix}{name}: {detail}")
 
     comparable = previous is not None and all(
-        previous.get(k) == current.get(k) for k in ("schema", "kind", "environment")
+        previous.get(k) == current.get(k) for k in ("schema", "kind", "environment", "client_policy")
     )
     # A diagnostic run (data on tmpfs) is never a baseline, nor compared with one.
     diagnostic = previous is not None and (previous.get("diagnostic") or current.get("diagnostic"))
@@ -147,7 +147,8 @@ def compare(previous, current, threshold, floor_ms):
         rows.append(("(all)", "latency", "", "", "",
                      f"not compared: a diagnostic run ({previous.get('diagnostic') or current.get('diagnostic')}) is never a baseline"))
     elif previous is not None and not comparable:
-        rows.append(("(all)", "latency", "", "", "", "not compared: the previous run is of another kind or environment"))
+        rows.append(("(all)", "latency", "", "", "",
+                     "not compared: the previous run is of another kind, environment or client deadline policy"))
     before = {s.get("name"): s for s in (previous or {}).get("scenarios", [])} if comparable else {}
     for scenario in current.get("scenarios", []):
         name = scenario.get("name")

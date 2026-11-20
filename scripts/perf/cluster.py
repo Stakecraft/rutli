@@ -75,10 +75,15 @@ class K8sCluster:
     """Three cosigners installed by scripts/perf/k8s-deploy.sh in one namespace; the load
     generator is the pod rutli-perf-loadgen there, driven with `kubectl exec`."""
 
-    def __init__(self, namespace, kind, load_path):
+    def __init__(self, namespace, kind, load_path, client_policy=None):
         self.ns = namespace
         self.kind = kind
         self.load_path = load_path
+        # The load generator's deadline policy for calls that fail over: flags added to every run.
+        self.client_flags = []
+        for flag, value in (client_policy or {}).items():
+            if value is not None:
+                self.client_flags += [f"--{flag.replace('_', '-')}", f"{value:g}"]
 
     @staticmethod
     def pod(node):
@@ -96,7 +101,7 @@ class K8sCluster:
         # through the API server for a whole run was reset on a real cluster.
         argv = [sys.executable, "-I", os.path.join(HERE, "k8s_loadgen.py"), "--namespace", self.ns, "--pod", pod, "--",
                 "--ca", "/certs/ca.crt", "--cert", "/certs/driver.crt", "--key", "/certs/driver.key",
-                "--timeout-secs", str(timeout_secs)]
+                "--timeout-secs", str(timeout_secs)] + self.client_flags
         for i, node in enumerate(NODES, start=1):
             # gRPC through the per-node Service; metrics through the pod's name behind the headless
             # Service, which the per-node Service does not expose.
@@ -836,6 +841,18 @@ def main():
     p.add_argument("--work", default="", help="upgrade suite: the --work directory of k8s-deploy.sh")
     p.add_argument("--values", action="append", default=[], help="upgrade suite: extra chart values, as for k8s-deploy.sh")
     p.add_argument("--load-path", choices=["grpc", "canton"], default="grpc")
+    p.add_argument("--sign-attempt-timeout-secs", type=float, default=None,
+                   help="the load generator's deadline per attempt of a signature (default: as "
+                        "--attempt-timeout-secs)")
+    p.add_argument("--attempt-timeout-secs", type=float, default=None,
+                   help="the load generator's deadline per attempt of another call that fails over, ECDH "
+                        "(default: one timeout per attempt, 30 s)")
+    p.add_argument("--request-timeout-secs", type=float, default=None,
+                   help="the load generator's budget per call across its attempts (default: none)")
+    p.add_argument("--driver-deadlines", action="store_true",
+                   help="the driver's policy: 5 s per sign attempt, 10 s per other attempt, 30 s per call "
+                        "(frost.sign-attempt-timeout, frost.attempt-timeout, frost.request-timeout), unless "
+                        "the flags above say otherwise")
     p.add_argument("--steady-secs", type=int, default=None, help="default: the profile's, else 60")
     p.add_argument("--rate", type=int, default=None, help="steady stream signatures/s; default: the profile's, else 20")
     p.add_argument("--disrupt-secs", type=int, default=120)
@@ -865,7 +882,17 @@ def main():
         if os.environ.get(name) and not shutil.which(shlex.split(os.environ[name])[0]):
             p.error(f"{name}={os.environ[name]!r}: not an executable")
 
-    cluster = K8sCluster(args.namespace, args.env_name, args.load_path)
+    if args.driver_deadlines:
+        args.sign_attempt_timeout_secs = args.sign_attempt_timeout_secs or 5.0
+        args.attempt_timeout_secs = args.attempt_timeout_secs or 10.0
+        args.request_timeout_secs = args.request_timeout_secs or 30.0
+    for flag in ("sign_attempt_timeout_secs", "attempt_timeout_secs", "request_timeout_secs"):
+        if getattr(args, flag) is not None and getattr(args, flag) <= 0:
+            p.error(f"--{flag.replace('_', '-')} must be positive")
+    client_policy = {"sign_attempt_timeout_secs": args.sign_attempt_timeout_secs,
+                     "attempt_timeout_secs": args.attempt_timeout_secs,
+                     "request_timeout_secs": args.request_timeout_secs}
+    cluster = K8sCluster(args.namespace, args.env_name, args.load_path, client_policy)
     # A diagnostic installation (k8s-deploy.sh --diagnostic-tmpfs) says so on its namespace; its
     # results are labelled and never a baseline.
     diagnostic = subprocess.run(["kubectl", "get", "namespace", args.namespace, "-o",
@@ -911,6 +938,9 @@ def main():
         "kind": "cluster",
         "environment": args.env_name,
         "load_path": args.load_path,
+        # How the load generator times out and fails over a call (None: its defaults); runs are
+        # compared only under the same policy.
+        "client_policy": client_policy if any(v is not None for v in client_policy.values()) else None,
         # "tmpfs": a diagnostic installation, never a configuration and never a baseline.
         "diagnostic": diagnostic,
         "commit": args.commit,
