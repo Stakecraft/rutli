@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use rutli_cosigner::intent;
 use rutli_cosigner::node::CeremonyKind;
 use rutli_cosigner::pb;
@@ -91,9 +91,26 @@ struct Cli {
     /// with DEADLINE_EXCEEDED). Default: none. The driver uses 30 s (frost.request-timeout).
     #[arg(long)]
     request_timeout_secs: Option<f64>,
+    /// Where a signature starts, as the driver's `frost.sign-leader`: `sticky` (the client's
+    /// leader, as every other call) or `rotate` (the next cosigner in turn that was not demoted
+    /// within the last 60 s; the sticky leader when none is healthy). Failover then walks the
+    /// ring from the start either way. Under `rotate` a signature never moves the sticky leader;
+    /// only a failure (the cosigner did not serve) does, and demotes that cosigner.
+    #[arg(long, value_enum, default_value_t = SignLeader::Sticky)]
+    sign_leader: SignLeader,
     #[command(subcommand)]
     command: Command,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum SignLeader {
+    Sticky,
+    Rotate,
+}
+
+/// How long a demoted cosigner is skipped as the start of a rotated signature (the driver's
+/// `frost.leader-recovery`).
+const LEADER_RECOVERY: Duration = Duration::from_secs(60);
 
 #[derive(Subcommand)]
 enum Command {
@@ -225,6 +242,7 @@ struct Ctx {
     sign_attempt: Duration,
     attempt: Duration,
     budget: Option<Duration>,
+    rotate_signs: bool,
 }
 
 impl Ctx {
@@ -245,6 +263,7 @@ impl Ctx {
             attempt,
             sign_attempt: positive_secs(cli.sign_attempt_timeout_secs, "--sign-attempt-timeout-secs")?.unwrap_or(attempt),
             budget: positive_secs(cli.request_timeout_secs, "--request-timeout-secs")?,
+            rotate_signs: cli.sign_leader == SignLeader::Rotate,
         })
     }
 
@@ -319,6 +338,12 @@ fn not_serving(status: &tonic::Status) -> bool {
 struct Client {
     conns: Vec<SignerClient<Channel>>,
     leader: AtomicUsize,
+    /// The rotation counter of rotated signatures: one per client, as one per driver.
+    cursor: AtomicUsize,
+    /// When each cosigner last failed to serve this client: nanoseconds since `epoch`, plus one
+    /// (0 = never).
+    demoted: Vec<AtomicU64>,
+    epoch: Instant,
 }
 
 /// How one request travelled: the codes that made the client move to another cosigner, and the
@@ -366,6 +391,39 @@ fn backoff(attempt: u32) -> Duration {
 }
 
 impl Client {
+    fn new(conns: Vec<SignerClient<Channel>>, leader: usize) -> Self {
+        let demoted = (0..conns.len()).map(|_| AtomicU64::new(0)).collect();
+        Client { conns, leader: AtomicUsize::new(leader), cursor: AtomicUsize::new(0), demoted, epoch: Instant::now() }
+    }
+
+    fn now(&self) -> u64 {
+        u64::try_from(self.epoch.elapsed().as_nanos()).unwrap_or(u64::MAX).saturating_add(1)
+    }
+
+    /// Not demoted within [`LEADER_RECOVERY`].
+    fn healthy(&self, i: usize) -> bool {
+        let at = self.demoted.get(i).map_or(0, |d| d.load(Ordering::Relaxed));
+        at == 0 || self.now().saturating_sub(at) > LEADER_RECOVERY.as_nanos() as u64
+    }
+
+    /// Cosigner `i` did not serve: it is demoted, and if it is the sticky leader the next one is
+    /// (a compare-and-set: it never overrides a newer leader).
+    fn demote(&self, i: usize) {
+        if let Some(d) = self.demoted.get(i) {
+            d.store(self.now(), Ordering::Relaxed);
+        }
+        let next = (i + 1) % self.conns.len();
+        let _ = self.leader.compare_exchange(i, next, Ordering::Relaxed, Ordering::Relaxed);
+    }
+
+    /// Where a rotated signature starts: the next cosigner in turn that is healthy, else the
+    /// sticky leader.
+    fn sign_start(&self) -> usize {
+        let n = self.conns.len();
+        let first = self.cursor.fetch_add(1, Ordering::Relaxed) % n;
+        (0..n).map(|k| (first + k) % n).find(|&i| self.healthy(i)).unwrap_or(self.leader.load(Ordering::Relaxed) % n)
+    }
+
     /// Run `call` against the leader; while the answer is [`not_serving`] and `failover` is on,
     /// move to the next cosigner and stay there. One attempt at a time, each with the deadline
     /// `limit`, cut to what is left of `budget` (the whole call's, across attempts) if there is
@@ -376,6 +434,7 @@ impl Client {
         failover: bool,
         limit: Duration,
         budget: Option<Duration>,
+        start: Option<usize>,
         call: impl Fn(SignerClient<Channel>) -> Fut,
     ) -> (Result<T, tonic::Status>, Route)
     where
@@ -383,7 +442,8 @@ impl Client {
     {
         let n = self.conns.len();
         let mut moves = Vec::new();
-        let mut at = self.leader.load(Ordering::Relaxed) % n;
+        // `start`: a rotated signature's own start; it never moves the sticky leader.
+        let mut at = start.unwrap_or_else(|| self.leader.load(Ordering::Relaxed)) % n;
         let began = Instant::now();
         loop {
             let Some(deadline) = attempt_deadline(limit, budget, began.elapsed(), moves.len()) else {
@@ -399,12 +459,20 @@ impl Client {
             #[allow(clippy::indexing_slicing)]
             let conn = self.conns[at].clone();
             match bounded(deadline, call(conn)).await {
+                // A cosigner that did not serve is demoted, the last one asked too; the sticky
+                // leader moves only through `demote`'s compare-and-set, so a slower call never
+                // moves it back to a cosigner another call has just demoted.
                 Err(status) if failover && not_serving(&status) && moves.len() + 1 < n => {
                     moves.push(code_name(status.code()));
+                    self.demote(at);
                     at = (at + 1) % n;
-                    self.leader.store(at, Ordering::Relaxed);
                 }
-                answer => return (answer, Route { failovers: moves, leader: Some(at) }),
+                answer => {
+                    if failover && matches!(&answer, Err(status) if not_serving(status)) {
+                        self.demote(at);
+                    }
+                    return (answer, Route { failovers: moves, leader: Some(at) });
+                }
             }
         }
     }
@@ -492,8 +560,9 @@ impl Run {
                         // driver does, so the cosigners charge it once.
                         let request =
                             pb::SignRequest { key_id: key_id.clone(), message: message.clone(), intent: Some(signed) };
+                        let start = self.ctx.rotate_signs.then(|| client.sign_start());
                         let (answer, moves) = client
-                            .call(failover, limit, budget, |mut c| {
+                            .call(failover, limit, budget, start, |mut c| {
                                 let request = request.clone();
                                 async move { c.sign(request).await }
                             })
@@ -505,7 +574,7 @@ impl Run {
             Op::Ecdh { key_id, peer_point, expected } => {
                 let request = pb::EcdhDeriveRequest { key_id: key_id.clone(), peer_point: peer_point.clone() };
                 let (answer, moves) = client
-                    .call(failover, limit, budget, |mut c| {
+                    .call(failover, limit, budget, None, |mut c| {
                         let request = request.clone();
                         async move { c.ecdh_derive(request).await }
                     })
@@ -540,7 +609,7 @@ impl Run {
                     };
                     let request = pb::DkgRequest { key_id: key_id.clone(), intent: Some(signed) };
                     let (answer, moves) = client
-                        .call(false, limit, budget, |mut c| {
+                        .call(false, limit, budget, None, |mut c| {
                             let request = request.clone();
                             async move { c.dkg(request).await }
                         })
@@ -578,7 +647,7 @@ impl Run {
                 Ok(signed) => {
                     let request = pb::RefreshRequest { key_id: key_id.clone(), intent: Some(signed) };
                     let (answer, moves) = client
-                        .call(false, limit, budget, |mut c| {
+                        .call(false, limit, budget, None, |mut c| {
                             let request = request.clone();
                             async move { c.refresh(request).await }
                         })
@@ -628,10 +697,7 @@ async fn generate(run: Arc<Run>, load: &Load) -> Result<stats::ClientReport, Fai
     let prefer = load.prefer.as_deref().map(|name| ctx.index_of(name)).transpose()?;
     let mut clients = Vec::with_capacity(load.clients);
     for i in 0..load.clients {
-        clients.push(Arc::new(Client {
-            conns: ctx.connect_all()?,
-            leader: AtomicUsize::new(prefer.unwrap_or(i % ctx.targets.len())),
-        }));
+        clients.push(Arc::new(Client::new(ctx.connect_all()?, prefer.unwrap_or(i % ctx.targets.len()))));
     }
     let mut connect_report = None;
     if load.eager_connect {
@@ -1187,6 +1253,26 @@ mod tests {
         assert!(positive_secs(Some(-1.0), "--x").is_err());
         assert_eq!(positive_secs(Some(0.5), "--x").unwrap(), Some(Duration::from_millis(500)));
         assert_eq!(positive_secs(None, "--x").unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn rotated_signs_skip_a_demoted_cosigner_and_never_move_the_sticky_leader() {
+        let conns: Vec<SignerClient<Channel>> = (0..3)
+            .map(|_| SignerClient::new(Endpoint::from_static("http://127.0.0.1:1").connect_lazy()))
+            .collect();
+        let c = Client::new(conns, 0);
+        assert_eq!((0..6).map(|_| c.sign_start()).collect::<Vec<_>>(), vec![0, 1, 2, 0, 1, 2]);
+        assert_eq!(c.leader.load(Ordering::Relaxed), 0);
+        // Node 1 failed: skipped as a start, and the sticky leader (0) stays.
+        c.demote(1);
+        assert_eq!((0..6).map(|_| c.sign_start()).collect::<Vec<_>>(), vec![0, 2, 2, 0, 2, 2]);
+        assert_eq!(c.leader.load(Ordering::Relaxed), 0);
+        // The leader failed: the sticky leader moves on (compare-and-set: 0 -> 1); demoting 2,
+        // not the leader, leaves it. With every node demoted a signature starts at the sticky leader.
+        c.demote(0);
+        c.demote(2);
+        assert_eq!(c.leader.load(Ordering::Relaxed), 1);
+        assert!((0..3).all(|_| c.sign_start() == 1));
     }
 
     #[test]
