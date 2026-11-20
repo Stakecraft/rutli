@@ -32,7 +32,9 @@ concurrency:
 jobs:
   guard:
     name: Installed guard matches the repository's
-    runs-on: ${{ vars.PERF_RUNNER || vars.CI_RUNNER || 'ubuntu-24.04' }}
+    # As ci.yml: a pull request from a fork, and anything Dependabot starts, never go to the self-hosted
+    # runner (its job-started guard refuses them as well).
+    runs-on: ${{ github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.PERF_RUNNER || vars.CI_RUNNER) || 'ubuntu-24.04' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
