@@ -454,7 +454,7 @@ failure class being fixed. `KeyStore::reseal_plaintext_shares` must become type-
 **Do not claim secure erasure on delete.** On COW filesystems, wear-levelled SSDs and snapshotted
 PVs, removing a file does not destroy bytes. Honest statement: delete removes the only referenced
 copy; true destruction requires master-secret rotation (a `rewrap` ceremony that re-seals every live
-key under a new master, rendering old sealed blobs — including in backups — undecryptable).
+key under a new master, rendering old sealed blobs — including in backups — undecryptable once the old secret is destroyed).
 
 > **Shipped, with the tagged union simplified to one tag.** One directory, one file per key, one
 > sealed envelope, the same tmp → fsync → rename → fsync-dir write path. Only hosted keys carry

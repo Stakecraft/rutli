@@ -34,7 +34,7 @@ export KUBECONFIG=...
 scripts/perf/k8s-deploy.sh install --namespace rutli-perf --previous \
   --image <registry>/rutli-perf:<tag> --work ./perf-work [--storage-class NAME] [--pull-secret NAME] [--values extra.yaml]
 
-scripts/perf/cluster.py --namespace rutli-perf --profile scripts/perf/profiles/placeholder.json \
+scripts/perf/cluster.py --namespace rutli-perf --profile scripts/perf/profiles/devnet-validator.json \
   --upgrade-image <registry>/rutli-perf:<tag> --work ./perf-work --env-name <name> --out perf-out/cluster.json
 
 scripts/perf/compare.py last-week/cluster.json perf-out/cluster.json   # exit 1 on a regression
@@ -61,7 +61,7 @@ of the same name.
 | `connect` | N new clients connecting at the same moment (`connect.clients` of the profile: 50, 200, 500), one signature each, with each client's connection time recorded apart from its request (`rutli-loadgen --eager-connect`) and the cosigners' `rutli_grpc_handshake_timeouts_total` | never: a measurement of what many clients connecting together costs, for example every driver reconnecting after a cosigner restart |
 | `disrupt` | under the steady stream: a node lost, a data volume lost, a partition between two cosigners' nodes (`partition`), one cosigner cut off from both others (`partition-isolated`, as when a data centre loses its links), added network delay; afterwards, rounds of signatures until the cluster signs within the SLO again (`recovery_secs`) | a signature fails, a cosigner is not healthy afterwards, or the cluster does not sign normally again within `--settle-secs` (600); a step without its hook is reported as skipped |
 | `keys` | for each key count of the profile (1, 10, 100): that many FROST keys and hosted keys over ten tenant prefixes (`perf-t<n>-…`), sign latency over all of them, and each cosigner's Peer API `ListKeys` time | a setup, signature or listing fails |
-| `ramp` | the profile's baseline load × 1, 3, 10, 30, 100, … for `step_secs` each | never: the ramp stops at the first step over the SLO or with an error, and reports the last step that passed as the **headroom factor** |
+| `ramp` | the profile's baseline load × each factor (1, 3, 10, 20, 30, 45, 70, 100, 150, 200, 300 in `devnet-validator`); a step runs the baseline's phases one after another (average, busiest minute, burst), each × the factor | never: the last factor at which every phase passed is the **headroom factor**. A phase over the SLO or with an error drops out and the ramp goes on with the others, so each part of the real load gets its own headroom (`real_load_headroom`) |
 
 They run in the order `upgrade`, `scenarios`, `connect`, `keys`, `ramp`, `disrupt` (disruption last, so that
 what it leaves behind cannot skew the measurements of the others); `--suites` picks a subset.
@@ -76,6 +76,48 @@ as the rig's too.
 The load generator runs detached in its pod: `scripts/perf/k8s_loadgen.py` starts each run with a
 short `kubectl exec`, polls for its end, and fetches the report afterwards, retrying each call, so
 no stream to the API server is held open for the length of a run.
+
+## Diagnostic pass
+
+`cluster.py --diagnose` answers what limits the throughput, instead of running the suites. In order
+of what each step tells for its cost:
+
+1. **Flush cost.** On each cosigner's own data volume, before any load, in a dot-directory removed
+   afterwards: 100 writes with `O_DSYNC` (the device), and 50 rounds of what one released share
+   does (append a line and `fdatasync`, create a file and `fsync` it, `fsync` its directory), with
+   the shell's own cost subtracted: milliseconds per share on each node. A leader signs with itself
+   and the lowest other identifier ("leader first, then by identifier"), so with requests spread
+   evenly over the leaders, cosigner 1 releases a share for every signature, cosigner 2 for two
+   thirds and cosigner 3 for one third. The lowest of `1000 / (ms × fraction)` over the nodes is
+   what the flushes alone would allow (`predicted_ceiling_signs_per_sec`), an upper bound to hold
+   against the measured plateau.
+2. **Fine ramp around the knee** (`diagnose.factors` of the profile, `step_secs` each), signing only
+   unless `diagnose.with_ecdh` is set, spread over every load generator pod. Readings bracket the
+   middle of each step (not the generators' start and end). Per step and per container, from
+   cgroup v2 (the container's own cgroup, from `/proc/self/cgroup`): CPU cores used, the share
+   of time throttled by the CPU limit, CPU and IO pressure (the share of time tasks waited), writes
+   per second, memory; the achieved rate against the offered one, requests never sent, the
+   cosigners' p99, errors by code and message (so a session-cap refusal is told from another
+   `UNAVAILABLE`), and CPU milliseconds per signature. A step where a generator used most of its
+   CPU limit, or requests were not sent while no cosigner waited for CPU or IO, is marked
+   `generator_bound`; such a step, or one without every cosigner's readings, gives no verdict and
+   cannot be the knee. The ramp stops one step past the knee.
+3. **Keys.** The knee's (overloaded) rate over 2, 20 and 200 keys (`diagnose.key_counts`; without
+   a knee, the highest step's rate, `keys_rate_from`):
+   throughput rising with the key count means a per-key lock; flat means a limit shared by all
+   keys (the volume, the CPU).
+
+Install with `k8s-deploy.sh --generators 2` (or more) so that no step is generator-bound. To size
+the flush cost directly, install a second time with `--diagnostic-tmpfs` and run `--diagnose`
+again, into a namespace that does not exist yet: the cosigners then keep their data on an
+in-memory volume, with a 512 Mi memory limit to hold it. **That is a diagnostic only, never a
+configuration**: everything is lost on any restart, the namespace and every result are
+labelled `diagnostic: tmpfs`, `compare.py` never uses such a run as a baseline, and the upgrade
+and disrupt suites refuse to run there. The chart has no value for it: the suite patches the
+StatefulSets of that test installation.
+
+A bigger cosigner node type is the cluster's choice; compare a run on it with one on the smaller
+type: throughput that scales with the cores means CPU, flat means a lock or the volume.
 
 ## Provider hooks
 
@@ -106,28 +148,69 @@ node containers between the two cosigner pods), which CI uses. Hooks for a real 
 
 ## The load profile
 
-A JSON file ([`scripts/perf/profiles/placeholder.json`](../scripts/perf/profiles/placeholder.json)):
+[`scripts/perf/profiles/devnet-validator.json`](../scripts/perf/profiles/devnet-validator.json) is
+the load of a DevNet validator, measured over 7 days from its cosigners' metrics:
+
+| Measure | Value |
+|---|---|
+| Signatures a day | 5 470 (0 errors) |
+| Average rate | 0.063 /s |
+| 1-minute rate: median / p99 / max | 0.044 / 0.44 / 0.87 /s |
+| Shortest burst seen | 2.3 /s |
+| Sign sessions open at once, max | 7 |
+| Sign latency at the leader, p50 / p99 | 88 ms / 212 ms |
+| Hosted-key operations (ECDH, decrypt) | none |
+
+x1 is the shape of that load: each ramp step runs the average for 120 s, the busiest minute for
+60 s and the burst for 10 s, every rate times the step's factor.
 
 ```json
 {
-  "name": "placeholder",
+  "name": "devnet-validator",
   "slo": { "p99_ms": 1000 },
   "steady": { "sign_per_sec": 20, "secs": 60 },
-  "baseline": { "sign_per_sec": 1, "sign_keys": 2, "ecdh_per_sec": 0.2, "ecdh_keys": 1 },
-  "step_secs": 300,
-  "factors": [1, 3, 10, 30, 100, 300],
-  "keys": { "counts": [1, 10, 100], "sign_per_sec": 5, "secs": 60 },
+  "real": [
+    { "name": "average", "per_sec": 0.063, "min_secs": 60 },
+    { "name": "busiest minute", "per_sec": 0.87, "min_secs": 60 },
+    { "name": "burst", "per_sec": 2.3, "min_secs": 0 }
+  ],
+  "baseline": {
+    "sign_keys": 2, "ecdh_keys": 0,
+    "phases": [
+      { "name": "average", "sign_per_sec": 0.063, "secs": 120 },
+      { "name": "busiest-minute", "sign_per_sec": 0.87, "secs": 60 },
+      { "name": "burst", "sign_per_sec": 2.3, "secs": 10 }
+    ]
+  },
+  "factors": [1, 3, 10, 20, 30, 45, 70, 100, 150, 200, 300],
+  "keys": { "counts": [1, 11, 100], "sign_per_sec": 5, "secs": 60 },
   "connect": { "clients": [50, 200, 500] },
+  "diagnose": { "sign_per_sec": 1, "factors": [30, 50, 70, 100, 130, 160, 200, 250, 300], "step_secs": 120, "key_counts": [2, 20, 200] },
   "max_rss_mib": 256
 }
 ```
 
-`baseline` is the load of one participant: signatures and ECIES decryptions per second, and over
-how many keys. The shipped numbers are placeholders; real ones come from the soak cluster's
-metrics (`rutli_sign_requests_total`, `rutli_hosted_key_ops_total`). The hosted-key decryption
-limit is per key and node (`hosted_keys.decrypt_rate_limit_per_min`, 6000 by default): spread a
-high decryption rate over enough `ecdh_keys`, or the ramp measures the limit.
-`scripts/perf/profiles/smoke.json` is the short profile CI uses.
+The run reports headroom three ways:
+
+- the **headroom factor**: how many times the whole shape the cluster carries within the SLO and
+  without an error. The burst gives out first, so this is about the burst's headroom;
+- `real_load_headroom`, against each measure in `real`: the highest signing rate that passed in a
+  phase long enough to stand for it (`min_secs`: a busiest minute needs a phase of a minute or
+  more, a burst does not), divided by the measure's rate. `lower_bound` marks a measure whose
+  phases never failed (the factors ran out first);
+- with `--diagnose`, `plateau_vs_real`: the diagnosis's highest throughput divided by each measure.
+
+One quiet validator is a floor, not a forecast: a validator with busy applications, or a super
+validator, signs more. The steady stream of the disruption suite (20 /s) is far above this load on
+purpose, so that a recovery is measured in signatures, not in seconds of silence. Without
+`phases`, a profile's `baseline` is one phase of `step_secs` with its own rates.
+
+[`synthetic-ecdh.json`](../scripts/perf/profiles/synthetic-ecdh.json) is **not** a measurement:
+signing plus hosted-key ECDH, for clusters that host encryption keys. The measured validator sends
+no ECDH. The hosted-key decryption limit is per key and node
+(`hosted_keys.decrypt_rate_limit_per_min`, 6000 by default): spread a high decryption rate over
+enough `ecdh_keys`, or the ramp measures the limit. `scripts/perf/profiles/smoke.json` is the short
+profile CI uses; its numbers mean nothing.
 
 ## On a hardened cluster
 

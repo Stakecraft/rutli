@@ -18,7 +18,8 @@ procedure is B4 (`docs/migration.md`).
 key brought in by this ceremony **did**: on the old node, in its database, in its WAL and replicas,
 in every backup of that database, in any export file, and — for a few seconds — in the dealer's
 memory. Splitting it protects the future (no single cosigner can sign; one lost cosigner is
-survivable; after the first refresh, a stolen share or bundle is worthless). It **cannot un-expose
+survivable; after the first refresh, a dealt share no longer combines with the live ones, but dealt
+shares still combine with each other until the bundles and the sealing keys are destroyed, §9). It **cannot un-expose
 the past**: anyone who copied the key before destruction (§7) holds it forever, and the namespace key
 cannot be rotated. For a new node, use DKG. Use this ceremony only to keep an identity that already
 exists.
@@ -53,8 +54,11 @@ secret. A person who holds the key file must never also hold `t` seal secrets.
   ceremony and this key id, under an AAD binding node, cluster, key id, ceremony id, group key,
   fingerprint and public-key-package digest (`frost/cosigner/src/share_delivery.rs`). The secret half
   of that key lives sealed under the node's own seal key (`data_dir/ceremony/`, outside `keys/`, so
-  never in a backup) and is deleted the moment the share is installed: from then on the bundle opens
-  for nobody.
+  never in a backup) and is deleted the moment the share is installed. Deleted means unlinked: its bytes stay in free blocks
+  and snapshots, sealed under the node's seal key. A bundle, a copy of that file and the node's seal key
+  together reopen the dealt share, so the bundle stays sensitive until it is destroyed and the node's
+  seal key is rotated and the old one destroyed
+  ([key-material-handling.md](key-material-handling.md)).
 - **A request proves which node made it — forged requests are the dangerous direction.** A request
   names the key the dealer seals a *real* share to; whoever substitutes `t` requests on their way to
   the dealer gets `t` real shares, i.e. the key. So each request is signed with the node's mTLS key
@@ -105,10 +109,14 @@ missing from it survives the ceremony.
 | L8 | Operator machines | laptops, jump hosts, shell history, download folders | |
 | L9 | Dealer media | the live-boot medium and any USB stick that carried the key file | |
 
-Created by the ceremony, and also on the destruction list: the share bundles (sealed, dead after
-install), any copy of a bundle inside a pod's `/tmp`, and every cosigner backup taken **between
-install and the first refresh** (they hold the dealt shares, sealed; `t` of them plus the seal secret
-are the key).
+Created by the ceremony, and also on the destruction list: the share bundles (sealed; **not dead after
+install**, §2), any copy of a bundle inside a pod's `/tmp` (a disk-backed volume on the Kubernetes
+node), and every cosigner backup taken **between install and the first refresh** (they hold the
+dealt shares, sealed; `t` of them plus the seal secret are the key). Also: each cosigner's data
+volume (the pending recipient file, unlinked after install, stays in free blocks), its backup volume
+and old backup directories, snapshots of both, old values of the seal Secret and the escrow of the
+legacy master, if there is one. Their way out is rotating each node's sealing key after the first
+refresh and destroying the old one: [key-material-handling.md](key-material-handling.md).
 
 ### 3.3 Checklist
 
@@ -274,7 +282,10 @@ and the cosigners refuse the refresh. The operator role cannot refresh unless it
 pkp digest**. From here on the dealt shares — every bundle, every copy the dealer ever held — no
 longer combine with the live ones. Be precise about what this buys: refresh re-randomises the
 sharing; it does **nothing** about the whole key in §3.2's locations. Its job is to make a leaked
-dealt share useless, not to undo the key's history.
+dealt share stop combining with the live ones, not to undo the key's history. The dealt shares still
+combine with each other: `t` of them, from the bundles or from any pre-refresh backup of the nodes,
+are the key, for ever, while they and the sealing keys that open them exist. After Gate C, rotate each
+node's sealing key and destroy the old one ([key-material-handling.md](key-material-handling.md)).
 
 ### Step 7 — founding backups
 
@@ -303,9 +314,10 @@ per item in the destruction record (§8):
 | L4 S3 | delete **every version and delete marker** (`list-object-versions`), not just current objects; if object lock is on, record the retention end date — the copy exists until then | version listings before/after |
 | L5 snapshots | delete every snapshot taken while the key was in the DB | provider listing |
 | L6 identities dumps | delete every copy | listing |
-| L7/L8 exports, laptops | delete and empty trash; note where secure erase is impossible (SSD, cloud sync) | operator statement |
-| L9 dealer media | destroy or securely wipe the boot medium and transfer media | operator statement |
-| Bundles, pod `/tmp` copies | delete (they are dead already; this is hygiene) | listing |
+| L7/L8 exports, laptops | keep them only on a memory disk or encrypted image and destroy that place ([key-material-handling.md](key-material-handling.md)); note where erasure is impossible (SSD, cloud sync, backups) | operator statement |
+| L9 dealer media | destroy the boot medium and transfer media physically (overwriting flash media proves nothing) | operator statement |
+| Bundles, pod `/tmp` copies (and the Kubernetes node's disk under them) | destroy. A bundle is not dead after install: with a copy of the node's pending recipient file and its seal key it reopens the dealt share | listing |
+| Each cosigner's data volume, backup volume and their snapshots | rotate the node's sealing key and destroy the old one (the data volume holds the recipient files in free blocks, the backup volume the pre-refresh shares as tars) | `keyfile status`, the Secret history |
 | Pre-refresh cosigner backups | delete any backup taken between Step 4 and Step 6 | listing |
 
 **Residual exposure, stated plainly.** Deletion on SSDs, copy-on-write filesystems, cloud storage

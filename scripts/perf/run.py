@@ -60,6 +60,27 @@ CLUSTER_ANSWER = re.compile(
     r"Unavailable|DataLoss|Unauthenticated)\b|not healthy after|do not agree on a cluster id)")
 
 
+def context_verdict(handshake_timeouts, generator_throttled, fd_peak, fd_limit):
+    """Whose side gave out when requests ended in transport errors: the cosigners cutting slow
+    handshakes (product behaviour under load), the load generator starved of CPU or descriptors
+    (the rig), or not decided by these readings."""
+    try:
+        limit = int(fd_limit)
+    except (TypeError, ValueError):
+        limit = None
+    rig = []
+    if generator_throttled is not None and generator_throttled > 0.05:
+        rig.append(f"generator throttled {generator_throttled:.0%}")
+    if fd_peak is not None and limit and fd_peak >= 0.9 * limit:
+        rig.append(f"generator descriptors {fd_peak} of {limit}")
+    if handshake_timeouts and handshake_timeouts > 0:
+        cut = f"handshake timeouts {handshake_timeouts:g} > 0: the cosigners cut slow handshakes"
+        return cut + (f" (and the rig was strained: {', '.join(rig)})" if rig else "")
+    if rig:
+        return "the rig: " + ", ".join(rig)
+    return "undecided: no handshake timeouts, generator not throttled or near its descriptor limit"
+
+
 def rig_failure(returncode, stderr):
     """Whether a failed rutli-loadgen run is the rig's failure rather than the cluster's."""
     return not (returncode == 2 and CLUSTER_ANSWER.search(stderr or ""))
@@ -99,6 +120,10 @@ class ComposeCluster:
         argv += ["--ca", "/certs/ca.crt", "--cert", "/certs/driver.crt", "--key", "/certs/driver.key"]
         argv += ["--timeout-secs", str(timeout_secs)]
         return argv + self._targets() + args
+
+    @staticmethod
+    def generator_fd_limit():
+        return 65536  # the --ulimit of loadgen_argv
 
     def exec(self, node, shell):
         out = subprocess.run(
@@ -188,6 +213,7 @@ class Runner:
         of the body's loads by its own."""
         log(f"scenario {name}")
         before = self.resources()
+        gen_before = self.generator_cgroup()
         started = time.time()
         try:
             loads = body()
@@ -197,6 +223,11 @@ class Runner:
         # Connections of the run are closed by now; give the cosigners a moment to notice.
         time.sleep(3)
         after = self.resources()
+        generator = {}
+        if gen_before is not None:
+            import diagnose
+            generator = diagnose.derive(gen_before, self.generator_cgroup() or {}, time.time() - started)
+        self.last_generator = generator
 
         checks = []
 
@@ -224,6 +255,10 @@ class Runner:
             # (cluster.py records that), not by its health the moment the load ends.
             unhealthy = sorted(n for n, ok in load.get("health", {}).items() if not ok and n not in restarted)
             check("every cosigner is healthy afterwards", not unhealthy, ", ".join(unhealthy))
+        if unexpected:
+            # Enough context in the log to tell the cluster from the rig without the artifact: what
+            # the cosigners counted at their accept path, and the messages behind the codes.
+            unexpected.append(self.connection_context(loads))
         check("no request ended in a code the scenario does not allow", not unexpected, "; ".join(unexpected))
         check("every answer verifies", bad == 0, f"{bad} answers did not verify: {samples.get('OK', '')[:160]}")
         for code in required:
@@ -267,6 +302,52 @@ class Runner:
         }
         self.results.append(result)
         return result, check
+
+    def generator_cgroup(self):
+        """The first load generator pod's cgroup readings (Kubernetes), or None where the
+        generator has no lasting container to read (Compose runs one per load)."""
+        read = getattr(self.cluster, "generator_cgroup", None)
+        if read is None:
+            return None
+        import diagnose
+        return diagnose.parse_cgroup(read(diagnose.CGROUP_SCRIPT) or "")
+
+    def connection_context(self, loads):
+        """One line: the cosigners' handshake timeouts and accept errors during the loads, their
+        open connections and connection limit at the end, the generator's CPU throttling and
+        descriptors, the error messages behind the codes, and a verdict: whose side gave out."""
+        timeouts = accept = 0
+        fd_peak = fd_limit = None
+        conns, limits, messages = {}, {}, {}
+        for load in loads:
+            server = load.get("server", {})
+            for k, v in server.get("counters", {}).items():
+                if k.startswith("rutli_grpc_handshake_timeouts_total"):
+                    timeouts += v
+                elif k.startswith("rutli_grpc_accept_errors_total"):
+                    accept += v
+            for node, t in server.get("targets", {}).items():
+                for k, v in t.get("gauges", {}).items():
+                    if k == "rutli_grpc_connections":
+                        conns[node] = v
+                    elif k == "rutli_grpc_connection_limit":
+                        limits[node] = v
+            for msg, n in load.get("client", {}).get("error_messages", {}).items():
+                messages[msg] = messages.get(msg, 0) + n
+            client = load.get("client", {})
+            if client.get("fd_peak") is not None:
+                fd_peak = max(fd_peak or 0, client["fd_peak"])
+                fd_limit = client.get("fd_limit") or fd_limit
+        fd_limit = fd_limit or self.cluster.generator_fd_limit()
+        gen = getattr(self, "last_generator", {}) or {}
+        throttled = gen.get("cpu_throttled_share")
+        top = sorted(messages.items(), key=lambda kv: -kv[1])[:4]
+        verdict = context_verdict(timeouts, throttled, fd_peak, fd_limit)
+        return (f"verdict: {verdict}; cosigners: handshake timeouts {timeouts:g}, accept errors {accept:g}, "
+                f"connections at the end {conns or '?'}, connection limit {limits or '?'}; generator: CPU throttled "
+                f"{'?' if throttled is None else f'{throttled:.0%}'}, CPU cores {gen.get('cpu_cores', '?')}, "
+                f"descriptors peak {fd_peak if fd_peak is not None else '?'} of {fd_limit}; messages: "
+                + "; ".join(f"{n} x {m[:120]}" for m, n in top))
 
     def close(self, result):
         result["passed"] = all(c["ok"] for c in result["checks"])
@@ -391,21 +472,25 @@ class Runner:
         self.close(r)
 
         storm = f"perf-storm-{int(time.time())}"
-        # What a busy or refusing node answers. ALREADY_EXISTS only where the key is contested.
-        # INTERNAL too: a leader passes a member's ABORTED ("a dkg ceremony ... is already in
-        # progress") on to the client as INTERNAL (seen on the first run, reported). The scenario
-        # is about the nodes surviving the storm, not about that code.
+        # What a busy or refusing node answers. INTERNAL too: a leader passes a member's ABORTED
+        # ("a dkg ceremony ... is already in progress") on to the client as INTERNAL (#146). The
+        # distinct storm is about the nodes surviving it, not about that code.
         busy = ("UNAVAILABLE", "ABORTED", "FAILED_PRECONDITION", "RESOURCE_EXHAUSTED", "DEADLINE_EXCEEDED", "INTERNAL")
-        ceremony_codes = [busy, busy + ("ALREADY_EXISTS",), ("FAILED_PRECONDITION", "ABORTED")]
+        # The contested key: every client retries a contended answer with jittered backoff, as
+        # Canton does, so each ends with the key generated or ALREADY_EXISTS pointing at it.
+        ceremony_codes = [busy, ("ALREADY_EXISTS",), ("FAILED_PRECONDITION", "ABORTED")]
 
         def ceremonies():
             return [
                 # More DKGs at once than a node holds ceremony sessions (64).
                 self.loadgen(["dkg", "--prefix", storm, "--name", "dkg-distinct", "--count", "80", "--clients", "80",
                               "--prefer", "cosigner1"], timeout_secs=120, wall_timeout=900),
-                # One key, ten DKGs at once: whatever is answered OK must be the same key.
-                self.loadgen(["dkg", "--prefix", f"{storm}-same", "--same-key", "--name", "dkg-same-key", "--count", "10",
-                              "--clients", "10"], timeout_secs=120, wall_timeout=900),
+                # One key, ten DKGs at once, each retrying ABORTED up to six times (0.5 s doubling
+                # to 4 s, jittered): every answer OK must be the same key, and every ALREADY_EXISTS
+                # must point at that key (the generator asks GroupKey).
+                self.loadgen(["dkg", "--prefix", f"{storm}-same", "--same-key", "--retry-aborted", "6",
+                              "--name", "dkg-same-key", "--count", "10", "--clients", "10"],
+                             timeout_secs=120, wall_timeout=900),
                 # A refresh right after a refresh: allowed or refused, never a broken key.
                 self.loadgen(["refresh", "--key", KEY_SECOND, "--name", "refresh-twice", "--count", "2", "--clients", "1"],
                              timeout_secs=120, wall_timeout=900),
@@ -413,7 +498,15 @@ class Runner:
 
         r, check = self.scenario("limit-ceremony", ceremonies, allowed=ceremony_codes)
         if len(r["loads"]) == 3 and "failed" not in r["loads"][1]:
-            check("a DKG of the contested key succeeded", r["loads"][1].get("client", {}).get("ok", 0) >= 1)
+            # Retrying clients must converge: one group key exists, and every client ended with it
+            # (OK) or with ALREADY_EXISTS for it. Any other end is refused above as an unexpected
+            # code; two different keys are a wrong answer ("every answer verifies").
+            client = r["loads"][1].get("client", {})
+            winners, exists = client.get("ok", 0), client.get("errors", {}).get("ALREADY_EXISTS", 0)
+            r["contested_key_winners"] = winners
+            check("the ten retrying clients of the contested key converged on one group key",
+                  winners + exists == 10 and not client.get("bad_answers"),
+                  f"OK {winners}, ALREADY_EXISTS {exists}, other ends {client.get('errors')}")
         if r["loads"] and "failed" not in r["loads"][0]:
             check("some of the 80 DKGs succeeded", r["loads"][0].get("client", {}).get("ok", 0) >= 1)
         self.close(r)

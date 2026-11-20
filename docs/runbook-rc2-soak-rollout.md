@@ -36,7 +36,7 @@ What changes for the soak:
 
 ```sh
 umask 077
-D=$(mktemp -d /dev/shm/rutli-rc2.XXXXXX 2>/dev/null || mktemp -d)
+D=$(mktemp -d "${RUTLI_WORK:?mount the memory disk first, docs/key-material-handling.md}/rutli-rc2.XXXXXX")
 cd <repo>   # at the rc.2 release commit
 ```
 
