@@ -30,9 +30,13 @@ Status: **pre-production, not yet audited**. Use this as the engagement brief an
 - [ ] Driver tests: `scripts/publish-canton-deps.sh v3.6.1` (the KMS Driver API is not on Maven
   Central), then `sbt driver/test`
 - [ ] CI TLS smoke: `scripts/ci-frost-tls-smoke.sh` (also `.github/workflows/ci.yml` job `frost-tls-smoke`)
+- [ ] End-to-end ceremony scripts in CI (`.github/workflows/e2e.yml`: split, carry, ECIES hosted keys), and the whole migration procedure on Canton 3.6.1 (`scripts/e2e-migration.sh`)
+- [ ] Property tests and micro-benchmarks (`frost`, `scripts/bench.sh`), the load generator and the cluster suite (`docs/load-testing.md`, `docs/cluster-suite.md`), with a dated run in `docs/performance.md`
+- [ ] The production profile (`docs/production-profile.md`): every setting the threat model assumes, and `rutli-cosigner check-config` to read a config against it
+- [ ] Release verification: the image signature and attestation (`SECURITY.md`, "Verify the image"), from 0.5.0
 - [ ] Soak harness + runbook: `deploy/soak/`, `docs/testnet-soak.md`
 - [ ] Hardening history: `CHANGELOG.md` security sections, `[0.2.0]` and `[0.4.0-rc.1]` to
-  `[0.4.0-rc.6]`; `docs/security/internal-review-2026-10.md`, `docs/security/threat-model.md`
+  `[0.4.0-rc.6]`, `[0.4.0]`, `[0.4.1]` and `[Unreleased]` (the hardening for 0.5.0); `docs/security/internal-review-2026-10.md`, `docs/security/threat-model.md`
 - [ ] Ceremony / DR / approval runbooks: `docs/key-ceremony.md`, `docs/ceremonies.md`, `docs/split-ceremony.md`, `docs/disaster-recovery.md`, `docs/approval-quorum.md`
 
 ## Threat-model bullets for the auditor
@@ -41,8 +45,8 @@ Status: **pre-production, not yet audited**. Use this as the engagement brief an
    or for an imported key the offline dealer once; shares sealed at rest per node; mTLS mesh.
 2. **Nonce reuse must be impossible** across crash/restart (burn-before-share + fsync markers).
 3. **Ceremonies must not split shares** — per-key guard, ownership on part2/part3, cluster-wide fence, two-phase staging (signing is not fenced since 0.4.0-rc.4: part 3 only stages, commit evicts the signing state); client-signed ceremony intents (`require_ceremony_intent`), and since 0.4.0-rc.6 a ceremony bound to the leader that fenced it, with a durable fence mark per id.
-4. **Signer API is not “any cluster cert”** — `signer_allowlist` required when TLS is on.
-5. **Compliance controls** — fail-closed hash-chained audit; M-of-N Ed25519 approval; signing journal (detection, not semantic double-sign prevention); approvals, journal and rate limits also enforced by every cosigner on a driver-signed intent (`require_intent`).
+4. **Signer API is not “any cluster cert”** — `signer_allowlist` required when TLS is on; cosigners pin each other's TLS keys (from 0.5.0, required with TLS), so a certificate minted under the cluster CA is not a peer; a sign session belongs to the peer that opened it.
+5. **Compliance controls** — fail-closed hash-chained audit; M-of-N Ed25519 approval; signing journal (detection, not semantic double-sign prevention); approvals, journal and rate limits also enforced by every cosigner on a driver-signed intent (`require_intent`, on by default with TLS from 0.5.0).
 6. **Honest limits** — namespace key non-rotatable; journal cannot see height/round; software sealing ≠ HSM/enclave; hosted keys are replicated whole keys, not threshold.
 
 ## Suggested engagement shape
@@ -58,7 +62,7 @@ Status: **pre-production, not yet audited**. Use this as the engagement brief an
 - [ ] Sustained Splice DevNet soak meeting `docs/testnet-soak.md` exit criteria
 - [ ] Key ceremony witnessed (`docs/key-ceremony.md`)
 - [ ] DR drill completed (backup + restore of one share)
-- [ ] Production deploy: digest-pinned image, required anti-affinity, PDB, TLS + allowlist + sealing
+- [ ] Production deploy: digest-pinned image (signature verified), required anti-affinity, PDB, TLS + allowlist + sealing + peer key pins, `profile: production` and `check-config` exit 0 on every node
 - [ ] **Each cosigner in a separate cluster or cloud account**, administered by different people
   (below). One cluster under one administration is one trust domain, and its administrator holds
   every share ([threat model](security/threat-model.md#trust-domains), decision P10). No authority

@@ -118,15 +118,34 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
   }
 
   /** Stand up `n` fake cosigners and a FrostBackend whose roster lists them in order. */
-  private def withCluster[A](n: Int, hostedKeys: Boolean = false)(
+  private def withCluster[A](
+      n: Int,
+      hostedKeys: Boolean = false,
+      // Serve each call on a thread of its own, so a fake can block (stop answering) without
+      // blocking the client: needed by the deadline tests.
+      threaded: Boolean = false,
+      budget: FiniteDuration = 10.seconds,
+      signAttempt: FiniteDuration = 5.seconds,
+      recovery: FiniteDuration = 60.seconds,
+  )(
       body: (FrostBackend, IndexedSeq[FakeCosigner]) => A
   ): A = {
     val fakes = (0 until n).map(new FakeCosigner(_))
     val servers: Seq[Server] = fakes.map { f =>
-      InProcessServerBuilder.forName(f.name).directExecutor().addService(f).build().start()
+      val b = InProcessServerBuilder.forName(f.name).addService(f)
+      (if (threaded) b else b.directExecutor()).build().start()
     }
     val backend =
-      new FrostBackend(fakes.map(_.name), new NoDelegateBackend, logger, None, 10.seconds, hostedKeys) {
+      new FrostBackend(
+        fakes.map(_.name),
+        new NoDelegateBackend,
+        logger,
+        None,
+        budget,
+        hostedKeys,
+        signAttemptTimeout = signAttempt,
+        leaderRecovery = recovery,
+      ) {
         override protected def buildChannel(endpoint: String): io.grpc.ManagedChannel =
           InProcessChannelBuilder.forName(endpoint).directExecutor().build()
       }
@@ -511,6 +530,82 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
         signEntry shouldBe
           s"keyId=frost-ns algo=${SigningAlgoSpec.Ed25519} inBytes=34 msg=${RutliDriver.sha256Hex(Digest)} " +
           s"failover=${a.name}→${b.name} reason=INTERNAL sigBytes=64 outcome=ok"
+      }
+    }
+  }
+
+  "FrostBackend deadlines (keepalive and per-attempt)" should {
+
+    "fail a sign over after the sign attempt deadline, not after the whole budget" in {
+      withCluster(3, threaded = true, budget = 10.seconds, signAttempt = 300.millis) { case (b, Seq(a, next, _)) =>
+        a.signGate = _ => { Thread.sleep(3000); None } // stops answering
+        val t0 = System.nanoTime()
+        await(b.sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519)) shouldBe Signed
+        (System.nanoTime() - t0).nanos should be < 2500.millis
+        next.signCalls.get shouldBe 1
+      }
+    }
+
+    "stop at the request budget with DEADLINE_EXCEEDED, without asking the cosigners left" in {
+      withCluster(3, threaded = true, budget = 1500.millis, signAttempt = 1.second) { case (b, fakes) =>
+        fakes.foreach(_.signGate = _ => { Thread.sleep(3000); None })
+        val t0 = System.nanoTime()
+        val e = the[io.grpc.StatusRuntimeException] thrownBy await(b.sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519))
+        e.getStatus.getCode shouldBe Status.Code.DEADLINE_EXCEEDED
+        (System.nanoTime() - t0).nanos should be < 2800.millis
+        fakes(2).signCalls.get shouldBe 0
+      }
+    }
+
+    "give the lead back to the first cosigner once leaderRecovery has passed" in {
+      withCluster(3, recovery = 300.millis) { case (b, Seq(a, next, _)) =>
+        a.signGate = call => if (call == 1) Some(Status.UNAVAILABLE) else None
+        await(b.sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519)) shouldBe Signed
+        await(b.sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519)) shouldBe Signed
+        (a.signCalls.get, next.signCalls.get) shouldBe ((1, 2)) // the lead stayed on the next one
+        Thread.sleep(500)
+        await(b.sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519)) shouldBe Signed
+        a.signCalls.get shouldBe 2 // and came back
+      }
+    }
+  }
+
+  "RutliDriver over a FrostBackend, retryability" should {
+
+    def driverOf(backend: FrostBackend) =
+      new RutliDriver(
+        backend,
+        logger,
+        auditLogging = false,
+        auditLog = None,
+        com.stakecraft.rutli.policy.AutoApproveGate,
+        signingJournal = None,
+        backend.supportedSigningKeySpecs,
+        backend.supportedSigningAlgoSpecs,
+        backend.supportedEncryptionKeySpecs,
+        backend.supportedEncryptionAlgoSpecs,
+      )
+    def failure(f: => Future[_]): KmsDriverException = the[KmsDriverException] thrownBy await(f)
+
+    "report a cluster that cannot be reached, or a spent budget, as retryable" in {
+      withCluster(3, hostedKeys = true) { case (b, fakes) =>
+        fakes.foreach(_.signFails = Some(Status.UNAVAILABLE))
+        failure(driverOf(b).sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519)(Context.root())).retryable shouldBe true
+      }
+      withCluster(3, hostedKeys = true, threaded = true, budget = 1.second, signAttempt = 400.millis) { case (b, fakes) =>
+        fakes.foreach(_.signGate = _ => { Thread.sleep(2000); None })
+        failure(driverOf(b).sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519)(Context.root())).retryable shouldBe true
+      }
+    }
+
+    "report a policy refusal and a bad signature as not retryable" in {
+      withCluster(3, hostedKeys = true) { case (b, Seq(a, _, _)) =>
+        a.signFails = Some(Status.PERMISSION_DENIED.withDescription("not on the signer_acl"))
+        failure(driverOf(b).sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519)(Context.root())).retryable shouldBe false
+      }
+      withCluster(3, hostedKeys = true) { case (b, fakes) =>
+        fakes.foreach(_.signLies = true)
+        failure(driverOf(b).sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519)(Context.root())).retryable shouldBe false
       }
     }
   }

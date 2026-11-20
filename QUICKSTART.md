@@ -91,7 +91,10 @@ CANTON_HOME=/path/to/canton-open-source-3.6.1 \
   deploy/devnet/up.sh
 ```
 
-Same `=== OK … ===`, but now the namespace key was **born distributed**. Confirm the shares landed
+The compose examples are for labs: their configs run without the production profile (a cosigner
+logs what the profile would require and starts; the TLS example also needs the peer pins from `scripts/gen-frost-certs.sh` first). Never put an authority key on them; the
+production path is under "Where to go next". Same `=== OK … ===`, but now the namespace key was
+**born distributed**. Confirm the shares landed
 on the three cosigners:
 
 ```sh
@@ -139,12 +142,17 @@ genuine 2-of-3 FROST; the encryption and symmetric keys are not.
 
 ## Where to go next
 
-- **Production**: [`deploy/k8s`](deploy/k8s) or `deploy/frost/docker-compose.tls.yml` (mTLS + sealed
-  shares), then run the **key ceremony** ([`docs/key-ceremony.md`](docs/key-ceremony.md)) to birth a
+- **Production**: [`deploy/k8s`](deploy/k8s) or the Helm chart, which run the **production
+  profile**: a cosigner refuses to start while an enforcement setting is off, and with TLS it needs
+  the TLS key pin of every cosigner. Run `rutli-cosigner --config <file> check-config` on the config
+  before the first start ([docs/production-profile.md](docs/production-profile.md)), and use one
+  cosigner per separate cluster or cloud account. `deploy/frost/docker-compose.tls.yml` (mTLS +
+  sealed shares, `lab`) is a lab. Then run the **key ceremony** ([`docs/key-ceremony.md`](docs/key-ceremony.md)) to birth a
   real namespace key with witnesses and a signed record. The quickstart TLS cluster shares one
   `RUTLI_SEAL_SECRET`; production gives each node its own seal bundle
   ([`deploy/k8s/README.md`](deploy/k8s/README.md)). Helm chart:
   [`deploy/helm/rutli-cosigner`](deploy/helm/rutli-cosigner).
+- **Upgrading from 0.4.x**: [`docs/upgrading-to-0.5.md`](docs/upgrading-to-0.5.md).
 - **An existing validator**: [`docs/migration.md`](docs/migration.md) and the in-place runbook
   [`docs/runbook-migration-inplace.md`](docs/runbook-migration-inplace.md).
 - **Ceremonies and rotation**: [`docs/ceremonies.md`](docs/ceremonies.md),
@@ -171,3 +179,12 @@ genuine 2-of-3 FROST; the encryption and symmetric keys are not.
   **`rsa-oaep-sha-256`**, not the driver SPI's `RsaEsOaepSha256` spelling: pureconfig kebab-cases
   `RsaOaepSha256` and splits the digits apart. `deploy/devnet/canton-hosted.conf` has the working
   form.
+- **A cosigner refuses to start and names a setting, a pin or an unknown key** — `check-config`
+  lists every finding without starting anything: `rutli-cosigner --config <file> check-config`
+  (exit 0 clean, 1 a production node would refuse, 2 the file does not load). A node with TLS needs
+  `peers[].tls_spki_sha256` for every cosigner; `scripts/gen-frost-certs.sh` prints them. An unknown
+  key is a typo: the error names the file and the line. See
+  [`docs/production-profile.md`](docs/production-profile.md).
+- **A hand-run `grpcurl … Signer/Sign` against the TLS cluster is refused** — a signature needs a
+  client-signed intent by default. The driver signs them. For a test, run on a copy of the config
+  with `signing_policy.require_intent: false`, as `scripts/ci-frost-tls-smoke.sh` does.
