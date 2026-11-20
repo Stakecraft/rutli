@@ -43,6 +43,7 @@ pub mod service;
 pub mod share_delivery;
 pub mod share_import;
 pub mod sign_policy;
+pub mod supervise;
 pub mod sync;
 pub mod tls;
 pub mod tls_probe;

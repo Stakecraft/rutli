@@ -422,6 +422,21 @@ spec:
           a peer may time out. A cosigner normally needs a handful of connections (the drivers and the
           peers multiplex calls); many more come from a misbehaving client or something holding connections
           open. Check the sources of the connections to the gRPC port.'
+    - alert: RutliBackgroundLoopRestarted
+      expr: increase(rutli_background_loop_restarts_total[1h]) > 0
+      for: 0m
+      labels:
+        severity: warning
+      annotations:
+        summary: "R\xFCtli cosigner {{ $labels.instance }} restarted its {{ $labels.loop }} loop after\
+          \ a panic"
+        description: 'A pass of the {{ $labels.loop }} background loop panicked on {{ $labels.instance
+          }}. The loop was restarted after 30 s (anti_entropy then also waits one anti_entropy_interval_secs
+          before its next sweep) and keeps running, but a panic is a bug: find it in the cosigner log
+          at ''background loop panicked; restarting it'' (the panic message is in the same line) and report
+          it. A loop that panics on every pass gets no pass done: ceremony_resolver leaves STAGED ceremonies
+          unresolved, epoch_check stops refreshing stale-share marks, nonce_pruner lets burned nonce markers
+          pile up on the key volume, anti_entropy stops healing hosted keys.'
     - alert: RutliHostedKeyConflict
       expr: increase(rutli_anti_entropy_conflicts_total[1h]) > 0
       for: 0m

@@ -128,6 +128,9 @@ pub const GRPC_CONNECTION_LIMIT: &str = "rutli_grpc_connection_limit";
 pub const GRPC_ACCEPT_ERRORS: &str = "rutli_grpc_accept_errors_total";
 /// gRPC connections cut because their TLS handshake did not finish in time.
 pub const GRPC_HANDSHAKE_TIMEOUTS: &str = "rutli_grpc_handshake_timeouts_total";
+/// Background loops restarted after a panic in a pass ([`crate::supervise`]), by `loop`. The node
+/// kept going; the panic itself is a bug — alert on any increase and report it.
+pub const BACKGROUND_LOOP_RESTARTS: &str = "rutli_background_loop_restarts_total";
 /// Hosted keys repaired by anti-entropy (pulled here or pushed to a peer).
 pub const ANTI_ENTROPY_REPAIRS: &str = "rutli_anti_entropy_repairs_total";
 /// Hosted keys found with *different* material on two nodes under one id. Any increase is a
@@ -242,6 +245,9 @@ pub const LOCK_NAMES: &[&str] = &[
 pub const SESSION_OWNER_CALLS: &[&str] = &["round2", "abort"];
 /// The `cap` values of `rutli_sign_sessions_refused_total` (`PendingCap::as_str`).
 pub const SESSION_CAPS: &[&str] = &["key", "opener", "request"];
+/// The `loop` names of `rutli_background_loop_restarts_total`: the first argument of every
+/// `supervise::spawn_supervised` call (`RutliBackgroundLoopRestarted`); a test checks the call sites.
+pub const BACKGROUND_LOOPS: &[&str] = &["anti_entropy", "ceremony_resolver", "epoch_check", "nonce_pruner"];
 /// The `op` values of `rutli_hosted_key_ops_total` (`record_hosted_op` call sites in `service.rs`);
 /// `result` is "ok" | "error" (`RutliHostedKeyErrors`).
 pub const HOSTED_KEY_OPS_NAMES: &[&str] =
@@ -345,6 +351,9 @@ fn prime() {
     for cap in SESSION_CAPS {
         metrics::counter!(SIGN_SESSIONS_REFUSED, "cap" => *cap).absolute(0);
     }
+    for name in BACKGROUND_LOOPS {
+        metrics::counter!(BACKGROUND_LOOP_RESTARTS, "loop" => *name).absolute(0);
+    }
     for op in HOSTED_KEY_OPS_NAMES {
         for result in ["ok", "error"] {
             metrics::counter!(HOSTED_KEY_OPS, "op" => *op, "result" => result).absolute(0);
@@ -394,6 +403,7 @@ pub fn describe() {
     describe_gauge!(GRPC_CONNECTION_LIMIT, "Most gRPC connections served at once");
     describe_counter!(GRPC_ACCEPT_ERRORS, "Failed accepts of a gRPC connection (retried)");
     describe_counter!(GRPC_HANDSHAKE_TIMEOUTS, "gRPC connections cut for not finishing the TLS handshake in time");
+    describe_counter!(BACKGROUND_LOOP_RESTARTS, "Background loops restarted after a panic in a pass, by loop");
     describe_counter!(SIGN_ABORTS, "Aborted in-flight sign sessions (one per given-up signature)");
     describe_counter!(
         SIGN_SESSION_OWNER_REFUSALS,
@@ -511,6 +521,7 @@ mod tests {
             (LOCK_POISON_RECOVERIES, one("lock", LOCK_NAMES)),
             (SIGN_SESSION_OWNER_REFUSALS, one("call", SESSION_OWNER_CALLS)),
             (SIGN_SESSIONS_REFUSED, one("cap", SESSION_CAPS)),
+            (BACKGROUND_LOOP_RESTARTS, one("loop", BACKGROUND_LOOPS)),
         ];
         let mut ops = Vec::new();
         for op in HOSTED_KEY_OPS_NAMES {
@@ -737,6 +748,21 @@ mod tests {
         }
         let listed: std::collections::BTreeSet<String> = SESSION_OWNER_CALLS.iter().map(|c| (*c).to_owned()).collect();
         assert_eq!(emitted, listed, "not_session_owner call sites vs SESSION_OWNER_CALLS");
+    }
+
+    /// `BACKGROUND_LOOPS` (what `prime()` starts at 0) is exactly the set of names the background
+    /// loops are spawned under, so every loop's restart series exists before its first restart.
+    #[test]
+    fn background_loops_match_the_supervised_call_sites() {
+        let mut spawned = std::collections::BTreeSet::new();
+        for (file, src) in &crate_sources() {
+            for args in calls(src, "spawn_supervised") {
+                let what = format!("{file}: spawn_supervised(..)");
+                assert!(spawned.insert(literal(args.first(), &what).to_owned()), "{what}: a loop name is used twice");
+            }
+        }
+        let listed: std::collections::BTreeSet<String> = BACKGROUND_LOOPS.iter().map(|n| (*n).to_owned()).collect();
+        assert_eq!(spawned, listed, "rutli_background_loop_restarts_total: call sites vs BACKGROUND_LOOPS");
     }
 
     /// `TOMBSTONE_HOWS` (what `prime()` starts at 0) is exactly the set of `how` values the

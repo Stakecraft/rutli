@@ -221,8 +221,9 @@ fn retry_delay() -> Duration {
 
 /// The background check: a pass now (startup), then every [`CHECK_INTERVAL`] — or every
 /// [`RETRY_INTERVAL`] (minus a jitter) while some key had no usable peer answer or is stale.
+/// Restarted after a panic ([`crate::supervise`]).
 pub fn spawn(node: Arc<Node>) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
+    crate::supervise::spawn_supervised("epoch_check", node, |node| async move {
         loop {
             let inconclusive = check_all(&node).await;
             tokio::time::sleep(if inconclusive > 0 { retry_delay() } else { CHECK_INTERVAL }).await;

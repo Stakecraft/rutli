@@ -180,6 +180,14 @@ All notable changes to Rütli are documented here. Format loosely follows
   members until it is upgraded. Re-apply the alert rules (`deploy/monitoring/prometheus-rules.yml`, or the rendered
   `deploy/monitoring/k8s/prometheusrule.yaml`).
 
+- **A panic in a background pass no longer stops that loop for good.** The ceremony resolver, the
+  epoch check, the nonce-marker pruner and hosted-key anti-entropy each run as a loop in its own
+  task. A panic in one pass ended the task, and nothing showed it after the one panic line in the
+  log: STAGED ceremonies stayed unresolved, or nonce markers piled up, or hosted keys stopped
+  healing. The loop is now restarted 30 s after a panic (anti-entropy then also waits its usual
+  interval before the next sweep). The new counter
+  `rutli_background_loop_restarts_total{loop}` and the alert `RutliBackgroundLoopRestarted` report
+  it. The panic is still a bug to report; its message is in the log line. Closes #127.
 - **The driver reads an approver's key as `public-key-base64`,** the name the docs and
   `approve keygen` print. Up to 0.4.0 it only read `public-key-base-64`, so an `approval` block
   copied from the docs stopped the participant at startup with `Key not found`. Both names are read
@@ -250,6 +258,13 @@ All notable changes to Rütli are documented here. Format loosely follows
   scripts test, and on release-candidate tags; a failure on main opens an issue. The two Canton
   scripts now take `JAVA_HOME` when `CANTON_JAVA_HOME` is unset, and allow more time for console
   waits and polling on a slow host.
+- **The migration procedure of `docs/migration.md` is under test.** `scripts/e2e-migration.sh`, a new step of the e2e
+  workflow, walks it on Canton 3.6.1: a JCE participant with a party and contracts, the namespace key exported with a
+  password, the split ceremony into a local 2-of-3 cluster with the full signing policy, a new participant under the same
+  namespace on a fresh database, a rollback before the point of no return and a second cutover, the party moved with its
+  contracts, and the checks of Step 7 and Step 8 that a script can make. Wrong passwords, wrong fingerprints and a
+  dealt bundle after the refresh are refused on the way. Step 6 is the Splice re-onboard and needs a Splice network: the
+  script makes the same topology changes from the new participant instead, and the Splice step is left to a LocalNet job.
 
 ### Security
 
@@ -286,6 +301,14 @@ All notable changes to Rütli are documented here. Format loosely follows
   audit's funding is confirmed, not in the first quarter of 2027, and the four clean TestNet weeks
   are counted on the audited release. The README's status line names the Splice and Canton
   versions the DevNet validator runs today.
+- **`docs/migration.md`, corrections found by the migration e2e test.** Step 4.3: the new participant must start
+  without an identity; a participant configured by hand needs `init.identity.type = manual` and
+  `init.generate-topology-transactions-and-keys = false`. Step 5.1 and 5.3 are written as console code that compiles
+  (`Set(SigningKeyUsage.Namespace)`, `UniqueIdentifier.tryCreate`, `ParticipantId(NEW_UID)`). §6: a retry after a rollback
+  must give its signing key a new name, because since 0.4.0-rc.3 a DKG for an id the cluster holds returns that key, so
+  the retry would silently get the burned member's signing key; the offboarding command is written out. Step 8: the
+  command that removes the offboarded member's owner-to-key mapping, with the `AlienMember` force flag and an exact
+  member filter (`filterKeyOwnerUid` matches by prefix).
 - **Threshold ECIES is planned for 1.0, not 2.0** (decided 2026-11-19). `docs/roadmap.md`, the
   README, `docs/hosted-keys.md` and the explorer page say so, and the second audit phase in
   `docs/audit-rfq.md` (section 2.2) now lists four features. No code changes.
