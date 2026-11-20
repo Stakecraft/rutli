@@ -291,10 +291,11 @@ step_7_audit() {
   sig_ok="$(_ok sign "$SIG_KMS_ID")"
   enc_ok="$(_ok decryptAsymmetric "$ENC_KMS_ID")"
   # The one expected failure: §6's DKG under the rolled-back attempt's name, refused by newp2's driver.
-  refused="$(grep "outcome=failed" "$audit" | grep -c "generateSigningKeyPair spec=[^ ]* name=signing " || true)"
+  # Audit lines are JSON: "op":"generateSigningKeyPair","detail":"spec=… name=signing … outcome=failed …".
+  refused="$(grep -F '"op":"generateSigningKeyPair"' "$audit" | grep " name=signing " | grep -c "outcome=failed" || true)"
   [ "$refused" -eq 1 ] || fail "expected exactly one refused DKG under the name 'signing' in newp2's audit, found $refused"
   bad="$(cat "$(env_driver_audit newp1)" "$audit" 2>/dev/null | grep "outcome=failed" \
-    | grep -vc "generateSigningKeyPair spec=[^ ]* name=signing " || true)"
+    | grep -v -e '"op":"generateSigningKeyPair".* name=signing ' -c || true)"
   echo "sign ok: $KEY_ID $ns_ok, $SIG_KMS_ID $sig_ok; ECIES decrypt ok: $ENC_KMS_ID $enc_ok; failed: $bad"
   # OTK, trust certificate, package vetting, the old trust certificate's removal, the party's hosting.
   [ "$ns_ok" -ge 4 ] || fail "only $ns_ok signatures with the imported namespace key $KEY_ID"
@@ -358,7 +359,8 @@ step_8_destroy() {
   env_canton_out | grep -q "^E2E-DONE" || fail "the bootstrap script did not finish"
   env_canton_out | grep "^E2E-AFTER-DESTRUCTION"
   local bad errs
-  bad="$(cat "$(env_driver_audit newp2)" | grep -c "outcome=failed" || true)"
+  # §6's refused DKG under the rolled-back attempt's name is expected; nothing else may fail.
+  bad="$(grep "outcome=failed" "$(env_driver_audit newp2)" | grep -v -e '"op":"generateSigningKeyPair".* name=signing ' -c || true)"
   [ "$bad" -eq 0 ] || fail "$bad driver operations failed after the destruction"
   errs="$(commitment_errors)"
   [ -z "$errs" ] || fail "ACS commitment errors: $(head -n 3 <<<"$errs")"
