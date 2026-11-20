@@ -59,6 +59,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -67,6 +68,10 @@ import run as base  # noqa: E402  (the compose suite: Runner, scenarios, key nam
 
 NODES = base.NODES
 HERE = os.path.dirname(os.path.abspath(__file__))
+# The driver's deadlines (#196): 5 s a sign attempt, 10 s an attempt of any other call, 30 s a
+# call. The key-class spot checks use them whatever the run's own policy is.
+DRIVER_DEADLINES = ["--sign-attempt-timeout-secs", "5", "--attempt-timeout-secs", "10", "--request-timeout-secs", "30"]
+
 HOOKS = ("HOOK_KILL_NODE", "HOOK_DETACH_VOLUME", "HOOK_PARTITION", "HOOK_NET_DELAY")
 log = base.log
 
@@ -93,15 +98,18 @@ class K8sCluster:
         argv = ["kubectl"] + (["-n", self.ns] if namespaced else []) + list(args)
         return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, check=check)
 
-    def loadgen_argv(self, args, timeout_secs, pod="rutli-perf-loadgen"):
+    def loadgen_argv(self, args, timeout_secs, pod="rutli-perf-loadgen", cn=None, flags=None):
         if self.load_path == "canton" and args and args[0] == "sign":
             # The entry point for load through a participant (see the module docs).
             return shlex.split(os.environ["CANTON_LOAD_CMD"]) + args
         # Run detached in the pod and fetched afterwards (k8s_loadgen.py): a stream held open
         # through the API server for a whole run was reset on a real cluster.
+        # `cn`: the client certificate (the secret holds one per tenant's driver, the operator's
+        # and the refresher's); `flags`: a deadline policy that replaces the run's own.
+        cn = cn or "driver"
         argv = [sys.executable, "-I", os.path.join(HERE, "k8s_loadgen.py"), "--namespace", self.ns, "--pod", pod, "--",
-                "--ca", "/certs/ca.crt", "--cert", "/certs/driver.crt", "--key", "/certs/driver.key",
-                "--timeout-secs", str(timeout_secs)] + self.client_flags
+                "--ca", "/certs/ca.crt", "--cert", f"/certs/{cn}.crt", "--key", f"/certs/{cn}.key",
+                "--timeout-secs", str(timeout_secs)] + (self.client_flags if flags is None else list(flags))
         for i, node in enumerate(NODES, start=1):
             # gRPC through the per-node Service; metrics through the pod's name behind the headless
             # Service, which the per-node Service does not expose.
@@ -193,6 +201,98 @@ class Suite(base.Runner):
         self.skipped = []
         self.ramp = None
         self.keys = None
+        self.spot_checks = []
+
+    # -- tenants and key classes ---------------------------------------------------------------
+
+    def tenants(self):
+        """The profile's tenants: a driver certificate (cn) and the key prefix its ACL allows.
+        Without `tenants`, one: the driver, on the suite's own `perf-` keys."""
+        return self.profile.get("tenants") or [{"name": "a", "cn": "driver", "prefix": "perf-"}]
+
+    def class_keys(self, tenant):
+        """The tenant's namespace-class and hosted-class key ids (those the profile has)."""
+        classes = self.profile.get("classes") or {}
+        return {c: tenant["prefix"] + classes[c]["key"] for c in ("namespace", "hosted") if c in classes}
+
+    def setup_classes(self):
+        """Every tenant's keys besides the suite's own: its namespace-class FROST key and its
+        hosted encryption key, made with that tenant's certificate. {} when all went well."""
+        for t in self.tenants():
+            keys = self.class_keys(t)
+            args = ["setup"]
+            if "namespace" in keys:
+                args += ["--frost-key", keys["namespace"]]
+            if "hosted" in keys:
+                args += ["--ecies-key", keys["hosted"]]
+            if t["cn"] != "driver":
+                # The second tenant's own signing key, for the ramp.
+                args += ["--frost-key", f"{t['prefix']}steady"]
+            if len(args) == 1:
+                continue
+            r = self.setup_keys(args, wall_timeout=900, cn=t["cn"])
+            if "failed" in r:
+                return {"failed": f"tenant {t['name']}: {r['failed']}", "rig": bool(r.get("rig"))}
+        return {}
+
+    def spots(self, during):
+        """One signature with each tenant's namespace-class key and one decryption (ECDH) with
+        its hosted key, under the driver's deadlines (5 s a sign attempt, 10 s another call, 30 s a
+        call). Returns their reports, judged by the scenario that runs them: every one must
+        succeed. Their health readings are dropped: a disruption in progress is not the question."""
+        loads = []
+        for t in self.tenants():
+            for cls, key in self.class_keys(t).items():
+                op = "sign" if cls == "namespace" else "ecdh"
+                r = self.loadgen([op, "--key", key, "--name", f"{cls}-{during}-{t['name']}", "--count", "1",
+                                  "--clients", "1"], timeout_secs=10, wall_timeout=300, cn=t["cn"],
+                                 flags=DRIVER_DEADLINES)
+                r.pop("health", None)
+                client = r.get("client", {})
+                spot = {"during": during, "tenant": t["name"], "class": cls, "ok": client.get("ok", 0) == 1,
+                        "errors": client.get("errors", {}), "ms": (client.get("latency") or {}).get("max_ms"),
+                        "failed": r.get("failed")}
+                self.spot_checks.append(spot)
+                took = "" if spot["ms"] is None else f" in {spot['ms']:g} ms"
+                verdict = "ok" if spot["ok"] else f"FAILED {spot['errors'] or spot['failed']}"
+                log(f"  {cls} key of tenant {t['name']} during {during}: {verdict}{took}")
+                loads.append(r)
+        return loads
+
+    def key_classes(self):
+        """The key classes at rest: one spot check of each, then the namespace-class rate limit:
+        twice its per-minute budget plus five, at once, on the first tenant's namespace key. Each
+        signature is charged on the two nodes that made it, so between the budget and one and a
+        half times it pass; the rest must be RESOURCE_EXHAUSTED."""
+        classes = self.profile.get("classes") or {}
+        if not classes:
+            return
+        n_spots = sum(len(self.class_keys(t)) for t in self.tenants())
+        ns = classes.get("namespace")
+        limit = int(ns.get("per_min", 10)) if ns else 0
+        t0 = self.tenants()[0]
+
+        def body():
+            loads = self.spots("quiet")
+            if ns:
+                # A fresh minute: the spot signature above must not count against the burst.
+                time.sleep(61)
+                loads.append(self.loadgen(["sign", "--key", self.class_keys(t0)["namespace"], "--name",
+                                           "namespace-rate-limit", "--count", str(2 * limit + 5), "--clients", "5"],
+                                          timeout_secs=10, wall_timeout=600, cn=t0["cn"], flags=DRIVER_DEADLINES))
+            return loads
+
+        allowed = [()] * n_spots + ([("RESOURCE_EXHAUSTED",)] if ns else [])
+        r, check = self.scenario("key-classes", body, allowed=allowed)
+        if ns and len(r["loads"]) == n_spots + 1 and "failed" not in r["loads"][-1]:
+            client = r["loads"][-1].get("client", {})
+            ok, refused = client.get("ok", 0), client.get("errors", {}).get("RESOURCE_EXHAUSTED", 0)
+            ceiling = limit + limit // 2
+            check(f"the namespace rate limit ({limit}/min) let {limit} to {ceiling} signatures through",
+                  limit <= ok <= ceiling, f"{ok} ok")
+            check("the namespace rate limit refused the rest with RESOURCE_EXHAUSTED", refused > 0 and ok + refused == 2 * limit + 5,
+                  f"{refused} refused of {2 * limit + 5}")
+        self.close(r)
 
     # -- hooks ---------------------------------------------------------------------------------
 
@@ -224,6 +324,11 @@ class Suite(base.Runner):
                 ["sign", "--key", base.KEY_STEADY, "--name", "upgrade", "--rate", "5", "--clients", "3",
                  "--duration-secs", "360"] + [x for n in NODES for x in ("--restarted", n)]
             )
+            # The key classes during the rollout: a topology change or a decryption while
+            # cosigners restart one at a time is the case that matters.
+            spot_loads = []
+            spotter = threading.Thread(target=lambda: (time.sleep(40), spot_loads.extend(self.spots("upgrade"))))
+            spotter.start()
             time.sleep(10)
             log(f"  helm upgrade to {a.upgrade_image}")
             argv = [os.path.join(HERE, "k8s-deploy.sh"), "upgrade", "--namespace", self.cluster.ns,
@@ -232,13 +337,14 @@ class Suite(base.Runner):
                 argv += ["--values", values]
             up = subprocess.run(argv, capture_output=True, text=True, timeout=1200, check=False)
             report = self.loadgen_finish(proc, 900)
+            spotter.join()
             if up.returncode != 0:
-                return [report, {"failed": f"helm upgrade failed: {up.stderr[-1000:]}"}]
+                return [report, {"failed": f"helm upgrade failed: {up.stderr[-1000:]}"}] + spot_loads
             if not self.wait_healthy(600):
-                return [report, {"failed": "the cosigners did not become healthy after the upgrade"}]
+                return [report, {"failed": "the cosigners did not become healthy after the upgrade"}] + spot_loads
             self.after_upgrade = self.loadgen(self.setup_args, wall_timeout=900)
             return [report, self.loadgen(["sign", "--key", base.KEY_STEADY, "--key", base.KEY_SECOND,
-                                          "--name", "after-upgrade", "--count", "50", "--clients", "5"])]
+                                          "--name", "after-upgrade", "--count", "50", "--clients", "5"])] + spot_loads
 
         r, check = self.scenario("upgrade", body, allowed=[()], restarted=tuple(NODES))
         after = getattr(self, "after_upgrade", {"failed": "not reached"})
@@ -268,12 +374,12 @@ class Suite(base.Runner):
             return None
         return round(asked - since + float(r["healthy_after_secs"]), 1)
 
-    def setup_keys(self, args, wall_timeout):
+    def setup_keys(self, args, wall_timeout, cn=None):
         """`setup` for a suite's keys, tried three times a minute apart: a DKG needs every cosigner
         reachable, and a suite should not fail on a moment when one was not. Each failed attempt
         is logged."""
         for attempt in range(3):
-            r = self.loadgen(args, timeout_secs=120, wall_timeout=wall_timeout)
+            r = self.loadgen(args, timeout_secs=120, wall_timeout=wall_timeout, cn=cn)
             if "failed" not in r:
                 return r
             log(f"  key setup failed (attempt {attempt + 1} of 3): {r.get('stderr', r['failed'])[-300:]}")
@@ -314,11 +420,16 @@ class Suite(base.Runner):
                 ["sign", "--key", base.KEY_STEADY, "--name", name, "--rate", str(self.args.rate), "--clients", "6",
                  "--duration-secs", str(secs)]
             )
-            problems = []
+            problems, spot_loads = [], []
             time.sleep(15)
             try:
                 strike()
-                time.sleep(max(0, secs - 30))
+                struck = time.time()
+                time.sleep(5)
+                # The key classes during the disruption (each must succeed within the driver's
+                # deadlines), then the rest of the disruption.
+                spot_loads = self.spots(name)
+                time.sleep(max(0, secs - 30 - (time.time() - struck)))
             except (subprocess.SubprocessError, OSError) as e:
                 problems.append({"failed": f"strike: {e}", "rig": True})
             finally:
@@ -342,7 +453,7 @@ class Suite(base.Runner):
             if settled[0] is None:
                 problems.append({"failed": f"the cluster did not sign normally again within {self.args.settle_secs} s",
                                  "rig": rig})
-            return [report] + problems
+            return [report] + spot_loads + problems
 
         settled, healthy = [None], [None]
         r, _ = self.scenario(name, body, restarted=tuple(victims), allowed=allowed)
@@ -533,11 +644,18 @@ class Suite(base.Runner):
         step_secs = int(p.get("step_secs", 300))
         phases = ramp_phases(base_mix, step_secs)
         n_keys = max(1, int(base_mix.get("sign_keys", 2)))
-        sign_keys = [f"perf-ramp-{i}" for i in range(n_keys)]
+        # Every tenant carries the whole shape on its own signing keys, with its own certificate
+        # (the first tenant on the suite's perf-ramp-* keys).
+        tenant_keys = [(t, [f"{t['prefix']}ramp-{i}" for i in range(n_keys)]) for t in self.tenants()]
         n_hosted = max(1, int(base_mix.get("ecdh_keys", 1)))
         ecdh_keys = [f"rutli-perf-ramp-{i}" for i in range(n_hosted)] if any(ph["ecdh_per_sec"] > 0 for ph in phases) else []
-        setup = self.setup_keys(["setup"] + [x for k in sign_keys for x in ("--frost-key", k)]
-                                + [x for k in ecdh_keys for x in ("--ecies-key", k)], wall_timeout=1800)
+        setup = {}
+        for i, (t, keys) in enumerate(tenant_keys):
+            extra = [x for k in ecdh_keys for x in ("--ecies-key", k)] if i == 0 else []
+            setup = self.setup_keys(["setup"] + [x for k in keys for x in ("--frost-key", k)] + extra,
+                                    wall_timeout=1800, cn=t["cn"])
+            if "failed" in setup:
+                break
         steps, headroom = [], 0
         if "failed" in setup:
             self.ramp = {"failed": f"setup: {setup['failed']}", "rig": bool(setup.get("rig")), "steps": [],
@@ -558,9 +676,11 @@ class Suite(base.Runner):
                 log(f"ramp x{factor:g} {ph['name']}: {sign_rate:g} signatures/s, {ecdh_rate:g} ECDH/s for {secs} s")
                 procs = []
                 if sign_rate > 0:
-                    procs.append(("sign", self.loadgen_start(
-                        ["sign", "--name", label, "--rate", f"{sign_rate:g}", "--clients", clients(sign_rate),
-                         "--duration-secs", str(secs)] + [x for k in sign_keys for x in ("--key", k)])))
+                    for t, keys in tenant_keys:
+                        procs.append(("sign", self.loadgen_start(
+                            ["sign", "--name", label + ("" if len(tenant_keys) == 1 else f"-{t['name']}"),
+                             "--rate", f"{sign_rate:g}", "--clients", clients(sign_rate),
+                             "--duration-secs", str(secs)] + [x for k in keys for x in ("--key", k)], cn=t["cn"])))
                 if ecdh_rate > 0 and ecdh_keys:
                     # One hosted key per stream; each has its own per-minute decryption ceiling.
                     per_key = ecdh_rate / len(ecdh_keys)
@@ -909,6 +1029,8 @@ def main():
     setup = {"failed": "the cosigners did not become healthy"}
     if suite.wait_healthy(600):
         setup = suite.loadgen(suite.setup_args, wall_timeout=900)
+        if "failed" not in setup:
+            setup = suite.setup_classes() or setup
     suite.setup_report = setup
     diagnosis = None
     if "failed" not in setup:
@@ -918,6 +1040,9 @@ def main():
                 continue
             {"upgrade": suite.upgrade, "scenarios": suite.run, "connect": suite.connect_burst,
              "disrupt": suite.disrupt, "keys": suite.key_count, "ramp": suite.scale_ramp}[name]()
+        if not args.diagnose and suite.profile.get("classes"):
+            # At the end: its rate-limit burst empties the namespace key's bucket for a minute.
+            suite.key_classes()
 
     # `failed`: Rütli failed a check. `rig_failed`: only the test rig failed (a load generator that
     # could not be run or reached, a hook or kubectl error): nothing is known about Rütli there.
@@ -963,6 +1088,8 @@ def main():
         "setup": setup,
         "scenarios": suite.results,
         "skipped": suite.skipped,
+        "tenants": [t["name"] for t in suite.tenants()],
+        "key_class_spot_checks": suite.spot_checks,
         "keys": suite.keys,
         "ramp": suite.ramp,
         "diagnosis": diagnosis,

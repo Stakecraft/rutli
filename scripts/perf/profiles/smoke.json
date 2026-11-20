@@ -3,6 +3,8 @@
   "note": "A short profile that checks the suite runs end to end (CI on kind). Its numbers mean nothing.",
   "slo": { "p99_ms": 2000 },
   "steady": { "sign_per_sec": 10, "secs": 30 },
+  "tenants": [{ "name": "a", "cn": "driver", "prefix": "perf-" }, { "name": "b", "cn": "driver-b", "prefix": "tenantb-" }],
+  "classes": { "namespace": { "key": "frost-namespace", "per_min": 10, "per_day": 200 }, "hosted": { "key": "rutli-enc" } },
   "real": [{ "name": "average", "per_sec": 1, "min_secs": 10 }, { "name": "burst", "per_sec": 4, "min_secs": 0 }],
   "baseline": {
     "sign_keys": 2,
