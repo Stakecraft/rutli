@@ -67,6 +67,7 @@ annotations, NetworkPolicy ingress for pods labelled `rutli.io/scraper: "true"`)
 | `rutli_grpc_accept_errors_total` | counter | — | Failed accepts that needed a backoff, usually the process out of file descriptors; the loop retries (`RutliGrpcAcceptErrors`) |
 | `rutli_grpc_handshake_timeouts_total` | counter | — | Connections cut for not finishing the TLS handshake within 5 s of accept (without TLS: for sending nothing). Clients that open TCP and then send nothing count here; a probe that connects and closes does not |
 | `rutli_lock_poison_recoveries_total` | counter | `lock` | Locks recovered after a panicking request poisoned them (audit L3). The node kept serving; the panic is a bug (`RutliLockPoisonRecovered`) |
+| `rutli_background_loop_restarts_total` | counter | `loop` (`anti_entropy`, `ceremony_resolver`, `epoch_check`, `nonce_pruner`) | Background loops restarted 30 s after a panic in a pass (`anti_entropy` then also waits its own interval before the next sweep). The loop runs again; the panic is a bug (`RutliBackgroundLoopRestarted`) |
 
 Leader-side metrics (`sign_*`, `ceremony_*`) appear on whichever node served the driver's request —
 with driver failover that can be any of them, so always aggregate across instances (`sum(...)`).
@@ -100,7 +101,8 @@ for every label value they can carry, so the first event moves a series from 0 t
 that alert on increases see it (`deploy/monitoring/prometheus-rules.yml`:
 `RutliSignPolicyRefusals`, `RutliSignIntentAbsent`, `RutliSignRateLimited`, `RutliSignerAclAbsent`,
 `RutliSignJournalErrors`, `RutliDeleteIntentRefused`, `RutliHostedKeyDeleted`,
-`RutliCeremonyIntentRefused`, `RutliCeremonyIntentAbsent`, `RutliLockPoisonRecovered`).
+`RutliCeremonyIntentRefused`, `RutliCeremonyIntentAbsent`, `RutliLockPoisonRecovered`,
+`RutliBackgroundLoopRestarted`).
 `rutli_sign_round2_unknown_session_total` is primed too (`RutliSignUnknownSessions`).
 `rutli_stale_share` carries a key id and cannot be primed. `rutli_keyfiles` is set
 once per start (`RutliKeyFilesUnopenable`, `RutliKeyFileMigrationPending`).
