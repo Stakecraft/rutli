@@ -32,7 +32,9 @@ concurrency:
 jobs:
   guard:
     name: Installed guard matches the repository's
-    runs-on: ${{ vars.PERF_RUNNER || vars.CI_RUNNER || 'ubuntu-24.04' }}
+    # As ci.yml: a pull request from a fork, and anything Dependabot starts, never go to the self-hosted
+    # runner (its job-started guard refuses them as well).
+    runs-on: ${{ github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && (vars.PERF_RUNNER || vars.CI_RUNNER) || 'ubuntu-24.04' }}
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -47,4 +49,5 @@ jobs:
         run: scripts/check-runner-guard.sh
       - name: No self-hosted runner for this run
         if: runner.environment != 'self-hosted'
-        run: echo "::notice::this run landed on a hosted runner (PERF_RUNNER and CI_RUNNER are not set): no installed guard to check"
+        run: |
+          echo "::notice::this run landed on a hosted runner (PERF_RUNNER and CI_RUNNER are not set), so there is no installed guard to check"
