@@ -26,6 +26,7 @@ on:
       - Load test
       - Cluster suite (kind)
       - Image build check
+      - Generated code
       - Workflow lint
     types: [completed]
     branches: [main]
