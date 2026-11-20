@@ -67,7 +67,7 @@ All of these hold, or the release waits:
 - [ ] CI green on the candidate commit, including the weekly conformance run
 - [ ] Soak criteria in step 5 met
 - [ ] Quality report: no metric worse than the previous release without a written reason
-- [ ] `CHANGELOG.md` complete; upgrade notes for any config or wire change
+- [ ] `CHANGELOG.md` assembled from the fragments (`scripts/changelog.py assemble`, see [releasing.md](releasing.md)), `changelog.d/` empty apart from its README; upgrade notes for any config or wire change
 - [ ] SECURITY.md supported-versions table updated
 - [ ] Third-party license files regenerated
 - [ ] Release notes, chart defaults and examples do not present a single-cluster deployment as a

@@ -1,0 +1,45 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Changelog fragments: a pull request that changes frost/, driver/, deploy/ or scripts/ adds a file
+# under changelog.d/ (or carries the label `no-changelog`). See changelog.d/README.md.
+name: Changelog
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: changelog-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  fragment:
+    name: changelog fragment
+    # GitHub-hosted: this is a few seconds of Python, it must not queue on the self-hosted runners.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Script tests
+        run: python3 -I scripts/test_changelog.py
+
+      - name: Fragments are well-formed
+        run: python3 -I scripts/changelog.py check
+
+      - name: Code change has a fragment or the no-changelog label
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          git diff --name-status "$BASE_SHA...$HEAD_SHA" \
+            | python3 -I scripts/changelog.py require --pr "$PR_NUMBER" --labels "$PR_LABELS"
