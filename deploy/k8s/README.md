@@ -66,6 +66,10 @@ kubectl -n rutli get pods -l app.kubernetes.io/name=rutli-cosigner   # rutli-cos
 kubectl -n rutli logs rutli-cosigner-n1-0 -c cosigner | grep -E 'mutual TLS enabled|share sealing enabled \(bundle node=1\)'
 ```
 
+`values.yaml` sets the production profile (`docs/production-profile.md`): the cosigners refuse
+to start until the per-cluster values are filled in (`clusterId`, `keyfile`, `signingPolicy.signer_pins`)
+and re-rendered. Check the rendered config first: `rutli-cosigner --config cosigner-1.json check-config`.
+
 No key exists yet — DKG runs when the key is first requested (§4). Other `t`-of-`n`: set
 `replicaCount`/`threshold` in `values.yaml`, re-render, and add certs and bundles.
 

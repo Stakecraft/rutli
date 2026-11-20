@@ -210,6 +210,7 @@ data:
 
   cosigner-1.json: |
     {
+      "profile": "production",
       "identifier": 1,
       "listen": "0.0.0.0:9101",
       "metrics_listen": "0.0.0.0:9200",
@@ -229,10 +230,12 @@ data:
       "signer_allowlist": ["driver"],
       "operator_allowlist": ["operator"],
       "refresh_allowlist": ["refresher"],
+      "signing_policy": {"require_epoch_match":true,"signer_acl":{"driver":[""]},"signer_acl_required":true,"signer_may_refresh":false},
       "peer_allowlist": ["cosigner1","cosigner2","cosigner3"]
     }
   cosigner-2.json: |
     {
+      "profile": "production",
       "identifier": 2,
       "listen": "0.0.0.0:9101",
       "metrics_listen": "0.0.0.0:9200",
@@ -252,10 +255,12 @@ data:
       "signer_allowlist": ["driver"],
       "operator_allowlist": ["operator"],
       "refresh_allowlist": ["refresher"],
+      "signing_policy": {"require_epoch_match":true,"signer_acl":{"driver":[""]},"signer_acl_required":true,"signer_may_refresh":false},
       "peer_allowlist": ["cosigner1","cosigner2","cosigner3"]
     }
   cosigner-3.json: |
     {
+      "profile": "production",
       "identifier": 3,
       "listen": "0.0.0.0:9101",
       "metrics_listen": "0.0.0.0:9200",
@@ -275,6 +280,7 @@ data:
       "signer_allowlist": ["driver"],
       "operator_allowlist": ["operator"],
       "refresh_allowlist": ["refresher"],
+      "signing_policy": {"require_epoch_match":true,"signer_acl":{"driver":[""]},"signer_acl_required":true,"signer_may_refresh":false},
       "peer_allowlist": ["cosigner1","cosigner2","cosigner3"]
     }
 ---

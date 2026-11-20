@@ -1,4 +1,5 @@
 {
+  "profile": "lab",
   "identifier": 3,
   "listen": "0.0.0.0:9103",
   "threshold": 2,

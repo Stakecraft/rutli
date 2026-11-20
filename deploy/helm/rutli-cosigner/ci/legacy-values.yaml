@@ -3,3 +3,5 @@
 # CI render: the deprecated legacy topology. scripts/check-deploy-policy.sh must REJECT it (shared
 # seal env var, every node's TLS Secret in one pod spec) — CI asserts that it does.
 topology: legacy
+# The legacy topology cannot meet the production profile (one shared seal secret).
+profile: lab

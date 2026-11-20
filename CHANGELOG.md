@@ -7,6 +7,25 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Changed (breaking default)
 
+- **The production profile: `"profile": "production"` makes a cosigner refuse to start while any
+  enforcement setting is off, and the Helm chart now defaults to it.** The threat model assumes TLS,
+  per-node sealing, the operator and refresher roles, signing and ceremony intents, epoch match, the
+  signer ACL and SPKI pins, rate limits, key-file v2 and a pinned cluster id. Several of these are
+  off by default. Under `production` the node now names each one that is not set and stops. `lab`
+  logs the same list and starts. Unset behaves as `lab` with a warning, and **becomes `production`
+  in 0.6**. The new `rutli-cosigner check-config` prints the list without starting anything, under
+  any profile (exit 0 clean, 1 required findings, 2 the config does not load). An approval rule for
+  the namespace key is an advisory finding: reported, never refused. Table: `docs/production-profile.md`.
+  - **Upgrade note.** The chart's new `profile: production` default stops an install that does not
+    meet the list. Before `helm upgrade`, run `check-config` with the new image against the live
+    config and fix what it lists, in the order `docs/production-profile.md` ("Upgrading") gives.
+    Or set `profile: lab` for the upgrade and remove it once `check-config` exits 0. The chart
+    refuses `production` with `topology: legacy` at render time. `deploy/k8s` ships with
+    `production` and the enforcement that needs no per-cluster value. Fill in `clusterId`,
+    `keyfile` and `signingPolicy.signer_pins` before the first apply. The compose examples set
+    `lab`. A cosigner older than this release refuses a config with `profile` (unknown key), so
+    roll back the chart and the image together.
+
 - **A cosigner refuses to start on a config key it does not know.** Until now only the `keyfile`
   block was parsed strictly. A misspelt key such as `require_intnet`, or `requireIntent` in
   camelCase, was dropped without a word and the control it meant to set stayed at its default. Now
