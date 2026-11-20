@@ -1162,7 +1162,8 @@ class FrostBackend(
     * generation's fence. A FRESH intent per endpoint tried, as for a DKG: the intent names its
     * leader, and its request id is spent on every node the previous attempt fenced. Before each
     * attempt the endpoint is asked which roster slot it serves (`Capabilities.node_identifier`, on
-    * the same channel); an endpoint that cannot say (a cosigner older than 0.5.0) is refused.
+    * the same channel); an endpoint that cannot say (a cosigner older than 0.5.0) is refused, not
+    * failed over, and loses the lead, so the next generation starts at another endpoint.
     *
     * The leader's reply is one cosigner's word. Before the key id goes back to Canton every endpoint
     * is asked for its own copy ([[confirmHostedCopies]]), inside the failover: a reply the other
@@ -1171,73 +1172,90 @@ class FrostBackend(
     * which leads the same id under a fresh intent (it holds the key, adopts it from agreeing peers or
     * refuses; it never mints over a copy) and is checked again. Each endpoint is tried at most once.
     * A leader whose reply fails the check loses the lead and does not become the preferred one.
-    * The check uses what is left of the call's `requestTimeout`, keeping room for one more attempt;
-    * when no attempt could follow, a reply short only because endpoints were silent ends the call
-    * with that (non-retryable) error, not a spent request timeout.
+    * The call's `requestTimeout` covers the cluster-id lookup, every attempt and every check. The
+    * check uses what is left of it, keeping room for one more attempt when one fits (an endpoint left
+    * to lead, and time for an attempt as long as the last one plus a minimal check); when none fits,
+    * a reply short only because endpoints were silent ends the call with that (non-retryable)
+    * error, not a spent request timeout.
     */
   private def generateHosted(keyId: String, spec: String): Future[String] = {
     val notes = currentNotes.get
-    val cluster: Option[String] =
-      if (!signIntents) None
-      else
-        intentSigner.flatMap { _ =>
-          val c = learnClusterId()
-          if (c.isEmpty)
-            logger.warn(
-              s"FROST: hosted key $keyId is generated WITHOUT a generate intent: no cosigner reports a cluster id " +
-                "(frost.cluster-id unset); cosigners with signing_policy.require_ceremony_intent will refuse it."
-            )
-          c
-        }
-    val withIntent = intentSigner.isDefined && cluster.isDefined
-    def request(stub: SignerGrpc.SignerBlockingStub): GenerateKeyRequest = {
-      val b = GenerateKeyRequest.newBuilder().setKeyId(keyId).setSpec(spec)
-      for (signer <- intentSigner; c <- cluster) {
-        val leader = stub.capabilities(CapabilitiesRequest.newBuilder().build()).getNodeIdentifier
-        if (leader <= 0)
-          throw Status.FAILED_PRECONDITION
-            .withDescription(
-              s"cannot generate hosted key $keyId through this cosigner: it does not report its roster identifier " +
-                "(a cosigner older than 0.5.0) — upgrade the cosigners; a generate intent must name its leader"
-            )
-            .asRuntimeException()
-        val requestId = FrostIntentSigner.newRequestId()
-        b.setIntent(signer.signGenerate(c, keyId, spec, leader, requestId, System.currentTimeMillis(), intentLifetime.toMillis))
-        logger.info(
-          s"FROST: hosted key $keyId: generate intent for cosigner $leader " +
-            s"(ceremony ${FrostIntentSigner.generateCeremonyId(requestId)})"
-        )
-      }
-      b.build()
-    }
     Future(blocking {
       val start = preferred.get
-      // One budget for the whole call: every attempt and every copy check comes out of it.
+      // One budget for the whole call: the cluster-id lookup, every attempt and every copy check
+      // come out of it.
       val budgetEnd = System.nanoTime() + requestTimeout.toNanos
-      val answered = new AtomicInteger(-1)
+      val cluster: Option[String] =
+        if (!signIntents) None
+        else
+          intentSigner.flatMap { _ =>
+            val c = learnClusterId(FiniteDuration(math.max(budgetEnd - System.nanoTime(), 0L), NANOSECONDS))
+            if (c.isEmpty)
+              logger.warn(
+                s"FROST: hosted key $keyId is generated WITHOUT a generate intent: no cosigner reports a cluster id " +
+                  "(frost.cluster-id unset); cosigners with signing_policy.require_ceremony_intent will refuse it."
+              )
+            c
+          }
+      val withIntent = intentSigner.isDefined && cluster.isDefined
+      // The endpoint asked last (`tried` sets it before each attempt). Read by the request and the
+      // check for that attempt, and after withCheckedFailover returned: the leader whose reply passed.
+      val lastTried = new AtomicInteger(-1)
       val attempts = new AtomicInteger(0)
       val attemptStarted = new java.util.concurrent.atomic.AtomicLong(0L)
+      def request(stub: SignerGrpc.SignerBlockingStub): GenerateKeyRequest = {
+        val b = GenerateKeyRequest.newBuilder().setKeyId(keyId).setSpec(spec)
+        for (signer <- intentSigner; c <- cluster) {
+          val leader = stub.capabilities(CapabilitiesRequest.newBuilder().build()).getNodeIdentifier
+          if (leader <= 0) {
+            // Not failed over (a 0.5.0 leader refuses while an older peer is reachable anyway), but
+            // the endpoint loses the lead, so the next generation does not start here again.
+            demote(lastTried.get)
+            throw Status.FAILED_PRECONDITION
+              .withDescription(
+                s"cannot generate hosted key $keyId through this cosigner: it does not report its roster identifier " +
+                  "(a cosigner older than 0.5.0) — upgrade the cosigners; a generate intent must name its leader"
+              )
+              .asRuntimeException()
+          }
+          val requestId = FrostIntentSigner.newRequestId()
+          b.setIntent(signer.signGenerate(c, keyId, spec, leader, requestId, System.currentTimeMillis(), intentLifetime.toMillis))
+          logger.info(
+            s"FROST: hosted key $keyId: generate intent for cosigner $leader " +
+              s"(ceremony ${FrostIntentSigner.generateCeremonyId(requestId)})"
+          )
+        }
+        b.build()
+      }
       // A refusal (thrown) fails the call at once and costs the leader the lead here; a rejection
       // (returned) is demoted and failed over by withCheckedFailover.
       val check = (endpoint: String, reply: GenerateKeyReply) => {
-        val leader = answered.get
+        val leader = lastTried.get
         val now = System.nanoTime()
+        val attemptTook = now - attemptStarted.get
+        // The one rule for "another attempt fits", before and after the copy check: an endpoint is
+        // left to lead, and `remaining` (nanoseconds of the budget) covers an attempt as long as the
+        // one that just answered (at least MinAttempt) plus the shortest copy check after it.
+        def nextAttemptFits(remaining: Long): Boolean =
+          attempts.get < channels.size &&
+            remaining >= math.max(MinAttempt.toNanos, attemptTook) + (ProbeSlack + MinAttempt).toNanos
         val left = budgetEnd - now
-        // The copy check uses what is left of the budget, keeping room for one more attempt while
-        // an endpoint is left to lead: up to one attempt deadline, at most half of what is left, and
-        // only if that is at least as long as the attempt that just answered took. Otherwise the
-        // check gets all of it, and a rejection ends the call here with its own error: a next
-        // attempt could not finish, and the call would end on "request-timeout spent" instead.
+        // The copy check keeps a reserve (up to one attempt deadline, at most half of what is left)
+        // only when the next attempt fits in it and the check still gets time to probe; otherwise it
+        // gets all of what is left.
         val reserve = math.min(attemptTimeout.toNanos, left / 2)
-        val another = attempts.get < channels.size && reserve >= math.max(MinAttempt.toNanos, now - attemptStarted.get)
-        val probeBudget = FiniteDuration(math.max(left - (if (another) reserve else 0L), 0L), NANOSECONDS)
+        val keep = nextAttemptFits(reserve) && left - reserve >= (ProbeSlack + MinAttempt).toNanos
+        val probeBudget = FiniteDuration(math.max(left - (if (keep) reserve else 0L), 0L), NANOSECONDS)
         try {
           val outcome: Option[Rejected] = confirmHostedCopies(keyId, spec, reply, withIntent, endpoint, notes, probeBudget)
-          if (outcome.nonEmpty && (!another || budgetEnd - System.nanoTime() < MinAttempt.toNanos)) {
-            logger.warn(s"FROST: generateKey via $endpoint not confirmed; no attempt left in this call")
-            throw outcome.get.error
+          // A rejection is failed over only if the next attempt fits in what is left now; otherwise
+          // it ends the call with its own (non-retryable) error, not with "request-timeout spent".
+          outcome match {
+            case Some(rejected) if !nextAttemptFits(budgetEnd - System.nanoTime()) =>
+              logger.warn(s"FROST: generateKey via $endpoint not confirmed; no attempt left in this call")
+              throw rejected.error
+            case _ => outcome
           }
-          outcome
         } catch {
           case e: KmsDriverException =>
             demote(leader)
@@ -1255,7 +1273,7 @@ class FrostBackend(
         NoPreference,
         start,
         (i: Int) => {
-          answered.set(i)
+          lastTried.set(i)
           attempts.incrementAndGet()
           attemptStarted.set(System.nanoTime())
         },
@@ -1264,7 +1282,7 @@ class FrostBackend(
         attemptTimeout,
         budgetEnd,
       )(stub => stub.generateKey(request(stub)))
-      preferred.compareAndSet(start, answered.get)
+      preferred.compareAndSet(start, lastTried.get)
       reply
     }).map { reply =>
       learnSpec(keyId, spec)
@@ -1568,15 +1586,21 @@ class FrostBackend(
     * roster) and more than report any other value (audit F5: one compromised or misconfigured
     * cosigner cannot set the id every honest cosigner then refuses). Cached once found; asked again
     * at most once a minute while unknown, and again at once after a cluster refusal
-    * ([[forgetLearnedClusterId]]). */
-  private def learnClusterId(): Option[String] =
+    * ([[forgetLearnedClusterId]]).
+    *
+    * The lookup ends within `within` (a caller's remaining budget; by default up to 2 s past one
+    * `Capabilities` deadline of at most 5 s). With too little of it left to ask, nothing is asked
+    * and the next caller may ask at once. */
+  private def learnClusterId(within: FiniteDuration = requestTimeout.min(5.seconds) + 2.seconds): Option[String] =
     intentClusterId.orElse {
       val now = System.nanoTime()
       val last = lastClusterProbe.get
+      val lookupWait = within.min(requestTimeout.min(5.seconds) + 2.seconds)
+      val deadline = requestTimeout.min(5.seconds).min(lookupWait - ProbeSlack)
       if (last != 0L && now - last < 60.seconds.toNanos) None
+      else if (deadline < MinAttempt) None
       else {
         lastClusterProbe.set(now)
-        val deadline = requestTimeout.min(5.seconds)
         val probes = Future.traverse(channels.indices.toVector) { i =>
           Future(blocking {
             try {
@@ -1590,7 +1614,7 @@ class FrostBackend(
           })
         }
         val answers =
-          try scala.concurrent.Await.result(probes, deadline + 2.seconds).flatten
+          try scala.concurrent.Await.result(probes, lookupWait).flatten
           catch { case _: java.util.concurrent.TimeoutException => Vector.empty }
         val found = agreeOnClusterId(answers)
         found.foreach { id =>
