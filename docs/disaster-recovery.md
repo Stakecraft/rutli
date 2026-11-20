@@ -99,15 +99,20 @@ by a rule (`backup.retention`, on by default; `rutli-cosigner backup-retain`):
   the previous epoch is the only fallback, and it stays until the new epoch has shown that it signs. With
   no proof, nothing is deleted by epoch.
 - **A complete verified archive of the proven epoch always remains**, and the newest archive is never
-  deleted. "Verified" means the tar reads to its end and every key file in it has a v2 header for this
+  deleted. Every live FROST key must be proven for any archive to go by this rule (a key that was never
+  refreshed needs its own proof, after its DKG); hosted keys and tombstones have no epoch to prove and
+  only have to be as the proven archive has them. "Verified" means the tar reads to its end and every key file in it has a v2 header for this
   cluster and node; it does not mean restorable (the sidecar has no sealing key). Run a restore drill
   (`restore` on a scratch node) as before.
 - **Nothing is deleted** when an archive's epoch cannot be read (v1 key files: run `keyfile migrate`
   first; a damaged tar), when this node's own live epoch is behind its newest archive's, when the
   newest archive is not the live key set and epoch (a backup is pending), or on any error. The log says
   why: `BACKUP_RETENTION archive=… verdict=keep reason=…`, `BACKUP_RETENTION_SKIPPED … reason=…`.
-  `keep` (default 14) still caps the number of archives, oldest first, but never takes the newest or the
-  proven one.
+  `keep` (default 14) still caps the number of archives, oldest first, but only takes an archive whose
+  every key state another kept archive also holds (a copy), never the newest or the proven one and
+  never one it cannot read: the directory can therefore exceed `keep` while older epochs are unproven.
+  If a retention run keeps failing (`BACKUP_RETENTION_FAILED`), nothing bounds the directory (except
+  when the image lacks the binary: then the plain count cap runs): watch the backup volume.
 - **A node that missed a refresh** (stale share, `RutliStaleShare`) holds the old epoch while its peers
   are on the new one. No node can prove the new epoch while a node disagrees on it, so the old
   archives stay everywhere, which is the cluster's way back. Recover that node first (§1: restore a

@@ -1902,8 +1902,6 @@ fn append_sources(out: &mut String, mut source: Option<&(dyn std::error::Error +
     }
 }
 
-/// Back up the (sealed) key-share files from data_dir/keys to `out`. Shares are encrypted at rest
-/// when sealing is enabled, so the backup carries no plaintext key material.
 /// `backup-retain`: see [`Command::BackupRetain`].
 fn backup_retain_command(
     cfg: &Config,
@@ -1923,7 +1921,7 @@ fn backup_retain_command(
     };
     let node = cfg.identifier;
     let plan = r::run(dir, &cfg.data_dir.join("keys"), &settings, rutli_cosigner::intent::now_ms(), dry_run)
-        .map_err(|e| DaemonError::Config(format!("backup-retain: nothing deleted: {e}")))?;
+        .map_err(|e| DaemonError::Config(format!("backup-retain: {e}")))?;
     let (mut deleted, mut kept) = (0, 0);
     for (name, verdict) in &plan.verdicts {
         match verdict {
@@ -1958,6 +1956,8 @@ fn backup_retain_command(
     Ok(())
 }
 
+/// Back up the (sealed) key-share files from data_dir/keys to `out`. Shares are encrypted at rest
+/// when sealing is enabled, so the backup carries no plaintext key material.
 fn backup_command(cfg: &Config, out: &std::path::Path) -> Result<()> {
     let src = cfg.data_dir.join("keys");
     std::fs::create_dir_all(out)?;

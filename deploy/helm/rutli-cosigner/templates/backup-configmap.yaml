@@ -121,9 +121,19 @@ data:
     # takes the newest or the proven archive. It reads the key files' clear headers only and deletes
     # nothing when it cannot read an epoch, when this node's live epoch is behind an archive's, or on
     # any error; one BACKUP_RETENTION line per archive says why.
+    # A skipped run (BACKUP_RETENTION_SKIPPED) deletes nothing and is not an error. If the binary is
+    # missing (a custom backup.image without it) the old count cap runs instead, so the directory
+    # stays bounded; any other failure leaves the directory as it is and is logged.
+    rc=0
     rutli-cosigner --config "/config/cosigner-$2.json" backup-retain --dir /backup \
       --min-proof-age-days {{ int $backup.retention.minProofAgeDays }} --keep-older-epochs {{ int $backup.retention.keepOlderEpochs }} \
-      --keep-count {{ int $backup.destination.keep }} || echo "BACKUP_RETENTION_FAILED node=$2 (nothing was deleted)" >&2
+      --keep-count {{ int $backup.destination.keep }} || rc=$?
+    if [ "$rc" = 127 ]; then
+      echo "BACKUP_RETENTION_FAILED node=$2 reason=no-rutli-cosigner-binary-in-the-backup-image: using the count cap" >&2
+      ls -1 /backup/node-"$2"-*.tar 2>/dev/null | sort | head -n -{{ int $backup.destination.keep }} | while read -r old; do rm -f "$old"; done
+    elif [ "$rc" != 0 ]; then
+      echo "BACKUP_RETENTION_FAILED node=$2 rc=$rc (see the lines above; some archives may already have been deleted)" >&2
+    fi
 {{- else }}
     # Retention is off: keep the newest {{ int $backup.destination.keep }}, whatever their epoch.
     ls -1 /backup/node-"$2"-*.tar 2>/dev/null | sort | head -n -{{ int $backup.destination.keep }} | while read -r old; do rm -f "$old"; done

@@ -180,7 +180,7 @@ fn an_unreadable_directory_is_an_error_and_a_damaged_archive_is_kept() {
     let backups = tmp.path().join("backup");
     store(&keys).create(KEY, &share(3)).unwrap();
     let missing = cosigner(&cfg, &["backup-retain", "--dir", tmp.path().join("nope").to_str().unwrap()]);
-    assert!(!missing.status.success() && text(&missing).contains("nothing deleted"), "{}", text(&missing));
+    assert!(!missing.status.success() && text(&missing).contains("cannot list"), "{}", text(&missing));
 
     archive(&backups, "20261101T000000Z", 3);
     archive(&backups, "20261103T000000Z", 3);
