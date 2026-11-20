@@ -138,6 +138,21 @@ spec:
           \ a restore from an old backup or a volume snapshot rollback. Fix: restore a current backup\
           \ of this node (daemon stopped) or re-enrol it; the mark clears by itself once the share is\
           \ current (docs/ceremonies.md, Signing across epochs). Never copy another node's share file."
+    - alert: RutliKeyEpochUnproven
+      expr: rutli_key_epoch_proven == 0 and rutli_key_epoch_age_seconds > 259200
+      for: 1h
+      labels:
+        severity: warning
+      annotations:
+        summary: "R\xFCtli key {{ $labels.key }} has run its current epoch on {{ $labels.instance }} for\
+          \ over 3 days without a proof"
+        description: 'The key file of {{ $labels.key }} on {{ $labels.instance }} is more than 3 days
+          old and its live epoch has no proof: nobody has recorded that the shares of this epoch sign
+          together. Run `rutli-cosigner verify-key --sign-test --json` for the key, then `rutli-cosigner
+          keyfile prove --key-id <key> --epoch <epoch> --report <file>` on every node (docs/ceremonies.md,
+          Proving an epoch). Expect this alert for every key after upgrading to the release that adds
+          the command. A node whose share is stale (RutliStaleShare) cannot prove the epoch: bring it
+          back first. Not an outage.'
     - alert: RutliEpochMismatch
       expr: increase(rutli_epoch_mismatch_total[15m]) > 0
       for: 0m

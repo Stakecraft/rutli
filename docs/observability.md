@@ -31,6 +31,8 @@ annotations, NetworkPolicy ingress for pods labelled `rutli.io/scraper: "true"`)
 | `rutli_ceremony_unknown_no_votes` | gauge | — | No-votes held for ceremony ids peers asked about that this node never knew (capped, garbage-collected after 30 days) |
 | `rutli_epoch_mismatch_total` | counter | — | Sign round-1 refusals because the leader signs with another sharing (epoch, PKP digest) of the key than this node committed (audit H1/M1): two nodes hold different epochs of one key |
 | `rutli_epoch_check_skipped_total` | counter | — | Sign round-1 requests from a leader that sent no sharing (a release before epochs), so the epoch check was skipped. Expected only during a rolling upgrade |
+| `rutli_key_epoch_proven` | gauge | `key` | `1` while the live epoch of the FROST key has a `keyfile prove` marker for the live sharing (an operator's statement that `verify-key --sign-test` passed, `docs/ceremonies.md#proving-an-epoch`), else `0`. Only keys with a v2 key file |
+| `rutli_key_epoch_age_seconds` | gauge | `key` | Seconds since the live key file of `key` was written: since the epoch was installed, or the file was last re-sealed |
 | `rutli_stale_share` | gauge | `key` | `1` while this node's share of `key` is older than a committed sharing a peer holds (typically a restore from an old backup); the node refuses to sign or lead for that key. One cosigner's claim alone can set it while no peer holding this node's sharing answers; the log's stale reason then says "unconfirmed" and the mark clears on the next pass that reaches such a peer, at most 30 s later. Else `0` |
 | `rutli_nonce_markers` | gauge | — | Burned-session nonce markers on this node after the last prune pass (audit L4); each costs an inode on the key volume, bounded by the sign rate over the retention window |
 | `rutli_nonce_markers_pruned_total` | counter | — | Burned-session nonce markers removed past their retention |
@@ -85,7 +87,7 @@ Hosted-key metrics appear on every node, because hosted keys are **replicated wh
 shares**: each node holds the same material, serves its own decrypts, and counts them locally. (The
 FROST share itself is never listed, replicated or counted per-key — two nodes holding one share
 would silently break the threshold.) No hosted-key id is ever used as a label (only
-`rutli_stale_share` and `rutli_refreshes_6d` carry a key id: a FROST key, a handful per cluster); the label sets above are
+`rutli_stale_share`, `rutli_key_epoch_proven`, `rutli_key_epoch_age_seconds` and `rutli_refreshes_6d` carry a key id: a FROST key, a handful per cluster); the label sets above are
 exhaustive. Three collection details matter when writing rules:
 
 - `rutli_hosted_keys` is refreshed at the end of this node's own anti-entropy sweep and whenever a
@@ -117,7 +119,7 @@ that alert on increases see it (`deploy/monitoring/prometheus-rules.yml`:
 `rutli_sign_round2_unknown_session_total` is primed too (`RutliSignUnknownSessions`), and so are
 the sign-session refusal counters for every `call` and `cap` (`RutliSignSessionOwnerRefused`,
 `RutliSignSessionCapReached`).
-`rutli_stale_share` carries a key id and cannot be primed; `rutli_refreshes_6d` is set from the
+`rutli_stale_share`, `rutli_key_epoch_proven` and `rutli_key_epoch_age_seconds` carry a key id and cannot be primed; `rutli_refreshes_6d` is set from the
 ceremony records every resolver pass (30 s), for every key with a refresh record. `rutli_keyfiles` is set
 once per start (`RutliKeyFilesUnopenable`, `RutliKeyFileMigrationPending`).
 

@@ -372,6 +372,22 @@ enum KeyfileCommand {
         #[arg(long)]
         confirm: Option<String>,
     },
+    /// Record that an epoch of a FROST key is PROVEN: take the JSON of
+    /// `verify-key --sign-test --json` (every quorum signed, every node on one epoch and sharing),
+    /// check it against this node's live key, and write a clear marker `keys/.proven/<key>.<epoch>.json`.
+    /// The report is the OPERATOR'S statement: this node cannot check who produced it, only that it is
+    /// consistent and agrees with its own epoch, sharing and group key. Runs beside the daemon (it
+    /// only reads the key files). Backup retention keeps older epochs until the next one is proven.
+    Prove {
+        #[arg(long)]
+        key_id: String,
+        /// The epoch being proven; must be this node's live epoch.
+        #[arg(long)]
+        epoch: u64,
+        /// The report file written by `verify-key --sign-test --json`.
+        #[arg(long)]
+        report: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -970,6 +986,8 @@ async fn main() -> Result<()> {
     // transition log and the refusal gate stay current even when nobody calls Health. A dedicated
     // OS thread, not a tokio task: on a stalled volume it must keep going when the runtime cannot.
     rutli_cosigner::health::spawn_monitor(node.clone(), rutli_cosigner::health::MONITOR_INTERVAL);
+    // `rutli_key_epoch_proven` / `rutli_key_epoch_age_seconds`: read-only, its own thread.
+    rutli_cosigner::proof::spawn_gauge_updater(cfg.data_dir.join("keys"), std::time::Duration::from_secs(60));
 
     // Build the peer roster: this node as a local peer, every other as a lazy gRPC client.
     let mut peers: Vec<Arc<dyn PeerApi>> = Vec::new();
@@ -2318,7 +2336,7 @@ fn keyfile_command(cfg: &Config, command: KeyfileCommand) -> Result<()> {
     use rutli_cosigner::seal::DekUse;
     let sealer = offline_sealer(cfg)?;
     let lock = match command {
-        KeyfileCommand::Status => None,
+        KeyfileCommand::Status | KeyfileCommand::Prove { .. } => None,
         _ => Some(rutli_cosigner::instance_lock::InstanceLock::acquire(&cfg.data_dir)?),
     };
     let keystore = KeyStore::open_with_sealer(cfg.data_dir.join("keys"), Some(sealer.clone()))?;
@@ -2405,6 +2423,50 @@ fn keyfile_command(cfg: &Config, command: KeyfileCommand) -> Result<()> {
                      again, or it migrates the files back to v2 at start"
                 );
             }
+        }
+        KeyfileCommand::Prove { key_id, epoch, report } => {
+            let share = keystore.load(&key_id)?;
+            if share.epoch != epoch {
+                return Err(DaemonError::Config(format!(
+                    "keyfile prove: this node's live share of {key_id} is at epoch {}, not {epoch}",
+                    share.epoch
+                )));
+            }
+            let live = rutli_cosigner::proof::Live {
+                key_id: key_id.clone(),
+                epoch,
+                group_key: rutli_frost_core::dkg::group_verifying_key_bytes(&share.public_key_package)?,
+                pkp_digest: share.pkp_digest()?,
+                threshold: *share.key_package.min_signers(),
+                roster: share
+                    .public_key_package
+                    .verifying_shares()
+                    .keys()
+                    .map(|id| rutli_cosigner::hosted::identifier_index(*id))
+                    .collect::<std::result::Result<Vec<u16>, _>>()?,
+            };
+            let roster: Vec<u16> = cfg.peers.iter().map(|p| p.identifier).collect();
+            let (marker, wrote) = rutli_cosigner::proof::prove(
+                &cfg.data_dir.join("keys"),
+                &live,
+                &roster,
+                cfg.threshold,
+                &std::fs::read(&report)?,
+                rutli_cosigner::intent::now_ms(),
+            )?;
+            println!(
+                "{} {} epoch {} (group key {}, report sha256 {})",
+                if wrote { "recorded: proven" } else { "already recorded: proven" },
+                marker.key_id,
+                marker.epoch,
+                marker.group_key,
+                marker.report_sha256
+            );
+            println!(
+                "NOTE: this marker is YOUR statement. This node checked that the report is consistent \
+                 and agrees with its own epoch, sharing and group key; it cannot check who produced the \
+                 report. Backups of older epochs are kept until this epoch is proven and old enough."
+            );
         }
         KeyfileCommand::MigratePlaintext { key_id, confirm } => {
             use sha2::Digest;

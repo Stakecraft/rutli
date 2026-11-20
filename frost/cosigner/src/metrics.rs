@@ -64,6 +64,11 @@ pub const EPOCH_CHECK_SKIPPED: &str = "rutli_epoch_check_skipped_total";
 /// sharing this node never voted for — typically a restore from an old backup), else 0. A stale
 /// node refuses to sign or lead for the key. Labels: `key`. Alert on any 1.
 pub const STALE_SHARE: &str = "rutli_stale_share";
+/// Per FROST key (label `key`): 1 when the live epoch has a `keyfile prove` marker for the live
+/// sharing, else 0 (`proof::refresh_gauges`).
+pub const KEY_EPOCH_PROVEN: &str = "rutli_key_epoch_proven";
+/// Per FROST key (label `key`): seconds since the live key file was written.
+pub const KEY_EPOCH_AGE_SECONDS: &str = "rutli_key_epoch_age_seconds";
 /// Sign attempts beyond the first within one Sign request: a t-subset failed and the leader
 /// retried with another (fresh session, fresh commitments).
 /// Sign rounds this node took part in without a signing intent (a driver or leader older than
@@ -477,6 +482,11 @@ pub fn describe() {
     describe_counter!(EPOCH_MISMATCH, "Sign round-1 refusals: the leader signed with another sharing (epoch)");
     describe_counter!(EPOCH_CHECK_SKIPPED, "Sign round-1 requests without the leader's sharing (pre-epoch leader)");
     describe_gauge!(STALE_SHARE, "1 while this node's share of the key is stale (refuses to sign), else 0");
+    describe_gauge!(
+        KEY_EPOCH_PROVEN,
+        "1 while the live epoch of the key has a `keyfile prove` marker for the live sharing, else 0"
+    );
+    describe_gauge!(KEY_EPOCH_AGE_SECONDS, "Seconds since the live key file of the key was written (the epoch installed)");
     describe_counter!(SIGN_RETRIES, "Sign attempts beyond the first (a t-subset failed; retried with another)");
     describe_counter!(INVALID_SIGNATURE_SHARES, "Signature shares that failed verification at aggregation");
     describe_counter!(NONCE_MARKERS_PRUNED, "Burned-session nonce markers removed past their retention");
