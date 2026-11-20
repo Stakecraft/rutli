@@ -300,7 +300,8 @@ enum Command {
     /// signatures a cosigner journaled that the driver audit lacks (its tail truncated, or a
     /// signature made outside the driver with its certificate), and audited signatures no journal
     /// holds. Verifies both hash chains. Offline, read-only, needs no `--config`. Exit 0:
-    /// consistent; 1: discrepancies; 2: a file is unreadable or a chain is broken.
+    /// consistent; 1: discrepancies; 2: a file is unreadable or a chain is broken; 3: nothing to
+    /// compare (an empty audit log or journal, or no signature on either side) — not a pass.
     /// docs/audit-cross-check.md.
     AuditCrossCheck {
         /// The driver's audit log (`audit-log-path`), copied AFTER the journals.
@@ -1108,7 +1109,7 @@ fn audit_cross_check_command(
             for line in &report.lines {
                 println!("{line}");
             }
-            std::process::exit(if report.discrepancies == 0 { 0 } else { 1 })
+            std::process::exit(report.verdict().exit_code())
         }
         Err(e) => {
             eprintln!("audit-cross-check: {e}");

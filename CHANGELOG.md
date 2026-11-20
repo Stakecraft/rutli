@@ -98,6 +98,15 @@ All notable changes to Rütli are documented here. Format loosely follows
 
 ### Fixed
 
+- **`rutli-cosigner audit-cross-check` no longer reports an empty side as consistent.** An empty
+  driver audit log passed with exit 0, and every journaled signature was skipped as "older than the
+  driver audit log". Empty journal directories passed the same way, their audited signatures skipped as
+  "for keys no journal holds". Now an empty driver audit log, journals that are all empty, or a run that
+  compared no signature at all prints `NOTHING TO COMPARE:` with the reason and exits **3**. Exit 3 is
+  not a pass. A script that treats only exit 1 as a finding must also treat 3 as one (the e2e scripts
+  in `scripts/` fail on any non-zero exit). Discrepancies still take precedence (exit 1). A missing file
+  is still exit 2. One empty journal among others prints a `WARNING:` line only: a node the leaders
+  never picked journals nothing. `docs/audit-cross-check.md`.
 - **A cosigner that answers a sign wrongly no longer stays the driver's leader.** Up to 0.4.0 the
   driver made any node that answered its preferred leader before it checked the signature. One
   compromised cosigner that returned a signature that does not verify, or `NOT_FOUND`,
