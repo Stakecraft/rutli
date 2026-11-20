@@ -181,6 +181,7 @@ spec:
             - { name: data, mountPath: /data, readOnly: true }
             - { name: destination, mountPath: /destination, readOnly: true }
             - { name: backup-work, mountPath: /work }
+            - { name: config, mountPath: /config, readOnly: true }
             {{- if eq $backup.destination.type "pvc" }}
             - { name: backup-dest, mountPath: /backup }
             {{- else if $node.backupSecret }}

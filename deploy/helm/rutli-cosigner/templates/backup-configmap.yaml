@@ -111,10 +111,23 @@ data:
     # $1 = the tar, $2 = the node id. Exit non-zero on failure.
     set -eu
 {{- if eq $backup.destination.type "pvc" }}
-    # This node's own backup PVC at /backup: write atomically, keep the newest {{ int $backup.destination.keep }}.
+    # This node's own backup PVC at /backup: write atomically.
     cp "$1" "/backup/.$(basename "$1").part"
     mv "/backup/.$(basename "$1").part" "/backup/$(basename "$1")"
+{{- if $backup.retention.enabled }}
+    # Retention by epoch (docs/disaster-recovery.md, "Backup retention"): an archive of an older epoch
+    # goes only once the newer epoch is proven (`keyfile prove`) and the proof is {{ int $backup.retention.minProofAgeDays }} days old, and a complete
+    # verified archive of the proven epoch remains. The count cap ({{ int $backup.destination.keep }}) bounds the directory but never
+    # takes the newest or the proven archive. It reads the key files' clear headers only and deletes
+    # nothing when it cannot read an epoch, when this node's live epoch is behind an archive's, or on
+    # any error; one BACKUP_RETENTION line per archive says why.
+    rutli-cosigner --config "/config/cosigner-$2.json" backup-retain --dir /backup \
+      --min-proof-age-days {{ int $backup.retention.minProofAgeDays }} --keep-older-epochs {{ int $backup.retention.keepOlderEpochs }} \
+      --keep-count {{ int $backup.destination.keep }} || echo "BACKUP_RETENTION_FAILED node=$2 (nothing was deleted)" >&2
+{{- else }}
+    # Retention is off: keep the newest {{ int $backup.destination.keep }}, whatever their epoch.
     ls -1 /backup/node-"$2"-*.tar 2>/dev/null | sort | head -n -{{ int $backup.destination.keep }} | while read -r old; do rm -f "$old"; done
+{{- end }}
 {{- else }}
 {{ $backup.destination.ship | indent 4 }}
 {{- end }}
