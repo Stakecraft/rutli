@@ -14,7 +14,7 @@
 # Override image: RUTLI_COSIGNER_IMAGE=ghcr.io/stakecraft/rutli-cosigner:<tag>
 
 x-cosigner: &cosigner
-  image: ${RUTLI_COSIGNER_IMAGE:-ghcr.io/stakecraft/rutli-cosigner:0.4.0@sha256:6e606d2b00b53a6d70864a15693a697e0052c0e458386c18c22307eba4912d98}
+  image: ${RUTLI_COSIGNER_IMAGE:-ghcr.io/stakecraft/rutli-cosigner:0.4.1@sha256:16ad19650b580609dfd0b90136cfe07ec65126addcbdbd4c8676da41fd558326}
   build:
     context: ../../frost
     dockerfile: Dockerfile
