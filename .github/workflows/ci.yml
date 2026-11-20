@@ -137,9 +137,10 @@ jobs:
         with:
           persist-credentials: false
       # The job-started guard installed on the runner this job landed on is the one in the repository.
-      # Every CI run lands its jobs on the runners in turn, so each runner is checked within a few
-      # runs. A pull request only gets a warning (it may be the one changing the guard); a push to
-      # main fails until the runners are updated.
+      # The job lands on whichever runner is free, so over many runs every runner is checked (not
+      # guaranteed within a given number of runs). A pull request gets only a warning when the guard
+      # differs (it may be the one changing it); a guard that is not installed or not visible to the
+      # job fails everywhere; a push to main fails on a difference until the runners are updated.
       - name: Runner guard matches deploy/ci-runner/job-started-guard.sh
         if: runner.environment == 'self-hosted'
         env:
