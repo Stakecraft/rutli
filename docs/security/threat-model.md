@@ -51,7 +51,8 @@ the *routine* principals that used to collapse the domains — the shared seal S
 exec-capable backup job — but anyone who can read every Secret in the namespace, exec into every
 pod or read every node's volume holds `n` shares and every DEK. For mainnet, put the cosigners in
 separate clusters or cloud accounts administered by different people; nothing in Rütli can
-substitute for that.
+substitute for that. It is a go-live gate, and what counts as separate (control plane, account,
+credentials, operator) is listed in [audit-prep.md](../audit-prep.md#what-counts-as-a-separate-trust-domain).
 
 ## Adversaries
 
