@@ -1,0 +1,163 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Weekly mutation testing (cargo-mutants) of the signing path: the nonce store, the sign session,
+# the sign policy and journal, intent verification and sealing. Report only: missed mutants do not
+# fail the run; a baseline that fails (the unmutated tests are red) or a cargo-mutants error does,
+# and a scheduled run that fails opens (or updates) an issue.
+# What is in scope, how to read the result and the JSON schema: docs/mutation-testing.md.
+name: Mutation testing
+
+on:
+  schedule:
+    # Mondays 06:00 UTC (docs/release-process.md, "Test schedule").
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+  # A change to the mutation-testing setup itself runs one small module, to prove the plumbing.
+  pull_request:
+    paths:
+      - .github/workflows/mutants.yml
+      - frost/.cargo/mutants.toml
+      - scripts/mutants.sh
+      - scripts/mutants-summary.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mutants-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_MUTANTS_VERSION: "27.1.0"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  mutants:
+    name: cargo-mutants (${{ matrix.module }})
+    # Same runner selection as ci.yml: GitHub-hosted ubuntu-latest unless vars.CI_RUNNER is given;
+    # a fork's or Dependabot's pull request is always hosted. The largest modules (intent, journal,
+    # seal) take about two hours with --jobs 3 on a 4-vCPU hosted runner; 240 minutes is the cap.
+    runs-on: ${{ github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      # One job per module; scripts/mutants.sh maps each to its file and the tests that reach it.
+      # A pull request runs only the smallest module.
+      matrix:
+        module: ${{ fromJSON(github.event_name == 'pull_request' && '["nonce_store"]' || '["nonce_store", "session", "sign_policy", "journal", "intent", "seal"]') }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # The workspace's one Rust version, as in ci.yml.
+      - name: Rust version (frost/rust-toolchain.toml)
+        id: rust
+        run: |
+          v="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/rust-toolchain.toml)"
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      # dtolnay/rust-toolchain has no releases: pinned to a commit of its master branch.
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
+        with:
+          toolchain: ${{ steps.rust.outputs.version }}
+      - uses: taiki-e/install-action@75a7c0f87bd666af3cdb75c5b9e9d03ab6044e6f # v2.90.6
+        with:
+          tool: cargo-mutants@${{ env.CARGO_MUTANTS_VERSION }}
+      - name: cargo mutants
+        env:
+          MODULE: ${{ matrix.module }}
+        run: |
+          # Exit codes (https://mutants.rs/exit-codes.html): 0 all caught, 2 some missed, 3 some
+          # timed out — all three are a result. 1 (usage), 4 (baseline failed) and 70 are errors.
+          set +e
+          scripts/mutants.sh "$MODULE" --jobs 3 --output "$RUNNER_TEMP/out"
+          rc=$?
+          set -e
+          echo "cargo-mutants exit code $rc"
+          case "$rc" in 0|2|3) ;; *) exit "$rc" ;; esac
+      - name: Module summary
+        if: always()
+        run: |
+          f="$RUNNER_TEMP/out/mutants.out/outcomes.json"
+          if [ -f "$f" ]; then
+            echo "### ${{ matrix.module }}" >> "$GITHUB_STEP_SUMMARY"
+            python3 scripts/mutants-summary.py --commit "$GITHUB_SHA" --markdown "$GITHUB_STEP_SUMMARY" "$f" > /dev/null
+          fi
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: mutants-out-${{ matrix.module }}
+          path: ${{ runner.temp }}/out/mutants.out
+          if-no-files-found: warn
+          retention-days: 30
+
+  summary:
+    name: Missed mutants per module (JSON)
+    needs: mutants
+    if: always()
+    runs-on: ${{ github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: mutants-out-*
+          path: ${{ runner.temp }}/in
+      - name: Summarise
+        run: |
+          mapfile -t files < <(find "$RUNNER_TEMP/in" -name outcomes.json | sort)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no outcomes.json from any job" >&2
+            exit 1
+          fi
+          echo "## Mutation testing" >> "$GITHUB_STEP_SUMMARY"
+          expect="$(scripts/mutants.sh --list-modules | wc -w)"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then expect=1; fi
+          python3 scripts/mutants-summary.py --commit "$GITHUB_SHA" --expect "$expect" \
+            --markdown "$GITHUB_STEP_SUMMARY" "${files[@]}" > mutants-summary.json
+          cat mutants-summary.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: mutants-summary
+          path: mutants-summary.json
+          if-no-files-found: error
+          retention-days: 90
+
+  # A scheduled run that could not do its job (a baseline failure, a cargo-mutants error, a job out
+  # of time, no results) needs a person: one open issue, updated by later failures. Missed mutants
+  # are not a failure; they are in mutants-summary.json.
+  report-failure:
+    name: Open an issue for a failed scheduled run
+    needs: [mutants, summary]
+    if: always() && github.event_name == 'schedule' && (needs.mutants.result == 'failure' || needs.summary.result == 'failure')
+    # Scheduled runs only, so this repository's own code: the same runner as the other jobs.
+    runs-on: ${{ vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      # curl + jq rather than `gh`: works on a self-hosted runner image too, which ships jq but not the GitHub CLI.
+      - name: Open or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          API: ${{ github.api_url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          title="Mutation testing: the scheduled run failed"
+          api() { curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$@"; }
+          # Only an open issue with exactly this title counts as the same one.
+          existing="$(api "$API/repos/$REPO/issues?state=open&per_page=100" \
+            | jq -r --arg t "$title" '[.[] | select(.title == $t and (has("pull_request") | not))][0].number // empty')"
+          if [ -n "$existing" ]; then
+            jq -n --arg b "Failed again: $RUN_URL (commit $GITHUB_SHA)." '{body: $b}' \
+              | api -X POST "$API/repos/$REPO/issues/$existing/comments" -d @- >/dev/null
+          else
+            jq -n --arg t "$title" --arg b "The scheduled mutation-testing run failed: $RUN_URL (commit $GITHUB_SHA). This is not about missed mutants (those are in mutants-summary.json): a baseline failed, cargo-mutants stopped with an error, a job ran out of time, or no results came out. See docs/mutation-testing.md." \
+              '{title: $t, body: $b, labels: ["type:test", "prio:p1"]}' \
+              | api -X POST "$API/repos/$REPO/issues" -d @- >/dev/null
+          fi

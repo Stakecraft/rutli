@@ -227,6 +227,7 @@ Before protecting a real key, run the witnessed **[key ceremony](docs/key-ceremo
 | [docs/key-material-handling.md](docs/key-material-handling.md) | What delete does and does not do, where copies of key material can be, how to destroy them, rotating the sealing key |
 | [docs/audit-cross-check.md](docs/audit-cross-check.md) | Comparing the driver's audit log with the cosigners' journals |
 | [docs/observability.md](docs/observability.md) | Prometheus metrics, Grafana dashboard, alerts |
+| [docs/mutation-testing.md](docs/mutation-testing.md) | Weekly mutation testing of the signing path, and how to read its report |
 | [docs/performance.md](docs/performance.md) | Sign/DKG latency evidence, micro-benchmarks, a three-location cluster run |
 | [docs/load-testing.md](docs/load-testing.md), [docs/cluster-suite.md](docs/cluster-suite.md) | Load and disruption tests: on one machine, and on a Kubernetes cluster |
 | [docs/testnet-soak.md](docs/testnet-soak.md) | Splice DevNet validator soak: setup, drills, exit criteria |

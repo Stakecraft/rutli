@@ -1,0 +1,23 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# cargo-mutants settings (https://mutants.rs) shared by every run from frost/.
+#
+# The scope (which files, which tests) is not here: run scripts/mutants.sh MODULE, which the weekly
+# workflow (.github/workflows/mutants.yml) also uses. cargo-mutants adds `examine_globs` from this
+# file to every `--file`, so a glob here would widen each module's run to all of them.
+# See docs/mutation-testing.md.
+
+# Formatting output is not behaviour a test should pin.
+exclude_re = [
+    "impl .*Debug for ",
+    "impl .*Display for ",
+]
+
+# Tests take seconds, builds take longer; a mutant that hangs a test (a loop bound flipped) is cut
+# off well inside the job's time box.
+timeout_multiplier = 3.0
+minimum_test_timeout = 60
+
+# A mutant that only trips a lint is still a real mutant.
+cap_lints = true

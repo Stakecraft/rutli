@@ -30,6 +30,8 @@ Status: **pre-production, not yet audited**. Use this as the engagement brief an
 - [ ] Driver tests: `scripts/publish-canton-deps.sh v3.6.1` (the KMS Driver API is not on Maven
   Central), then `sbt driver/test`
 - [ ] CI TLS smoke: `scripts/ci-frost-tls-smoke.sh` (also `.github/workflows/ci.yml` job `frost-tls-smoke`)
+- [ ] Mutation testing of the signing path: `scripts/mutants.sh`, weekly report `mutants-summary.json`
+  (`.github/workflows/mutants.yml`, `docs/mutation-testing.md`)
 - [ ] End-to-end ceremony scripts in CI (`.github/workflows/e2e.yml`: split, carry, ECIES hosted keys), and the whole migration procedure on Canton 3.6.1 (`scripts/e2e-migration.sh`)
 - [ ] Property tests and micro-benchmarks (`frost`, `scripts/bench.sh`), the load generator and the cluster suite (`docs/load-testing.md`, `docs/cluster-suite.md`), with a dated run in `docs/performance.md`
 - [ ] The production profile (`docs/production-profile.md`): every setting the threat model assumes, and `rutli-cosigner check-config` to read a config against it
