@@ -184,17 +184,18 @@ pub const MAX_PENDING_SIGN_SESSIONS_PER_OPENER: usize = MAX_PENDING_SIGN_SESSION
 /// intent's request id, the same for every attempt and failover leader of one driver call).
 ///
 /// One leader's run of one request opens one session per attempt on each member and, when an
-/// attempt fails, aborts it on every member before the next attempt opens
-/// ([`crate::orchestrator`]): normally at most one is open here; if no abort arrives, at most
-/// [`crate::orchestrator::MAX_SIGN_ATTEMPTS`]. The driver sends one request through the same leader
-/// at most twice (one retry after learning the cluster id again), hence twice that. A leader the
+/// attempt fails, aborts it on every member ([`crate::orchestrator`]): normally at most one is open
+/// here; if no abort arrives, at most one per attempt — [`crate::orchestrator::MAX_SIGN_ATTEMPTS`]
+/// (2) from this release, ten from leaders up to 0.4.x, which this cap still serves during a
+/// rolling upgrade. The driver sends one request through the same leader at most twice (one retry
+/// after learning the cluster id again), hence twice ten. A leader the
 /// driver fails over to is another opener with its own count. `max_shares_per_request` (default 8)
 /// counts shares released for the request over its life, not sessions open at once (a failed
 /// attempt releases nothing), so it does not size this cap. With it, one replayed intent opens at
 /// most 20 sessions per node instead of the opener's 256; a global count per request id would not
 /// do: every member sees the intent in round 1, and could use up the request's room before the
 /// honest leader's round 1 reached the other members.
-pub const MAX_PENDING_SIGN_SESSIONS_PER_REQUEST: usize = 2 * crate::orchestrator::MAX_SIGN_ATTEMPTS;
+pub const MAX_PENDING_SIGN_SESSIONS_PER_REQUEST: usize = 2 * 10;
 
 /// The caps above, as round 1 checks them.
 pub const PENDING_SIGN_CAPS: rutli_frost_core::session::PendingCaps = rutli_frost_core::session::PendingCaps {
@@ -234,6 +235,11 @@ pub struct Node {
     keystore: KeyStore,
     /// Key-store readiness verdict (see [`crate::health`]), shared with Health and the monitor.
     keystore_health: Arc<crate::health::KeystoreHealth>,
+    /// Sign rounds served here and signatures led here ([`crate::liveness::SignLoad`]): reported
+    /// to leaders as `rutli-load`, and this leader's overload check.
+    sign_load: Arc<crate::liveness::SignLoad>,
+    /// Peer-liveness timings of the sign path ([`crate::peer::Liveness`]; tests override them).
+    liveness: crate::peer::Liveness,
     /// Loaded signing state per key: the share's cosigner and the sharing it belongs to.
     cosigners: Mutex<std::collections::HashMap<String, CachedKey>>,
     /// How many times a key was evicted from `cosigners` ([`Node::evict`]). Read and bumped only
@@ -406,6 +412,8 @@ impl Node {
             min_signers,
             keystore,
             keystore_health,
+            sign_load: Arc::new(crate::liveness::SignLoad::default()),
+            liveness: crate::peer::Liveness::default(),
             cosigners: Mutex::new(Default::default()),
             stale: Mutex::new(Default::default()),
             require_epoch_match: false,
@@ -1190,6 +1198,59 @@ impl Node {
             .expect("configure the key-store probe before the node is shared")
     }
 
+    /// This node's sign counters ([`crate::liveness::SignLoad`]).
+    pub fn sign_load(&self) -> &Arc<crate::liveness::SignLoad> {
+        &self.sign_load
+    }
+
+    /// This node's sign load as it reports it to leaders (`rutli-load`).
+    pub fn load_now(&self) -> crate::liveness::Load {
+        self.sign_load.snapshot(!self.keystore_health.is_down())
+    }
+
+    /// The sign path's liveness timings ([`crate::peer::Liveness`]).
+    pub fn liveness(&self) -> &crate::peer::Liveness {
+        &self.liveness
+    }
+
+    /// Other liveness timings (tests): round deadlines, the overload threshold, the quorum wait.
+    pub fn with_liveness(mut self, liveness: crate::peer::Liveness) -> Self {
+        self.liveness = liveness;
+        self
+    }
+
+    /// A sign round's store work on the blocking pool ([`Node::blocking`]), counted in this node's
+    /// load while it runs — queued or running, until `op` really ends, even when the caller stopped
+    /// waiting. A round 2 still running after [`crate::health::STORE_SLOW_AFTER`] kicks an
+    /// immediate key-store probe ([`crate::health::KeystoreHealth::kick`]).
+    pub async fn sign_op<T, F>(self: &Arc<Self>, round: crate::liveness::Round, op: F) -> Result<T>
+    where
+        F: FnOnce(&Node) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let counted = self.sign_load.begin(round);
+        let work = self.blocking(move |n| {
+            let result = op(n);
+            drop(counted);
+            result
+        });
+        if round == crate::liveness::Round::One {
+            return work.await;
+        }
+        tokio::pin!(work);
+        tokio::select! {
+            result = &mut work => result,
+            _ = tokio::time::sleep(crate::health::STORE_SLOW_AFTER) => {
+                tracing::warn!(
+                    after_ms = crate::health::STORE_SLOW_AFTER.as_millis() as u64,
+                    "sign round 2 store work still running — probing the key store now"
+                );
+                self.keystore_health.kick();
+                work.await
+            }
+        }
+    }
+
     /// Run `op` against this node on tokio's blocking pool and await it.
     ///
     /// For every node operation an RPC handler (or the in-process [`crate::peer::LocalPeer`])
@@ -1220,7 +1281,8 @@ impl Node {
         }
     }
 
-    /// `Err(NotServing)` — gRPC UNAVAILABLE — while this node's key store fails its readiness probe
+    /// `Err(KeystoreDown)` — gRPC UNAVAILABLE with the `rutli-error: keystore-down` trailer — while
+    /// this node's key store fails its readiness probe
     /// ([`crate::health`]). Checked at the entry of every store-touching Signer RPC (Sign, Dkg,
     /// Refresh, GroupKey and the hosted-key operations), so a sick node declines to LEAD before
     /// starting anything (the driver fails over on UNAVAILABLE — every driver version, not only one
@@ -1229,7 +1291,7 @@ impl Node {
     /// declines to JOIN another leader's quorum.
     pub fn refuse_if_keystore_down(&self) -> Result<()> {
         if self.keystore_health.is_down() {
-            return Err(DaemonError::NotServing(format!(
+            return Err(DaemonError::KeystoreDown(format!(
                 "key store {} failed its readiness probe — not leading or joining an operation it \
                  cannot finish",
                 self.keystore.dir().display()
@@ -1597,7 +1659,26 @@ impl Node {
             metrics::counter!(crate::metrics::SIGN_ROUND2_UNKNOWN_SESSION).increment(1);
         }
         self.update_pending_gauge();
-        result
+        self.store_failure(result)
+    }
+
+    /// Round 2's store work (the journal append, the nonce marker) failed with a definite I/O error:
+    /// mark the key store down now ([`crate::health::KeystoreHealth::report_definite`]) rather than
+    /// at the next probe, and answer [`DaemonError::KeystoreDown`], so leaders route around this
+    /// node at once. The next readiness probe that finds the store working clears it.
+    fn store_failure<T>(&self, result: Result<T>) -> Result<T> {
+        let Err(e) = &result else { return result };
+        let Some(detail) = crate::health::is_definite_io(e) else { return result };
+        self.keystore_health.report_definite(&detail);
+        tracing::error!(
+            error = %e,
+            "sign round 2 store work failed with a definite I/O error — key store marked down until \
+             a readiness probe finds it working"
+        );
+        Err(DaemonError::KeystoreDown(format!(
+            "key store {} failed sign round-2 store work: {detail}",
+            self.keystore.dir().display()
+        )))
     }
 
     /// A round 2 or abort refused because another caller opened the session: counted by call,

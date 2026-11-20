@@ -342,6 +342,16 @@ impl Signer for SignerSvc {
     async fn sign(&self, req: Request<pb::SignRequest>) -> Result<Response<pb::SignReply>, Status> {
         let caller = self.authorize(&req)?;
         self.check_acl(caller.as_ref(), &req.get_ref().key_id)?;
+        // The client's deadline: it only ever shortens this leader's work (orchestrator::sign_within).
+        // An unparseable value is ignored like an absent one (tonic's own timer has the same view).
+        let client_deadline = req
+            .metadata()
+            .get(GRPC_TIMEOUT_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_grpc_timeout);
+        // Whether the caller is authenticated (a client certificate): only then does a no-quorum
+        // refusal name the cosigners this leader cannot reach.
+        let authenticated = caller_of(&req).is_some();
         let r = req.into_inner();
         let started = std::time::Instant::now();
         // The signing intent (audit C2), checked here first so a refusal is a clear
@@ -353,10 +363,23 @@ impl Signer for SignerSvc {
         // as a sign error below so the sick node's own metrics show it.
         let result = match self.node.refuse_if_keystore_down() {
             Ok(()) => {
-                orchestrator::sign_with_intent(&self.node, &self.peers, &r.key_id, &r.message, r.intent.as_ref())
-                    .await
+                orchestrator::sign_within(
+                    &self.node,
+                    &self.peers,
+                    &r.key_id,
+                    &r.message,
+                    r.intent.as_ref(),
+                    client_deadline,
+                )
+                .await
             }
             Err(e) => Err(e),
+        };
+        let result = match result {
+            Err(crate::DaemonError::NoQuorum { needed, visible, .. }) if !authenticated => {
+                Err(crate::DaemonError::NoQuorum { needed, visible, missing: Vec::new() })
+            }
+            other => other,
         };
         let outcome = if result.is_ok() { "ok" } else { "error" };
         metrics::counter!(crate::metrics::SIGN_REQUESTS, "result" => outcome).increment(1);
@@ -773,6 +796,48 @@ impl SignerSvc {
     }
 }
 
+/// The `grpc-timeout` request header (the client's deadline), which tonic leaves in the metadata.
+const GRPC_TIMEOUT_HEADER: &str = "grpc-timeout";
+
+/// A `grpc-timeout` value: at most 8 digits and a unit (`H`, `M`, `S`, `m`, `u`, `n`), per the gRPC
+/// HTTP/2 protocol. `None` for anything else.
+pub fn parse_grpc_timeout(value: &str) -> Option<std::time::Duration> {
+    use std::time::Duration;
+    let unit = value.chars().last()?;
+    let digits = &value[..value.len() - unit.len_utf8()];
+    if digits.is_empty() || digits.len() > 8 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n: u64 = digits.parse().ok()?;
+    Some(match unit {
+        'H' => Duration::from_secs(n * 3600),
+        'M' => Duration::from_secs(n * 60),
+        'S' => Duration::from_secs(n),
+        'm' => Duration::from_millis(n),
+        'u' => Duration::from_micros(n),
+        'n' => Duration::from_nanos(n),
+        _ => return None,
+    })
+}
+
+/// A Peer reply carrying this node's sign load (`rutli-load`), on success and on error, so a
+/// leader can tell a busy node from a stalled one ([`crate::liveness`]).
+fn with_load<T>(node: &Node, result: crate::Result<T>) -> Result<Response<T>, Status> {
+    let load = node.load_now();
+    match result {
+        Ok(reply) => {
+            let mut response = Response::new(reply);
+            load.insert_into(response.metadata_mut());
+            Ok(response)
+        }
+        Err(e) => {
+            let mut status = Status::from(e);
+            load.insert_into(status.metadata_mut());
+            Err(status)
+        }
+    }
+}
+
 /// The mTLS identity of a request's caller, if it presented a certificate.
 fn caller_of<T>(req: &Request<T>) -> Option<crate::intent::Caller> {
     req.peer_certs().and_then(|certs| certs.first().and_then(|leaf| crate::intent::Caller::from_leaf_der(leaf.as_ref())))
@@ -1012,14 +1077,11 @@ impl Peer for PeerSvc {
             intent: r.intent.clone(),
             sign_test,
         };
-        let commitments = self
+        let result = self
             .node
-            .blocking(move |n| n.sign_round1_as(&r.key_id, &r.session_id, &ctx, &opener))
-            .await
-            .map_err(Status::from)?;
-        Ok(Response::new(pb::SignRound1Reply {
-            commitments: json(&commitments)?,
-        }))
+            .sign_op(crate::liveness::Round::One, move |n| n.sign_round1_as(&r.key_id, &r.session_id, &ctx, &opener))
+            .await;
+        with_load(&self.node, result.and_then(|c| Ok(pb::SignRound1Reply { commitments: serde_json::to_vec(&c)? })))
     }
 
     async fn sign_round2(
@@ -1037,14 +1099,13 @@ impl Peer for PeerSvc {
             32 => Some(<[u8; 32]>::try_from(r.intent_digest.as_slice()).expect("32 bytes")),
             n => return Err(Status::invalid_argument(format!("intent_digest must be 32 bytes, got {n}"))),
         };
-        let share = self
+        let result = self
             .node
-            .blocking(move |n| {
+            .sign_op(crate::liveness::Round::Two, move |n| {
                 n.sign_round2_as(&r.key_id, &r.session_id, &r.message, &commitments, intent_digest, &caller)
             })
-            .await
-            .map_err(Status::from)?;
-        Ok(Response::new(pb::SignRound2Reply { share: json(&share)? }))
+            .await;
+        with_load(&self.node, result.and_then(|share| Ok(pb::SignRound2Reply { share: serde_json::to_vec(&share)? })))
     }
 
     async fn abort_sign(
@@ -1053,8 +1114,8 @@ impl Peer for PeerSvc {
     ) -> Result<Response<pb::AbortSignReply>, Status> {
         let caller = self.session_owner(&req)?;
         let r = req.into_inner();
-        self.node.abort_sign_as(&r.key_id, &r.session_id, &caller).map_err(Status::from)?;
-        Ok(Response::new(pb::AbortSignReply {}))
+        let result = self.node.abort_sign_as(&r.key_id, &r.session_id, &caller);
+        with_load(&self.node, result.map(|()| pb::AbortSignReply {}))
     }
 
     async fn ceremony_fence(
@@ -1365,14 +1426,17 @@ impl Peer for PeerSvc {
         req: Request<pb::NodeInfoRequest>,
     ) -> Result<Response<pb::NodeInfoReply>, Status> {
         self.authorize(&req)?;
-        Ok(Response::new(pb::NodeInfoReply {
-            identifier: crate::hosted::identifier_index(self.node.identifier).map_err(Status::from)? as u32,
+        // In memory only, inline on the async runtime: it answers while the blocking pool is
+        // jammed, which is what lets a leader's probe tell a stalled store from a dead node.
+        let reply = crate::hosted::identifier_index(self.node.identifier).map(|id| pb::NodeInfoReply {
+            identifier: id as u32,
             // Empty with hosted keys off: the reply also carries the ceremony protocol, which every
             // node must report.
             dist_public_key: self.node.dist_public_key().map(|k| k.to_vec()).unwrap_or_default(),
             hosted_key_specs: self.node.hosted_specs(),
             ceremony_protocol: crate::ceremony::CEREMONY_PROTOCOL,
-        }))
+        });
+        with_load(&self.node, reply)
     }
 
     async fn key_epoch(
@@ -1458,6 +1522,22 @@ fn de<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Status> {
 #[cfg(test)]
 mod tests {
     use super::cn_of;
+
+    #[test]
+    fn grpc_timeout_values_parse_per_the_protocol_and_nothing_else_does() {
+        use std::time::Duration;
+        let parse = super::parse_grpc_timeout;
+        assert_eq!(parse("5000m"), Some(Duration::from_secs(5)));
+        assert_eq!(parse("5S"), Some(Duration::from_secs(5)));
+        assert_eq!(parse("2M"), Some(Duration::from_secs(120)));
+        assert_eq!(parse("1H"), Some(Duration::from_secs(3600)));
+        assert_eq!(parse("750000u"), Some(Duration::from_millis(750)));
+        assert_eq!(parse("99999999S"), Some(Duration::from_secs(99_999_999)));
+        assert_eq!(parse("10n"), Some(Duration::from_nanos(10)));
+        for bad in ["", "S", "5", "5s", "123456789S", "-5S", "5 S", "five"] {
+            assert_eq!(parse(bad), None, "{bad:?}");
+        }
+    }
 
     #[test]
     fn cn_of_extracts_common_name() {

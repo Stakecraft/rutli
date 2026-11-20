@@ -200,6 +200,49 @@ pub const PEER_PINS_UNPINNED: &str = "rutli_peer_pins_unpinned";
 /// The `direction` values of `rutli_peer_pin_refusals_total`.
 pub const PEER_PIN_DIRECTIONS: &[&str] = &["inbound", "outbound"];
 
+/// Histogram, label `call`: how long this node's peer calls took, at the caller, whatever their
+/// outcome (a call past its deadline records the deadline). `sign_round1` / `sign_round2` / `abort`
+/// / `control` are calls to remote peers (`control`: NodeInfo, KeyEpoch, CeremonyStatus and the
+/// liveness probes); `local_share` is this leader's own round 2 (its share). The bucket edges sit at
+/// a third of each deadline ([`PEER_CALL_DURATION_BUCKETS`]), so "p99.9 under the edge" reads as a 3×
+/// margin.
+pub const PEER_CALL_DURATION: &str = "rutli_peer_call_duration_seconds";
+/// The `call` values of `rutli_peer_call_duration_seconds`.
+pub const PEER_CALLS: &[&str] = &["sign_round1", "sign_round2", "abort", "control", "local_share"];
+/// Upper bounds (seconds) of `rutli_peer_call_duration_seconds`: 0.33, 0.67, 1.67 are a third of
+/// the 1 s abort, 2 s round-1 and 5 s round-2 deadlines; 1, 2, 3, 5 the deadlines themselves.
+pub const PEER_CALL_DURATION_BUCKETS: &[f64] =
+    &[0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.33, 0.5, 0.67, 1.0, 1.67, 2.0, 3.0, 5.0, 10.0];
+/// Gauge, labels `peer` (roster number) and `state` (up|down|trial): 1 for the state this node's
+/// breaker holds for that peer ([`crate::liveness`]), 0 for the others. `down` lasting minutes is a
+/// peer this leader cannot use (`RutliPeerDown`).
+pub const PEER_STATE: &str = "rutli_peer_state";
+/// The `state` values of `rutli_peer_state`.
+pub const PEER_STATES: &[&str] = &["up", "down", "trial"];
+/// Counter, labels `peer`, `to` and `reason`: breaker transitions — to `down` for `unreachable`,
+/// `stalled` or `refusing`; to `trial` when a window passed (`window`); to `up` after a `probe` or a
+/// successful `call`. Many in a short time is a flapping link (`RutliPeerFlapping`); none at all is
+/// expected in steady state and under load.
+pub const PEER_TRANSITIONS: &str = "rutli_peer_breaker_transitions_total";
+/// The (`to`, `reason`) pairs of `rutli_peer_breaker_transitions_total`, primed per peer.
+pub const PEER_TRANSITIONS_LABELS: &[(&str, &str)] = &[
+    ("down", "unreachable"),
+    ("down", "stalled"),
+    ("down", "refusing"),
+    ("trial", "window"),
+    ("up", "probe"),
+    ("up", "call"),
+];
+/// Counter, label `reason`: Sign calls this node refused as leader without a signature —
+/// `no-quorum` (fewer than `t` cosigners reachable from here; most are refused before any member is
+/// contacted) or `overloaded` (too many signatures in flight here, or its own round missed its
+/// deadline). Both UNAVAILABLE with a `rutli-error` trailer: the client moves to another leader.
+/// No-quorum on two or more nodes at once is a cluster that cannot sign (`RutliNoQuorum`).
+pub const SIGN_FAST_REFUSALS: &str = "rutli_sign_fast_refusals_total";
+/// The `reason` values of `rutli_sign_fast_refusals_total` (`fast_refusal(..)` call sites in
+/// `orchestrator.rs`).
+pub const FAST_REFUSAL_REASONS: &[&str] = &["no-quorum", "overloaded"];
+
 /// Every `reason` label value `rutli_sign_policy_refusals_total` can carry (the string literals the
 /// `refused(..)` call sites in `intent.rs`, `sign_policy.rs`, `service.rs` and `node.rs` pass).
 /// Primed to 0 at start so the first refusal moves the series from 0 to 1 and `increase()` sees it
@@ -333,7 +376,8 @@ pub const SIGN_DURATION_BUCKETS: &[f64] =
 /// test pins exactly what the daemon serves.
 fn builder() -> std::result::Result<PrometheusBuilder, BuildError> {
     PrometheusBuilder::new()
-        .set_buckets_for_metric(Matcher::Full(SIGN_DURATION.to_owned()), SIGN_DURATION_BUCKETS)
+        .set_buckets_for_metric(Matcher::Full(SIGN_DURATION.to_owned()), SIGN_DURATION_BUCKETS)?
+        .set_buckets_for_metric(Matcher::Full(PEER_CALL_DURATION.to_owned()), PEER_CALL_DURATION_BUCKETS)
 }
 
 /// Install the process-global Prometheus recorder and serve `/metrics` on `listen`.
@@ -437,6 +481,11 @@ fn prime() {
     for direction in PEER_PIN_DIRECTIONS {
         metrics::counter!(PEER_PIN_REFUSALS, "direction" => *direction).absolute(0);
     }
+    for reason in FAST_REFUSAL_REASONS {
+        metrics::counter!(SIGN_FAST_REFUSALS, "reason" => *reason).absolute(0);
+    }
+    // The per-peer state gauge and transition counters are primed when each peer handle is built
+    // (crate::liveness::PeerHealth::new): their `peer` label is the roster's.
 }
 
 /// Register help texts (shown in the Prometheus exposition; harmless without a recorder).
@@ -519,6 +568,10 @@ pub fn describe() {
         "Split-ceremony sign tests refused by the per-key rate limit"
     );
     describe_gauge!(KEY_REPLICAS, "Fewest cosigners holding any one hosted key");
+    describe_histogram!(PEER_CALL_DURATION, Unit::Seconds, "Peer call latency at the caller, by call");
+    describe_gauge!(PEER_STATE, "1 for the liveness state this node holds for the peer (up, down, trial), else 0");
+    describe_counter!(PEER_TRANSITIONS, "Peer liveness (breaker) transitions, by peer, target state and reason");
+    describe_counter!(SIGN_FAST_REFUSALS, "Sign calls refused as leader without a signature (no-quorum, overloaded)");
     describe_gauge!(
         KEYSTORE_UNREADABLE,
         "1 while this node's key store cannot be listed, opened or written (readiness probe), else 0"
@@ -620,6 +673,7 @@ mod tests {
             (SIGN_SESSIONS_REFUSED, one("cap", SESSION_CAPS)),
             (BACKGROUND_LOOP_RESTARTS, one("loop", BACKGROUND_LOOPS)),
             (HOSTED_REPLICATION_REFUSALS, one("reason", HOSTED_REFUSAL_REASONS)),
+            (SIGN_FAST_REFUSALS, one("reason", FAST_REFUSAL_REASONS)),
         ];
         let mut ops = Vec::new();
         for op in HOSTED_KEY_OPS_NAMES {
@@ -780,6 +834,64 @@ mod tests {
         );
         each("record_hosted_op", Box::new(|lit, what| assert!(HOSTED_KEY_OPS_NAMES.contains(&lit), "{what}: {lit:?}")));
         each("hosted_refusal", Box::new(|lit, what| assert!(HOSTED_REFUSAL_REASONS.contains(&lit), "{what}: {lit:?}")));
+        each("fast_refusal", Box::new(|lit, what| assert!(FAST_REFUSAL_REASONS.contains(&lit), "{what}: {lit:?}")));
+    }
+
+    /// `rutli_peer_call_duration_seconds` renders as a histogram with the agreed edges, its `call`
+    /// labels are the ones the code records, and a peer handle primes its state gauge (up = 1) and
+    /// every transition series at 0.
+    #[test]
+    fn peer_liveness_metrics_render_and_match_the_code() {
+        let recorder = builder().expect("valid buckets").build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            describe();
+            prime();
+            let _h = crate::liveness::PeerHealth::new(2, crate::peer::Liveness::default());
+            metrics::histogram!(PEER_CALL_DURATION, "call" => "sign_round2").record(0.004);
+        });
+        let out = handle.render();
+        assert!(out.contains("# TYPE rutli_peer_call_duration_seconds histogram"), "{out}");
+        for le in PEER_CALL_DURATION_BUCKETS {
+            let line = format!(r#"{PEER_CALL_DURATION}_bucket{{call="sign_round2",le="{le}"}} 1"#);
+            assert!(out.lines().any(|l| l == line), "missing {line:?}:\n{out}");
+        }
+        assert!(PEER_CALL_DURATION_BUCKETS.windows(2).all(|w| w[0] < w[1]));
+        let states = series(&out, PEER_STATE);
+        for state in PEER_STATES {
+            let want = if *state == "up" { "1" } else { "0" };
+            assert!(
+                states.iter().any(|(l, v)| l.get("peer").map(String::as_str) == Some("2") && l.get("state").map(String::as_str) == Some(*state) && v == want),
+                "rutli_peer_state{{peer=2,state={state}}} != {want}:\n{out}"
+            );
+        }
+        let transitions = series(&out, PEER_TRANSITIONS);
+        for (to, reason) in PEER_TRANSITIONS_LABELS {
+            assert!(
+                transitions.iter().any(|(l, v)| l.get("to").map(String::as_str) == Some(*to) && l.get("reason").map(String::as_str) == Some(*reason) && v == "0"),
+                "transition {to}/{reason} not primed:\n{out}"
+            );
+        }
+        // The `call` literals recorded in the code are the listed ones.
+        let mut recorded = std::collections::BTreeSet::new();
+        for (file, src) in &crate_sources() {
+            for args in calls(src, "metrics::histogram!") {
+                if args.first().is_some_and(|a| a.ends_with("PEER_CALL_DURATION")) {
+                    let value = args.get(1).and_then(|a| a.split_once("=>")).map(|(_, v)| v.trim().to_owned());
+                    if value.as_deref() == Some("call") {
+                        continue; // peer.rs records the CallClass's own label
+                    }
+                    recorded.insert(literal(value.as_ref(), file).to_owned());
+                }
+            }
+        }
+        for call in &recorded {
+            assert!(PEER_CALLS.contains(&call.as_str()), "{call:?} is not in PEER_CALLS");
+        }
+        let classes = ["sign_round1", "sign_round2", "abort", "control"];
+        for call in PEER_CALLS {
+            assert!(recorded.contains(*call) || classes.contains(call), "{call:?} is never recorded");
+        }
     }
 
     /// The lock names behind `rutli_lock_poison_recoveries_total{lock}`: `sync::recover(&l, "x")`,

@@ -31,6 +31,7 @@ pub mod instance_lock;
 pub mod intent;
 pub mod journal;
 pub mod keystore;
+pub mod liveness;
 pub mod metrics;
 pub mod node;
 pub mod orchestrator;

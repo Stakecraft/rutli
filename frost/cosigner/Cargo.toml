@@ -61,6 +61,8 @@ protoc-bin-vendored = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# Paused time for the peer-liveness tests (deadlines and keepalives without real waits).
+tokio = { workspace = true, features = ["test-util"] }
 rcgen = { workspace = true }
 proptest = { workspace = true }
 criterion = { workspace = true }

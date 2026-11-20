@@ -852,9 +852,15 @@ async fn a_node_that_cannot_journal_releases_no_share() {
         (Identifier::try_from(2u16).unwrap(), nodes[1].sign_round1(KEY, "no-journal", &ctx).unwrap()),
     ]);
     let err = nodes[0].sign_round2_with(KEY, "no-journal", &msg, &cs, Some(intent::intent_digest(&i2))).unwrap_err();
-    assert!(matches!(err, DaemonError::Io(_) | DaemonError::Journal(_)), "{err:?}");
+    // A definite I/O error (EACCES) in round-2 store work: the node marks its key store down at
+    // once and answers `keystore-down`, so leaders route around it.
+    assert!(matches!(err, DaemonError::KeystoreDown(_)), "{err:?}");
+    assert!(nodes[0].keystore_health().is_down());
     assert_eq!(markers(1), before, "no marker burned for a share that was not journaled");
     std::fs::set_permissions(&seg, std::fs::Permissions::from_mode(0o600)).unwrap();
+    // Not sticky: the next readiness probe that finds the store working clears it.
+    nodes[0].check_keystore().unwrap();
+    assert!(!nodes[0].keystore_health().is_down());
 }
 
 /// A node that restarted between the two rounds holds neither the session's nonces nor its

@@ -16,7 +16,7 @@ use frost_ed25519::Identifier;
 use rutli_cosigner::epoch_check::{self, Verdict};
 use rutli_cosigner::keystore::KeyStore;
 use rutli_cosigner::node::{Node, Round1Ctx};
-use rutli_cosigner::orchestrator::{run_dkg, run_refresh, sign, Peers};
+use rutli_cosigner::orchestrator::{run_dkg, run_refresh, sign, Peers, MAX_SIGN_ATTEMPTS};
 use rutli_cosigner::peer::{LocalPeer, PeerApi};
 use rutli_cosigner::{DaemonError, Result};
 
@@ -388,26 +388,30 @@ async fn an_invalid_signature_share_is_attributed_and_routed_around() {
 }
 
 #[tokio::test]
-async fn three_of_five_retries_through_subsets_until_one_works() {
+async fn three_of_five_retries_one_more_subset_then_lets_the_client_move_on() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, plain) = cluster(tmp.path(), 5, 3);
     let group = run_dkg(&plain, KEY).await.unwrap();
-    // Node 2 is down in round 1 and node 3 fails round 2: the leader works through the subsets.
-    let (peers, log) = spied(&nodes, &[Fault::None, Fault::Round1, Fault::Round2, Fault::None, Fault::None]);
+    // Node 2 is down in round 1: the leader excludes it and the next subset signs.
+    let (peers, log) = spied(&nodes, &[Fault::None, Fault::Round1, Fault::None, Fault::None, Fault::None]);
     let msg = digest(b"three of five");
     let sig = sign(&nodes[0], &peers, KEY, &msg).await.unwrap();
     assert!(verifies(&group, &msg, &sig));
     let a = attempts(&log);
-    // {1,2,3} fails at 2 (round 1), {1,3,4} fails at 3 (round 2), {1,4,5} signs.
-    assert_eq!(a.len(), 3, "{a:?}");
+    // {1,2,3} fails at 2 (round 1), {1,3,4} signs.
+    assert_eq!(a.len(), 2, "{a:?}");
+
+    // Node 2 down in round 1 and node 3 failing round 2: two attempts ({1,2,3} at 2, {1,3,4} at 3)
+    // are all one signature gets (MAX_SIGN_ATTEMPTS); the leader answers UNAVAILABLE rather than
+    // hold the client, which moves to another leader.
+    let (peers, log) = spied(&nodes, &[Fault::None, Fault::Round1, Fault::Round2, Fault::None, Fault::None]);
+    let err = sign(&nodes[0], &peers, KEY, &digest(b"two faulty")).await.unwrap_err();
+    assert!(matches!(err, DaemonError::NotServing(ref m) if m.contains("2 attempt(s)")), "{err:?}");
+    assert_eq!(tonic::Status::from(err).code(), tonic::Code::Unavailable);
+    assert_eq!(attempts(&log).len(), MAX_SIGN_ATTEMPTS);
     for n in &nodes {
         assert_eq!(n.pending_sign_count(KEY), 0);
     }
-
-    // Three faulty nodes of five leave two: below threshold, after trying what it could.
-    let (peers, _log) = spied(&nodes, &[Fault::None, Fault::Round1, Fault::Round2, Fault::BadShare, Fault::None]);
-    let err = sign(&nodes[0], &peers, KEY, &digest(b"too few")).await.unwrap_err();
-    assert!(matches!(err, DaemonError::ThresholdNotMet { needed: 3, got: 2 }), "{err:?}");
 }
 
 // ── session binding through the node ──────────────────────────────────────────────────────────
