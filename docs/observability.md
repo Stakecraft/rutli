@@ -36,6 +36,8 @@ annotations, NetworkPolicy ingress for pods labelled `rutli.io/scraper: "true"`)
 | `rutli_nonce_markers_pruned_total` | counter | — | Burned-session nonce markers removed past their retention |
 | `rutli_sign_round1_skips_total` | counter | — | Peers skipped in sign round 1 — the quorum-margin canary: skips mean you are signing with less headroom than you deployed |
 | `rutli_sign_round2_unknown_session_total` | counter | — | Sign round 2 requests refused as an unknown signing session: the node holds no round-1 nonces for it, because it restarted or committed a ceremony between the two rounds, or the session outlived its 5-minute TTL. The peer answers `ABORTED` and the leader signs with the others. One or two at a restart or a refresh are expected; a steady rate is not (`RutliSignUnknownSessions`: more than 3 in 15 minutes). The same with a signing policy: a session the node holds no nonces for is counted here, not as a policy refusal |
+| `rutli_sign_session_owner_refusals_total` | counter | `call`=round2\|abort | Sign round 2s and aborts this node refused because another caller opened the session (since 0.5.0 a session belongs to the peer whose certificate CN opened it, or to this node's own leader). No other peer can abort or advance the session. A correct cosigner never does this: any increase names a peer to investigate (`RutliSignSessionOwnerRefused`); the log line names the caller and the owner |
+| `rutli_sign_sessions_refused_total` | counter | `cap`=key\|opener\|request | Sign round 1s refused because too many sessions wait for round 2: `opener` = one opener holds 256 for the key, `request` = one opener holds 20 for one signing request, `key` = all openers together hold 1024. Answered `UNAVAILABLE`. Only `key` stops other leaders, and it needs four openers at their caps. An honest leader holds about as many as it has signs in flight (normally a few, up to about 128 on a large participant host) and aborts the sessions of calls the driver gave up on. A leader that hears this answer tries other cosigners and does not exclude this one. Without TLS no peer is identified: all remote leaders share one opener's room, so one filler takes it all (`RutliSignSessionCapReached`); the log line names the opener |
 | `rutli_sign_aborts_total` | counter | — | Given-up signatures (leader aborted the in-flight session on the quorum) |
 | `rutli_sign_retries_total` | counter | — | Sign attempts beyond the first within one `Signer.Sign`: a t-subset failed and the leader retried with another |
 | `rutli_invalid_signature_shares_total` | counter | — | Signature shares that failed verification at aggregation (attributed to a cosigner and routed around). Any increase means a cosigner returned a bad share (`RutliInvalidSignatureShare`) |
@@ -103,9 +105,19 @@ that alert on increases see it (`deploy/monitoring/prometheus-rules.yml`:
 `RutliSignJournalErrors`, `RutliDeleteIntentRefused`, `RutliHostedKeyDeleted`,
 `RutliCeremonyIntentRefused`, `RutliCeremonyIntentAbsent`, `RutliLockPoisonRecovered`,
 `RutliBackgroundLoopRestarted`).
-`rutli_sign_round2_unknown_session_total` is primed too (`RutliSignUnknownSessions`).
+`rutli_sign_round2_unknown_session_total` is primed too (`RutliSignUnknownSessions`), and so are
+the sign-session refusal counters for every `call` and `cap` (`RutliSignSessionOwnerRefused`,
+`RutliSignSessionCapReached`).
 `rutli_stale_share` carries a key id and cannot be primed. `rutli_keyfiles` is set
 once per start (`RutliKeyFilesUnopenable`, `RutliKeyFileMigrationPending`).
+
+Since 0.5.0 each member of a sign attempt gets its own session id, so the same signature shows a
+different session id in each node's log and journal. To follow one attempt across nodes, run the
+leader at `debug`: its `sign attempt: one session id per member` line gives an attempt id and the
+members' identifiers, and its round failure lines name the attempt and the member. It does not log
+the members' session ids (each member's id is kept from the others), and the attempt id is never
+sent to a peer. The journals and
+`audit-cross-check` match signatures by key, request id and digest, not by session id.
 
 Published latency snapshots and how to reproduce them: [`performance.md`](performance.md).
 

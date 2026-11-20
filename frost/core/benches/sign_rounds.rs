@@ -29,7 +29,7 @@ use frost::round1::SigningCommitments;
 use frost::round2::SignatureShare;
 use frost::Identifier;
 use rutli_frost_core::nonce_store::NonceStore;
-use rutli_frost_core::session::{aggregate, Cosigner, SessionBinding};
+use rutli_frost_core::session::{aggregate, Cosigner, SessionBinding, SessionOwner};
 
 const KEY: &str = "bench-frost-namespace";
 
@@ -98,7 +98,7 @@ fn sign_rounds(c: &mut Criterion) {
             || (session_id(), binding(&a, &b, &msg)),
             |(session, binding)| {
                 let commitments = a.round1(&session, binding).unwrap();
-                a.abort(&session);
+                a.abort_as(&session, &SessionOwner::Local).unwrap();
                 black_box(commitments)
             },
             BatchSize::SmallInput,
@@ -111,7 +111,7 @@ fn sign_rounds(c: &mut Criterion) {
                 // Only cosigner 1 signs. Cosigner 2's commitment is all round 2 needs from it, so
                 // its half of the session is dropped here and its in-flight map stays empty.
                 let (session, commitments) = open_session(&a, &b, &msg);
-                b.abort(&session);
+                b.abort_as(&session, &SessionOwner::Local).unwrap();
                 (session, commitments)
             },
             |(session, commitments)| black_box(a.round2(&session, KEY, &msg, &commitments, None).unwrap()),

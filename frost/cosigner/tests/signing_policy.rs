@@ -892,7 +892,9 @@ async fn a_round2_without_its_round1_authorization_is_refused_while_the_nonces_a
     ]);
     let markers = || std::fs::read_dir(tmp.path().join(format!("node-1/keys/{KEY}.nonces"))).map(|d| d.count()).unwrap_or(0);
     let burned = markers();
-    assert!(nodes[0].sign_guard().unwrap().take(KEY, "no-auth").is_some());
+    // Lose the authorization (as a restart or a poisoned map would), keep the nonces.
+    let owner = rutli_cosigner::node::SessionOwner::Local;
+    assert!(nodes[0].sign_guard().unwrap().take_as(KEY, "no-auth", &owner).unwrap().is_some());
     assert_eq!(nodes[0].pending_sign_count(KEY), 1);
 
     let err = nodes[0].sign_round2_with(KEY, "no-auth", &msg, &cs, Some(intent::intent_digest(&i1))).unwrap_err();
@@ -939,7 +941,7 @@ async fn a_round2_after_a_commit_is_an_unknown_session_even_with_a_lapsed_intent
     let out = handle.render();
     assert!(out.lines().any(|l| l == "rutli_sign_round2_unknown_session_total 1"), "{out}");
     assert!(!out.contains("rutli_sign_policy_refusals_total"), "not counted as a policy refusal:\n{out}");
-    assert!(nodes[0].sign_guard().unwrap().take(KEY, "committed").is_none(), "the authorization was taken");
+    assert!(!nodes[0].sign_guard().unwrap().holds(KEY, "committed"), "the authorization was taken");
 }
 
 /// A round 2 that arrives after the session was aborted (a leader that gave up on this node and
@@ -955,9 +957,9 @@ async fn a_round2_after_an_abort_is_an_unknown_session() {
         (Identifier::try_from(1u16).unwrap(), nodes[0].sign_round1(KEY, "aborted", &ctx).unwrap()),
         (Identifier::try_from(2u16).unwrap(), nodes[1].sign_round1(KEY, "aborted", &ctx).unwrap()),
     ]);
-    nodes[0].abort_sign(KEY, "aborted");
+    nodes[0].abort_sign_as(KEY, "aborted", &rutli_cosigner::node::SessionOwner::Local).unwrap();
     assert_eq!(nodes[0].pending_sign_count(KEY), 0);
-    assert!(nodes[0].sign_guard().unwrap().take(KEY, "aborted").is_none(), "the abort forgot the authorization");
+    assert!(!nodes[0].sign_guard().unwrap().holds(KEY, "aborted"), "the abort forgot the authorization");
 
     let err = nodes[0].sign_round2_with(KEY, "aborted", &msg, &cs, Some(intent::intent_digest(&i1))).unwrap_err();
     assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))), "{err:?}");
