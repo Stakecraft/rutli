@@ -55,12 +55,21 @@ rustls-pemfile = { workspace = true }
 # The pinned mesh dial (tls.rs).
 hyper-util = { workspace = true }
 
+[features]
+# Fault injection for the crate's own integration tests (`Node::with_sign_store_hook`). Turned on
+# for them through the dev-dependency on this crate below; never in a release build.
+test-hooks = []
+
 [build-dependencies]
 tonic-build = { workspace = true }
 protoc-bin-vendored = { workspace = true }
 
 [dev-dependencies]
+# This crate with its test hooks, for its integration tests (see [features]).
+rutli-cosigner = { path = ".", features = ["test-hooks"] }
 tempfile = "3"
+# Paused time for the peer-liveness tests (deadlines and keepalives without real waits).
+tokio = { workspace = true, features = ["test-util"] }
 rcgen = { workspace = true }
 proptest = { workspace = true }
 criterion = { workspace = true }

@@ -391,12 +391,26 @@ async fn commit_everywhere(peers: &Peers, ceremony_id: &str, key_id: &str) -> Re
     )))
 }
 
-/// Most t-subsets one Sign tries: C(5,3) = 10 covers every supported roster (C(3,2) = 3).
-pub const MAX_SIGN_ATTEMPTS: usize = 10;
+/// Most t-subsets one Sign tries over a roster of `n` with threshold `t`: `n − t + 1` (2 in 2-of-3,
+/// 3 in 3-of-5). Each failed attempt excludes one member, so this is every attempt that can still
+/// reach a subset of `t` usable members: two members that refuse (or a link attacker that stalls
+/// a different member each attempt) cannot stop a leader before the subset that works. Slow
+/// attempts are stopped by the sign clock instead ([`SIGN_BUDGET`] or the client's deadline, the
+/// round deadlines, no subset started with less than [`crate::peer::ROUND_RESERVE`] left).
+///
+/// Shares: a member releases at most one share per attempt it is in (each attempt is a fresh
+/// session on it, and a session signs once), late shares of abandoned attempts included, so one
+/// Sign call costs a member at most `n − t + 1` of the request's `max_shares_per_request` (8 by
+/// default).
+pub fn max_sign_attempts(n: usize, t: usize) -> usize {
+    n.saturating_sub(t) + 1
+}
 
-/// Wall-clock budget for one Sign's attempts — inside the driver's 60 s deadline, so a request
-/// that cannot be served here ends with an error the driver can still fail over on.
-pub const SIGN_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
+/// Wall-clock budget for one Sign's attempts when the client sends no deadline (`grpc-timeout`).
+/// With one, the budget is the smaller of the two: the client's deadline only ever shortens it.
+/// 20 s covers two attempts that each run to both round deadlines (2 × (2 s + 5 s)) with room left;
+/// a third (3-of-5) starts only if time is left.
+pub const SIGN_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Coordinate one signature (audit H1: epoch-matched quorums with retry).
 ///
@@ -404,16 +418,28 @@ pub const SIGN_BUDGET: std::time::Duration = std::time::Duration::from_secs(45);
 ///   round 1; a peer on another sharing refuses ([`DaemonError::EpochMismatch`]), and a stale peer
 ///   refuses too. A leader whose own share is stale declines to lead (UNAVAILABLE, the driver
 ///   fails over).
-/// * Candidate t-subsets are the roster's combinations, leader first then by identifier. Each
-///   attempt is a fresh session (a new random session id per member, fresh round-1 commitments from every member —
-///   commitments are never reused across subsets). A member that fails round 1 or round 2, or whose
-///   share fails verification at aggregation (frost's cheater detection names it), is excluded for
-///   the rest of the request; its session is aborted on the members that hold nonces, and the next
-///   subset without any excluded member is tried.
+/// * Candidate t-subsets are the roster's combinations over [`base_order`] (leader first, then by
+///   identifier), stable-sorted by their worst member's liveness tier ([`crate::liveness::Tier`]:
+///   up, trial, down) — a peer this leader knows to be down is tried last, never skipped. A
+///   stalled or refusing peer whose window has passed gets a trial: this signature tries a subset
+///   with it first, if it takes the trial when that attempt starts
+///   ([`crate::liveness::PeerHealth::take_trial`], one signature per window); a signature that
+///   finds it taken skips only that first try, the subset keeps its place in the tier order, and
+///   an attempt that ends before it sent the peer a round gives the trial back. Each
+///   attempt is a fresh session (a new random session id per member, fresh round-1 commitments from
+///   every member — commitments are never reused across subsets). A member that fails round 1 or
+///   round 2, misses its round deadline, or whose share fails verification at aggregation (frost's
+///   cheater detection names it), is excluded for the rest of the request; its session is aborted
+///   (detached — never waited for) and the other members' in parallel, and the next subset without
+///   any excluded member is tried.
 /// * If `t` peers report one sharing that is not older than the leader's, the leader is the odd
 ///   one out: it stops and answers UNAVAILABLE so the driver fails over to a node on the cluster's
 ///   sharing (and nudges its own resolver if it has a ceremony for the key staged).
-/// * At most [`MAX_SIGN_ATTEMPTS`] attempts within [`SIGN_BUDGET`].
+/// * At most [`max_sign_attempts`] (`n − t + 1`) attempts within [`SIGN_BUDGET`] or the client's
+///   deadline.
+/// * Fast refusals, before any member is contacted: fewer than `t` cosigners reachable
+///   ([`DaemonError::NoQuorum`]), or this leader overloaded ([`DaemonError::Overloaded`], also when
+///   its own round misses its deadline). Both UNAVAILABLE with a trailer; the driver fails over.
 ///
 /// Every step that may read this node's key store runs on the blocking pool ([`Node::blocking`];
 /// the [`PeerApi`] calls do the same on their side), so a stalled volume parks a blocking thread,
@@ -436,12 +462,49 @@ pub async fn sign_with_intent(
     message: &[u8],
     intent: Option<&crate::pb::SignedIntent>,
 ) -> Result<[u8; 64]> {
+    sign_within(node, peers, key_id, message, intent, None).await
+}
+
+/// [`sign_with_intent`] within the client's deadline (`client_deadline`, from the Sign call's
+/// `grpc-timeout`; `None` without one). The deadline only ever shortens the leader's work: the
+/// budget is the smaller of it and [`SIGN_BUDGET`], each round's deadline at most the time left
+/// minus [`crate::peer::ROUND_RESERVE`] (kept for a further subset; the last attempt keeps none),
+/// no subset starts with less than that reserve left, and a deadline below it is refused at once
+/// ([`DaemonError::ClientDeadline`]) — no round is started. It never lengthens a wait or skips a
+/// check.
+pub async fn sign_within(
+    node: &Arc<Node>,
+    peers: &Peers,
+    key_id: &str,
+    message: &[u8],
+    intent: Option<&crate::pb::SignedIntent>,
+    client_deadline: Option<std::time::Duration>,
+) -> Result<[u8; 64]> {
     if message.len() != CANTON_DIGEST_LEN {
         return Err(DaemonError::InvalidMessageLength {
             got: message.len(),
             expected: CANTON_DIGEST_LEN,
         });
     }
+    let timing = node.liveness().clone();
+    let clock = SignClock::start(&timing, client_deadline)?;
+    // Overloaded before round 1: refuse without contacting a member (the client moves on, which
+    // also spreads the load off a hot leader).
+    let leading = node.sign_load().lead();
+    if leading.count > timing.leader_inflight_limit {
+        fast_refusal("overloaded");
+        return Err(DaemonError::Overloaded(format!(
+            "{} signatures in flight on this leader (limit {}) — another cosigner can lead",
+            leading.count, timing.leader_inflight_limit
+        )));
+    }
+    let request_id = intent.and_then(request_id_of);
+    let ordered = base_order(node.identifier, request_id.as_deref(), peers);
+    // A stalled or refusing peer whose window has passed: a subset with it goes first. Looked at
+    // once, before this signature's first wait, so signatures that start together all see it; the
+    // trial is taken only when that attempt starts, and a signature that finds it taken by then
+    // skips only that first try (the subset stays in its tier's place).
+    let trial = ordered.iter().position(|p| trial_due(p));
     let me = {
         let key_id = key_id.to_owned();
         node.blocking(move |n| n.signing_view(&key_id)).await?
@@ -453,11 +516,15 @@ pub async fn sign_with_intent(
         )));
     }
     let threshold = usize::from(me.threshold);
-    let started = std::time::Instant::now();
+    visible_quorum(peers, threshold, &timing, key_id).await?;
 
-    // Leader first, then the rest in roster order.
-    let mut ordered: Vec<&Arc<dyn PeerApi>> = peers.iter().filter(|p| p.identifier() == node.identifier).collect();
-    ordered.extend(peers.iter().filter(|p| p.identifier() != node.identifier));
+    let tiers: Vec<crate::liveness::Tier> = ordered.iter().map(|p| sign_tier(p)).collect();
+    let subsets = order_subsets(ordered.len(), threshold, &tiers, trial);
+    // The front copy of the trial subset ([`order_subsets`]), tried only as the trial.
+    let mut trial_front = trial;
+    // The trial this signature took, if any: given back if no round reached its peer.
+    let mut taken = TakenTrial::default();
+    let max_attempts = max_sign_attempts(ordered.len(), threshold);
 
     let mut excluded: BTreeMap<Identifier, String> = BTreeMap::new();
     // The first signing-policy refusal by a member: the answer if no subset can sign.
@@ -465,21 +532,39 @@ pub async fn sign_with_intent(
     // Sharings peers reported that differ from ours and are not older (epoch-mismatch refusals).
     let mut elsewhere: BTreeMap<Identifier, crate::node::KeyVersion> = BTreeMap::new();
     let mut attempts = 0usize;
+    let mut out_of_time = false;
     // Members that answered "no room for this leader's sessions" (a cap on waiting sessions). Not
     // a failure of theirs: the room is this leader's own, filled by its earlier sessions. They are
     // skipped while other subsets remain, never excluded, and tried once more after a pass.
     let mut busy: BTreeSet<Identifier> = BTreeSet::new();
     let mut busy_retried = false;
     'passes: loop {
-        for subset in combinations(ordered.len(), threshold) {
-            // `combinations(ordered.len(), threshold)` yields only indices below `ordered.len()`.
-            #[allow(clippy::indexing_slicing)]
-            let members: Vec<&Arc<dyn PeerApi>> = subset.iter().map(|&i| ordered[i]).collect();
+        for (pos, subset) in subsets.iter().enumerate() {
+            if pos == 0 && trial.is_some() && trial_front.is_none() {
+                // The trial's front copy, already tried or skipped: the subset keeps its own place.
+                continue;
+            }
+            let members: Vec<&Arc<dyn PeerApi>> = subset.iter().filter_map(|&i| ordered.get(i).copied()).collect();
             if members.iter().any(|p| excluded.contains_key(&p.identifier()) || busy.contains(&p.identifier())) {
                 continue;
             }
-            if attempts >= MAX_SIGN_ATTEMPTS || started.elapsed() >= SIGN_BUDGET {
+            if attempts >= max_attempts {
                 break 'passes;
+            }
+            if !clock.room_for_subset() {
+                out_of_time = true;
+                break 'passes;
+            }
+            if pos == 0 {
+                if let Some(i) = trial_front.take() {
+                    // The trial's front copy, the first attempt (nothing is excluded or busy yet).
+                    match ordered.get(i).and_then(|p| take_trial(p)) {
+                        Some(t) => taken.held = Some(t),
+                        // Another signature took it first: it pays the deadline, not this one. The
+                        // same subset is still tried in its tier's place if better ones fail.
+                        None => continue,
+                    }
+                }
             }
             attempts += 1;
             if attempts > 1 {
@@ -487,9 +572,23 @@ pub async fn sign_with_intent(
             }
             let ctx =
                 crate::node::Round1Ctx { leader_view: Some(me.view), intent: intent.cloned(), ..Default::default() };
-            match attempt(node, &members, key_id, message, &ctx, "sign").await {
+            // The last attempt keeps no reserve for a further subset.
+            let reserve = attempts < max_attempts;
+            let result =
+                attempt(node, &members, key_id, message, &ctx, &clock.for_attempt(reserve), &mut taken.reached)
+                    .await;
+            taken.settle();
+            match result {
                 Ok(signature) => return Ok(signature),
                 Err(Attempt::Fatal(e)) => return Err(e),
+                Err(Attempt::Leader(e)) => {
+                    fast_refusal("overloaded");
+                    return Err(e);
+                }
+                Err(Attempt::OutOfTime) => {
+                    out_of_time = true;
+                    break 'passes;
+                }
                 Err(Attempt::Members(failed)) => {
                     for (id, e) in failed {
                         if is_sessions_full(&e) {
@@ -522,15 +621,15 @@ pub async fn sign_with_intent(
                 }
             }
         }
-        if !busy.is_empty() && !busy_retried {
+        if !busy.is_empty() && !busy_retried && attempts < max_attempts {
             busy_retried = true;
             busy.clear();
             continue 'passes;
         }
         break;
     }
-    let usable = ordered.len() - excluded.len();
-    tracing::warn!(key_id, attempts, ?excluded, ?busy, "sign gave up: no t-subset of cosigners could sign");
+    let usable = ordered.len().saturating_sub(excluded.len());
+    tracing::warn!(key_id, attempts, ?excluded, ?busy, out_of_time, "sign gave up: no t-subset of cosigners could sign");
     if let Some(refusal) = policy_refusal {
         return Err(refusal);
     }
@@ -541,15 +640,221 @@ pub async fn sign_with_intent(
              (and no subset without them could sign) — another cosigner can lead"
         )));
     }
-    if usable < threshold {
-        Err(DaemonError::ThresholdNotMet { needed: threshold, got: usable })
-    } else {
-        Err(DaemonError::NotServing(format!(
-            "sign for {key_id} gave up after {attempts} attempt(s) in {:?} ({} cosigner(s) excluded)",
-            started.elapsed(),
-            excluded.len()
-        )))
+    // Not the no-quorum refusal: members excluded here answered or timed out for this signature,
+    // for any reason (an invalid share, a refusal) — reachability is the quorum check's business,
+    // before round 1. UNAVAILABLE either way (below the threshold, or attempts or time used up
+    // with enough cosigners left), with its own trailer.
+    tracing::debug!(key_id, elapsed = ?clock.elapsed(), "sign attempts exhausted");
+    Err(DaemonError::AttemptsExhausted {
+        needed: threshold,
+        usable,
+        attempts,
+        // A member whose roster number cannot be computed is left out, never reported as peer 0.
+        excluded: excluded.keys().filter_map(|id| crate::hosted::identifier_index(*id).ok()).collect(),
+        out_of_time,
+    })
+}
+
+/// Count one fast refusal in `rutli_sign_fast_refusals_total{reason}` (the reasons are listed in
+/// [`crate::metrics::FAST_REFUSAL_REASONS`]).
+fn fast_refusal(reason: &'static str) {
+    metrics::counter!(crate::metrics::SIGN_FAST_REFUSALS, "reason" => reason).increment(1);
+}
+
+/// The time one signature may take: the smaller of [`SIGN_BUDGET`] and the client's deadline.
+#[derive(Clone, Copy)]
+struct SignClock {
+    started: tokio::time::Instant,
+    budget: std::time::Duration,
+    reserve: std::time::Duration,
+    round1: std::time::Duration,
+    round2: std::time::Duration,
+    abort: std::time::Duration,
+    /// Rounds keep the reserve for a further subset ([`SignClock::for_attempt`]).
+    keep_reserve: bool,
+}
+
+impl SignClock {
+    /// A clock for a signature starting now; a client deadline below the reserve is refused.
+    fn start(timing: &crate::peer::Liveness, client: Option<std::time::Duration>) -> Result<Self> {
+        if let Some(left) = client {
+            if left < timing.round_reserve {
+                return Err(DaemonError::ClientDeadline { left, needed: timing.round_reserve });
+            }
+        }
+        Ok(Self {
+            started: tokio::time::Instant::now(),
+            budget: client.map_or(timing.sign_budget, |c| c.min(timing.sign_budget)),
+            reserve: timing.round_reserve,
+            round1: timing.round1,
+            round2: timing.round2,
+            abort: timing.abort,
+            keep_reserve: true,
+        })
     }
+
+    /// This clock for one attempt: its rounds keep the reserve only if another attempt may follow.
+    fn for_attempt(&self, reserve: bool) -> Self {
+        Self { keep_reserve: reserve, ..*self }
+    }
+
+    fn elapsed(&self) -> std::time::Duration {
+        self.started.elapsed()
+    }
+
+    fn left(&self) -> std::time::Duration {
+        self.budget.saturating_sub(self.started.elapsed())
+    }
+
+    /// Whether a new subset may start: at least the reserve left.
+    fn room_for_subset(&self) -> bool {
+        self.left() >= self.reserve
+    }
+
+    /// The deadline of a round whose own bound is `cap`: min(cap, time left − reserve), the reserve
+    /// kept for a further subset only when one may follow; `None` when no time is left.
+    fn round(&self, cap: std::time::Duration) -> Option<std::time::Duration> {
+        let keep = if self.keep_reserve { self.reserve } else { std::time::Duration::ZERO };
+        let d = cap.min(self.left().saturating_sub(keep));
+        (!d.is_zero()).then_some(d)
+    }
+}
+
+/// Refuse at once when fewer than `threshold` cosigners (this one included) are reachable. Only a
+/// peer known *unreachable* counts as missing — a stalled one is reachable, so saturation never
+/// refuses here. Each unreachable peer is asked once more (its probe joined or started, a probe
+/// younger than [`crate::peer::PROBE_FRESH`] reused), all together within
+/// [`crate::peer::QUORUM_PROBE_WAIT`].
+async fn visible_quorum(peers: &Peers, threshold: usize, timing: &crate::peer::Liveness, key_id: &str) -> Result<()> {
+    // Unreachable peers, and peers whose round deadline is being judged right now (their probe is
+    // joined, not doubled).
+    let unreachable: Vec<&Arc<dyn PeerApi>> =
+        peers.iter().filter(|p| p.health().is_some_and(|h| h.is_unreachable() || h.is_suspect())).collect();
+    // Nothing known unreachable: whatever is missing is not a reachability question (a roster
+    // smaller than `t` gives up after trying, as before).
+    if unreachable.is_empty() || peers.len() - unreachable.len() >= threshold {
+        return Ok(());
+    }
+    let mut asked = tokio::task::JoinSet::new();
+    for p in &unreachable {
+        let (p, fresh, wait) = ((*p).clone(), timing.probe_fresh, timing.quorum_wait);
+        asked.spawn(async move { (p.identifier(), p.reachable_within(fresh, wait).await) });
+    }
+    let mut missing = Vec::new();
+    while let Some(joined) = asked.join_next().await {
+        match joined {
+            Ok((_, true)) => {}
+            Ok((id, false)) => missing.push(crate::hosted::identifier_index(id).unwrap_or(0)),
+            Err(_) => {}
+        }
+    }
+    missing.sort_unstable();
+    let visible = peers.len() - missing.len();
+    if visible >= threshold {
+        return Ok(());
+    }
+    fast_refusal("no-quorum");
+    tracing::warn!(key_id, visible, needed = threshold, ?missing, "sign refused: too few cosigners reachable from this leader");
+    Err(DaemonError::NoQuorum { needed: threshold, visible, missing })
+}
+
+/// The tier of one candidate member: this node and peers that keep no health are always up.
+fn sign_tier(p: &Arc<dyn PeerApi>) -> crate::liveness::Tier {
+    match p.health() {
+        Some(h) if !p.is_local() => h.sign_tier(),
+        _ => crate::liveness::Tier::Up,
+    }
+}
+
+/// Whether a candidate member's trial is due ([`crate::liveness::PeerHealth::trial_due`]).
+fn trial_due(p: &Arc<dyn PeerApi>) -> bool {
+    !p.is_local() && p.health().is_some_and(|h| h.trial_due())
+}
+
+/// Take a candidate member's trial ([`crate::liveness::PeerHealth::take_trial`]).
+fn take_trial(p: &Arc<dyn PeerApi>) -> Option<HeldTrial> {
+    if p.is_local() {
+        return None;
+    }
+    let h = p.health()?;
+    h.take_trial().map(|t| (p.identifier(), h.clone(), t))
+}
+
+/// A trial taken for one attempt: its peer, the peer's health, the taking.
+type HeldTrial = (Identifier, Arc<crate::liveness::PeerHealth>, crate::liveness::TrialTaken);
+
+/// The trial one signature took, given back ([`crate::liveness::PeerHealth::release_trial`]) when
+/// the attempt it was taken for ends, or the signature is dropped, without having sent its peer a
+/// round — an earlier member of that attempt failed, or the time ran out. A trial whose peer was
+/// sent a round keeps its hold: that round's outcome is the verdict.
+#[derive(Default)]
+struct TakenTrial {
+    held: Option<HeldTrial>,
+    /// Members this signature sent a sign round to (noted before each round 1 is sent).
+    reached: BTreeSet<Identifier>,
+}
+
+impl TakenTrial {
+    /// The attempt the trial was taken for is over.
+    fn settle(&mut self) {
+        if let Some((id, health, taken)) = self.held.take() {
+            if !self.reached.contains(&id) {
+                health.release_trial(taken);
+            }
+        }
+    }
+}
+
+impl Drop for TakenTrial {
+    fn drop(&mut self) {
+        self.settle();
+    }
+}
+
+/// The request id a signing intent names (the same for every attempt and failover leader of one
+/// driver call), or `None`.
+fn request_id_of(intent: &crate::pb::SignedIntent) -> Option<Vec<u8>> {
+    use prost::Message;
+    crate::pb::SignIntent::decode(intent.intent.as_slice()).ok().map(|i| i.request_id)
+}
+
+/// The order subsets are formed over, before the liveness sort: this leader first, then the rest
+/// in roster order — today's order. `request_id` is the seam for a per-request rotation of the
+/// partners (#193), deliberately unused here: a change of subset choice gets its own review.
+pub fn base_order<'a>(
+    leader: Identifier,
+    request_id: Option<&[u8]>,
+    peers: &'a Peers,
+) -> Vec<&'a Arc<dyn PeerApi>> {
+    let _ = request_id;
+    let mut ordered: Vec<&Arc<dyn PeerApi>> = peers.iter().filter(|p| p.identifier() == leader).collect();
+    ordered.extend(peers.iter().filter(|p| p.identifier() != leader));
+    ordered
+}
+
+/// Every `threshold`-subset of `0..n` (indices into the base order), in [`combinations`] order,
+/// then stable-sorted by its worst member's tier: subsets with a down member last, subsets with a
+/// trial before those, the base order kept within each tier. With `trial` (the index of a peer
+/// whose trial is due), a copy of the subset with it whose other members are best (then the base
+/// order) is put in front: the trial. The rest is the tier order, that subset included in its own
+/// place, so a signature that does not get the trial still tries it there.
+pub fn order_subsets(
+    n: usize,
+    threshold: usize,
+    tiers: &[crate::liveness::Tier],
+    trial: Option<usize>,
+) -> Vec<Vec<usize>> {
+    let tier = |i: usize| tiers.get(i).copied().unwrap_or(crate::liveness::Tier::Up);
+    let mut subsets = combinations(n, threshold);
+    subsets.sort_by_key(|s| s.iter().map(|&i| tier(i)).max());
+    if let Some(t) = trial {
+        let others = |s: &[usize]| s.iter().filter(|&&i| i != t).map(|&i| tier(i)).max();
+        let front = subsets.iter().enumerate().filter(|(_, s)| s.contains(&t)).min_by_key(|(pos, s)| (others(s), *pos));
+        if let Some(s) = front.map(|(_, s)| s.clone()) {
+            subsets.insert(0, s);
+        }
+    }
+    subsets
 }
 
 /// A member's "no room for this leader's sessions" (a cap on waiting sign sessions), in process or
@@ -579,16 +884,24 @@ fn clone_policy_refusal(e: &DaemonError) -> DaemonError {
 
 /// Why one signing attempt (one t-subset, one session) failed.
 enum Attempt {
-    /// These members failed (round 1, round 2, or an invalid share): another subset may work.
+    /// These members failed (round 1, round 2, a missed deadline, or an invalid share): another
+    /// subset may work.
     Members(Vec<(Identifier, DaemonError)>),
+    /// This leader's own round missed its deadline: overload here, never a member's fault — no
+    /// further subset, the client moves to another leader.
+    Leader(DaemonError),
+    /// The signature's time ran out before the next round.
+    OutOfTime,
     /// Not attributable to a member: give up.
     Fatal(DaemonError),
 }
 
 /// One signing session over exactly `members`: round 1 to each (fresh nonces, bound to `message`
-/// and this signer set), round 2 to each, aggregate. On a member's failure the session is aborted
-/// on every member still holding nonces for it, so nothing lingers until the pending TTL; a member
-/// that already produced its share has burned its nonce and is unaffected.
+/// and this signer set), round 2 to each, aggregate. Each round call has its deadline from `clock`.
+/// On a member's failure the session is aborted on every member still holding nonces for it — on
+/// the failed member detached (never waited for: it may be the one that does not answer), on the
+/// others in parallel, each within the abort deadline — so nothing lingers until the pending TTL; a
+/// member that already produced its share has burned its nonce and is unaffected.
 ///
 /// Each member, this node's own share included, gets its own random session id, used for its
 /// round 1, round 2 and abort. FROST needs no common id: the members agree on the message and the
@@ -597,15 +910,20 @@ enum Attempt {
 /// under, so it cannot open that id there first (the leader's round 1 would meet a duplicate and
 /// exclude an honest node), abort it or send its round 2. The attempt id is for the leader's log
 /// only and never leaves this node.
+///
+/// Every member sent a round 1 is noted in `reached` before it is sent (a trial given back only
+/// if its peer is not there, [`TakenTrial`]).
 async fn attempt(
     node: &Arc<Node>,
     members: &[&Arc<dyn PeerApi>],
     key_id: &str,
     message: &[u8],
     base: &crate::node::Round1Ctx,
-    prefix: &str,
+    clock: &SignClock,
+    reached: &mut BTreeSet<Identifier>,
 ) -> std::result::Result<[u8; 64], Attempt> {
     let attempt_id = new_id("attempt");
+    let prefix = if base.sign_test { "signtest" } else { "sign" };
     let sessions: Vec<String> = members.iter().map(|_| new_id(prefix)).collect();
     // The members, not their session ids: the id map is what this design keeps from each member.
     tracing::debug!(
@@ -614,7 +932,7 @@ async fn attempt(
         members = ?members.iter().map(|p| p.identifier()).collect::<Vec<_>>(),
         "sign attempt: one session id per member"
     );
-    let mut open = OpenSessions { key_id: key_id.to_owned(), opened: Vec::new() };
+    let mut open = OpenSessions { key_id: key_id.to_owned(), opened: Vec::new(), abort_deadline: clock.abort };
     let mut signers = Vec::with_capacity(members.len());
     for p in members {
         signers.push(crate::hosted::identifier_index(p.identifier()).map_err(Attempt::Fatal)?);
@@ -623,17 +941,27 @@ async fn attempt(
     let mut commitments: BTreeMap<Identifier, SigningCommitments> = BTreeMap::new();
     // `sessions` has one id per member (built from `members` above), so the zip drops nothing.
     for (p, session) in members.iter().zip(&sessions) {
+        let Some(deadline) = clock.round(clock.round1) else {
+            open.abort_after_failure(None).await;
+            return Err(Attempt::OutOfTime);
+        };
         // Noted before asking: a round 1 that times out or errors may still have opened the
         // session on the member, so a failure aborts it there too.
         open.opened.push(((*p).clone(), session.clone()));
-        match p.sign_round1(key_id, session, ctx).await {
+        reached.insert(p.identifier());
+        match p.sign_round1_within(key_id, session, ctx, deadline).await {
             Ok(c) => {
                 commitments.insert(p.identifier(), c);
             }
             Err(e) => {
                 metrics::counter!(crate::metrics::SIGN_ROUND1_SKIPS).increment(1);
-                tracing::debug!(key_id, attempt = %attempt_id, peer = ?p.identifier(), "sign round 1 failed");
-                open.abort_now().await;
+                tracing::debug!(key_id, attempt = %attempt_id, peer = ?p.identifier(), error = %e, "sign round 1 failed");
+                open.abort_after_failure(Some(p.identifier())).await;
+                if p.is_local() && matches!(e, DaemonError::PeerDeadline { .. }) {
+                    return Err(Attempt::Leader(DaemonError::Overloaded(format!(
+                        "this leader's own sign round 1 did not finish within {deadline:?} — another cosigner can lead"
+                    ))));
+                }
                 return Err(Attempt::Members(vec![(p.identifier(), e)]));
             }
         }
@@ -641,15 +969,30 @@ async fn attempt(
     let intent_digest = ctx.intent.as_ref().map(crate::intent::intent_digest);
     let mut shares: BTreeMap<Identifier, SignatureShare> = BTreeMap::new();
     for (p, session) in members.iter().zip(&sessions) {
-        match p.sign_round2(key_id, session, message, &commitments, intent_digest.as_ref()).await {
+        let Some(deadline) = clock.round(clock.round2) else {
+            open.abort_after_failure(None).await;
+            return Err(Attempt::OutOfTime);
+        };
+        let started = tokio::time::Instant::now();
+        let answer = p.sign_round2_within(key_id, session, message, &commitments, intent_digest.as_ref(), deadline).await;
+        if p.is_local() {
+            metrics::histogram!(crate::metrics::PEER_CALL_DURATION, "call" => "local_share")
+                .record(started.elapsed().as_secs_f64());
+        }
+        match answer {
             Ok(share) => {
                 shares.insert(p.identifier(), share);
             }
             Err(e) => {
-                tracing::debug!(key_id, attempt = %attempt_id, peer = ?p.identifier(), "sign round 2 failed");
+                tracing::debug!(key_id, attempt = %attempt_id, peer = ?p.identifier(), error = %e, "sign round 2 failed");
                 // Members before this one burned their nonce; this one and later ones may still
                 // hold theirs — free them now.
-                open.abort_now().await;
+                open.abort_after_failure(Some(p.identifier())).await;
+                if p.is_local() && matches!(e, DaemonError::PeerDeadline { .. }) {
+                    return Err(Attempt::Leader(DaemonError::Overloaded(format!(
+                        "this leader's own sign round 2 did not finish within {deadline:?} — another cosigner can lead"
+                    ))));
+                }
                 return Err(Attempt::Members(vec![(p.identifier(), e)]));
             }
         }
@@ -763,62 +1106,80 @@ pub async fn ceremony_sign_test(
     // One attempt over exactly this quorum, with the leader's sharing like any sign. No intent: each
     // member accepts a sign-test round only for its own test digest of the key.
     let ctx = crate::node::Round1Ctx { leader_view: Some(view.view), sign_test: true, ..Default::default() };
-    match attempt(node, &quorum, key_id, &message, &ctx, "signtest").await {
+    let clock = SignClock::start(node.liveness(), None)?;
+    match attempt(node, &quorum, key_id, &message, &ctx, &clock.for_attempt(false), &mut BTreeSet::new()).await {
         Ok(signature) => Ok((message, signature)),
-        Err(Attempt::Fatal(e)) => Err(e),
+        Err(Attempt::Fatal(e) | Attempt::Leader(e)) => Err(e),
+        Err(Attempt::OutOfTime) => Err(DaemonError::NotServing(format!("sign test for {key_id} ran out of time"))),
         Err(Attempt::Members(mut failed)) => Err(failed.pop().map(|(_, e)| e).expect("one member error")),
     }
 }
 
 /// The sessions an attempt asked its members to open and has not seen used. A failure aborts them
-/// ([`OpenSessions::abort_now`]); an attempt dropped before it finished (the driver's call was
-/// cancelled or ran out of time, and tonic dropped the request's future) aborts them from `Drop`.
-/// Without that they would stay on the members until the pending TTL, counted against this
+/// ([`OpenSessions::abort_after_failure`]); an attempt dropped before it finished (the driver's call
+/// was cancelled or ran out of time, and tonic dropped the request's future) aborts them from
+/// `Drop`. Without that they would stay on the members until the pending TTL, counted against this
 /// leader's caps there, and a burst of cancelled calls would leave it no room. Each abort runs as
 /// its own task, so it finishes even if the attempt is dropped while waiting for it, and the list is
 /// taken when the abort starts, so no session is aborted twice by it.
 struct OpenSessions {
     key_id: String,
     opened: Vec<(Arc<dyn PeerApi>, String)>,
+    abort_deadline: std::time::Duration,
 }
 
 impl OpenSessions {
-    fn spawn_abort(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+    /// Abort every open session: the one on `failed` (the member that just failed, which may not
+    /// answer at all) detached, the others in parallel, waited for — each within the abort
+    /// deadline, so this returns within it.
+    async fn abort_after_failure(&mut self, failed: Option<Identifier>) {
         if self.opened.is_empty() {
-            return None;
+            return;
         }
-        let runtime = tokio::runtime::Handle::try_current().ok()?;
-        let (opened, key_id) = (std::mem::take(&mut self.opened), self.key_id.clone());
-        Some(runtime.spawn(async move { abort_sign(&opened, &key_id).await }))
-    }
-
-    async fn abort_now(&mut self) {
-        if let Some(task) = self.spawn_abort() {
-            let _ = task.await;
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else { return };
+        metrics::counter!(crate::metrics::SIGN_ABORTS).increment(1);
+        let (gone, rest): (Vec<_>, Vec<_>) =
+            std::mem::take(&mut self.opened).into_iter().partition(|(p, _)| Some(p.identifier()) == failed);
+        let (key_id, deadline) = (self.key_id.clone(), self.abort_deadline);
+        if !gone.is_empty() {
+            let key_id = key_id.clone();
+            runtime.spawn(async move { abort_sign(gone, &key_id, deadline).await });
+        }
+        if !rest.is_empty() {
+            let _ = runtime.spawn(async move { abort_sign(rest, &key_id, deadline).await }).await;
         }
     }
 }
 
 impl Drop for OpenSessions {
     fn drop(&mut self) {
-        if !self.opened.is_empty() {
-            tracing::debug!(key_id = %self.key_id, sessions = self.opened.len(), "sign attempt dropped before it finished; aborting its sessions");
-            let _ = self.spawn_abort();
+        if self.opened.is_empty() {
+            return;
+        }
+        tracing::debug!(key_id = %self.key_id, sessions = self.opened.len(), "sign attempt dropped before it finished; aborting its sessions");
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            metrics::counter!(crate::metrics::SIGN_ABORTS).increment(1);
+            let (opened, key_id, deadline) = (std::mem::take(&mut self.opened), self.key_id.clone(), self.abort_deadline);
+            runtime.spawn(async move { abort_sign(opened, &key_id, deadline).await });
         }
     }
 }
 
-/// Best-effort: tell each quorum member to drop the in-flight session so its round-1 nonces are
-/// freed now instead of at the pending-TTL sweep. Errors are swallowed — abort is a courtesy, and
-/// the per-session TTL is the correctness backstop. Aborting a session a peer already completed
-/// (round-2 done) is a harmless no-op.
-async fn abort_sign(opened: &[(Arc<dyn PeerApi>, String)], key_id: &str) {
-    metrics::counter!(crate::metrics::SIGN_ABORTS).increment(1);
+/// Best-effort: tell each member to drop its in-flight session so its round-1 nonces are freed now
+/// instead of at the pending-TTL sweep — all members at once, each within `deadline`. Errors are
+/// swallowed — abort is a courtesy, and the per-session TTL is the correctness backstop. Aborting a
+/// session a peer already completed (round-2 done) is a harmless no-op.
+async fn abort_sign(opened: Vec<(Arc<dyn PeerApi>, String)>, key_id: &str, deadline: std::time::Duration) {
+    let mut asked = tokio::task::JoinSet::new();
     for (p, session_id) in opened {
-        if let Err(e) = p.abort_sign(key_id, session_id).await {
-            tracing::debug!(peer = ?p.identifier(), error = %e, "sign abort failed; nonces will TTL-expire");
-        }
+        let key_id = key_id.to_owned();
+        asked.spawn(async move {
+            if let Err(e) = p.abort_sign_within(&key_id, &session_id, deadline).await {
+                tracing::debug!(peer = ?p.identifier(), error = %e, "sign abort failed; nonces will TTL-expire");
+            }
+        });
     }
+    while asked.join_next().await.is_some() {}
 }
 
 /// Take the per-key ceremony guard on every peer before DKG/refresh crypto. Rolls back on the
@@ -898,10 +1259,16 @@ pub const DEFAULT_WRITE_QUORUM: usize = 2;
 fn is_unreachable(e: &DaemonError) -> bool {
     match e {
         DaemonError::Transport(_) => true,
+        // Our own deadline on the call (peer::CallClass): a peer that does not answer in time is as
+        // good as unreachable — never a conflict.
+        DaemonError::PeerDeadline { .. } => true,
+        // A node whose key store is down (in process, or the `keystore-down` trailer): it cannot
+        // take part, and it is not a conflicting answer either.
+        DaemonError::KeystoreDown(_) => true,
         DaemonError::Status(s) => match s.code() {
             tonic::Code::Unavailable | tonic::Code::DeadlineExceeded => true,
-            // Our own client-side deadline (peer::PEER_RPC_TIMEOUT): tonic reports it as Cancelled
-            // "Timeout expired". A peer that does not answer in time is as good as unreachable.
+            // tonic's own backstop (peer::PEER_RPC_TIMEOUT on the endpoint): Cancelled "Timeout
+            // expired". A peer that does not answer in time is as good as unreachable.
             tonic::Code::Cancelled => s.message().contains("Timeout expired"),
             // tonic reports a connection that failed below the RPC layer as Unknown with the
             // message "transport error" — which is what a stopped cosigner actually produces, as
@@ -2048,6 +2415,12 @@ pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<usize
         if p.identifier() == node.identifier || !seen.insert(p.identifier()) {
             continue;
         }
+        // A peer this node's liveness probe cannot reach is not waited for this sweep: logged, and
+        // asked again by the next one (the probe brings it back within a second of it answering).
+        if p.health().is_some_and(|h| h.is_unreachable()) {
+            tracing::warn!(peer = ?p.identifier(), "anti-entropy: peer unreachable (its liveness probe fails) — not asked this sweep");
+            continue;
+        }
         let p = p.clone();
         asked.spawn(async move { (i, tokio::time::timeout(SWEEP_LIST_TIMEOUT, p.list_inventory()).await) });
     }
@@ -2216,5 +2589,68 @@ mod tests {
         assert!(is_unreachable(&DaemonError::Status(tonic::Status::unavailable("not serving"))));
         assert!(!is_unreachable(&DaemonError::Status(tonic::Status::cancelled("client went away"))));
         assert!(!is_unreachable(&DaemonError::Status(tonic::Status::aborted("ceremony in progress"))));
+        // Our own per-call deadline (peer::CallClass) and a node whose key store is down: absent,
+        // never a conflict (T10).
+        let late = DaemonError::PeerDeadline { peer: 2, call: "a ceremony or hosted-key call", after: std::time::Duration::from_secs(10) };
+        assert!(is_unreachable(&late));
+        assert!(is_unreachable(&DaemonError::KeystoreDown("x".into())));
+        assert!(!is_material_conflict(&late));
+        // A refusal with a trailer is an answer, not an absence.
+        let conflict = tonic::Status::from(DaemonError::HostedConflict { key_id: "k".into(), detail: "x".into() });
+        assert!(!is_unreachable(&DaemonError::Status(conflict)));
+    }
+
+    /// The liveness sort is stable over whatever base order it is given (the #193 seam): within a
+    /// tier the base order stands, subsets with a trial come after all-up ones and subsets with a
+    /// down member last — never dropped.
+    #[test]
+    fn subsets_stable_sort_by_their_worst_member_over_any_base_order() {
+        use crate::liveness::Tier::{Down, Trial, Up};
+        // 2-of-3, member at base index 1 down: {0,2} first, then the two with it, in base order.
+        assert_eq!(order_subsets(3, 2, &[Up, Down, Up], None), vec![vec![0, 2], vec![0, 1], vec![1, 2]]);
+        // All up: exactly the base order.
+        assert_eq!(order_subsets(3, 2, &[Up, Up, Up], None), combinations(3, 2));
+        // 3-of-5 with one trial and one down member: every subset kept, tiers ascending, and the
+        // base (lexicographic) order inside each tier.
+        let tiers = [Up, Up, Trial, Down, Up];
+        let ordered = order_subsets(5, 3, &tiers, None);
+        assert_eq!(ordered.len(), 10);
+        let worst: Vec<_> = ordered.iter().map(|s| s.iter().map(|&i| tiers[i]).max().unwrap()).collect();
+        assert!(worst.windows(2).all(|w| w[0] <= w[1]), "{worst:?}");
+        for tier in [Up, Trial, Down] {
+            let within: Vec<_> = ordered.iter().zip(&worst).filter(|(_, w)| **w == tier).map(|(s, _)| s.clone()).collect();
+            let mut sorted = within.clone();
+            sorted.sort();
+            assert_eq!(within, sorted, "base order kept within {tier:?}");
+        }
+        assert_eq!(ordered[0], vec![0, 1, 4]);
+    }
+
+    /// A due trial puts a copy of one subset with that peer first — the one whose other members
+    /// are best — and leaves the rest of the order as the tiers put it, that subset included: a
+    /// signature that does not get the trial still tries it in its own place.
+    #[test]
+    fn a_due_trial_puts_one_subset_with_its_peer_first() {
+        use crate::liveness::Tier::{Down, Up};
+        // 2-of-3, base index 1 stalled with its window passed: {0,1} (the trial), then the tier
+        // order {0,2}, {0,1}, {1,2}.
+        assert_eq!(
+            order_subsets(3, 2, &[Up, Down, Up], Some(1)),
+            vec![vec![0, 1], vec![0, 2], vec![0, 1], vec![1, 2]]
+        );
+        // 3-of-5, index 3 due and index 1 down: the trial subset avoids the other down peer.
+        let tiers = [Up, Down, Up, Down, Up];
+        let ordered = order_subsets(5, 3, &tiers, Some(3));
+        assert_eq!(ordered[0], vec![0, 2, 3]);
+        assert_eq!(ordered[1], vec![0, 2, 4], "then the all-up subset");
+        assert_eq!(ordered[1..], order_subsets(5, 3, &tiers, None)[..], "then exactly the tier order");
+    }
+
+    #[test]
+    fn the_attempt_cap_is_n_minus_t_plus_one() {
+        assert_eq!(max_sign_attempts(3, 2), 2);
+        assert_eq!(max_sign_attempts(5, 3), 3);
+        assert_eq!(max_sign_attempts(2, 2), 1);
+        assert_eq!(max_sign_attempts(1, 2), 1);
     }
 }

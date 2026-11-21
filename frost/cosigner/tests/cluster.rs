@@ -677,10 +677,11 @@ async fn a_failed_sign_round2_aborts_the_in_flight_session_on_every_quorum_membe
     ];
 
     // With no other subset to retry on, the leader gives up after excluding node 1: UNAVAILABLE
-    // (ThresholdNotMet), so the driver fails over, rather than the member's own error.
+    // (attempts exhausted, below the threshold), so the driver fails over, rather than the
+    // member's own error.
     let message = canton_digest(b"round2 will fail");
     let err = sign(&nodes[0], &peers, KEY_ID, &message).await.unwrap_err();
-    assert!(matches!(err, DaemonError::ThresholdNotMet { needed: 2, got: 1 }), "got {err:?}");
+    assert!(matches!(err, DaemonError::AttemptsExhausted { needed: 2, usable: 1, .. }), "got {err:?}");
 
     // The load-bearing assertion: node 1 held a round-1 nonce (it answered round 1) and the leader's
     // abort freed it immediately — no waiting for the pending TTL. Node 0 burned its own in round 2.
@@ -706,7 +707,7 @@ async fn a_threshold_shortfall_after_round1_aborts_the_lone_commitment() {
     // then the sign gives up; that lone nonce must be aborted, not left for the TTL.
     let only_leader: Peers = vec![Arc::new(LocalPeer::new(nodes[0].clone())) as Arc<dyn PeerApi>];
     let err = sign(&nodes[0], &only_leader, KEY_ID, &canton_digest(b"lonely")).await.unwrap_err();
-    assert!(matches!(err, DaemonError::ThresholdNotMet { .. }), "got {err:?}");
+    assert!(matches!(err, DaemonError::AttemptsExhausted { needed: 2, usable: 1, .. }), "got {err:?}");
     assert_eq!(nodes[0].pending_sign_count(KEY_ID), 0, "shortfall must abort the lone commitment");
     assert_eq!(group_key.len(), 32);
 }

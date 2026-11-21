@@ -125,7 +125,7 @@ fn delivery_failure_code(e: &DaemonError) -> &'static str {
     match e {
         DaemonError::Status(s) => s.code().description(),
         DaemonError::Transport(_) => "transport error",
-        DaemonError::NotServing(_) => "recipient not serving",
+        DaemonError::NotServing(_) | DaemonError::KeystoreDown(_) => "recipient not serving",
         DaemonError::UnknownDkg(_) => "recipient has no such session",
         DaemonError::Serde(_) | DaemonError::Frost(_) => "malformed package",
         DaemonError::CeremonyRefused(_) | DaemonError::Ceremony(_) | DaemonError::Config(_) => "refused by the recipient",

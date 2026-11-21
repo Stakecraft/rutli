@@ -63,6 +63,12 @@
 #   rutli_keyfiles{format="v1"|"v2"|"plaintext", dek=...}            gauge
 #   rutli_peer_pin_refusals_total{direction="inbound"|"outbound"}     counter (primed at 0)
 #   rutli_peer_pins_unpinned                                         gauge
+#   rutli_peer_call_duration_seconds{call=...}                       histogram
+#     (call = sign_round1 | sign_round2 | abort | control | local_share; buckets 0.005 … 10 s,
+#     edges at a third of each peer deadline)
+#   rutli_peer_state{peer=..., state="up"|"down"|"trial"}            gauge (one-hot per peer)
+#   rutli_peer_breaker_transitions_total{peer=..., to=..., reason=...} counter (primed at 0)
+#   rutli_sign_fast_refusals_total{reason="no-quorum"|"overloaded"}  counter (primed at 0)
 #
 # The signing-policy series (audit C2) and the delete/tombstone series (audit M2) are not
 # pre-primed either — a series first appears when it first counts — so their rules alert on
@@ -157,6 +163,42 @@ groups:
         annotations:
           summary: "Rütli peer round-1 skips detected on {{ $labels.instance }}"
           description: "{{ $labels.instance }} recorded sign round-1 skips in the last 10 minutes, meaning a quorum peer failed or was unreachable during round 1. With a 2-of-3 quorum the safety margin is shrinking — investigate the skipped peer before another one goes down."
+
+      - alert: RutliPeerDown
+        # One node's liveness view of one peer (0.5.0): `peer` is the roster number. Fed only by
+        # that node's own calls; a peer down for one node and up for the others is a link, down for
+        # every node is the peer. Down peers are still tried last, so signing goes on while t are up.
+        # On `state="down"`: a peer on trial is being tried again, not down. A stalled peer whose
+        # trials fail goes down → trial (≤ 7 s) → down with windows of at most 30 s, so "down at some
+        # point in every minute" for 5 minutes, not "down at every scrape", which a trial would reset.
+        expr: max by (instance, peer) (max_over_time(rutli_peer_state{job="rutli-cosigner",state="down"}[1m])) == 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} has repeatedly seen peer {{ $labels.peer }} down for 5 minutes"
+          description: "{{ $labels.instance }} has held cosigner {{ $labels.peer }} as down (unreachable, stalled or refusing) for at least 5 minutes (trials in between failed), and tries it last in every signature but one trial per window. Check rutli_peer_breaker_transitions_total{peer=\"{{ $labels.peer }}\"} for the reason: unreachable is the network or the process (connect, TLS, keepalive), stalled is a member whose sign rounds stopped completing (a hung volume), refusing is a member whose key store is down (RutliKeystoreUnreadable on it). If every node reports the same peer, look at that peer; if only one does, look at the link between them. At 2-of-3 the margin is gone while it lasts."
+
+      - alert: RutliNoQuorum
+        # Leaders refusing signatures because fewer than t cosigners are reachable from them, on two
+        # or more nodes at once: the cluster as a whole cannot sign, not just one cut-off leader.
+        expr: count(increase(rutli_sign_fast_refusals_total{job="rutli-cosigner",reason="no-quorum"}[5m]) > 0) >= 2
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Rütli: two or more cosigners refuse signatures for lack of a reachable quorum"
+          description: "At least two cosigners answered Sign with UNAVAILABLE no-quorum in the last 5 minutes: each sees fewer than t cosigners (itself included) it can reach. One leader alone doing so is a cut-off node and the driver signs elsewhere; two or more means no leader can form a quorum. Check rutli_peer_state on every instance to see which links are down, then the network between the nodes (NetworkPolicy, CNI, node failures) and whether a majority of cosigners is up at all."
+
+      - alert: RutliPeerFlapping
+        # A peer going down and coming back over and over: a lossy link or a member at the edge of
+        # its deadlines. Steady state and load never move this counter.
+        expr: sum by (instance, peer) (increase(rutli_peer_breaker_transitions_total{job="rutli-cosigner",to="down"}[15m])) > 6
+        labels:
+          severity: warning
+        annotations:
+          summary: "Rütli cosigner {{ $labels.instance }} keeps marking peer {{ $labels.peer }} down"
+          description: "{{ $labels.instance }} marked cosigner {{ $labels.peer }} down more than 6 times in 15 minutes. Each time it recovered (a probe or a successful call) and failed again. Each failure costs at most one signature one peer deadline (2 s in round 1, 5 s in round 2). Look for a lossy or saturated link, a member whose round latency sits near its deadline (rutli_peer_call_duration_seconds on this instance), or a member restarting in a loop."
 
       - alert: RutliPendingSessionsGrowing
         expr: rutli_pending_sign_sessions > 50

@@ -56,6 +56,25 @@ pub const UNRESPONSIVE_AFTER: Duration = Duration::from_secs(2 * PROBE_TIMEOUT.a
 pub const MONITOR_INTERVAL: Duration = Duration::from_secs(15);
 /// A verdict younger than this is served from cache instead of probing again.
 pub const FRESH: Duration = Duration::from_secs(5);
+/// Sign round-2 store work (journal append, nonce marker) still running after this long kicks an
+/// immediate readiness probe ([`KeystoreHealth::kick`]): with the grace of [`UNRESPONSIVE_AFTER`]
+/// a hung volume is then refused about 9 s after it hung instead of up to 21 s.
+pub const STORE_SLOW_AFTER: Duration = Duration::from_secs(3);
+
+/// Whether `e` is a definite key-store I/O failure — the store answered and said no: EROFS, EIO,
+/// ENOSPC, EACCES (also ESTALE, a dead NFS handle). Not a timeout, not a missing file.
+pub fn is_definite_io(e: &DaemonError) -> Option<String> {
+    let io = match e {
+        DaemonError::Io(io) => io,
+        DaemonError::Core(rutli_frost_core::CoreError::Io(io)) => io,
+        DaemonError::KeystoreUnavailable { source, what, .. } if *what != "unresponsive" => source,
+        _ => return None,
+    };
+    match io.raw_os_error() {
+        Some(libc::EROFS | libc::EIO | libc::ENOSPC | libc::EACCES | libc::ESTALE) => Some(io.to_string()),
+        _ => None,
+    }
+}
 
 /// The last published probe outcome.
 struct Verdict {
@@ -103,6 +122,8 @@ pub struct KeystoreHealth {
     finished_async: tokio::sync::Notify,
     /// Last issued probe sequence number.
     seq: AtomicU64,
+    /// A [`KeystoreHealth::kick`] is running (its probe or the wait for it): at most one at a time.
+    kicking: AtomicBool,
 }
 
 /// What asking for a verdict found.
@@ -130,6 +151,7 @@ impl KeystoreHealth {
             finished: Condvar::new(),
             finished_async: tokio::sync::Notify::new(),
             seq: AtomicU64::new(0),
+            kicking: AtomicBool::new(false),
         }
     }
 
@@ -218,9 +240,14 @@ impl KeystoreHealth {
 
     /// Serve the cache, find the probe already running, or start one on its own thread.
     fn start(self: &Arc<Self>) -> Started {
+        self.start_with(false)
+    }
+
+    /// [`KeystoreHealth::start`]; with `ignore_cache` a fresh verdict does not stop a new probe.
+    fn start_with(self: &Arc<Self>, ignore_cache: bool) -> Started {
         let (seq, since) = {
             let mut s = self.lock();
-            if s.verdict.at.is_some_and(|at| at.elapsed() < self.fresh) {
+            if !ignore_cache && s.verdict.at.is_some_and(|at| at.elapsed() < self.fresh) {
                 return Started::Cached(s.verdict.failure.clone().map_or(Ok(()), Err));
             }
             if let Some(r) = &s.running {
@@ -321,6 +348,48 @@ impl KeystoreHealth {
         }
     }
 
+    /// Round-2 store work on this node failed with a definite I/O error (`detail`): EROFS, EIO,
+    /// ENOSPC, EACCES. Published at once as a failed probe would be, so the node refuses further
+    /// work (with the `keystore-down` trailer) instead of failing it one call at a time.
+    ///
+    /// Not sticky: it is an ordinary verdict under a new sequence number, so the next readiness
+    /// probe that *starts* after it — the monitor's tick, a Health call past the cache — replaces it,
+    /// and a store that works again serves again with no restart. A probe already running when the
+    /// error came (an older sequence number) cannot clear it.
+    pub fn report_definite(&self, detail: &str) {
+        let seq = self.next_seq();
+        let unwritable = DaemonError::KeystoreUnavailable {
+            path: self.dir.clone(),
+            what: "not writable",
+            source: std::io::Error::other(format!("sign round 2: {detail}")),
+        };
+        self.publish(seq, Some(unwritable.to_string()), false);
+    }
+
+    /// Store work has been running suspiciously long (a sign round 2 still busy after
+    /// [`STORE_SLOW_AFTER`]): probe now instead of at the next monitor tick, past the cache, and
+    /// wait for that probe on a thread of its own so a hung probe is published as unresponsive when
+    /// its grace runs out. At most one kick at a time; a probe already in flight is waited for, not
+    /// doubled. Returns at once.
+    pub fn kick(self: &Arc<Self>) {
+        if self.kicking.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let me = self.clone();
+        let spawned = std::thread::Builder::new().name("rutli-keystore-kick".into()).spawn(move || {
+            let patience = me.unresponsive_after.max(PROBE_TIMEOUT);
+            match me.start_with(true) {
+                Started::Cached(_) => {}
+                Started::InFlight { seq, since } | Started::Probing { seq, since } => me.wait_blocking(seq, since, patience),
+            }
+            me.kicking.store(false, Ordering::Release);
+        });
+        if let Err(e) = spawned {
+            self.kicking.store(false, Ordering::Release);
+            tracing::warn!(error = %e, "could not start a key-store probe for slow store work");
+        }
+    }
+
     /// The verdict, probing if it is stale and waiting for the probe in flight — this call's or
     /// another caller's — until `patience` after it started. Blocking; needs no async runtime: the
     /// monitor thread's path. Waiting on a probe Health started too is what lets the monitor publish
@@ -397,6 +466,32 @@ mod tests {
         let seq = h.next_seq();
         h.lock().running = Some(Running { seq, since: Instant::now() - for_, slow_logged: false });
         seq
+    }
+
+    #[test]
+    fn a_definite_error_marks_the_store_down_until_a_later_probe_finds_it_working() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("keys");
+        std::fs::create_dir_all(&dir).unwrap();
+        let h = KeystoreHealth::new(&dir);
+        h.check().unwrap();
+        // A probe that started before the error and finishes after it must not clear it.
+        let older = h.next_seq();
+        h.report_definite("Read-only file system (os error 30)");
+        assert!(h.is_down());
+        assert!(h.current().unwrap_err().contains("not writable"), "{:?}", h.current());
+        h.publish(older, None, false);
+        assert!(h.is_down(), "an older probe's success cannot clear a newer definite error");
+        // The next probe that starts after it, with the store working, clears it: no restart.
+        h.check().unwrap();
+        assert!(!h.is_down());
+
+        let eio = DaemonError::Io(std::io::Error::from_raw_os_error(libc::EIO));
+        assert!(is_definite_io(&eio).is_some());
+        let erofs = DaemonError::Core(rutli_frost_core::CoreError::Io(std::io::Error::from_raw_os_error(libc::EROFS)));
+        assert!(is_definite_io(&erofs).is_some());
+        assert!(is_definite_io(&DaemonError::Io(std::io::Error::from_raw_os_error(libc::ENOENT))).is_none());
+        assert!(is_definite_io(&DaemonError::Io(std::io::Error::other("timed out"))).is_none());
     }
 
     #[test]

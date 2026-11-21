@@ -16,7 +16,7 @@ use frost_ed25519::Identifier;
 use rutli_cosigner::epoch_check::{self, Verdict};
 use rutli_cosigner::keystore::KeyStore;
 use rutli_cosigner::node::{Node, Round1Ctx};
-use rutli_cosigner::orchestrator::{run_dkg, run_refresh, sign, Peers};
+use rutli_cosigner::orchestrator::{max_sign_attempts, run_dkg, run_refresh, sign, Peers};
 use rutli_cosigner::peer::{LocalPeer, PeerApi};
 use rutli_cosigner::{DaemonError, Result};
 
@@ -184,6 +184,9 @@ async fn a_current_cluster_reports_nobody_stale() {
 enum Fault {
     None,
     Round1,
+    /// Answers round 1 with a refusal (a reachable member that will not sign: a stale share, its
+    /// policy).
+    Refuse,
     Round2,
     BadShare,
     /// Forwards round 2 with another message than the leader declared at round 1.
@@ -219,6 +222,9 @@ impl PeerApi for Spy {
     async fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &Round1Ctx) -> Result<SigningCommitments> {
         if self.fault == Fault::Round1 {
             return Err(down());
+        }
+        if self.fault == Fault::Refuse {
+            return Err(DaemonError::Status(tonic::Status::failed_precondition("test: this member refuses")));
         }
         let c = self.inner.sign_round1(key_id, session_id, ctx).await?;
         self.note("round1", session_id, serde_json::to_string(&c).unwrap());
@@ -384,7 +390,7 @@ async fn an_invalid_signature_share_is_attributed_and_routed_around() {
     // returning a bad signature.
     let pair: Peers = vec![peers[0].clone(), peers[1].clone()];
     let err = sign(&nodes[0], &pair, KEY, &digest(b"no way around")).await.unwrap_err();
-    assert!(matches!(err, DaemonError::ThresholdNotMet { needed: 2, got: 1 }), "{err:?}");
+    assert!(matches!(err, DaemonError::AttemptsExhausted { needed: 2, usable: 1, .. }), "{err:?}");
 }
 
 #[tokio::test]
@@ -398,16 +404,37 @@ async fn three_of_five_retries_through_subsets_until_one_works() {
     let sig = sign(&nodes[0], &peers, KEY, &msg).await.unwrap();
     assert!(verifies(&group, &msg, &sig));
     let a = attempts(&log);
-    // {1,2,3} fails at 2 (round 1), {1,3,4} fails at 3 (round 2), {1,4,5} signs.
+    // {1,2,3} fails at 2 (round 1), {1,3,4} fails at 3 (round 2), {1,4,5} signs: n − t + 1 attempts.
     assert_eq!(a.len(), 3, "{a:?}");
+    assert_eq!(max_sign_attempts(5, 3), 3);
     for n in &nodes {
         assert_eq!(n.pending_sign_count(KEY), 0);
     }
 
+    // Two reachable members that answer with a refusal cost one attempt each, and the leader still
+    // reaches the one triple that works ({1,4,5}) — so does every other leader.
+    for leader in [0usize, 3, 4] {
+        let (peers, log) = spied(&nodes, &[Fault::None, Fault::Refuse, Fault::Refuse, Fault::None, Fault::None]);
+        let msg = digest(format!("two refuse, leader {}", leader + 1).as_bytes());
+        let sig = sign(&nodes[leader], &peers, KEY, &msg).await.unwrap();
+        assert!(verifies(&group, &msg, &sig));
+        assert!(attempts(&log).len() <= max_sign_attempts(5, 3), "{:?}", attempts(&log));
+    }
+
     // Three faulty nodes of five leave two: below threshold, after trying what it could.
-    let (peers, _log) = spied(&nodes, &[Fault::None, Fault::Round1, Fault::Round2, Fault::BadShare, Fault::None]);
+    let (peers, log) = spied(&nodes, &[Fault::None, Fault::Round1, Fault::Round2, Fault::BadShare, Fault::None]);
     let err = sign(&nodes[0], &peers, KEY, &digest(b"too few")).await.unwrap_err();
-    assert!(matches!(err, DaemonError::ThresholdNotMet { needed: 3, got: 2 }), "{err:?}");
+    assert!(
+        matches!(err, DaemonError::AttemptsExhausted { needed: 3, usable: 2, attempts: 3, ref excluded, out_of_time: false } if excluded == &vec![2, 3, 4]),
+        "{err:?}"
+    );
+    let status = tonic::Status::from(err);
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+    assert_eq!(status.metadata().get(rutli_cosigner::error::ERROR_TRAILER).unwrap(), rutli_cosigner::error::ATTEMPTS_EXHAUSTED);
+    assert_eq!(attempts(&log).len(), max_sign_attempts(5, 3));
+    for n in &nodes {
+        assert_eq!(n.pending_sign_count(KEY), 0);
+    }
 }
 
 // ── session binding through the node ──────────────────────────────────────────────────────────
