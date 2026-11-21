@@ -7,7 +7,7 @@ jobs run. For the self-hosted runners themselves see [deploy/ci-runner/README.md
 
 | Variable | Used by | Meaning |
 | --- | --- | --- |
-| `CI_RUNNER` | `ci.yml`, `e2e.yml`, `proptest.yml` (and the load test when `PERF_RUNNER` is unset) | label of the self-hosted runner for this repository's own branches; empty = GitHub-hosted `ubuntu-latest` |
+| `CI_RUNNER` | `ci.yml`, `e2e.yml`, `proptest.yml`, `quality.yml` (and the load test when `PERF_RUNNER` is unset) | label of the self-hosted runner for this repository's own branches; empty = GitHub-hosted `ubuntu-latest` |
 | `PERF_RUNNER` | `load.yml` (scheduled and manual runs) | label of the runner for **measured** runs; empty = follows `CI_RUNNER`; both empty = hosted `ubuntu-24.04`. Give it a label carried by **one** runner: the baseline check compares the kind of runner (self-hosted or hosted), not the VM, so a label shared by two VMs makes the weekly latencies come from either |
 
 Fork and Dependabot pull requests always run on hosted runners, whatever these say.
@@ -36,6 +36,9 @@ calls it); a workflow added later that does must use `PERF_RUNNER` too.
 | `ci.yml`, `e2e.yml` | `actions/cache` Canton API | `canton-api-<os>-<arch>-<tag>-v1` | any ref (1 MB) |
 | `ci.yml` conformance job (schedule, manual) | `actions/cache` full Canton, `~/.ivy2/local/com.daml` | `canton-full-<os>-<arch>-<tag>-v1` | any ref |
 | `e2e.yml` | `actions/cache` Canton release | `canton-release-<os>-<version>-<sha256>` | any ref (about 300 MB) |
+| `quality.yml` | `Swatinem/rust-cache`, workspace `frost` | `v0-rust-quality-…` (same shape as CI's) | main only (`save-if`) |
+| `quality.yml` | `actions/cache` pinned quality tools (`scripts/quality/tools.txt`) | `quality-tools-<os>-<arch>-<hash of tools.txt and semgrep-requirements.txt>` | main only (`actions/cache/save`); downloads, pip cache, crate builds, rules: about 0.4 GB |
+| `quality.yml` | `setup-java` sbt, Canton API | as `ci.yml` (shared keys) | any ref |
 
 The Rust cache restores the newest entry with the same first hash (same Rust version and env): a pull
 request that changes a lockfile or a `Cargo.toml` restores main's entry, rebuilds the difference on every
