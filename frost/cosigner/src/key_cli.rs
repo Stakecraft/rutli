@@ -176,10 +176,10 @@ mod tests {
     #[test]
     fn show_routes_an_id_as_the_cosigners_do() {
         // The driver's two id shapes, with and without a `frost.key-prefix`.
-        for id in ["frost-namespace", "b8-frost-signing", "frost-import-1220cb0e", "frost-participant1-rutli-x"] {
+        for id in ["frost-namespace", "p1-frost-signing", "frost-import-1220cb0e", "frost-participant1-rutli-x"] {
             assert_eq!(KeyKind::of(id), KeyKind::Frost, "{id}");
         }
-        for id in ["rutli-enc-1", "b4-rutli-enc-ecies-1", "soak1-rutli-enc-frost-named-key-1", "rutli-sym-p1"] {
+        for id in ["rutli-enc-1", "p2-rutli-enc-ecies-1", "p1-rutli-enc-frost-named-key-1", "rutli-sym-p1"] {
             assert_eq!(KeyKind::of(id), KeyKind::Hosted, "{id}");
         }
         // No tag: never a hosted key (every hosted write refuses such an id), so a FROST lookup.

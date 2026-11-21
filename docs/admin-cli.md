@@ -18,7 +18,7 @@ air-gapped dealer host and is not in the cosigner image.
 | Import an ECIES key | `rutli-cosigner import-key` on one cosigner; the cluster replicates it. [hosted-keys.md](hosted-keys.md#export-and-import-portable-copies) | That node's config and seal |
 | Show a cluster key: public key, fingerprint, origin, epoch | `rutli-cosigner key show --key-id ID` | An operator certificate (`operator_allowlist`) |
 | Fingerprint of a public key file | `rutli-cosigner key fingerprint --in FILE` | None. Offline |
-| Verify a key against the fingerprint you expect | `key show --expect-fingerprint FP`, or `verify-key` (FROST, adds `--sign-test`) and `verify-hosted` | An operator certificate |
+| Verify a key against the fingerprint you expect | `key show --expect-fingerprint FP`, or `verify-key` (FROST; with `--sign-test` every quorum also signs) and `verify-hosted` | An operator certificate |
 | Refresh the shares of a FROST key | `rutli-cosigner refresh --key-id ID`. [key-rotation.md](key-rotation.md#2-share-refresh--rotate-the-secret-keep-the-key-rütli) | A refresher certificate (`refresh_allowlist`), or the driver certificate while `signing_policy.signer_may_refresh` is on. It signs the ceremony intent |
 | Rotate a signing or encryption key | Canton console. [key-rotation.md](key-rotation.md#the-recipe) | The namespace key, through the driver |
 | Delete a hosted key | `rutli-cosigner delete-hosted-key`; undo with `hosted-undelete` on each node. [hosted-keys.md](hosted-keys.md#delete) | A certificate on `hosted_keys.delete_allowlist`, plus approvals if configured |

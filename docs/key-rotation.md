@@ -33,7 +33,9 @@ signing key onto a new FROST key this way. The full console blocks, with their a
 1. **Check first.** The node is connected, and its Authorized store and the synchronizer show the
    same `OwnerToKeyMapping`. For a signing key the driver must be able to sign a ceremony intent
    (driver 0.4.0-rc.4 or later, its certificate allowed for the key prefix). For an encryption key
-   the driver runs with `hosted-keys = true`.
+   the driver runs with `hosted-keys = true` and signs a generate intent (driver 0.5.0 or later;
+   a cosigner with TLS refuses a generation without one unless
+   `signing_policy.require_ceremony_intent` is off).
 2. **Generate the new key through the driver.** Canton asks the driver, the driver creates the key
    in the cluster and Canton registers it.
 

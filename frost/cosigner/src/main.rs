@@ -1686,7 +1686,8 @@ async fn verify_key_command(
             for (leader, signers) in sign_test_plan(&roster, cfg.threshold) {
                 let (Some((endpoint, server_name)), Some(client)) = (endpoints.get(&leader), clients.get(&leader))
                 else {
-                    report.problems.push(format!("sign test: node {leader} is not in the roster"));
+                    // Through the report, so that it fails and names no fingerprint.
+                    report.record_signature(leader, &signers, Err("the leader is not in the roster".into()));
                     continue;
                 };
                 let endpoint = *endpoint;
