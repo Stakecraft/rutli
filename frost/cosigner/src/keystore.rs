@@ -48,6 +48,16 @@ pub struct Share {
     pub key_id: String,
 }
 
+/// The signing share is wiped when a `Share` is dropped: every load, stage, import and refresh
+/// builds one, and frost's `KeyPackage` implements `Zeroize` but does not wipe itself on drop.
+/// Code that hands the key package on clones it (the clone's owner wipes its own copy, e.g.
+/// [`rutli_frost_core::session::Cosigner`]).
+impl Drop for Share {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.key_package);
+    }
+}
+
 impl Share {
     /// SHA-256 of the canonical public key package ([`rutli_frost_core::dealer::pkp_digest`]): two
     /// nodes hold shares of the same sharing iff their digests match.

@@ -1,0 +1,326 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Quality ratchet: collects the metrics in scripts/quality/metrics.json for every language in the
+# repository and compares them with main as main last measured itself (the quality-metrics
+# artifact of the last successful run on main, scripts/quality/fetch-baseline.sh). Old debt does not
+# block a change; new debt does. No pull request edits a baseline file. See quality/README.md and
+# docs/release-process.md ("Test schedule").
+#
+#   pull request      the areas the change touches (scripts/quality/changed-areas.sh), no
+#                     coverage, no advisories; fails on a regression against its base commit
+#   push to main      every area with coverage, unfiltered; a red run is reported by main-status.yml
+#                     ("main is red"), which watches this workflow
+#   nightly 02:00     cargo audit and a trivy scan of the released image; a regression opens (or
+#                     comments on) the issue "Quality: new advisories"
+#   Monday 06:00      quality report: last release tag against main (artifact and job summary)
+#   manual            with base and head: that report for any two refs; without: as a push to main.
+#                     With accept: as a push to main, but a regression does not fail the run, so
+#                     its numbers become the baseline (a deliberate, reviewed regression)
+name: Quality
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 2 * * *"
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "Report: older ref, e.g. the previous release tag (empty: run as on main)"
+        required: false
+        default: ""
+      head:
+        description: "Report: newer ref, e.g. the release candidate"
+        required: false
+        default: ""
+      accept:
+        description: "Run as on main and accept a regression: this run becomes the baseline"
+        type: boolean
+        required: false
+        default: false
+
+permissions:
+  contents: read
+
+# As in ci.yml: a new push to a pull request cancels its older run; a push to main, a schedule or a
+# manual run has its own group (the run id) and is never cancelled.
+concurrency:
+  group: quality-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    # Explicit, so every step gets -o pipefail.
+    shell: bash
+
+env:
+  CANTON_TAG: v3.6.1
+  SBT_OPTS: "-Xmx4g -Xss8m"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  quality:
+    name: Quality ratchet
+    # Runner choice as in ci.yml (docs/ci-cache.md): `vars.CI_RUNNER` for this repository's own
+    # branches when set, otherwise, and always for forks and Dependabot, GitHub's `ubuntu-latest`.
+    # Nothing here is a timing measurement, so PERF_RUNNER does not apply.
+    runs-on: ${{ github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) && vars.CI_RUNNER || 'ubuntu-latest' }}
+    timeout-minutes: 240
+    permissions:
+      contents: read
+      # fetch-baseline.sh reads the quality-metrics artifact of earlier runs on main.
+      actions: read
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+      regressed: ${{ steps.ratchet.outputs.regressed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history and tags: changed areas, buf breaking against the last release tag, and
+          # report mode all need them.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Plan
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          INPUT_BASE: ${{ inputs.base }}
+          INPUT_HEAD: ${{ inputs.head }}
+        run: |
+          all=rust,scala,shell,python,docker,actions,k8s,proto,semgrep,repo
+          base="" head="" coverage=true
+          case "$EVENT" in
+            pull_request) mode=pr coverage=false areas="$(scripts/quality/changed-areas.sh "$PR_BASE" HEAD)" ;;
+            schedule)
+              if [ "$SCHEDULE" = "0 2 * * *" ]; then
+                mode=nightly areas=audit,image
+              else
+                mode=report areas="$all,audit" head=origin/main
+                base="$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude '*-*' origin/main)"
+              fi
+              ;;
+            workflow_dispatch)
+              if [ -n "$INPUT_BASE" ] && [ -n "$INPUT_HEAD" ]; then
+                for r in "$INPUT_BASE" "$INPUT_HEAD"; do
+                  [[ "$r" =~ ^[A-Za-z0-9][A-Za-z0-9._/-]*$ ]] || { echo "not a ref name: $r" >&2; exit 1; }
+                done
+                mode=report areas="$all,audit" base="$INPUT_BASE" head="$INPUT_HEAD"
+              else
+                mode=main areas="$all"
+              fi
+              ;;
+            *) mode=main areas="$all" ;;
+          esac
+          {
+            echo "mode=$mode"
+            echo "areas=$areas"
+            echo "base=$base"
+            echo "head=$head"
+            echo "coverage=$coverage"
+            # Toolchains are set up only for the areas that run.
+            echo "rust=$([[ ",$areas," == *,rust,* ]] && echo true || echo false)"
+            echo "scala=$([[ ",$areas," == *,scala,* ]] && echo true || echo false)"
+          } >>"$GITHUB_OUTPUT"
+          echo "mode $mode, areas $areas${base:+, report $base..$head}"
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        if: steps.plan.outputs.mode != 'nightly'
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        if: steps.plan.outputs.scala == 'true'
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: sbt
+
+      - uses: sbt/setup-sbt@7e114eae4f32ec3f93c851c2793376a77f384409 # v1.5.15
+        if: steps.plan.outputs.scala == 'true'
+
+      - name: Cache Canton API artifacts (ivy local)
+        id: canton-cache
+        if: steps.plan.outputs.scala == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.ivy2/local/com.daml
+          key: canton-api-${{ runner.os }}-${{ runner.arch }}-${{ env.CANTON_TAG }}-v1
+
+      - name: Publish Canton kms-driver-api locally
+        if: steps.plan.outputs.scala == 'true' && steps.canton-cache.outputs.cache-hit != 'true'
+        run: scripts/publish-canton-deps.sh "$CANTON_TAG"
+
+      # The version in frost/rust-toolchain.toml, as in ci.yml, with the components the collectors
+      # need. A tree measured in report mode that pins another version gets its components from
+      # rust.sh (QUALITY_RUSTUP_COMPONENTS).
+      - name: Rust version (frost/rust-toolchain.toml)
+        id: rustver
+        if: steps.plan.outputs.rust == 'true'
+        run: |
+          v="$(sed -n 's/^channel = "\(.*\)"$/\1/p' frost/rust-toolchain.toml 2>/dev/null || true)"
+          echo "version=${v:-stable}" >>"$GITHUB_OUTPUT"
+          echo "QUALITY_RUSTUP_COMPONENTS=1" >>"$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master, 2026-11-15
+        if: steps.plan.outputs.rust == 'true'
+        with:
+          toolchain: ${{ steps.rustver.outputs.version }}
+          components: clippy, rustfmt, llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        if: steps.plan.outputs.rust == 'true'
+        with:
+          workspaces: frost
+          # As in ci.yml: only main saves (docs/ci-cache.md); pull requests restore main's entry.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Binaries are checked against the sha256 in scripts/quality/tools.txt on every run; the
+      # cache only saves downloads and the cargo-install builds. Restored everywhere, saved by main
+      # only (docs/ci-cache.md).
+      - name: Restore quality tools
+        id: tools-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/rutli-quality-tools/downloads
+            ~/.cache/rutli-quality-tools/pip-cache
+            ~/.cache/rutli-quality-tools/crates
+            ~/.cache/rutli-quality-tools/semgrep-rules
+          key: quality-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/quality/tools.txt', 'scripts/quality/semgrep-requirements.txt') }}
+
+      - name: Install quality tools (pinned)
+        env:
+          MODE: ${{ steps.plan.outputs.mode }}
+        run: |
+          dir="$HOME/.cache/rutli-quality-tools"
+          if [ "$MODE" = nightly ]; then
+            scripts/quality/install-tools.sh "$dir" cargo-audit trivy
+          else
+            scripts/quality/install-tools.sh "$dir"
+          fi
+          echo "QUALITY_TOOLS_DIR=$dir" >>"$GITHUB_ENV"
+
+      - name: Save quality tools
+        if: github.ref == 'refs/heads/main' && steps.plan.outputs.mode == 'main' && steps.tools-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/rutli-quality-tools/downloads
+            ~/.cache/rutli-quality-tools/pip-cache
+            ~/.cache/rutli-quality-tools/crates
+            ~/.cache/rutli-quality-tools/semgrep-rules
+          key: ${{ steps.tools-cache.outputs.cache-primary-key }}
+
+      - name: Baseline (main's last measurement)
+        if: steps.plan.outputs.mode != 'report'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ steps.plan.outputs.mode }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/quality"
+          scripts/quality/fetch-baseline.sh "$MODE" "$RUNNER_TEMP/quality/baseline.json" | tee "$RUNNER_TEMP/quality/baseline-source.txt"
+          { echo; cat "$RUNNER_TEMP/quality/baseline-source.txt"; echo; } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Collect metrics
+        if: steps.plan.outputs.mode != 'report'
+        env:
+          MODE: ${{ steps.plan.outputs.mode }}
+          AREAS: ${{ steps.plan.outputs.areas }}
+          COVERAGE: ${{ steps.plan.outputs.coverage }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/quality"
+          # Coverage runs on main (and for a baseline change) only; pull requests are compared
+          # without it.
+          if [ "$COVERAGE" != true ]; then export QUALITY_COVERAGE=0; fi
+          # The Scala coverage report goes into the artifact next to the numbers.
+          export QUALITY_KEEP_DIR="$RUNNER_TEMP/quality"
+          scripts/quality/collect.sh --only "$AREAS" --ref "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" \
+            --out "$RUNNER_TEMP/quality/current.json"
+          scripts/quality/render.sh "$RUNNER_TEMP/quality/baseline.json" "$RUNNER_TEMP/quality/current.json" \
+            "Quality ($MODE): baseline → this run" >"$RUNNER_TEMP/quality/current.md"
+          cat "$RUNNER_TEMP/quality/current.md" >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Ratchet (fails if a gated metric is worse than the baseline)
+        id: ratchet
+        if: steps.plan.outputs.mode != 'report'
+        env:
+          ACCEPT: ${{ inputs.accept && steps.plan.outputs.mode == 'main' }}
+        run: |
+          rc=0
+          scripts/quality/ratchet.sh "$RUNNER_TEMP/quality/baseline.json" "$RUNNER_TEMP/quality/current.json" \
+            >"$RUNNER_TEMP/quality/ratchet.txt" 2>&1 || rc=$?
+          cat "$RUNNER_TEMP/quality/ratchet.txt"
+          { echo; echo '## Ratchet'; echo; echo '```'; cat "$RUNNER_TEMP/quality/ratchet.txt"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+          if [ "$rc" != 0 ]; then echo "regressed=true" >>"$GITHUB_OUTPUT"; fi
+          if [ "$rc" != 0 ] && [ "$ACCEPT" = true ]; then
+            echo "::notice::regression accepted by a manual run (accept); this run is the new baseline"
+            exit 0
+          fi
+          exit "$rc"
+
+      - name: Report (quality-report.sh base head)
+        if: steps.plan.outputs.mode == 'report'
+        env:
+          BASE: ${{ steps.plan.outputs.base }}
+          HEAD: ${{ steps.plan.outputs.head }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/quality"
+          scripts/quality-report.sh "$BASE" "$HEAD" --json "$RUNNER_TEMP/quality/report.json" \
+            >"$RUNNER_TEMP/quality/report.md"
+          cat "$RUNNER_TEMP/quality/report.md" >>"$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        # Convenience only, as in ci.yml: an upload failure must not turn the run red.
+        continue-on-error: true
+        with:
+          name: quality-metrics
+          path: ${{ runner.temp }}/quality/
+          retention-days: 30
+
+  # The nightly advisory scan cannot block anything: on a regression, open the issue, or comment on
+  # the open one, with the ratchet output. A red push to main is main-status.yml's business. The
+  # only job with write access, and it runs no repository code.
+  issue:
+    name: Report new advisories
+    needs: quality
+    if: always() && needs.quality.outputs.regressed == 'true' && needs.quality.outputs.mode == 'nightly'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: quality-metrics
+          path: quality
+      - name: Open or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          SHA: ${{ github.sha }}
+        run: |
+          title="Quality: new advisories (nightly cargo audit / image scan)"
+          details="$(grep -v '^ok' quality/ratchet.txt 2>/dev/null || echo 'ratchet output missing, see the run')"
+          body="$(printf 'The nightly quality run found a metric worse than the previous night at %s.\n\nRun: %s\n\n~~~\n%s\n~~~\n' \
+            "$SHA" "$RUN_URL" "$details")"
+          api() { curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$@"; }
+          number="$(api "https://api.github.com/repos/$REPO/issues?state=open&per_page=100" \
+            | jq -r --arg t "$title" '[.[] | select(.pull_request == null and .title == $t)][0].number // empty')"
+          if [ -n "$number" ]; then
+            api -X POST "https://api.github.com/repos/$REPO/issues/$number/comments" \
+              -d "$(jq -n --arg b "$body" '{body: $b}')" >/dev/null
+            echo "commented on #$number"
+          else
+            api -X POST "https://api.github.com/repos/$REPO/issues" \
+              -d "$(jq -n --arg t "$title" --arg b "$body" '{title: $t, body: $b}')" | jq -r '"opened #\(.number)"'
+          fi

@@ -10,7 +10,7 @@
 - [ ] Changelog fragment `changelog.d/<PR number>.<section>.md` added, if users or operators would notice (or the label `no-changelog`; see `changelog.d/README.md`)
 - [ ] Docs and runbooks updated, if behaviour or configuration changed
 - [ ] Compatibility stated: rolling-upgrade order, wire / key-file / config format changes, rollback
-- [ ] No key material, secrets or tokens added, not even test ones (tests generate keys at run time)
+- [ ] No key material, secrets or tokens added, not even test ones (tests generate keys at run time). Exception: known-answer fixtures that pin a dependency's bytes, generated fresh by a script in the repo, in a directory that says so, allowlisted for the secret scanner by that path only
 - [ ] Every commit is signed off (`git commit -s`, DCO)
 - [ ] Key-path change (FROST, nonces, sealing, intents, ceremonies, key routing, TLS): second, independent review done
 - [ ] No infrastructure details (hosts, IPs, cluster names)

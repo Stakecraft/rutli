@@ -767,7 +767,7 @@ impl<'a> Scan<'a> {
             self.file(&path, Place::Staged);
             let gone = self.changed.len() > changed_before;
             if !gone && !ceremony.as_ref().is_some_and(|c| open.contains(c)) {
-                let epoch = self.findings[before..].iter().find_map(|f| f.epoch);
+                let epoch = self.findings.get(before..).unwrap_or_default().iter().find_map(|f| f.epoch);
                 self.findings.push(Finding {
                     class: Class::StagedOrphan,
                     path: Self::path_str(&path),
@@ -982,8 +982,8 @@ enum TarItem {
 fn tar_magic(f: &mut std::fs::File) -> std::result::Result<bool, String> {
     let mut hdr = [0u8; 512];
     let mut got = 0;
-    while got < 512 {
-        match f.read(&mut hdr[got..]) {
+    while let Some(rest) = hdr.get_mut(got..).filter(|r| !r.is_empty()) {
+        match f.read(rest) {
             Ok(0) => break,
             Ok(n) => got += n,
             Err(e) => return Err(e.to_string()),
@@ -1010,8 +1010,8 @@ fn tar_num(field: &[u8]) -> Option<u64> {
 }
 
 fn cstr(field: &[u8]) -> String {
-    let end = field.iter().position(|b| *b == 0).unwrap_or(field.len());
-    String::from_utf8_lossy(&field[..end]).into_owned()
+    let text = field.split(|b| *b == 0).next().unwrap_or_default();
+    String::from_utf8_lossy(text).into_owned()
 }
 
 /// The `path` record of a pax extended header, if any.
@@ -1019,16 +1019,14 @@ fn pax_path(data: &[u8]) -> Option<String> {
     let mut rest = data;
     while !rest.is_empty() {
         let sp = rest.iter().position(|b| *b == b' ')?;
-        let len: usize = std::str::from_utf8(&rest[..sp]).ok()?.parse().ok()?;
-        if len <= sp || len > rest.len() {
-            return None;
-        }
-        let rec = &rest[sp + 1..len];
+        let len: usize = std::str::from_utf8(rest.get(..sp)?).ok()?.parse().ok()?;
+        // A record is `<len> <key>=<value>\n`, `len` counting itself; anything else ends the parse.
+        let rec = rest.get(sp + 1..len)?;
         let rec = rec.strip_suffix(b"\n").unwrap_or(rec);
         if let Some(v) = rec.strip_prefix(b"path=") {
             return Some(String::from_utf8_lossy(v).into_owned());
         }
-        rest = &rest[len..];
+        rest = rest.get(len..)?;
     }
     None
 }

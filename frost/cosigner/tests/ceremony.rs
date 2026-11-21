@@ -583,8 +583,8 @@ async fn refresh_keeps_the_group_key_and_old_and_new_shares_never_combine() {
 
     // Node 1's pre-refresh share with node 2's post-refresh share: no valid signature.
     let tmp = tempfile::tempdir().unwrap();
-    let c1 = Cosigner::new(old1.key_package, old1.public_key_package.clone(), NonceStore::open(tmp.path().join("a")).unwrap());
-    let c2 = Cosigner::new(new2.key_package, new2.public_key_package.clone(), NonceStore::open(tmp.path().join("b")).unwrap());
+    let c1 = Cosigner::new(old1.key_package.clone(), old1.public_key_package.clone(), NonceStore::open(tmp.path().join("a")).unwrap());
+    let c2 = Cosigner::new(new2.key_package.clone(), new2.public_key_package.clone(), NonceStore::open(tmp.path().join("b")).unwrap());
     let msg = rutli_frost_core::dealer::canton_test_message(b"mixed epochs");
     let commitments = BTreeMap::from([(c1.identifier(), c1.round1("s", rutli_frost_core::session::SessionBinding::new(KEY)).unwrap()), (c2.identifier(), c2.round1("s", rutli_frost_core::session::SessionBinding::new(KEY)).unwrap())]);
     let shares = BTreeMap::from([
@@ -1321,7 +1321,7 @@ async fn signing_continues_through_every_phase_of_a_refresh_and_across_its_commi
         .iter()
         .map(|n| (n.identifier, n.sign_round2(KEY, "early", &early_msg, &early).unwrap()))
         .collect();
-    let pkp = KeyStore::open(rig.nodes[0].key_store_dir()).unwrap().load(KEY).unwrap().public_key_package;
+    let pkp = KeyStore::open(rig.nodes[0].key_store_dir()).unwrap().load(KEY).unwrap().public_key_package.clone();
     let signing_package = frost_ed25519::SigningPackage::new(early.clone(), &early_msg);
     let sig = frost_ed25519::aggregate(&signing_package, &shares, &pkp).unwrap().serialize().unwrap();
     assert!(rutli_cosigner::verify_key::signature_verifies(&group, &early_msg, &sig));

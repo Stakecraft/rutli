@@ -25,6 +25,10 @@
 //! whose software or host is under someone else's control can report whatever public key it likes,
 //! whatever it holds. This verifies the honest cluster's state, not an adversary's.
 //! Public values only: the operator role (`operator_allowlist`) can run it.
+//!
+//! `rutli-cosigner key show` runs the same checks and may leave the expectation out. Then a
+//! symmetric key, which has no public key, is no problem in itself: the report says every node
+//! holds a key of that spec under the id — and nothing about whether it is the same key.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -55,32 +59,39 @@ pub struct HostedRow {
 #[derive(Debug, Clone, Serialize)]
 pub struct HostedReport {
     pub key_id: String,
-    pub expected_fingerprint: String,
+    /// `hosted`: which of the two report shapes `key show --json` printed.
+    pub kind: &'static str,
+    /// Absent when the caller gave none (`key show` without `--expect-fingerprint`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_fingerprint: Option<String>,
     pub ok: bool,
     pub problems: Vec<String>,
     /// The spec and public key every node agrees on, once they do.
     pub spec: Option<String>,
-    /// Hex SPKI DER.
+    /// Hex SPKI DER; empty for a symmetric key.
     pub public_key_der: Option<String>,
+    /// The Canton fingerprint of that public key, only when every check passed (`ok`): a report
+    /// with problems names no fingerprint as the cluster's. Each node's own is in its row.
+    pub fingerprint: Option<String>,
     pub nodes: Vec<HostedRow>,
 }
 
 /// Check every node's view against the expectation and against each other. `roster` comes from the
-/// operator's own configuration, not from any node.
+/// operator's own configuration, not from any node. With no `expected_fingerprint` (`key show`)
+/// every check but that comparison still runs.
 pub fn check_hosted_views(
     key_id: &str,
-    expected_fingerprint: &str,
+    expected_fingerprint: Option<&str>,
     roster: &[u16],
     views: &[HostedView],
 ) -> HostedReport {
     let mut problems = Vec::new();
-    let expected = match crate::share_delivery::canonical_fingerprint(expected_fingerprint) {
-        Ok(fp) => fp,
-        Err(e) => {
+    let expected = expected_fingerprint.map(|given| {
+        crate::share_delivery::canonical_fingerprint(given).unwrap_or_else(|e| {
             problems.push(format!("--expect-fingerprint: {e}"));
-            expected_fingerprint.trim().to_string()
-        }
-    };
+            given.trim().to_string()
+        })
+    });
     let expected_ids: BTreeSet<u16> = roster.iter().copied().collect();
     let seen_ids: BTreeSet<u16> = views.iter().map(|v| v.identifier).collect();
     if seen_ids != expected_ids || views.len() != roster.len() {
@@ -111,7 +122,7 @@ pub fn check_hosted_views(
                 if s.present {
                     served.entry((s.spec.clone(), s.public_key_der.clone())).or_default().push(v.identifier);
                 }
-                check_one(v.identifier, s, &expected, &mut row)
+                check_one(v.identifier, s, expected.as_deref(), &mut row)
             }
         };
         if let Err(e) = outcome {
@@ -133,13 +144,20 @@ pub fn check_hosted_views(
         ));
     }
     let agreed = (served.len() == 1).then(|| served.keys().next().cloned()).flatten();
+    let fingerprint = agreed
+        .as_ref()
+        .filter(|_| problems.is_empty())
+        .and_then(|(_, der)| rutli_canton_key::PublicKey::from_spki_der(der).ok())
+        .map(|public| public.fingerprint());
     HostedReport {
         key_id: key_id.into(),
+        kind: crate::key_cli::KeyKind::Hosted.as_str(),
         expected_fingerprint: expected,
         ok: problems.is_empty(),
         problems,
         spec: agreed.as_ref().map(|(spec, _)| spec.clone()),
         public_key_der: agreed.map(|(_, der)| hex::encode(der)),
+        fingerprint,
         nodes: rows,
     }
 }
@@ -147,7 +165,7 @@ pub fn check_hosted_views(
 fn check_one(
     identifier: u16,
     s: &HostedKeyStatusReply,
-    expected: &str,
+    expected: Option<&str>,
     row: &mut HostedRow,
 ) -> std::result::Result<(), String> {
     if s.identifier != u32::from(identifier) {
@@ -157,12 +175,20 @@ fn check_one(
         return Err("does not hold the key".into());
     }
     if s.public_key_der.is_empty() {
-        return Err(format!("{} is a symmetric key — it has no public key or Canton fingerprint", s.spec));
+        // Nothing to compare an expectation with. Without one, only a symmetric spec may come
+        // without a public key.
+        return match expected {
+            None if crate::hosted::HostedSpec::parse(&s.spec).is_ok_and(|spec| !spec.is_asymmetric()) => Ok(()),
+            None => Err(format!("holds a {} key but serves no public key for it", s.spec)),
+            Some(_) => {
+                Err(format!("{} is a symmetric key — it has no public key or Canton fingerprint", s.spec))
+            }
+        };
     }
     let public = rutli_canton_key::PublicKey::from_spki_der(&s.public_key_der)
         .map_err(|e| format!("serves a public key Canton could not read: {e}"))?;
     row.fingerprint = public.fingerprint();
-    if row.fingerprint != expected {
+    if let Some(expected) = expected.filter(|e| *e != row.fingerprint) {
         return Err(format!("its public key has Canton fingerprint {}, not the expected {expected}", row.fingerprint));
     }
     Ok(())
@@ -203,11 +229,90 @@ mod tests {
     fn a_cluster_serving_one_key_with_the_expected_fingerprint_passes() {
         let key = HostedKey::generate(HostedSpec::EcP256, 1).unwrap();
         let (v, fp) = views(&key);
-        let r = check_hosted_views(KEY, &fp.to_uppercase(), &[1, 2, 3], &v);
+        let r = check_hosted_views(KEY, Some(&fp.to_uppercase()), &[1, 2, 3], &v);
         assert!(r.ok, "{:?}", r.problems);
         assert_eq!(r.spec.as_deref(), Some("ec-p256-ecies"));
         assert_eq!(r.public_key_der, Some(hex::encode(key.public_key_der().unwrap())));
         assert!(r.nodes.iter().all(|n| n.fingerprint == fp));
+    }
+
+    /// `key show` without `--expect-fingerprint`: the same checks, compared with nothing.
+    #[test]
+    fn without_an_expectation_the_report_shows_the_key_and_still_checks_everything_else() {
+        let key = HostedKey::generate(HostedSpec::EcP256, 1).unwrap();
+        let other = HostedKey::generate(HostedSpec::EcP256, 1).unwrap();
+        let (v, fp) = views(&key);
+        let shown = check_hosted_views(KEY, None, &[1, 2, 3], &v);
+        assert!(shown.ok, "{:?}", shown.problems);
+        assert_eq!((shown.kind, shown.expected_fingerprint.as_deref()), ("hosted", None));
+        assert_eq!(shown.fingerprint.as_deref(), Some(fp.as_str()));
+        assert_eq!(shown.public_key_der, Some(hex::encode(key.public_key_der().unwrap())));
+        // With the right expectation: the same report, plus the expectation.
+        let verified = check_hosted_views(KEY, Some(&fp), &[1, 2, 3], &v);
+        let mut json = serde_json::to_value(&verified).unwrap();
+        assert_eq!(json.as_object_mut().unwrap().remove("expected_fingerprint"), Some(fp.clone().into()));
+        assert_eq!(json, serde_json::to_value(&shown).unwrap());
+
+        // A report with a problem names no fingerprint as the cluster's.
+        let problems = |v: &[HostedView]| {
+            let r = check_hosted_views(KEY, None, &[1, 2, 3], v);
+            assert!(!r.ok && r.fingerprint.is_none(), "{:?}", r.fingerprint);
+            r.problems.join(" | ")
+        };
+        // A node without the key: the two that hold it agree, and each row says what it serves.
+        let (mut v, _) = views(&key);
+        v[1].status = Ok(HostedKeyStatusReply { present: false, ..reply(2, &key) });
+        assert!(problems(&v).contains("node 2: does not hold the key"));
+        let r = check_hosted_views(KEY, None, &[1, 2, 3], &v);
+        assert_eq!((r.nodes[0].fingerprint.as_str(), r.nodes[1].fingerprint.as_str()), (fp.as_str(), ""));
+        // Another key under the id on one node.
+        let (mut v, _) = views(&key);
+        v[2].status = Ok(reply(3, &other));
+        assert!(problems(&v).contains("2 different public keys"));
+        let (mut v, _) = views(&key);
+        v[0].status = Ok(reply(2, &key));
+        assert!(problems(&v).contains("answers as node 2"));
+        let (mut v, _) = views(&key);
+        v.pop();
+        assert!(problems(&v).contains("the roster is"));
+        let (mut v, _) = views(&key);
+        v[0].status = Ok(HostedKeyStatusReply { public_key_der: vec![0x30, 0x00], ..reply(1, &key) });
+        assert!(problems(&v).contains("could not read"));
+        // An asymmetric spec with no public key is not a symmetric key.
+        let (mut v, _) = views(&key);
+        v[0].status = Ok(HostedKeyStatusReply { public_key_der: Vec::new(), ..reply(1, &key) });
+        assert!(problems(&v).contains("serves no public key"));
+        // Nor does a wrong or malformed expectation: every node agrees, the report still names none.
+        let (v, _) = views(&key);
+        let wrong = format!("1220{}", "0".repeat(64));
+        for expected in [wrong.as_str(), "1220abc"] {
+            let r = check_hosted_views(KEY, Some(expected), &[1, 2, 3], &v);
+            assert!(!r.ok && r.fingerprint.is_none() && r.public_key_der.is_some(), "{:?}", r.problems);
+            assert!(r.nodes.iter().all(|n| n.fingerprint == fp));
+        }
+    }
+
+    /// A symmetric key has nothing to fingerprint. Shown without an expectation it is no problem —
+    /// and the report claims no public key and no fingerprint for it. With one it fails, as ever.
+    #[test]
+    fn a_symmetric_key_is_shown_without_a_fingerprint_and_never_matches_an_expected_one() {
+        let aes = HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
+        let views = || -> Vec<HostedView> {
+            (1..=3u16)
+                .map(|id| HostedView { identifier: id, endpoint: format!("https://n{id}"), status: Ok(reply(id, &aes)) })
+                .collect()
+        };
+        let r = check_hosted_views(KEY, None, &[1, 2, 3], &views());
+        assert!(r.ok, "{:?}", r.problems);
+        assert_eq!((r.spec.as_deref(), r.public_key_der.as_deref(), r.fingerprint), (Some("aes-256-gcm"), Some(""), None));
+        assert!(r.nodes.iter().all(|n| n.present && n.fingerprint.is_empty()));
+        // One node holds an asymmetric key under the id: two "keys", a problem.
+        let mut v = views();
+        v[0].status = Ok(reply(1, &HostedKey::generate(HostedSpec::EcP256, 1).unwrap()));
+        assert!(!check_hosted_views(KEY, None, &[1, 2, 3], &v).ok);
+        let fp = format!("1220{}", "0".repeat(64));
+        let r = check_hosted_views(KEY, Some(&fp), &[1, 2, 3], &views());
+        assert!(!r.ok && r.problems.iter().all(|p| p.contains("symmetric")), "{:?}", r.problems);
     }
 
     #[test]
@@ -216,7 +321,7 @@ mod tests {
         let other = HostedKey::generate(HostedSpec::EcP256, 1).unwrap();
         let (_, fp) = views(&key);
         let problems = |v: &[HostedView], fp: &str| {
-            let r = check_hosted_views(KEY, fp, &[1, 2, 3], v);
+            let r = check_hosted_views(KEY, Some(fp), &[1, 2, 3], v);
             assert!(!r.ok && r.spec.is_none() == r.problems.iter().any(|p| p.contains("different public keys")));
             r.problems.join(" | ")
         };
@@ -235,7 +340,7 @@ mod tests {
         // The right key everywhere, but not the one the operator expects.
         let (v, other_fp) = views(&other);
         assert!(problems(&v, &fp).contains("not the expected"));
-        assert!(check_hosted_views(KEY, &other_fp, &[1, 2, 3], &v).ok);
+        assert!(check_hosted_views(KEY, Some(&other_fp), &[1, 2, 3], &v).ok);
         // A node answering as someone else; a node missing from the answers.
         let (mut v, _) = views(&key);
         v[0].status = Ok(reply(2, &key));
