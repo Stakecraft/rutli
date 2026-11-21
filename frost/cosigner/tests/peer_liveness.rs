@@ -13,7 +13,9 @@
 //!   is never opened, a frozen one is (T5); refusals do not open, a falsely opened peer is still
 //!   used, DKG ignores it (T7, T8, T9); a member stalled once is back within one window through
 //!   its trial while another member is up (T17); a control call that reads the store opens nothing
-//!   past its deadline, `NodeInfo` does (T18);
+//!   past its deadline, `NodeInfo` does (T18); a signature that finds the trial taken still tries
+//!   that subset in its own place (T21); a trial whose peer was never sent a round is given back
+//!   at once (T22);
 //! - fast refusal: an isolated leader refuses within a few seconds, then at once, and signs again
 //!   right after the heal (T6);
 //! - hosted writes: a member past its deadline is skipped as unreachable, never read as a conflict
@@ -25,7 +27,7 @@
 //!   past its caller's deadline for a blocking thread opens no session (T19);
 //! - the client's deadline: it only shortens the leader's work (T12, T13, T4b);
 //! - saturation: slow but progressing members open no breaker, and no signature makes more than
-//!   `n − t + 1` attempts (T14).
+//!   `n − t + 1` attempts, counted at every member (T14).
 //!
 //! Nonce and intent safety under abandoned attempts (T16) is in `signing_policy.rs`, next to the
 //! journal helpers it needs.
@@ -41,7 +43,7 @@ mod store_fault;
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -63,7 +65,7 @@ use rutli_cosigner::pb::peer_server::PeerServer;
 use rutli_cosigner::pb::signer_client::SignerClient;
 use rutli_cosigner::pb::signer_server::SignerServer;
 use rutli_cosigner::peer::{
-    GrpcPeer, LocalPeer, PeerApi, BREAKER_WINDOW, CONTROL_DEADLINE, ROUND1_DEADLINE,
+    GrpcPeer, Liveness, LocalPeer, PeerApi, BREAKER_WINDOW, CONTROL_DEADLINE, ROUND1_DEADLINE,
     ROUND2_DEADLINE,
 };
 use rutli_cosigner::ratelimit::DecryptRateLimiter;
@@ -802,6 +804,125 @@ async fn t17_a_member_stalled_once_is_back_within_one_window_while_another_membe
     assert_eq!(m.health(1, 3).transitions(), 0);
 }
 
+/// T21. Two signatures start together after a stalled member's window while the other member
+/// refuses round 1: both see the trial due, one takes it and signs through it; the other finds it
+/// taken, skips only that first try, and once the refusing member has failed signs with the same
+/// subset in its tier's place — down peers are reordered, never skipped.
+#[tokio::test(start_paused = true)]
+async fn t21_a_signature_that_finds_the_trial_taken_still_tries_its_subset_in_place() {
+    let m = Mesh::new().await;
+    m.sign(1, "t21-warm").await.unwrap();
+    m.control(2).set("SignRound2", None, delay(600));
+    m.sign(1, "t21-stall").await.unwrap();
+    settle(0.1).await; // the deadline's probe
+    assert_eq!(m.health(1, 2).down_reason(), Some(DownReason::Stalled));
+    // Node 2 has recovered (node 1 still holds it down); node 3 refuses every round 1.
+    m.control(2).clear();
+    m.control(3).set(
+        "SignRound1",
+        None,
+        Act::Reply(Arc::new(|| {
+            tonic::Status::failed_precondition("t21: refused")
+        })),
+    );
+    settle(BREAKER_WINDOW.as_secs_f64()).await;
+    assert!(m.health(1, 2).trial_due());
+    let (to2, to3) = (
+        m.control(2).seen("SignRound1"),
+        m.control(3).seen("SignRound1"),
+    );
+
+    let (a, b) = tokio::join!(m.sign(1, "t21-a"), m.sign(1, "t21-b"));
+    a.expect("the signature with the trial signs through {1,2}");
+    b.expect("the other one signs through {1,2} after {1,3} failed");
+    assert_eq!(
+        m.control(2).seen("SignRound1"),
+        to2 + 2,
+        "both signatures sent node 2 a round 1"
+    );
+    assert_eq!(
+        m.control(3).seen("SignRound1"),
+        to3 + 1,
+        "only the signature without the trial tried {{1,3}}"
+    );
+    assert_eq!(m.health(1, 2).state_name(), "up");
+}
+
+/// T22. 3-of-5: a stalled member's trial subset is {leader, best other, stalled}, and rounds go to
+/// members in turn. When the middle member refuses round 1, the stalled one is never sent a round:
+/// the trial is given back at once (published `down` again, due, its window not doubled) and the
+/// next signature takes it.
+#[tokio::test(start_paused = true)]
+async fn t22_a_trial_whose_peer_was_never_sent_a_round_is_given_back() {
+    let tmp = tempfile::tempdir().unwrap();
+    let nodes: Vec<Arc<Node>> = (1..=5u16)
+        .map(|i| {
+            let ks = KeyStore::open(tmp.path().join(format!("node-{i}"))).unwrap();
+            Arc::new(Node::new(Identifier::try_from(i).unwrap(), 5, 3, ks))
+        })
+        .collect();
+    rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
+    let plain: Peers = nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+        .collect();
+    run_dkg(&plain, KEY).await.unwrap();
+    let round1s: Round1Log = Arc::default();
+    let refuse = Arc::new(AtomicBool::new(true));
+    let stalled = Arc::new(PeerHealth::new(4, Liveness::default()));
+    let view: Peers = plain
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            Arc::new(Counted {
+                inner: p.clone(),
+                round1s: round1s.clone(),
+                health: (i == 3).then(|| stalled.clone()),
+                refuse_round1: (i == 1).then(|| refuse.clone()),
+            }) as Arc<dyn PeerApi>
+        })
+        .collect();
+    stalled.open(DownReason::Stalled);
+    settle(BREAKER_WINDOW.as_secs_f64()).await;
+    assert!(stalled.trial_due());
+    let before = stalled.transitions();
+    let to = |member: u16| {
+        round1s
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.member == member)
+            .count()
+    };
+
+    // {1,2,4} (the trial) fails at node 2 before node 4 is asked; {1,3,5} signs.
+    sign(&nodes[0], &view, KEY, &msg("t22-a"))
+        .await
+        .expect("the all-up subset signs");
+    assert_eq!(to(2), 1);
+    assert_eq!(to(4), 0, "node 4 was never sent a round");
+    assert_eq!(
+        (stalled.state_name(), stalled.down_reason()),
+        ("down", Some(DownReason::Stalled)),
+        "the trial is given back and published as down"
+    );
+    assert_eq!(stalled.transitions(), before + 2, "down → trial → down");
+    assert!(stalled.trial_due(), "due again at once");
+
+    // Node 2 answers again: the next signature takes the trial and sends node 4 its rounds.
+    refuse.store(false, Ordering::SeqCst);
+    sign(&nodes[0], &view, KEY, &msg("t22-b"))
+        .await
+        .expect("the trial subset signs");
+    assert_eq!(to(4), 1, "the next signature took the trial");
+    // In-process members feed no health: no verdict, the trial is held.
+    assert_eq!(stalled.state_name(), "trial");
+    // Its window was not doubled by the given-back trial: a failed trial now waits 2 × 2 s.
+    stalled.open(DownReason::Stalled);
+    settle(2.0 * BREAKER_WINDOW.as_secs_f64()).await;
+    assert!(stalled.trial_due());
+}
+
 /// T18. A `KeyEpoch` or `CeremonyStatus` past its deadline (a slow store on the peer) opens no
 /// breaker and signing goes on with that peer; a `NodeInfo` past its deadline opens it as
 /// unreachable, and the prober brings it back once it answers.
@@ -1369,14 +1490,29 @@ fn t19_a_round_1_queued_past_its_callers_deadline_opens_no_session() {
 
 // ── T14: saturation ───────────────────────────────────────────────────────────────────────────
 
-/// The sign round 1s leaders sent: (message, sent to the leader's own node).
-type Round1Log = Arc<Mutex<Vec<(Vec<u8>, bool)>>>;
+/// One sign round 1 a leader sent.
+struct Round1Sent {
+    message: Vec<u8>,
+    session: String,
+    member: u16,
+    /// The member is its attempt's first: an attempt sends its first member a round 1 before any
+    /// other member, so these count attempts, whichever member is first.
+    first: bool,
+}
+
+/// The sign round 1s leaders sent ([`Round1Sent`]).
+type Round1Log = Arc<Mutex<Vec<Round1Sent>>>;
 
 /// A leader's view of one member that logs the leader's sign round 1s ([`Round1Log`]) and forwards
 /// everything, liveness included.
 struct Counted {
     inner: Arc<dyn PeerApi>,
     round1s: Round1Log,
+    /// Health kept here, for an in-process member (which keeps none): it is then a remote member to
+    /// the leader.
+    health: Option<Arc<PeerHealth>>,
+    /// While set, round 1 is refused (an answered policy refusal) after it is logged.
+    refuse_round1: Option<Arc<AtomicBool>>,
 }
 
 #[async_trait]
@@ -1385,10 +1521,10 @@ impl PeerApi for Counted {
         self.inner.identifier()
     }
     fn is_local(&self) -> bool {
-        self.inner.is_local()
+        self.health.is_none() && self.inner.is_local()
     }
     fn health(&self) -> Option<&Arc<PeerHealth>> {
-        self.inner.health()
+        self.health.as_ref().or_else(|| self.inner.health())
     }
     async fn reachable_within(&self, fresh: Duration, wait: Duration) -> bool {
         self.inner.reachable_within(fresh, wait).await
@@ -1400,10 +1536,24 @@ impl PeerApi for Counted {
         ctx: &Round1Ctx,
         deadline: Duration,
     ) -> rutli_cosigner::Result<SigningCommitments> {
-        self.round1s.lock().unwrap().push((
-            ctx.message.clone().unwrap_or_default(),
-            self.inner.is_local(),
-        ));
+        let member = (1..=u16::MAX)
+            .find(|&i| Identifier::try_from(i).ok() == Some(self.identifier()))
+            .unwrap();
+        self.round1s.lock().unwrap().push(Round1Sent {
+            message: ctx.message.clone().unwrap_or_default(),
+            session: session_id.to_owned(),
+            member,
+            first: ctx.signers.as_ref().and_then(|s| s.first()) == Some(&member),
+        });
+        if self
+            .refuse_round1
+            .as_ref()
+            .is_some_and(|r| r.load(Ordering::SeqCst))
+        {
+            return Err(DaemonError::PolicyRefused(format!(
+                "cosigner {member}: refused for the test"
+            )));
+        }
         self.inner
             .sign_round1_within(key_id, session_id, ctx, deadline)
             .await
@@ -1501,9 +1651,10 @@ impl PeerApi for Counted {
 
 /// T14. Every member a single slow server (sign rounds queued, 150 ms each) under three leaders
 /// signing at once: round deadlines are missed, but every member keeps making progress. Counted
-/// per signature, not in aggregate: no signature makes more than `n − t + 1` attempts (one round 1
-/// to the leader's own node per attempt), no member journals more shares for one signature than
-/// that (nor more than `max_shares_per_request`), and no breaker opens.
+/// per signature, not in aggregate: no signature makes more than `n − t + 1` attempts (counted at
+/// every member: one round-1 session at each attempt's first member, the leader's own node or
+/// not), no member opens more round-1 sessions for one signature than that, nor journals more
+/// shares for it (nor more than `max_shares_per_request`), and no breaker opens.
 #[tokio::test(start_paused = true)]
 async fn t14_saturated_but_progressing_members_open_no_breaker() {
     let m = Arc::new(Mesh::journaled().await);
@@ -1522,6 +1673,8 @@ async fn t14_saturated_but_progressing_members_open_no_breaker() {
                     Arc::new(Counted {
                         inner: p.clone(),
                         round1s: round1s.clone(),
+                        health: None,
+                        refuse_round1: None,
                     }) as Arc<dyn PeerApi>
                 })
                 .collect()
@@ -1564,16 +1717,30 @@ async fn t14_saturated_but_progressing_members_open_no_breaker() {
     assert!(m.all_up());
 
     let cap = max_sign_attempts(N as usize, T as usize);
-    let mut attempts: HashMap<Vec<u8>, usize> = HashMap::new();
-    for (message, own) in round1s.lock().unwrap().iter() {
-        if *own {
-            *attempts.entry(message.clone()).or_default() += 1;
+    // Unique round-1 sessions per signature: at each attempt's first member (= attempts), and at
+    // each member.
+    let mut attempts: HashMap<Vec<u8>, HashSet<String>> = HashMap::new();
+    let mut opened: HashMap<(Vec<u8>, u16), HashSet<String>> = HashMap::new();
+    for r in round1s.lock().unwrap().iter() {
+        if r.first {
+            attempts
+                .entry(r.message.clone())
+                .or_default()
+                .insert(r.session.clone());
         }
+        opened
+            .entry((r.message.clone(), r.member))
+            .or_default()
+            .insert(r.session.clone());
     }
     assert_eq!(attempts.len(), N as usize * per_leader, "every signature counted");
     assert!(
-        attempts.values().all(|&a| (1..=cap).contains(&a)),
+        attempts.values().all(|a| (1..=cap).contains(&a.len())),
         "attempts per signature: {attempts:?}"
+    );
+    assert!(
+        opened.values().all(|s| s.len() <= cap),
+        "round-1 sessions per member and signature: {opened:?}"
     );
     let max_shares = SigningPolicyConfig::default().max_shares_per_request as usize;
     for id in 1..=N {

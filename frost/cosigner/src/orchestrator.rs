@@ -418,7 +418,9 @@ pub const SIGN_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 ///   up, trial, down) — a peer this leader knows to be down is tried last, never skipped. A
 ///   stalled or refusing peer whose window has passed gets a trial: this signature tries a subset
 ///   with it first, if it takes the trial when that attempt starts
-///   ([`crate::liveness::PeerHealth::take_trial`], one signature per window). Each
+///   ([`crate::liveness::PeerHealth::take_trial`], one signature per window); a signature that
+///   finds it taken skips only that first try, the subset keeps its place in the tier order, and
+///   an attempt that ends before it sent the peer a round gives the trial back. Each
 ///   attempt is a fresh session (a new random session id per member, fresh round-1 commitments from
 ///   every member — commitments are never reused across subsets). A member that fails round 1 or
 ///   round 2, misses its round deadline, or whose share fails verification at aggregation (frost's
@@ -491,6 +493,13 @@ pub async fn sign_within(
             leading.count, timing.leader_inflight_limit
         )));
     }
+    let request_id = intent.and_then(request_id_of);
+    let ordered = base_order(node.identifier, request_id.as_deref(), peers);
+    // A stalled or refusing peer whose window has passed: a subset with it goes first. Looked at
+    // once, before this signature's first wait, so signatures that start together all see it; the
+    // trial is taken only when that attempt starts, and a signature that finds it taken by then
+    // skips only that first try (the subset stays in its tier's place).
+    let trial = ordered.iter().position(|p| trial_due(p));
     let me = {
         let key_id = key_id.to_owned();
         node.blocking(move |n| n.signing_view(&key_id)).await?
@@ -504,13 +513,12 @@ pub async fn sign_within(
     let threshold = usize::from(me.threshold);
     visible_quorum(peers, threshold, &timing, key_id).await?;
 
-    let request_id = intent.and_then(request_id_of);
-    let ordered = base_order(node.identifier, request_id.as_deref(), peers);
     let tiers: Vec<crate::liveness::Tier> = ordered.iter().map(|p| sign_tier(p)).collect();
-    // A stalled or refusing peer whose window has passed: a subset with it goes first. The trial is
-    // taken only when that attempt starts; a signature that finds it taken skips that subset.
-    let mut trial = ordered.iter().position(|p| trial_due(p));
     let subsets = order_subsets(ordered.len(), threshold, &tiers, trial);
+    // The front copy of the trial subset ([`order_subsets`]), tried only as the trial.
+    let mut trial_front = trial;
+    // The trial this signature took, if any: given back if no round reached its peer.
+    let mut taken = TakenTrial::default();
     let max_attempts = max_sign_attempts(ordered.len(), threshold);
 
     let mut excluded: BTreeMap<Identifier, String> = BTreeMap::new();
@@ -526,7 +534,11 @@ pub async fn sign_within(
     let mut busy: BTreeSet<Identifier> = BTreeSet::new();
     let mut busy_retried = false;
     'passes: loop {
-        for subset in &subsets {
+        for (pos, subset) in subsets.iter().enumerate() {
+            if pos == 0 && trial.is_some() && trial_front.is_none() {
+                // The trial's front copy, already tried or skipped: the subset keeps its own place.
+                continue;
+            }
             let members: Vec<&Arc<dyn PeerApi>> = subset.iter().filter_map(|&i| ordered.get(i).copied()).collect();
             if members.iter().any(|p| excluded.contains_key(&p.identifier()) || busy.contains(&p.identifier())) {
                 continue;
@@ -538,11 +550,15 @@ pub async fn sign_within(
                 out_of_time = true;
                 break 'passes;
             }
-            if let Some(i) = trial.take() {
-                // The first attempt is the trial subset (nothing is excluded or busy yet).
-                if subset.contains(&i) && !ordered.get(i).is_some_and(|p| take_trial(p)) {
-                    // Another signature took it first: it pays the deadline, not this one.
-                    continue;
+            if pos == 0 {
+                if let Some(i) = trial_front.take() {
+                    // The trial's front copy, the first attempt (nothing is excluded or busy yet).
+                    match ordered.get(i).and_then(|p| take_trial(p)) {
+                        Some(t) => taken.held = Some(t),
+                        // Another signature took it first: it pays the deadline, not this one. The
+                        // same subset is still tried in its tier's place if better ones fail.
+                        None => continue,
+                    }
                 }
             }
             attempts += 1;
@@ -553,7 +569,11 @@ pub async fn sign_within(
                 crate::node::Round1Ctx { leader_view: Some(me.view), intent: intent.cloned(), ..Default::default() };
             // The last attempt keeps no reserve for a further subset.
             let reserve = attempts < max_attempts;
-            match attempt(node, &members, key_id, message, &ctx, "sign", &clock.for_attempt(reserve)).await {
+            let result =
+                attempt(node, &members, key_id, message, &ctx, &clock.for_attempt(reserve), &mut taken.reached)
+                    .await;
+            taken.settle();
+            match result {
                 Ok(signature) => return Ok(signature),
                 Err(Attempt::Fatal(e)) => return Err(e),
                 Err(Attempt::Leader(e)) => {
@@ -746,8 +766,43 @@ fn trial_due(p: &Arc<dyn PeerApi>) -> bool {
 }
 
 /// Take a candidate member's trial ([`crate::liveness::PeerHealth::take_trial`]).
-fn take_trial(p: &Arc<dyn PeerApi>) -> bool {
-    !p.is_local() && p.health().is_some_and(|h| h.take_trial())
+fn take_trial(p: &Arc<dyn PeerApi>) -> Option<HeldTrial> {
+    if p.is_local() {
+        return None;
+    }
+    let h = p.health()?;
+    h.take_trial().map(|t| (p.identifier(), h.clone(), t))
+}
+
+/// A trial taken for one attempt: its peer, the peer's health, the taking.
+type HeldTrial = (Identifier, Arc<crate::liveness::PeerHealth>, crate::liveness::TrialTaken);
+
+/// The trial one signature took, given back ([`crate::liveness::PeerHealth::release_trial`]) when
+/// the attempt it was taken for ends, or the signature is dropped, without having sent its peer a
+/// round — an earlier member of that attempt failed, or the time ran out. A trial whose peer was
+/// sent a round keeps its hold: that round's outcome is the verdict.
+#[derive(Default)]
+struct TakenTrial {
+    held: Option<HeldTrial>,
+    /// Members this signature sent a sign round to (noted before each round 1 is sent).
+    reached: BTreeSet<Identifier>,
+}
+
+impl TakenTrial {
+    /// The attempt the trial was taken for is over.
+    fn settle(&mut self) {
+        if let Some((id, health, taken)) = self.held.take() {
+            if !self.reached.contains(&id) {
+                health.release_trial(taken);
+            }
+        }
+    }
+}
+
+impl Drop for TakenTrial {
+    fn drop(&mut self) {
+        self.settle();
+    }
 }
 
 /// The request id a signing intent names (the same for every attempt and failover leader of one
@@ -774,8 +829,9 @@ pub fn base_order<'a>(
 /// Every `threshold`-subset of `0..n` (indices into the base order), in [`combinations`] order,
 /// then stable-sorted by its worst member's tier: subsets with a down member last, subsets with a
 /// trial before those, the base order kept within each tier. With `trial` (the index of a peer
-/// whose trial is due), the subset with it whose other members are best (then the base order)
-/// moves to the front; its other subsets stay where their tier puts them.
+/// whose trial is due), a copy of the subset with it whose other members are best (then the base
+/// order) is put in front: the trial. The rest is the tier order, that subset included in its own
+/// place, so a signature that does not get the trial still tries it there.
 pub fn order_subsets(
     n: usize,
     threshold: usize,
@@ -788,8 +844,7 @@ pub fn order_subsets(
     if let Some(t) = trial {
         let others = |s: &[usize]| s.iter().filter(|&&i| i != t).map(|&i| tier(i)).max();
         let front = subsets.iter().enumerate().filter(|(_, s)| s.contains(&t)).min_by_key(|(pos, s)| (others(s), *pos));
-        if let Some(pos) = front.map(|(pos, _)| pos) {
-            let s = subsets.remove(pos);
+        if let Some(s) = front.map(|(_, s)| s.clone()) {
             subsets.insert(0, s);
         }
     }
@@ -849,16 +904,20 @@ enum Attempt {
 /// under, so it cannot open that id there first (the leader's round 1 would meet a duplicate and
 /// exclude an honest node), abort it or send its round 2. The attempt id is for the leader's log
 /// only and never leaves this node.
+///
+/// Every member sent a round 1 is noted in `reached` before it is sent (a trial given back only
+/// if its peer is not there, [`TakenTrial`]).
 async fn attempt(
     node: &Arc<Node>,
     members: &[&Arc<dyn PeerApi>],
     key_id: &str,
     message: &[u8],
     base: &crate::node::Round1Ctx,
-    prefix: &str,
     clock: &SignClock,
+    reached: &mut BTreeSet<Identifier>,
 ) -> std::result::Result<[u8; 64], Attempt> {
     let attempt_id = new_id("attempt");
+    let prefix = if base.sign_test { "signtest" } else { "sign" };
     let sessions: Vec<String> = members.iter().map(|_| new_id(prefix)).collect();
     // The members, not their session ids: the id map is what this design keeps from each member.
     tracing::debug!(
@@ -882,6 +941,7 @@ async fn attempt(
         // Noted before asking: a round 1 that times out or errors may still have opened the
         // session on the member, so a failure aborts it there too.
         open.opened.push(((*p).clone(), session.clone()));
+        reached.insert(p.identifier());
         match p.sign_round1_within(key_id, session, ctx, deadline).await {
             Ok(c) => {
                 commitments.insert(p.identifier(), c);
@@ -1040,7 +1100,7 @@ pub async fn ceremony_sign_test(
     // member accepts a sign-test round only for its own test digest of the key.
     let ctx = crate::node::Round1Ctx { leader_view: Some(view.view), sign_test: true, ..Default::default() };
     let clock = SignClock::start(node.liveness(), None)?;
-    match attempt(node, &quorum, key_id, &message, &ctx, "signtest", &clock.for_attempt(false)).await {
+    match attempt(node, &quorum, key_id, &message, &ctx, &clock.for_attempt(false), &mut BTreeSet::new()).await {
         Ok(signature) => Ok((message, signature)),
         Err(Attempt::Fatal(e) | Attempt::Leader(e)) => Err(e),
         Err(Attempt::OutOfTime) => Err(DaemonError::NotServing(format!("sign test for {key_id} ran out of time"))),
@@ -2462,22 +2522,24 @@ mod tests {
         assert_eq!(ordered[0], vec![0, 1, 4]);
     }
 
-    /// A due trial puts one subset with that peer first — the one whose other members are best —
-    /// and leaves the rest of the order as the tiers put it.
+    /// A due trial puts a copy of one subset with that peer first — the one whose other members
+    /// are best — and leaves the rest of the order as the tiers put it, that subset included: a
+    /// signature that does not get the trial still tries it in its own place.
     #[test]
     fn a_due_trial_puts_one_subset_with_its_peer_first() {
         use crate::liveness::Tier::{Down, Up};
-        // 2-of-3, base index 1 stalled with its window passed: {0,1} first, then {0,2}, then {1,2}.
-        assert_eq!(order_subsets(3, 2, &[Up, Down, Up], Some(1)), vec![vec![0, 1], vec![0, 2], vec![1, 2]]);
+        // 2-of-3, base index 1 stalled with its window passed: {0,1} (the trial), then the tier
+        // order {0,2}, {0,1}, {1,2}.
+        assert_eq!(
+            order_subsets(3, 2, &[Up, Down, Up], Some(1)),
+            vec![vec![0, 1], vec![0, 2], vec![0, 1], vec![1, 2]]
+        );
         // 3-of-5, index 3 due and index 1 down: the trial subset avoids the other down peer.
         let tiers = [Up, Down, Up, Down, Up];
         let ordered = order_subsets(5, 3, &tiers, Some(3));
         assert_eq!(ordered[0], vec![0, 2, 3]);
         assert_eq!(ordered[1], vec![0, 2, 4], "then the all-up subset");
-        assert_eq!(ordered.len(), 10);
-        let mut all = ordered.clone();
-        all.sort();
-        assert_eq!(all, combinations(5, 3), "nothing dropped, nothing doubled");
+        assert_eq!(ordered[1..], order_subsets(5, 3, &tiers, None)[..], "then exactly the tier order");
     }
 
     #[test]

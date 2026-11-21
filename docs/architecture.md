@@ -207,11 +207,13 @@ trial. It is fed only by the leader's own calls:
 
 A stalled or refusing peer gets a trial after a window of 2 s, doubling up to 30 s on every failed
 trial: the next signature tries a subset with it first, and a successful round closes it. The trial
-is taken only when that attempt starts (one signature per window per leader), so a signature that
-does not contact the peer never uses it up, and at most one signature per window pays a round
-deadline for it. A probe whose self-reported load shows round 2s completing again (or the store
-back) closes it too. Answered refusals (policy, epoch, an unknown session, `sessions-full`, an
-invalid share) never open a breaker.
+is taken only when that attempt starts (one signature per window per leader) and given back at once
+if the attempt ends before it sent the peer a round, so a signature that does not contact the peer
+never uses it up, and at most one signature per window pays a round deadline for it. A signature
+that finds the trial taken still tries that subset in its tier's place. A probe whose
+self-reported load shows round 2s completing again (or the store back) closes it too. Answered
+refusals (policy, epoch, an unknown session, `sessions-full`, an invalid share) never open a
+breaker.
 
 The breaker only orders: subsets are sorted by their worst member (up, trial, down), and a down
 peer is tried last, never skipped. Within its attempts a leader still reaches a subset of t members

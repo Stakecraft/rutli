@@ -263,6 +263,13 @@ impl State {
     }
 }
 
+/// One taking of a peer's trial ([`PeerHealth::take_trial`]), for [`PeerHealth::release_trial`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TrialTaken {
+    /// The end of the hold this taking set: no other taking sets the same one.
+    until: Instant,
+}
+
 /// What this leader had seen from a peer when a call started: the input of the progress test.
 #[derive(Clone, Copy, Debug)]
 pub struct Mark {
@@ -479,16 +486,18 @@ impl PeerHealth {
         }
     }
 
-    /// Take the trial for the current window: `true` for exactly one caller per window (checked
+    /// Take the trial for the current window: `Some` for exactly one caller per window (checked
     /// and set under the state lock), which must then send the peer a sign round. Called by the
     /// sign path only when an attempt whose members include the peer starts. The trial is held for
-    /// one round 1 plus one round 2 ([`crate::peer::Liveness::trial_hold`]); one that ends with no
-    /// verdict (the attempt failed at another member first) may be taken again after that.
-    pub fn take_trial(&self) -> bool {
+    /// one round 1 plus one round 2 ([`crate::peer::Liveness::trial_hold`]). An attempt that ends
+    /// before it sent the peer any round gives it back ([`PeerHealth::release_trial`]); one that
+    /// sent a round and got no verdict (the attempt failed at another member meanwhile) leaves it
+    /// to be taken again after the hold.
+    pub fn take_trial(&self) -> Option<TrialTaken> {
         let mut s = self.lock();
         let now = Instant::now();
         if !Self::due(&s, now) {
-            return false;
+            return None;
         }
         let State::Down {
             reason,
@@ -498,11 +507,12 @@ impl PeerHealth {
             ..
         } = *s
         else {
-            return false;
+            return None;
         };
+        let until = now + self.timing.trial_hold();
         let next = State::Down {
             reason,
-            until: now + self.timing.trial_hold(),
+            until,
             backoff,
             trial: true,
             r2_mark,
@@ -511,7 +521,37 @@ impl PeerHealth {
             self.transition(&s, &next, "window");
         }
         *s = next;
-        true
+        Some(TrialTaken { until })
+    }
+
+    /// Give back a trial whose attempt sent the peer no round (it ended at another member first, or
+    /// was dropped): down again at once, published as `down`, due for the next signature, its
+    /// window not doubled — nothing was learnt about the peer. A no-op once the trial has a verdict
+    /// or was taken again after its hold (`taken` names one taking).
+    pub fn release_trial(&self, taken: TrialTaken) {
+        let mut s = self.lock();
+        let State::Down {
+            reason,
+            until,
+            backoff,
+            trial: true,
+            r2_mark,
+        } = *s
+        else {
+            return;
+        };
+        if until != taken.until {
+            return;
+        }
+        let next = State::Down {
+            reason,
+            until: Instant::now(),
+            backoff,
+            trial: false,
+            r2_mark,
+        };
+        self.transition(&s, &next, reason.as_str());
+        *s = next;
     }
 
     /// What this leader has seen from the peer so far.
@@ -831,7 +871,7 @@ mod tests {
         // A round 1 success does not prove the store: still down.
         h.on_success(CallClass::Round1);
         assert_eq!(h.down_reason(), Some(DownReason::Stalled));
-        assert!(!h.trial_due() && !h.take_trial(), "inside the window");
+        assert!(!h.trial_due() && h.take_trial().is_none(), "inside the window");
         tokio::time::advance(Duration::from_secs(2)).await;
         // The window passed. Looking does not use the trial up: only an attempt that includes the
         // peer takes it, and exactly one does.
@@ -840,39 +880,55 @@ mod tests {
             assert!(h.trial_due());
         }
         assert_eq!(h.state_name(), "down");
-        assert!(h.take_trial());
+        assert!(h.take_trial().is_some());
         assert_eq!(h.state_name(), "trial");
-        assert!(!h.trial_due() && !h.take_trial(), "one trial per window");
+        assert!(!h.trial_due() && h.take_trial().is_none(), "one trial per window");
         // The trial failed: down again for twice the window.
         h.open(DownReason::Stalled);
         tokio::time::advance(Duration::from_secs(3)).await;
         assert!(!h.trial_due(), "the window doubled to 4 s");
         tokio::time::advance(Duration::from_secs(1)).await;
-        assert!(h.take_trial());
+        assert!(h.take_trial().is_some());
         h.on_success(CallClass::Round2);
         assert_eq!((h.state_name(), h.sign_tier()), ("up", Tier::Up));
     }
 
-    /// A trial taken by an attempt that failed at another member before reaching the peer gives
-    /// no verdict: after its hold (one round 1 plus one round 2) the next attempt may take it again,
-    /// with no transition and no doubled window.
+    /// A trial whose attempt sent the peer a round but got no verdict (the attempt failed at
+    /// another member meanwhile) is held for one round 1 plus one round 2, then may be taken again
+    /// with no transition and no doubled window. One whose attempt sent the peer nothing is given
+    /// back at once: `down` again, due for the next signature, the window not doubled; giving back
+    /// an older taking does nothing.
     #[tokio::test(start_paused = true)]
     async fn a_trial_with_no_verdict_can_be_taken_again_after_its_hold() {
         let h = PeerHealth::new(2, Liveness::default());
         h.open(DownReason::Refusing);
         tokio::time::advance(Duration::from_secs(2)).await;
-        assert!(h.take_trial());
+        let first = h.take_trial().expect("due");
         let after_take = h.transitions();
         tokio::time::advance(Liveness::default().trial_hold() - Duration::from_millis(1)).await;
-        assert!(!h.take_trial(), "still held");
+        assert!(h.take_trial().is_none(), "still held");
         tokio::time::advance(Duration::from_millis(1)).await;
-        assert!(h.take_trial());
+        let second = h.take_trial().expect("held no longer");
         assert_eq!(h.transitions(), after_take);
+        // The first taking is over: giving it back now leaves the second one alone.
+        h.release_trial(first);
+        assert_eq!(h.state_name(), "trial");
+        assert!(h.take_trial().is_none());
+        // The second attempt ends without reaching the peer: given back, due again at once.
+        h.release_trial(second);
+        assert_eq!((h.state_name(), h.down_reason()), ("down", Some(DownReason::Refusing)));
+        assert_eq!(h.transitions(), after_take + 1);
+        assert!(h.trial_due());
+        assert!(h.take_trial().is_some(), "the next signature takes it");
+        // Not doubled: a failed trial now opens a 4 s window (2 s doubled once), not 8 s.
+        h.open(DownReason::Refusing);
+        tokio::time::advance(Duration::from_secs(4)).await;
+        assert!(h.trial_due(), "the window doubled once, for the one trial that had a verdict");
         // An unreachable peer gets no trial at all: its prober decides.
         let u = PeerHealth::new(3, Liveness::default());
         u.open(DownReason::Unreachable);
         tokio::time::advance(Duration::from_secs(60)).await;
-        assert!(!u.trial_due() && !u.take_trial());
+        assert!(!u.trial_due() && u.take_trial().is_none());
     }
 
     /// A 0.4.x member reports no load: a round deadline on it never opens it Stalled, however
@@ -901,11 +957,11 @@ mod tests {
         h.open(DownReason::Refusing);
         for _ in 0..10 {
             tokio::time::advance(Duration::from_secs(31)).await;
-            assert!(h.take_trial());
+            assert!(h.take_trial().is_some());
             h.open(DownReason::Refusing);
         }
         tokio::time::advance(Duration::from_secs(30)).await;
-        assert!(h.take_trial(), "never more than 30 s");
+        assert!(h.take_trial().is_some(), "never more than 30 s");
     }
 
     #[tokio::test(start_paused = true)]
