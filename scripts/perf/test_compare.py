@@ -295,6 +295,7 @@ class SlowNode(unittest.TestCase):
 
     def test_the_scenarios_are_ms_and_policy(self):
         import argparse
+
         import cluster
         self.assertEqual(cluster.parse_slow_node("2500:sticky, 6000:rotate"), [(2500, "sticky"), (6000, "rotate")])
         for bad in ("2500", "x:rotate", "0:rotate", "2500:random"):
