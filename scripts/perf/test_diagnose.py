@@ -87,15 +87,17 @@ class Flush(unittest.TestCase):
         share = "== share\nbase_ns=50000000 flush_ns=550000000\n"
         self.assertEqual(diagnose.parse_share_probe(share), 10.0)   # (550-50) ms over 50 rounds
         self.assertIsNone(diagnose.parse_share_probe("nothing"))
-        # Node 1 serves every signature (leaders 2 and 3 sign with it): it alone caps the rate.
-        self.assertEqual(diagnose.predicted_ceiling({1: 10.0, 2: 10.0, 3: 10.0}), 100.0)
-        # Node 2 serves two thirds (leaders 1 and 2), node 3 a third (leader 3 only).
+        # Hashed partners (#250): every node serves two thirds, so the slowest node caps the rate.
+        self.assertEqual(diagnose.predicted_ceiling({1: 10.0, 2: 10.0, 3: 10.0}), 150.0)
         self.assertEqual(diagnose.predicted_ceiling({1: 10.0, 2: 20.0, 3: 10.0}), 75.0)
-        self.assertEqual(diagnose.predicted_ceiling({1: 10.0, 2: 10.0, 3: 20.0}), 100.0)
-        self.assertEqual(diagnose.predicted_ceiling({1: 10.0, 2: 10.0, 3: 40.0}), 75.0)
-        # Balanced subsets: each node serves two thirds.
-        balanced = {1: (1, 2), 2: (2, 3), 3: (3, 1)}
-        self.assertEqual(diagnose.predicted_ceiling({1: 10.0, 2: 10.0, 3: 10.0}, balanced), 150.0)
+        self.assertEqual(diagnose.predicted_ceiling({1: 10.0, 2: 10.0, 3: 40.0}), 37.5)
+        # 3-of-5: each node serves three fifths.
+        self.assertEqual(diagnose.share_fractions([1, 2, 3, 4, 5], threshold=3), {n: 0.6 for n in range(1, 6)})
+        # The order before #250 (leader, then the lowest other identifier): node 1 serves every
+        # signature, node 2 two thirds, node 3 one third.
+        legacy = {1: (1, 2), 2: (2, 1), 3: (3, 1)}
+        self.assertEqual(diagnose.predicted_ceiling({1: 10.0, 2: 10.0, 3: 10.0}, legacy), 100.0)
+        self.assertEqual(diagnose.predicted_ceiling({1: 10.0, 2: 10.0, 3: 40.0}, legacy), 75.0)
         self.assertIsNone(diagnose.predicted_ceiling({1: None, 2: 1.0, 3: 1.0}))
         self.assertIsNone(diagnose.predicted_ceiling({}))
 
