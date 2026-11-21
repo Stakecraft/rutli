@@ -9,8 +9,8 @@ license = "Apache-2.0"
 repository = "https://github.com/Stakecraft/rutli"
 
 [workspace.dependencies]
-frost-ed25519 = "2"
-frost-core = "2"
+frost-ed25519 = "=3.0.0"
+frost-core = "=3.0.0"
 rand = "0.8"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

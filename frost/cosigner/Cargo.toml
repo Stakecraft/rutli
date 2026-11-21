@@ -73,6 +73,9 @@ tokio = { workspace = true, features = ["test-util"] }
 rcgen = { workspace = true }
 proptest = { workspace = true }
 criterion = { workspace = true }
+# The previous FROST major: key files this code writes must load on a node rolled back to 2.2.0
+# (tests/frost_rollback.rs). Remove once no cluster can roll back to 2.x.
+frost-ed25519-v2 = { package = "frost-ed25519", version = "=2.2.0" }
 
 # scripts/bench.sh
 [[bench]]

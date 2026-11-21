@@ -48,11 +48,11 @@
 //! out (the expanded scalar, the reconstructed and original scalars compared in the checks), and
 //! every [`SecretShare`] and [`KeyPackage`] built during the checks.
 //!
-//! What cannot be: `frost_ed25519::SigningKey` implements neither `Zeroize` nor `Drop`, and it and
-//! the scalars inside FROST's types are `Copy`, so the copies frost-core makes internally (the
-//! `SigningKey` held for the split, the random polynomial coefficients in `keys::split`, the
-//! reconstructed key) are freed unwiped; so are serde_json's per-field temporaries when a share is
-//! serialized. The dealer therefore runs as its own short-lived process (`rutli-dealer`) with core
+//! Since frost 3.0, `SigningKey`, `SecretShare` and `KeyPackage` also wipe themselves on drop. What
+//! cannot be wiped: the scalars inside FROST's types are `Copy` (`SigningShare` among them), so the
+//! copies frost-core makes internally (the random polynomial coefficients in `keys::split`, the
+//! intermediate scalars of reconstruction) are freed unwiped; so are serde_json's per-field
+//! temporaries when a share is serialized. The dealer therefore runs as its own short-lived process (`rutli-dealer`) with core
 //! dumps and ptrace disabled, memory locked where possible and swap refused, and that process
 //! isolation is the real control.
 
@@ -116,13 +116,15 @@ pub fn split_ed25519_seed(
     let expected_public = public_key_from_seed(seed);
     let signing_key = signing_key_from_seed(seed)?;
 
-    let (mut by_id, pkp) = frost::keys::split(
+    let (mut by_id, split_pkp) = frost::keys::split(
         &signing_key,
         ids.len() as u16,
         t,
         IdentifierList::Custom(&identifiers),
         &mut OsRng,
     )?;
+    // As frost 2.x wrote it: see [`crate::dkg::without_min_signers`].
+    let pkp = crate::dkg::without_min_signers(&split_pkp);
     let mut shares = Vec::with_capacity(identifiers.len());
     for id in &identifiers {
         match by_id.remove(id) {
@@ -264,7 +266,7 @@ fn verify_split(
             let signed = selftest_sign(&quorum, pkp, &message);
             let mut quorum = quorum;
             wipe(&mut quorum);
-            let (mut got, mut want) = (reconstructed?.to_scalar(), signing_key.to_scalar());
+            let (mut got, mut want) = (reconstructed?.to_scalar(), signing_key.clone().to_scalar());
             let same = got == want;
             got.zeroize();
             want.zeroize();
@@ -551,12 +553,12 @@ mod tests {
         for subset in subsets(kps.len(), 3) {
             let quorum: Vec<KeyPackage> = subset.iter().map(|&i| kps[i].clone()).collect();
             assert!(quorum.iter().all(|kp| *kp.min_signers() == 3));
-            assert_eq!(frost::keys::reconstruct(&quorum).unwrap().to_scalar(), sk.to_scalar());
+            assert_eq!(frost::keys::reconstruct(&quorum).unwrap().to_scalar(), sk.clone().to_scalar());
             assert!(verify(&public, &msg, &selftest_sign(&quorum, &pkp, &msg).unwrap()));
         }
         // t − 1 shares reconstruct garbage, not the key.
         let short = frost::keys::reconstruct(&kps[..2]);
-        assert!(short.map(|k| k.to_scalar() != sk.to_scalar()).unwrap_or(true));
+        assert!(short.map(|k| k.to_scalar() != sk.clone().to_scalar()).unwrap_or(true));
     }
 
     #[test]
@@ -596,13 +598,13 @@ mod tests {
         // Replace node 2's verifying share with node 3's (a swap / mislabel).
         let three = vs[&id(3)];
         vs.insert(id(2), three);
-        let swapped = PublicKeyPackage::new(vs.clone(), *pkp.verifying_key());
+        let swapped = PublicKeyPackage::new(vs.clone(), *pkp.verifying_key(), None);
         assert!(check_public_key_package(&swapped, 2).is_err());
 
         // Replace it with an unrelated point (the verifying share of a different sharing).
         let (_, other) = split_ed25519_seed(&hex32(RFC8032[1].0), &IDS, 2).unwrap();
         vs.insert(id(2), other.verifying_shares()[&id(2)]);
-        let tampered = PublicKeyPackage::new(vs, *pkp.verifying_key());
+        let tampered = PublicKeyPackage::new(vs, *pkp.verifying_key(), None);
         assert!(check_public_key_package(&tampered, 2).is_err());
 
         // And a share relabelled to a different identifier fails VSS against the commitment.

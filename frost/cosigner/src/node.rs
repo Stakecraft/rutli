@@ -2865,9 +2865,8 @@ impl Node {
         });
         let others = without_self(round1_map, self.identifier);
         let (key_package, public_key_package) =
-            // Cloned: `old` wipes its own copy when it drops. frost's refresh_dkg_shares consumes
-            // this clone and drops it without wiping (as it does its intermediate scalars); that
-            // needs an upstream change.
+            // Cloned: `old` wipes its own copy when it drops; frost (3.0+) wipes this one when
+            // refresh_dkg_shares drops it. Its intermediate scalars are not wiped (upstream).
             p.part3(&others, round2_for_me, old.public_key_package.clone(), old.key_package.clone())?;
         if group_verifying_key_bytes(&public_key_package)? != old_group {
             // Never stage a share whose group key drifted — that would change the node identity.

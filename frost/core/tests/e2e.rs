@@ -255,16 +255,22 @@ fn lost_share_is_repaired_from_helpers_and_signs() {
 
     // id1 is destroyed with no backup. Helpers id2, id3 (a threshold) rebuild its share.
     let helpers = [id2, id3];
-    let d2 = helper_step1(&helpers, &shares[&id2], id1).unwrap();
-    let d3 = helper_step1(&helpers, &shares[&id3], id1).unwrap();
+    let kp = |id: Identifier| KeyPackage::try_from(shares[&id].clone()).unwrap();
+    let d2 = helper_step1(&helpers, &kp(id2), id1).unwrap();
+    let d3 = helper_step1(&helpers, &kp(id3), id1).unwrap();
 
     // Each helper sums the deltas addressed to it.
     let sigma2 = helper_step2(&[d2[&id2], d3[&id2]]);
     let sigma3 = helper_step2(&[d2[&id3], d3[&id3]]);
 
-    // id1 reconstructs its KeyPackage from the sigmas + the public VSS commitment (any helper's).
-    let commitment = shares[&id2].commitment();
-    let repaired = participant_step3(&[sigma2, sigma3], id1, commitment).unwrap();
+    // id1 rebuilds its KeyPackage from the sigmas and the group's public key package, in the form
+    // Rütli stores it (no min_signers).
+    let stored = rutli_frost_core::dkg::without_min_signers(&pkp);
+    let repaired = participant_step3(&[sigma2, sigma3], id1, &stored, MIN_SIGNERS).unwrap();
+    assert_eq!(repaired.signing_share(), shares[&id1].signing_share(), "exactly the lost share");
+
+    // A wrong sigma (here: one helper's sigma used twice) is refused, not turned into a share.
+    assert!(participant_step3(&[sigma2, sigma2], id1, &stored, MIN_SIGNERS).is_err());
 
     // The repaired share signs (with an untouched helper) and verifies under the SAME group key.
     let msg = canton_digest(b"after repair");

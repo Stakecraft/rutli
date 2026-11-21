@@ -26,6 +26,9 @@ proptest = { workspace = true }
 # B1's real Canton 3.6.1 key vectors, for the dealer tests.
 rutli-canton-key = { path = "../canton-key" }
 criterion = { workspace = true }
+# The previous FROST major, for the cross-version tests (tests/cross_version.rs): data written by
+# either version must be read by the other, byte for byte, until no cluster can roll back to 2.x.
+frost-ed25519-v2 = { package = "frost-ed25519", version = "=2.2.0" }
 
 # scripts/bench.sh
 [[bench]]

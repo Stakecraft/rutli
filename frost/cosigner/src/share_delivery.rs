@@ -555,6 +555,15 @@ impl ShareBundle {
         if self.max_signers != request.max_signers {
             return mismatch("max_signers", &self.max_signers, &request.max_signers);
         }
+        // Rütli's dealer never writes min_signers (rutli_frost_core::dkg::without_min_signers);
+        // frost 3 would read it, store it and digest it, and frost 2.x could not load the result.
+        if self.public_key_package.min_signers().is_some() {
+            return Err(DaemonError::Ceremony(
+                "the bundle's public key package records min_signers, which Rütli's dealer never \
+                 writes — not a bundle from rutli-dealer"
+                    .into(),
+            ));
+        }
         let roster: Vec<u16> = request.roster.clone();
         let ids: std::collections::BTreeSet<Identifier> =
             roster.iter().map(|&i| ident(i)).collect::<Result<_>>()?;

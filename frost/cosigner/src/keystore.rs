@@ -49,7 +49,8 @@ pub struct Share {
 }
 
 /// The signing share is wiped when a `Share` is dropped: every load, stage, import and refresh
-/// builds one, and frost's `KeyPackage` implements `Zeroize` but does not wipe itself on drop.
+/// builds one. frost 3.0's `KeyPackage` wipes itself on drop too; this stays as defence in depth
+/// until every cluster runs 3.x (then a follow-up removes it).
 /// Code that hands the key package on clones it (the clone's owner wipes its own copy, e.g.
 /// [`rutli_frost_core::session::Cosigner`]).
 impl Drop for Share {
@@ -682,6 +683,15 @@ impl KeyStore {
                 return Err(DaemonError::KeyFile(format!(
                     "{key_id}: the record does not match its header (epoch {} / digest {})",
                     h.epoch, h.digest
+                )));
+            }
+        }
+        if let Record::Frost(share) = record {
+            if share.public_key_package.min_signers().is_some() {
+                return Err(DaemonError::KeyFile(format!(
+                    "{key_id}: the public key package records min_signers, which Rütli never writes \
+                     (rutli_frost_core::dkg::without_min_signers) — a file from another tool, or \
+                     edited; refused, as a node rolled back to frost 2.x could not load it"
                 )));
             }
         }
@@ -1490,6 +1500,22 @@ mod tests {
             rutli_frost_core::dealer::split_ed25519_seed(&[5u8; 32], &[1, 2, 3], 2).unwrap();
         let key_package = frost::keys::KeyPackage::try_from(shares[0].clone()).unwrap();
         Share { key_package, public_key_package: pkp, origin, epoch: 0, key_id: String::new() }
+    }
+
+    #[test]
+    fn a_share_whose_package_records_min_signers_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ks = KeyStore::open(tmp.path().join("keys")).unwrap();
+        let mut share = dealt_share(None);
+        let pkp = share.public_key_package.clone();
+        share.public_key_package =
+            frost::keys::PublicKeyPackage::new(pkp.verifying_shares().clone(), *pkp.verifying_key(), Some(2));
+        ks.create("frost-a", &share).unwrap();
+        let err = ks.load("frost-a").err().expect("refused");
+        assert!(err.to_string().contains("min_signers"), "{err}");
+        // The form Rütli writes loads.
+        ks.create("frost-b", &dealt_share(None)).unwrap();
+        assert!(ks.load("frost-b").is_ok());
     }
 
     fn origin() -> KeyOrigin {
