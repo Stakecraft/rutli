@@ -1,19 +1,22 @@
 # Quality metrics
 
 CI (`.github/workflows/quality.yml`) measures every language in the repository and compares the
-numbers with `quality/baseline.json`. Old debt does not block a change; new debt does not get in.
+numbers with **main as main last measured itself**: the `quality-metrics` artifact of the last
+successful Quality run on `main` (`scripts/quality/fetch-baseline.sh`). Old debt does not block a
+change; new debt does not get in. Nobody edits a baseline file in a pull request.
 
 | When | What runs | On a regression |
 |---|---|---|
-| Pull request | The areas the change touches (`scripts/quality/changed-areas.sh`), without coverage | The PR fails |
-| Push to `main` | Every area, with Rust and Scala coverage | An issue is opened (or commented on) |
-| Nightly, 02:00 UTC | `cargo audit`, trivy scan of the released image | An issue is opened (or commented on) |
+| Pull request | The areas the change touches (`scripts/quality/changed-areas.sh`), without coverage or advisories, against main's run for the PR's base commit | The PR fails |
+| Push to `main` | Every area, with Rust and Scala coverage, against main's previous successful run | The run is red; "Main status" opens "main is red" |
+| Nightly, 02:00 UTC | `cargo audit`, trivy scan of the released image, against the previous night | An issue is opened (or commented on), once per new advisory |
 | Monday, 06:00 UTC | Report: last release tag against `main` | — (artifact and job summary) |
 | Manual, `base` + `head` | Report for any two refs | — |
+| Manual, `accept` | As a push to main, but a regression does not fail: the run becomes the baseline | — |
 
 | File | What it is |
 |---|---|
-| `baseline.json` | The metrics that runs are compared with |
+| `baseline.json` | The floor recorded at the last release; used only when no run on main has an artifact (first run, expired artifacts) |
 | `reports/` | Release-to-release comparisons (`scripts/quality-report.sh`) |
 | `../scripts/quality/metrics.json` | Every metric: label, direction, gated or not, tolerance |
 | `../scripts/quality/tools.txt` | Pinned tool versions and sha256 sums |
@@ -23,7 +26,7 @@ numbers with `quality/baseline.json`. Old debt does not block a change; new debt
 ```bash
 scripts/quality/install-tools.sh ~/.cache/rutli-quality-tools
 QUALITY_TOOLS_DIR=~/.cache/rutli-quality-tools scripts/quality/collect.sh --out /tmp/current.json
-scripts/quality/render.sh quality/baseline.json /tmp/current.json
+scripts/quality/render.sh quality/baseline.json /tmp/current.json      # or a run's current.json
 scripts/quality/ratchet.sh quality/baseline.json /tmp/current.json
 ```
 
@@ -35,22 +38,27 @@ off for the run is listed under `skipped`.
 ## The ratchet
 
 - Counts (warnings, findings, unsafe uses, unformatted files, advisories) must not grow: no
-  tolerance.
+  tolerance. typos findings are reported, not gated: most are identifiers and encoded data.
 - Coverage may drop by up to 0.5 percentage points, the rustqual score by 0.1.
 - A gated metric that has no value now (tool failed, build broken), an area that crashed, a gated
-  metric missing from the baseline, or a baseline key `metrics.json` does not know: all fail.
+  metric this run measured that the baseline lacks, or a baseline key `metrics.json` does not know:
+  all fail.
 - Areas a run did not cover, and metrics it skipped, are not compared.
 - Tests, lines of code, `clippy::pedantic` and the rustqual dimensions are reported, not gated.
 
-When a change improves a gated metric, the ratchet says so: update `baseline.json` in the same
-change to lock the gain in. When a change has to make a metric worse (a new dependency with an
-advisory, a deliberate breaking proto change), update `baseline.json` in that change and say why in
-the PR description.
+## How the baseline moves
 
-## Updating the baseline
-
-Take the `quality-metrics` artifacts of a Quality run on `main` (a manual run without inputs does
-the same) and of a nightly run, and merge their `current.json`:
+- **An improvement** locks itself in: after the merge, main's run measures the better number and the
+  next pull request is compared with it. Nothing to edit.
+- **A deliberate regression** (a new dependency with an advisory, a breaking proto change, an
+  accepted drop in coverage): say why in the PR. A maintainer merges it despite the red check, then
+  runs the Quality workflow by hand on `main` with `accept` ticked. That run is green and becomes
+  the baseline.
+- **Main went red** because something got in that the pull request run could not see (coverage is
+  measured on main only): fix it, or accept it as above. Until then pull requests are compared with
+  the last good run on main.
+- **At a release** the floor in `quality/baseline.json` moves to the release, from the artifacts of a
+  run on main and of a nightly run:
 
 ```bash
 scripts/quality/update-baseline.sh main-current.json nightly-current.json
