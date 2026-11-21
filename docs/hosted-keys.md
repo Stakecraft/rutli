@@ -231,6 +231,13 @@ skips what it cannot parse, `KeyInfo` says `exists: false`) — the shape that e
      (`ecies-failure=after-ecdh`) only if no cosigner's shared secret opens it. The cost of that,
      for a genuinely forged ciphertext, is bounded: at most **one `EcdhDerive` per roster entry**
      (n calls, never a retry loop), each charged to that node's decryption rate limit (section 5).
+   - "I do not have it" (or a shared secret that does not open the ciphertext) is the call's answer
+     only when **every** cosigner on the roster answered. If one of them could not be reached
+     (`UNAVAILABLE`, or its deadline passed), it may hold the key: the call then fails with that
+     cosigner's status, which Canton retries, and the audit entry carries
+     `unconfirmed=<endpoint> reason=<CODE>`. Before 0.5.0 such a call could end `NOT_FOUND`, which
+     Canton takes as final. The same holds for a FROST key in `keyExistsAndIsActive` and for a
+     group-key read that nobody answered with a key.
      A rate-limit refusal (`RESOURCE_EXHAUSTED`) is never routed around: it is surfaced at once.
 
 ```hocon
