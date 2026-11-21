@@ -490,7 +490,7 @@ class Runner:
                 # More DKGs at once than a node holds ceremony sessions (64).
                 self.loadgen(["dkg", "--prefix", storm, "--name", "dkg-distinct", "--count", "80", "--clients", "80",
                               "--prefer", "cosigner1"], timeout_secs=120, wall_timeout=900),
-                # One key, ten DKGs at once, each retrying ABORTED up to six times (0.5 s doubling
+                # One key, ten DKGs at once, each retrying UNAVAILABLE or ABORTED up to six times (0.5 s doubling
                 # to 4 s, jittered): every answer OK must be the same key, and every ALREADY_EXISTS
                 # must point at that key (the generator asks GroupKey).
                 self.loadgen(["dkg", "--prefix", f"{storm}-same", "--same-key", "--retry-aborted", "6",
