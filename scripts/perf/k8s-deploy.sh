@@ -187,7 +187,8 @@ kubectl label namespace "$ns" --overwrite rutli.io/client-ns=true pod-security.k
 echo "==> Certificates (throwaway CA)"
 # gen-frost-certs.sh also writes certs/peer-pins.json, the TLS key pin of each cosigner certificate
 # (Helm value peerPins). The chart refuses to render without them; install and upgrade pass it.
-"$REPO/scripts/gen-frost-certs.sh" 3 "$work/certs"
+# driver-b: the second tenant's driver (scripts/perf/profiles/production.json).
+RUTLI_EXTRA_CLIENTS=driver-b "$REPO/scripts/gen-frost-certs.sh" 3 "$work/certs"
 label() { k label "$@" rutli-perf/suite=1 --overwrite >/dev/null; }
 k create secret generic rutli-cosigner-ca --from-file=ca.crt="$work/certs/ca.crt"
 label secret rutli-cosigner-ca
@@ -195,8 +196,13 @@ for i in 1 2 3; do
   k create secret tls "rutli-cosigner-tls-$i" --cert="$work/certs/cosigner$i.crt" --key="$work/certs/cosigner$i.key"
   label secret "rutli-cosigner-tls-$i"
 done
-k create secret generic rutli-perf-driver --from-file=ca.crt="$work/certs/ca.crt" \
-  --from-file=driver.crt="$work/certs/driver.crt" --from-file=driver.key="$work/certs/driver.key"
+# Every client certificate the load generator may run as: the two tenants' drivers, the operator
+# (verify-key) and the refresher (refreshes).
+client_files=(--from-file=ca.crt="$work/certs/ca.crt")
+for c in driver driver-b operator refresher; do
+  client_files+=(--from-file="$c.crt=$work/certs/$c.crt" --from-file="$c.key=$work/certs/$c.key")
+done
+k create secret generic rutli-perf-driver "${client_files[@]}"
 k create secret generic rutli-perf-peer --from-file=peer.crt="$work/certs/cosigner1.crt" \
   --from-file=peer.key="$work/certs/cosigner1.key"
 label secret rutli-perf-driver
@@ -273,13 +279,30 @@ if kubectl get nodes -l rutli-perf/role=cosigner -o name 2>/dev/null | grep -q .
 fi
 pull_values="[]"
 [ -z "$pull_secret" ] || pull_values="[{ name: \"$pull_secret\" }]"
+# The per-cluster production values: the drivers' key pins, the cluster id (derived from this CA,
+# then pinned), one key-file uuid.
+spki() { openssl x509 -in "$1" -noout -pubkey | openssl pkey -pubin -outform DER | openssl dgst -sha256 -hex | awk '{print $NF}'; }
+pin_a="$(spki "$work/certs/driver.crt")"
+pin_b="$(spki "$work/certs/driver-b.crt")"
+cluster_id="$(openssl dgst -sha256 -hex "$work/certs/ca.crt" | awk '{print $NF}' | cut -c1-16)"
+cluster_uuid="$(python3 -c 'import uuid; print(uuid.uuid4())')"
 cat >"$work/values.yaml" <<EOF
-# A load-test rig, not an authority-key deployment: the sign rate limits are off on purpose (to
-# measure throughput), and the per-cluster production values (signer pins, key-file v2, a pinned
-# cluster id) are not set. So the production profile (the chart's default) is turned off
-# explicitly; the cosigners log what production would refuse (docs/production-profile.md). Not the
-# end state: a second pass of the functional scenarios under the production profile is #172.
-profile: lab
+# The production profile (docs/production-profile.md), as operators run it: the cosigners refuse to
+# start if anything it requires is missing. Two tenants, as on a cluster serving two validators:
+# each driver certificate is pinned and limited to its own key prefixes. The sign rate limits are
+# far above any real load (but not off, which production refuses), so the ramp measures the
+# cluster; the namespace-class keys keep a realistic limit (10 a minute, 200 a day), and keys named
+# perf-limited* the ceiling of the limit-rate scenario. scripts/perf/profiles/production.json knows
+# the same key names.
+profile: production
+signerAllowlist: [driver, driver-b]
+operatorAllowlist: [operator]
+refreshAllowlist: [refresher]
+clusterId: "$cluster_id"
+keyfile:
+  cluster_uuid: "$cluster_uuid"
+  write_version: 2
+  accept_v1: false
 replicaCount: 3
 threshold: 2
 nodes:
@@ -295,10 +318,21 @@ persistence:
 imagePullSecrets: $pull_values
 nodeSelector: $selector
 signingPolicy:
-  sign_rate_limit_per_min: 0
-  sign_rate_limit_per_day: 0
+  signer_acl_required: true
+  signer_may_refresh: false
+  require_epoch_match: true
+  signer_acl:
+    driver: ["perf-", "rutli-perf-"]
+    driver-b: ["tenantb-"]
+  signer_pins:
+    driver: ["$pin_a"]
+    driver-b: ["$pin_b"]
+  sign_rate_limit_per_min: 1000000
+  sign_rate_limit_per_day: 1000000000
   rate_limits:
     - { key_id_prefix: perf-limited, per_min: 120, per_day: 100000 }
+    - { key_id_prefix: perf-frost-namespace, per_min: 10, per_day: 200 }
+    - { key_id_prefix: tenantb-frost-namespace, per_min: 10, per_day: 200 }
 EOF
 
 echo "==> Chart"

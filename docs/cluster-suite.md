@@ -34,7 +34,7 @@ export KUBECONFIG=...
 scripts/perf/k8s-deploy.sh install --namespace rutli-perf --previous \
   --image <registry>/rutli-perf:<tag> --work ./perf-work [--storage-class NAME] [--pull-secret NAME] [--values extra.yaml]
 
-scripts/perf/cluster.py --namespace rutli-perf --profile scripts/perf/profiles/devnet-validator.json \
+scripts/perf/cluster.py --namespace rutli-perf --profile scripts/perf/profiles/production.json \
   --upgrade-image <registry>/rutli-perf:<tag> --work ./perf-work --env-name <name> --out perf-out/cluster.json
 
 scripts/perf/compare.py last-week/cluster.json perf-out/cluster.json   # exit 1 on a regression
@@ -61,10 +61,14 @@ of the same name.
 | `connect` | N new clients connecting at the same moment (`connect.clients` of the profile: 50, 200, 500), one signature each, with each client's connection time recorded apart from its request (`rutli-loadgen --eager-connect`) and the cosigners' `rutli_grpc_handshake_timeouts_total` | never: a measurement of what many clients connecting together costs, for example every driver reconnecting after a cosigner restart |
 | `disrupt` | under the steady stream: a node lost, a data volume lost, a partition between two cosigners' nodes (`partition`), one cosigner cut off from both others (`partition-isolated`, as when a data centre loses its links), added network delay; afterwards, rounds of signatures until the cluster signs within the SLO again (`recovery_secs`) | a signature fails, a cosigner is not healthy afterwards, or the cluster does not sign normally again within `--settle-secs` (600); a step without its hook is reported as skipped |
 | `keys` | for each key count of the profile (1, 10, 100): that many FROST keys and hosted keys over ten tenant prefixes (`perf-t<n>-…`), sign latency over all of them, and each cosigner's Peer API `ListKeys` time | a setup, signature or listing fails |
+| `upgrade`, `disrupt` (key classes) | with a profile that has `classes` (`production`): during each disruption and during the upgrade's rollout, one signature with each tenant's namespace-class key and one decryption (ECDH) with its hosted key, under the driver's deadlines (5 s a sign attempt, 10 s another call, 30 s a call) | one of them fails or runs out of time: a topology change or a decryption during an incident is the case that matters |
+| `key-classes` | last, with `classes`: the same spot checks at rest, then twice the namespace-class key's per-minute limit plus five at once | a spot check fails, fewer than the limit or more than one and a half times it pass, or the rest is not refused with `RESOURCE_EXHAUSTED` |
 | `ramp` | the profile's baseline load × each factor (1, 3, 10, 20, 30, 45, 70, 100, 150, 200, 300 in `devnet-validator`); a step runs the baseline's phases one after another (average, busiest minute, burst), each × the factor | never: the last factor at which every phase passed is the **headroom factor**. A phase over the SLO or with an error drops out and the ramp goes on with the others, so each part of the real load gets its own headroom (`real_load_headroom`) |
 
 They run in the order `upgrade`, `scenarios`, `connect`, `keys`, `ramp`, `disrupt` (disruption last, so that
-what it leaves behind cannot skew the measurements of the others); `--suites` picks a subset.
+what it leaves behind cannot skew the measurements of the others), then `key-classes` when the
+profile has classes; `--suites` picks a subset. With several tenants, every ramp step runs the
+shape for each tenant at once, each on its own keys with its own driver certificate.
 Every scenario also checks that no cosigner restarted unless the scenario did it, and that their
 memory and file descriptors stay within bounds. A cosigner a disruption restarts on purpose is not
 judged by its health the moment the load ends but by `time_to_healthy_secs`: the seconds from the
@@ -224,6 +228,40 @@ no ECDH. The hosted-key decryption limit is per key and node
 (`hosted_keys.decrypt_rate_limit_per_min`, 6000 by default): spread a high decryption rate over
 enough `ecdh_keys`, or the ramp measures the limit. `scripts/perf/profiles/smoke.json` is the short
 profile CI uses; its numbers mean nothing.
+
+## The production profile
+
+`k8s-deploy.sh` installs Rütli with `profile: production`
+([production-profile.md](production-profile.md)), so every suite runs on the configuration
+operators are told to run; the rendered config passes `check-config` with no required finding.
+What it sets, per throwaway installation:
+
+- two tenants, as on a cluster serving two validators: driver certificates `driver` and `driver-b`,
+  each pinned (`signer_pins`) and limited to its key prefixes (`signer_acl`: `perf-` and
+  `rutli-perf-`, `tenantb-`);
+- the operator and refresher roles, `signer_may_refresh: false` (`limit-ceremony` refreshes with
+  the refresher's certificate), intents required, `require_epoch_match`;
+- key-file v2 with a fresh `cluster_uuid`, `accept_v1: false`, and `clusterId` pinned to the id
+  derived from the run's CA;
+- rate limits: far above any real load for signing keys (a million a minute per key: production
+  refuses 0, and the ramp must measure the cluster, not the brake), 10 a minute and 200 a day for
+  the namespace-class keys (`perf-frost-namespace`, `tenantb-frost-namespace`), 120 a minute for
+  `perf-limited*`.
+
+One advisory finding remains on purpose: no `quorum` approval rule for the namespace keys. Such a
+rule makes every namespace signature wait for human approvals, which an unattended run cannot
+give.
+
+[`scripts/perf/profiles/production.json`](../scripts/perf/profiles/production.json) is the
+matching load profile: the measured shape of `devnet-validator` for each tenant's signing keys,
+and three key classes. On a DevNet cluster serving two validators, practically all signatures
+are made with protocol signing keys (DKG keys); a namespace key signs a handful of times a month,
+and a hosted encryption key served 9 operations in 30 days. So the signing class carries the
+ladder and the disruption load, and the other two get the spot checks above, where a failure
+means a topology change or a decryption that does not happen during an incident.
+
+The previous release that `--previous` installs reads the same values: it understands every
+setting above except `profile` and the peer pins, which it ignores.
 
 ## On a hardened cluster
 
