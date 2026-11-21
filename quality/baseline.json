@@ -72,7 +72,7 @@
     "rust.coverage.lines": 87.47,
     "rust.coverage.functions": 85.48,
     "scala.warnings": 2,
-    "scala.tests": 305,
+    "scala.tests": 360,
     "scala.coverage.statements": 80.02,
     "scala.coverage.branches": 74.47,
     "image.trivy.critical": 0,
