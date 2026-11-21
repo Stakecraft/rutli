@@ -247,6 +247,18 @@ self-reported load shows round 2s completing again (or the store back) closes it
 refusals (policy, epoch, an unknown session, `sessions-full`, an invalid share) never open a
 breaker.
 
+**Which partners a leader signs with.** A leader always signs with itself. Its partners are the
+next t − 1 cosigners on the ring of the others, starting at an offset taken from the intent's
+request id: SHA-256 of a fixed tag and the request id, first 8 bytes, modulo n − 1. A leader
+keeps one order for all its attempts, and a failover leader of the same driver call uses the same
+offset over its own others. The driver draws request
+ids at random, so over many signatures every cosigner takes part in the same share of them: about
+half each besides a sticky leader in 2-of-3, about 60 % each in 3-of-5. Before 0.5.0 a leader
+always signed with the lowest other identifier, so cosigner 1 took part in every signature and the
+highest identifiers in few. A Sign without an intent, or with an empty request id, keeps that
+roster order. The fallback subsets
+after an excluded member follow the same rotated order.
+
 The breaker only orders: subsets are sorted by their worst member (up, trial, down), and a down
 peer is tried last, never skipped. Within its attempts a leader still reaches a subset of t members
 that answer it, if there is one, so a false open costs a signature time, not the signature — unless
