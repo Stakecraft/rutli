@@ -35,7 +35,7 @@ const N: u16 = 3;
 const T: u16 = 2;
 const CLUSTER_UUID: &str = "3f5c2b1e-7a4d-4c8e-9b0f-2d6e8a1c4b70";
 const DKG_KEY: &str = "frost-fixture-namespace";
-const SPLIT_KEY: &str = "frost-import-1220cb0e";
+const SPLIT_KEY: &str = "frost-import-fixture";
 const SPLIT_CEREMONY: &str = "fixture-split";
 
 fn dir() -> PathBuf {
@@ -325,6 +325,36 @@ fn split_bundles_open_with_the_recipient_files_and_sign() {
     verify(&group, &msg, &sign_with(&[&kps[1], &kps[2]], &pkp, &msg));
 }
 
+// ── the fixtures stay out of deployments ───────────────────────────────────────────────────────
+
+/// No configuration under `deploy/` names a fixture key id or the fixture cluster: the fixtures are
+/// test material and must never be what a cluster is set up with.
+#[test]
+fn no_deployment_config_names_a_fixture() {
+    let deploy = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy");
+    let needles = [DKG_KEY, SPLIT_KEY, SPLIT_CEREMONY, CLUSTER_UUID];
+    let mut stack = vec![deploy.clone()];
+    let mut seen = 0;
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if let Ok(text) = std::fs::read_to_string(&p) {
+                seen += 1;
+                for n in needles {
+                    assert!(
+                        !text.contains(n),
+                        "{} names the test fixture value {n}",
+                        p.display()
+                    );
+                }
+            }
+        }
+    }
+    assert!(seen > 0, "nothing read under {}", deploy.display());
+}
+
 // ── the generator (run once, on frost-ed25519 2.2.0) ───────────────────────────────────────────
 
 fn write(rel: &str, bytes: &[u8]) {
@@ -337,18 +367,14 @@ fn json<T: serde::Serialize>(v: &T) -> Vec<u8> {
     serde_json::to_vec(v).unwrap()
 }
 
-/// The namespace key of B1's throwaway Canton 3.6.1 node (already committed test material).
-fn canton_namespace_key() -> ([u8; 32], String) {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../canton-key/testdata/vectors");
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).unwrap()).unwrap();
-    let password = manifest["password"].as_str().unwrap();
-    let input = std::fs::read(dir.join("namespace.export-pw.bin")).unwrap();
-    let key = rutli_canton_key::parse(&input, Some(password.as_bytes())).unwrap();
-    let rutli_canton_key::PrivateKeyMaterial::Ed25519 { seed } = &key.material else {
-        panic!()
-    };
-    (**seed, key.fingerprint())
+/// A fresh Ed25519 key for the split fixture, generated here and nowhere else (the seed is not
+/// kept: the dealer discards it too). Returns the seed and its Canton fingerprint.
+fn fresh_split_key() -> ([u8; 32], String) {
+    use rand::RngCore;
+    let mut seed = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut seed);
+    let public = rutli_frost_core::dealer::public_key_from_seed(&seed);
+    (seed, share_delivery::ed25519_fingerprint(&public))
 }
 
 /// Write every fixture. Ignored: run by hand only, and only on the FROST version named in the
@@ -549,7 +575,7 @@ fn regenerate() {
     }
 
     // A split ceremony: recipient files on each node, the dealer's bundles.
-    let (seed, fingerprint) = canton_namespace_key();
+    let (seed, fingerprint) = fresh_split_key();
     let mut requests = Vec::new();
     for i in 1..=N {
         let data_dir = dir().join(format!("split/node-{i}"));
