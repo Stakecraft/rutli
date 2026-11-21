@@ -52,7 +52,7 @@
     {"key": "image.trivy.medium", "area": "Advisories", "label": "released image: MEDIUM vulnerabilities (trivy)", "better": "lower", "gate": false, "tolerance": 0},
     {"key": "image.trivy.low", "area": "Advisories", "label": "released image: LOW vulnerabilities (trivy)", "better": "lower", "gate": false, "tolerance": 0},
     {"key": "repo.gitleaks", "area": "Repository", "label": "gitleaks findings", "better": "lower", "gate": true, "tolerance": 0},
-    {"key": "repo.typos", "area": "Repository", "label": "typos findings", "better": "lower", "gate": true, "tolerance": 0},
+    {"key": "repo.typos", "area": "Repository", "label": "typos findings (reported, not gated: most are identifiers and encoded data)", "better": "lower", "gate": false, "tolerance": 0},
     {"key": "loc.rust", "area": "Lines of code", "label": "Rust", "better": "none", "gate": false, "tolerance": 0},
     {"key": "loc.scala", "area": "Lines of code", "label": "Scala", "better": "none", "gate": false, "tolerance": 0},
     {"key": "loc.java", "area": "Lines of code", "label": "Java (generated gRPC stubs)", "better": "none", "gate": false, "tolerance": 0},
