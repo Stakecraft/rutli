@@ -13,7 +13,7 @@ air-gapped dealer host and is not in the cosigner image.
 | Task | Command | Credential |
 |---|---|---|
 | Generate a FROST key (namespace, signing) | Canton, at bootstrap or from the console (`keys.secret.generate_signing_key`); the driver runs the DKG. [key-ceremony.md](key-ceremony.md) | The driver certificate (`signer_allowlist`, `signer_acl`). It signs the ceremony intent |
-| Generate a hosted key (encryption) | Canton (`keys.secret.generate_encryption_key`), with `hosted-keys = true` in the driver. [hosted-keys.md](hosted-keys.md) | The driver certificate |
+| Generate a hosted key (encryption) | Canton (`keys.secret.generate_encryption_key`), with `hosted-keys = true` in the driver. [hosted-keys.md](hosted-keys.md) | The driver certificate. It signs the generate intent |
 | Import an Ed25519 key as shares | `rutli-dealer split-key` on the dealer host; `share-recipient`, `recipient-sas`, `import-share` on each cosigner. [split-ceremony.md](split-ceremony.md) | Each node's own config, TLS key and seal. The dealer holds the key itself |
 | Import an ECIES key | `rutli-cosigner import-key` on one cosigner; the cluster replicates it. [hosted-keys.md](hosted-keys.md#export-and-import-portable-copies) | That node's config and seal |
 | Show a cluster key: public key, fingerprint, origin, epoch | `rutli-cosigner key show --key-id ID` | An operator certificate (`operator_allowlist`) |
@@ -32,7 +32,8 @@ config for it (`client-operator.json`).
 Backup, restore, `export-key` and the key-file commands are in
 [disaster-recovery.md](disaster-recovery.md), seal bundles in
 [runbook-per-node-seal.md](runbook-per-node-seal.md), stuck ceremonies in
-[ceremonies.md](ceremonies.md).
+[ceremonies.md](ceremonies.md), `residue-scan` in [residue-scan.md](residue-scan.md), `check-config`
+in [production-profile.md](production-profile.md).
 
 ## `key show`
 
