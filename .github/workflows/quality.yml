@@ -2,18 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Quality ratchet: collects the metrics in scripts/quality/metrics.json for every language in the
-# repository and compares them with quality/baseline.json. Old debt does not block a change; new
-# debt does. See quality/README.md and docs/release-process.md ("Test schedule").
+# repository and compares them with main as main last measured itself (the quality-metrics
+# artifact of the last successful run on main, scripts/quality/fetch-baseline.sh). Old debt does not
+# block a change; new debt does. No pull request edits a baseline file. See quality/README.md and
+# docs/release-process.md ("Test schedule").
 #
 #   pull request      the areas the change touches (scripts/quality/changed-areas.sh), no
-#                     coverage; fails on a regression. A pull request that changes
-#                     quality/baseline.json is measured in full (every area, coverage, advisories).
+#                     coverage, no advisories; fails on a regression against its base commit
 #   push to main      every area with coverage, unfiltered; a red run is reported by main-status.yml
 #                     ("main is red"), which watches this workflow
 #   nightly 02:00     cargo audit and a trivy scan of the released image; a regression opens (or
 #                     comments on) the issue "Quality: new advisories"
 #   Monday 06:00      quality report: last release tag against main (artifact and job summary)
-#   manual            with base and head: that report for any two refs; without: as a push to main
+#   manual            with base and head: that report for any two refs; without: as a push to main.
+#                     With accept: as a push to main, but a regression does not fail the run, so
+#                     its numbers become the baseline (a deliberate, reviewed regression)
 name: Quality
 
 on:
@@ -33,6 +36,11 @@ on:
         description: "Report: newer ref, e.g. the release candidate"
         required: false
         default: ""
+      accept:
+        description: "Run as on main and accept a regression: this run becomes the baseline"
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -61,6 +69,10 @@ jobs:
     # Nothing here is a timing measurement, so PERF_RUNNER does not apply.
     runs-on: ${{ github.actor != 'dependabot[bot]' && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login != 'dependabot[bot]')) && vars.CI_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 240
+    permissions:
+      contents: read
+      # fetch-baseline.sh reads the quality-metrics artifact of earlier runs on main.
+      actions: read
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
       regressed: ${{ steps.ratchet.outputs.regressed }}
@@ -84,13 +96,7 @@ jobs:
           all=rust,scala,shell,python,docker,actions,k8s,proto,semgrep,repo
           base="" head="" coverage=true
           case "$EVENT" in
-            pull_request)
-              mode=pr coverage=false areas="$(scripts/quality/changed-areas.sh "$PR_BASE" HEAD)"
-              # A change of the baseline is checked against every number it records.
-              if [ -n "$(git diff --name-only "$PR_BASE...HEAD" -- quality/baseline.json)" ]; then
-                coverage=true areas="$all,audit,image"
-              fi
-              ;;
+            pull_request) mode=pr coverage=false areas="$(scripts/quality/changed-areas.sh "$PR_BASE" HEAD)" ;;
             schedule)
               if [ "$SCHEDULE" = "0 2 * * *" ]; then
                 mode=nightly areas=audit,image
@@ -211,6 +217,17 @@ jobs:
             ~/.cache/rutli-quality-tools/semgrep-rules
           key: ${{ steps.tools-cache.outputs.cache-primary-key }}
 
+      - name: Baseline (main's last measurement)
+        if: steps.plan.outputs.mode != 'report'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ steps.plan.outputs.mode }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/quality"
+          scripts/quality/fetch-baseline.sh "$MODE" "$RUNNER_TEMP/quality/baseline.json" | tee "$RUNNER_TEMP/quality/baseline-source.txt"
+          { echo; cat "$RUNNER_TEMP/quality/baseline-source.txt"; echo; } >>"$GITHUB_STEP_SUMMARY"
+
       - name: Collect metrics
         if: steps.plan.outputs.mode != 'report'
         env:
@@ -226,20 +243,26 @@ jobs:
           export QUALITY_KEEP_DIR="$RUNNER_TEMP/quality"
           scripts/quality/collect.sh --only "$AREAS" --ref "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" \
             --out "$RUNNER_TEMP/quality/current.json"
-          scripts/quality/render.sh quality/baseline.json "$RUNNER_TEMP/quality/current.json" \
+          scripts/quality/render.sh "$RUNNER_TEMP/quality/baseline.json" "$RUNNER_TEMP/quality/current.json" \
             "Quality ($MODE): baseline → this run" >"$RUNNER_TEMP/quality/current.md"
           cat "$RUNNER_TEMP/quality/current.md" >>"$GITHUB_STEP_SUMMARY"
 
-      - name: Ratchet (fails if a gated metric is worse than quality/baseline.json)
+      - name: Ratchet (fails if a gated metric is worse than the baseline)
         id: ratchet
         if: steps.plan.outputs.mode != 'report'
+        env:
+          ACCEPT: ${{ inputs.accept && steps.plan.outputs.mode == 'main' }}
         run: |
           rc=0
-          scripts/quality/ratchet.sh quality/baseline.json "$RUNNER_TEMP/quality/current.json" \
+          scripts/quality/ratchet.sh "$RUNNER_TEMP/quality/baseline.json" "$RUNNER_TEMP/quality/current.json" \
             >"$RUNNER_TEMP/quality/ratchet.txt" 2>&1 || rc=$?
           cat "$RUNNER_TEMP/quality/ratchet.txt"
           { echo; echo '## Ratchet'; echo; echo '```'; cat "$RUNNER_TEMP/quality/ratchet.txt"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
           if [ "$rc" != 0 ]; then echo "regressed=true" >>"$GITHUB_OUTPUT"; fi
+          if [ "$rc" != 0 ] && [ "$ACCEPT" = true ]; then
+            echo "::notice::regression accepted by a manual run (accept); this run is the new baseline"
+            exit 0
+          fi
           exit "$rc"
 
       - name: Report (quality-report.sh base head)
@@ -288,7 +311,7 @@ jobs:
         run: |
           title="Quality: new advisories (nightly cargo audit / image scan)"
           details="$(grep -v '^ok' quality/ratchet.txt 2>/dev/null || echo 'ratchet output missing, see the run')"
-          body="$(printf 'The quality ratchet found a metric worse than quality/baseline.json at %s.\n\nRun: %s\n\n~~~\n%s\n~~~\n' \
+          body="$(printf 'The nightly quality run found a metric worse than the previous night at %s.\n\nRun: %s\n\n~~~\n%s\n~~~\n' \
             "$SHA" "$RUN_URL" "$details")"
           api() { curl -fsS -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$@"; }
           number="$(api "https://api.github.com/repos/$REPO/issues?state=open&per_page=100" \

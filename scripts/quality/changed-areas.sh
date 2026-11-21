@@ -6,8 +6,8 @@
 #   scripts/quality/changed-areas.sh BASE_COMMIT [HEAD_COMMIT]
 #
 # semgrep and repo (gitleaks, typos) always run: they are cheap and cover every file. A change to
-# the quality tooling itself selects every tree area; audit and image (advisory counts that move
-# without code changes, run nightly) only when their own scripts or the tool pins change.
+# the quality tooling itself selects every tree area. audit and image are never selected: their
+# counts move when advisories are published, not when code changes, so they run nightly.
 set -euo pipefail
 
 [ $# -ge 1 ] || {
@@ -29,12 +29,6 @@ while IFS= read -r f; do
     scripts/quality/* | scripts/quality-report.sh | quality/* | .github/workflows/quality.yml)
       for a in rust scala shell python docker actions k8s proto; do add "$a"; done
       ;;
-  esac
-  case "$f" in
-    scripts/quality/audit.sh | scripts/quality/tools.txt) add audit ;;
-  esac
-  case "$f" in
-    scripts/quality/image.sh | scripts/quality/tools.txt) add image ;;
   esac
   case "$f" in frost/*) add rust ;; esac
   case "$f" in driver/* | build.sbt | project/* | .scalafmt.conf) add scala ;; esac
