@@ -25,14 +25,20 @@ fn sealer(i: u16) -> Sealer {
     let mut dek = [0u8; 32];
     dek[0] = i as u8;
     dek[31] = 0x5a;
-    Sealer::from_dek(zeroize::Zeroizing::new(dek), i)
-        .with_binding(KeyFileBinding { node: i, cluster_uuid: Some(UUID.into()), write_version: 2, accept_v1: false })
+    Sealer::from_dek(zeroize::Zeroizing::new(dek), i).with_binding(KeyFileBinding {
+        node: i,
+        cluster_uuid: Some(UUID.into()),
+        write_version: 2,
+        accept_v1: false,
+    })
 }
 
 /// Node `i`'s key file for KEY, read as a v2 node would: its FROST parts parse with v2 types.
 fn read_as_v2(dir: &std::path::Path, i: u16, epoch: u64) -> [u8; 32] {
     let raw = std::fs::read(dir.join(format!("node-{i}/{KEY}.json"))).unwrap();
-    let (plain, hdr) = sealer(i).unseal_record(&raw, KEY, &[RecordKind::FrostShare]).unwrap();
+    let (plain, hdr) = sealer(i)
+        .unseal_record(&raw, KEY, &[RecordKind::FrostShare])
+        .unwrap();
     assert_eq!(hdr.unwrap().epoch, epoch);
     /// The FROST parts of a key file as a v2 node reads them (the rest of `Share` is Rütli's own).
     #[derive(serde::Deserialize)]
@@ -42,12 +48,23 @@ fn read_as_v2(dir: &std::path::Path, i: u16, epoch: u64) -> [u8; 32] {
     }
     let old: V2Share = serde_json::from_slice(&plain).expect("v2 reads the key file");
     // The same file as this version loads it: both versions write each part to the same bytes.
-    let ks = KeyStore::open_with_sealer(dir.join(format!("node-{i}")), Some(Arc::new(sealer(i)))).unwrap();
+    let ks = KeyStore::open_with_sealer(dir.join(format!("node-{i}")), Some(Arc::new(sealer(i))))
+        .unwrap();
     let now = ks.load(KEY).unwrap();
-    assert_eq!(serde_json::to_vec(&old.key_package).unwrap(), serde_json::to_vec(&now.key_package).unwrap());
-    assert_eq!(serde_json::to_vec(&old.public_key_package).unwrap(), serde_json::to_vec(&now.public_key_package).unwrap());
+    assert_eq!(
+        serde_json::to_vec(&old.key_package).unwrap(),
+        serde_json::to_vec(&now.key_package).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_vec(&old.public_key_package).unwrap(),
+        serde_json::to_vec(&now.public_key_package).unwrap()
+    );
     let digest: [u8; 32] = Sha256::digest(old.public_key_package.serialize().unwrap()).into();
-    assert_eq!(digest, now.pkp_digest().unwrap(), "v2 and this version compute the same pkp_digest");
+    assert_eq!(
+        digest,
+        now.pkp_digest().unwrap(),
+        "v2 and this version compute the same pkp_digest"
+    );
     digest
 }
 
@@ -56,12 +73,19 @@ async fn key_files_written_after_a_dkg_and_a_refresh_load_on_v2_with_the_same_di
     let tmp = tempfile::tempdir().unwrap();
     let nodes: Vec<Arc<Node>> = (1..=3u16)
         .map(|i| {
-            let ks = KeyStore::open_with_sealer(tmp.path().join(format!("node-{i}")), Some(Arc::new(sealer(i)))).unwrap();
+            let ks = KeyStore::open_with_sealer(
+                tmp.path().join(format!("node-{i}")),
+                Some(Arc::new(sealer(i))),
+            )
+            .unwrap();
             Arc::new(Node::new(Identifier::try_from(i).unwrap(), 3, 2, ks))
         })
         .collect();
     rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
-    let peers: Peers = nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    let peers: Peers = nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+        .collect();
 
     run_dkg(&peers, KEY).await.unwrap();
     for (epoch, step) in [(1u64, "dkg"), (2, "refresh")] {
