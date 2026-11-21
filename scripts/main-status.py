@@ -26,6 +26,8 @@ WATCHED = [
     "Load test",
     "Cluster suite (kind)",
     "Image build check",
+    "Generated code",
+    "Workflow lint",
     "Quality",
 ]
 

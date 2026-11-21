@@ -53,6 +53,31 @@ enum Command {
         #[arg(long)]
         out: std::path::PathBuf,
     },
+    /// Delete the backup archives (`node-<N>-<stamp>.tar`) of older key epochs from a directory, by
+    /// the retention rule: an archive of an older epoch goes only once the newer epoch is PROVEN
+    /// (`keyfile prove`) and the proof is old enough, and a complete verified archive of the proven
+    /// epoch remains. Runs beside the daemon; reads the key files' clear headers only (no sealing
+    /// key). Nothing is deleted when it cannot read an epoch, when this node's live epoch is behind
+    /// an archive's, or on any error. `--dry-run` lists what it would do. The backup sidecar runs it
+    /// after each backup (docs/disaster-recovery.md, "Backup retention").
+    BackupRetain {
+        /// The directory of this node's archives (the backup PVC's mount).
+        #[arg(long)]
+        dir: std::path::PathBuf,
+        /// List the verdicts, delete nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// How old a `keyfile prove` marker must be before the epoch before it may go.
+        #[arg(long, default_value_t = 7)]
+        min_proof_age_days: u64,
+        /// Keep this many extra epochs below the proven one.
+        #[arg(long, default_value_t = 0)]
+        keep_older_epochs: usize,
+        /// Hard cap on the number of archives (0 = none): the oldest go first, never the newest and
+        /// never the proven one.
+        #[arg(long, default_value_t = 0)]
+        keep_count: usize,
+    },
     /// Export ONE cluster-hosted key as a portable artifact. Run with the node stopped.
     ///
     /// Unlike `backup` (sealed with this cluster's master secret, restorable only onto this node),
@@ -484,6 +509,8 @@ enum SealCommand {
     },
     /// DEK rotation, last step: the same bundle without `previous_share_deks`. Only once `keyfile
     /// status` on that node shows no file under a previous DEK and a backup has been taken since.
+    /// This removes the previous DEK from the bundle only; it is destroyed when every other copy
+    /// is (docs/key-material-handling.md).
     DropPrevious {
         #[arg(long, value_name = "FILE")]
         r#in: std::path::PathBuf,
@@ -546,6 +573,9 @@ async fn main() -> Result<()> {
             return refresh_command(&cfg, &key_id, target, tls_server_name).await
         }
         Some(Command::Backup { out }) => return backup_command(&cfg, &out),
+        Some(Command::BackupRetain { dir, dry_run, min_proof_age_days, keep_older_epochs, keep_count }) => {
+            return backup_retain_command(&cfg, &dir, dry_run, min_proof_age_days, keep_older_epochs, keep_count)
+        }
         Some(Command::ExportKey { key_id, out, passphrase_env, unsafe_plaintext }) => {
             return export_key_command(&cfg, &key_id, &out, passphrase_env.as_deref(), unsafe_plaintext)
         }
@@ -630,6 +660,8 @@ async fn main() -> Result<()> {
         _ => {}
     }
     tracing::info!(identifier = cfg.identifier, listen = %cfg.listen, "starting cosigner");
+    // Before any key store is opened: a crash must not write share memory to a core file.
+    log_core_dumps(&rutli_cosigner::process_hardening::disable_core_dumps());
     // Peer key pins: required with TLS unless opted out, and this node's own key must be among its
     // own pins — or every peer would refuse it. Before anything else, so a bad rollout stops here.
     cfg.check_peer_pins_required()?;
@@ -1257,6 +1289,42 @@ fn check_config_command(path: &std::path::Path) -> ! {
         println!("meets the production profile");
     }
     std::process::exit(if required == 0 { 0 } else { 1 })
+}
+
+/// Startup: what [`rutli_cosigner::process_hardening::disable_core_dumps`] achieved, in one line.
+/// INFO only when every setting took effect; otherwise WARN naming what did not.
+fn log_core_dumps(d: &rutli_cosigner::process_hardening::CoreDumps) {
+    let pattern = d.core_pattern.as_deref().unwrap_or("unknown");
+    let suid = d.suid_dumpable.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into());
+    let linux = cfg!(target_os = "linux");
+    if d.all_applied() && !d.may_dump() {
+        tracing::info!(
+            rlimit_core_zero = d.core_limit_zero,
+            not_dumpable = d.not_dumpable,
+            core_pattern = pattern,
+            suid_dumpable = %suid,
+            "core dumps off: RLIMIT_CORE=0{}",
+            if linux { ", not dumpable" } else { " (PR_SET_DUMPABLE is Linux-only)" }
+        );
+        return;
+    }
+    let failed = [
+        (!d.core_limit_zero).then_some("RLIMIT_CORE could not be set to 0"),
+        (linux && !d.not_dumpable).then_some("PR_SET_DUMPABLE could not be cleared"),
+        d.may_dump().then_some(if d.core_pattern.as_deref().is_some_and(|p| p.starts_with('|')) {
+            "a crash can still be dumped: a piped core_pattern ignores RLIMIT_CORE for a dumpable process"
+        } else {
+            "a crash can still be dumped"
+        }),
+    ];
+    tracing::warn!(
+        rlimit_core_zero = d.core_limit_zero,
+        not_dumpable = d.not_dumpable,
+        core_pattern = pattern,
+        suid_dumpable = %suid,
+        "core dumps not fully off: {}",
+        failed.into_iter().flatten().collect::<Vec<_>>().join("; ")
+    );
 }
 
 /// Startup: the production-profile findings of a node that is not refusing on them (a production
@@ -1897,6 +1965,60 @@ fn append_sources(out: &mut String, mut source: Option<&(dyn std::error::Error +
     }
 }
 
+/// `backup-retain`: see [`Command::BackupRetain`].
+fn backup_retain_command(
+    cfg: &Config,
+    dir: &std::path::Path,
+    dry_run: bool,
+    min_proof_age_days: u64,
+    keep_older_epochs: usize,
+    keep_count: usize,
+) -> Result<()> {
+    use rutli_cosigner::backup_retain::{self as r, Skip, Verdict};
+    let settings = r::Settings {
+        node: cfg.identifier,
+        cluster_uuid: cfg.keyfile.cluster_uuid.clone(),
+        min_proof_age_ms: min_proof_age_days.saturating_mul(86_400_000),
+        keep_older_epochs,
+        keep_count,
+    };
+    let node = cfg.identifier;
+    let plan = r::run(dir, &cfg.data_dir.join("keys"), &settings, rutli_cosigner::intent::now_ms(), dry_run)
+        .map_err(|e| DaemonError::Config(format!("backup-retain: {e}")))?;
+    let (mut deleted, mut kept) = (0, 0);
+    for (name, verdict) in &plan.verdicts {
+        match verdict {
+            Verdict::Keep(why) => {
+                kept += 1;
+                println!("BACKUP_RETENTION node={node} archive={name} verdict=keep reason={}", why.code());
+            }
+            Verdict::DeleteOlderEpoch { covered_by } => {
+                deleted += 1;
+                println!(
+                    "BACKUP_RETENTION node={node} archive={name} verdict={} reason=older-epoch covered-by={covered_by}",
+                    if dry_run { "would-delete" } else { "deleted" }
+                );
+            }
+            Verdict::DeleteCountCap => {
+                deleted += 1;
+                println!(
+                    "BACKUP_RETENTION node={node} archive={name} verdict={} reason=count-cap",
+                    if dry_run { "would-delete" } else { "deleted" }
+                );
+            }
+        }
+    }
+    match &plan.skip {
+        Some(Skip::Closed(why)) => println!("BACKUP_RETENTION_SKIPPED node={node} mode=nothing-deleted reason=\"{why}\""),
+        Some(Skip::CapOnly(why)) => {
+            println!("BACKUP_RETENTION_SKIPPED node={node} mode=count-cap-only reason=\"{why}\"")
+        }
+        None => {}
+    }
+    println!("BACKUP_RETENTION_DONE node={node} archives={} kept={kept} deleted={deleted} dry_run={dry_run}", plan.verdicts.len());
+    Ok(())
+}
+
 /// `residue-scan`: see [`Command::ResidueScan`] and [`rutli_cosigner::residue`]. Exits the process.
 fn residue_scan_command(
     config_path: &std::path::Path,
@@ -2210,8 +2332,11 @@ fn seal_command(command: SealCommand) -> Result<()> {
             let dropped = bundle.without_previous();
             write_new_private_file(&out, &dropped.to_json()?)?;
             println!(
-                "wrote {} (node {}): share_dek id {}, {} previous DEK(s) dropped. Files sealed under \
-                 a dropped DEK no longer open on this node — including old backups.",
+                "wrote {} (node {}): share_dek id {}, {} previous DEK(s) removed from this bundle. \
+                 With this bundle, files sealed under a removed DEK no longer open on this node \
+                 (including old backups). The DEK is not destroyed until every other copy is: \
+                 earlier values of the seal Secret and their history, escrowed bundles, operator \
+                 machines (docs/key-material-handling.md).",
                 out.display(),
                 dropped.node,
                 dropped.dek_id(),
@@ -2763,8 +2888,10 @@ fn export_key_command(
         tracing::warn!(
             key_id,
             path = %out.display(),
-            "writing an UNENCRYPTED private key — this file IS the key; move it to an HSM or \
-             offline media and shred the copy"
+            "writing an UNENCRYPTED private key — this file IS the key. Write it only to a place \
+             you can destroy (a memory disk or an encrypted image), move it to an HSM or offline \
+             media, then destroy that place: deleting or overwriting the file does not erase it on \
+             flash, copy-on-write, journaling or network storage (docs/key-material-handling.md)"
         );
         rutli_cosigner::export::export_plaintext(key_id, &key)?
     } else {

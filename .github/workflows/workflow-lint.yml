@@ -1,0 +1,58 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# A workflow file that does not parse never runs, and nothing reports it (the Runner guard workflow
+# merged unable to run). actionlint parses every workflow, checks expressions and contexts, and runs
+# shellcheck on the `run:` scripts. It runs on every pull request and on every push to main (watched
+# by main-status.yml).
+name: Workflow lint
+
+on:
+  push:
+    branches: [main]
+  # No path filter: a job that is skipped by one never reports, and a check that may become
+  # required has to report on every pull request. It takes seconds.
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: workflow-lint-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # actionlint from its GitHub release, checked against the tarball's sha256 as listed in the
+      # release's checksums file. To bump: set ACTIONLINT_VERSION and the `linux_amd64` line of that release's
+      # actionlint_<version>_checksums.txt.
+      - name: Install actionlint
+        env:
+          ACTIONLINT_VERSION: "1.7.12"
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          set -euo pipefail
+          tmp="$(mktemp -d)"
+          tarball="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "${tmp}/${tarball}" "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${tarball}"
+          echo "${ACTIONLINT_SHA256}  ${tmp}/${tarball}" | sha256sum -c -
+          tar -xzf "${tmp}/${tarball}" -C "${tmp}" actionlint
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 "${tmp}/actionlint" "$HOME/.local/bin/actionlint"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      # SC2015 (style note: `A && B || C` is not if-then-else) is excluded: the workflows use that
+      # form on purpose as an assertion that ends the step with `|| { …; exit 1; }`.
+      - name: Lint every workflow
+        env:
+          SHELLCHECK_OPTS: -e SC2015
+        run: |
+          shellcheck --version | head -n 2
+          actionlint -color

@@ -16,6 +16,7 @@
 
 pub mod accept;
 pub mod audit_check;
+pub mod backup_retain;
 pub mod carry;
 pub mod ceremony;
 pub mod ceremony_record;
@@ -35,6 +36,7 @@ pub mod metrics;
 pub mod node;
 pub mod orchestrator;
 pub mod peer;
+pub mod process_hardening;
 pub mod profile;
 pub mod proof;
 pub mod ratelimit;
