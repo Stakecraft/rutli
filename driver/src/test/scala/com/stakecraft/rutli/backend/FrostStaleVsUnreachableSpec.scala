@@ -147,10 +147,13 @@ class FrostStaleVsUnreachableSpec extends AnyWordSpec with Matchers {
       pinFirst: Boolean,
       run: FrostBackend => Future[Any],
       isOwnFinal: Throwable => Boolean,
+      // Whether the own answer says the cosigner cannot use the key, and so becomes final by count.
+      counts: Boolean = true,
   ) {
 
-    /** How many cosigners of `n` must give the own answer before it is final: all but one. */
-    def quorum(n: Int): Int = math.max(1, n - 1)
+    /** How many cosigners of `n` must give the own answer before it is final: all but one, or
+      * never for an answer that is about the cosigner's state at the moment. */
+    def quorum(n: Int): Int = if (counts) math.max(1, n - 1) else Int.MaxValue
   }
 
   private def hasStatus(t: Throwable, code: Status.Code): Boolean = t match {
@@ -203,14 +206,23 @@ class FrostStaleVsUnreachableSpec extends AnyWordSpec with Matchers {
       pinFirst = true,
       signIt,
       hasStatus(_, Status.Code.FAILED_PRECONDITION),
+      counts = false,
     ),
-    Call("sign, leader ABORTED", Failing(Status.ABORTED), pinFirst = true, signIt, hasStatus(_, Status.Code.ABORTED)),
+    Call(
+      "sign, leader ABORTED",
+      Failing(Status.ABORTED),
+      pinFirst = true,
+      signIt,
+      hasStatus(_, Status.Code.ABORTED),
+      counts = false
+    ),
     Call(
       "sign, leader UNIMPLEMENTED",
       Failing(Status.UNIMPLEMENTED),
       pinFirst = true,
       signIt,
       hasStatus(_, Status.Code.UNIMPLEMENTED),
+      counts = false,
     ),
   )
 
@@ -305,9 +317,22 @@ class FrostStaleVsUnreachableSpec extends AnyWordSpec with Matchers {
       // The bound on Canton's retries: with two of three saying so, the one that is down could not
       // use the key alone. A key that exists nowhere is reported as such while a cosigner is down.
       val down = Status.UNAVAILABLE
-      for (call <- calls; at <- 0 to 2) withClue(s"${call.name}, unreachable at $at: ") {
+      for (call <- calls.filter(_.counts); at <- 0 to 2) withClue(s"${call.name}, unreachable at $at: ") {
         val states = Seq.tabulate[State](3)(i => if (i == at) Failing(down) else call.own)
         expected(states, call.own, Failing(down), call.quorum(3)) shouldBe OwnAnswerFinal
+        check(call, states, down)
+      }
+    }
+
+    "stay retryable while a cosigner is unreachable when the answer is about the leader's state at the moment" in {
+      // A ceremony holding the key, a session that is gone, an old release: two leaders saying so
+      // does not mean the key cannot be used, so the count never makes it final.
+      val down = Status.UNAVAILABLE
+      calls.filterNot(_.counts).map(_.name) shouldBe
+        Seq("sign, leader FAILED_PRECONDITION", "sign, leader ABORTED", "sign, leader UNIMPLEMENTED")
+      for (call <- calls.filterNot(_.counts); at <- 0 to 2) withClue(s"${call.name}, unreachable at $at: ") {
+        val states = Seq.tabulate[State](3)(i => if (i == at) Failing(down) else call.own)
+        expected(states, call.own, Failing(down), call.quorum(3)) shouldBe Retryable
         check(call, states, down)
       }
     }
@@ -343,11 +368,11 @@ class FrostStaleVsUnreachableSpec extends AnyWordSpec with Matchers {
     "need four of five answers, so that a threshold below a majority is safe too" in {
       // 2-of-5: with three cosigners saying NOT_FOUND, the two that are unreachable could still
       // sign together. Only the fourth answer leaves too few.
-      calls.map(_.quorum(5)).distinct shouldBe Seq(4)
+      calls.filter(_.counts).map(_.quorum(5)).distinct shouldBe Seq(4)
     }
 
     "fail retryably while one answer short of the bound, the other cosigners unreachable, in every rotation" in {
-      for (call <- calls; states <- rotations(roster(call, call.quorum(5) - 1)))
+      for (call <- calls.filter(_.counts); states <- rotations(roster(call, call.quorum(5) - 1)))
         withClue(s"${call.name}, ${states.mkString(" ")}: ") {
           expected(states, call.own, Failing(down), call.quorum(5)) shouldBe Retryable
           check(call, states, down)
@@ -355,7 +380,7 @@ class FrostStaleVsUnreachableSpec extends AnyWordSpec with Matchers {
     }
 
     "end with the own answer, final, at the bound, although the other cosigners are unreachable" in {
-      for (call <- calls; states <- rotations(roster(call, call.quorum(5))))
+      for (call <- calls.filter(_.counts); states <- rotations(roster(call, call.quorum(5))))
         withClue(s"${call.name}, ${states.mkString(" ")}: ") {
           expected(states, call.own, Failing(down), call.quorum(5)) shouldBe OwnAnswerFinal
           check(call, states, down)

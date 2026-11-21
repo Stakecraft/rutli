@@ -225,7 +225,7 @@ sum(rate(rutli_sign_duration_seconds_sum{result="ok"}[1h]))
    cosigner answered "not found" (or another key, or that it cannot sign) while `<endpoint>` could
    not be reached or did not answer within the attempt deadline: the driver reported a retryable
    error, not a final one, and logged `FROST: <call>: the cosigners that answered said <answer>,
-   but <endpoint> could not be reached`. It clears when that cosigner is back. It cannot go on
+   but <endpoint> did not serve the call`. It clears when that cosigner is back. It cannot go on
    for a key that exists nowhere: once enough cosigners gave the answer that the rest could not
    use the key (all but one: 2 of 3, 4 of 5), it is final. Repeated
    entries therefore mean most of the cluster is unreachable from this participant.
