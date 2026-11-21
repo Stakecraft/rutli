@@ -8,6 +8,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use frost_ed25519 as frost;
@@ -32,6 +33,50 @@ pub trait PeerApi: Send + Sync {
     /// no other node). A leader fences its own node first ([`crate::orchestrator`]).
     fn is_local(&self) -> bool {
         false
+    }
+    /// This leader's view of the peer's liveness ([`crate::liveness`]); `None` (this node, or a
+    /// peer that keeps none) reads as always up.
+    fn health(&self) -> Option<&Arc<crate::liveness::PeerHealth>> {
+        None
+    }
+    /// Whether the peer counts as reachable for the leader's quorum check: anything not known
+    /// unreachable is. A peer known unreachable is asked once more (a probe no older than `fresh`
+    /// is reused, one in flight is joined), waiting at most `wait`.
+    async fn reachable_within(&self, _fresh: std::time::Duration, _wait: std::time::Duration) -> bool {
+        true
+    }
+    /// [`PeerApi::sign_round1`] within `deadline` (the leader's clock, around the whole call): past
+    /// it, [`crate::DaemonError::PeerDeadline`].
+    async fn sign_round1_within(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        ctx: &Round1Ctx,
+        deadline: std::time::Duration,
+    ) -> Result<SigningCommitments> {
+        within(self.identifier(), CallClass::Round1, deadline, self.sign_round1(key_id, session_id, ctx)).await
+    }
+    /// [`PeerApi::sign_round2`] within `deadline`, as [`PeerApi::sign_round1_within`].
+    async fn sign_round2_within(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        message: &[u8],
+        commitments: &BTreeMap<Identifier, SigningCommitments>,
+        intent_digest: Option<&[u8; 32]>,
+        deadline: std::time::Duration,
+    ) -> Result<SignatureShare> {
+        within(
+            self.identifier(),
+            CallClass::Round2,
+            deadline,
+            self.sign_round2(key_id, session_id, message, commitments, intent_digest),
+        )
+        .await
+    }
+    /// [`PeerApi::abort_sign`] within `deadline`.
+    async fn abort_sign_within(&self, key_id: &str, session_id: &str, deadline: std::time::Duration) -> Result<()> {
+        within(self.identifier(), CallClass::Abort, deadline, self.abort_sign(key_id, session_id)).await
     }
     /// Sign round 1. `ctx` is what the leader declares for the session (its sharing of the key);
     /// a refusal because of it is [`crate::DaemonError::EpochMismatch`] or
@@ -289,7 +334,9 @@ impl PeerApi for LocalPeer {
     async fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &Round1Ctx) -> Result<SigningCommitments> {
         let (key_id, session_id, ctx) = (key_id.to_owned(), session_id.to_owned(), ctx.clone());
         let owner = self.session_owner();
-        self.node.blocking(move |n| n.sign_round1_as(&key_id, &session_id, &ctx, &owner)).await
+        self.node
+            .sign_op(crate::liveness::Round::One, move |n| n.sign_round1_as(&key_id, &session_id, &ctx, &owner))
+            .await
     }
     async fn sign_round2(
         &self,
@@ -303,7 +350,9 @@ impl PeerApi for LocalPeer {
         let (message, commitments, digest) = (message.to_vec(), commitments.clone(), intent_digest.copied());
         let owner = self.session_owner();
         self.node
-            .blocking(move |n| n.sign_round2_as(&key_id, &session_id, &message, &commitments, digest, &owner))
+            .sign_op(crate::liveness::Round::Two, move |n| {
+                n.sign_round2_as(&key_id, &session_id, &message, &commitments, digest, &owner)
+            })
             .await
     }
     async fn abort_sign(&self, key_id: &str, session_id: &str) -> Result<()> {
@@ -527,21 +576,256 @@ impl PeerApi for LocalPeer {
     }
 }
 
-/// Deadline on every mesh RPC (and on establishing the connection for it).
+/// Deadline of a ceremony or hosted-key call (DKG/refresh parts, fences, commits, replicas,
+/// listings), and tonic's own backstop on every mesh RPC (`Endpoint::timeout`).
 ///
-/// Every peer RPC is small — a signing round, a ceremony part, a hosted-key replica or listing — so
-/// anything slower is a sick peer (a hung volume, a wedged process), and waiting on it would hold
-/// the leader past the driver's own deadline. A timeout surfaces as `CANCELLED: Timeout expired`:
-/// in sign round 1 the peer is skipped like any failure, in a ceremony it fails the ceremony (which
-/// rolls back), and a hosted-key write treats it as unreachable. It can never cause a nonce reuse:
-/// the leader never re-sends a round 2 (it aborts and starts a fresh session), and a peer burns its
-/// nonce marker before it computes a share, whether or not anyone is still waiting for the reply.
-pub const PEER_RPC_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Every peer RPC is small, so anything slower is a sick peer (a hung volume, a wedged process).
+/// The deadline is the leader's own clock around the whole call ([`CallClass`]): queue, connect and
+/// RPC, so a dead peer's queue never drains one connect timeout at a time. A call past it is
+/// [`crate::DaemonError::PeerDeadline`]: in a sign round the member is excluded from that signature,
+/// in a ceremony it fails the ceremony (which rolls back), and a hosted-key write treats it as
+/// unreachable. It can never cause a nonce reuse: the leader never re-sends a round 2 (it aborts and
+/// starts a fresh session, fresh nonces on every member), and a member's round 2 takes the session's
+/// nonces out of memory under the session lock before it signs, so a late round 2 or an abort that
+/// races it finds nothing to use again.
+pub const PEER_RPC_TIMEOUT: Duration = Duration::from_secs(10);
+/// Sign round 1 (memory only on the member, with room for a fresh connection).
+pub const ROUND1_DEADLINE: Duration = Duration::from_secs(2);
+/// Sign round 2 (two fsyncs on the member, plus queueing under a burst).
+pub const ROUND2_DEADLINE: Duration = Duration::from_secs(5);
+/// Aborting a sign session (memory only).
+pub const ABORT_DEADLINE: Duration = Duration::from_secs(1);
+/// Control calls: `NodeInfo`, `KeyEpoch`, `CeremonyStatus`.
+pub const CONTROL_DEADLINE: Duration = Duration::from_secs(3);
+/// The breaker's `NodeInfo` probe.
+pub const PROBE_DEADLINE: Duration = Duration::from_secs(2);
+/// TCP connect plus TLS handshake and pin check ([`crate::tls::PeerDial`] and the endpoint): one
+/// lost SYN (1 s retransmit) plus a few WAN round trips.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+/// HTTP/2 keepalive on peer channels, also while idle: a PING every 5 s without traffic, and the
+/// connection closed when its PONG does not come within 3 s — a dead connection (a partition, a
+/// replaced pod, a paused container whose kernel still ACKs) is gone at most 8 s after its last
+/// read, and tonic dials afresh (re-resolving the name) on the next call.
+pub const H2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
+pub const H2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(3);
+/// While a peer is unreachable, its `NodeInfo` probe runs this often (one at a time).
+pub const PROBE_EVERY: Duration = Duration::from_secs(1);
+/// A stalled or refusing peer is tried as a trial after this window, doubling on every failed
+/// trial up to [`BREAKER_WINDOW_CAP`].
+pub const BREAKER_WINDOW: Duration = Duration::from_secs(2);
+pub const BREAKER_WINDOW_CAP: Duration = Duration::from_secs(30);
+/// The progress test's probe after a sign round passed its deadline with nothing heard meanwhile.
+pub const PROGRESS_PROBE_DEADLINE: Duration = Duration::from_secs(1);
+/// How long the quorum check waits for probes of unreachable peers before refusing.
+pub const QUORUM_PROBE_WAIT: Duration = Duration::from_millis(1500);
+/// A probe younger than this is reused by the quorum check.
+pub const PROBE_FRESH: Duration = Duration::from_secs(3);
+/// Time a sign round leaves for the rest of the signature: a round's deadline is at most the
+/// client's time left minus this, and no new subset starts with less than this left.
+pub const ROUND_RESERVE: Duration = Duration::from_secs(1);
+/// Signatures this node may lead at once before it answers `overloaded` without contacting a
+/// member. Provisional: perf's ramp run (the knee) decides the number. Why 512 for now:
+///
+/// - the blocking pool is tokio's default, 512 threads (`main.rs` does not change it). A signature
+///   led here holds at most one of them at a time on this node (its own round, then the
+///   aggregation), so up to 512 led signatures cannot queue this leader's own work behind itself;
+///   rounds it serves for other leaders share the same pool, which is what its own round deadline
+///   ([`Overloaded`](crate::DaemonError::Overloaded) when it misses it) catches;
+/// - the per-key session caps on each member bound what one key can hold anyway: at most 256
+///   waiting sessions from one opener ([`crate::node::MAX_PENDING_SIGN_SESSIONS_PER_OPENER`]), and
+///   this leader opens one per member per attempt, so on one key the members answer `sessions-full`
+///   well before 512; the limit here is the bound across keys.
+pub const MAX_LEADER_SIGNS_IN_FLIGHT: usize = 512;
+
+/// What a peer call is: its deadline, and what its failure tells the breaker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallClass {
+    Round1,
+    Round2,
+    Abort,
+    /// `NodeInfo` and other calls answered from memory: past its deadline the peer is unreachable.
+    Control,
+    /// `KeyEpoch`, `CeremonyStatus`: control calls that read the peer's key store. Their deadline is
+    /// [`CONTROL_DEADLINE`] too, but past it the breaker is not opened — a slow store is not an
+    /// unreachable peer (its own readiness probe and the sign rounds judge the store).
+    StoreRead,
+    Probe,
+    /// Ceremony parts and hosted-key writes and reads: [`PEER_RPC_TIMEOUT`], ignored by the breaker.
+    Ceremony,
+}
+
+impl CallClass {
+    /// The call's name in [`crate::DaemonError::PeerDeadline`].
+    pub fn name(self) -> &'static str {
+        match self {
+            CallClass::Round1 => "sign round 1",
+            CallClass::Round2 => "sign round 2",
+            CallClass::Abort => "sign abort",
+            CallClass::Control | CallClass::StoreRead => "a control call",
+            CallClass::Probe => "a probe",
+            CallClass::Ceremony => "a ceremony or hosted-key call",
+        }
+    }
+
+    /// The `call` label of `rutli_peer_call_duration_seconds`, for the classes it covers.
+    fn metric(self) -> Option<&'static str> {
+        match self {
+            CallClass::Round1 => Some("sign_round1"),
+            CallClass::Round2 => Some("sign_round2"),
+            CallClass::Abort => Some("abort"),
+            CallClass::Control | CallClass::StoreRead | CallClass::Probe => Some("control"),
+            CallClass::Ceremony => None,
+        }
+    }
+}
+
+/// The liveness constants above, as one value: production defaults, overridable by tests
+/// ([`GrpcPeer::with_liveness`], [`Node::with_liveness`]). Not configuration: no knob reaches it.
+#[derive(Clone, Debug)]
+pub struct Liveness {
+    pub round1: Duration,
+    pub round2: Duration,
+    pub abort: Duration,
+    pub control: Duration,
+    pub probe: Duration,
+    pub ceremony: Duration,
+    pub probe_every: Duration,
+    pub window: Duration,
+    pub window_cap: Duration,
+    pub progress_probe: Duration,
+    pub quorum_wait: Duration,
+    pub probe_fresh: Duration,
+    pub round_reserve: Duration,
+    pub leader_inflight_limit: usize,
+    /// A signature's budget without a client deadline ([`crate::orchestrator::SIGN_BUDGET`]).
+    pub sign_budget: Duration,
+}
+
+impl Default for Liveness {
+    fn default() -> Self {
+        Self {
+            round1: ROUND1_DEADLINE,
+            round2: ROUND2_DEADLINE,
+            abort: ABORT_DEADLINE,
+            control: CONTROL_DEADLINE,
+            probe: PROBE_DEADLINE,
+            ceremony: PEER_RPC_TIMEOUT,
+            probe_every: PROBE_EVERY,
+            window: BREAKER_WINDOW,
+            window_cap: BREAKER_WINDOW_CAP,
+            progress_probe: PROGRESS_PROBE_DEADLINE,
+            quorum_wait: QUORUM_PROBE_WAIT,
+            probe_fresh: PROBE_FRESH,
+            round_reserve: ROUND_RESERVE,
+            leader_inflight_limit: MAX_LEADER_SIGNS_IN_FLIGHT,
+            sign_budget: crate::orchestrator::SIGN_BUDGET,
+        }
+    }
+}
+
+impl Liveness {
+    /// The deadline of a call of `class`.
+    pub fn deadline(&self, class: CallClass) -> Duration {
+        match class {
+            CallClass::Round1 => self.round1,
+            CallClass::Round2 => self.round2,
+            CallClass::Abort => self.abort,
+            CallClass::Control | CallClass::StoreRead => self.control,
+            CallClass::Probe => self.probe,
+            CallClass::Ceremony => self.ceremony,
+        }
+    }
+
+    /// How long a taken trial is held before another signature may take it: one round 1 plus one
+    /// round 2.
+    pub fn trial_hold(&self) -> Duration {
+        self.round1 + self.round2
+    }
+}
+
+/// `fut` within `deadline`, or [`crate::DaemonError::PeerDeadline`] for `peer`.
+pub async fn within<T>(
+    peer: Identifier,
+    class: CallClass,
+    deadline: Duration,
+    fut: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    match tokio::time::timeout(deadline, fut).await {
+        Ok(result) => result,
+        Err(_) => Err(crate::DaemonError::PeerDeadline {
+            peer: crate::hosted::identifier_index(peer).unwrap_or(0),
+            call: class.name(),
+            after: deadline,
+        }),
+    }
+}
+
+/// What a peer's failed call tells its breaker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Failure {
+    /// No transport to the peer: connect or TLS failure, a connection closed under the call
+    /// (keepalive, GOAWAY), UNAVAILABLE without a `rutli-error` trailer (also an older peer's
+    /// key-store refusal).
+    Hard,
+    /// It answered that its key store is down (the `keystore-down` trailer).
+    KeystoreDown,
+    /// It answered: a refusal of any kind, UNAVAILABLE with another trailer included.
+    Answered,
+    /// A client-side timer (tonic's "Timeout expired": the request's own `grpc-timeout`, or the
+    /// endpoint's backstop): the caller's deadline, not an answer.
+    Silent,
+}
+
+/// Classify a peer call's failure for the breaker (and, through [`is_hard_failure`], for the
+/// hosted-key write quorum).
+pub fn classify(status: &tonic::Status) -> Failure {
+    let trailer = status.metadata().get(crate::error::ERROR_TRAILER).and_then(|v| v.to_str().ok());
+    match trailer {
+        Some(crate::error::KEYSTORE_DOWN) => return Failure::KeystoreDown,
+        Some(_) => return Failure::Answered,
+        None => {}
+    }
+    let m = status.message();
+    match status.code() {
+        tonic::Code::Unavailable => Failure::Hard,
+        tonic::Code::Cancelled if m.contains("Timeout expired") => Failure::Silent,
+        // tonic reports a connection that failed below the RPC layer as Unknown "transport error",
+        // and an HTTP/2 failure as "h2 protocol error: …" (whatever its code). A refusal from our
+        // own code always carries a specific code and never these messages.
+        tonic::Code::Unknown if m.contains("transport error") || m.contains("connection") => Failure::Hard,
+        _ if m.starts_with("h2 protocol error") => Failure::Hard,
+        _ => Failure::Answered,
+    }
+}
+
+/// Whether `e` says the peer could not be reached at all (as opposed to an answer): a transport
+/// error, or a status [`classify`] reads as hard.
+pub fn is_hard_failure(e: &crate::DaemonError) -> bool {
+    match e {
+        crate::DaemonError::Transport(_) => true,
+        crate::DaemonError::Status(s) => classify(s) == Failure::Hard,
+        _ => false,
+    }
+}
+
+/// A request carrying `deadline` as its `grpc-timeout`, so the peer drops the handler of a call
+/// the leader stopped waiting for.
+fn timed<T>(msg: T, deadline: Duration) -> tonic::Request<T> {
+    let mut req = tonic::Request::new(msg);
+    req.set_timeout(deadline);
+    req
+}
 
 /// A remote cosigner, over gRPC. The channel connects lazily; FROST packages ride as JSON bytes.
+/// Keeps this leader's view of the peer's liveness ([`crate::liveness::PeerHealth`]).
 pub struct GrpcPeer {
+    inner: Arc<GrpcInner>,
+}
+
+struct GrpcInner {
     identifier: Identifier,
     client: PeerClient<tonic::transport::Channel>,
+    health: Arc<crate::liveness::PeerHealth>,
 }
 
 impl GrpcPeer {
@@ -556,9 +840,8 @@ impl GrpcPeer {
             None => {
                 let ep = tonic::transport::Endpoint::from_shared(endpoint.to_string())
                     .map_err(|e| crate::DaemonError::Config(format!("bad endpoint {endpoint}: {e}")))?
-                    .timeout(PEER_RPC_TIMEOUT)
-                    .connect_timeout(PEER_RPC_TIMEOUT);
-                Ok(Self { identifier, client: PeerClient::new(ep.connect_lazy()) })
+                    .tcp_keepalive(Some(crate::tls::TCP_KEEPALIVE));
+                Ok(Self::new(identifier, PeerClient::new(liveness_endpoint(ep).connect_lazy())))
             }
         }
     }
@@ -577,38 +860,287 @@ impl GrpcPeer {
         C::Error: Into<crate::tls::BoxError>,
         hyper_util::rt::TokioIo<C::Response>: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
     {
-        let channel = dial
-            .endpoint(endpoint)?
-            .timeout(PEER_RPC_TIMEOUT)
-            .connect_timeout(PEER_RPC_TIMEOUT)
-            .connect_with_connector_lazy(connector);
-        Ok(Self { identifier, client: PeerClient::new(channel) })
+        let channel = liveness_endpoint(dial.endpoint(endpoint)?).connect_with_connector_lazy(connector);
+        Ok(Self::new(identifier, PeerClient::new(channel)))
+    }
+
+    fn new(identifier: Identifier, client: PeerClient<tonic::transport::Channel>) -> Self {
+        let index = crate::hosted::identifier_index(identifier).unwrap_or(0);
+        let health = Arc::new(crate::liveness::PeerHealth::new(index, Liveness::default()));
+        Self { inner: Arc::new(GrpcInner { identifier, client, health }) }
+    }
+
+    /// This peer with other liveness timings (tests). Call before the peer is used.
+    pub fn with_liveness(mut self, timing: Liveness) -> Self {
+        let inner = Arc::get_mut(&mut self.inner).expect("set the liveness timings before the peer is shared");
+        inner.health = Arc::new(crate::liveness::PeerHealth::new(inner.health.peer(), timing));
+        self
+    }
+}
+
+/// The peer endpoint's liveness settings: HTTP/2 keepalive (also while idle), the connect bound,
+/// and tonic's per-RPC backstop. The per-call deadlines are the leader's own ([`CallClass`]).
+fn liveness_endpoint(ep: tonic::transport::Endpoint) -> tonic::transport::Endpoint {
+    ep.timeout(PEER_RPC_TIMEOUT)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .http2_keep_alive_interval(H2_KEEPALIVE_INTERVAL)
+        .keep_alive_timeout(H2_KEEPALIVE_TIMEOUT)
+        .keep_alive_while_idle(true)
+}
+
+impl GrpcInner {
+    fn timing(&self) -> &Liveness {
+        self.health.timing()
+    }
+
+    fn index(&self) -> u16 {
+        self.health.peer()
+    }
+
+    /// One RPC of `class` within `deadline` (sent as its `grpc-timeout` by `rpc`), feeding the
+    /// breaker and the call-duration histogram; a status error is mapped by `map`.
+    async fn call<T, Fut>(
+        self: &Arc<Self>,
+        class: CallClass,
+        deadline: Duration,
+        map: impl FnOnce(tonic::Status) -> crate::DaemonError,
+        rpc: impl FnOnce(PeerClient<tonic::transport::Channel>) -> Fut,
+    ) -> Result<T>
+    where
+        Fut: std::future::Future<Output = std::result::Result<tonic::Response<T>, tonic::Status>>,
+    {
+        let mark = self.health.mark();
+        let started = tokio::time::Instant::now();
+        let outcome = tokio::time::timeout(deadline, rpc(self.client.clone())).await;
+        if let Some(call) = class.metric() {
+            metrics::histogram!(crate::metrics::PEER_CALL_DURATION, "call" => call)
+                .record(started.elapsed().as_secs_f64());
+        }
+        match outcome {
+            // tonic enforces the request's own `grpc-timeout` too, and at the same instant may win
+            // the race with the timer above: the same deadline either way.
+            Ok(Err(status)) if classify(&status) == Failure::Silent => {
+                self.on_deadline(class, mark);
+                Err(crate::DaemonError::PeerDeadline { peer: self.index(), call: class.name(), after: deadline })
+            }
+            Ok(Ok(reply)) => {
+                self.health.note_reply(crate::liveness::Load::from_metadata(reply.metadata()));
+                match class {
+                    CallClass::Round1 => self.health.note_done(crate::liveness::Round::One),
+                    CallClass::Round2 => self.health.note_done(crate::liveness::Round::Two),
+                    _ => {}
+                }
+                self.health.on_success(class);
+                Ok(reply.into_inner())
+            }
+            Ok(Err(status)) => {
+                self.observe(&status);
+                Err(map(status))
+            }
+            Err(_) => {
+                self.on_deadline(class, mark);
+                Err(crate::DaemonError::PeerDeadline { peer: self.index(), call: class.name(), after: deadline })
+            }
+        }
+    }
+
+    /// What a failed call's status tells the breaker.
+    fn observe(self: &Arc<Self>, status: &tonic::Status) {
+        match classify(status) {
+            Failure::Hard => self.open(crate::liveness::DownReason::Unreachable),
+            Failure::KeystoreDown => {
+                self.health.note_reply(crate::liveness::Load::from_metadata(status.metadata()));
+                self.open(crate::liveness::DownReason::Refusing);
+            }
+            Failure::Answered => {
+                self.health.note_reply(crate::liveness::Load::from_metadata(status.metadata()));
+                self.health.on_answer();
+            }
+            Failure::Silent => {}
+        }
+    }
+
+    fn open(self: &Arc<Self>, reason: crate::liveness::DownReason) {
+        self.health.open(reason);
+        self.ensure_prober();
+    }
+
+    /// A call passed its deadline. A sign round is judged by the progress test in the background
+    /// (the member is excluded from its signature either way); a memory-only control call or a
+    /// probe is an unreachable peer; a control call that reads the store, an abort or a ceremony
+    /// call says nothing to the breaker.
+    fn on_deadline(self: &Arc<Self>, class: CallClass, mark: crate::liveness::Mark) {
+        use crate::liveness::{Judged, Round};
+        let round = match class {
+            CallClass::Round1 => Round::One,
+            CallClass::Round2 => Round::Two,
+            CallClass::Control | CallClass::Probe => return self.open(crate::liveness::DownReason::Unreachable),
+            CallClass::StoreRead | CallClass::Abort | CallClass::Ceremony => return,
+        };
+        let Ok(rt) = tokio::runtime::Handle::try_current() else { return };
+        // Sorted after up peers until the verdict, so the next signatures do not walk into the same
+        // deadline meanwhile.
+        self.health.suspect(self.timing().progress_probe + self.timing().abort);
+        let inner = self.clone();
+        rt.spawn(async move {
+            let reason = match inner.health.judge(round, &mark) {
+                Judged::Busy => None,
+                Judged::Probe => {
+                    let probed = inner.probe(mark.at, inner.timing().progress_probe).await;
+                    inner.health.judge_probe(round, &mark, probed)
+                }
+            };
+            inner.health.clear_suspect();
+            match reason {
+                Some(reason) => inner.open(reason),
+                None => tracing::debug!(peer = inner.index(), ?round, "a sign round passed its deadline on a busy cosigner (it made progress meanwhile): not marked down"),
+            }
+        });
+    }
+
+    /// One `NodeInfo` probe, single flight: a probe that finished after `since` is reused, one in
+    /// flight is joined. Records the answer's load; changes no state (the caller decides).
+    async fn probe(self: &Arc<Self>, since: tokio::time::Instant, deadline: Duration) -> crate::liveness::Probed {
+        use crate::liveness::Probed;
+        let _slot = self.health.probe_slot.lock().await;
+        if let Some(last) = self.health.last_probe() {
+            if last.at >= since {
+                return last.outcome;
+            }
+        }
+        let started = tokio::time::Instant::now();
+        let answer =
+            tokio::time::timeout(deadline, self.client.clone().node_info(timed(pb::NodeInfoRequest {}, deadline))).await;
+        metrics::histogram!(crate::metrics::PEER_CALL_DURATION, "call" => "control")
+            .record(started.elapsed().as_secs_f64());
+        let outcome = match answer {
+            Ok(Ok(reply)) => {
+                let load = crate::liveness::Load::from_metadata(reply.metadata());
+                self.health.note_reply(load);
+                Probed::Answered(load)
+            }
+            Ok(Err(status)) => match classify(&status) {
+                Failure::Hard | Failure::Silent => Probed::Failed,
+                Failure::KeystoreDown | Failure::Answered => {
+                    let load = crate::liveness::Load::from_metadata(status.metadata());
+                    self.health.note_reply(load);
+                    Probed::Answered(load)
+                }
+            },
+            Err(_) => Probed::Failed,
+        };
+        self.health.record_probe(outcome);
+        outcome
+    }
+
+    /// Start the background prober unless it runs (then wake it). It probes a down peer — every
+    /// [`PROBE_EVERY`] while unreachable, at the end of each window while stalled or refusing —
+    /// and stops once the peer is up or the peer handle is gone.
+    fn ensure_prober(self: &Arc<Self>) {
+        if self.health.prober.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            self.health.wake.notify_one();
+            return;
+        }
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            self.health.prober.store(false, std::sync::atomic::Ordering::Release);
+            return;
+        };
+        let (weak, health) = (Arc::downgrade(self), self.health.clone());
+        rt.spawn(async move {
+            use std::sync::atomic::Ordering;
+            loop {
+                let Some(wait) = health.next_probe_in() else {
+                    health.prober.store(false, Ordering::Release);
+                    // Opened again between the check and the store: carry on, unless another
+                    // prober took over.
+                    if health.next_probe_in().is_some() && !health.prober.swap(true, Ordering::AcqRel) {
+                        continue;
+                    }
+                    return;
+                };
+                tokio::select! {
+                    _ = tokio::time::sleep(wait) => {}
+                    _ = health.wake.notified() => {}
+                }
+                let Some(inner) = weak.upgrade() else {
+                    health.prober.store(false, Ordering::Release);
+                    return;
+                };
+                let probed = inner.probe(tokio::time::Instant::now(), inner.timing().probe).await;
+                drop(inner);
+                health.after_probe(probed);
+            }
+        });
+    }
+
+    fn deadline(&self, class: CallClass) -> Duration {
+        self.timing().deadline(class)
     }
 }
 
 #[async_trait]
 impl PeerApi for GrpcPeer {
     fn identifier(&self) -> Identifier {
-        self.identifier
+        self.inner.identifier
+    }
+
+    fn health(&self) -> Option<&Arc<crate::liveness::PeerHealth>> {
+        Some(&self.inner.health)
+    }
+
+    async fn reachable_within(&self, fresh: Duration, wait: Duration) -> bool {
+        use crate::liveness::Probed;
+        let h = &self.inner.health;
+        if !h.is_unreachable() && !h.is_suspect() {
+            return true;
+        }
+        if let Some(last) = h.last_probe() {
+            if last.at.elapsed() < fresh && matches!(last.outcome, Probed::Failed) {
+                return false;
+            }
+        }
+        // Joins the probe a deadline's judgment (or the prober) has in flight, else starts one.
+        let probe = self.inner.probe(tokio::time::Instant::now(), wait.min(self.inner.timing().probe));
+        match tokio::time::timeout(wait, probe).await {
+            Ok(probed) => {
+                h.after_probe(probed);
+                matches!(probed, Probed::Answered(_)) && !h.is_unreachable()
+            }
+            Err(_) => false,
+        }
     }
 
     async fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &Round1Ctx) -> Result<SigningCommitments> {
+        self.sign_round1_within(key_id, session_id, ctx, self.inner.deadline(CallClass::Round1)).await
+    }
+
+    async fn sign_round1_within(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        ctx: &Round1Ctx,
+        deadline: Duration,
+    ) -> Result<SigningCommitments> {
+        let msg = pb::SignRound1Request {
+            key_id: key_id.into(),
+            session_id: session_id.into(),
+            epoch: ctx.leader_view.map(|v| v.0).unwrap_or(0),
+            pkp_digest: ctx.leader_view.map(|v| v.1.to_vec()).unwrap_or_default(),
+            message: ctx.message.clone().unwrap_or_default(),
+            signers: ctx.signers.iter().flatten().map(|&i| u32::from(i)).collect(),
+            intent: ctx.intent.clone(),
+            purpose: if ctx.sign_test { crate::intent::PURPOSE_SIGN_TEST.into() } else { String::new() },
+        };
+        let leader_view = ctx.leader_view;
         let reply = self
-            .client
-            .clone()
-            .sign_round1(pb::SignRound1Request {
-                key_id: key_id.into(),
-                session_id: session_id.into(),
-                epoch: ctx.leader_view.map(|v| v.0).unwrap_or(0),
-                pkp_digest: ctx.leader_view.map(|v| v.1.to_vec()).unwrap_or_default(),
-                message: ctx.message.clone().unwrap_or_default(),
-                signers: ctx.signers.iter().flatten().map(|&i| u32::from(i)).collect(),
-                intent: ctx.intent.clone(),
-                purpose: if ctx.sign_test { crate::intent::PURPOSE_SIGN_TEST.into() } else { String::new() },
-            })
-            .await
-            .map_err(|s| crate::DaemonError::from_peer_status(s, key_id, ctx.leader_view))?
-            .into_inner();
+            .inner
+            .call(
+                CallClass::Round1,
+                deadline,
+                |s| crate::DaemonError::from_peer_status(s, key_id, leader_view),
+                |mut c| async move { c.sign_round1(timed(msg, deadline)).await },
+            )
+            .await?;
         Ok(serde_json::from_slice(&reply.commitments)?)
     }
 
@@ -620,59 +1152,87 @@ impl PeerApi for GrpcPeer {
         commitments: &BTreeMap<Identifier, SigningCommitments>,
         intent_digest: Option<&[u8; 32]>,
     ) -> Result<SignatureShare> {
+        let deadline = self.inner.deadline(CallClass::Round2);
+        self.sign_round2_within(key_id, session_id, message, commitments, intent_digest, deadline).await
+    }
+
+    async fn sign_round2_within(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        message: &[u8],
+        commitments: &BTreeMap<Identifier, SigningCommitments>,
+        intent_digest: Option<&[u8; 32]>,
+        deadline: Duration,
+    ) -> Result<SignatureShare> {
+        let msg = pb::SignRound2Request {
+            key_id: key_id.into(),
+            session_id: session_id.into(),
+            message: message.to_vec(),
+            commitments_map: serde_json::to_vec(commitments)?,
+            intent_digest: intent_digest.map(|d| d.to_vec()).unwrap_or_default(),
+        };
         let reply = self
-            .client
-            .clone()
-            .sign_round2(pb::SignRound2Request {
-                key_id: key_id.into(),
-                session_id: session_id.into(),
-                message: message.to_vec(),
-                commitments_map: serde_json::to_vec(commitments)?,
-                intent_digest: intent_digest.map(|d| d.to_vec()).unwrap_or_default(),
-            })
-            .await
-            .map_err(|s| crate::DaemonError::from_peer_status(s, key_id, None))?
-            .into_inner();
+            .inner
+            .call(
+                CallClass::Round2,
+                deadline,
+                |s| crate::DaemonError::from_peer_status(s, key_id, None),
+                |mut c| async move { c.sign_round2(timed(msg, deadline)).await },
+            )
+            .await?;
         Ok(serde_json::from_slice(&reply.share)?)
     }
 
     async fn abort_sign(&self, key_id: &str, session_id: &str) -> Result<()> {
-        self.client
-            .clone()
-            .abort_sign(pb::AbortSignRequest {
-                key_id: key_id.into(),
-                session_id: session_id.into(),
+        self.abort_sign_within(key_id, session_id, self.inner.deadline(CallClass::Abort)).await
+    }
+
+    async fn abort_sign_within(&self, key_id: &str, session_id: &str, deadline: Duration) -> Result<()> {
+        let msg = pb::AbortSignRequest { key_id: key_id.into(), session_id: session_id.into() };
+        self.inner
+            .call(CallClass::Abort, deadline, crate::DaemonError::Status, |mut c| async move {
+                c.abort_sign(timed(msg, deadline)).await
             })
             .await?;
         Ok(())
     }
 
     async fn ceremony_fence(&self, ceremony_id: &str, key_id: &str, kind: &'static str) -> Result<()> {
-        self.client
-            .clone()
-            .ceremony_fence(pb::CeremonyFenceRequest {
-                ceremony_id: ceremony_id.into(),
-                key_id: key_id.into(),
-                kind: kind.into(),
-                ..Default::default()
+        let d = self.inner.deadline(CallClass::Ceremony);
+        let msg = pb::CeremonyFenceRequest {
+            ceremony_id: ceremony_id.into(),
+            key_id: key_id.into(),
+            kind: kind.into(),
+            ..Default::default()
+        };
+        self.inner
+            .call(CallClass::Ceremony, d, crate::DaemonError::Status, |mut c| async move {
+                c.ceremony_fence(timed(msg, d)).await
             })
             .await?;
         Ok(())
     }
 
     async fn ceremony_release(&self, ceremony_id: &str, key_id: &str) -> Result<()> {
-        self.client
-            .clone()
-            .ceremony_release(pb::CeremonyReleaseRequest {
-                ceremony_id: ceremony_id.into(),
-                key_id: key_id.into(),
+        let d = self.inner.deadline(CallClass::Ceremony);
+        let msg = pb::CeremonyReleaseRequest { ceremony_id: ceremony_id.into(), key_id: key_id.into() };
+        self.inner
+            .call(CallClass::Ceremony, d, crate::DaemonError::Status, |mut c| async move {
+                c.ceremony_release(timed(msg, d)).await
             })
             .await?;
         Ok(())
     }
 
     async fn node_info(&self) -> Result<(u16, [u8; 32])> {
-        let reply = self.client.clone().node_info(pb::NodeInfoRequest {}).await?.into_inner();
+        let d = self.inner.deadline(CallClass::Control);
+        let reply = self
+            .inner
+            .call(CallClass::Control, d, crate::DaemonError::Status, |mut c| async move {
+                c.node_info(timed(pb::NodeInfoRequest {}, d)).await
+            })
+            .await?;
         let pk: [u8; 32] = reply
             .dist_public_key
             .as_slice()
@@ -684,8 +1244,15 @@ impl PeerApi for GrpcPeer {
             })?;
         Ok((reply.identifier as u16, pk))
     }
+
     async fn hosted_specs(&self) -> Result<Vec<String>> {
-        let reply = self.client.clone().node_info(pb::NodeInfoRequest {}).await?.into_inner();
+        let d = self.inner.deadline(CallClass::Control);
+        let reply = self
+            .inner
+            .call(CallClass::Control, d, crate::DaemonError::Status, |mut c| async move {
+                c.node_info(timed(pb::NodeInfoRequest {}, d)).await
+            })
+            .await?;
         Ok(reply.hosted_key_specs)
     }
 
@@ -696,25 +1263,37 @@ impl PeerApi for GrpcPeer {
         spec: &str,
         intent: Option<&pb::SignedIntent>,
     ) -> Result<()> {
-        self.client
-            .clone()
-            .ceremony_fence(pb::CeremonyFenceRequest {
-                ceremony_id: ceremony_id.into(),
-                key_id: key_id.into(),
-                kind: "genkey".into(),
-                spec: spec.into(),
-                intent: intent.cloned(),
-                ..Default::default()
-            })
-            .await
-            // A peer's policy refusal keeps its type (the `policy-refused` trailer), so the leader
-            // answers its client PERMISSION_DENIED too.
-            .map_err(|s| crate::DaemonError::from_peer_status(s, key_id, None))?;
+        let d = self.inner.deadline(CallClass::Ceremony);
+        let msg = pb::CeremonyFenceRequest {
+            ceremony_id: ceremony_id.into(),
+            key_id: key_id.into(),
+            kind: "genkey".into(),
+            spec: spec.into(),
+            intent: intent.cloned(),
+            ..Default::default()
+        };
+        // A peer's policy refusal keeps its type (the `policy-refused` trailer), so the leader
+        // answers its client PERMISSION_DENIED too.
+        self.inner
+            .call(
+                CallClass::Ceremony,
+                d,
+                |s| crate::DaemonError::from_peer_status(s, key_id, None),
+                |mut c| async move { c.ceremony_fence(timed(msg, d)).await },
+            )
+            .await?;
         Ok(())
     }
 
     async fn hosted_protocol(&self) -> Result<u32> {
-        Ok(self.client.clone().node_info(pb::NodeInfoRequest {}).await?.into_inner().hosted_protocol)
+        let d = self.inner.deadline(CallClass::Control);
+        let reply = self
+            .inner
+            .call(CallClass::Control, d, crate::DaemonError::Status, |mut c| async move {
+                c.node_info(timed(pb::NodeInfoRequest {}, d)).await
+            })
+            .await?;
+        Ok(reply.hosted_protocol)
     }
 
     async fn replicate_key(
@@ -725,41 +1304,49 @@ impl PeerApi for GrpcPeer {
         public_key_der: &[u8],
         wrapped: &crate::wrap::Wrapped,
     ) -> Result<Vec<u8>> {
+        let d = self.inner.deadline(CallClass::Ceremony);
+        let msg = pb::ReplicateKeyRequest {
+            ceremony_id: ceremony_id.into(),
+            key_id: key_id.into(),
+            spec: spec.into(),
+            public_key_der: public_key_der.to_vec(),
+            wrapped: Some(to_pb_wrapped(wrapped)),
+        };
         let reply = self
-            .client
-            .clone()
-            .replicate_key(pb::ReplicateKeyRequest {
-                ceremony_id: ceremony_id.into(),
-                key_id: key_id.into(),
-                spec: spec.into(),
-                public_key_der: public_key_der.to_vec(),
-                wrapped: Some(to_pb_wrapped(wrapped)),
-            })
-            .await
-            // A conflict keeps its type across the mesh (the `hosted-conflict` trailer).
-            .map_err(|s| crate::DaemonError::from_peer_status(s, key_id, None))?
-            .into_inner();
+            .inner
+            .call(
+                CallClass::Ceremony,
+                d,
+                // A conflict keeps its type across the mesh (the `hosted-conflict` trailer).
+                |s| crate::DaemonError::from_peer_status(s, key_id, None),
+                |mut c| async move { c.replicate_key(timed(msg, d)).await },
+            )
+            .await?;
         Ok(reply.commitment)
     }
 
     async fn fetch_key(&self, key_id: &str) -> Result<(String, Vec<u8>, crate::wrap::Wrapped)> {
+        let d = self.inner.deadline(CallClass::Ceremony);
+        let msg = pb::FetchKeyRequest { key_id: key_id.into(), include_tombstone: false };
         let reply = self
-            .client
-            .clone()
-            .fetch_key(pb::FetchKeyRequest { key_id: key_id.into(), include_tombstone: false })
-            .await?
-            .into_inner();
+            .inner
+            .call(CallClass::Ceremony, d, crate::DaemonError::Status, |mut c| async move {
+                c.fetch_key(timed(msg, d)).await
+            })
+            .await?;
         let wrapped = from_pb_wrapped(reply.wrapped)?;
         Ok((reply.spec, reply.public_key_der, wrapped))
     }
 
     async fn fetch_key_state(&self, key_id: &str) -> Result<FetchedCopy> {
+        let d = self.inner.deadline(CallClass::Ceremony);
+        let msg = pb::FetchKeyRequest { key_id: key_id.into(), include_tombstone: true };
         let reply = self
-            .client
-            .clone()
-            .fetch_key(pb::FetchKeyRequest { key_id: key_id.into(), include_tombstone: true })
-            .await?
-            .into_inner();
+            .inner
+            .call(CallClass::Ceremony, d, crate::DaemonError::Status, |mut c| async move {
+                c.fetch_key(timed(msg, d)).await
+            })
+            .await?;
         if let Some(t) = reply.tombstone.filter(|t| t.tombstone) {
             return Ok(FetchedCopy::Tombstone(Box::new(t)));
         }
@@ -767,44 +1354,62 @@ impl PeerApi for GrpcPeer {
     }
 
     async fn list_keys(&self) -> Result<Vec<(String, String, Vec<u8>)>> {
-        let reply = self.client.clone().list_keys(pb::ListKeysRequest {}).await?.into_inner();
-        Ok(reply.keys.into_iter().filter(|k| !k.tombstone).map(|k| (k.key_id, k.spec, k.commitment)).collect())
+        Ok(self
+            .list_inventory()
+            .await?
+            .into_iter()
+            .filter(|k| !k.tombstone)
+            .map(|k| (k.key_id, k.spec, k.commitment))
+            .collect())
     }
 
     async fn list_inventory(&self) -> Result<Vec<pb::KeyManifest>> {
-        Ok(self.client.clone().list_keys(pb::ListKeysRequest {}).await?.into_inner().keys)
+        let d = self.inner.deadline(CallClass::Ceremony);
+        let reply = self
+            .inner
+            .call(CallClass::Ceremony, d, crate::DaemonError::Status, |mut c| async move {
+                c.list_keys(timed(pb::ListKeysRequest {}, d)).await
+            })
+            .await?;
+        Ok(reply.keys)
     }
 
     async fn purge_key(&self, ceremony_id: &str, key_id: &str) -> Result<bool> {
+        let d = self.inner.deadline(CallClass::Ceremony);
+        let msg = pb::PurgeKeyRequest { ceremony_id: ceremony_id.into(), key_id: key_id.into(), intent: None };
         let reply = self
-            .client
-            .clone()
-            .purge_key(pb::PurgeKeyRequest {
-                ceremony_id: ceremony_id.into(),
-                key_id: key_id.into(),
-                intent: None,
+            .inner
+            .call(CallClass::Ceremony, d, crate::DaemonError::Status, |mut c| async move {
+                c.purge_key(timed(msg, d)).await
             })
-            .await?
-            .into_inner();
+            .await?;
         Ok(reply.deleted)
     }
 
     async fn delete_key(&self, ceremony_id: &str, key_id: &str, intent: &pb::SignedIntent) -> Result<bool> {
+        let d = self.inner.deadline(CallClass::Ceremony);
+        let msg = pb::PurgeKeyRequest {
+            ceremony_id: ceremony_id.into(),
+            key_id: key_id.into(),
+            intent: Some(intent.clone()),
+        };
         let reply = self
-            .client
-            .clone()
-            .purge_key(pb::PurgeKeyRequest {
-                ceremony_id: ceremony_id.into(),
-                key_id: key_id.into(),
-                intent: Some(intent.clone()),
+            .inner
+            .call(CallClass::Ceremony, d, crate::DaemonError::Status, |mut c| async move {
+                c.purge_key(timed(msg, d)).await
             })
-            .await?
-            .into_inner();
+            .await?;
         Ok(reply.deleted)
     }
 
     async fn key_epoch(&self, key_id: &str) -> Result<pb::KeyEpochReply> {
-        Ok(self.client.clone().key_epoch(pb::KeyEpochRequest { key_id: key_id.into() }).await?.into_inner())
+        let d = self.inner.deadline(CallClass::StoreRead);
+        let msg = pb::KeyEpochRequest { key_id: key_id.into() };
+        self.inner
+            .call(CallClass::StoreRead, d, crate::DaemonError::Status, |mut c| async move {
+                c.key_epoch(timed(msg, d)).await
+            })
+            .await
     }
 
     async fn ceremony_begin(
@@ -815,55 +1420,70 @@ impl PeerApi for GrpcPeer {
         expect: Option<(u64, [u8; 32])>,
         intent: Option<&pb::SignedIntent>,
     ) -> Result<()> {
-        self.client
-            .clone()
-            .ceremony_fence(pb::CeremonyFenceRequest {
-                ceremony_id: ceremony_id.into(),
-                key_id: key_id.into(),
-                kind: kind.as_str().into(),
-                expected_epoch: expect.map(|e| e.0).unwrap_or(0),
-                expected_pkp_digest: expect.map(|e| e.1.to_vec()).unwrap_or_default(),
-                protocol: crate::ceremony::CEREMONY_PROTOCOL,
-                intent: intent.cloned(),
-                spec: String::new(),
+        let d = self.inner.deadline(CallClass::Ceremony);
+        let msg = pb::CeremonyFenceRequest {
+            ceremony_id: ceremony_id.into(),
+            key_id: key_id.into(),
+            kind: kind.as_str().into(),
+            expected_epoch: expect.map(|e| e.0).unwrap_or(0),
+            expected_pkp_digest: expect.map(|e| e.1.to_vec()).unwrap_or_default(),
+            protocol: crate::ceremony::CEREMONY_PROTOCOL,
+            intent: intent.cloned(),
+            spec: String::new(),
+        };
+        self.inner
+            .call(CallClass::Ceremony, d, crate::error::from_fence_status, |mut c| async move {
+                c.ceremony_fence(timed(msg, d)).await
             })
-            .await
-            .map_err(crate::error::from_fence_status)?;
+            .await?;
         Ok(())
     }
 
     async fn ceremony_commit(&self, ceremony_id: &str) -> Result<StatusInfo> {
+        let d = self.inner.deadline(CallClass::Ceremony);
+        let msg = pb::CeremonyCommitRequest { ceremony_id: ceremony_id.into() };
         let reply = self
-            .client
-            .clone()
-            .ceremony_commit(pb::CeremonyCommitRequest { ceremony_id: ceremony_id.into() })
-            .await?
-            .into_inner();
+            .inner
+            .call(CallClass::Ceremony, d, crate::DaemonError::Status, |mut c| async move {
+                c.ceremony_commit(timed(msg, d)).await
+            })
+            .await?;
         status_from_pb(&reply)
     }
 
     async fn ceremony_status(&self, ceremony_id: &str) -> Result<StatusInfo> {
+        let d = self.inner.deadline(CallClass::StoreRead);
+        let msg = pb::CeremonyStatusRequest { ceremony_id: ceremony_id.into() };
         let reply = self
-            .client
-            .clone()
-            .ceremony_status(pb::CeremonyStatusRequest { ceremony_id: ceremony_id.into() })
-            .await?
-            .into_inner();
+            .inner
+            .call(CallClass::StoreRead, d, crate::DaemonError::Status, |mut c| async move {
+                c.ceremony_status(timed(msg, d)).await
+            })
+            .await?;
         status_from_pb(&reply)
     }
 
     async fn ceremony_abort(&self, ceremony_id: &str) -> Result<StatusInfo> {
+        let d = self.inner.deadline(CallClass::Ceremony);
+        let msg = pb::CeremonyAbortRequest { ceremony_id: ceremony_id.into() };
         let reply = self
-            .client
-            .clone()
-            .ceremony_abort(pb::CeremonyAbortRequest { ceremony_id: ceremony_id.into() })
-            .await?
-            .into_inner();
+            .inner
+            .call(CallClass::Ceremony, d, crate::DaemonError::Status, |mut c| async move {
+                c.ceremony_abort(timed(msg, d)).await
+            })
+            .await?;
         status_from_pb(&reply)
     }
 
     async fn ceremony_protocol(&self) -> Result<u32> {
-        Ok(self.client.clone().node_info(pb::NodeInfoRequest {}).await?.into_inner().ceremony_protocol)
+        let d = self.inner.deadline(CallClass::Control);
+        let reply = self
+            .inner
+            .call(CallClass::Control, d, crate::DaemonError::Status, |mut c| async move {
+                c.node_info(timed(pb::NodeInfoRequest {}, d)).await
+            })
+            .await?;
+        Ok(reply.ceremony_protocol)
     }
 
     async fn ceremony_part1(
@@ -874,19 +1494,21 @@ impl PeerApi for GrpcPeer {
         roster: &[u16],
         intent: Option<&pb::SignedIntent>,
     ) -> Result<round1::Package> {
+        let d = self.inner.deadline(CallClass::Ceremony);
+        let msg = pb::CeremonyPart1Request {
+            ceremony_id: ceremony_id.into(),
+            key_id: key_id.into(),
+            kind: kind.as_str().into(),
+            roster: roster.iter().map(|&i| u32::from(i)).collect(),
+            protocol: crate::ceremony::CEREMONY_PROTOCOL,
+            intent: intent.cloned(),
+        };
         let reply = self
-            .client
-            .clone()
-            .ceremony_part1(pb::CeremonyPart1Request {
-                ceremony_id: ceremony_id.into(),
-                key_id: key_id.into(),
-                kind: kind.as_str().into(),
-                roster: roster.iter().map(|&i| u32::from(i)).collect(),
-                protocol: crate::ceremony::CEREMONY_PROTOCOL,
-                intent: intent.cloned(),
+            .inner
+            .call(CallClass::Ceremony, d, crate::DaemonError::Status, |mut c| async move {
+                c.ceremony_part1(timed(msg, d)).await
             })
-            .await?
-            .into_inner();
+            .await?;
         Ok(serde_json::from_slice(&reply.round1_package)?)
     }
 
@@ -895,15 +1517,14 @@ impl PeerApi for GrpcPeer {
         ceremony_id: &str,
         round1_map: &BTreeMap<Identifier, round1::Package>,
     ) -> Result<crate::ceremony::Part2Outcome> {
+        let d = self.inner.deadline(CallClass::Ceremony);
+        let msg = pb::CeremonyPart2Request { ceremony_id: ceremony_id.into(), round1_map: serde_json::to_vec(round1_map)? };
         let reply = self
-            .client
-            .clone()
-            .ceremony_part2(pb::CeremonyPart2Request {
-                ceremony_id: ceremony_id.into(),
-                round1_map: serde_json::to_vec(round1_map)?,
+            .inner
+            .call(CallClass::Ceremony, d, crate::DaemonError::Status, |mut c| async move {
+                c.ceremony_part2(timed(msg, d)).await
             })
-            .await?
-            .into_inner();
+            .await?;
         Ok(crate::ceremony::Part2Outcome {
             round1_digest: to_digest(&reply.round1_digest)?,
             delivered: reply
@@ -925,29 +1546,31 @@ impl PeerApi for GrpcPeer {
         // The package rides inside this TLS session only: dialled under the recipient's own
         // server name, so only that node can read it.
         let bytes = zeroize::Zeroizing::new(serde_json::to_vec(package)?);
-        self.client
-            .clone()
-            .ceremony_deliver(pb::CeremonyDeliverRequest {
-                ceremony_id: ceremony_id.into(),
-                from: u32::from(from),
-                to: u32::from(to),
-                round1_digest: round1_digest.to_vec(),
-                round2_package: bytes.to_vec(),
+        let d = self.inner.deadline(CallClass::Ceremony);
+        let msg = pb::CeremonyDeliverRequest {
+            ceremony_id: ceremony_id.into(),
+            from: u32::from(from),
+            to: u32::from(to),
+            round1_digest: round1_digest.to_vec(),
+            round2_package: bytes.to_vec(),
+        };
+        self.inner
+            .call(CallClass::Ceremony, d, crate::DaemonError::Status, |mut c| async move {
+                c.ceremony_deliver(timed(msg, d)).await
             })
             .await?;
         Ok(())
     }
 
     async fn ceremony_part3(&self, ceremony_id: &str, round1_digest: &[u8; 32]) -> Result<StagedOutcome> {
+        let d = self.inner.deadline(CallClass::Ceremony);
+        let msg = pb::CeremonyPart3Request { ceremony_id: ceremony_id.into(), round1_digest: round1_digest.to_vec() };
         let reply = self
-            .client
-            .clone()
-            .ceremony_part3(pb::CeremonyPart3Request {
-                ceremony_id: ceremony_id.into(),
-                round1_digest: round1_digest.to_vec(),
+            .inner
+            .call(CallClass::Ceremony, d, crate::DaemonError::Status, |mut c| async move {
+                c.ceremony_part3(timed(msg, d)).await
             })
-            .await?
-            .into_inner();
+            .await?;
         Ok(StagedOutcome {
             new_epoch: reply.new_epoch,
             new_pkp_digest: to_digest(&reply.new_pkp_digest)?,

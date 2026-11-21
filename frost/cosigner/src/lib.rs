@@ -33,6 +33,7 @@ pub mod intent;
 pub mod journal;
 pub mod key_cli;
 pub mod keystore;
+pub mod liveness;
 pub mod metrics;
 pub mod node;
 pub mod orchestrator;

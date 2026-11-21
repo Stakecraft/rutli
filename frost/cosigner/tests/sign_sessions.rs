@@ -484,8 +484,10 @@ async fn a_round1_that_failed_after_opening_is_aborted() {
 }
 
 /// A member with no room left for this leader's sessions is not failing: the leader tries another
-/// subset, and comes back to it once the other subsets are used up, without excluding it. Here
-/// node 3 is down, so the sign needs node 2, whose room frees after its first refusal.
+/// subset, never excludes it, and a later signature asks it again. Here node 3 is down, so the sign
+/// needs node 2, whose room frees after its first refusal: the first signature spends its two
+/// attempts ({1,2} refused for room, {1,3} down) and answers UNAVAILABLE (another leader has its
+/// own room there), the next one signs with node 2.
 #[tokio::test]
 async fn a_member_at_its_cap_for_this_leader_is_not_excluded() {
     use rutli_cosigner::node::{SessionOwner, MAX_PENDING_SIGN_SESSIONS_PER_OPENER};
@@ -508,6 +510,8 @@ async fn a_member_at_its_cap_for_this_leader_is_not_excluded() {
         Arc::new(Scripted::new(as_seen_by(&nodes, 2, 0), Mode::Down, &log)),
     ];
     let msg = rutli_frost_core::dealer::canton_test_message(b"full, then room");
+    let err = sign(&nodes[0], &peers, KEY, &msg).await.unwrap_err();
+    assert!(matches!(err, DaemonError::NotServing(ref m) if m.contains("no room")), "{err:?}");
     let sig = sign(&nodes[0], &peers, KEY, &msg).await.expect("node 2 is asked again and signs");
     assert!(rutli_cosigner::verify_key::signature_verifies(&group, &msg, &sig));
     assert_eq!(node2.round1s.load(Ordering::SeqCst), 2, "refused once for room, then asked again");

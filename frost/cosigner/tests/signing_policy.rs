@@ -11,6 +11,8 @@
 
 #[path = "common/pki.rs"]
 mod pki;
+#[path = "common/store_fault.rs"]
+mod store_fault;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -731,6 +733,376 @@ impl PeerApi for FlakyOnce {
     }
 }
 
+/// A member that answers round 2 late: it holds the request `hold`, then signs anyway — and then
+/// replays the same round 2 once more, which must be refused — and holds an abort `abort_hold`.
+/// The leader has given up on it by then (its round deadline), so this is a member answering for
+/// an attempt the leader abandoned.
+struct Late {
+    inner: Arc<dyn PeerApi>,
+    hold: std::time::Duration,
+    abort_hold: std::time::Duration,
+    sessions: Arc<std::sync::Mutex<Vec<String>>>,
+    /// Each late round 2 as it came out.
+    outcomes: Arc<std::sync::Mutex<Vec<LateOutcome>>>,
+}
+
+/// What a late round 2 and its replay answered.
+#[derive(Clone, Debug)]
+struct LateOutcome {
+    signed: bool,
+    /// The first round 2 found no session (`UnknownSession`).
+    first_unknown: bool,
+    /// The replay was refused as `UnknownSession` — exactly that, not any error.
+    replay_unknown: bool,
+    replay: String,
+}
+
+fn unknown_session<T>(r: &Result<T>) -> bool {
+    matches!(r, Err(DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_))))
+}
+
+impl Late {
+    fn new(inner: Arc<dyn PeerApi>, hold: u64, abort_hold: u64) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            hold: std::time::Duration::from_secs(hold),
+            abort_hold: std::time::Duration::from_secs(abort_hold),
+            sessions: Default::default(),
+            outcomes: Default::default(),
+        })
+    }
+}
+
+#[async_trait]
+impl PeerApi for Late {
+    fn identifier(&self) -> Identifier {
+        self.inner.identifier()
+    }
+    async fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &Round1Ctx) -> Result<SigningCommitments> {
+        self.inner.sign_round1(key_id, session_id, ctx).await
+    }
+    async fn sign_round2(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        message: &[u8],
+        commitments: &BTreeMap<Identifier, SigningCommitments>,
+        intent_digest: Option<&[u8; 32]>,
+    ) -> Result<SignatureShare> {
+        self.sessions.lock().unwrap().push(session_id.to_owned());
+        let (inner, hold, outcomes) = (self.inner.clone(), self.hold, self.outcomes.clone());
+        let (k, s, m, c, d) = (key_id.to_owned(), session_id.to_owned(), message.to_vec(), commitments.clone(), intent_digest.copied());
+        // Its own task: the leader dropping this call does not stop the member.
+        tokio::spawn(async move {
+            tokio::time::sleep(hold).await;
+            let first = inner.sign_round2(&k, &s, &m, &c, d.as_ref()).await;
+            let replay = inner.sign_round2(&k, &s, &m, &c, d.as_ref()).await;
+            outcomes.lock().unwrap().push(LateOutcome {
+                signed: first.is_ok(),
+                first_unknown: unknown_session(&first),
+                replay_unknown: unknown_session(&replay),
+                replay: replay.err().map(|e| e.to_string()).unwrap_or_else(|| "SIGNED TWICE".into()),
+            });
+            first
+        })
+        .await
+        .unwrap()
+    }
+    async fn abort_sign(&self, key_id: &str, session_id: &str) -> Result<()> {
+        let (inner, hold, k, s) = (self.inner.clone(), self.abort_hold, key_id.to_owned(), session_id.to_owned());
+        tokio::spawn(async move {
+            tokio::time::sleep(hold).await;
+            inner.abort_sign(&k, &s).await
+        })
+        .await
+        .unwrap()
+    }
+    async fn ceremony_fence(&self, c: &str, k: &str, kind: &'static str) -> Result<()> {
+        self.inner.ceremony_fence(c, k, kind).await
+    }
+    async fn ceremony_release(&self, c: &str, k: &str) -> Result<()> {
+        self.inner.ceremony_release(c, k).await
+    }
+    async fn node_info(&self) -> Result<(u16, [u8; 32])> {
+        self.inner.node_info().await
+    }
+    async fn replicate_key(&self, a: &str, b: &str, s: &str, d: &[u8], w: &rutli_cosigner::wrap::Wrapped) -> Result<Vec<u8>> {
+        self.inner.replicate_key(a, b, s, d, w).await
+    }
+    async fn fetch_key(&self, k: &str) -> Result<(String, Vec<u8>, rutli_cosigner::wrap::Wrapped)> {
+        self.inner.fetch_key(k).await
+    }
+    async fn list_keys(&self) -> Result<Vec<(String, String, Vec<u8>)>> {
+        self.inner.list_keys().await
+    }
+    async fn purge_key(&self, c: &str, k: &str) -> Result<bool> {
+        self.inner.purge_key(c, k).await
+    }
+}
+
+/// Nonce and intent safety under the leader's round deadlines and detached aborts (peer liveness).
+/// Every member handle acts for its leader ([`peers_for`]), so session ownership is the real one:
+///
+/// - a member whose round 2 comes after the leader gave up on it (and whose abort comes later still)
+///   signs that session once: its nonce marker is burnt, a replay of the same round 2 is refused as
+///   an unknown session, and the share is journaled once for the request;
+/// - meanwhile a second leader with the same request cannot send that session's round 2 or abort
+///   it: refused as not the session's owner, nothing burnt, nothing journaled, the session kept;
+/// - when the abort reaches the member first, its late round 2 finds no session and releases
+///   nothing;
+/// - each request id is charged once on every node, however many attempts and late shares it had,
+///   and no node releases more than `max_shares_per_request` shares for it.
+#[tokio::test(start_paused = true)]
+async fn an_abandoned_attempt_never_signs_twice_and_its_intent_is_charged_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let policy =
+        SigningPolicyConfig { require_intent: Some(true), sign_rate_limit_per_min: 2, sign_rate_limit_per_day: 100, ..Default::default() };
+    let (ids, nodes) = local(tmp.path(), &policy).await;
+    let msg = digest(b"abandoned");
+    let journal = |i: u16, request: u8| journal_of(tmp.path(), i, request);
+    let markers = rutli_frost_core::nonce_store::NonceStore::open(tmp.path().join(format!("node-2/keys/{KEY}.nonces"))).unwrap();
+
+    // The member answers round 2 after the leader's 5 s deadline, the abort ten seconds after that.
+    let late = Late::new(peers_for(&nodes, 0)[1].clone(), 6, 10);
+    let mut peers = peers_for(&nodes, 0);
+    peers[1] = late.clone();
+    let started = tokio::time::Instant::now();
+    let sig = sign_with_intent(&nodes[0], &peers, KEY, &msg, Some(&intent_by(&ids, "driver", KEY, &msg, 90))).await.unwrap();
+    assert!(rutli_cosigner::verify_key::signature_verifies(&nodes[0].group_key(KEY).unwrap(), &msg, &sig));
+    assert!(started.elapsed() < std::time::Duration::from_millis(5200), "one round-2 deadline: {:?}", started.elapsed());
+    let session = late.sessions.lock().unwrap()[0].clone();
+
+    // Leader 1 gave up on node 2's session; its late round 2 has not landed yet. Another leader
+    // (node 3) with the same request can neither sign it nor abort it.
+    let rival = LocalPeer::new(nodes[1].clone()).on_behalf_of(nodes[2].clone());
+    let owner = |r: &Result<_>| matches!(r, Err(DaemonError::Core(rutli_frost_core::CoreError::NotSessionOwner { .. })));
+    let r2 = rival.sign_round2(KEY, &session, &msg, &BTreeMap::new(), None).await.map(|_| ());
+    assert!(owner(&r2), "{r2:?}");
+    let abort = rival.abort_sign(KEY, &session).await;
+    assert!(owner(&abort), "{abort:?}");
+    assert_eq!(nodes[1].pending_sign_count(KEY), 1, "the session stays with its opener");
+    assert!(!markers.is_consumed(&session).unwrap());
+    assert_eq!(journal(2, 90), 0);
+
+    tokio::time::sleep(std::time::Duration::from_secs(12)).await;
+    let outcomes = late.outcomes.lock().unwrap().clone();
+    assert_eq!(outcomes.len(), 1);
+    assert!(outcomes[0].signed, "the late round 2 signed");
+    assert!(outcomes[0].replay_unknown, "a replayed round 2 is an unknown session: {}", outcomes[0].replay);
+    assert!(markers.is_consumed(&session).unwrap(), "the abandoned session's marker is burnt");
+    for n in &nodes {
+        assert_eq!(n.pending_sign_count(KEY), 0);
+    }
+    // The leader released its own share in both attempts, node 2 its late one, node 3 one.
+    assert_eq!((journal(1, 90), journal(2, 90), journal(3, 90)), (2, 1, 1));
+
+    // The abort comes first: the late round 2 finds no session and releases nothing.
+    let late = Late::new(peers_for(&nodes, 0)[1].clone(), 6, 0);
+    let mut peers = peers_for(&nodes, 0);
+    peers[1] = late.clone();
+    sign_with_intent(&nodes[0], &peers, KEY, &msg, Some(&intent_by(&ids, "driver", KEY, &msg, 91))).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    let outcomes = late.outcomes.lock().unwrap().clone();
+    assert_eq!(outcomes.len(), 1);
+    assert!(!outcomes[0].signed && outcomes[0].first_unknown, "no nonces left for the abandoned session: {outcomes:?}");
+    assert!(outcomes[0].replay_unknown);
+    let session = late.sessions.lock().unwrap()[0].clone();
+    assert!(!markers.is_consumed(&session).unwrap());
+    assert_eq!(journal(2, 91), 0);
+
+    // Two requests, two charges (the limit is two a minute): attempts and late shares cost nothing
+    // more, and the third request is refused.
+    let err = sign_with_intent(&nodes[0], &peers_for(&nodes, 0), KEY, &msg, Some(&intent_by(&ids, "driver", KEY, &msg, 92)))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, DaemonError::RateLimited(_)), "{err:?}");
+    for i in 1..=N {
+        for request in [90, 91] {
+            assert!(journal(i, request) <= SigningPolicyConfig::default().max_shares_per_request as usize);
+        }
+    }
+}
+
+/// Session ids, as a test wrapper saw them.
+type Sessions = Arc<std::sync::Mutex<Vec<String>>>;
+
+/// A member's view that records the round 2s and aborts it is sent, and forwards them.
+struct Watched {
+    inner: Arc<dyn PeerApi>,
+    round2s: Sessions,
+    aborts: Sessions,
+}
+
+#[async_trait]
+impl PeerApi for Watched {
+    fn identifier(&self) -> Identifier {
+        self.inner.identifier()
+    }
+    async fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &Round1Ctx) -> Result<SigningCommitments> {
+        self.inner.sign_round1(key_id, session_id, ctx).await
+    }
+    async fn sign_round2(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        message: &[u8],
+        commitments: &BTreeMap<Identifier, SigningCommitments>,
+        intent_digest: Option<&[u8; 32]>,
+    ) -> Result<SignatureShare> {
+        self.round2s.lock().unwrap().push(session_id.to_owned());
+        self.inner.sign_round2(key_id, session_id, message, commitments, intent_digest).await
+    }
+    async fn abort_sign(&self, key_id: &str, session_id: &str) -> Result<()> {
+        self.aborts.lock().unwrap().push(session_id.to_owned());
+        self.inner.abort_sign(key_id, session_id).await
+    }
+    async fn ceremony_fence(&self, c: &str, k: &str, kind: &'static str) -> Result<()> {
+        self.inner.ceremony_fence(c, k, kind).await
+    }
+    async fn ceremony_release(&self, c: &str, k: &str) -> Result<()> {
+        self.inner.ceremony_release(c, k).await
+    }
+    async fn node_info(&self) -> Result<(u16, [u8; 32])> {
+        self.inner.node_info().await
+    }
+    async fn replicate_key(&self, a: &str, b: &str, s: &str, d: &[u8], w: &rutli_cosigner::wrap::Wrapped) -> Result<Vec<u8>> {
+        self.inner.replicate_key(a, b, s, d, w).await
+    }
+    async fn fetch_key(&self, k: &str) -> Result<(String, Vec<u8>, rutli_cosigner::wrap::Wrapped)> {
+        self.inner.fetch_key(k).await
+    }
+    async fn list_keys(&self) -> Result<Vec<(String, String, Vec<u8>)>> {
+        self.inner.list_keys().await
+    }
+    async fn purge_key(&self, c: &str, k: &str) -> Result<bool> {
+        self.inner.purge_key(c, k).await
+    }
+}
+
+/// Yield until `done`, moving no time (a held blocking thread keeps paused time from advancing by
+/// itself; nothing here needs it to).
+async fn until(what: &str, done: impl Fn() -> bool) {
+    // Bounded by wall time, not by a count of yields: the work waited for may be on a blocking
+    // thread, which a loaded runner can leave unscheduled for longer than any fixed number of
+    // yields takes. The short real sleep gives that thread the CPU without moving paused time.
+    let give_up = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < give_up {
+        if done() {
+            return;
+        }
+        tokio::task::yield_now().await;
+        std::thread::sleep(std::time::Duration::from_micros(200));
+    }
+    panic!("never happened within 30 s: {what}");
+}
+
+/// An abort that lands DURING a member's round 2, at orchestrator level: node 2's round 2 holds in
+/// its store work — after it took the session's authorization and nonces out of memory, before the
+/// journal entry and the marker — while the leader's round-2 deadline passes. The leader aborts it
+/// (detached) and signs with node 3. The abort finds nothing to drop; when the store moves, node 2's
+/// round 2 finishes once: one journal entry, one marker, nothing more for the request.
+#[tokio::test(start_paused = true)]
+async fn an_abort_during_round_2_finds_nothing_and_the_share_is_journaled_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let policy =
+        SigningPolicyConfig { require_intent: Some(true), sign_rate_limit_per_min: 100, sign_rate_limit_per_day: 1000, ..Default::default() };
+    let store = store_fault::StoreFault::new();
+    let (ids, nodes) = local_hooked(tmp.path(), &policy, 2, store.hook()).await;
+    let msg = digest(b"abort during round 2");
+    let journal = |i: u16, request: u8| journal_of(tmp.path(), i, request);
+    let (round2s, aborts): (Sessions, Sessions) = Default::default();
+    let mut peers = peers_for(&nodes, 0);
+    peers[1] = Arc::new(Watched { inner: peers[1].clone(), round2s: round2s.clone(), aborts: aborts.clone() });
+
+    store.set(store_fault::Store::Hold);
+    let signing = {
+        let (leader, peers, intent, msg) = (nodes[0].clone(), peers.clone(), intent_by(&ids, "driver", KEY, &msg, 93), msg.clone());
+        tokio::spawn(async move { sign_with_intent(&leader, &peers, KEY, &msg, Some(&intent)).await })
+    };
+    until("node 2's round 2 to hold in its store work", || store.held() == 1).await;
+    let session = round2s.lock().unwrap()[0].clone();
+    assert_eq!(nodes[1].pending_sign_count(KEY), 0, "its nonces are out of memory already");
+    assert_eq!(journal(2, 93), 0);
+
+    tokio::time::advance(rutli_cosigner::peer::ROUND2_DEADLINE + std::time::Duration::from_millis(10)).await;
+    let sig = signing.await.unwrap().expect("signed with node 3");
+    assert!(rutli_cosigner::verify_key::signature_verifies(&nodes[0].group_key(KEY).unwrap(), &msg, &sig));
+    until("the abort to reach node 2", || aborts.lock().unwrap().contains(&session)).await;
+    let markers = rutli_frost_core::nonce_store::NonceStore::open(tmp.path().join(format!("node-2/keys/{KEY}.nonces"))).unwrap();
+    assert!(!markers.is_consumed(&session).unwrap(), "the abort landed while round 2 held");
+    assert_eq!(journal(2, 93), 0);
+
+    store.set(store_fault::Store::Ok);
+    until("node 2's round 2 to end", || nodes[1].load_now().inflight == 0).await;
+    assert!(markers.is_consumed(&session).unwrap(), "round 2 finished: its marker is burnt");
+    assert_eq!((journal(1, 93), journal(2, 93), journal(3, 93)), (2, 1, 1));
+    assert_eq!(round2s.lock().unwrap().len(), 1, "the leader never resends a round 2");
+}
+
+/// With `max_shares_per_request = 1` a second attempt for the same request is refused on a member
+/// that already released a share for it (here the leader's own node: it is in every subset), and
+/// nothing more is released anywhere.
+#[tokio::test]
+async fn with_one_share_per_request_a_second_attempt_is_refused_where_a_share_left_already() {
+    let tmp = tempfile::tempdir().unwrap();
+    let policy = SigningPolicyConfig { require_intent: Some(true), max_shares_per_request: 1, ..Default::default() };
+    let (ids, nodes) = local(tmp.path(), &policy).await;
+    let msg = digest(b"one share each");
+    let mut peers = peers_for(&nodes, 0);
+    peers[1] = Arc::new(FlakyOnce { inner: peers[1].clone(), failed: Default::default() });
+    let err = sign_with_intent(&nodes[0], &peers, KEY, &msg, Some(&intent_by(&ids, "driver", KEY, &msg, 94))).await.unwrap_err();
+    assert!(matches!(err, DaemonError::RateLimited(ref m) if m.contains("max_shares_per_request")), "{err:?}");
+    let journal = |i: u16| journal_of(tmp.path(), i, 94);
+    assert_eq!((journal(1), journal(2), journal(3)), (1, 0, 0));
+    for n in &nodes {
+        assert_eq!(n.pending_sign_count(KEY), 0);
+    }
+}
+
+/// Node `i`'s journal entries for request id 16×`request`.
+fn journal_of(root: &Path, i: u16, request: u8) -> usize {
+    read_key_dir(&root.join(format!("node-{i}/journal")).join(KEY))
+        .unwrap()
+        .entries
+        .into_iter()
+        .filter(|e| e.request_id == hex::encode([request; 16]))
+        .count()
+}
+
+/// Leader `leader`'s (0-based) view of an in-process cluster: its own node as itself, every other
+/// node acting for it — so the sessions it opens are owned by its CN there, as over gRPC.
+fn peers_for(nodes: &[Arc<Node>], leader: usize) -> Peers {
+    nodes
+        .iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let peer = if i == leader { LocalPeer::new(n.clone()) } else { LocalPeer::new(n.clone()).on_behalf_of(nodes[leader].clone()) };
+            Arc::new(peer) as Arc<dyn PeerApi>
+        })
+        .collect()
+}
+
+/// [`local`] with a [`rutli_cosigner::node::SignStoreHook`] on node `hooked`.
+async fn local_hooked(
+    root: &Path,
+    policy: &SigningPolicyConfig,
+    hooked: u16,
+    hook: rutli_cosigner::node::SignStoreHook,
+) -> (Ids, Vec<Arc<Node>>) {
+    let ids = Ids::new(&root.join("certs"));
+    let nodes: Vec<Arc<Node>> = (1..=N)
+        .map(|i| {
+            let ks = KeyStore::open(root.join(format!("node-{i}")).join("keys")).unwrap();
+            let node = Node::new(Identifier::try_from(i).unwrap(), N, T, ks).with_sign_guard(guard(root, &ids, i, policy));
+            Arc::new(if i == hooked { node.with_sign_store_hook(hook.clone()) } else { node })
+        })
+        .collect();
+    rutli_cosigner::peer::wire_local_mesh(&nodes).unwrap();
+    let dkg = ceremony_by(&ids, "driver", rutli_cosigner::node::CeremonyKind::Dkg, KEY, 0xd0);
+    run_dkg_with_intent(&peers_of(&nodes), KEY, Some(dkg)).await.unwrap();
+    (ids, nodes)
+}
+
 /// An in-process cluster (no gRPC) on `policy`, key generated.
 async fn local(root: &Path, policy: &SigningPolicyConfig) -> (Ids, Vec<Arc<Node>>) {
     let ids = Ids::new(&root.join("certs"));
@@ -853,9 +1225,15 @@ async fn a_node_that_cannot_journal_releases_no_share() {
         (Identifier::try_from(2u16).unwrap(), nodes[1].sign_round1(KEY, "no-journal", &ctx).unwrap()),
     ]);
     let err = nodes[0].sign_round2_with(KEY, "no-journal", &msg, &cs, Some(intent::intent_digest(&i2))).unwrap_err();
-    assert!(matches!(err, DaemonError::Io(_) | DaemonError::Journal(_)), "{err:?}");
+    // A definite I/O error (EACCES) in round-2 store work: the node marks its key store down at
+    // once and answers `keystore-down`, so leaders route around it.
+    assert!(matches!(err, DaemonError::KeystoreDown(_)), "{err:?}");
+    assert!(nodes[0].keystore_health().is_down());
     assert_eq!(markers(1), before, "no marker burned for a share that was not journaled");
     std::fs::set_permissions(&seg, std::fs::Permissions::from_mode(0o600)).unwrap();
+    // Not sticky: the next readiness probe that finds the store working clears it.
+    nodes[0].check_keystore().unwrap();
+    assert!(!nodes[0].keystore_health().is_down());
 }
 
 /// A node that restarted between the two rounds holds neither the session's nonces nor its

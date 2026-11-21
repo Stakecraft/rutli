@@ -362,16 +362,22 @@ Shares of different sharings never combine, so signing is epoch-aware (audit H1,
   is not stale: its resolver commits it. Recovery is restoring a current backup of that node
   (daemon stopped) or re-enrolling it; the mark clears by itself once the share is current.
 * **Quorum selection with retry.** The leader tries t-subsets of the roster, itself first, then
-  by identifier. Each attempt is a fresh session: a new random session id for each member (since
-  0.5.0; one shared id before) and fresh round-1 commitments from every member, never reused across
-  subsets. A member that fails round 1 or round 2, or whose
+  by identifier, with subsets that contain a peer the leader holds as down sorted last (never
+  skipped; `docs/architecture.md`, "Peer liveness"). Each attempt is a fresh session: a new random
+  session id for each member (since 0.5.0; one shared id before) and fresh round-1 commitments from
+  every member, never reused across subsets. A member that fails round 1 or round 2, misses its
+  round deadline (2 s / 5 s, since 0.5.0), or whose
   signature share fails verification at aggregation (frost's cheater detection names it;
   `rutli_invalid_signature_shares_total`), is excluded for the rest of the request; the session is
-  aborted on the members still holding nonces, and the next subset without an excluded member is
-  tried (`rutli_sign_retries_total`). At most 10 attempts within 45 s. If `t` peers report one
-  sharing that is not older than the leader's, the leader is the odd one out and answers
-  UNAVAILABLE so the driver fails over to a node on the cluster's sharing. When no subset can
-  sign, the answer is UNAVAILABLE (`could not reach signing threshold`).
+  aborted on the members still holding nonces (on the failed member without waiting for it), and
+  the next subset without an excluded member is tried (`rutli_sign_retries_total`). At most
+  n − t + 1 attempts (2 in 2-of-3, 3 in 3-of-5; 10 up to 0.4.x) within 20 s or the client's
+  deadline, whichever is shorter. If `t`
+  peers report one sharing that is not older than the leader's, the leader is the odd one out and
+  answers UNAVAILABLE so the driver fails over to a node on the cluster's sharing. When no subset
+  can sign, the answer is UNAVAILABLE (`could not reach signing threshold`, trailer
+  `rutli-error: attempts-exhausted`); a leader that cannot
+  reach t cosigners at all answers UNAVAILABLE `no-quorum` before round 1.
 * **Session binding.** Round 1 also declares the message and the attempt's signer set; each node
   binds its nonces to them (and to the key). A round 2 for that session with another message,
   another commitment set, or the node's own round-1 commitment altered is refused

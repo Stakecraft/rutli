@@ -197,17 +197,18 @@ pub const MAX_PENDING_SIGN_SESSIONS_PER_OPENER: usize = MAX_PENDING_SIGN_SESSION
 /// intent's request id, the same for every attempt and failover leader of one driver call).
 ///
 /// One leader's run of one request opens one session per attempt on each member and, when an
-/// attempt fails, aborts it on every member before the next attempt opens
-/// ([`crate::orchestrator`]): normally at most one is open here; if no abort arrives, at most
-/// [`crate::orchestrator::MAX_SIGN_ATTEMPTS`]. The driver sends one request through the same leader
-/// at most twice (one retry after learning the cluster id again), hence twice that. A leader the
+/// attempt fails, aborts it on every member ([`crate::orchestrator`]): normally at most one is open
+/// here; if no abort arrives, at most one per attempt — [`crate::orchestrator::max_sign_attempts`]
+/// (`n − t + 1`: 2 in 2-of-3, 3 in 3-of-5) from this release, ten from leaders up to 0.4.x, which
+/// this cap still serves during a rolling upgrade. The driver sends one request through the same leader at most twice (one retry
+/// after learning the cluster id again), hence twice ten. A leader the
 /// driver fails over to is another opener with its own count. `max_shares_per_request` (default 8)
 /// counts shares released for the request over its life, not sessions open at once (a failed
 /// attempt releases nothing), so it does not size this cap. With it, one replayed intent opens at
 /// most 20 sessions per node instead of the opener's 256; a global count per request id would not
 /// do: every member sees the intent in round 1, and could use up the request's room before the
 /// honest leader's round 1 reached the other members.
-pub const MAX_PENDING_SIGN_SESSIONS_PER_REQUEST: usize = 2 * crate::orchestrator::MAX_SIGN_ATTEMPTS;
+pub const MAX_PENDING_SIGN_SESSIONS_PER_REQUEST: usize = 2 * 10;
 
 /// The caps above, as round 1 checks them.
 pub const PENDING_SIGN_CAPS: rutli_frost_core::session::PendingCaps = rutli_frost_core::session::PendingCaps {
@@ -247,6 +248,11 @@ pub struct Node {
     keystore: KeyStore,
     /// Key-store readiness verdict (see [`crate::health`]), shared with Health and the monitor.
     keystore_health: Arc<crate::health::KeystoreHealth>,
+    /// Sign rounds served here and signatures led here ([`crate::liveness::SignLoad`]): reported
+    /// to leaders as `rutli-load`, and this leader's overload check.
+    sign_load: Arc<crate::liveness::SignLoad>,
+    /// Peer-liveness timings of the sign path ([`crate::peer::Liveness`]; tests override them).
+    liveness: crate::peer::Liveness,
     /// Loaded signing state per key: the share's cosigner and the sharing it belongs to.
     cosigners: Mutex<std::collections::HashMap<String, CachedKey>>,
     /// How many times a key was evicted from `cosigners` ([`Node::evict`]). Read and bumped only
@@ -296,9 +302,23 @@ pub struct Node {
     unknown_no_vote_caps: (usize, usize),
     /// See [`MIXED_EVIDENCE_REGATHER`].
     regather_delay: Duration,
+    /// See [`SignStoreHook`]. Unset in the daemon.
+    #[cfg(feature = "test-hooks")]
+    sign_store_hook: Option<SignStoreHook>,
     #[cfg(test)]
     hooks: TestHooks,
 }
+
+/// Fault-injection seam for a sign round 2's store work, for tests (also the integration tests,
+/// which the `#[cfg(test)]` hooks do not reach). Only with the `test-hooks` feature, which the
+/// crate's own tests turn on and a release build never has. Not reachable from config.
+/// Called with the key id and session id on the blocking thread at the release step: after the
+/// session's nonces and authorization were taken out of memory, before the journal entry and the
+/// nonce marker. An error is that store work failing with it (an `EIO` is a definite I/O error);
+/// blocking in it is a slow or hung store.
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+pub type SignStoreHook = Arc<dyn Fn(&str, &str) -> std::io::Result<()> + Send + Sync>;
 
 #[cfg(test)]
 type OnceHook = Box<dyn FnOnce(&Node) + Send>;
@@ -419,6 +439,8 @@ impl Node {
             min_signers,
             keystore,
             keystore_health,
+            sign_load: Arc::new(crate::liveness::SignLoad::default()),
+            liveness: crate::peer::Liveness::default(),
             cosigners: Mutex::new(Default::default()),
             stale: Mutex::new(Default::default()),
             require_epoch_match: false,
@@ -437,6 +459,8 @@ impl Node {
             repair_bucket: Mutex::new((REPAIR_FANOUT_BURST, Instant::now())),
             unknown_no_vote_caps: (MAX_UNKNOWN_NO_VOTES_PER_ASKER, MAX_UNKNOWN_NO_VOTES),
             regather_delay: MIXED_EVIDENCE_REGATHER,
+            #[cfg(feature = "test-hooks")]
+            sign_store_hook: None,
             #[cfg(test)]
             hooks: TestHooks::default(),
         };
@@ -1292,6 +1316,83 @@ impl Node {
             .expect("configure the key-store probe before the node is shared")
     }
 
+    /// This node's sign counters ([`crate::liveness::SignLoad`]).
+    pub fn sign_load(&self) -> &Arc<crate::liveness::SignLoad> {
+        &self.sign_load
+    }
+
+    /// This node's sign load as it reports it to leaders (`rutli-load`).
+    pub fn load_now(&self) -> crate::liveness::Load {
+        self.sign_load.snapshot(!self.keystore_health.is_down())
+    }
+
+    /// The sign path's liveness timings ([`crate::peer::Liveness`]).
+    pub fn liveness(&self) -> &crate::peer::Liveness {
+        &self.liveness
+    }
+
+    /// Other liveness timings (tests): round deadlines, the overload threshold, the quorum wait.
+    pub fn with_liveness(mut self, liveness: crate::peer::Liveness) -> Self {
+        self.liveness = liveness;
+        self
+    }
+
+    /// Install a [`SignStoreHook`]. Tests only (the `test-hooks` feature).
+    #[cfg(feature = "test-hooks")]
+    #[doc(hidden)]
+    pub fn with_sign_store_hook(mut self, hook: SignStoreHook) -> Self {
+        self.sign_store_hook = Some(hook);
+        self
+    }
+
+    /// Run the [`SignStoreHook`], if any.
+    #[cfg(feature = "test-hooks")]
+    fn sign_store_work(&self, key_id: &str, session_id: &str) -> Result<()> {
+        match &self.sign_store_hook {
+            Some(hook) => hook(key_id, session_id).map_err(DaemonError::Io),
+            None => Ok(()),
+        }
+    }
+
+    /// No store hook without the `test-hooks` feature.
+    #[cfg(not(feature = "test-hooks"))]
+    #[inline(always)]
+    fn sign_store_work(&self, _key_id: &str, _session_id: &str) -> Result<()> {
+        Ok(())
+    }
+
+    /// A sign round's store work on the blocking pool ([`Node::blocking`]), counted in this node's
+    /// load while it runs — queued or running, until `op` really ends, even when the caller stopped
+    /// waiting. A round 2 still running after [`crate::health::STORE_SLOW_AFTER`] kicks an
+    /// immediate key-store probe ([`crate::health::KeystoreHealth::kick`]).
+    pub async fn sign_op<T, F>(self: &Arc<Self>, round: crate::liveness::Round, op: F) -> Result<T>
+    where
+        F: FnOnce(&Node) -> Result<T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let counted = self.sign_load.begin(round);
+        let work = self.blocking(move |n| {
+            let result = op(n);
+            drop(counted);
+            result
+        });
+        if round == crate::liveness::Round::One {
+            return work.await;
+        }
+        tokio::pin!(work);
+        tokio::select! {
+            result = &mut work => result,
+            _ = tokio::time::sleep(crate::health::STORE_SLOW_AFTER) => {
+                tracing::warn!(
+                    after_ms = crate::health::STORE_SLOW_AFTER.as_millis() as u64,
+                    "sign round 2 store work still running — probing the key store now"
+                );
+                self.keystore_health.kick();
+                work.await
+            }
+        }
+    }
+
     /// Run `op` against this node on tokio's blocking pool and await it.
     ///
     /// For every node operation an RPC handler (or the in-process [`crate::peer::LocalPeer`])
@@ -1322,7 +1423,8 @@ impl Node {
         }
     }
 
-    /// `Err(NotServing)` — gRPC UNAVAILABLE — while this node's key store fails its readiness probe
+    /// `Err(KeystoreDown)` — gRPC UNAVAILABLE with the `rutli-error: keystore-down` trailer — while
+    /// this node's key store fails its readiness probe
     /// ([`crate::health`]). Checked at the entry of every store-touching Signer RPC (Sign, Dkg,
     /// Refresh, GroupKey and the hosted-key operations), so a sick node declines to LEAD before
     /// starting anything (the driver fails over on UNAVAILABLE — every driver version, not only one
@@ -1331,7 +1433,7 @@ impl Node {
     /// declines to JOIN another leader's quorum.
     pub fn refuse_if_keystore_down(&self) -> Result<()> {
         if self.keystore_health.is_down() {
-            return Err(DaemonError::NotServing(format!(
+            return Err(DaemonError::KeystoreDown(format!(
                 "key store {} failed its readiness probe — not leading or joining an operation it \
                  cannot finish",
                 self.keystore.dir().display()
@@ -1608,8 +1710,9 @@ impl Node {
             return Err(self.not_session_owner("round2", key_id, caller, e));
         }
         let result = match &self.sign_guard {
-            None => cosigner
-                .round2_guarded_as(caller, session_id, key_id, message, commitments, intent_digest.as_ref(), || Ok(())),
+            None => cosigner.round2_guarded_as(caller, session_id, key_id, message, commitments, intent_digest.as_ref(), || {
+                self.sign_store_work(key_id, session_id)
+            }),
             Some(g) => {
                 // Taken on every path from here on: a round 2 that gets this far uses up the
                 // session's authorization, whatever it then answers. (One refused before this
@@ -1674,7 +1777,10 @@ impl Node {
                                 message,
                                 commitments,
                                 intent_digest.as_ref(),
-                                || g.journal_release(key_id, session_id, &auth, message),
+                                || {
+                                    self.sign_store_work(key_id, session_id)?;
+                                    g.journal_release(key_id, session_id, &auth, message)
+                                },
                             );
                             // Refused before the nonces were taken (the entry changed hands since
                             // `take_as`): put the authorization back, so the call leaves the session
@@ -1699,7 +1805,26 @@ impl Node {
             metrics::counter!(crate::metrics::SIGN_ROUND2_UNKNOWN_SESSION).increment(1);
         }
         self.update_pending_gauge();
-        result
+        self.store_failure(result)
+    }
+
+    /// Round 2's store work (the journal append, the nonce marker) failed with a definite I/O error:
+    /// mark the key store down now ([`crate::health::KeystoreHealth::report_definite`]) rather than
+    /// at the next probe, and answer [`DaemonError::KeystoreDown`], so leaders route around this
+    /// node at once. The next readiness probe that finds the store working clears it.
+    fn store_failure<T>(&self, result: Result<T>) -> Result<T> {
+        let Err(e) = &result else { return result };
+        let Some(detail) = crate::health::is_definite_io(e) else { return result };
+        self.keystore_health.report_definite(&detail);
+        tracing::error!(
+            error = %e,
+            "sign round 2 store work failed with a definite I/O error — key store marked down until \
+             a readiness probe finds it working"
+        );
+        Err(DaemonError::KeystoreDown(format!(
+            "key store {} failed sign round-2 store work: {detail}",
+            self.keystore.dir().display()
+        )))
     }
 
     /// A round 2 or abort refused because another caller opened the session: counted by call,
@@ -4553,7 +4678,7 @@ mod sign_across_commit_tests {
     ///
     /// The leader does retry in the same call, with a fresh session on another subset, but that
     /// round 1 is refused by the epoch check — the leader's view of the sharing predates the
-    /// commit — so the call gives up (`ThresholdNotMet`: one member excluded at round 2, the other
+    /// commit — so the call gives up (`AttemptsExhausted`: one member excluded at round 2, the other
     /// at the retry's round 1). The next sign, with fresh sessions on the new sharing, succeeds.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_mixed_round2_across_a_refresh_commit_fails_cleanly_and_a_fresh_sign_succeeds() {
@@ -4574,7 +4699,7 @@ mod sign_across_commit_tests {
         gate.open();
 
         let err = leading.await.unwrap().unwrap_err();
-        assert!(matches!(err, DaemonError::ThresholdNotMet { needed: 2, got: 1 }), "{err:?}");
+        assert!(matches!(err, DaemonError::AttemptsExhausted { needed: 2, usable: 1, .. }), "{err:?}");
         // Node 1 (the leader) released its old share; node 2's round 2 found no session on its new
         // cosigner and burned nothing; its old nonces went with the evicted cosigner.
         assert_burned_once(&nodes[0], &session);
