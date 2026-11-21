@@ -237,7 +237,8 @@ pub struct Cosigner {
 }
 
 /// The signing share is wiped when the cosigner is dropped (an evicted or replaced cache entry, a
-/// refresh, shutdown). frost's `KeyPackage` implements `Zeroize` but does not wipe itself on drop.
+/// refresh, shutdown). frost 3.0's `KeyPackage` wipes itself on drop too; this stays as defence in
+/// depth until every cluster runs 3.x (then a follow-up removes it).
 impl Drop for Cosigner {
     fn drop(&mut self) {
         zeroize::Zeroize::zeroize(&mut self.key_package);

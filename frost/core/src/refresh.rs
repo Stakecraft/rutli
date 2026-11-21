@@ -87,6 +87,6 @@ impl RefreshParticipant {
             old_public_key_package,
             old_key_package,
         )?;
-        Ok((key_package, public_key_package))
+        Ok((key_package, crate::dkg::without_min_signers(&public_key_package)))
     }
 }

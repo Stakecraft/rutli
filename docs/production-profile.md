@@ -125,8 +125,8 @@ that made itself non-dumpable is not dumped on Linux, whatever `kernel.core_patt
 
 Key shares are also wiped from memory when the process drops them: the share loaded from a key
 file, the signing cache's copy (on eviction, refresh, shutdown) and the shares a ceremony builds.
-One copy is not: during a refresh the FROST library consumes the old share and drops it without
-wiping it, which needs an upstream change.
+Since frost 3.0 the FROST library also wipes the old share it consumes during a refresh. Not wiped:
+intermediate scalars inside the library (refresh, DKG, signing), which are plain copyable values.
 
 ## Upgrading
 

@@ -1002,22 +1002,29 @@ async fn attempt(
     let (k, m) = (key_id.to_owned(), message.to_vec());
     match node.blocking(move |n| n.aggregate(&k, &m, &commitments, &shares)).await {
         Ok(signature) => Ok(signature),
-        Err(e) => match culprit(&e) {
-            Some(id) => {
-                metrics::counter!(crate::metrics::INVALID_SIGNATURE_SHARES).increment(1);
-                tracing::error!(key_id, peer = ?id, error = %e, "a cosigner returned an invalid signature share");
-                Err(Attempt::Members(vec![(id, e)]))
+        Err(e) => {
+            let blamed = culprits(&e);
+            if blamed.is_empty() {
+                return Err(Attempt::Fatal(e));
             }
-            None => Err(Attempt::Fatal(e)),
-        },
+            metrics::counter!(crate::metrics::INVALID_SIGNATURE_SHARES).increment(blamed.len() as u64);
+            tracing::error!(key_id, peers = ?blamed, error = %e, "cosigner(s) returned an invalid signature share");
+            // One error per blamed member (DaemonError is not Clone): each names only that member.
+            Err(Attempt::Members(
+                blamed
+                    .into_iter()
+                    .map(|id| (id, DaemonError::Frost(frost_ed25519::Error::InvalidSignatureShare { culprits: vec![id] })))
+                    .collect(),
+            ))
+        }
     }
 }
 
-/// The cosigner frost's cheater detection blames for a failed aggregation, if any.
-fn culprit(e: &DaemonError) -> Option<Identifier> {
+/// The cosigners frost's cheater detection blames for a failed aggregation (empty if none).
+fn culprits(e: &DaemonError) -> Vec<Identifier> {
     match e {
-        DaemonError::Core(rutli_frost_core::CoreError::Frost(f)) | DaemonError::Frost(f) => f.culprit(),
-        _ => None,
+        DaemonError::Core(rutli_frost_core::CoreError::Frost(f)) | DaemonError::Frost(f) => f.culprits(),
+        _ => Vec::new(),
     }
 }
 

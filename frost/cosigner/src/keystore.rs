@@ -49,7 +49,8 @@ pub struct Share {
 }
 
 /// The signing share is wiped when a `Share` is dropped: every load, stage, import and refresh
-/// builds one, and frost's `KeyPackage` implements `Zeroize` but does not wipe itself on drop.
+/// builds one. frost 3.0's `KeyPackage` wipes itself on drop too; this stays as defence in depth
+/// until every cluster runs 3.x (then a follow-up removes it).
 /// Code that hands the key package on clones it (the clone's owner wipes its own copy, e.g.
 /// [`rutli_frost_core::session::Cosigner`]).
 impl Drop for Share {

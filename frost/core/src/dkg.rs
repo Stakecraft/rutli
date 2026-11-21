@@ -72,8 +72,23 @@ impl DkgParticipant {
             .take()
             .ok_or(crate::CoreError::InvalidCeremonyState("dkg part3 before part2"))?;
         let (key_package, public_key_package) = part3(&r2, round1_packages, round2_packages)?;
-        Ok((key_package, public_key_package))
+        Ok((key_package, without_min_signers(&public_key_package)))
     }
+}
+
+/// `pkp` with `min_signers` unset, as frost 2.x wrote every package.
+///
+/// frost 3.0 records the threshold in a `PublicKeyPackage` it produces (DKG, refresh, trusted-dealer
+/// split). That one optional field changes the package's JSON (which frost 2.x refuses:
+/// `deny_unknown_fields`) and its postcard bytes, hence [`crate::dealer::pkp_digest`], which nodes
+/// compare across the cluster and which ceremony records, journals and runbook gates hold. Every
+/// package Rütli produces goes through this, so stored files, wire messages and digests stay
+/// byte-identical to 2.x in both directions: a mixed-version cluster agrees on ceremony outcomes,
+/// and a node rolled back to 2.x loads every key file written meanwhile. The threshold itself is
+/// still enforced by Rütli (every signing session checks it, and each `KeyPackage` carries it).
+/// Switching to `Some` is a tracked follow-up for when no cluster can roll back to 2.x.
+pub fn without_min_signers(pkp: &frost::keys::PublicKeyPackage) -> frost::keys::PublicKeyPackage {
+    frost::keys::PublicKeyPackage::new(pkp.verifying_shares().clone(), *pkp.verifying_key(), None)
 }
 
 /// The group public key as a 32-byte RFC 8032 Ed25519 verifying key — the raw key Canton wraps in
