@@ -30,7 +30,11 @@ pub struct StoreFault {
 
 impl StoreFault {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self { state: Mutex::new(Store::Ok), changed: Condvar::new(), held: AtomicUsize::new(0) })
+        Arc::new(Self {
+            state: Mutex::new(Store::Ok),
+            changed: Condvar::new(),
+            held: AtomicUsize::new(0),
+        })
     }
 
     pub fn set(&self, store: Store) {

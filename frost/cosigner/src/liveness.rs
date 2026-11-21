@@ -160,7 +160,9 @@ pub struct OpGuard {
 impl Drop for OpGuard {
     fn drop(&mut self) {
         self.load.inflight.fetch_sub(1, Ordering::AcqRel);
-        self.round.pick(&self.load.done).fetch_add(1, Ordering::AcqRel);
+        self.round
+            .pick(&self.load.done)
+            .fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -419,7 +421,9 @@ impl PeerHealth {
 
     /// Whether the peer's counters moved for `round` after `since`.
     fn progressed_since(&self, round: Round, since: Instant) -> bool {
-        round.pick(&self.seen().progress_at).is_some_and(|at| at > since)
+        round
+            .pick(&self.seen().progress_at)
+            .is_some_and(|at| at > since)
     }
 
     pub(crate) fn last_probe(&self) -> Option<ProbeRecord> {
@@ -743,7 +747,8 @@ impl PeerHealth {
     /// counters were seen moving meanwhile; otherwise one probe decides.
     pub fn judge(&self, round: Round, start: &Mark) -> Judged {
         let now = self.mark();
-        if round.pick(&now.done) > round.pick(&start.done) || self.progressed_since(round, start.at) {
+        if round.pick(&now.done) > round.pick(&start.done) || self.progressed_since(round, start.at)
+        {
             return Judged::Busy;
         }
         Judged::Probe
@@ -871,7 +876,10 @@ mod tests {
         // A round 1 success does not prove the store: still down.
         h.on_success(CallClass::Round1);
         assert_eq!(h.down_reason(), Some(DownReason::Stalled));
-        assert!(!h.trial_due() && h.take_trial().is_none(), "inside the window");
+        assert!(
+            !h.trial_due() && h.take_trial().is_none(),
+            "inside the window"
+        );
         tokio::time::advance(Duration::from_secs(2)).await;
         // The window passed. Looking does not use the trial up: only an attempt that includes the
         // peer takes it, and exactly one does.
@@ -882,7 +890,10 @@ mod tests {
         assert_eq!(h.state_name(), "down");
         assert!(h.take_trial().is_some());
         assert_eq!(h.state_name(), "trial");
-        assert!(!h.trial_due() && h.take_trial().is_none(), "one trial per window");
+        assert!(
+            !h.trial_due() && h.take_trial().is_none(),
+            "one trial per window"
+        );
         // The trial failed: down again for twice the window.
         h.open(DownReason::Stalled);
         tokio::time::advance(Duration::from_secs(3)).await;
@@ -916,14 +927,20 @@ mod tests {
         assert!(h.take_trial().is_none());
         // The second attempt ends without reaching the peer: given back, due again at once.
         h.release_trial(second);
-        assert_eq!((h.state_name(), h.down_reason()), ("down", Some(DownReason::Refusing)));
+        assert_eq!(
+            (h.state_name(), h.down_reason()),
+            ("down", Some(DownReason::Refusing))
+        );
         assert_eq!(h.transitions(), after_take + 1);
         assert!(h.trial_due());
         assert!(h.take_trial().is_some(), "the next signature takes it");
         // Not doubled: a failed trial now opens a 4 s window (2 s doubled once), not 8 s.
         h.open(DownReason::Refusing);
         tokio::time::advance(Duration::from_secs(4)).await;
-        assert!(h.trial_due(), "the window doubled once, for the one trial that had a verdict");
+        assert!(
+            h.trial_due(),
+            "the window doubled once, for the one trial that had a verdict"
+        );
         // An unreachable peer gets no trial at all: its prober decides.
         let u = PeerHealth::new(3, Liveness::default());
         u.open(DownReason::Unreachable);
@@ -941,8 +958,14 @@ mod tests {
             tokio::time::advance(Duration::from_secs(5)).await;
             h.note_reply(None);
             assert_eq!(h.judge(Round::Two, &start), Judged::Probe);
-            assert_eq!(h.judge_probe(Round::Two, &start, Probed::Answered(None)), None);
-            assert_eq!(h.judge_probe(Round::One, &start, Probed::Answered(None)), None);
+            assert_eq!(
+                h.judge_probe(Round::Two, &start, Probed::Answered(None)),
+                None
+            );
+            assert_eq!(
+                h.judge_probe(Round::One, &start, Probed::Answered(None)),
+                None
+            );
         }
         let start = h.mark();
         assert_eq!(

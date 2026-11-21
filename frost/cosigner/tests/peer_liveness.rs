@@ -47,19 +47,17 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use frost_ed25519::Identifier;
-use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use async_trait::async_trait;
 use frost_ed25519::round1::SigningCommitments;
 use frost_ed25519::round2::SignatureShare;
+use frost_ed25519::Identifier;
+use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
 use rutli_cosigner::config::{SigningPolicyConfig, TlsConfig};
 use rutli_cosigner::journal::{read_key_dir, JournalEntry, Retention, SignJournal};
 use rutli_cosigner::keystore::KeyStore;
 use rutli_cosigner::liveness::{DownReason, PeerHealth};
 use rutli_cosigner::node::{Node, Round1Ctx};
-use rutli_cosigner::orchestrator::{
-    max_sign_attempts, run_dkg, sign, Peers, DEFAULT_WRITE_QUORUM,
-};
+use rutli_cosigner::orchestrator::{max_sign_attempts, run_dkg, sign, Peers, DEFAULT_WRITE_QUORUM};
 use rutli_cosigner::pb;
 use rutli_cosigner::pb::peer_server::PeerServer;
 use rutli_cosigner::pb::signer_client::SignerClient;
@@ -701,7 +699,11 @@ async fn t04_a_stalled_round_2_costs_one_deadline_and_the_abort_is_not_waited_fo
     for i in 0..5 {
         let t = Instant::now();
         m.sign(1, &format!("t4-after-{i}")).await.unwrap();
-        assert!(t.elapsed() < Duration::from_millis(100), "{:?}", t.elapsed());
+        assert!(
+            t.elapsed() < Duration::from_millis(100),
+            "{:?}",
+            t.elapsed()
+        );
         settle(0.5).await;
     }
 }
@@ -938,7 +940,11 @@ async fn t18_a_store_reading_control_call_past_its_deadline_opens_nothing_and_no
         matches!(err, DaemonError::PeerDeadline { peer: 2, .. }),
         "{err:?}"
     );
-    assert!(close(t.elapsed(), CONTROL_DEADLINE, 50), "{:?}", t.elapsed());
+    assert!(
+        close(t.elapsed(), CONTROL_DEADLINE, 50),
+        "{:?}",
+        t.elapsed()
+    );
     let err = to2.ceremony_status("t18").await.unwrap_err();
     assert!(
         matches!(err, DaemonError::PeerDeadline { peer: 2, .. }),
@@ -1418,8 +1424,7 @@ async fn t20_a_round_2_cancelled_in_its_store_work_finishes_once() {
     );
     assert_eq!(m.markers(2), markers + 1, "and burnt one marker");
     let session = &late[0].session_id;
-    let store =
-        rutli_frost_core::nonce_store::NonceStore::open(nonce_dir(&m, 2)).unwrap();
+    let store = rutli_frost_core::nonce_store::NonceStore::open(nonce_dir(&m, 2)).unwrap();
     assert!(store.is_consumed(session).unwrap());
     assert_eq!(
         m.control(2).seen("SignRound2"),
@@ -1733,7 +1738,11 @@ async fn t14_saturated_but_progressing_members_open_no_breaker() {
             .or_default()
             .insert(r.session.clone());
     }
-    assert_eq!(attempts.len(), N as usize * per_leader, "every signature counted");
+    assert_eq!(
+        attempts.len(),
+        N as usize * per_leader,
+        "every signature counted"
+    );
     assert!(
         attempts.values().all(|a| (1..=cap).contains(&a.len())),
         "attempts per signature: {attempts:?}"
