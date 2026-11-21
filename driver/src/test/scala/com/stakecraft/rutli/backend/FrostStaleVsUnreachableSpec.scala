@@ -44,6 +44,8 @@ class FrostStaleVsUnreachableSpec extends AnyWordSpec with Matchers {
   private val FrostKey = "frost-ns"
   private val HostedKey = "rutli-enc-ec"
   private val Ecies = EncryptionAlgoSpec.EciesHkdfHmacSha256Aes128Cbc
+  // BouncyCastle's name for Canton's ECIES scheme: ECIES, SHA-256, AES-CBC.
+  private val EciesTransformation = Seq("ECIES", "with", "SHA256", "and", "AES-CBC").mkString
 
   private val Group: KeyPair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
   private val Other: KeyPair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
@@ -66,7 +68,7 @@ class FrostStaleVsUnreachableSpec extends AnyWordSpec with Matchers {
   private val Ciphertext: Array[Byte] = {
     val iv = new Array[Byte](16)
     new SecureRandom().nextBytes(iv)
-    val c = Cipher.getInstance("ECIESwithSHA256andAES-CBC", new org.bouncycastle.jce.provider.BouncyCastleProvider)
+    val c = Cipher.getInstance(EciesTransformation, new org.bouncycastle.jce.provider.BouncyCastleProvider)
     c.init(Cipher.ENCRYPT_MODE, EcPair.getPublic, new IESParameterSpec(Array[Byte](), Array[Byte](), 512, 128, iv))
     iv ++ c.doFinal(Plaintext)
   }
@@ -137,23 +139,6 @@ class FrostStaleVsUnreachableSpec extends AnyWordSpec with Matchers {
       backend.close()
       servers.foreach(_.shutdownNow())
     }
-  }
-
-  /** A call for which one cosigner's own answer is not the cluster's: the answer (`own`, the state
-    * of a cosigner that gives it) and how the call fails when that answer is final. */
-  private final case class Call(
-      name: String,
-      own: State,
-      pinFirst: Boolean,
-      run: FrostBackend => Future[Any],
-      isOwnFinal: Throwable => Boolean,
-      // Whether the own answer says the cosigner cannot use the key, and so becomes final by count.
-      counts: Boolean = true,
-  ) {
-
-    /** How many cosigners of `n` must give the own answer before it is final: all but one, or
-      * never for an answer that is about the cosigner's state at the moment. */
-    def quorum(n: Int): Int = if (counts) math.max(1, n - 1) else Int.MaxValue
   }
 
   private def hasStatus(t: Throwable, code: Status.Code): Boolean = t match {
@@ -256,10 +241,12 @@ class FrostStaleVsUnreachableSpec extends AnyWordSpec with Matchers {
           result.isSuccess shouldBe true
         case OwnAnswerFinal =>
           call.isOwnFinal(thrown) shouldBe true
-          thrown match {
-            case e: StatusRuntimeException => RutliDriver.transient(e.getStatus) shouldBe false
-            case _                         => succeed
+          // Final for Canton: not one of the statuses the driver reports as retryable.
+          val retried = thrown match {
+            case e: StatusRuntimeException => RutliDriver.transient(e.getStatus)
+            case _                         => false
           }
+          retried shouldBe false
           notes.render should not include "unconfirmed="
           everyCosignerAskedOnce()
         case Retryable =>
@@ -484,6 +471,23 @@ object FrostStaleVsUnreachableSpec {
 
   /** It fails every key call with this status. */
   final case class Failing(status: Status) extends State
+
+  /** A call for which one cosigner's own answer is not the cluster's: the answer (`own`, the state
+    * of a cosigner that gives it) and how the call fails when that answer is final. */
+  final case class Call(
+      name: String,
+      own: State,
+      pinFirst: Boolean,
+      run: FrostBackend => Future[Any],
+      isOwnFinal: Throwable => Boolean,
+      // Whether the own answer says the cosigner cannot use the key, and so becomes final by count.
+      counts: Boolean = true,
+  ) {
+
+    /** How many cosigners of `n` must give the own answer before it is final: all but one, or
+      * never for an answer that is about the cosigner's state at the moment. */
+    def quorum(n: Int): Int = if (counts) math.max(1, n - 1) else Int.MaxValue
+  }
 
   /** How a call over a roster ends. */
   sealed trait Outcome
