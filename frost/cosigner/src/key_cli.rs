@@ -72,7 +72,9 @@ const PEM_BEGIN: &str = "-----BEGIN ";
 const PEM_PUBLIC_BEGIN: &str = "-----BEGIN PUBLIC KEY-----";
 const PEM_PUBLIC_END: &str = "-----END PUBLIC KEY-----";
 /// The fixed head of an Ed25519 SubjectPublicKeyInfo (RFC 8410); the 32-byte key follows.
-const ED25519_SPKI_HEAD: [u8; 12] = [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00];
+const ED25519_SPKI_HEAD: [u8; 12] = [
+    0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+];
 
 /// Read a public key for `key fingerprint`. Accepted, and told apart by the input alone:
 ///
@@ -88,7 +90,8 @@ const ED25519_SPKI_HEAD: [u8; 12] = [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0
 /// forms. 64 hex digits, however, are always read as a public key: a raw Ed25519 seed looks the
 /// same, so this command must only ever be given public values.
 pub fn parse_public_input(input: &[u8]) -> Result<PublicInput> {
-    let refuse = |why: String| DaemonError::Config(format!("not a public key this command reads: {why}"));
+    let refuse =
+        |why: String| DaemonError::Config(format!("not a public key this command reads: {why}"));
     if input.len() > MAX_PUBLIC_KEY_INPUT {
         return Err(refuse(format!("more than {MAX_PUBLIC_KEY_INPUT} bytes")));
     }
@@ -97,12 +100,18 @@ pub fn parse_public_input(input: &[u8]) -> Result<PublicInput> {
         if text.starts_with(PEM_BEGIN) {
             let der = public_pem_to_der(text).map_err(refuse)?;
             let public = PublicKey::from_spki_der(&der).map_err(|e| refuse(e.to_string()))?;
-            return Ok(PublicInput { public, format: "SubjectPublicKeyInfo (PEM)" });
+            return Ok(PublicInput {
+                public,
+                format: "SubjectPublicKeyInfo (PEM)",
+            });
         }
         if !text.is_empty() && text.bytes().all(|b| b.is_ascii_hexdigit()) {
             let bytes = hex::decode(text).map_err(|e| refuse(format!("hex: {e}")))?;
             let (der, format) = match <[u8; 32]>::try_from(bytes.as_slice()) {
-                Ok(raw) => ([ED25519_SPKI_HEAD.as_slice(), &raw].concat(), "raw Ed25519 public key (hex)"),
+                Ok(raw) => (
+                    [ED25519_SPKI_HEAD.as_slice(), &raw].concat(),
+                    "raw Ed25519 public key (hex)",
+                ),
                 Err(_) => (bytes, "SubjectPublicKeyInfo (hex)"),
             };
             let public = PublicKey::from_spki_der(&der).map_err(|e| refuse(e.to_string()))?;
@@ -110,7 +119,12 @@ pub fn parse_public_input(input: &[u8]) -> Result<PublicInput> {
         }
     }
     let as_spki = match PublicKey::from_spki_der(input) {
-        Ok(public) => return Ok(PublicInput { public, format: "SubjectPublicKeyInfo (DER)" }),
+        Ok(public) => {
+            return Ok(PublicInput {
+                public,
+                format: "SubjectPublicKeyInfo (DER)",
+            })
+        }
         Err(e) => e,
     };
     match rutli_canton_key::parse_public_key(input) {
@@ -165,8 +179,15 @@ mod tests {
 
     fn pem(der: &[u8]) -> String {
         let b64 = base64::engine::general_purpose::STANDARD.encode(der);
-        let body: Vec<&str> = b64.as_bytes().chunks(64).map(|c| std::str::from_utf8(c).unwrap()).collect();
-        format!("{PEM_PUBLIC_BEGIN}\n{}\n{PEM_PUBLIC_END}\n", body.join("\n"))
+        let body: Vec<&str> = b64
+            .as_bytes()
+            .chunks(64)
+            .map(|c| std::str::from_utf8(c).unwrap())
+            .collect();
+        format!(
+            "{PEM_PUBLIC_BEGIN}\n{}\n{PEM_PUBLIC_END}\n",
+            body.join("\n")
+        )
     }
 
     fn refusal(input: &[u8]) -> String {
@@ -176,10 +197,20 @@ mod tests {
     #[test]
     fn show_routes_an_id_as_the_cosigners_do() {
         // The driver's two id shapes, with and without a `frost.key-prefix`.
-        for id in ["frost-namespace", "p1-frost-signing", "frost-import-1220cb0e", "frost-participant1-rutli-x"] {
+        for id in [
+            "frost-namespace",
+            "p1-frost-signing",
+            "frost-import-1220cb0e",
+            "frost-participant1-rutli-x",
+        ] {
             assert_eq!(KeyKind::of(id), KeyKind::Frost, "{id}");
         }
-        for id in ["rutli-enc-1", "p2-rutli-enc-ecies-1", "p1-rutli-enc-frost-named-key-1", "rutli-sym-p1"] {
+        for id in [
+            "rutli-enc-1",
+            "p2-rutli-enc-ecies-1",
+            "p1-rutli-enc-frost-named-key-1",
+            "rutli-sym-p1",
+        ] {
             assert_eq!(KeyKind::of(id), KeyKind::Hosted, "{id}");
         }
         // No tag: never a hosted key (every hosted write refuses such an id), so a FROST lookup.
@@ -187,11 +218,21 @@ mod tests {
             assert_eq!(KeyKind::of(id), KeyKind::Frost, "{id}");
         }
         // Exactly the cosigners' own rule, for every id above and a few more.
-        for id in ["frost-a", "rutli-a", "x-rutli-frost-a", "x-frost-rutli-a", "plain", "RUTLI-a"] {
+        for id in [
+            "frost-a",
+            "rutli-a",
+            "x-rutli-frost-a",
+            "x-frost-rutli-a",
+            "plain",
+            "RUTLI-a",
+        ] {
             let hosted = crate::node::refuse_unless_hosted_id(id).is_ok();
             assert_eq!(KeyKind::of(id) == KeyKind::Hosted, hosted, "{id}");
         }
-        assert_eq!((KeyKind::Frost.as_str(), KeyKind::Hosted.as_str()), ("frost", "hosted"));
+        assert_eq!(
+            (KeyKind::Frost.as_str(), KeyKind::Hosted.as_str()),
+            ("frost", "hosted")
+        );
     }
 
     #[test]
@@ -202,8 +243,14 @@ mod tests {
         let expected = crate::share_delivery::ed25519_fingerprint(&raw);
         assert!(expected.starts_with("1220") && expected.len() == 68);
         for (input, format) in [
-            (RFC8032_PUBLIC.as_bytes().to_vec(), "raw Ed25519 public key (hex)"),
-            (format!("  {}\n", RFC8032_PUBLIC.to_uppercase()).into_bytes(), "raw Ed25519 public key (hex)"),
+            (
+                RFC8032_PUBLIC.as_bytes().to_vec(),
+                "raw Ed25519 public key (hex)",
+            ),
+            (
+                format!("  {}\n", RFC8032_PUBLIC.to_uppercase()).into_bytes(),
+                "raw Ed25519 public key (hex)",
+            ),
             (der.clone(), "SubjectPublicKeyInfo (DER)"),
             (hex::encode(&der).into_bytes(), "SubjectPublicKeyInfo (hex)"),
             (pem(&der).into_bytes(), "SubjectPublicKeyInfo (PEM)"),
@@ -218,12 +265,25 @@ mod tests {
     #[test]
     fn hosted_public_keys_are_read_as_the_cluster_prints_them() {
         use crate::hosted::{HostedKey, HostedSpec};
-        for (spec, name) in [(HostedSpec::EcP256, "EC P-256"), (HostedSpec::Rsa2048, "RSA-2048")] {
-            let der = HostedKey::generate(spec, 1).unwrap().public_key_der().unwrap();
+        for (spec, name) in [
+            (HostedSpec::EcP256, "EC P-256"),
+            (HostedSpec::Rsa2048, "RSA-2048"),
+        ] {
+            let der = HostedKey::generate(spec, 1)
+                .unwrap()
+                .public_key_der()
+                .unwrap();
             let expected = PublicKey::from_spki_der(&der).unwrap().fingerprint();
-            for input in [der.clone(), hex::encode(&der).into_bytes(), pem(&der).into_bytes()] {
+            for input in [
+                der.clone(),
+                hex::encode(&der).into_bytes(),
+                pem(&der).into_bytes(),
+            ] {
                 let parsed = parse_public_input(&input).unwrap();
-                assert_eq!((parsed.spec_name(), parsed.public.fingerprint()), (name, expected.clone()));
+                assert_eq!(
+                    (parsed.spec_name(), parsed.public.fingerprint()),
+                    (name, expected.clone())
+                );
             }
         }
     }
@@ -232,7 +292,8 @@ mod tests {
     /// them (`frost/canton-key/testdata`, throwaway keys).
     #[test]
     fn cantons_public_key_files_give_cantons_fingerprints() {
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../canton-key/testdata/vectors");
+        let dir =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../canton-key/testdata/vectors");
         let manifest: serde_json::Value =
             serde_json::from_slice(&std::fs::read(dir.join("manifest.json")).unwrap()).unwrap();
         let keys = manifest["keys"].as_array().unwrap();
@@ -241,11 +302,22 @@ mod tests {
             let name = key["name"].as_str().unwrap();
             let file = std::fs::read(dir.join(format!("{name}.pub.bin"))).unwrap();
             let parsed = parse_public_input(&file).unwrap();
-            assert_eq!(parsed.format, "Canton public key (keys.public.download)", "{name}");
-            assert_eq!(parsed.public.fingerprint(), key["fingerprint"].as_str().unwrap(), "{name}");
+            assert_eq!(
+                parsed.format, "Canton public key (keys.public.download)",
+                "{name}"
+            );
+            assert_eq!(
+                parsed.public.fingerprint(),
+                key["fingerprint"].as_str().unwrap(),
+                "{name}"
+            );
             // The same key as bare SPKI: the same fingerprint.
             let spki = parse_public_input(&parsed.public.spki_der()).unwrap();
-            assert_eq!(spki.public.fingerprint(), parsed.public.fingerprint(), "{name}");
+            assert_eq!(
+                spki.public.fingerprint(),
+                parsed.public.fingerprint(),
+                "{name}"
+            );
             // The private halves of the same keys are not public keys.
             for private in ["export", "export-pw", "stored"] {
                 let file = std::fs::read(dir.join(format!("{name}.{private}.bin"))).unwrap();
@@ -259,22 +331,38 @@ mod tests {
         let raw: [u8; 32] = hex::decode(RFC8032_PUBLIC).unwrap().try_into().unwrap();
         let der = PublicKey::Ed25519(raw).spki_der();
         // Private keys, by label: the body here is not even base64.
-        for label in ["PRIVATE KEY", "EC PRIVATE KEY", "RSA PRIVATE KEY", "ENCRYPTED PRIVATE KEY"] {
-            let r = refusal(format!("-----BEGIN {label}-----\n!!!\n-----END {label}-----\n").as_bytes());
+        for label in [
+            "PRIVATE KEY",
+            "EC PRIVATE KEY",
+            "RSA PRIVATE KEY",
+            "ENCRYPTED PRIVATE KEY",
+        ] {
+            let r = refusal(
+                format!("-----BEGIN {label}-----\n!!!\n-----END {label}-----\n").as_bytes(),
+            );
             assert!(r.contains("PRIVATE key") && !r.contains("base64"), "{r}");
         }
         let r = refusal(b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n");
-        assert!(r.contains("one `PUBLIC KEY` block") && !r.contains("CERTIFICATE"), "{r}");
+        assert!(
+            r.contains("one `PUBLIC KEY` block") && !r.contains("CERTIFICATE"),
+            "{r}"
+        );
         // One block, whole, and nothing around it.
         let one = pem(&der);
         assert!(refusal(format!("{one}{one}").as_bytes()).contains("after the PEM END line"));
         assert!(refusal(one.replace(PEM_PUBLIC_END, "").as_bytes()).contains("END line missing"));
-        assert!(refusal(format!("{PEM_PUBLIC_BEGIN}\n!!!\n{PEM_PUBLIC_END}\n").as_bytes()).contains("base64"));
+        assert!(
+            refusal(format!("{PEM_PUBLIC_BEGIN}\n!!!\n{PEM_PUBLIC_END}\n").as_bytes())
+                .contains("base64")
+        );
         // Hex of the wrong length, a point not on the curve, a truncated or padded SPKI. 31 or 33
         // bytes of hex are never padded or cut to a key: they are read as (bad) SPKI.
         for digits in [62, 66] {
             let hex = format!("{RFC8032_PUBLIC}00");
-            assert!(refusal(&hex.as_bytes()[..digits]).contains("SubjectPublicKeyInfo: "), "{digits}");
+            assert!(
+                refusal(&hex.as_bytes()[..digits]).contains("SubjectPublicKeyInfo: "),
+                "{digits}"
+            );
         }
         // 31 zero bytes: padded to 32 they would be a valid point (y = 0).
         assert!(ed25519_dalek::VerifyingKey::from_bytes(&[0u8; 32]).is_ok());
@@ -283,7 +371,9 @@ mod tests {
         // A y with no x on edwards25519 (about every second one).
         let off_curve = (2u8..)
             .map(|y| [&[y][..], &[0u8; 31]].concat())
-            .find(|y| ed25519_dalek::VerifyingKey::from_bytes(y.as_slice().try_into().unwrap()).is_err())
+            .find(|y| {
+                ed25519_dalek::VerifyingKey::from_bytes(y.as_slice().try_into().unwrap()).is_err()
+            })
             .unwrap();
         assert!(refusal(hex::encode(off_curve).as_bytes()).contains("not a valid curve point"));
         assert!(refusal(&der[..der.len() - 1]).contains("as SubjectPublicKeyInfo DER"));
