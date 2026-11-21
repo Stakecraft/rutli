@@ -52,6 +52,27 @@ class SigningJournalSpec extends AnyWordSpec with Matchers {
       clock.record(j2, "frost-ns", "e", t0 + 61000)
     }
 
+    "not count entries older than the window after a restart, and still know their digests" in {
+      val dir = tmpDir()
+      val t0 = 1000000L
+      val clock = new Clock(t0)
+      val j1 = clock.journal(dir, Some(2), 60)
+      clock.record(j1, "frost-ns", "a", t0)
+      clock.record(j1, "frost-ns", "b", t0 + 1000)
+      a[SecurityException] should be thrownBy clock.record(j1, "frost-ns", "c", t0 + 2000)
+
+      // Restart two minutes later: both entries are outside the 60 s window, so the key has its
+      // full allowance again, no more.
+      val later = t0 + 120000L
+      val j2 = clock.journal(dir, Some(2), 60)
+      clock.ms = later
+      j2.recover(nowMillis = later)
+      j2.distinctCount("frost-ns") shouldBe 2
+      clock.record(j2, "frost-ns", "d", later)
+      clock.record(j2, "frost-ns", "e", later + 1000)
+      a[SecurityException] should be thrownBy clock.record(j2, "frost-ns", "f", later + 2000)
+    }
+
     "record distinct digests and flag repeats without blocking them" in {
       val dir = tmpDir()
       val j = new SigningJournal(dir, None, 60, logger)

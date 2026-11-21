@@ -99,6 +99,68 @@ class GroupKeyPinStoreSpec extends AnyWordSpec with Matchers {
       the[IllegalStateException] thrownBy new GroupKeyPinStore(d, logger)
     }
 
+    "refuse a pin file whose checksum is right but whose content is not a pin, saying what is wrong" in {
+      // The checksum only catches damage. Each file below carries the right checksum for its
+      // content, and the content is what is refused.
+      def withChecksum(lines: Seq[String]): String = {
+        val content = lines.map(_ + "\n").mkString
+        val sum = java.security.MessageDigest.getInstance("SHA-256").digest(content.getBytes(UTF_8)).map("%02x".format(_)).mkString
+        content + s"sha256=$sum\n"
+      }
+      val good = Seq(
+        GroupKeyPinStore.Header,
+        "key-id=frost-namespace",
+        s"group-key=$K1",
+        "source=dkg",
+        "agreed-by=c1:9101,c2:9101",
+        "dissent=",
+        "pinned-at=2026-11-20T12:00:00Z",
+      )
+      val cases: Seq[(String, String)] = Seq(
+        "malformed line 'source'" -> withChecksum(good.updated(3, "source")),
+        "malformed line '=dkg'" -> withChecksum(good.updated(3, "=dkg")),
+        "no source" -> withChecksum(good.patch(3, Nil, 1)),
+        "no pinned-at" -> withChecksum(good.dropRight(1)),
+        "not 64 lower-case hex" -> withChecksum(good.updated(2, "group-key=" + "AB" * 32)),
+        "not 64 lower-case hex" -> withChecksum(good.updated(2, "group-key=" + "11" * 31)),
+        "unknown source guess" -> withChecksum(good.updated(3, "source=guess")),
+        "no checksum line" -> good.map(_ + "\n").mkString,
+      )
+      cases.foreach { case (why, text) =>
+        val d = dir()
+        val f = d.resolve("frost-namespace.pin")
+        Files.write(f, text.getBytes(UTF_8))
+        withClue(why) {
+          val e = the[IllegalStateException] thrownBy new GroupKeyPinStore(d, logger)
+          e.getMessage should (include(f.toString) and include(why))
+          // The read-only check an operator runs before an upgrade says the same, and writes nothing.
+          GroupKeyPinStore.preflight(d) shouldBe Left(e.getMessage)
+          new String(Files.readAllBytes(f), UTF_8) shouldBe text
+        }
+      }
+      // The unchanged file is a pin: the cases above fail for their content, not for the helper.
+      val d = dir()
+      Files.write(d.resolve("frost-namespace.pin"), withChecksum(good).getBytes(UTF_8))
+      new GroupKeyPinStore(d, logger).get("frost-namespace") shouldBe Some(pin("frost-namespace", K1))
+    }
+
+    "check a pin directory read-only: its pins, and the temp files a start would remove" in {
+      val d = dir()
+      GroupKeyPinStore.preflight(d.resolve("absent")) shouldBe Right((Nil, 0))
+      new GroupKeyPinStore(d, logger).create(pin("frost-namespace", K1))
+      new GroupKeyPinStore(d, logger).create(pin("frost-a", K2, "adopted"))
+      Files.write(d.resolve("frost-namespace.pin.tmp.123"), "half".getBytes(UTF_8))
+      GroupKeyPinStore.preflight(d) shouldBe Right((List(pin("frost-a", K2, "adopted"), pin("frost-namespace", K1)), 1))
+      Files.exists(d.resolve("frost-namespace.pin.tmp.123")) shouldBe true
+    }
+
+    "ignore a malformed line in a ceremony file, keeping the ids around it" in {
+      val d = dir()
+      val (c1, c2) = ("dkg-" + "a" * 32, "dkg-" + "b" * 32)
+      Files.write(d.resolve("frost-namespace.dkg"), s"$c1\nDKG-not-an-id\n$c2\n".getBytes(UTF_8))
+      new GroupKeyPinStore(d, logger).ceremonies("frost-namespace") shouldBe Set(c1, c2)
+    }
+
     "remove temp files a crash left behind, and ignore files that are not pins" in {
       val d = dir()
       Files.write(d.resolve("frost-namespace.pin.tmp.123"), "half".getBytes(UTF_8))

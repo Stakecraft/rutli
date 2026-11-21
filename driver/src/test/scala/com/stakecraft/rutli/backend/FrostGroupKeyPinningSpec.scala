@@ -5,6 +5,7 @@ package com.stakecraft.rutli.backend
 
 import com.digitalasset.canton.crypto.kms.driver.api.v1._
 import com.google.protobuf.ByteString
+import com.stakecraft.rutli.audit.AuditNotes
 import com.stakecraft.rutli.grpc._
 import io.grpc.Status
 import io.grpc.inprocess.{InProcessChannelBuilder, InProcessServerBuilder}
@@ -45,7 +46,12 @@ class FrostGroupKeyPinningSpec extends AnyWordSpec with Matchers {
     @volatile var dkgKey: Array[Byte] = groupKey
     @volatile var signer: Array[Byte] => Array[Byte] = signWith(honest, _)
 
-    override def groupKey(req: GroupKeyRequest, obs: StreamObserver[GroupKeyReply]): Unit =
+    val groupKeyCalls = new java.util.concurrent.atomic.AtomicInteger
+    override def groupKey(req: GroupKeyRequest, obs: StreamObserver[GroupKeyReply]): Unit = {
+      groupKeyCalls.incrementAndGet()
+      answerGroupKey(obs)
+    }
+    private def answerGroupKey(obs: StreamObserver[GroupKeyReply]): Unit =
       if (down) obs.onError(Status.UNAVAILABLE.asRuntimeException())
       else if (notFound) obs.onError(Status.NOT_FOUND.asRuntimeException())
       else { obs.onNext(GroupKeyReply.newBuilder().setGroupVerifyingKey(ByteString.copyFrom(groupKey)).build()); obs.onCompleted() }
@@ -373,20 +379,51 @@ class FrostGroupKeyPinningSpec extends AnyWordSpec with Matchers {
 
   "FrostBackend.keyExistsAndIsActive with a pin" should {
 
-    "route around a cosigner that answers another key or NOT_FOUND, and fail when none answers the pin" in {
+    "route around a cosigner that answers another key, and fail when none answers the pin" in {
       val kp = keyPair()
       val fakes = honestCluster(3, kp)
       withCluster(fakes) { b =>
         await(b.getPublicKey("frost-ns"))
         fakes.head.groupKey = raw(keyPair())
-        noException should be thrownBy await(b.keyExistsAndIsActive("frost-ns"))
-        fakes.head.notFound = true
-        noException should be thrownBy await(b.keyExistsAndIsActive("frost-ns"))
-        fakes.head.notFound = false
+        val notes = new AuditNotes
+        await(b.withAuditNotes(notes)(b.keyExistsAndIsActive("frost-ns")))
+        notes.render shouldBe
+          s"groupkey-dissent=${fakes(0).name} failover=${fakes(0).name}→${fakes(1).name} reason=GROUP_KEY_MISMATCH"
         val other = raw(keyPair())
         fakes.foreach(_.groupKey = other)
         val ex = the[KmsDriverException] thrownBy await(b.keyExistsAndIsActive("frost-ns"))
         ex.retryable shouldBe false
+      }
+    }
+
+    "ask the next cosigner when the leader answers NOT_FOUND, and keep the key active" in {
+      // The leader here never answered another key, so it is not skipped as a dissenter: its
+      // NOT_FOUND is what the call meets first.
+      val fakes = honestCluster(3)
+      withCluster(fakes) { b =>
+        await(b.getPublicKey("frost-ns"))
+        val asked = fakes.map(_.groupKeyCalls.get)
+        fakes.head.notFound = true
+        val notes = new AuditNotes
+        await(b.withAuditNotes(notes)(b.keyExistsAndIsActive("frost-ns")))
+        notes.render shouldBe s"failover=${fakes(0).name}→${fakes(1).name} reason=NOT_FOUND"
+        fakes.map(_.groupKeyCalls.get).zip(asked).map { case (now, before) => now - before } shouldBe Seq(1, 1, 0)
+
+        // That cosigner lost the lead: the next check starts at the one that answered.
+        await(b.keyExistsAndIsActive("frost-ns"))
+        fakes.map(_.groupKeyCalls.get).zip(asked).map { case (now, before) => now - before } shouldBe Seq(1, 2, 0)
+      }
+    }
+
+    "end with NOT_FOUND once every cosigner was asked and none has the key" in {
+      val fakes = honestCluster(3)
+      withCluster(fakes) { b =>
+        await(b.getPublicKey("frost-ns"))
+        val asked = fakes.map(_.groupKeyCalls.get)
+        fakes.foreach(_.notFound = true)
+        val err = the[io.grpc.StatusRuntimeException] thrownBy await(b.keyExistsAndIsActive("frost-ns"))
+        err.getStatus.getCode shouldBe Status.Code.NOT_FOUND
+        fakes.map(_.groupKeyCalls.get).zip(asked).map { case (now, before) => now - before } shouldBe Seq(1, 1, 1)
       }
     }
   }
