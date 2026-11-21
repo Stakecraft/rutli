@@ -17,7 +17,7 @@ import org.scalatest.wordspec.AnyWordSpec
 import org.slf4j.LoggerFactory
 
 import java.security.spec.ECGenParameterSpec
-import java.security.{KeyPair, KeyPairGenerator, SecureRandom}
+import java.security.{KeyPair, KeyPairGenerator, SecureRandom, Signature}
 import java.util.concurrent.atomic.AtomicInteger
 import javax.crypto.Cipher
 import scala.concurrent.duration._
@@ -46,6 +46,13 @@ class FrostStaleVsUnreachableSpec extends AnyWordSpec with Matchers {
   private val Group: KeyPair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
   private val Other: KeyPair = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
   private def raw(kp: KeyPair): Array[Byte] = kp.getPublic.getEncoded.takeRight(32)
+  private def signWith(kp: KeyPair, msg: Array[Byte]): Array[Byte] = {
+    val s = Signature.getInstance("Ed25519")
+    s.initSign(kp.getPrivate)
+    s.update(msg)
+    s.sign()
+  }
+  private val Digest: Array[Byte] = Array.fill(34)(7.toByte)
 
   private val EcPair: KeyPair = {
     val g = KeyPairGenerator.getInstance("EC")
@@ -84,6 +91,12 @@ class FrostStaleVsUnreachableSpec extends AnyWordSpec with Matchers {
       serve(obs) {
         val key = if (state == OtherKey) raw(Other) else raw(Group)
         obs.onNext(GroupKeyReply.newBuilder().setGroupVerifyingKey(ByteString.copyFrom(key)).build())
+        obs.onCompleted()
+      }(notFound(obs))
+    override def sign(req: SignRequest, obs: StreamObserver[SignReply]): Unit =
+      serve(obs) {
+        val signature = signWith(if (state == OtherKey) Other else Group, req.getMessage.toByteArray)
+        obs.onNext(SignReply.newBuilder().setSignature(ByteString.copyFrom(signature)).build())
         obs.onCompleted()
       }(notFound(obs))
     override def keyInfo(req: KeyInfoRequest, obs: StreamObserver[KeyInfoReply]): Unit =
@@ -293,6 +306,95 @@ class FrostStaleVsUnreachableSpec extends AnyWordSpec with Matchers {
         val thrown = the[KmsDriverException] thrownBy await(backend.keyExistsAndIsActive(FrostKey))
         thrown.retryable shouldBe false
         nodes.map(_.asked.get) shouldBe Seq(1, 1, 1)
+      }
+    }
+  }
+
+  "a sign whose last leader cannot sign for a reason of its own" should {
+
+    /** Pin the key while every cosigner holds it, then put the cosigners in `states`. */
+    def pinnedThen[A](states: Seq[State])(body: (FrostBackend, IndexedSeq[Node]) => A): A =
+      withCluster(Seq(Holds, Holds, Holds)) { (backend, nodes) =>
+        await(backend.getPublicKey(FrostKey))
+        nodes.zip(states).foreach { case (node, s) => node.state = s }
+        nodes.foreach(_.asked.set(0))
+        body(backend, nodes)
+      }
+    def sign(backend: FrostBackend, notes: AuditNotes = new AuditNotes): Array[Byte] =
+      await(backend.withAuditNotes(notes)(backend.sign(Digest, FrostKey, SigningAlgoSpec.Ed25519)))
+
+    // What one leader answers from its own state: it lacks the share, a ceremony holds the key, it
+    // is too old, or it returns a signature the pinned group key does not verify.
+    val leaderLocal = Seq[State](
+      Missing,
+      OtherKey,
+      Failing(Status.FAILED_PRECONDITION),
+      Failing(Status.ABORTED),
+      Failing(Status.UNIMPLEMENTED),
+    )
+
+    "fail retryably when the other cosigners could not be reached, wherever that leader is in the order" in {
+      for (answer <- leaderLocal; down <- unreachable; at <- 0 to 2) withClue(s"$answer at $at, ${down.getCode}: ") {
+        pinnedThen(Seq.tabulate[State](3)(i => if (i == at) answer else Failing(down))) { (backend, nodes) =>
+          val notes = new AuditNotes
+          retryableAs(intercept[Throwable](sign(backend, notes)), down)
+          nodes.map(_.asked.get) shouldBe Seq(1, 1, 1)
+          if (at == 2) notes.render should include(s"unconfirmed=${nodes(1).name} reason=${down.getCode}")
+
+          // The cosigners are back: Canton's retry of the same sign gets its signature.
+          nodes.foreach(_.state = Holds)
+          sign(backend) shouldBe signWith(Group, Digest)
+        }
+      }
+    }
+
+    "end as that leader's answer, final, when every cosigner gave it" in {
+      pinnedThen(Seq(Missing, Missing, Missing)) { (backend, nodes) =>
+        notFoundStatus(intercept[Throwable](sign(backend))) shouldBe true
+        nodes.map(_.asked.get) shouldBe Seq(1, 1, 1)
+      }
+      pinnedThen(Seq(OtherKey, OtherKey, OtherKey)) { (backend, nodes) =>
+        val thrown = the[KmsDriverException] thrownBy sign(backend)
+        thrown.retryable shouldBe false
+        thrown.getMessage should include("does not verify")
+        nodes.map(_.asked.get) shouldBe Seq(1, 1, 1)
+      }
+    }
+
+    "keep an internal error as the last error of the walk, as before" in {
+      pinnedThen(Seq(Failing(Status.UNAVAILABLE), Failing(Status.UNAVAILABLE), Failing(Status.INTERNAL))) { (backend, _) =>
+        val thrown = intercept[StatusRuntimeException](sign(backend))
+        thrown.getStatus.getCode shouldBe Status.Code.INTERNAL
+      }
+    }
+
+    "return a policy refusal at once, whatever was unreachable before it" in {
+      val refusal = Status.PERMISSION_DENIED.withDescription("not on the signer_acl")
+      pinnedThen(Seq(Failing(Status.UNAVAILABLE), Failing(refusal), Holds)) { (backend, nodes) =>
+        val thrown = intercept[StatusRuntimeException](sign(backend))
+        thrown.getStatus.getCode shouldBe Status.Code.PERMISSION_DENIED
+        nodes.map(_.asked.get) shouldBe Seq(1, 1, 0)
+      }
+    }
+  }
+
+  "a key that no reachable cosigner has, while one cosigner stays unreachable" should {
+
+    "be reported as retryable call after call, each time naming the unreachable cosigner: there is no time bound" in {
+      // Deliberate: the driver cannot tell a key that exists nowhere from one whose only holder is
+      // down, and "does not exist" for an authority key must not depend on how long an outage
+      // lasted. The operator sees the endpoint in every attempt's audit entry and WARN line.
+      for (call <- calls) withClue(s"${call.name}: ") {
+        withCluster(Seq(Failing(Status.UNAVAILABLE), Missing, Missing)) { (backend, nodes) =>
+          for (attempt <- 1 to 4) withClue(s"attempt $attempt: ") {
+            val notes = new AuditNotes
+            retryableAs(intercept[Throwable](await(backend.withAuditNotes(notes)(call.run(backend)))), Status.UNAVAILABLE)
+            notes.render should include(s"unconfirmed=${nodes(0).name} reason=UNAVAILABLE")
+          }
+          // Once that cosigner answers too, the answer is final.
+          nodes(0).state = Missing
+          call.isNotFound(intercept[Throwable](await(call.run(backend)))) shouldBe true
+        }
       }
     }
   }

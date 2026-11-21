@@ -224,7 +224,12 @@ sum(rate(rutli_sign_duration_seconds_sum{result="ok"}[1h]))
    `unconfirmed=<endpoint> reason=UNAVAILABLE|DEADLINE_EXCEEDED` on a failed entry means the
    cosigners that answered did not have the key (or answered another one) while `<endpoint>` could
    not be reached: the driver reported a retryable error, not "no such key". It clears when that
-   cosigner is back; if it stays, one cosigner is down and another is missing the key.
+   cosigner is back; if it stays, one cosigner is down and another is missing the key. There is
+   no time bound: for a key that exists nowhere, Canton keeps retrying for as long as a cosigner
+   stays unreachable, and each attempt logs `FROST: <call>: the cosigners that answered said
+   NOT_FOUND, but <endpoint> could not be reached`. Bring the cosigner back (or take it off the
+   driver's roster) to get the final answer. A sign ends the same way when its last leader could
+   not sign for a reason of its own after another cosigner was unreachable.
    **A hosted key the driver did not accept** (0.5.0): after `GenerateKey` the driver asks every
    cosigner for its own copy and gives the key id to Canton only when at least two hold the
    material the leader reported and none reports other material. If it is short only because

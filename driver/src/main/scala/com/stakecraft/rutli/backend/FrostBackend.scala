@@ -89,7 +89,12 @@ import scala.util.control.NonFatal
   *     ([[withEcFailover]]) — the other cosigners are asked, and "not found" is the call's answer
   *     only when every endpoint answered. While one could not be reached (UNAVAILABLE or
   *     DEADLINE_EXCEEDED) the call fails with that endpoint's status: retryable, because Canton
-  *     never retries a final error and the unreachable cosigner may hold the key.
+  *     never retries a final error and the unreachable cosigner may hold the key. The same goes
+  *     for a sign whose last leader answered from its own state (NOT_FOUND, FAILED_PRECONDITION,
+  *     ABORTED, UNIMPLEMENTED, a signature that does not verify) after another cosigner could not
+  *     be reached. There is no time bound on this: while a cosigner stays unreachable, a key that
+  *     no reachable cosigner has is reported as "retry", never as "does not exist"; every such
+  *     call logs a WARN naming the endpoint and notes `unconfirmed=<endpoint>` in its audit entry.
   * Every hop is logged at WARN and recorded in the operation's own audit entry
   * (`failover=<from>→<to> reason=<CODE>`, see [[withAuditNotes]]). The leader is sticky: the
   * endpoint that last served a request successfully leads the next one, so once a node is found
@@ -638,10 +643,11 @@ class FrostBackend(
     * endpoint index just before it is asked.
     *
     * `unreachableOutranks` names the failures that are only an answer when the whole roster could
-    * be asked (a cosigner's NOT_FOUND for a key the others may hold). When the walk ends on one of
-    * them and an endpoint asked earlier in this call was unreachable (UNAVAILABLE or
-    * DEADLINE_EXCEEDED), the call fails with that endpoint's status instead ([[unconfirmed]]):
-    * retryable, because the cosigner that could not be reached may hold the key. */
+    * be asked (a cosigner's NOT_FOUND for a key the others may hold). When every endpoint has
+    * failed, one of them with such a failure and another was unreachable (UNAVAILABLE or
+    * DEADLINE_EXCEEDED), in either order, the call fails with the unreachable endpoint's status
+    * ([[unconfirmed]]): retryable, because the cosigner that could not be reached may hold the
+    * key. A failure for which `retryOn` does not hold is still thrown at once. */
   private def withCheckedFailover[A](
       what: String,
       retryOn: Status => Boolean,
@@ -663,7 +669,13 @@ class FrostBackend(
     // by what is left of the budget, and no attempt starts once less than MinAttempt is left.
     def left: Long = budgetEnd - System.nanoTime()
     // `unreachable`: the endpoint asked most recently in this call that could not be reached.
-    @tailrec def attempt(k: Int, lastReason: String, unreachable: Option[(String, StatusRuntimeException)]): A = {
+    // `partial`: the most recent failure in this call that `unreachableOutranks` names (its code).
+    @tailrec def attempt(
+        k: Int,
+        lastReason: String,
+        unreachable: Option[(String, StatusRuntimeException)],
+        partial: Option[String],
+    ): A = {
       if (k > 0 && left < MinAttempt.toNanos) {
         logger.warn(s"FROST: $what: request-timeout $requestTimeout spent after $k cosigner(s); last: $lastReason")
         notes.add("request-timeout=spent")
@@ -713,24 +725,25 @@ class FrostBackend(
             case Left(e) if isNodeDown(e.getStatus) => Some(endpoints(i) -> e)
             case _                                  => unreachable
           }
+          val partialNow: Option[String] = if (unreachableOutranks(failure)) Some(code) else partial
           if (loseLead) demote(i)
           if (!retry) throw error
           if (k + 1 < n) {
             val next = endpoints((i + 1) % n)
             logger.warn(s"FROST: $what via ${endpoints(i)} failed ($reason); failing over to $next")
             notes.add(s"failover=${endpoints(i)}→$next reason=$code")
-            attempt(k + 1, reason, unreachableNow)
+            attempt(k + 1, reason, unreachableNow, partialNow)
           } else {
             logger.warn(s"FROST: $what via ${endpoints(i)} failed ($reason); no cosigner left to try")
             // The roster is exhausted. An answer that only counts when every cosigner gave it does
-            // not stand while one of them could not be reached.
-            if (unreachableOutranks(failure))
-              unreachableNow.foreach { case (endpoint, down) => throw unconfirmed(what, notes, endpoint, down, code) }
+            // not stand while one of them could not be reached, whichever of the two came last.
+            for ((endpoint, down) <- unreachableNow; answer <- partialNow)
+              throw unconfirmed(what, notes, endpoint, down, answer)
             throw error
           }
       }
     }
-    attempt(0, "", None)
+    attempt(0, "", None, None)
   }
 
   /** The error of a call whose cosigners answered `answer` (NOT_FOUND, say) while `endpoint` could
@@ -1607,6 +1620,8 @@ class FrostBackend(
                   (i: Int) => lastTried.set(i),
                   signAttemptTimeout,
                   budgetEnd,
+                  // A leader's own "cannot sign" is not the cluster's while a cosigner was unreachable.
+                  signAnswerIsLeaderLocal,
                 )(_.sign(built))
               catch {
                 // A cosigner says the intent names another cluster: the learned id is wrong (one
@@ -2171,6 +2186,24 @@ object FrostBackend {
           Status.Code.INVALID_ARGUMENT =>
         false
       case _ => true
+    }
+
+  /** The sign failures that are one leader's own and so do not end a sign as final while another
+    * cosigner could not be reached (`unreachableOutranks` of [[withCheckedFailover]]): NOT_FOUND,
+    * FAILED_PRECONDITION, ABORTED and UNIMPLEMENTED — that leader's state, see [[signFailsOver]] —
+    * and a signature the pinned group key does not verify. With two cosigners down and the third
+    * answering one of these, the sign fails with an unreachable cosigner's status, which Canton
+    * retries: a final error would be a signature Canton never asks for again, although the
+    * cosigners that were down can produce it. INTERNAL and UNKNOWN stay as they are (the last
+    * error of the walk), as do the refusals that are returned at once. */
+  private def signAnswerIsLeaderLocal(failure: Either[StatusRuntimeException, Rejected]): Boolean =
+    failure match {
+      case Left(e) =>
+        e.getStatus.getCode match {
+          case Status.Code.NOT_FOUND | Status.Code.FAILED_PRECONDITION | Status.Code.ABORTED | Status.Code.UNIMPLEMENTED => true
+          case _                                                                                                           => false
+        }
+      case Right(rejected) => rejected.code == BadSignature
     }
 
   /** Which error statuses take the lead from a SIGN leader (see [[withCheckedFailover]]): every
