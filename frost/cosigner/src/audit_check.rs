@@ -34,8 +34,9 @@
 //!
 //! An empty side proves nothing: an empty driver audit log, journals that are all empty, or two
 //! sides with no signature between them to compare give the verdict [`Verdict::NothingToCompare`],
-//! never "consistent". One empty journal among others is only a warning: with `t < n` a node the
-//! leaders never pick journals nothing, and `--min-journals` holds each audited sign to the
+//! never "consistent". One empty journal among others is only a warning: with `t < n` a node can
+//! journal nothing over a short window (the partners are spread over every cosigner, so over many
+//! signatures it is a reason to look), and `--min-journals` holds each audited sign to the
 //! threshold anyway. A driver audit log cut down to nothing is the extreme case of a truncated tail.
 
 use std::collections::{BTreeMap, BTreeSet};
