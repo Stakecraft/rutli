@@ -644,7 +644,8 @@ pub async fn sign_within(
         needed: threshold,
         usable,
         attempts,
-        excluded: excluded.keys().map(|id| crate::hosted::identifier_index(*id).unwrap_or(0)).collect(),
+        // A member whose roster number cannot be computed is left out, never reported as peer 0.
+        excluded: excluded.keys().filter_map(|id| crate::hosted::identifier_index(*id).ok()).collect(),
         out_of_time,
     })
 }

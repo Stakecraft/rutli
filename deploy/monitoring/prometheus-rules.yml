@@ -175,7 +175,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Rütli cosigner {{ $labels.instance }} has seen peer {{ $labels.peer }} down for 5 minutes"
+          summary: "Rütli cosigner {{ $labels.instance }} has repeatedly seen peer {{ $labels.peer }} down for 5 minutes"
           description: "{{ $labels.instance }} has held cosigner {{ $labels.peer }} as down (unreachable, stalled or refusing) for at least 5 minutes (trials in between failed), and tries it last in every signature but one trial per window. Check rutli_peer_breaker_transitions_total{peer=\"{{ $labels.peer }}\"} for the reason: unreachable is the network or the process (connect, TLS, keepalive), stalled is a member whose sign rounds stopped completing (a hung volume), refusing is a member whose key store is down (RutliKeystoreUnreadable on it). If every node reports the same peer, look at that peer; if only one does, look at the link between them. At 2-of-3 the margin is gone while it lasts."
 
       - alert: RutliNoQuorum
