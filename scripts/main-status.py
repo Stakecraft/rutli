@@ -28,6 +28,7 @@ WATCHED = [
     "Image build check",
     "Generated code",
     "Workflow lint",
+    "Quality",
 ]
 
 TITLE = "main is red"
