@@ -25,9 +25,12 @@ on:
 permissions:
   contents: read
 
+# A new push to a pull request cancels its earlier smoke run. The nightly run, a manual run for a
+# release candidate and any other run have their own group (the run id) and are never cancelled or
+# replaced by another.
 concurrency:
-  group: fuzz-${{ github.ref }}
-  cancel-in-progress: true
+  group: fuzz-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_FUZZ_VERSION: "0.13.2"

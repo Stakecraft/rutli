@@ -12,9 +12,9 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: changelog-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+# No concurrency group, on purpose: the check takes seconds, and adding or removing a label re-runs it
+# on the same commit. A superseded run that is cancelled would stay next to the new one as a
+# CANCELLED check and leave the pull request UNSTABLE.
 
 jobs:
   fragment:
