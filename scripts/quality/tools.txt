@@ -1,0 +1,61 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Pinned tool binaries for scripts/quality/install-tools.sh: one line per tool and platform.
+#   tool  version  platform  sha256  url
+# To bump a tool: change version, URL and sha256 for both platforms. Take the sha256 from the
+# release's own checksum file (or the asset digest GitHub shows for the release) and confirm it
+# against `shasum -a 256` of the downloaded file before committing.
+# Platforms: linux-x86_64 (CI) and darwin-arm64 (local runs). hadolint has no arm64 macOS build;
+# the x86_64 one runs under Rosetta.
+shellcheck     0.11.0  linux-x86_64  b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6  https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.linux.x86_64.tar.gz
+shellcheck     0.11.0  darwin-arm64  339b930feb1ea764467013cc1f72d09cd6b869ebf1013296ba9055ab2ffbd26f  https://github.com/koalaman/shellcheck/releases/download/v0.11.0/shellcheck-v0.11.0.darwin.aarch64.tar.gz
+shfmt          3.14.1  linux-x86_64  76e77641faa025814b77f153b29796b8e6fa2fca03e0c76a691608b86c7ea7bf  https://github.com/mvdan/sh/releases/download/v3.14.1/shfmt_v3.14.1_linux_amd64
+shfmt          3.14.1  darwin-arm64  b7c872db63553ccffc7253aba3ed7d4885a27d83f1ba567b1138c6315a5847e5  https://github.com/mvdan/sh/releases/download/v3.14.1/shfmt_v3.14.1_darwin_arm64
+ruff           0.17.3  linux-x86_64  85e76bbb60e708a22624b31efb227e8bdaa6978177b93c146d352de4caf37ba1  https://github.com/astral-sh/ruff/releases/download/0.17.3/ruff-x86_64-unknown-linux-musl.tar.gz
+ruff           0.17.3  darwin-arm64  118f7121aa838785672bf612487f755a89108bb5f44e0f3df96c5967a72614f9  https://github.com/astral-sh/ruff/releases/download/0.17.3/ruff-aarch64-apple-darwin.tar.gz
+hadolint       2.15.1  linux-x86_64  c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507  https://github.com/hadolint/hadolint/releases/download/v2.15.1/hadolint-linux-x86_64
+hadolint       2.15.1  darwin-arm64  ffe9bb18b23d5ed1eae50237aecdbb523d016e96da0bd4e7aa432040acfc3fde  https://github.com/hadolint/hadolint/releases/download/v2.15.1/hadolint-macos-x86_64
+actionlint     1.7.12  linux-x86_64  8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+actionlint     1.7.12  darwin-arm64  aba9ced2dee8d27fecca3dc7feb1a7f9a52caefa1eb46f3271ea66b6e0e6953f  https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_darwin_arm64.tar.gz
+zizmor         1.31.1  linux-x86_64  d185f726bdaf92df78273217dfdd24ebcd6b0ef48cf3ce776ff5762b6e138c99  https://github.com/zizmorcore/zizmor/releases/download/v1.31.1/zizmor-x86_64-unknown-linux-gnu.tar.gz
+zizmor         1.31.1  darwin-arm64  ad5aa633cd56215b11e6c51d51f90c7e6b22904a75047d1215abbd422f61d698  https://github.com/zizmorcore/zizmor/releases/download/v1.31.1/zizmor-aarch64-apple-darwin.tar.gz
+kubeconform    0.8.0   linux-x86_64  9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883  https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz
+kubeconform    0.8.0   darwin-arm64  f84f4dfbebf4a6b0b230385fa065a39ea35e02608c2b50d025dcf64775a69d67  https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-darwin-arm64.tar.gz
+buf            1.75.0  linux-x86_64  fad1e38d6909bbb583a4da81d8c02a01046e2cd663bde7e337dd24277393764b  https://github.com/bufbuild/buf/releases/download/v1.75.0/buf-Linux-x86_64
+buf            1.75.0  darwin-arm64  f71b009ebd8530b12fd85b060c6c245e15d6e5110ccc8da48d8b6fa71e59330b  https://github.com/bufbuild/buf/releases/download/v1.75.0/buf-Darwin-arm64
+gitleaks       8.30.1  linux-x86_64  551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+gitleaks       8.30.1  darwin-arm64  b40ab0ae55c505963e365f271a8d3846efbc170aa17f2607f13df610a9aeb6a5  https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_darwin_arm64.tar.gz
+typos          1.52.0  linux-x86_64  6155d4114f9a0f5b8f6d4fda96266c9d5f6add71df80da7f684ee5e72eb14588  https://github.com/crate-ci/typos/releases/download/v1.52.0/typos-v1.52.0-x86_64-unknown-linux-musl.tar.gz
+typos          1.52.0  darwin-arm64  90724dd2905cb1ce033343c71ed60e52fe898674f882803e3110cd228e09e1c5  https://github.com/crate-ci/typos/releases/download/v1.52.0/typos-v1.52.0-aarch64-apple-darwin.tar.gz
+scalafmt       3.11.5  linux-x86_64  4a29c3651f64fbaf9adcca01c6ac2ba0e8281a3d20e08c12b152582139fae290  https://github.com/scalameta/scalafmt/releases/download/v3.11.5/scalafmt-linux-glibc
+scalafmt       3.11.5  darwin-arm64  8ccd72f826dd33b5c7ab5e0e01944044d041aa8c3c49cbda3caac31930483d5d  https://github.com/scalameta/scalafmt/releases/download/v3.11.5/scalafmt-aarch64-apple-darwin.zip
+helm           3.16.4  linux-x86_64  fc307327959aa38ed8f9f7e66d45492bb022a66c3e5da6063958254b9767d179  https://get.helm.sh/helm-v3.16.4-linux-amd64.tar.gz
+helm           3.16.4  darwin-arm64  e2442d8f05d53d84c39b869bc5fe5affad247ee2f4c706a040919c146edb1f94  https://get.helm.sh/helm-v3.16.4-darwin-arm64.tar.gz
+kube-linter    0.8.3   linux-x86_64  618d299a3e2839c8ca9d86fce0db617be0fba41f0fecbbbfb7fbf1c04299fae1  https://github.com/stackrox/kube-linter/releases/download/v0.8.3/kube-linter-linux
+kube-linter    0.8.3   darwin-arm64  662277a6a267ba2cb1371b56539a371872ef142b196fa0d87195e4213773cdf8  https://github.com/stackrox/kube-linter/releases/download/v0.8.3/kube-linter-darwin_arm64
+trivy          0.76.1  linux-x86_64  c7cbe3137fb8a48a17574bede3dd6beb16742d1e9772929940fc90082c39d9c0  https://github.com/aquasecurity/trivy/releases/download/v0.76.1/trivy_0.76.1_Linux-64bit.tar.gz
+trivy          0.76.1  darwin-arm64  11a9b6cd2752011b54f01ea4bd0dbfa9f0c41dc6538d5a3f9d23955f471bf4e5  https://github.com/aquasecurity/trivy/releases/download/v0.76.1/trivy_0.76.1_macOS-ARM64.tar.gz
+cargo-deny     0.20.2  linux-x86_64  9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
+cargo-deny     0.20.2  darwin-arm64  fe67d82a10d8597a3549364cb733a3f9cc1bfff9031b7ae46384a9f2a72090c3  https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-aarch64-apple-darwin.tar.gz
+cargo-audit    0.22.2  linux-x86_64  7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428  https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz
+cargo-audit    0.22.2  darwin-arm64  ec7ca4263769593df4d909be85b94a6b79efa2897be5d2bb8ebd516e823175af  https://github.com/rustsec/rustsec/releases/download/cargo-audit/v0.22.2/cargo-audit-aarch64-apple-darwin-v0.22.2.tgz
+cargo-llvm-cov 0.9.1   linux-x86_64  3fca950394a3c49457657c158b1619cec8dfd2647ae5b48746734c0ab969a522  https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.9.1/cargo-llvm-cov-x86_64-unknown-linux-musl.tar.gz
+cargo-llvm-cov 0.9.1   darwin-arm64  7e821a6c90c0884f79f759f5d9be50799ade67bb82515186d922f26032ef43b8  https://github.com/taiki-e/cargo-llvm-cov/releases/download/v0.9.1/cargo-llvm-cov-aarch64-apple-darwin.tar.gz
+#
+# Crates without release binaries: built with `cargo install --locked --version`, which checks
+# each crate's checksum against the crates.io index.
+#   tool          version  crate
+crate cargo-geiger  0.14.0   cargo-geiger
+crate tokei         15.0.0   tokei
+crate rustqual      1.8.3    rustqual
+#
+# Python tools: a virtualenv per tool from a requirements file with a sha256 for every
+# distribution (pip --require-hashes). Needs python3 >= 3.10.
+#   tool     version   requirements file (relative to this directory)
+pip semgrep  1.181.0   semgrep-requirements.txt
+#
+# Rule sets fetched at a pinned commit (git checks the content against the commit id), installed
+# into DIR/<name>.
+#   name           commit                                    repository
+git semgrep-rules  16b9e6d45f10649f6a531ec4838ed9924372c3bc  https://github.com/semgrep/semgrep-rules
