@@ -222,6 +222,8 @@ jobs:
           # Coverage runs on main (and for a baseline change) only; pull requests are compared
           # without it.
           if [ "$COVERAGE" != true ]; then export QUALITY_COVERAGE=0; fi
+          # The Scala coverage report goes into the artifact next to the numbers.
+          export QUALITY_KEEP_DIR="$RUNNER_TEMP/quality"
           scripts/quality/collect.sh --only "$AREAS" --ref "${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}" \
             --out "$RUNNER_TEMP/quality/current.json"
           scripts/quality/render.sh quality/baseline.json "$RUNNER_TEMP/quality/current.json" \

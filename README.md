@@ -215,6 +215,7 @@ Before protecting a real key, run the witnessed **[key ceremony](docs/key-ceremo
 | [docs/upgrading-to-0.5.md](docs/upgrading-to-0.5.md) | What an operator does to move a 0.4.x cluster to 0.5.0, in order |
 | [docs/security/threat-model.md](docs/security/threat-model.md) | What each adversary can and cannot do, and which setting each claim rests on |
 | [docs/key-ceremony.md](docs/key-ceremony.md) | Witnessed namespace-key generation |
+| [docs/admin-cli.md](docs/admin-cli.md) | Which command does what to a key, and with which credential |
 | [docs/ceremonies.md](docs/ceremonies.md) | DKG, refresh and the other ceremonies: intents, fences, the refresh interval |
 | [docs/split-ceremony.md](docs/split-ceremony.md) | Carrying an existing namespace key into the cluster with the offline dealer |
 | [docs/runbook-per-node-seal.md](docs/runbook-per-node-seal.md) | Moving from one shared seal secret to per-node seal bundles |

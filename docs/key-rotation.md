@@ -19,47 +19,80 @@ mode — the ones Rütli holds.)
 
 ## Rotating the rotatable keys
 
-Canton rotates **staged — it activates the new key first, then deactivates the old one** — so there
-is no signing gap. From the Canton console:
+Canton rotates **staged: it activates the new key first, then deactivates the old one**, so there
+is no signing gap. A rotation is a change to the node's `OwnerToKeyMapping`, signed by the
+namespace key (on a `frost` node, a threshold signature).
 
-```scala
-// rotate every node key at once
-myNode.keys.secret.rotate_node_keys()
+### The recipe
 
-// or rotate a single key
-myNode.keys.secret.rotate_node_key(oldKeyFingerprint, "new-key-name")
-```
-
-Under the hood each rotation is two topology transactions on the node's `OwnerToKeyMapping`,
-**authorized (signed) by the namespace key**:
-
-```scala
-myNode.topology.owner_to_key_mappings.add_key(newKey.fingerprint, newKey.purpose)
-myNode.topology.owner_to_key_mappings.remove_key(oldKey.fingerprint, oldKey.purpose)
-```
-
-**With Rütli there is nothing extra to do.** `rotate_node_key(s)` calls the driver's
-`generateSigningKeyPair` / `generateEncryptionKeyPair` to mint the new key in the backend, then
-Canton signs the topology change with the namespace key (which, for a `frost` node, is the
-threshold signature). On a `frost` node a new Ed25519 signing key is a FROST DKG (the driver signs
-its ceremony intent when intents are on), and a new encryption key is a cluster-hosted key (`hosted-keys = true`) or
-goes to the delegate. The new key lives behind the same driver; the old one is deactivated but
-stays registered. Do not `keys.secret.delete` it: under KMS that deletes the key in the backend,
-and it may still be needed to decrypt views in flight. Rotate on your normal schedule, or
-immediately if a non-root key is suspected exposed.
-
-**Canton 3.7 (Splice 0.10):** these commands, and `owner_to_key_mappings.add_key(s)` / `remove_key` / `rotate_key`, take an
-optional `synchronizerId`. Without it Canton auto-detects the synchronizer, which only works when exactly one is registered
-and connected. During an LSU window the predecessor and the successor are both registered, so pass the id, or do not
-rotate in the window. PV 37 also caps an owner at 20 signing keys (`max_signing_keys_per_entity`). Rotation removes the
-old key from the `OwnerToKeyMapping`, so the count stays flat. An `add_key` without a matching `remove_key` makes it
-grow. See [splice-0.10.md](splice-0.10.md).
-
-The in-place migration rehearsal (B8, 2026-11-01) rotated the encryption key onto a new hosted
-ECIES key and the signing key onto a new FROST key with `generate_encryption_key` /
-`generate_signing_key` and `owner_to_key_mappings.rotate_key`, with the cosigners on
-0.4.0-rc.6. `rotate_node_keys()` itself was not rehearsed. The commands are in
+This is the path that was rehearsed: the in-place migration rehearsal (B8, 2026-11-01, Canton
+3.6.1, cosigners on 0.4.0-rc.6) rotated the encryption key onto a new hosted ECIES key and the
+signing key onto a new FROST key this way. The full console blocks, with their assertions, are in
 [runbook-migration-inplace.md](runbook-migration-inplace.md) 5.2.
+
+1. **Check first.** The node is connected, and its Authorized store and the synchronizer show the
+   same `OwnerToKeyMapping`. For a signing key the driver must be able to sign a ceremony intent
+   (driver 0.4.0-rc.4 or later, its certificate allowed for the key prefix). For an encryption key
+   the driver runs with `hosted-keys = true` and signs a generate intent (driver 0.5.0 or later;
+   a cosigner with TLS refuses a generation without one unless
+   `signing_policy.require_ceremony_intent` is off).
+2. **Generate the new key through the driver.** Canton asks the driver, the driver creates the key
+   in the cluster and Canton registers it.
+
+   ```scala
+   // encryption: a new cluster-hosted ECIES key
+   val encNew = p.keys.secret.generate_encryption_key("encryption-r1", Some(EncryptionKeySpec.EcP256))
+   // signing: a new FROST key from a DKG
+   val sigNew = p.keys.secret.generate_signing_key("signing-r1",
+     SigningKeyUsage.ProtocolWithProofOfOwnership ++ SigningKeyUsage.SequencerAuthenticationOnly,
+     Some(SigningKeySpec.EcCurve25519))
+   ```
+3. **Rotate the mapping.**
+
+   ```scala
+   p.topology.owner_to_key_mappings.rotate_key(p.id.member, encOld, encNew)
+   // and for the signing key
+   p.topology.owner_to_key_mappings.rotate_key(p.id.member, sigOld, sigNew)
+   ```
+
+   `encOld` and `sigOld` are the public keys being replaced, from `keys.secret.list`.
+
+   Wait until the old fingerprint has left the synchronizer's mapping. After a signing-key
+   rotation, disconnect and reconnect the synchronizer so that sequencer authentication uses the
+   new key.
+4. **Check the new key in the cluster.** Its KMS id is in `keys.secret.list`.
+
+   ```sh
+   rutli-cosigner --config client-operator.json key show \
+     --key-id <kms id> --expect-fingerprint <fingerprint Canton printed>
+   ```
+
+   Every node must hold it ([admin-cli.md](admin-cli.md)). In the rehearsal the new hosted key
+   was on all three nodes within a minute.
+5. **Ping, then back up the cosigners.** The backup taken before the rotation does not hold the new
+   keys.
+
+**Never `keys.secret.delete` the old key.** Under KMS that deletes the key in the cluster, and it
+may still be needed to decrypt views in flight. The old key stays registered and is no longer in
+the mapping.
+
+**Canton 3.7 (Splice 0.10):** `rotate_key`, `add_key(s)`, `remove_key` and the `rotate_*` commands
+below take an optional `synchronizerId`. Without it Canton detects the synchronizer itself, which
+only works when exactly one is registered and connected. During an LSU window the predecessor and
+the successor are both registered, so pass the id, or do not rotate in the window. The recipe was
+rehearsed on Canton 3.6.1, not on 3.7. PV 37 also caps an owner at 20 signing keys
+(`max_signing_keys_per_entity`). Rotation removes the old key from the mapping, so the count stays
+flat; an `add_key` without a matching `remove_key` makes it grow. See
+[splice-0.10.md](splice-0.10.md).
+
+### Other console commands
+
+- `keys.secret.rotate_node_key(fingerprint, name)` and `rotate_node_keys()` do the same in one
+  call: generate through the driver, then change the mapping. **Not rehearsed with Rütli.**
+- `keys.secret.rotate_kms_node_key` rotates onto a key that already exists in the KMS, named by
+  its KMS id. **It does not apply to keys Canton generates in Rütli:** `generate_*` creates and
+  registers such a key in one step, and there is no way to create a key in the cluster ahead of
+  Canton. It could only take an imported key. **Not rehearsed.**
 
 ## Why the namespace root key cannot be rotated
 
@@ -138,8 +171,9 @@ never be swapped. Full procedure: [disaster-recovery.md](disaster-recovery.md).
 
 ## Summary
 
-- **Signing / encryption / sequencer-auth keys** — rotate any time with `rotate_node_key(s)`; Rütli
-  mints the replacement behind the driver. No downtime (staged activate-then-deactivate).
+- **Signing / encryption / sequencer-auth keys** — rotate any time: generate the new key through
+  the driver, then `owner_to_key_mappings.rotate_key` ([the recipe](#the-recipe)). No downtime
+  (staged activate-then-deactivate).
 - **Namespace root key** — never rotates (it *is* the identity). Instead: keep it **offline and
   delegate**, and **refresh its shares** regularly if it's online in the cluster.
 - **Compromise of the root** — refresh, then offboard/rebuild; there is no in-place replacement.

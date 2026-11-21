@@ -345,8 +345,10 @@ pub fn plan(archives: &[Archive], live: &BTreeMap<String, Option<KeyInfo>>, proo
                 .collect();
             let snapshot = verdicts.clone();
             if states.iter().all(|st| holders(st, &snapshot, &a.name)) {
-                verdicts[idx].1 = Verdict::DeleteCountCap;
-                remaining -= 1;
+                if let Some((_, v)) = verdicts.get_mut(idx) {
+                    *v = Verdict::DeleteCountCap;
+                    remaining -= 1;
+                }
             }
         }
     }

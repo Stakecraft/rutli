@@ -1,0 +1,10 @@
+# gitleaks configuration (scripts/quality/repo.sh scans the tracked files with it).
+# Default rules, plus one allowlisted path: known-answer test fixtures of FROST data, which are
+# throwaway test material by design (see the README in each fixture directory).
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "FROST known-answer test fixtures: throwaway test keys, protecting nothing"
+paths = ['''frost/cosigner/tests/fixtures/frost-[0-9.]+/''']
