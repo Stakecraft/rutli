@@ -1359,13 +1359,18 @@ async fn t13_the_client_deadline_only_ever_shortens_the_leaders_work() {
 /// Yield until `done`, moving no time (a held blocking thread stops paused time from advancing by
 /// itself, and none is needed here).
 async fn until(what: &str, done: impl Fn() -> bool) {
-    for _ in 0..100_000 {
+    // Bounded by wall time, not by a count of yields: the work waited for may be on a blocking
+    // thread, which a loaded runner can leave unscheduled for longer than any fixed number of
+    // yields takes. The short real sleep gives that thread the CPU without moving paused time.
+    let give_up = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < give_up {
         if done() {
             return;
         }
         tokio::task::yield_now().await;
+        std::thread::sleep(std::time::Duration::from_micros(200));
     }
-    panic!("never happened: {what}");
+    panic!("never happened within 30 s: {what}");
 }
 
 /// T20. The real cancel-while-blocking path: a member's round 2 is inside its store work (after it
