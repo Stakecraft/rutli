@@ -90,7 +90,7 @@ import scala.util.control.NonFatal
   *     FAILED_PRECONDITION, ABORTED, UNIMPLEMENTED or unverifiable signature — the other cosigners
   *     are asked, and the outcome is decided over the whole roster, whatever the order
   *     ([[rosterVerdict]]): the answer is final once enough endpoints gave it that the rest could
-  *     not use the key ([[ownAnswerQuorum]], [[hostedAnswerQuorum]]: 2 of 3); short of that, while
+  *     not use the key ([[ownAnswerQuorum]]: all but one, 2 of 3, 4 of 5); short of that, while
   *     an endpoint could not be reached (UNAVAILABLE or DEADLINE_EXCEEDED) the call fails with
   *     that endpoint's status. That is retryable: Canton never retries a final error, and the
   *     unreachable cosigner may hold the key.
@@ -743,12 +743,16 @@ class FrostBackend(
   }
 
   /** How many endpoints must give a cosigner's own "I do not have it" before it is the cluster's
-    * answer: n - t + 1, so that fewer than t cosigners are left that could hold the key — too few to
-    * sign with it. The driver does not know the threshold t and takes it to be a majority of the
-    * roster, as for [[capabilitiesQuorum]] (2-of-3 and 3-of-5 are the deployed shapes): 2 of 3, 3 of
-    * 5, the lone endpoint of a dev roster. A cluster whose threshold is below a majority would need
-    * more answers than this; none is deployed or documented. */
-  private val ownAnswerQuorum: Int = channels.size - (channels.size / 2 + 1) + 1
+    * answer: all but one (2 of 3, 4 of 5; the lone endpoint of a dev roster). Then at most one
+    * cosigner is left that could hold the key, and that is too few to use it:
+    *   - a FROST key needs t holders to sign. The driver does not know t, and a cosigner accepts
+    *     any threshold up to n, also one below a majority (2-of-5), so n - t + 1 cannot be used; a
+    *     threshold key has t >= 2, for which all but one is always enough;
+    *   - a hosted key is a whole key on every cosigner that holds it, and the driver saw
+    *     [[requiredCopies]] (two) of them before it gave the key id to Canton
+    *     ([[confirmHostedCopies]]), so a key only one cosigner holds is one whose generation was
+    *     never confirmed. */
+  private val ownAnswerQuorum: Int = math.max(1, channels.size - 1)
 
   /** What a call fails with once every endpoint has failed, for a call where one cosigner's own
     * answer ("not found", "another key", "I cannot sign") is not the cluster's. Decided over the
@@ -774,14 +778,6 @@ class FrostBackend(
           case None => own.map(_._2).orElse(seen.other).getOrElse(last)
         }
     }
-
-  /** [[ownAnswerQuorum]] for a hosted key, which is a whole key on every cosigner that holds it, so
-    * a single holder can serve it and the threshold argument does not apply. What the driver knows
-    * is that it saw [[requiredCopies]] copies before it gave the key id to Canton
-    * ([[confirmHostedCopies]]): "not found" is the cluster's answer once so many endpoints said so
-    * that fewer than that many are left, n - requiredCopies + 1 (2 of 3, 4 of 5, the lone endpoint
-    * of a dev roster). */
-  private def hostedAnswerQuorum: Int = math.max(1, channels.size - requiredCopies + 1)
 
   /** The error of a call whose cosigners answered `answer` (NOT_FOUND, say), fewer of them than
     * [[ownAnswerQuorum]], while `endpoint` could not be reached: that cosigner may hold the key, so
@@ -829,8 +825,8 @@ class FrostBackend(
     * FROST/RSA/AES semantics are unchanged.
     *
     * How the walk ends when no answer was used is decided over the whole roster, whatever the order
-    * the endpoints were asked in (the rule of [[rosterVerdict]], with [[hostedAnswerQuorum]]):
-    *   1. at least [[hostedAnswerQuorum]] endpoints gave a stale answer: the first stale answer
+    * the endpoints were asked in (the rule of [[rosterVerdict]]):
+    *   1. at least [[ownAnswerQuorum]] endpoints gave a stale answer: the first stale answer
     *      stands (the key is not there, or no cosigner's secret opens the blob);
     *   2. otherwise, an endpoint could not be reached (UNAVAILABLE or DEADLINE_EXCEEDED, the
     *      driver's own attempt deadline included): the call fails with that endpoint's status, which
@@ -878,7 +874,7 @@ class FrostBackend(
           lastSick: Option[StatusRuntimeException],
       ): A =
         (first, down, lastSick) match {
-          case (Some(f), _, _) if staleCount >= hostedAnswerQuorum => settle(f)
+          case (Some(f), _, _) if staleCount >= ownAnswerQuorum => settle(f)
           case (Some(f), Some((endpoint, e)), _) =>
             throw unconfirmed(what, notes, endpoint, e, f.fold(_.getStatus.getCode.toString, a => staleAnswer(a)._1))
           case (None, Some((_, e)), _) => throw e

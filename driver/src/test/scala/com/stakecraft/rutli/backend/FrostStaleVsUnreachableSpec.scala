@@ -26,9 +26,9 @@ import scala.concurrent.{Await, ExecutionContext, Future}
 /** One cosigner's own answer — "not found", "another key", "I cannot sign" — is not the cluster's
   * while another cosigner could not be reached: that one may hold the key. Canton never retries a
   * final error, so such a call must fail with the unreachable cosigner's status (retryable), in
-  * whatever order the endpoints were asked. The answer becomes final once so many endpoints gave
-  * it that the rest could not use the key: n - t + 1 for a FROST key (2 of 3, 3 of 5), and for a
-  * hosted key, of which the driver saw two copies, all but one (2 of 3, 4 of 5).
+  * whatever order the endpoints were asked. The answer becomes final once all but one endpoint gave
+  * it (2 of 3, 4 of 5): one cosigner alone cannot use a threshold key, whatever the threshold, and
+  * of a hosted key the driver saw two copies before it returned the id.
   *
   * Every cosigner is in one state per test: it holds the key, it gives its own negative answer, it
   * fails with a status, or it cannot be reached.
@@ -147,11 +147,10 @@ class FrostStaleVsUnreachableSpec extends AnyWordSpec with Matchers {
       pinFirst: Boolean,
       run: FrostBackend => Future[Any],
       isOwnFinal: Throwable => Boolean,
-      hosted: Boolean = false,
   ) {
 
-    /** How many cosigners of `n` must give the own answer before it is final. */
-    def quorum(n: Int): Int = if (hosted) math.max(1, n - 1) else n - (n / 2 + 1) + 1
+    /** How many cosigners of `n` must give the own answer before it is final: all but one. */
+    def quorum(n: Int): Int = math.max(1, n - 1)
   }
 
   private def hasStatus(t: Throwable, code: Status.Code): Boolean = t match {
@@ -172,16 +171,14 @@ class FrostStaleVsUnreachableSpec extends AnyWordSpec with Matchers {
       pinFirst = false,
       _.keyExistsAndIsActive(HostedKey),
       _.isInstanceOf[NoSuchElementException],
-      hosted = true,
     ),
-    Call("getPublicKey, EC hosted key", Missing, pinFirst = false, _.getPublicKey(HostedKey), isNotFound, hosted = true),
+    Call("getPublicKey, EC hosted key", Missing, pinFirst = false, _.getPublicKey(HostedKey), isNotFound),
     Call(
       "decryptAsymmetric, ECIES",
       Missing,
       pinFirst = false,
       _.decryptAsymmetric(Ciphertext, HostedKey, Ecies),
       isNotFound,
-      hosted = true,
     ),
     Call("keyExistsAndIsActive, FROST key not pinned", Missing, pinFirst = false, _.keyExistsAndIsActive(FrostKey), isNotFound),
     Call(
@@ -279,7 +276,7 @@ class FrostStaleVsUnreachableSpec extends AnyWordSpec with Matchers {
     if (n == 0) Seq(Seq.empty[State])
     else for (head <- alphabet; tail <- sequences(alphabet, n - 1)) yield head +: tail
 
-  "a call that every cosigner may answer for itself, over three cosigners (2-of-3)" should {
+  "a call that every cosigner may answer for itself, over three cosigners" should {
 
     "end the same way for the same answers in whatever order the cosigners are asked" in {
       val down = Status.UNAVAILABLE
@@ -332,7 +329,7 @@ class FrostStaleVsUnreachableSpec extends AnyWordSpec with Matchers {
     }
   }
 
-  "the same calls over five cosigners (3-of-5)" should {
+  "the same calls over five cosigners" should {
 
     def rotations(states: Seq[State]): Seq[Seq[State]] = states.indices.map(i => states.drop(i) ++ states.take(i))
     val down = Status.UNAVAILABLE
@@ -343,8 +340,10 @@ class FrostStaleVsUnreachableSpec extends AnyWordSpec with Matchers {
       answers.zipAll(silent, Internal, Internal).flatMap { case (a, b) => Seq(a, b) }.filterNot(_ == Internal)
     }
 
-    "know the bound: three answers for a FROST key, four for a hosted key" in {
-      calls.map(c => c.hosted -> c.quorum(5)).distinct.toMap shouldBe Map(false -> 3, true -> 4)
+    "need four of five answers, so that a threshold below a majority is safe too" in {
+      // 2-of-5: with three cosigners saying NOT_FOUND, the two that are unreachable could still
+      // sign together. Only the fourth answer leaves too few.
+      calls.map(_.quorum(5)).distinct shouldBe Seq(4)
     }
 
     "fail retryably while one answer short of the bound, the other cosigners unreachable, in every rotation" in {

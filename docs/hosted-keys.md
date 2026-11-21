@@ -240,9 +240,10 @@ skips what it cannot parse, `KeyInfo` says `exists: false`) — the shape that e
      `unconfirmed=<endpoint> reason=<CODE>`. Before 0.5.0 such a call could end `NOT_FOUND`, which
      Canton takes as final. A shared secret that does not open the ciphertext is the exception: it
      ends the decrypt as an ECIES failure even while a cosigner is unreachable, so a forged
-     ciphertext cannot buy retries. FROST keys follow the same rule with the threshold as the
-     bound (`keyExistsAndIsActive`, a sign whose leader cannot sign for a reason of its own): final
-     once n − t + 1 cosigners said so (2 of 3, 3 of 5).
+     ciphertext cannot buy retries. FROST keys follow the same rule and the same bound
+     (`keyExistsAndIsActive`, a sign whose leader cannot sign for a reason of its own): one
+     cosigner alone cannot use a threshold key, whatever the threshold. The driver does not know
+     the threshold, so it does not use the tighter n − t + 1.
      A rate-limit refusal (`RESOURCE_EXHAUSTED`) is never routed around: it is surfaced at once.
 
 ```hocon

@@ -227,7 +227,7 @@ sum(rate(rutli_sign_duration_seconds_sum{result="ok"}[1h]))
    error, not a final one, and logged `FROST: <call>: the cosigners that answered said <answer>,
    but <endpoint> could not be reached`. It clears when that cosigner is back. It cannot go on
    for a key that exists nowhere: once enough cosigners gave the answer that the rest could not
-   use the key (2 of 3; 3 of 5 for a FROST key, 4 of 5 for a hosted one), it is final. Repeated
+   use the key (all but one: 2 of 3, 4 of 5), it is final. Repeated
    entries therefore mean most of the cluster is unreachable from this participant.
    **A hosted key the driver did not accept** (0.5.0): after `GenerateKey` the driver asks every
    cosigner for its own copy and gives the key id to Canton only when at least two hold the
