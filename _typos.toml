@@ -1,0 +1,5 @@
+# typos configuration (scripts/quality/repo.sh scans the tracked files with it).
+
+[files]
+# Known-answer FROST test fixtures: random hex and keys, not prose (see the README there).
+extend-exclude = ["**/frost/cosigner/tests/fixtures/frost-*/"]
