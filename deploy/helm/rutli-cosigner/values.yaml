@@ -427,6 +427,7 @@ backup:
     # script: run `ship` with $1 = the tar, $2 = the node id; credentials from nodes[].backupSecret
     #   (mounted at /backup-creds, per node). Add the endpoint to backup.egress.
     type: pvc
+    # The cap on the number of tars. With retention on it never takes the newest or the proven one.
     keep: 14
     pvc:
       size: 1Gi
@@ -438,6 +439,16 @@ backup:
     ship: |
       echo "ship: no backup destination script configured — set backup.destination.ship" >&2
       exit 1
+  # Retention by epoch (type=pvc): a node's archives of an older key epoch are deleted only when the
+  # newer epoch is PROVEN (`rutli-cosigner keyfile prove`, docs/ceremonies.md "Proving an epoch") and
+  # the proof is `minProofAgeDays` old, and a complete verified archive of the proven epoch remains.
+  # With no proof nothing is deleted by epoch. Archives it cannot read an epoch of (v1 key files) are
+  # never deleted by this rule; only the `keep` cap above applies to them. `keepOlderEpochs` keeps
+  # that many extra epochs below the proven one. Off: only the `keep` cap, whatever the epoch.
+  retention:
+    enabled: true
+    minProofAgeDays: 7
+    keepOlderEpochs: 0
   # Extra egress for the cosigner pods so the sidecar can reach an off-cluster destination
   # (type=script). The pod shares one network namespace, so this also opens the path for the
   # cosigner process — keep it to the one endpoint. e.g. [{ cidr: 203.0.113.10/32, port: 443 }]

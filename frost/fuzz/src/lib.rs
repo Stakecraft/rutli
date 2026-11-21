@@ -518,7 +518,7 @@ fn template() -> &'static Template {
         rt.block_on(async {
             rutli_cosigner::orchestrator::run_dkg(&signer.peers, KEY_ID).await.expect("dkg");
             for (key_id, spec) in [(HOSTED_AES, "aes-256-gcm"), (HOSTED_EC, "ec-p256-ecies")] {
-                let req = pb::GenerateKeyRequest { key_id: key_id.into(), spec: spec.into() };
+                let req = pb::GenerateKeyRequest { key_id: key_id.into(), spec: spec.into(), intent: None };
                 signer.generate_key(tonic::Request::new(req)).await.expect("generate hosted key");
             }
         });
@@ -741,6 +741,7 @@ pub fn generated_seeds(target: &str) -> Vec<(String, Vec<u8>)> {
                 not_after_ms: NOW_MS + 60_000,
                 approval_nonce: Vec::new(),
                 approvals: Vec::new(),
+                ..Default::default()
             };
             let with = |mode: u8, i: &pb::SignIntent| [vec![mode], i.encode_to_vec()].concat();
             let ceremony = |purpose: &str| pb::SignIntent { purpose: purpose.into(), digest: vec![], ..base.clone() };
@@ -788,7 +789,7 @@ pub fn generated_seeds(target: &str) -> Vec<(String, Vec<u8>)> {
             put("ecdh.bin", g(12, pb::EcdhDeriveRequest { key_id: HOSTED_EC.into(), ..Default::default() }.encode_to_vec()));
             put("symmetric-encrypt.bin", g(13, pb::SymmetricRequest { key_id: HOSTED_AES.into(), data: b"x".to_vec() }.encode_to_vec()));
             put("symmetric-decrypt.bin", g(14, pb::SymmetricRequest { key_id: HOSTED_AES.into(), data: vec![0; 40] }.encode_to_vec()));
-            put("generate-aes.bin", g(16, pb::GenerateKeyRequest { key_id: "rutli-fuzz-new".into(), spec: "aes-256-gcm".into() }.encode_to_vec()));
+            put("generate-aes.bin", g(16, pb::GenerateKeyRequest { key_id: "rutli-fuzz-new".into(), spec: "aes-256-gcm".into(), intent: None }.encode_to_vec()));
             put(
                 "round1.bin",
                 g(

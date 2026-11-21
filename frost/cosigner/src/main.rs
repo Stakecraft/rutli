@@ -53,6 +53,31 @@ enum Command {
         #[arg(long)]
         out: std::path::PathBuf,
     },
+    /// Delete the backup archives (`node-<N>-<stamp>.tar`) of older key epochs from a directory, by
+    /// the retention rule: an archive of an older epoch goes only once the newer epoch is PROVEN
+    /// (`keyfile prove`) and the proof is old enough, and a complete verified archive of the proven
+    /// epoch remains. Runs beside the daemon; reads the key files' clear headers only (no sealing
+    /// key). Nothing is deleted when it cannot read an epoch, when this node's live epoch is behind
+    /// an archive's, or on any error. `--dry-run` lists what it would do. The backup sidecar runs it
+    /// after each backup (docs/disaster-recovery.md, "Backup retention").
+    BackupRetain {
+        /// The directory of this node's archives (the backup PVC's mount).
+        #[arg(long)]
+        dir: std::path::PathBuf,
+        /// List the verdicts, delete nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// How old a `keyfile prove` marker must be before the epoch before it may go.
+        #[arg(long, default_value_t = 7)]
+        min_proof_age_days: u64,
+        /// Keep this many extra epochs below the proven one.
+        #[arg(long, default_value_t = 0)]
+        keep_older_epochs: usize,
+        /// Hard cap on the number of archives (0 = none): the oldest go first, never the newest and
+        /// never the proven one.
+        #[arg(long, default_value_t = 0)]
+        keep_count: usize,
+    },
     /// Export ONE cluster-hosted key as a portable artifact. Run with the node stopped.
     ///
     /// Unlike `backup` (sealed with this cluster's master secret, restorable only onto this node),
@@ -250,6 +275,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Read-only key commands: what the cluster holds under a key id, and the Canton fingerprint
+    /// of a public key file. docs/admin-cli.md.
+    Key {
+        #[command(subcommand)]
+        command: KeyCommand,
+    },
     /// TLS key pins (`peers[].tls_spki_sha256`): `tls spki <CERT>...` prints a certificate's pin
     /// (needs no `--config`); `tls spki --peers` checks the running roster nodes against theirs.
     Tls {
@@ -352,6 +383,34 @@ enum Command {
         /// Do not count signatures made without a signing intent (before require_intent is on).
         #[arg(long)]
         allow_no_intent: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum KeyCommand {
+    /// Print what every cosigner in the roster holds under a key id — public key, Canton
+    /// fingerprint (`1220…`), origin, epoch — and whether the nodes agree. A `<prefix>rutli-…` id
+    /// is read as a cluster-hosted key, any other as a FROST key. The same checks, read-only RPCs and
+    /// certificate as `verify-key` and `verify-hosted` (`operator_allowlist` suffices), and with
+    /// --expect-fingerprint the same verdict. Without it the output is the cluster's own report,
+    /// compared with nothing: never take an import's or a migration's expected fingerprint from
+    /// it. Exits non-zero on any problem.
+    Show {
+        #[arg(long)]
+        key_id: String,
+        /// The Canton fingerprint (`1220…`) the key must have.
+        #[arg(long)]
+        expect_fingerprint: Option<String>,
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the Canton fingerprint (`1220…`) of a public key file. Offline: needs no `--config`
+    /// and no certificate. Reads SubjectPublicKeyInfo (DER, PEM or hex), a Canton
+    /// `keys.public.download` file, or a raw Ed25519 public key as 64 hex digits. Public keys only.
+    Fingerprint {
+        #[arg(long, value_name = "FILE")]
+        r#in: std::path::PathBuf,
     },
 }
 
@@ -484,6 +543,8 @@ enum SealCommand {
     },
     /// DEK rotation, last step: the same bundle without `previous_share_deks`. Only once `keyfile
     /// status` on that node shows no file under a previous DEK and a backup has been taken since.
+    /// This removes the previous DEK from the bundle only; it is destroyed when every other copy
+    /// is (docs/key-material-handling.md).
     DropPrevious {
         #[arg(long, value_name = "FILE")]
         r#in: std::path::PathBuf,
@@ -513,6 +574,9 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    if let Some(Command::Key { command: KeyCommand::Fingerprint { r#in } }) = args.command {
+        return key_fingerprint_command(&r#in);
+    }
     if let Some(Command::Seal { command }) = args.command {
         return seal_command(command);
     }
@@ -546,6 +610,9 @@ async fn main() -> Result<()> {
             return refresh_command(&cfg, &key_id, target, tls_server_name).await
         }
         Some(Command::Backup { out }) => return backup_command(&cfg, &out),
+        Some(Command::BackupRetain { dir, dry_run, min_proof_age_days, keep_older_epochs, keep_count }) => {
+            return backup_retain_command(&cfg, &dir, dry_run, min_proof_age_days, keep_older_epochs, keep_count)
+        }
         Some(Command::ExportKey { key_id, out, passphrase_env, unsafe_plaintext }) => {
             return export_key_command(&cfg, &key_id, &out, passphrase_env.as_deref(), unsafe_plaintext)
         }
@@ -584,11 +651,25 @@ async fn main() -> Result<()> {
             return abort_import_command(&cfg, &key_id, &ceremony_id, yes_delete_installed_share)
         }
         Some(Command::VerifyKey { key_id, expect_fingerprint, sign_test, json }) => {
-            return verify_key_command(&cfg, &key_id, &expect_fingerprint, sign_test, json).await
+            return verify_key_command(&cfg, "verify-key", &key_id, Some(&expect_fingerprint), sign_test, json).await
         }
         Some(Command::VerifyHosted { key_id, expect_fingerprint, json }) => {
-            return verify_hosted_command(&cfg, &key_id, &expect_fingerprint, json).await
+            return verify_hosted_command(&cfg, "verify-hosted", &key_id, Some(&expect_fingerprint), json).await
         }
+        Some(Command::Key { command: KeyCommand::Show { key_id, expect_fingerprint, json } }) => {
+            let expect = expect_fingerprint.as_deref();
+            return match rutli_cosigner::key_cli::KeyKind::of(&key_id) {
+                rutli_cosigner::key_cli::KeyKind::Frost => {
+                    verify_key_command(&cfg, "key show", &key_id, expect, false, json).await
+                }
+                rutli_cosigner::key_cli::KeyKind::Hosted => {
+                    verify_hosted_command(&cfg, "key show", &key_id, expect, json).await
+                }
+            };
+        }
+        // Handled before the config is read; named here so that it can never reach `_` below and
+        // start the daemon.
+        Some(Command::Key { command: KeyCommand::Fingerprint { r#in } }) => return key_fingerprint_command(&r#in),
         Some(Command::Health) => health_command(&cfg),
         Some(Command::Tls { command: TlsCommand::Spki { .. } }) => return tls_spki_peers_command(&cfg).await,
         Some(Command::Ceremony { command: CeremonyCommand::Resolve { ceremony_id, assume_lost } }) => {
@@ -630,6 +711,8 @@ async fn main() -> Result<()> {
         _ => {}
     }
     tracing::info!(identifier = cfg.identifier, listen = %cfg.listen, "starting cosigner");
+    // Before any key store is opened: a crash must not write share memory to a core file.
+    log_core_dumps(&rutli_cosigner::process_hardening::disable_core_dumps());
     // Peer key pins: required with TLS unless opted out, and this node's own key must be among its
     // own pins — or every peer would refuse it. Before anything else, so a bad rollout stops here.
     cfg.check_peer_pins_required()?;
@@ -1259,6 +1342,42 @@ fn check_config_command(path: &std::path::Path) -> ! {
     std::process::exit(if required == 0 { 0 } else { 1 })
 }
 
+/// Startup: what [`rutli_cosigner::process_hardening::disable_core_dumps`] achieved, in one line.
+/// INFO only when every setting took effect; otherwise WARN naming what did not.
+fn log_core_dumps(d: &rutli_cosigner::process_hardening::CoreDumps) {
+    let pattern = d.core_pattern.as_deref().unwrap_or("unknown");
+    let suid = d.suid_dumpable.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into());
+    let linux = cfg!(target_os = "linux");
+    if d.all_applied() && !d.may_dump() {
+        tracing::info!(
+            rlimit_core_zero = d.core_limit_zero,
+            not_dumpable = d.not_dumpable,
+            core_pattern = pattern,
+            suid_dumpable = %suid,
+            "core dumps off: RLIMIT_CORE=0{}",
+            if linux { ", not dumpable" } else { " (PR_SET_DUMPABLE is Linux-only)" }
+        );
+        return;
+    }
+    let failed = [
+        (!d.core_limit_zero).then_some("RLIMIT_CORE could not be set to 0"),
+        (linux && !d.not_dumpable).then_some("PR_SET_DUMPABLE could not be cleared"),
+        d.may_dump().then_some(if d.core_pattern.as_deref().is_some_and(|p| p.starts_with('|')) {
+            "a crash can still be dumped: a piped core_pattern ignores RLIMIT_CORE for a dumpable process"
+        } else {
+            "a crash can still be dumped"
+        }),
+    ];
+    tracing::warn!(
+        rlimit_core_zero = d.core_limit_zero,
+        not_dumpable = d.not_dumpable,
+        core_pattern = pattern,
+        suid_dumpable = %suid,
+        "core dumps not fully off: {}",
+        failed.into_iter().flatten().collect::<Vec<_>>().join("; ")
+    );
+}
+
 /// Startup: the production-profile findings of a node that is not refusing on them (a production
 /// node with a required finding never gets here).
 fn log_profile(cfg: &Config) {
@@ -1512,12 +1631,22 @@ async fn refresh_command(
     Ok(())
 }
 
+/// What a report was compared with, for its first line.
+fn expectation(expected: Option<&str>) -> String {
+    match expected {
+        Some(fp) => format!("expected {fp}"),
+        None => "no expected fingerprint: the nodes' own report, compared with nothing".to_string(),
+    }
+}
+
 /// Operator command: ask every cosigner for its view of `key_id` and check the cluster agrees on the
-/// expected key. See [`rutli_cosigner::verify_key`].
+/// expected key. See [`rutli_cosigner::verify_key`]. `command` is the name it was run as
+/// (`verify-key`, or `key show`, which may give no expectation).
 async fn verify_key_command(
     cfg: &Config,
+    command: &str,
     key_id: &str,
-    expect_fingerprint: &str,
+    expect_fingerprint: Option<&str>,
     sign_test: bool,
     json: bool,
 ) -> Result<()> {
@@ -1557,7 +1686,8 @@ async fn verify_key_command(
             for (leader, signers) in sign_test_plan(&roster, cfg.threshold) {
                 let (Some((endpoint, server_name)), Some(client)) = (endpoints.get(&leader), clients.get(&leader))
                 else {
-                    report.problems.push(format!("sign test: node {leader} is not in the roster"));
+                    // Through the report, so that it fails and names no fingerprint.
+                    report.record_signature(leader, &signers, Err("the leader is not in the roster".into()));
                     continue;
                 };
                 let endpoint = *endpoint;
@@ -1588,7 +1718,7 @@ async fn verify_key_command(
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        println!("verify-key {key_id} — expected {expect_fingerprint}");
+        println!("{command} {key_id} (FROST) — {}", expectation(report.expected_fingerprint.as_deref()));
         for n in &report.nodes {
             match &n.error {
                 Some(e) => println!("  node {} {}: {e}", n.identifier, n.endpoint),
@@ -1613,6 +1743,12 @@ async fn verify_key_command(
         if let (Some(g), Some(d)) = (&report.group_verifying_key, &report.pkp_digest) {
             println!("  group key {g}\n  pkp digest {d}");
         }
+        if let Some(fp) = &report.fingerprint {
+            println!("  fingerprint {fp}");
+        }
+        if let (Some(origin), Some(epoch), Some(refreshes)) = (&report.origin, report.epoch, report.refresh_count) {
+            println!("  origin {origin} epoch {epoch} refreshes {refreshes} threshold {}", report.threshold);
+        }
         for s in &report.sign_test {
             println!(
                 "  sign test by {:?} led by node {}: {}",
@@ -1629,14 +1765,21 @@ async fn verify_key_command(
     if report.ok {
         Ok(())
     } else {
-        Err(DaemonError::Ceremony(format!("verify-key: {} problem(s)", report.problems.len())))
+        Err(DaemonError::Ceremony(format!("{command}: {} problem(s)", report.problems.len())))
     }
 }
 
 /// Operator command: ask every cosigner for its own copy of hosted key `key_id` and check the
 /// cluster serves one key with the expected Canton fingerprint. See
-/// [`rutli_cosigner::verify_hosted`].
-async fn verify_hosted_command(cfg: &Config, key_id: &str, expect_fingerprint: &str, json: bool) -> Result<()> {
+/// [`rutli_cosigner::verify_hosted`]. `command` is the name it was run as (`verify-hosted`, or `key
+/// show`, which may give no expectation).
+async fn verify_hosted_command(
+    cfg: &Config,
+    command: &str,
+    key_id: &str,
+    expect_fingerprint: Option<&str>,
+    json: bool,
+) -> Result<()> {
     use rutli_cosigner::pb::HostedKeyStatusRequest;
     use rutli_cosigner::verify_hosted::{check_hosted_views, HostedView};
 
@@ -1663,7 +1806,7 @@ async fn verify_hosted_command(cfg: &Config, key_id: &str, expect_fingerprint: &
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        println!("verify-hosted {key_id} — expected {}", report.expected_fingerprint);
+        println!("{command} {key_id} (hosted) — {}", expectation(report.expected_fingerprint.as_deref()));
         for n in &report.nodes {
             match &n.error {
                 Some(e) => println!("  node {} {}: {e}", n.identifier, n.endpoint),
@@ -1673,8 +1816,16 @@ async fn verify_hosted_command(cfg: &Config, key_id: &str, expect_fingerprint: &
                 ),
             }
         }
-        if let Some(der) = &report.public_key_der {
-            println!("  public key (SPKI) {der}");
+        match (&report.spec, &report.public_key_der) {
+            (Some(spec), Some(der)) if der.is_empty() && report.ok => println!(
+                "  {spec}: a symmetric key has no public key or fingerprint — every node holds a key of \
+                 this spec under the id; that it is the same key is not shown"
+            ),
+            (_, Some(der)) if !der.is_empty() => println!("  public key (SPKI) {der}"),
+            _ => {}
+        }
+        if let Some(fp) = &report.fingerprint {
+            println!("  fingerprint {fp}");
         }
         for p in &report.problems {
             println!("  PROBLEM: {p}");
@@ -1684,8 +1835,23 @@ async fn verify_hosted_command(cfg: &Config, key_id: &str, expect_fingerprint: &
     if report.ok {
         Ok(())
     } else {
-        Err(DaemonError::Config(format!("verify-hosted: {} problem(s)", report.problems.len())))
+        Err(DaemonError::Config(format!("{command}: {} problem(s)", report.problems.len())))
     }
+}
+
+/// `key fingerprint`: the Canton fingerprint of a public key file, alone on stdout; what the file
+/// was read as goes to stderr. Offline. See [`rutli_cosigner::key_cli::parse_public_input`].
+fn key_fingerprint_command(path: &std::path::Path) -> Result<()> {
+    use std::io::Read;
+    let limit = rutli_cosigner::key_cli::MAX_PUBLIC_KEY_INPUT as u64 + 1;
+    let mut input = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(limit).read_to_end(&mut input))
+        .map_err(|e| DaemonError::Config(format!("{}: {e}", path.display())))?;
+    let key = rutli_cosigner::key_cli::parse_public_input(&input)?;
+    eprintln!("{} public key, read as {}", key.spec_name(), key.format);
+    println!("{}", key.public.fingerprint());
+    Ok(())
 }
 
 /// Connect and call deadlines of the operator commands' Signer clients.
@@ -1895,6 +2061,60 @@ fn append_sources(out: &mut String, mut source: Option<&(dyn std::error::Error +
         }
         source = e.source();
     }
+}
+
+/// `backup-retain`: see [`Command::BackupRetain`].
+fn backup_retain_command(
+    cfg: &Config,
+    dir: &std::path::Path,
+    dry_run: bool,
+    min_proof_age_days: u64,
+    keep_older_epochs: usize,
+    keep_count: usize,
+) -> Result<()> {
+    use rutli_cosigner::backup_retain::{self as r, Skip, Verdict};
+    let settings = r::Settings {
+        node: cfg.identifier,
+        cluster_uuid: cfg.keyfile.cluster_uuid.clone(),
+        min_proof_age_ms: min_proof_age_days.saturating_mul(86_400_000),
+        keep_older_epochs,
+        keep_count,
+    };
+    let node = cfg.identifier;
+    let plan = r::run(dir, &cfg.data_dir.join("keys"), &settings, rutli_cosigner::intent::now_ms(), dry_run)
+        .map_err(|e| DaemonError::Config(format!("backup-retain: {e}")))?;
+    let (mut deleted, mut kept) = (0, 0);
+    for (name, verdict) in &plan.verdicts {
+        match verdict {
+            Verdict::Keep(why) => {
+                kept += 1;
+                println!("BACKUP_RETENTION node={node} archive={name} verdict=keep reason={}", why.code());
+            }
+            Verdict::DeleteOlderEpoch { covered_by } => {
+                deleted += 1;
+                println!(
+                    "BACKUP_RETENTION node={node} archive={name} verdict={} reason=older-epoch covered-by={covered_by}",
+                    if dry_run { "would-delete" } else { "deleted" }
+                );
+            }
+            Verdict::DeleteCountCap => {
+                deleted += 1;
+                println!(
+                    "BACKUP_RETENTION node={node} archive={name} verdict={} reason=count-cap",
+                    if dry_run { "would-delete" } else { "deleted" }
+                );
+            }
+        }
+    }
+    match &plan.skip {
+        Some(Skip::Closed(why)) => println!("BACKUP_RETENTION_SKIPPED node={node} mode=nothing-deleted reason=\"{why}\""),
+        Some(Skip::CapOnly(why)) => {
+            println!("BACKUP_RETENTION_SKIPPED node={node} mode=count-cap-only reason=\"{why}\"")
+        }
+        None => {}
+    }
+    println!("BACKUP_RETENTION_DONE node={node} archives={} kept={kept} deleted={deleted} dry_run={dry_run}", plan.verdicts.len());
+    Ok(())
 }
 
 /// `residue-scan`: see [`Command::ResidueScan`] and [`rutli_cosigner::residue`]. Exits the process.
@@ -2210,8 +2430,11 @@ fn seal_command(command: SealCommand) -> Result<()> {
             let dropped = bundle.without_previous();
             write_new_private_file(&out, &dropped.to_json()?)?;
             println!(
-                "wrote {} (node {}): share_dek id {}, {} previous DEK(s) dropped. Files sealed under \
-                 a dropped DEK no longer open on this node — including old backups.",
+                "wrote {} (node {}): share_dek id {}, {} previous DEK(s) removed from this bundle. \
+                 With this bundle, files sealed under a removed DEK no longer open on this node \
+                 (including old backups). The DEK is not destroyed until every other copy is: \
+                 earlier values of the seal Secret and their history, escrowed bundles, operator \
+                 machines (docs/key-material-handling.md).",
                 out.display(),
                 dropped.node,
                 dropped.dek_id(),
@@ -2763,8 +2986,10 @@ fn export_key_command(
         tracing::warn!(
             key_id,
             path = %out.display(),
-            "writing an UNENCRYPTED private key — this file IS the key; move it to an HSM or \
-             offline media and shred the copy"
+            "writing an UNENCRYPTED private key — this file IS the key. Write it only to a place \
+             you can destroy (a memory disk or an encrypted image), move it to an HSM or offline \
+             media, then destroy that place: deleting or overwriting the file does not erase it on \
+             flash, copy-on-write, journaling or network storage (docs/key-material-handling.md)"
         );
         rutli_cosigner::export::export_plaintext(key_id, &key)?
     } else {

@@ -16,6 +16,11 @@
 //! - the package interpolates: every `t`-subset of verifying shares yields the group key;
 //! - provenance agrees (origin, ceremony id, refresh count, and what the key was carried for).
 //!
+//! `rutli-cosigner key show` runs the same checks and may leave the expectation out: the report
+//! then says what the nodes hold and that they agree, and is compared with nothing. Every answer
+//! is a node's self-report, so a fingerprint read this way is never the `--expect-fingerprint` of
+//! an import or a migration — that one comes from the old node or from Canton's topology.
+//!
 //! A public view can be perfect while a node's *secret* share is wrong, so with `--sign-test` the
 //! command then has the cluster sign with **every `t`-subset** of cosigners in turn
 //! ([`sign_test_plan`], `Signer.CeremonySignTest`, leader rotating), each verified with
@@ -82,10 +87,17 @@ pub struct SignRow {
 #[derive(Debug, Clone, Serialize)]
 pub struct VerifyReport {
     pub key_id: String,
-    pub expected_fingerprint: String,
+    /// `frost`: which of the two report shapes `key show --json` printed.
+    pub kind: &'static str,
+    /// Absent when the caller gave none (`key show` without `--expect-fingerprint`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_fingerprint: Option<String>,
     pub ok: bool,
     pub problems: Vec<String>,
     pub group_verifying_key: Option<String>,
+    /// The Canton fingerprint of the group key, only when every check passed (`ok`): a report with
+    /// problems names no fingerprint as the cluster's. Each node's own is in its row.
+    pub fingerprint: Option<String>,
     pub pkp_digest: Option<String>,
     pub threshold: u16,
     pub origin: Option<String>,
@@ -132,6 +144,8 @@ impl VerifyReport {
         });
         if let Err(e) = &outcome {
             self.ok = false;
+            // A report with a problem names no fingerprint as the cluster's.
+            self.fingerprint = None;
             self.problems.push(format!("sign test by {signers:?} (led by node {leader}): {e}"));
         }
         self.sign_test.push(SignRow {
@@ -187,10 +201,11 @@ pub fn signature_verifies(public: &[u8; 32], message: &[u8], signature: &[u8]) -
 }
 
 /// Check every node's view against the expectation and against each other. `roster` and
-/// `threshold` come from the operator's own configuration, not from any node.
+/// `threshold` come from the operator's own configuration, not from any node. With no
+/// `expected_fingerprint` (`key show`) every check but that comparison still runs.
 pub fn check_views(
     key_id: &str,
-    expected_fingerprint: &str,
+    expected_fingerprint: Option<&str>,
     roster: &[u16],
     threshold: u16,
     views: &[NodeView],
@@ -198,13 +213,12 @@ pub fn check_views(
     let mut problems = Vec::new();
     // Canonical (trimmed, lower case) like every fingerprint computed here; a malformed one is a
     // problem of its own and matches nothing.
-    let expected_fingerprint = match crate::share_delivery::canonical_fingerprint(expected_fingerprint) {
-        Ok(fp) => fp,
-        Err(e) => {
+    let expected_fingerprint = expected_fingerprint.map(|given| {
+        crate::share_delivery::canonical_fingerprint(given).unwrap_or_else(|e| {
             problems.push(format!("--expect-fingerprint: {e}"));
-            expected_fingerprint.trim().to_string()
-        }
-    };
+            given.trim().to_string()
+        })
+    });
     let mut rows = Vec::new();
     let expected_ids: BTreeSet<u16> = roster.iter().copied().collect();
     let seen_ids: BTreeSet<u16> = views.iter().map(|v| v.identifier).collect();
@@ -262,7 +276,8 @@ pub fn check_views(
                     s.carried_for.clone(),
                     s.recorded_usage.clone(),
                 ));
-                if let Err(e) = check_one(v.identifier, s, &expected_fingerprint, roster, threshold, &mut row) {
+                let expected = expected_fingerprint.as_deref();
+                if let Err(e) = check_one(v.identifier, s, expected, roster, threshold, &mut row) {
                     problems.push(format!("node {}: {e}", v.identifier));
                 }
                 digests.insert(row.pkp_digest.clone());
@@ -292,12 +307,20 @@ pub fn check_views(
         }
         _ => (None, None, None, None, None),
     };
+    let group_verifying_key = single(&groups);
+    let fingerprint = group_verifying_key
+        .as_ref()
+        .filter(|_| problems.is_empty())
+        .and_then(|h| <[u8; 32]>::try_from(hex::decode(h).ok()?).ok())
+        .map(|g| crate::share_delivery::ed25519_fingerprint(&g));
     VerifyReport {
         key_id: key_id.into(),
+        kind: crate::key_cli::KeyKind::Frost.as_str(),
         expected_fingerprint,
         ok: problems.is_empty(),
         problems,
-        group_verifying_key: single(&groups),
+        group_verifying_key,
+        fingerprint,
         pkp_digest: single(&digests),
         threshold,
         origin,
@@ -314,7 +337,7 @@ pub fn check_views(
 fn check_one(
     identifier: u16,
     s: &KeyStatusReply,
-    expected_fingerprint: &str,
+    expected_fingerprint: Option<&str>,
     roster: &[u16],
     threshold: u16,
     row: &mut NodeRow,
@@ -329,11 +352,8 @@ fn check_one(
         .try_into()
         .map_err(|_| "group key is not 32 bytes".to_string())?;
     row.fingerprint = crate::share_delivery::ed25519_fingerprint(&group);
-    if row.fingerprint != expected_fingerprint {
-        return Err(format!(
-            "group key fingerprint {} is not the expected {expected_fingerprint}",
-            row.fingerprint
-        ));
+    if let Some(expected) = expected_fingerprint.filter(|e| *e != row.fingerprint) {
+        return Err(format!("group key fingerprint {} is not the expected {expected}", row.fingerprint));
     }
     let pkp: PublicKeyPackage = serde_json::from_slice(&s.public_key_package)
         .map_err(|e| format!("unreadable public key package: {e}"))?;
@@ -421,16 +441,16 @@ mod tests {
     #[test]
     fn a_consistent_cluster_passes() {
         let (v, fp) = views([1u8; 32]);
-        let r = check_views(KEY, &fp, &[1, 2, 3], 2, &v);
+        let r = check_views(KEY, Some(&fp), &[1, 2, 3], 2, &v);
         assert!(r.ok, "{:?}", r.problems);
         assert!(r.agreed_group_key().is_some());
         assert_eq!(r.refresh_count, Some(0));
         assert_eq!((r.carried_for.as_deref(), r.recorded_usage.as_deref()), (Some("namespace"), Some("namespace")));
         // The operator's fingerprint is compared in canonical form (2026-10-15 review, L2).
-        let r = check_views(KEY, &format!(" {} ", fp.to_uppercase()), &[1, 2, 3], 2, &v);
+        let r = check_views(KEY, Some(&format!(" {} ", fp.to_uppercase())), &[1, 2, 3], 2, &v);
         assert!(r.ok, "{:?}", r.problems);
-        assert_eq!(r.expected_fingerprint, fp);
-        let r = check_views(KEY, "1220zz", &[1, 2, 3], 2, &v);
+        assert_eq!(r.expected_fingerprint.as_deref(), Some(fp.as_str()));
+        let r = check_views(KEY, Some("1220zz"), &[1, 2, 3], 2, &v);
         assert!(!r.ok && r.problems.iter().any(|p| p.contains("not a 1220")), "{:?}", r.problems);
     }
 
@@ -440,47 +460,110 @@ mod tests {
         // A missing node.
         let (mut v, _) = views([1u8; 32]);
         v[2].status = Err("NOT_FOUND: unknown key id".into());
-        assert!(!check_views(KEY, &fp, &[1, 2, 3], 2, &v).ok);
+        assert!(!check_views(KEY, Some(&fp), &[1, 2, 3], 2, &v).ok);
         // The wrong key everywhere.
         let (v, _) = views([2u8; 32]);
-        let r = check_views(KEY, &fp, &[1, 2, 3], 2, &v);
+        let r = check_views(KEY, Some(&fp), &[1, 2, 3], 2, &v);
         assert!(r.problems.iter().any(|p| p.contains("fingerprint")), "{:?}", r.problems);
         // One node from a different split of the same key: same group key, different package.
         let (mut v, _) = views([1u8; 32]);
         let (other, _) = views([1u8; 32]);
         v.pop();
         v.push(other.into_iter().nth(2).unwrap());
-        let r = check_views(KEY, &fp, &[1, 2, 3], 2, &v);
+        let r = check_views(KEY, Some(&fp), &[1, 2, 3], 2, &v);
         assert!(r.problems.iter().any(|p| p.contains("different public key packages")), "{:?}", r.problems);
         // A node whose own share is not in the package (e.g. a mis-installed bundle).
         let (mut v, _) = views([1u8; 32]);
         let s1 = v[0].status.as_ref().unwrap().own_verifying_share.clone();
         v[1].status.as_mut().unwrap().own_verifying_share = s1;
-        assert!(!check_views(KEY, &fp, &[1, 2, 3], 2, &v).ok);
+        assert!(!check_views(KEY, Some(&fp), &[1, 2, 3], 2, &v).ok);
         // A node answering as someone else.
         let (mut v, _) = views([1u8; 32]);
         v[0].identifier = 2;
-        assert!(!check_views(KEY, &fp, &[1, 2, 3], 2, &v).ok);
+        assert!(!check_views(KEY, Some(&fp), &[1, 2, 3], 2, &v).ok);
         // Provenance disagreement (one node refreshed, others not — a half-applied refresh).
         let (mut v, _) = views([1u8; 32]);
         v[0].status.as_mut().unwrap().refresh_count = 1;
-        assert!(!check_views(KEY, &fp, &[1, 2, 3], 2, &v).ok);
+        assert!(!check_views(KEY, Some(&fp), &[1, 2, 3], 2, &v).ok);
         // ... or on what the key was carried for.
         let (mut v, _) = views([1u8; 32]);
         v[2].status.as_mut().unwrap().carried_for = "protocol".into();
-        let r = check_views(KEY, &fp, &[1, 2, 3], 2, &v);
+        let r = check_views(KEY, Some(&fp), &[1, 2, 3], 2, &v);
         assert!(r.problems.iter().any(|p| p.contains("carried for")), "{:?}", r.problems);
         // Wrong configured threshold.
         let (v, _) = views([1u8; 32]);
-        assert!(!check_views(KEY, &fp, &[1, 2, 3], 3, &v).ok);
+        assert!(!check_views(KEY, Some(&fp), &[1, 2, 3], 3, &v).ok);
+    }
+
+    /// `key show` without `--expect-fingerprint`: the same checks, compared with nothing.
+    #[test]
+    fn without_an_expectation_the_report_shows_the_key_and_still_checks_everything_else() {
+        let (v, fp) = views([1u8; 32]);
+        let shown = check_views(KEY, None, &[1, 2, 3], 2, &v);
+        assert!(shown.ok, "{:?}", shown.problems);
+        assert_eq!((shown.kind, shown.expected_fingerprint.as_deref()), ("frost", None));
+        assert_eq!(shown.fingerprint.as_deref(), Some(fp.as_str()));
+        assert!(shown.nodes.iter().all(|n| n.fingerprint == fp && n.own_share_in_package));
+        assert_eq!((shown.origin.as_deref(), shown.epoch, shown.threshold), (Some("dealer-split"), Some(0), 2));
+        // With the right expectation: the same report, plus the expectation.
+        let verified = check_views(KEY, Some(&fp), &[1, 2, 3], 2, &v);
+        let mut json = serde_json::to_value(&verified).unwrap();
+        assert_eq!(json.as_object_mut().unwrap().remove("expected_fingerprint"), Some(fp.clone().into()));
+        assert_eq!(json, serde_json::to_value(&shown).unwrap());
+
+        // Everything `verify-key` catches other than "not the expected key" is caught here too,
+        // and a report with a problem names no fingerprint as the cluster's.
+        let problems = |v: &[NodeView]| {
+            let r = check_views(KEY, None, &[1, 2, 3], 2, v);
+            assert!(!r.ok && r.fingerprint.is_none(), "{:?}", r.fingerprint);
+            r.problems.join(" | ")
+        };
+        let (mut v, _) = views([1u8; 32]);
+        v[2].status = Err("NOT_FOUND: unknown key id".into());
+        assert!(problems(&v).contains("node 3: NOT_FOUND"));
+        // Two nodes on one key, the third on another: no fingerprint is reported as the cluster's.
+        let (mut v, _) = views([1u8; 32]);
+        let (other, other_fp) = views([2u8; 32]);
+        v[2] = other.into_iter().nth(2).unwrap();
+        let r = check_views(KEY, None, &[1, 2, 3], 2, &v);
+        assert!(!r.ok && r.fingerprint.is_none() && r.group_verifying_key.is_none(), "{:?}", r.problems);
+        assert!(r.problems.iter().any(|p| p.contains("different public key packages")), "{:?}", r.problems);
+        assert_eq!((r.nodes[0].fingerprint.as_str(), r.nodes[2].fingerprint.as_str()), (fp.as_str(), other_fp.as_str()));
+        let (mut v, _) = views([1u8; 32]);
+        let s1 = v[0].status.as_ref().unwrap().own_verifying_share.clone();
+        v[1].status.as_mut().unwrap().own_verifying_share = s1;
+        assert!(problems(&v).contains("own verifying share"));
+        let (mut v, _) = views([1u8; 32]);
+        v[0].status.as_mut().unwrap().epoch = 1;
+        assert!(problems(&v).contains("different epochs"));
+        let (mut v, _) = views([1u8; 32]);
+        v[1].status.as_mut().unwrap().stale = true;
+        assert!(problems(&v).contains("stale"));
+        let (mut v, _) = views([1u8; 32]);
+        v[0].status.as_mut().unwrap().refresh_count = 1;
+        assert!(problems(&v).contains("provenance"));
+        let (mut v, _) = views([1u8; 32]);
+        v.pop();
+        assert!(problems(&v).contains("the roster is"));
+        let (v, _) = views([1u8; 32]);
+        assert!(!check_views(KEY, None, &[1, 2, 3], 3, &v).ok);
+        // Nor does a wrong or malformed expectation: every node agrees, the report still names none.
+        let wrong = format!("1220{}", "0".repeat(64));
+        for expected in [wrong.as_str(), "1220zz"] {
+            let r = check_views(KEY, Some(expected), &[1, 2, 3], 2, &v);
+            assert!(!r.ok && r.fingerprint.is_none() && r.group_verifying_key.is_some(), "{:?}", r.problems);
+            assert!(r.nodes.iter().all(|n| n.fingerprint == fp));
+        }
     }
 
     #[test]
     fn signatures_are_checked_strictly_and_failures_fail_the_report() {
         let (v, fp) = views([1u8; 32]);
-        let mut r = check_views(KEY, &fp, &[1, 2, 3], 2, &v);
+        let mut r = check_views(KEY, Some(&fp), &[1, 2, 3], 2, &v);
         let msg = verify_message("c", KEY);
+        assert_eq!(r.fingerprint.as_deref(), Some(fp.as_str()));
         r.record_signature(1, &[1, 2], Err("UNAVAILABLE".into()));
+        assert!(!r.ok && r.fingerprint.is_none());
         r.record_signature(2, &[1, 3], Ok((msg.to_vec(), vec![0u8; 64])));
         // A valid-looking reply over a message the operator did not expect is a failure too.
         r.record_signature(3, &[2, 3], Ok((verify_message("other", KEY).to_vec(), vec![0u8; 64])));

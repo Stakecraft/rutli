@@ -10,8 +10,27 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PROTOBUF_VERSION="${PROTOBUF_VERSION:-4.29.3}"   # keep in sync with protobufVersion in build.sbt
-GRPC_VERSION="${GRPC_VERSION:-1.82.1}"           # keep in sync with grpcVersion in build.sbt
+# The versions come from build.sbt, so the generator cannot drift from the runtime (override with the
+# environment variables to try another version).
+sbt_version() { sed -n "s/^val $1 *= *\"\([^\"]*\)\".*/\1/p" "$REPO/build.sbt" | head -n 1; }
+PROTOBUF_VERSION="${PROTOBUF_VERSION:-$(sbt_version protobufVersion)}"
+GRPC_VERSION="${GRPC_VERSION:-$(sbt_version grpcVersion)}"
+[ -n "$PROTOBUF_VERSION" ] && [ -n "$GRPC_VERSION" ] || { echo "cannot read protobufVersion / grpcVersion from build.sbt"; exit 1; }
+# Optional: PROTOC_SHA256 and PROTOC_GEN_GRPC_JAVA_SHA256 make the script refuse a binary whose sha256
+# differs (CI sets them for linux-x86_64).
+verify() { # file expected-sha256-or-empty
+  [ -z "$2" ] && return 0
+  local ok=1
+  if command -v sha256sum >/dev/null; then
+    echo "$2  $1" | sha256sum -c - >/dev/null 2>&1 && ok=0
+  else
+    echo "$2  $1" | shasum -a 256 -c - >/dev/null 2>&1 && ok=0
+  fi
+  if [ "$ok" -ne 0 ]; then
+    echo "sha256 of $(basename "$1") differs from the expected $2 (after a version bump in build.sbt, update PROTOC_SHA256 and PROTOC_GEN_GRPC_JAVA_SHA256 in .github/workflows/generated-code.yml)"
+    exit 1
+  fi
+}
 
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) CLASSIFIER="osx-aarch_64" ;;
@@ -26,10 +45,12 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 echo "Fetching protoc $PROTOBUF_VERSION and protoc-gen-grpc-java $GRPC_VERSION ($CLASSIFIER)..."
-curl -sL -o "$TMP/protoc" \
+curl -fsSL --proto '=https' -o "$TMP/protoc" \
   "$CENTRAL/com/google/protobuf/protoc/$PROTOBUF_VERSION/protoc-$PROTOBUF_VERSION-$CLASSIFIER.exe"
-curl -sL -o "$TMP/grpc" \
+curl -fsSL --proto '=https' -o "$TMP/grpc" \
   "$CENTRAL/io/grpc/protoc-gen-grpc-java/$GRPC_VERSION/protoc-gen-grpc-java-$GRPC_VERSION-$CLASSIFIER.exe"
+verify "$TMP/protoc" "${PROTOC_SHA256:-}"
+verify "$TMP/grpc" "${PROTOC_GEN_GRPC_JAVA_SHA256:-}"
 chmod +x "$TMP/protoc" "$TMP/grpc"
 
 OUT="$REPO/driver/src/main/java"

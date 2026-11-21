@@ -898,6 +898,20 @@ async fn group_key(ctx: &Ctx, key_id: &str) -> Result<Vec<u8>, tonic::Status> {
     Err(last)
 }
 
+/// The same through `KeyStatus`, which the refresher role may call (it may not call `GroupKey`).
+async fn status_group_key(ctx: &Ctx, key_id: &str) -> Result<Vec<u8>, tonic::Status> {
+    let mut last = tonic::Status::unavailable("no cosigner configured");
+    for i in 0..ctx.targets.len() {
+        let Ok(mut c) = ctx.connect(i) else { continue };
+        match bounded(ctx.timeout, c.key_status(pb::KeyStatusRequest { key_id: key_id.to_string() })).await {
+            Ok(reply) => return Ok(reply.group_verifying_key),
+            Err(status) if not_serving(&status) => last = status,
+            Err(status) => return Err(status),
+        }
+    }
+    Err(last)
+}
+
 fn verifying_key(key_id: &str, bytes: &[u8]) -> Result<ed25519_dalek::VerifyingKey, Fail> {
     let raw: [u8; 32] = bytes.try_into().map_err(|_| format!("{key_id}: a group key of {} bytes", bytes.len()))?;
     Ok(ed25519_dalek::VerifyingKey::from_bytes(&raw).map_err(|e| format!("{key_id}: not an Ed25519 key: {e}"))?)
@@ -1141,9 +1155,11 @@ async fn run(cli: Cli) -> Result<(), Fail> {
         }
         Command::Refresh { key, load } => {
             let cluster = cluster_id(&ctx).await?;
-            let group = group_key(&ctx, &key)
+            // KeyStatus, not GroupKey: a refresh runs with the refresher's certificate, as the
+            // refresh job does, and that role may read a key's status but not call the Signer API.
+            let group = status_group_key(&ctx, &key)
                 .await
-                .map_err(|s| format!("GroupKey of {key}: {:?}: {}", s.code(), s.message()))?;
+                .map_err(|s| format!("KeyStatus of {key}: {:?}: {}", s.code(), s.message()))?;
             print_json(&load_command(ctx, "refresh", Op::Refresh { key_id: key, group_key: group }, cluster, load).await?)
         }
     }

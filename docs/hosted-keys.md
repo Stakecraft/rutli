@@ -399,7 +399,7 @@ worth knowing:
 
 **Hosted keys are create-once-immutable**: a key id maps to one key forever. Rotation means minting
 a *new* key id plus a Canton topology transaction, which is exactly what
-`rotate_node_key(s)` already does — see [`key-rotation.md`](key-rotation.md). The driver mints the
+the rotation recipe does — see [`key-rotation.md`](key-rotation.md#the-recipe). The driver mints the
 replacement in the cluster; the topology transaction is signed by the namespace key, which is still
 threshold-signed by the FROST quorum.
 
