@@ -221,6 +221,14 @@ sum(rate(rutli_sign_duration_seconds_sum{result="ok"}[1h]))
    replica) — investigate it as for `rutli_anti_entropy_conflicts_total`. On a decrypt that failed
    anyway (`ecies-failure=after-ecdh`), every node's secret was refused: the ciphertext is the
    suspect, and it cost one `EcdhDerive` per cosigner.
+   `unconfirmed=<endpoint> reason=UNAVAILABLE|DEADLINE_EXCEEDED` on a failed entry means a
+   cosigner answered "not found" (or another key, or that it cannot sign) while `<endpoint>` could
+   not be reached or did not answer within the attempt deadline: the driver reported a retryable
+   error, not a final one, and logged `FROST: <call>: the cosigners that answered said <answer>,
+   but <endpoint> did not serve the call`. It clears when that cosigner is back. It cannot go on
+   for a key that exists nowhere: once enough cosigners gave the answer that the rest could not
+   use the key (all but one: 2 of 3, 4 of 5), it is final. Repeated
+   entries therefore mean most of the cluster is unreachable from this participant.
    **A hosted key the driver did not accept** (0.5.0): after `GenerateKey` the driver asks every
    cosigner for its own copy and gives the key id to Canton only when at least two hold the
    material the leader reported and none reports other material. If it is short only because
