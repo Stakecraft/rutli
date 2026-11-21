@@ -56,6 +56,10 @@ the same) and of a nightly run, and merge their `current.json`:
 scripts/quality/update-baseline.sh main-current.json nightly-current.json
 ```
 
+A run with coverage also puts the driver's scoverage report into the artifact
+(`scoverage.xml.gz`: every statement with its file, line and hit count), for a look at what the
+tests do not reach.
+
 A local run lacks what needs CI's toolchain (coverage, the sbt build), so do not use one. At each
 release the baseline moves to the release (`docs/release-process.md`).
 

@@ -8,6 +8,8 @@
 # (scripts/publish-canton-deps.sh). sbt-scoverage is added for this run only (--addPluginSbtFile),
 # so the build itself, and older trees measured by quality-report.sh, need no change.
 # QUALITY_SCALA_BUILD=0 skips the sbt run; QUALITY_COVERAGE=0 runs the tests without coverage.
+# QUALITY_KEEP_DIR, when set to an existing directory, receives the scoverage report
+# (scoverage.xml.gz).
 set -euo pipefail
 # shellcheck source=scripts/quality/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -88,6 +90,11 @@ if [ -n "$xml" ]; then
   q_tool sbt-scoverage echo "$SCOVERAGE_VERSION"
   q_metric scala.coverage.statements "$(q_grep -m1 -oE 'statement-rate="[0-9.]+"' "$xml" | q_grep -m1 -oE '[0-9.]+')"
   q_metric scala.coverage.branches "$(q_grep -m1 -oE 'branch-rate="[0-9.]+"' "$xml" | q_grep -m1 -oE '[0-9.]+')"
+  # The report itself (every statement with its file, line and hit count), for whoever wants to
+  # see what is not covered. In CI it lands in the quality-metrics artifact.
+  if [ -n "${QUALITY_KEEP_DIR:-}" ] && [ -d "$QUALITY_KEEP_DIR" ]; then
+    gzip -c "$xml" >"$QUALITY_KEEP_DIR/scoverage.xml.gz" || rm -f "$QUALITY_KEEP_DIR/scoverage.xml.gz"
+  fi
 else
   q_null scala.coverage.statements "no scoverage report (sbt exit $rc: tests failed?)"
   q_null scala.coverage.branches "no scoverage report (sbt exit $rc: tests failed?)"
