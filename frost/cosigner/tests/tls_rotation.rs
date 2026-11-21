@@ -51,7 +51,10 @@ impl Ca {
         p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         p.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         p.distinguished_name.push(DnType::CommonName, cn);
-        Self { cert: p.self_signed(&key).unwrap(), key }
+        Self {
+            cert: p.self_signed(&key).unwrap(),
+            key,
+        }
     }
 
     /// A cosigner leaf: CN `cn` and the same name as its SAN (as gen-frost-certs.sh issues it: each
@@ -61,8 +64,10 @@ impl Ca {
         let mut p = CertificateParams::new(vec![cn.to_string()]).unwrap();
         p.distinguished_name.push(DnType::CommonName, cn);
         p.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-        p.extended_key_usages =
-            vec![ExtendedKeyUsagePurpose::ServerAuth, ExtendedKeyUsagePurpose::ClientAuth];
+        p.extended_key_usages = vec![
+            ExtendedKeyUsagePurpose::ServerAuth,
+            ExtendedKeyUsagePurpose::ClientAuth,
+        ];
         let cert = p.signed_by(&key, &self.cert, &self.key).unwrap();
         (cert.pem(), key.serialize_pem())
     }
@@ -72,13 +77,27 @@ impl Ca {
 /// order (`cat old.crt new.crt` during the overlap).
 fn tls_files(dir: &Path, name: &str, issuer: &Ca, cn: &str, trust: &[&Ca]) -> TlsConfig {
     let (cert, key) = issuer.leaf(cn);
-    let bundle: String = trust.iter().map(|ca| ca.cert.pem()).collect::<Vec<_>>().join("");
-    let (cert_path, key_path, ca_path) =
-        (dir.join(format!("{name}.crt")), dir.join(format!("{name}.key")), dir.join(format!("{name}-ca.crt")));
+    let bundle: String = trust
+        .iter()
+        .map(|ca| ca.cert.pem())
+        .collect::<Vec<_>>()
+        .join("");
+    let (cert_path, key_path, ca_path) = (
+        dir.join(format!("{name}.crt")),
+        dir.join(format!("{name}.key")),
+        dir.join(format!("{name}-ca.crt")),
+    );
     std::fs::write(&cert_path, cert).unwrap();
     std::fs::write(&key_path, key).unwrap();
     std::fs::write(&ca_path, bundle).unwrap();
-    TlsConfig { ca_cert: ca_path, cert: cert_path, key: key_path, domain: None, allow_expired_ca: false, require_peer_pins: None }
+    TlsConfig {
+        ca_cert: ca_path,
+        cert: cert_path,
+        key: key_path,
+        domain: None,
+        allow_expired_ca: false,
+        require_peer_pins: None,
+    }
 }
 
 /// Node 1 serves the Peer API with `server`'s TLS; node 2 dials it with `client`'s TLS and asks
@@ -94,7 +113,11 @@ async fn node_info(dir: &Path, server: &TlsConfig, client: &TlsConfig) -> Result
         Some(client_tls.dial_as(NODE1, None, 0).unwrap()),
     )
     .unwrap();
-    let result = peer.node_info().await.map(|(id, _)| id).map_err(|e| format!("{e:?}"));
+    let result = peer
+        .node_info()
+        .await
+        .map(|(id, _)| id)
+        .map_err(|e| format!("{e:?}"));
     serving.abort();
     result
 }
@@ -109,9 +132,15 @@ async fn serve(dir: &Path, server: &TlsConfig) -> (String, tokio::task::JoinHand
             .with_hosted_keys(MASTER, CLUSTER.to_string())
             .unwrap(),
     );
-    let peer_cns: Arc<HashSet<String>> = Arc::new((1..=3).map(|i| format!("cosigner{i}")).collect());
+    let peer_cns: Arc<HashSet<String>> =
+        Arc::new((1..=3).map(|i| format!("cosigner{i}")).collect());
     let peer_ids = Arc::new((1..=3u16).map(|i| (format!("cosigner{i}"), i)).collect());
-    let svc = PeerSvc { node, allowed_cns: Some(peer_cns), peer_ids: Some(peer_ids), peer_pins: None };
+    let svc = PeerSvc {
+        node,
+        allowed_cns: Some(peer_cns),
+        peer_ids: Some(peer_ids),
+        peer_pins: None,
+    };
 
     let server_tls = rutli_cosigner::tls::load(server).unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -140,21 +169,40 @@ async fn the_tls_probe_reports_how_a_node_refuses_a_client_and_nothing_otherwise
     let s = tls_files(dir, "s", &new, "cosigner1", &[&new]);
     let (endpoint, serving) = serve(dir, &s).await;
 
-    let old_client = TlsProbe::new(&tls_files(dir, "c-old", &old, "operator", &[&old, &new])).unwrap();
+    let old_client =
+        TlsProbe::new(&tls_files(dir, "c-old", &old, "operator", &[&old, &new])).unwrap();
     for _ in 0..20 {
         let r = old_client.refusal_as(&endpoint, NODE1).await;
-        assert!(r.as_deref().is_some_and(|r| r.contains("received fatal alert: UnknownCA")), "{r:?}");
+        assert!(
+            r.as_deref()
+                .is_some_and(|r| r.contains("received fatal alert: UnknownCA")),
+            "{r:?}"
+        );
     }
-    let new_client = TlsProbe::new(&tls_files(dir, "c-new", &new, "operator", &[&old, &new])).unwrap();
-    assert_eq!(new_client.refusal_as(&endpoint, NODE1).await, None, "an accepted client is not refused");
+    let new_client =
+        TlsProbe::new(&tls_files(dir, "c-new", &new, "operator", &[&old, &new])).unwrap();
+    assert_eq!(
+        new_client.refusal_as(&endpoint, NODE1).await,
+        None,
+        "an accepted client is not refused"
+    );
     // The client side refusing the node (it trusts only the old CA) is a handshake failure.
-    let old_trust = TlsProbe::new(&tls_files(dir, "c-oldtrust", &old, "operator", &[&old])).unwrap();
+    let old_trust =
+        TlsProbe::new(&tls_files(dir, "c-oldtrust", &old, "operator", &[&old])).unwrap();
     let r = old_trust.refusal_as(&endpoint, NODE1).await;
-    assert!(r.as_deref().is_some_and(|r| r.contains("handshake failed") && r.contains("UnknownIssuer")), "{r:?}");
+    assert!(
+        r.as_deref()
+            .is_some_and(|r| r.contains("handshake failed") && r.contains("UnknownIssuer")),
+        "{r:?}"
+    );
 
     serving.abort();
     let _ = serving.await;
-    assert_eq!(old_client.refusal_as(&endpoint, NODE1).await, None, "a node that is down has no TLS detail");
+    assert_eq!(
+        old_client.refusal_as(&endpoint, NODE1).await,
+        None,
+        "a node that is down has no TLS detail"
+    );
 }
 
 #[tokio::test]
@@ -173,19 +221,30 @@ async fn a_two_ca_trust_bundle_carries_mtls_both_ways_and_dropping_the_old_ca_lo
     //     the bundle old+new.
     let s = tls_files(dir, "sa", &new, "cosigner1", &[&old, &new]);
     let c = tls_files(dir, "ca", &old, "cosigner2", &[&old, &new]);
-    assert_eq!(node_info(dir, &s, &c).await.unwrap(), 1, "new-CA server, old-CA client");
+    assert_eq!(
+        node_info(dir, &s, &c).await.unwrap(),
+        1,
+        "new-CA server, old-CA client"
+    );
 
     // (b) The reverse, and with the bundle in the other order on one side.
     let s = tls_files(dir, "sb", &old, "cosigner1", &[&new, &old]);
     let c = tls_files(dir, "cb", &new, "cosigner2", &[&old, &new]);
-    assert_eq!(node_info(dir, &s, &c).await.unwrap(), 1, "old-CA server, new-CA client");
+    assert_eq!(
+        node_info(dir, &s, &c).await.unwrap(),
+        1,
+        "old-CA server, new-CA client"
+    );
 
     // (c) After the old CA is dropped from the server's trust file, a client still presenting an
     //     old-CA leaf is refused at the handshake — even though it trusts the server.
     let s = tls_files(dir, "sc", &new, "cosigner1", &[&new]);
     let c = tls_files(dir, "cc", &old, "cosigner2", &[&old, &new]);
     let e = node_info(dir, &s, &c).await.unwrap_err();
-    assert!(e.contains("UnknownCA"), "a server trusting only the new CA must refuse an old-CA client: {e}");
+    assert!(
+        e.contains("UnknownCA"),
+        "a server trusting only the new CA must refuse an old-CA client: {e}"
+    );
 
     // (d) The client side of the same lockout: a node that still trusts only the old CA cannot
     //     reach a peer that already has a new-CA leaf — why the bundle must be everywhere before
@@ -193,7 +252,10 @@ async fn a_two_ca_trust_bundle_carries_mtls_both_ways_and_dropping_the_old_ca_lo
     let s = tls_files(dir, "sd", &new, "cosigner1", &[&old, &new]);
     let c = tls_files(dir, "cd", &old, "cosigner2", &[&old]);
     let e = node_info(dir, &s, &c).await.unwrap_err();
-    assert!(e.contains("UnknownIssuer"), "an old-trust client must refuse a new-CA server: {e}");
+    assert!(
+        e.contains("UnknownIssuer"),
+        "an old-trust client must refuse a new-CA server: {e}"
+    );
 
     // After the rotation: new leaves, new trust only.
     let s = tls_files(dir, "s1", &new, "cosigner1", &[&new]);
@@ -204,7 +266,10 @@ async fn a_two_ca_trust_bundle_carries_mtls_both_ways_and_dropping_the_old_ca_lo
     let s = tls_files(dir, "se", &new, "cosigner1", &[&old, &new]);
     let c = tls_files(dir, "ce", &new, "driver", &[&old, &new]);
     let e = node_info(dir, &s, &c).await.unwrap_err();
-    assert!(e.contains("PermissionDenied"), "a non-cosigner CN must not reach the Peer API: {e}");
+    assert!(
+        e.contains("PermissionDenied"),
+        "a non-cosigner CN must not reach the Peer API: {e}"
+    );
 }
 
 // --- Review M1: every certificate in the trust file used to be a full mTLS anchor ----------------
@@ -218,23 +283,44 @@ impl Ca {
         p.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         p.distinguished_name.push(DnType::CommonName, cn);
         f(&mut p);
-        Self { cert: p.self_signed(&key).unwrap(), key }
+        Self {
+            cert: p.self_signed(&key).unwrap(),
+            key,
+        }
     }
 }
 
 /// A node's TLS files with an arbitrary trust file.
-fn tls_files_raw(dir: &Path, name: &str, (cert, key): (String, String), trust: String) -> TlsConfig {
-    let (cert_path, key_path, ca_path) =
-        (dir.join(format!("{name}.crt")), dir.join(format!("{name}.key")), dir.join(format!("{name}-ca.crt")));
+fn tls_files_raw(
+    dir: &Path,
+    name: &str,
+    (cert, key): (String, String),
+    trust: String,
+) -> TlsConfig {
+    let (cert_path, key_path, ca_path) = (
+        dir.join(format!("{name}.crt")),
+        dir.join(format!("{name}.key")),
+        dir.join(format!("{name}-ca.crt")),
+    );
     std::fs::write(&cert_path, cert).unwrap();
     std::fs::write(&key_path, key).unwrap();
     std::fs::write(&ca_path, trust).unwrap();
-    TlsConfig { ca_cert: ca_path, cert: cert_path, key: key_path, domain: None, allow_expired_ca: false, require_peer_pins: None }
+    TlsConfig {
+        ca_cert: ca_path,
+        cert: cert_path,
+        key: key_path,
+        domain: None,
+        allow_expired_ca: false,
+        require_peer_pins: None,
+    }
 }
 
 fn load_err(cfg: &TlsConfig) -> String {
     match rutli_cosigner::tls::load(cfg) {
-        Ok(_) => panic!("tls::load accepted trust file {}", std::fs::read_to_string(&cfg.ca_cert).unwrap()),
+        Ok(_) => panic!(
+            "tls::load accepted trust file {}",
+            std::fs::read_to_string(&cfg.ca_cert).unwrap()
+        ),
         Err(e) => e.to_string(),
     }
 }
@@ -253,14 +339,20 @@ async fn a_leaf_in_the_trust_file_is_refused_at_load_and_cannot_issue_a_peer_ide
     let mut lp = CertificateParams::new(vec!["cosigner1".to_string()]).unwrap();
     lp.distinguished_name.push(DnType::CommonName, "cosigner1");
     lp.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-    lp.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth, ExtendedKeyUsagePurpose::ClientAuth];
+    lp.extended_key_usages = vec![
+        ExtendedKeyUsagePurpose::ServerAuth,
+        ExtendedKeyUsagePurpose::ClientAuth,
+    ];
     let leaf = lp.signed_by(&leaf_key, &ca.cert, &ca.key).unwrap();
     // The cosigner1.key holder mints "cosigner2", issued by the leaf.
     let forged_key = KeyPair::generate().unwrap();
     let mut fp = CertificateParams::new(vec!["cosigner2".to_string()]).unwrap();
     fp.distinguished_name.push(DnType::CommonName, "cosigner2");
     fp.key_usages = vec![KeyUsagePurpose::DigitalSignature];
-    fp.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth, ExtendedKeyUsagePurpose::ClientAuth];
+    fp.extended_key_usages = vec![
+        ExtendedKeyUsagePurpose::ServerAuth,
+        ExtendedKeyUsagePurpose::ClientAuth,
+    ];
     let forged = fp.signed_by(&forged_key, &leaf, &leaf_key).unwrap();
 
     let polluted = format!("{}{}", ca.cert.pem(), leaf.pem());
@@ -268,14 +360,27 @@ async fn a_leaf_in_the_trust_file_is_refused_at_load_and_cannot_issue_a_peer_ide
     let e = load_err(&s);
     assert!(e.contains("certificate 1") && e.contains("not a CA"), "{e}");
     // Leaf first, CA second: the same.
-    let s = tls_files_raw(dir, "s2", ca.leaf("cosigner1"), format!("{}{}", leaf.pem(), ca.cert.pem()));
+    let s = tls_files_raw(
+        dir,
+        "s2",
+        ca.leaf("cosigner1"),
+        format!("{}{}", leaf.pem(), ca.cert.pem()),
+    );
     assert!(load_err(&s).contains("certificate 0"));
 
     // With the trust file as it should be, the forged identity gets nowhere.
     let s = tls_files_raw(dir, "s3", ca.leaf("cosigner1"), ca.cert.pem());
-    let c = tls_files_raw(dir, "c3", (forged.pem(), forged_key.serialize_pem()), ca.cert.pem());
+    let c = tls_files_raw(
+        dir,
+        "c3",
+        (forged.pem(), forged_key.serialize_pem()),
+        ca.cert.pem(),
+    );
     let e = node_info(dir, &s, &c).await.unwrap_err();
-    assert!(e.contains("UnknownCA") || e.contains("UnknownIssuer"), "{e}");
+    assert!(
+        e.contains("UnknownCA") || e.contains("UnknownIssuer"),
+        "{e}"
+    );
 }
 
 /// Review M1 (PoC `poc_expired_ca_anchor_still_trusted_by_mtls`): rustls never checks a trust
@@ -298,7 +403,10 @@ async fn an_expired_or_not_yet_valid_ca_in_the_trust_file_is_refused_at_load() {
         let trust = format!("{}{}", bad.cert.pem(), new.cert.pem());
         let s = tls_files_raw(dir, name, new.leaf("cosigner1"), trust);
         let e = load_err(&s);
-        assert!(e.contains("certificate 0") && e.contains("expired or not yet valid"), "{name}: {e}");
+        assert!(
+            e.contains("certificate 0") && e.contains("expired or not yet valid"),
+            "{name}: {e}"
+        );
     }
     // The emergency override (rotating away from a CA that has already expired): the expired CA
     // loads and still certifies its leaves until it is dropped.
@@ -311,7 +419,12 @@ async fn an_expired_or_not_yet_valid_ca_in_the_trust_file_is_refused_at_load() {
     assert!(!loaded.anchors[0].valid_now && loaded.anchors[1].valid_now);
     assert_eq!(node_info(dir, &s, &c).await.unwrap(), 1);
     // ...but never a leaf, override or not.
-    let mut leafy = tls_files_raw(dir, "sl", new.leaf("cosigner1"), format!("{}{}", new.cert.pem(), new.leaf("cosigner3").0));
+    let mut leafy = tls_files_raw(
+        dir,
+        "sl",
+        new.leaf("cosigner1"),
+        format!("{}{}", new.cert.pem(), new.leaf("cosigner3").0),
+    );
     leafy.allow_expired_ca = true;
     assert!(load_err(&leafy).contains("not a CA"));
 }
@@ -324,12 +437,23 @@ fn a_trust_file_with_a_private_key_or_no_certificate_is_refused() {
     let dir = tmp.path();
     let ca = Ca::new("rutli-frost-cluster-ca");
     let (leaf, key) = ca.leaf("cosigner1");
-    let s = tls_files_raw(dir, "k", (leaf.clone(), key.clone()), format!("{}{}", ca.cert.pem(), key));
+    let s = tls_files_raw(
+        dir,
+        "k",
+        (leaf.clone(), key.clone()),
+        format!("{}{}", ca.cert.pem(), key),
+    );
     let e = load_err(&s);
-    assert!(e.contains("PRIVATE KEY") && e.contains("only CA certificates"), "{e}");
+    assert!(
+        e.contains("PRIVATE KEY") && e.contains("only CA certificates"),
+        "{e}"
+    );
     let body = key.lines().nth(1).unwrap();
     assert!(!e.contains(body), "the error must not echo the key: {e}");
-    for (name, junk) in [("empty", String::new()), ("text", "not a pem\n".to_string())] {
+    for (name, junk) in [
+        ("empty", String::new()),
+        ("text", "not a pem\n".to_string()),
+    ] {
         let s = tls_files_raw(dir, name, (leaf.clone(), key.clone()), junk);
         assert!(load_err(&s).contains("no CERTIFICATE"), "{name}");
     }

@@ -88,7 +88,9 @@ fn intent_verify(c: &mut Criterion) {
         ..Default::default()
     };
     let signed = intent::sign_intent(&pki.signer("driver"), &unsigned).unwrap();
-    verifier.verify(&signed, KEY, now).expect("the benchmark's intent verifies");
+    verifier
+        .verify(&signed, KEY, now)
+        .expect("the benchmark's intent verifies");
 
     let mut group = c.benchmark_group("intent");
     group.bench_function("verify_p256", |bench| {
@@ -99,10 +101,22 @@ fn intent_verify(c: &mut Criterion) {
 
 fn journal_append(c: &mut Criterion) {
     let dir = bench_dir();
-    let journal = SignJournal::open(dir.path().join("journal"), 1, Retention { days: 90, max_bytes: 64 << 20 }).unwrap();
+    let journal = SignJournal::open(
+        dir.path().join("journal"),
+        1,
+        Retention {
+            days: 90,
+            max_bytes: 64 << 20,
+        },
+    )
+    .unwrap();
     // No ceiling: the benchmark appends more than a day's default quota. The ledger still counts
     // the last minute's charges and records each new one.
-    let limits = Limits { per_min: 0, per_day: 0, max_shares_per_charge: 8 };
+    let limits = Limits {
+        per_min: 0,
+        per_day: 0,
+        max_shares_per_charge: 8,
+    };
     let digest = hex::encode(message());
     let mut now = intent::now_ms();
     let mut n: u64 = 0;
@@ -131,7 +145,8 @@ fn journal_append(c: &mut Criterion) {
 
 fn seal_unseal(c: &mut Criterion) {
     // A real share record: what the key store seals for a FROST key.
-    let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&random_32(), &[1, 2, 3], 2).unwrap();
+    let (shares, pkp) =
+        rutli_frost_core::dealer::split_ed25519_seed(&random_32(), &[1, 2, 3], 2).unwrap();
     let share = Share {
         key_package: frost_ed25519::keys::KeyPackage::try_from(shares[0].clone()).unwrap(),
         public_key_package: pkp,
@@ -141,7 +156,12 @@ fn seal_unseal(c: &mut Criterion) {
     };
     let plain = serde_json::to_vec(&share).unwrap();
     let digest = share.pkp_digest().unwrap();
-    let meta = RecordMeta { kind: RecordKind::FrostShare, key_id: KEY, epoch: share.epoch, digest: &digest };
+    let meta = RecordMeta {
+        kind: RecordKind::FrostShare,
+        key_id: KEY,
+        epoch: share.epoch,
+        digest: &digest,
+    };
     let sealer = Sealer::from_master_secret(&random_32(), 1).with_binding(KeyFileBinding {
         node: 1,
         cluster_uuid: Some("0b0e6a52-8f0c-4a3e-9d57-5c1f2f3a4b5c".into()),
@@ -152,15 +172,27 @@ fn seal_unseal(c: &mut Criterion) {
     let mut group = c.benchmark_group("seal");
     for version in [1u8, 2] {
         let sealed = sealer.seal_record_as(version, &meta, &plain).unwrap();
-        let (opened, _) = sealer.unseal_record(&sealed, KEY, &[RecordKind::FrostShare]).unwrap();
+        let (opened, _) = sealer
+            .unseal_record(&sealed, KEY, &[RecordKind::FrostShare])
+            .unwrap();
         assert_eq!(opened, plain, "a sealed record opens to what was sealed");
 
         group.bench_function(format!("seal_v{version}"), |bench| {
-            bench.iter(|| black_box(sealer.seal_record_as(version, &meta, black_box(&plain)).unwrap()))
+            bench.iter(|| {
+                black_box(
+                    sealer
+                        .seal_record_as(version, &meta, black_box(&plain))
+                        .unwrap(),
+                )
+            })
         });
         group.bench_function(format!("unseal_v{version}"), |bench| {
             bench.iter(|| {
-                black_box(sealer.unseal_record(black_box(&sealed), KEY, &[RecordKind::FrostShare]).unwrap())
+                black_box(
+                    sealer
+                        .unseal_record(black_box(&sealed), KEY, &[RecordKind::FrostShare])
+                        .unwrap(),
+                )
             })
         });
     }

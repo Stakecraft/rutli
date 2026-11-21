@@ -25,7 +25,10 @@ impl Ca {
         p.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         p.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         p.distinguished_name.push(DnType::CommonName, cn);
-        Self { cert: p.self_signed(&key).unwrap(), key }
+        Self {
+            cert: p.self_signed(&key).unwrap(),
+            key,
+        }
     }
 }
 
@@ -60,7 +63,9 @@ impl Node {
     fn config(&self, cluster_pin: Option<&str>, change_allowed: bool) -> PathBuf {
         let d = self.dir.path();
         // The node's own TLS key pin: it refuses to start with TLS and an unpinned roster.
-        let pin = hex::encode(rutli_cosigner::tls::spki_sha256_of_pem_file(&d.join("cosigner1.crt")).unwrap());
+        let pin = hex::encode(
+            rutli_cosigner::tls::spki_sha256_of_pem_file(&d.join("cosigner1.crt")).unwrap(),
+        );
         let mut cfg = serde_json::json!({
             "identifier": 1, "listen": "127.0.0.1:0", "threshold": 1,
             "data_dir": self.data_dir(),
@@ -83,7 +88,9 @@ impl Node {
     }
 
     fn recorded(&self) -> Option<String> {
-        std::fs::read_to_string(self.data_dir().join("cluster-id")).ok().map(|s| s.trim().to_string())
+        std::fs::read_to_string(self.data_dir().join("cluster-id"))
+            .ok()
+            .map(|s| s.trim().to_string())
     }
 }
 
@@ -159,7 +166,11 @@ fn refuses(config: &Path, needle: &str) {
     let (mut child, rx) = serve(config);
     let (hit, lines) = wait_for(&mut child, &rx, needle);
     let status = child.wait_timeout_or_kill();
-    assert!(hit && status.is_some_and(|s| !s.success()), "expected a refusal with {needle:?}:\n{}", lines.join("\n"));
+    assert!(
+        hit && status.is_some_and(|s| !s.success()),
+        "expected a refusal with {needle:?}:\n{}",
+        lines.join("\n")
+    );
 }
 
 trait WaitTimeout {
@@ -190,7 +201,9 @@ fn a_dropped_pin_after_a_ca_rotation_stops_the_node_instead_of_moving_it_to_anot
     // An existing, unpinned install: its first start records the id it runs under.
     let derived = node.set_trust(&[&old]);
     let lines = starts(&node.config(None, false));
-    assert!(lines.iter().any(|l| l.contains(&format!("cluster id {derived} (derived from tls.ca_cert)"))));
+    assert!(lines
+        .iter()
+        .any(|l| l.contains(&format!("cluster id {derived} (derived from tls.ca_cert)"))));
     assert_eq!(node.recorded().as_deref(), Some(derived.as_str()));
 
     // Phase 0: pinned to the derived value — nothing changes.
@@ -210,19 +223,33 @@ fn a_dropped_pin_after_a_ca_rotation_stops_the_node_instead_of_moving_it_to_anot
     let out = Command::new(env!("CARGO_BIN_EXE_rutli-cosigner"))
         .arg("--config")
         .arg(node.config(None, false))
-        .args(["share-recipient", "--key-id", "frost-import-x", "--ceremony-id", "c", "--out"])
+        .args([
+            "share-recipient",
+            "--key-id",
+            "frost-import-x",
+            "--ceremony-id",
+            "c",
+            "--out",
+        ])
         .arg(node.dir.path().join("r1.json"))
         .output()
         .unwrap();
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("cluster id mismatch"), "{out:?}");
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("cluster id mismatch"),
+        "{out:?}"
+    );
 
     // Putting the pin back is the fix.
     starts(&node.config(Some(&pin), false));
 
     // A deliberate change: allowed for one start, recorded, then enforced again.
     let lines = starts(&node.config(None, true));
-    assert!(lines.iter().any(|l| l.contains("cluster id CHANGED")), "{}", lines.join("\n"));
+    assert!(
+        lines.iter().any(|l| l.contains("cluster id CHANGED")),
+        "{}",
+        lines.join("\n")
+    );
     assert_eq!(node.recorded().as_deref(), Some(bundle_id.as_str()));
     starts(&node.config(None, false));
     refuses(&node.config(Some(&pin), false), "cluster id mismatch");

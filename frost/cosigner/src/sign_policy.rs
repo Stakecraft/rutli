@@ -33,11 +33,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use crate::intent::{refused, refused_ceremony, IntentVerifier, VerifiedCeremony, VerifiedGenerate, VerifiedIntent};
-use crate::node::CeremonyKind;
-use crate::pb;
+use crate::intent::{
+    refused, refused_ceremony, IntentVerifier, VerifiedCeremony, VerifiedGenerate, VerifiedIntent,
+};
 use crate::journal::{JournalEntry, Limits, SignJournal};
+use crate::node::CeremonyKind;
 use crate::node::Round1Ctx;
+use crate::pb;
 use crate::{DaemonError, Result};
 use rutli_frost_core::session::SessionOwner;
 
@@ -185,7 +187,14 @@ impl SignGuard {
             };
             return self
                 .verifier
-                .verify_generate(signed, key_id, spec, leader, ceremony_id, crate::intent::now_ms())
+                .verify_generate(
+                    signed,
+                    key_id,
+                    spec,
+                    leader,
+                    ceremony_id,
+                    crate::intent::now_ms(),
+                )
                 .map(Some);
         }
         if self.require_ceremony_intent {
@@ -200,7 +209,11 @@ impl SignGuard {
         }
         metrics::counter!(crate::metrics::CEREMONY_INTENT_ABSENT).increment(1);
         let now = crate::intent::now_ms() / 60_000;
-        if self.last_ceremony_absent_warning.swap(now, Ordering::Relaxed) != now {
+        if self
+            .last_ceremony_absent_warning
+            .swap(now, Ordering::Relaxed)
+            != now
+        {
             tracing::warn!(
                 key_id,
                 ceremony_id,
@@ -221,7 +234,9 @@ impl SignGuard {
         own_test_message: impl FnOnce() -> Result<[u8; 34]>,
     ) -> Result<SessionAuth> {
         if let Some(signed) = &ctx.intent {
-            let v = self.verifier.verify(signed, key_id, crate::intent::now_ms())?;
+            let v = self
+                .verifier
+                .verify(signed, key_id, crate::intent::now_ms())?;
             if ctx.message.as_ref().is_some_and(|m| m != &v.message) {
                 return Err(refused(
                     "key",
@@ -270,13 +285,17 @@ impl SignGuard {
     pub fn remember(&self, key_id: &str, session_id: &str, auth: SessionAuth, owner: SessionOwner) {
         let mut s = self.sessions();
         s.retain(|_, (started, _, _)| started.elapsed() < rutli_frost_core::session::PENDING_TTL);
-        s.insert((key_id.to_string(), session_id.to_string()), (Instant::now(), auth, owner));
+        s.insert(
+            (key_id.to_string(), session_id.to_string()),
+            (Instant::now(), auth, owner),
+        );
     }
 
     /// Whether an authorization for `session_id` of `key_id` is held (for inspection; nothing is
     /// taken).
     pub fn holds(&self, key_id: &str, session_id: &str) -> bool {
-        self.sessions().contains_key(&(key_id.to_string(), session_id.to_string()))
+        self.sessions()
+            .contains_key(&(key_id.to_string(), session_id.to_string()))
     }
 
     /// What authorized `session_id` of `key_id`, removed (round 2 runs once), for a round 2 from
@@ -326,7 +345,12 @@ impl SignGuard {
     }
 
     /// Round 2's policy checks, before the core binding checks.
-    pub fn check_round2(&self, auth: &SessionAuth, message: &[u8], intent_digest: Option<&[u8; 32]>) -> Result<()> {
+    pub fn check_round2(
+        &self,
+        auth: &SessionAuth,
+        message: &[u8],
+        intent_digest: Option<&[u8; 32]>,
+    ) -> Result<()> {
         match auth {
             SessionAuth::Intent(v) => {
                 if intent_digest != Some(&v.digest) {
@@ -336,13 +360,19 @@ impl SignGuard {
                     ));
                 }
                 if message != v.message.as_slice() {
-                    return Err(refused("key", "round 2 signs another message than the intent authorizes".into()));
+                    return Err(refused(
+                        "key",
+                        "round 2 signs another message than the intent authorizes".into(),
+                    ));
                 }
                 self.verifier.check_live(v, crate::intent::now_ms())
             }
             SessionAuth::SignTest | SessionAuth::NoIntent => {
                 if intent_digest.is_some() {
-                    return Err(refused("key", "round 2 presents an intent round 1 never verified".into()));
+                    return Err(refused(
+                        "key",
+                        "round 2 presents an intent round 1 never verified".into(),
+                    ));
                 }
                 Ok(())
             }
@@ -350,10 +380,20 @@ impl SignGuard {
     }
 
     /// The release step: charge the rate limit and journal the share durably, or refuse.
-    pub fn journal_release(&self, key_id: &str, session_id: &str, auth: &SessionAuth, message: &[u8]) -> Result<()> {
+    pub fn journal_release(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        auth: &SessionAuth,
+        message: &[u8],
+    ) -> Result<()> {
         let policy = self.verifier.policy();
         let (per_min, per_day) = policy.rate_limit_for(key_id);
-        let limits = Limits { per_min, per_day, max_shares_per_charge: policy.max_shares_per_request };
+        let limits = Limits {
+            per_min,
+            per_day,
+            max_shares_per_charge: policy.max_shares_per_request,
+        };
         let mut entry = JournalEntry {
             key_id: key_id.to_string(),
             digest: hex::encode(message),
@@ -371,7 +411,10 @@ impl SignGuard {
             SessionAuth::SignTest => entry.purpose = crate::journal::PURPOSE_SIGN_TEST.into(),
             SessionAuth::NoIntent => entry.purpose = crate::journal::PURPOSE_NO_INTENT.into(),
         }
-        match self.journal.append_charged(entry, limits, crate::intent::now_ms()) {
+        match self
+            .journal
+            .append_charged(entry, limits, crate::intent::now_ms())
+        {
             Ok(_) => Ok(()),
             Err(e @ DaemonError::RateLimited(_)) => {
                 metrics::counter!(crate::metrics::SIGN_RATE_LIMITED).increment(1);
@@ -397,9 +440,22 @@ mod tests {
 
     /// A guard with no CA (the paths tested here never verify an intent) over a journal in `dir`.
     fn guard(dir: &std::path::Path, require_intent: bool) -> SignGuard {
-        let policy = SigningPolicyConfig { require_intent: Some(require_intent), ..Default::default() };
-        let verifier = IntentVerifier::new(Vec::new(), false, "c".into(), Vec::<String>::new(), &policy).unwrap();
-        let journal = SignJournal::open(dir.join("journal"), 1, Retention { days: 90, max_bytes: 1 << 20 }).unwrap();
+        let policy = SigningPolicyConfig {
+            require_intent: Some(require_intent),
+            ..Default::default()
+        };
+        let verifier =
+            IntentVerifier::new(Vec::new(), false, "c".into(), Vec::<String>::new(), &policy)
+                .unwrap();
+        let journal = SignJournal::open(
+            dir.join("journal"),
+            1,
+            Retention {
+                days: 90,
+                max_bytes: 1 << 20,
+            },
+        )
+        .unwrap();
         SignGuard::new(Arc::new(verifier), journal, 10)
     }
 
@@ -408,11 +464,17 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let strict = guard(tmp.path(), true);
         assert!(strict.require_intent());
-        let err = strict.authorize_round1(KEY, &Round1Ctx::default(), || unreachable!()).unwrap_err();
+        let err = strict
+            .authorize_round1(KEY, &Round1Ctx::default(), || unreachable!())
+            .unwrap_err();
         assert!(matches!(err, DaemonError::PolicyRefused(_)), "{err:?}");
         let lax = guard(&tmp.path().join("lax"), false);
         assert!(!lax.require_intent());
-        assert_eq!(lax.authorize_round1(KEY, &Round1Ctx::default(), || unreachable!()).unwrap(), SessionAuth::NoIntent);
+        assert_eq!(
+            lax.authorize_round1(KEY, &Round1Ctx::default(), || unreachable!())
+                .unwrap(),
+            SessionAuth::NoIntent
+        );
     }
 
     #[test]
@@ -420,9 +482,18 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let g = guard(tmp.path(), true);
         let mine = [7u8; 34];
-        let ctx = |m: &[u8]| Round1Ctx { message: Some(m.to_vec()), sign_test: true, ..Default::default() };
-        assert_eq!(g.authorize_round1(KEY, &ctx(&mine), || Ok(mine)).unwrap(), SessionAuth::SignTest);
-        let err = g.authorize_round1(KEY, &ctx(&[8u8; 34]), || Ok(mine)).unwrap_err();
+        let ctx = |m: &[u8]| Round1Ctx {
+            message: Some(m.to_vec()),
+            sign_test: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            g.authorize_round1(KEY, &ctx(&mine), || Ok(mine)).unwrap(),
+            SessionAuth::SignTest
+        );
+        let err = g
+            .authorize_round1(KEY, &ctx(&[8u8; 34]), || Ok(mine))
+            .unwrap_err();
         assert!(matches!(err, DaemonError::PolicyRefused(_)), "{err:?}");
     }
 
@@ -438,7 +509,11 @@ mod tests {
         // A later `remember` sweeps only entries past the TTL, never live ones.
         assert_eq!(g.take_as(KEY, "s1", &me), Ok(Some(SessionAuth::NoIntent)));
         assert_eq!(g.take_as(KEY, "s1", &me), Ok(None), "round 2 runs once");
-        assert_eq!(g.take_as("frost-other", "s2", &me), Ok(None), "a session id never stands in for another key's");
+        assert_eq!(
+            g.take_as("frost-other", "s2", &me),
+            Ok(None),
+            "a session id never stands in for another key's"
+        );
         // Another caller can neither take nor drop a session it did not open.
         assert_eq!(g.take_as(KEY, "s2", &other), Err(me.clone()));
         g.forget_as(KEY, "s2", &other);
@@ -463,9 +538,13 @@ mod tests {
     fn a_released_share_is_journaled_with_its_message_session_and_purpose() {
         let tmp = tempfile::tempdir().unwrap();
         let g = guard(tmp.path(), false);
-        g.journal_release(KEY, "sess-1", &SessionAuth::NoIntent, &[0xab; 34]).unwrap();
-        g.journal_release(KEY, "sess-2", &SessionAuth::SignTest, &[0xcd; 34]).unwrap();
-        let entries = read_key_dir(&tmp.path().join("journal").join(KEY)).unwrap().entries;
+        g.journal_release(KEY, "sess-1", &SessionAuth::NoIntent, &[0xab; 34])
+            .unwrap();
+        g.journal_release(KEY, "sess-2", &SessionAuth::SignTest, &[0xcd; 34])
+            .unwrap();
+        let entries = read_key_dir(&tmp.path().join("journal").join(KEY))
+            .unwrap()
+            .entries;
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].digest, "ab".repeat(34));
         assert_eq!(entries[0].session_id, "sess-1");

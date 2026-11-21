@@ -52,7 +52,8 @@ pub(crate) fn fields<'a>(buf: &'a [u8], msg: &'static str) -> Result<Vec<Field<'
                     .filter(|end| *end <= buf.len())
                     .ok_or_else(|| malformed(msg, format!("field {number}: truncated")))?;
                 let v = Value::Bytes(
-                    buf.get(pos..end).ok_or_else(|| malformed(msg, format!("field {number}: truncated")))?,
+                    buf.get(pos..end)
+                        .ok_or_else(|| malformed(msg, format!("field {number}: truncated")))?,
                 );
                 pos = end;
                 v
@@ -72,7 +73,9 @@ pub(crate) fn fields<'a>(buf: &'a [u8], msg: &'static str) -> Result<Vec<Field<'
 fn varint(buf: &[u8], pos: &mut usize, msg: &'static str) -> Result<u64> {
     let mut v: u64 = 0;
     for i in 0..10 {
-        let b = *buf.get(*pos).ok_or_else(|| malformed(msg, "truncated varint".into()))?;
+        let b = *buf
+            .get(*pos)
+            .ok_or_else(|| malformed(msg, "truncated varint".into()))?;
         *pos += 1;
         if i == 9 && b > 1 {
             return Err(malformed(msg, "varint overflows 64 bits".into()));
@@ -101,7 +104,10 @@ pub(crate) struct Msg<'a> {
 
 impl<'a> Msg<'a> {
     pub fn parse(buf: &'a [u8], name: &'static str) -> Result<Self> {
-        Ok(Self { name, fields: fields(buf, name)? })
+        Ok(Self {
+            name,
+            fields: fields(buf, name)?,
+        })
     }
 
     /// Fail if any field number outside `known` is present.
@@ -110,7 +116,10 @@ impl<'a> Msg<'a> {
             if !known.contains(&f.number) {
                 return Err(malformed(
                     self.name,
-                    format!("unknown field {} — refusing to guess at a newer format", f.number),
+                    format!(
+                        "unknown field {} — refusing to guess at a newer format",
+                        f.number
+                    ),
                 ));
             }
         }
@@ -121,7 +130,10 @@ impl<'a> Msg<'a> {
         let mut it = self.fields.iter().filter(|f| f.number == number);
         let first = it.next().map(|f| f.value);
         if it.next().is_some() {
-            return Err(malformed(self.name, format!("field {number} occurs more than once")));
+            return Err(malformed(
+                self.name,
+                format!("field {number} occurs more than once"),
+            ));
         }
         Ok(first)
     }
@@ -181,7 +193,9 @@ pub(crate) fn untyped_versioned(buf: &[u8]) -> Result<&[u8]> {
         .bytes(1)?
         .ok_or_else(|| Error::Malformed("UntypedVersionedMessage: no data".into()))?;
     if version == 0 {
-        return Err(Error::Malformed("UntypedVersionedMessage: no version".into()));
+        return Err(Error::Malformed(
+            "UntypedVersionedMessage: no version".into(),
+        ));
     }
     if version != 30 {
         return Err(Error::Unsupported(format!(

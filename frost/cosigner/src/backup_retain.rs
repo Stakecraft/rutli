@@ -148,7 +148,9 @@ impl Why {
 pub enum Verdict {
     Keep(Why),
     /// Deleted by the epoch rule; `covered_by` is the proven archive that holds the proven sharing.
-    DeleteOlderEpoch { covered_by: String },
+    DeleteOlderEpoch {
+        covered_by: String,
+    },
     /// Deleted by the count cap.
     DeleteCountCap,
 }
@@ -171,10 +173,13 @@ pub struct Plan {
 
 fn verified(a: &Archive, s: &Settings) -> bool {
     let Ok(files) = &a.files else { return false };
-    let Some(uuid) = s.cluster_uuid.as_deref() else { return false };
+    let Some(uuid) = s.cluster_uuid.as_deref() else {
+        return false;
+    };
     !files.is_empty()
         && files.iter().all(|(stem, info)| {
-            info.as_ref().is_some_and(|i| i.key_id == *stem && i.cluster == uuid && i.node == s.node)
+            info.as_ref()
+                .is_some_and(|i| i.key_id == *stem && i.cluster == uuid && i.node == s.node)
         })
 }
 
@@ -185,39 +190,70 @@ fn info<'a>(a: &'a Archive, key: &str) -> Option<&'a KeyInfo> {
 /// Decide the fate of every archive. `live`: this node's key files' headers (`None`: not a readable
 /// v2 header). `proofs`: `(key, epoch)` -> the proof, already filtered to markers that are not dated
 /// in the future. Pure: no I/O.
-pub fn plan(archives: &[Archive], live: &BTreeMap<String, Option<KeyInfo>>, proofs: &BTreeMap<(String, u64), Proof>, s: &Settings) -> Plan {
+pub fn plan(
+    archives: &[Archive],
+    live: &BTreeMap<String, Option<KeyInfo>>,
+    proofs: &BTreeMap<(String, u64), Proof>,
+    s: &Settings,
+) -> Plan {
     let mut sorted: Vec<&Archive> = archives.iter().collect();
     sorted.sort_by(|a, b| a.name.cmp(&b.name));
     let names: Vec<String> = sorted.iter().map(|a| a.name.clone()).collect();
-    let keep_all = |why: Why| -> Vec<(String, Verdict)> { names.iter().map(|n| (n.clone(), Verdict::Keep(why))).collect() };
-    let closed = |reason: &str| Plan { skip: Some(Skip::Closed(reason.into())), verdicts: keep_all(Why::Protected) };
+    let keep_all = |why: Why| -> Vec<(String, Verdict)> {
+        names
+            .iter()
+            .map(|n| (n.clone(), Verdict::Keep(why)))
+            .collect()
+    };
+    let closed = |reason: &str| Plan {
+        skip: Some(Skip::Closed(reason.into())),
+        verdicts: keep_all(Why::Protected),
+    };
 
     if sorted.is_empty() {
-        return Plan { skip: None, verdicts: Vec::new() };
+        return Plan {
+            skip: None,
+            verdicts: Vec::new(),
+        };
     }
 
     // 0. What the epoch rule needs to exist at all.
     if s.cluster_uuid.is_none() {
-        return cap_only(&names, s, "this node has no keyfile.cluster_uuid, so no key-file header can be tied to it");
+        return cap_only(
+            &names,
+            s,
+            "this node has no keyfile.cluster_uuid, so no key-file header can be tied to it",
+        );
     }
     if live.is_empty() {
         return closed("this node lists no key files");
     }
     if live.values().any(|i| i.is_none()) {
-        return cap_only(&names, s, "a live key file has no readable v2 header (migrate the node's key files to v2)");
+        return cap_only(
+            &names,
+            s,
+            "a live key file has no readable v2 header (migrate the node's key files to v2)",
+        );
     }
-    let live: BTreeMap<&String, &KeyInfo> = live.iter().filter_map(|(k, i)| i.as_ref().map(|i| (k, i))).collect();
+    let live: BTreeMap<&String, &KeyInfo> = live
+        .iter()
+        .filter_map(|(k, i)| i.as_ref().map(|i| (k, i)))
+        .collect();
 
     // 1. Fail closed on anything that says this node or its newest backup is not in step.
     let newest = *sorted.last().expect("not empty");
     if !verified(newest, s) {
-        return closed("the newest archive cannot be read or is not a complete v2 backup of this node");
+        return closed(
+            "the newest archive cannot be read or is not a complete v2 backup of this node",
+        );
     }
     // Any readable header at a higher epoch than the live one, verified archive or not.
     for a in &sorted {
         let Ok(files) = &a.files else { continue };
         for (stem, i) in files {
-            let (Some(i), Some(l)) = (i, live.get(stem)) else { continue };
+            let (Some(i), Some(l)) = (i, live.get(stem)) else {
+                continue;
+            };
             if i.kind == l.kind && is_frost(i) && i.epoch > l.epoch {
                 return closed("this node's live epoch is behind an archive's (a missed refresh: its older archives are its way back)");
             }
@@ -226,12 +262,16 @@ pub fn plan(archives: &[Archive], live: &BTreeMap<String, Option<KeyInfo>>, proo
     let newest_keys: BTreeSet<&String> = newest.files.as_ref().expect("verified").keys().collect();
     let live_keys: BTreeSet<&String> = live.keys().copied().collect();
     if newest_keys != live_keys {
-        return closed("the newest archive's key set is not the live key set (a backup is pending)");
+        return closed(
+            "the newest archive's key set is not the live key set (a backup is pending)",
+        );
     }
     for (stem, l) in &live {
         let i = info(newest, stem).expect("same key set");
         if i.kind != l.kind || i.epoch != l.epoch || i.digest != l.digest {
-            return closed("the newest archive is not at the live epoch and sharing (a backup is pending)");
+            return closed(
+                "the newest archive is not at the live epoch and sharing (a backup is pending)",
+            );
         }
     }
 
@@ -244,10 +284,10 @@ pub fn plan(archives: &[Archive], live: &BTreeMap<String, Option<KeyInfo>>, proo
             continue;
         }
         let known = (*epoch == l.epoch && proof.digest == l.digest)
-            || sorted
-                .iter()
-                .filter(|a| verified(a, s))
-                .any(|a| info(a, key).is_some_and(|i| is_frost(i) && i.epoch == *epoch && i.digest == proof.digest));
+            || sorted.iter().filter(|a| verified(a, s)).any(|a| {
+                info(a, key)
+                    .is_some_and(|i| is_frost(i) && i.epoch == *epoch && i.digest == proof.digest)
+            });
         if !known {
             continue;
         }
@@ -255,7 +295,11 @@ pub fn plan(archives: &[Archive], live: &BTreeMap<String, Option<KeyInfo>>, proo
             proven.insert(key, (*epoch, &proof.digest));
         }
     }
-    let frost_keys: Vec<&&String> = live.iter().filter(|(_, l)| is_frost(l)).map(|(k, _)| k).collect();
+    let frost_keys: Vec<&&String> = live
+        .iter()
+        .filter(|(_, l)| is_frost(l))
+        .map(|(k, _)| k)
+        .collect();
     let all_proven = !frost_keys.is_empty() && frost_keys.iter().all(|k| proven.contains_key(**k));
 
     // 3. F: the newest verified archive that holds every live key as the proven sharing has it: FROST
@@ -263,12 +307,22 @@ pub fn plan(archives: &[Archive], live: &BTreeMap<String, Option<KeyInfo>>, proo
     let holds_proven = |a: &Archive| -> bool {
         verified(a, s)
             && live.iter().all(|(k, l)| match proven.get(*k) {
-                Some((e, d)) => info(a, k).is_some_and(|i| is_frost(i) && i.epoch == *e && &i.digest == *d),
-                None => !is_frost(l) && info(a, k).is_some_and(|i| i.kind == l.kind && i.epoch == l.epoch && i.digest == l.digest),
+                Some((e, d)) => {
+                    info(a, k).is_some_and(|i| is_frost(i) && i.epoch == *e && &i.digest == *d)
+                }
+                None => {
+                    !is_frost(l)
+                        && info(a, k).is_some_and(|i| {
+                            i.kind == l.kind && i.epoch == l.epoch && i.digest == l.digest
+                        })
+                }
             })
     };
-    let proven_archive: Option<&Archive> =
-        if all_proven { sorted.iter().rev().copied().find(|a| holds_proven(a)) } else { None };
+    let proven_archive: Option<&Archive> = if all_proven {
+        sorted.iter().rev().copied().find(|a| holds_proven(a))
+    } else {
+        None
+    };
 
     // 4. Verdicts.
     let mut protected: BTreeSet<String> = BTreeSet::new();
@@ -287,8 +341,10 @@ pub fn plan(archives: &[Archive], live: &BTreeMap<String, Option<KeyInfo>>, proo
             }
         }
     }
-    let kept_older: BTreeMap<&String, BTreeSet<u64>> =
-        below.into_iter().map(|(k, set)| (k, set.into_iter().rev().take(s.keep_older_epochs).collect())).collect();
+    let kept_older: BTreeMap<&String, BTreeSet<u64>> = below
+        .into_iter()
+        .map(|(k, set)| (k, set.into_iter().rev().take(s.keep_older_epochs).collect()))
+        .collect();
 
     let mut verdicts: Vec<(String, Verdict)> = Vec::new();
     for a in &sorted {
@@ -316,23 +372,39 @@ pub fn plan(archives: &[Archive], live: &BTreeMap<String, Option<KeyInfo>>, proo
     // duplicates and never the last copy of anything; and never the newest or the proven archive,
     // nor one it cannot read.
     if s.keep_count > 0 {
-        let holders = |state: &(String, String, u64, String, String), verdicts: &[(String, Verdict)], except: &str| -> bool {
+        let holders = |state: &(String, String, u64, String, String),
+                       verdicts: &[(String, Verdict)],
+                       except: &str|
+         -> bool {
             sorted.iter().any(|b| {
                 b.name != except
                     && verified(b, s)
-                    && verdicts.iter().any(|(n, v)| *n == b.name && matches!(v, Verdict::Keep(_)))
+                    && verdicts
+                        .iter()
+                        .any(|(n, v)| *n == b.name && matches!(v, Verdict::Keep(_)))
                     && info(b, &state.0).is_some_and(|i| {
-                        i.kind == state.1 && i.epoch == state.2 && i.digest == state.3 && i.dek_id == state.4
+                        i.kind == state.1
+                            && i.epoch == state.2
+                            && i.digest == state.3
+                            && i.dek_id == state.4
                     })
             })
         };
-        let mut remaining = verdicts.iter().filter(|(_, v)| matches!(v, Verdict::Keep(_))).count();
+        let mut remaining = verdicts
+            .iter()
+            .filter(|(_, v)| matches!(v, Verdict::Keep(_)))
+            .count();
         for a in &sorted {
             if remaining <= s.keep_count {
                 break;
             }
-            let idx = verdicts.iter().position(|(n, _)| *n == a.name).expect("every archive has a verdict");
-            let Some((_, Verdict::Keep(why))) = verdicts.get(idx) else { continue };
+            let idx = verdicts
+                .iter()
+                .position(|(n, _)| *n == a.name)
+                .expect("every archive has a verdict");
+            let Some((_, Verdict::Keep(why))) = verdicts.get(idx) else {
+                continue;
+            };
             if protected.contains(&a.name) || !verified(a, s) || *why == Why::EpochUnreadable {
                 continue;
             }
@@ -341,7 +413,17 @@ pub fn plan(archives: &[Archive], live: &BTreeMap<String, Option<KeyInfo>>, proo
                 .as_ref()
                 .expect("verified")
                 .iter()
-                .filter_map(|(k, i)| i.as_ref().map(|i| (k.clone(), i.kind.clone(), i.epoch, i.digest.clone(), i.dek_id.clone())))
+                .filter_map(|(k, i)| {
+                    i.as_ref().map(|i| {
+                        (
+                            k.clone(),
+                            i.kind.clone(),
+                            i.epoch,
+                            i.digest.clone(),
+                            i.dek_id.clone(),
+                        )
+                    })
+                })
                 .collect();
             let snapshot = verdicts.clone();
             if states.iter().all(|st| holders(st, &snapshot, &a.name)) {
@@ -354,12 +436,16 @@ pub fn plan(archives: &[Archive], live: &BTreeMap<String, Option<KeyInfo>>, proo
     }
 
     // Defensive: at least one verified archive is kept, always.
-    let kept_verified =
-        verdicts.iter().any(|(n, v)| matches!(v, Verdict::Keep(_)) && sorted.iter().any(|a| &a.name == n && verified(a, s)));
+    let kept_verified = verdicts.iter().any(|(n, v)| {
+        matches!(v, Verdict::Keep(_)) && sorted.iter().any(|a| &a.name == n && verified(a, s))
+    });
     if !kept_verified {
         return closed("internal: the plan would leave no verified archive");
     }
-    Plan { skip: None, verdicts }
+    Plan {
+        skip: None,
+        verdicts,
+    }
 }
 
 fn is_frost(i: &KeyInfo) -> bool {
@@ -369,7 +455,10 @@ fn is_frost(i: &KeyInfo) -> bool {
 /// The plain count cap (the old behaviour), for when the epoch rule cannot run: oldest first, never
 /// the newest.
 fn cap_only(names: &[String], s: &Settings, reason: &str) -> Plan {
-    let mut verdicts: Vec<(String, Verdict)> = names.iter().map(|n| (n.clone(), Verdict::Keep(Why::Protected))).collect();
+    let mut verdicts: Vec<(String, Verdict)> = names
+        .iter()
+        .map(|n| (n.clone(), Verdict::Keep(Why::Protected)))
+        .collect();
     if s.keep_count > 0 {
         let mut remaining = verdicts.len();
         let last = verdicts.len().saturating_sub(1);
@@ -383,7 +472,10 @@ fn cap_only(names: &[String], s: &Settings, reason: &str) -> Plan {
             }
         }
     }
-    Plan { skip: Some(Skip::CapOnly(reason.into())), verdicts }
+    Plan {
+        skip: Some(Skip::CapOnly(reason.into())),
+        verdicts,
+    }
 }
 
 /// The epoch rule for one verified archive `a` of a node whose live keys are all proven and held by
@@ -396,12 +488,18 @@ fn classify(
     proven: &BTreeMap<&String, (u64, &String)>,
     kept_older: &BTreeMap<&String, BTreeSet<u64>>,
 ) -> Verdict {
-    let Ok(files) = &a.files else { return Verdict::Keep(Why::EpochUnreadable) };
+    let Ok(files) = &a.files else {
+        return Verdict::Keep(Why::EpochUnreadable);
+    };
     let mut older = false;
     for (k, i) in files {
-        let (Some(i), Some(l)) = (i, live.get(k)) else { return Verdict::Keep(Why::KeyNotLive) };
+        let (Some(i), Some(l)) = (i, live.get(k)) else {
+            return Verdict::Keep(Why::KeyNotLive);
+        };
         if is_frost(i) && is_frost(l) {
-            let Some((p, d)) = proven.get(k) else { return Verdict::Keep(Why::UnprovenEpoch) };
+            let Some((p, d)) = proven.get(k) else {
+                return Verdict::Keep(Why::UnprovenEpoch);
+            };
             if i.epoch < *p {
                 if kept_older.get(k).is_some_and(|set| set.contains(&i.epoch)) {
                     return Verdict::Keep(Why::KeepOlderEpochs);
@@ -410,13 +508,17 @@ fn classify(
             } else if !(i.epoch == *p && &i.digest == *d) {
                 return Verdict::Keep(Why::AtOrAfterProvenEpoch);
             }
-        } else if info(f, k).is_none_or(|fi| fi.kind != i.kind || fi.epoch != i.epoch || fi.digest != i.digest) {
+        } else if info(f, k)
+            .is_none_or(|fi| fi.kind != i.kind || fi.epoch != i.epoch || fi.digest != i.digest)
+        {
             // A key of another kind that `f` does not hold in this state.
             return Verdict::Keep(Why::AtOrAfterProvenEpoch);
         }
     }
     if older {
-        Verdict::DeleteOlderEpoch { covered_by: f.name.clone() }
+        Verdict::DeleteOlderEpoch {
+            covered_by: f.name.clone(),
+        }
     } else {
         Verdict::Keep(Why::NothingOlder)
     }
@@ -437,7 +539,10 @@ pub fn read_archive(path: &Path) -> Result<BTreeMap<String, Option<KeyInfo>>, St
             return;
         }
         let stem = entry.trim_end_matches(".json").to_string();
-        out.insert(stem, bytes.and_then(|b| crate::seal::header_of(b).map(KeyInfo::from)));
+        out.insert(
+            stem,
+            bytes.and_then(|b| crate::seal::header_of(b).map(KeyInfo::from)),
+        );
     })?;
     Ok(out)
 }
@@ -452,19 +557,31 @@ pub fn read_dir(dir: &Path, node: u16) -> Result<Vec<Archive>, String> {
         .filter(|n| n.starts_with(&prefix) && n.ends_with(".tar"))
         .collect();
     names.sort();
-    Ok(names.into_iter().map(|name| Archive { files: read_archive(&dir.join(&name)), name }).collect())
+    Ok(names
+        .into_iter()
+        .map(|name| Archive {
+            files: read_archive(&dir.join(&name)),
+            name,
+        })
+        .collect())
 }
 
 /// This node's live key files' headers.
 pub fn read_live(keys_dir: &Path) -> Result<BTreeMap<String, Option<KeyInfo>>, String> {
     let mut out = BTreeMap::new();
-    for e in std::fs::read_dir(keys_dir).map_err(|e| format!("cannot list {}: {e}", keys_dir.display()))?.flatten() {
+    for e in std::fs::read_dir(keys_dir)
+        .map_err(|e| format!("cannot list {}: {e}", keys_dir.display()))?
+        .flatten()
+    {
         let name = e.file_name().to_string_lossy().into_owned();
         if name.starts_with('.') || !name.ends_with(".json") {
             continue;
         }
         let bytes = std::fs::read(e.path()).map_err(|e| format!("cannot read {name}: {e}"))?;
-        out.insert(name.trim_end_matches(".json").to_string(), crate::seal::header_of(&bytes).map(KeyInfo::from));
+        out.insert(
+            name.trim_end_matches(".json").to_string(),
+            crate::seal::header_of(&bytes).map(KeyInfo::from),
+        );
     }
     Ok(out)
 }
@@ -473,13 +590,23 @@ pub fn read_live(keys_dir: &Path) -> Result<BTreeMap<String, Option<KeyInfo>>, S
 /// and its file's), skipping markers dated in the future.
 pub fn read_proofs(keys_dir: &Path, now_ms: u64) -> BTreeMap<(String, u64), Proof> {
     let mut out = BTreeMap::new();
-    let Ok(rd) = std::fs::read_dir(keys_dir.join(crate::proof::DIR)) else { return out };
+    let Ok(rd) = std::fs::read_dir(keys_dir.join(crate::proof::DIR)) else {
+        return out;
+    };
     for e in rd.flatten() {
         let name = e.file_name().to_string_lossy().into_owned();
-        let Some(stem) = name.strip_suffix(".json") else { continue };
-        let Some((key, epoch)) = stem.rsplit_once('.') else { continue };
-        let Ok(epoch) = epoch.parse::<u64>() else { continue };
-        let Some(marker) = crate::proof::read_marker(keys_dir, key, epoch) else { continue };
+        let Some(stem) = name.strip_suffix(".json") else {
+            continue;
+        };
+        let Some((key, epoch)) = stem.rsplit_once('.') else {
+            continue;
+        };
+        let Ok(epoch) = epoch.parse::<u64>() else {
+            continue;
+        };
+        let Some(marker) = crate::proof::read_marker(keys_dir, key, epoch) else {
+            continue;
+        };
         if marker.proven_ms > now_ms {
             continue;
         }
@@ -490,14 +617,26 @@ pub fn read_proofs(keys_dir: &Path, now_ms: u64) -> BTreeMap<(String, u64), Proo
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or(now_ms, |d| d.as_millis() as u64);
         let age_ms = (now_ms - marker.proven_ms).min(now_ms.saturating_sub(file_ms));
-        out.insert((key.to_string(), epoch), Proof { digest: marker.pkp_digest, age_ms });
+        out.insert(
+            (key.to_string(), epoch),
+            Proof {
+                digest: marker.pkp_digest,
+                age_ms,
+            },
+        );
     }
     out
 }
 
 /// Run retention on `dir`: read, plan, and (unless `dry_run`) delete. Returns the plan. Any error
 /// reading the directory is an `Err` and nothing is deleted.
-pub fn run(dir: &Path, keys_dir: &Path, s: &Settings, now_ms: u64, dry_run: bool) -> Result<Plan, String> {
+pub fn run(
+    dir: &Path,
+    keys_dir: &Path,
+    s: &Settings,
+    now_ms: u64,
+    dry_run: bool,
+) -> Result<Plan, String> {
     let archives = read_dir(dir, s.node)?;
     let live = read_live(keys_dir)?;
     let proofs = read_proofs(keys_dir, now_ms);
@@ -505,10 +644,17 @@ pub fn run(dir: &Path, keys_dir: &Path, s: &Settings, now_ms: u64, dry_run: bool
     if !dry_run {
         let mut done: Vec<&str> = Vec::new();
         for (name, verdict) in &plan.verdicts {
-            if matches!(verdict, Verdict::DeleteOlderEpoch { .. } | Verdict::DeleteCountCap) {
+            if matches!(
+                verdict,
+                Verdict::DeleteOlderEpoch { .. } | Verdict::DeleteCountCap
+            ) {
                 let p: PathBuf = dir.join(name);
                 std::fs::remove_file(&p).map_err(|e| {
-                    format!("cannot delete {}: {e} (already deleted before this error: {})", p.display(), done.join(", "))
+                    format!(
+                        "cannot delete {}: {e} (already deleted before this error: {})",
+                        p.display(),
+                        done.join(", ")
+                    )
                 })?;
                 done.push(name);
             }
@@ -525,24 +671,56 @@ mod tests {
     const DAY: u64 = 86_400_000;
 
     fn settings() -> Settings {
-        Settings { node: 1, cluster_uuid: Some(CLUSTER.into()), min_proof_age_ms: 7 * DAY, keep_older_epochs: 0, keep_count: 0 }
+        Settings {
+            node: 1,
+            cluster_uuid: Some(CLUSTER.into()),
+            min_proof_age_ms: 7 * DAY,
+            keep_older_epochs: 0,
+            keep_count: 0,
+        }
     }
 
     fn ki(key: &str, epoch: u64, digest: &str) -> KeyInfo {
-        KeyInfo { key_id: key.into(), kind: "frost-share".into(), epoch, digest: digest.into(), cluster: CLUSTER.into(), node: 1, dek_id: "00".into() }
+        KeyInfo {
+            key_id: key.into(),
+            kind: "frost-share".into(),
+            epoch,
+            digest: digest.into(),
+            cluster: CLUSTER.into(),
+            node: 1,
+            dek_id: "00".into(),
+        }
     }
 
     /// An archive of single-key sharings: `(key, epoch, digest)`.
     fn arch(name: &str, keys: &[(&str, u64, &str)]) -> Archive {
-        Archive { name: name.into(), files: Ok(keys.iter().map(|(k, e, d)| (k.to_string(), Some(ki(k, *e, d)))).collect()) }
+        Archive {
+            name: name.into(),
+            files: Ok(keys
+                .iter()
+                .map(|(k, e, d)| (k.to_string(), Some(ki(k, *e, d))))
+                .collect()),
+        }
     }
 
     fn live(keys: &[(&str, u64, &str)]) -> BTreeMap<String, Option<KeyInfo>> {
-        keys.iter().map(|(k, e, d)| (k.to_string(), Some(ki(k, *e, d)))).collect()
+        keys.iter()
+            .map(|(k, e, d)| (k.to_string(), Some(ki(k, *e, d))))
+            .collect()
     }
 
     fn proofs(p: &[(&str, u64, &str, u64)]) -> BTreeMap<(String, u64), Proof> {
-        p.iter().map(|(k, e, d, age)| ((k.to_string(), *e), Proof { digest: d.to_string(), age_ms: *age })).collect()
+        p.iter()
+            .map(|(k, e, d, age)| {
+                (
+                    (k.to_string(), *e),
+                    Proof {
+                        digest: d.to_string(),
+                        age_ms: *age,
+                    },
+                )
+            })
+            .collect()
     }
 
     fn verdict<'a>(p: &'a Plan, name: &str) -> &'a Verdict {
@@ -551,16 +729,35 @@ mod tests {
 
     // Archives a1 (epoch 1), a2 (epoch 2), a3 (epoch 3, live).
     fn three() -> Vec<Archive> {
-        vec![arch("a1", &[("k", 1, "d1")]), arch("a2", &[("k", 2, "d2")]), arch("a3", &[("k", 3, "d3")])]
+        vec![
+            arch("a1", &[("k", 1, "d1")]),
+            arch("a2", &[("k", 2, "d2")]),
+            arch("a3", &[("k", 3, "d3")]),
+        ]
     }
 
     #[test]
     fn the_previous_epochs_go_only_when_the_new_one_is_proven_and_old_enough() {
         let l = live(&[("k", 3, "d3")]);
-        let p = plan(&three(), &l, &proofs(&[("k", 3, "d3", 8 * DAY)]), &settings());
+        let p = plan(
+            &three(),
+            &l,
+            &proofs(&[("k", 3, "d3", 8 * DAY)]),
+            &settings(),
+        );
         assert!(p.skip.is_none());
-        assert_eq!(verdict(&p, "a1"), &Verdict::DeleteOlderEpoch { covered_by: "a3".into() });
-        assert_eq!(verdict(&p, "a2"), &Verdict::DeleteOlderEpoch { covered_by: "a3".into() });
+        assert_eq!(
+            verdict(&p, "a1"),
+            &Verdict::DeleteOlderEpoch {
+                covered_by: "a3".into()
+            }
+        );
+        assert_eq!(
+            verdict(&p, "a2"),
+            &Verdict::DeleteOlderEpoch {
+                covered_by: "a3".into()
+            }
+        );
         assert_eq!(verdict(&p, "a3"), &Verdict::Keep(Why::Protected));
     }
 
@@ -571,12 +768,19 @@ mod tests {
             ("no proof", proofs(&[])),
             ("too young", proofs(&[("k", 3, "d3", 6 * DAY)])),
             ("another sharing", proofs(&[("k", 3, "other", 9 * DAY)])),
-            ("proof of an epoch no archive holds", proofs(&[("k", 5, "d5", 9 * DAY)])),
+            (
+                "proof of an epoch no archive holds",
+                proofs(&[("k", 5, "d5", 9 * DAY)]),
+            ),
         ] {
             let p = plan(&three(), &l, &pr, &settings());
             assert!(p.skip.is_none(), "{why}");
             for n in ["a1", "a2"] {
-                assert_eq!(verdict(&p, n), &Verdict::Keep(Why::UnprovenEpoch), "{why}: {n}");
+                assert_eq!(
+                    verdict(&p, n),
+                    &Verdict::Keep(Why::UnprovenEpoch),
+                    "{why}: {n}"
+                );
             }
         }
     }
@@ -585,8 +789,18 @@ mod tests {
     fn an_unproven_newer_epoch_keeps_the_proven_one_and_everything_above_it() {
         // Epoch 2 proven and old; epoch 3 live and unproven: epoch 1 goes, epoch 2 stays.
         let l = live(&[("k", 3, "d3")]);
-        let p = plan(&three(), &l, &proofs(&[("k", 2, "d2", 20 * DAY)]), &settings());
-        assert_eq!(verdict(&p, "a1"), &Verdict::DeleteOlderEpoch { covered_by: "a2".into() });
+        let p = plan(
+            &three(),
+            &l,
+            &proofs(&[("k", 2, "d2", 20 * DAY)]),
+            &settings(),
+        );
+        assert_eq!(
+            verdict(&p, "a1"),
+            &Verdict::DeleteOlderEpoch {
+                covered_by: "a2".into()
+            }
+        );
         assert_eq!(verdict(&p, "a2"), &Verdict::Keep(Why::Protected));
         assert_eq!(verdict(&p, "a3"), &Verdict::Keep(Why::Protected));
     }
@@ -597,7 +811,12 @@ mod tests {
         // the unproven epoch 3.
         let l = live(&[("k", 3, "d3")]);
         let archives = vec![arch("a1", &[("k", 1, "d1")]), arch("a3", &[("k", 3, "d3")])];
-        let p = plan(&archives, &l, &proofs(&[("k", 2, "d2", 20 * DAY)]), &settings());
+        let p = plan(
+            &archives,
+            &l,
+            &proofs(&[("k", 2, "d2", 20 * DAY)]),
+            &settings(),
+        );
         // The proof's digest is held by no archive, so it does not count as a proven epoch at all.
         assert_eq!(verdict(&p, "a1"), &Verdict::Keep(Why::UnprovenEpoch));
     }
@@ -607,9 +826,17 @@ mod tests {
         let l = live(&[("k", 3, "d3")]);
         let mut archives = three();
         archives[0] = arch("a1", &[("k", 1, "d1"), ("gone", 1, "g1")]);
-        let p = plan(&archives, &l, &proofs(&[("k", 3, "d3", 9 * DAY)]), &settings());
+        let p = plan(
+            &archives,
+            &l,
+            &proofs(&[("k", 3, "d3", 9 * DAY)]),
+            &settings(),
+        );
         assert_eq!(verdict(&p, "a1"), &Verdict::Keep(Why::KeyNotLive));
-        assert!(matches!(verdict(&p, "a2"), Verdict::DeleteOlderEpoch { .. }));
+        assert!(matches!(
+            verdict(&p, "a2"),
+            Verdict::DeleteOlderEpoch { .. }
+        ));
     }
 
     #[test]
@@ -617,9 +844,20 @@ mod tests {
         let l = live(&[("k", 3, "d3")]);
         let mut archives = three();
         // a1 holds a v1 (header-less) file; a2 is a damaged tar.
-        archives[0] = Archive { name: "a1".into(), files: Ok([("k".to_string(), None)].into_iter().collect()) };
-        archives[1] = Archive { name: "a2".into(), files: Err("truncated".into()) };
-        let p = plan(&archives, &l, &proofs(&[("k", 3, "d3", 9 * DAY)]), &settings());
+        archives[0] = Archive {
+            name: "a1".into(),
+            files: Ok([("k".to_string(), None)].into_iter().collect()),
+        };
+        archives[1] = Archive {
+            name: "a2".into(),
+            files: Err("truncated".into()),
+        };
+        let p = plan(
+            &archives,
+            &l,
+            &proofs(&[("k", 3, "d3", 9 * DAY)]),
+            &settings(),
+        );
         assert_eq!(verdict(&p, "a1"), &Verdict::Keep(Why::EpochUnreadable));
         assert_eq!(verdict(&p, "a2"), &Verdict::Keep(Why::EpochUnreadable));
     }
@@ -632,12 +870,30 @@ mod tests {
         let mut other_node = ki("k", 2, "d2");
         other_node.node = 2;
         let archives = vec![
-            Archive { name: "a1".into(), files: Ok([("k".to_string(), Some(other_cluster))].into_iter().collect()) },
-            Archive { name: "a2".into(), files: Ok([("k".to_string(), Some(other_node))].into_iter().collect()) },
-            Archive { name: "a2b".into(), files: Ok([("k".to_string(), Some(ki("renamed", 2, "d2")))].into_iter().collect()) },
+            Archive {
+                name: "a1".into(),
+                files: Ok([("k".to_string(), Some(other_cluster))]
+                    .into_iter()
+                    .collect()),
+            },
+            Archive {
+                name: "a2".into(),
+                files: Ok([("k".to_string(), Some(other_node))].into_iter().collect()),
+            },
+            Archive {
+                name: "a2b".into(),
+                files: Ok([("k".to_string(), Some(ki("renamed", 2, "d2")))]
+                    .into_iter()
+                    .collect()),
+            },
             arch("a3", &[("k", 3, "d3")]),
         ];
-        let p = plan(&archives, &l, &proofs(&[("k", 3, "d3", 9 * DAY)]), &settings());
+        let p = plan(
+            &archives,
+            &l,
+            &proofs(&[("k", 3, "d3", 9 * DAY)]),
+            &settings(),
+        );
         for n in ["a1", "a2", "a2b"] {
             assert_eq!(verdict(&p, n), &Verdict::Keep(Why::EpochUnreadable), "{n}");
         }
@@ -648,9 +904,17 @@ mod tests {
         // A node that missed a refresh: live epoch 2, an archive at 3 (taken before it went stale).
         let l = live(&[("k", 2, "d2")]);
         let archives = three();
-        let p = plan(&archives, &l, &proofs(&[("k", 2, "d2", 20 * DAY)]), &settings());
+        let p = plan(
+            &archives,
+            &l,
+            &proofs(&[("k", 2, "d2", 20 * DAY)]),
+            &settings(),
+        );
         assert!(matches!(p.skip, Some(Skip::Closed(_))));
-        assert!(p.verdicts.iter().all(|(_, v)| matches!(v, Verdict::Keep(_))));
+        assert!(p
+            .verdicts
+            .iter()
+            .all(|(_, v)| matches!(v, Verdict::Keep(_))));
     }
 
     #[test]
@@ -658,20 +922,46 @@ mod tests {
         let archives = three();
         // A key the newest archive does not hold yet.
         let l = live(&[("k", 3, "d3"), ("new", 1, "n1")]);
-        let p = plan(&archives, &l, &proofs(&[("k", 3, "d3", 9 * DAY)]), &settings());
+        let p = plan(
+            &archives,
+            &l,
+            &proofs(&[("k", 3, "d3", 9 * DAY)]),
+            &settings(),
+        );
         assert!(matches!(p.skip, Some(Skip::Closed(_))), "a new key");
         // The live key is newer than the newest archive (a backup after the refresh is pending).
         let l = live(&[("k", 4, "d4")]);
-        let p = plan(&archives, &l, &proofs(&[("k", 3, "d3", 9 * DAY)]), &settings());
+        let p = plan(
+            &archives,
+            &l,
+            &proofs(&[("k", 3, "d3", 9 * DAY)]),
+            &settings(),
+        );
         assert!(matches!(p.skip, Some(Skip::Closed(_))), "a pending backup");
         // Same epoch, another sharing.
         let l = live(&[("k", 3, "other")]);
-        let p = plan(&archives, &l, &proofs(&[("k", 3, "d3", 9 * DAY)]), &settings());
-        assert!(matches!(p.skip, Some(Skip::Closed(_))), "a different sharing at the same epoch");
+        let p = plan(
+            &archives,
+            &l,
+            &proofs(&[("k", 3, "d3", 9 * DAY)]),
+            &settings(),
+        );
+        assert!(
+            matches!(p.skip, Some(Skip::Closed(_))),
+            "a different sharing at the same epoch"
+        );
         // The newest archive is unreadable.
         let mut a = three();
-        a[2] = Archive { name: "a3".into(), files: Err("truncated".into()) };
-        let p = plan(&a, &live(&[("k", 3, "d3")]), &proofs(&[("k", 3, "d3", 9 * DAY)]), &settings());
+        a[2] = Archive {
+            name: "a3".into(),
+            files: Err("truncated".into()),
+        };
+        let p = plan(
+            &a,
+            &live(&[("k", 3, "d3")]),
+            &proofs(&[("k", 3, "d3", 9 * DAY)]),
+            &settings(),
+        );
         assert!(matches!(p.skip, Some(Skip::Closed(_))), "newest unreadable");
     }
 
@@ -705,10 +995,27 @@ mod tests {
         s.keep_count = 2;
         let p = plan(&archives, &l, &proofs(&[("k", 2, "d2", 9 * DAY)]), &s);
         assert!(p.skip.is_none());
-        assert_eq!(verdict(&p, "a1"), &Verdict::DeleteOlderEpoch { covered_by: "a2".into() });
-        assert_eq!(verdict(&p, "a2"), &Verdict::Keep(Why::Protected), "the proven archive stays");
-        assert_eq!(verdict(&p, "a3"), &Verdict::Keep(Why::AtOrAfterProvenEpoch), "the only copy of epoch 3: the cap does not take it");
-        assert_eq!(verdict(&p, "a4"), &Verdict::Keep(Why::Protected), "the newest stays");
+        assert_eq!(
+            verdict(&p, "a1"),
+            &Verdict::DeleteOlderEpoch {
+                covered_by: "a2".into()
+            }
+        );
+        assert_eq!(
+            verdict(&p, "a2"),
+            &Verdict::Keep(Why::Protected),
+            "the proven archive stays"
+        );
+        assert_eq!(
+            verdict(&p, "a3"),
+            &Verdict::Keep(Why::AtOrAfterProvenEpoch),
+            "the only copy of epoch 3: the cap does not take it"
+        );
+        assert_eq!(
+            verdict(&p, "a4"),
+            &Verdict::Keep(Why::Protected),
+            "the newest stays"
+        );
     }
 
     #[test]
@@ -731,7 +1038,8 @@ mod tests {
     }
 
     #[test]
-    fn the_cap_never_deletes_the_last_archive_of_the_last_proven_epoch_even_when_the_proof_is_too_young() {
+    fn the_cap_never_deletes_the_last_archive_of_the_last_proven_epoch_even_when_the_proof_is_too_young(
+    ) {
         // Review input A: epoch 2 proof only a day old (minimum 7): no proven archive exists, so the cap
         // must still not take the unique archives of epochs 1 and 2.
         let l = live(&[("k", 3, "d3")]);
@@ -747,7 +1055,11 @@ mod tests {
         for n in ["a1", "a2"] {
             assert!(matches!(verdict(&p, n), Verdict::Keep(_)), "{n}: {p:?}");
         }
-        assert_eq!(verdict(&p, "a3"), &Verdict::DeleteCountCap, "a copy of the newest");
+        assert_eq!(
+            verdict(&p, "a3"),
+            &Verdict::DeleteCountCap,
+            "a copy of the newest"
+        );
     }
 
     #[test]
@@ -757,11 +1069,19 @@ mod tests {
         if let Some(Some(i)) = old_dek.files.as_mut().unwrap().get_mut("k") {
             i.dek_id = "old".into();
         }
-        let archives = vec![old_dek, arch("a2", &[("k", 3, "d3")]), arch("a3", &[("k", 3, "d3")])];
+        let archives = vec![
+            old_dek,
+            arch("a2", &[("k", 3, "d3")]),
+            arch("a3", &[("k", 3, "d3")]),
+        ];
         let mut s = settings();
         s.keep_count = 1;
         let p = plan(&archives, &l, &proofs(&[]), &s);
-        assert_eq!(verdict(&p, "a1"), &Verdict::Keep(Why::UnprovenEpoch), "the only copy sealed under the old DEK stays");
+        assert_eq!(
+            verdict(&p, "a1"),
+            &Verdict::Keep(Why::UnprovenEpoch),
+            "the only copy sealed under the old DEK stays"
+        );
         assert_eq!(verdict(&p, "a2"), &Verdict::DeleteCountCap);
     }
 
@@ -770,26 +1090,61 @@ mod tests {
         // Review input B and finding 2: a live hosted key (no epoch to prove) in every archive.
         let hosted = |epoch_unused: u64| {
             let _ = epoch_unused;
-            KeyInfo { key_id: "h".into(), kind: "hosted-key".into(), epoch: 0, digest: "hd".into(), cluster: CLUSTER.into(), node: 1, dek_id: "00".into() }
+            KeyInfo {
+                key_id: "h".into(),
+                kind: "hosted-key".into(),
+                epoch: 0,
+                digest: "hd".into(),
+                cluster: CLUSTER.into(),
+                node: 1,
+                dek_id: "00".into(),
+            }
         };
         let with_hosted = |name: &str, e: u64, d: &str| {
             let mut a = arch(name, &[("k", e, d)]);
-            a.files.as_mut().unwrap().insert("h".into(), Some(hosted(0)));
+            a.files
+                .as_mut()
+                .unwrap()
+                .insert("h".into(), Some(hosted(0)));
             a
         };
         let mut l = live(&[("k", 3, "d3")]);
         l.insert("h".into(), Some(hosted(0)));
-        let archives = vec![with_hosted("a1", 1, "d1"), with_hosted("a2", 2, "d2"), with_hosted("a3", 3, "d3")];
-        let p = plan(&archives, &l, &proofs(&[("k", 3, "d3", 9 * DAY)]), &settings());
-        assert!(matches!(verdict(&p, "a1"), Verdict::DeleteOlderEpoch { .. }), "{p:?}");
-        assert!(matches!(verdict(&p, "a2"), Verdict::DeleteOlderEpoch { .. }));
+        let archives = vec![
+            with_hosted("a1", 1, "d1"),
+            with_hosted("a2", 2, "d2"),
+            with_hosted("a3", 3, "d3"),
+        ];
+        let p = plan(
+            &archives,
+            &l,
+            &proofs(&[("k", 3, "d3", 9 * DAY)]),
+            &settings(),
+        );
+        assert!(
+            matches!(verdict(&p, "a1"), Verdict::DeleteOlderEpoch { .. }),
+            "{p:?}"
+        );
+        assert!(matches!(
+            verdict(&p, "a2"),
+            Verdict::DeleteOlderEpoch { .. }
+        ));
         // A hosted key that changed since (another digest) is not as the proven archive has it.
         let mut other = with_hosted("a1", 1, "d1");
         if let Some(Some(h)) = other.files.as_mut().unwrap().get_mut("h") {
             h.digest = "other".into();
         }
-        let archives = vec![other, with_hosted("a2", 2, "d2"), with_hosted("a3", 3, "d3")];
-        let p = plan(&archives, &l, &proofs(&[("k", 3, "d3", 9 * DAY)]), &settings());
+        let archives = vec![
+            other,
+            with_hosted("a2", 2, "d2"),
+            with_hosted("a3", 3, "d3"),
+        ];
+        let p = plan(
+            &archives,
+            &l,
+            &proofs(&[("k", 3, "d3", 9 * DAY)]),
+            &settings(),
+        );
         assert_eq!(verdict(&p, "a1"), &Verdict::Keep(Why::AtOrAfterProvenEpoch));
     }
 
@@ -801,10 +1156,27 @@ mod tests {
             arch("x1", &[("a", 1, "a1"), ("b", 1, "b1")]),
             arch("x2", &[("a", 2, "a2"), ("b", 1, "b1")]),
         ];
-        let only_a = plan(&archives, &l, &proofs(&[("a", 2, "a2", 9 * DAY)]), &settings());
-        assert_eq!(verdict(&only_a, "x1"), &Verdict::Keep(Why::UnprovenEpoch), "b is unproven");
-        let both = plan(&archives, &l, &proofs(&[("a", 2, "a2", 9 * DAY), ("b", 1, "b1", 9 * DAY)]), &settings());
-        assert!(matches!(verdict(&both, "x1"), Verdict::DeleteOlderEpoch { .. }), "{both:?}");
+        let only_a = plan(
+            &archives,
+            &l,
+            &proofs(&[("a", 2, "a2", 9 * DAY)]),
+            &settings(),
+        );
+        assert_eq!(
+            verdict(&only_a, "x1"),
+            &Verdict::Keep(Why::UnprovenEpoch),
+            "b is unproven"
+        );
+        let both = plan(
+            &archives,
+            &l,
+            &proofs(&[("a", 2, "a2", 9 * DAY), ("b", 1, "b1", 9 * DAY)]),
+            &settings(),
+        );
+        assert!(
+            matches!(verdict(&both, "x1"), Verdict::DeleteOlderEpoch { .. }),
+            "{both:?}"
+        );
     }
 
     #[test]
@@ -814,13 +1186,25 @@ mod tests {
         let l = live(&[("k", 2, "d2")]);
         let mut odd = arch("a3", &[("k", 3, "d3")]);
         odd.files.as_mut().unwrap().insert("alien".into(), None);
-        let archives = vec![arch("a1", &[("k", 1, "d1")]), arch("a2", &[("k", 2, "d2")]), odd];
+        let archives = vec![
+            arch("a1", &[("k", 1, "d1")]),
+            arch("a2", &[("k", 2, "d2")]),
+            odd,
+        ];
         // The newest (a3) is unreadable as a complete backup: closed for that reason already; make a
         // verified newest archive so the behind check is what trips.
         let mut archives2 = archives.clone();
         archives2.push(arch("a4", &[("k", 2, "d2")]));
-        let p = plan(&archives2, &l, &proofs(&[("k", 2, "d2", 9 * DAY)]), &settings());
-        assert!(matches!(p.skip, Some(Skip::Closed(ref why)) if why.contains("behind")), "{p:?}");
+        let p = plan(
+            &archives2,
+            &l,
+            &proofs(&[("k", 2, "d2", 9 * DAY)]),
+            &settings(),
+        );
+        assert!(
+            matches!(p.skip, Some(Skip::Closed(ref why)) if why.contains("behind")),
+            "{p:?}"
+        );
     }
 
     #[test]
@@ -835,8 +1219,14 @@ mod tests {
         let mut s = settings();
         s.keep_older_epochs = 1;
         let p = plan(&archives, &l, &proofs(&[("k", 4, "d4", 9 * DAY)]), &s);
-        assert!(matches!(verdict(&p, "a1"), Verdict::DeleteOlderEpoch { .. }));
-        assert!(matches!(verdict(&p, "a2"), Verdict::DeleteOlderEpoch { .. }));
+        assert!(matches!(
+            verdict(&p, "a1"),
+            Verdict::DeleteOlderEpoch { .. }
+        ));
+        assert!(matches!(
+            verdict(&p, "a2"),
+            Verdict::DeleteOlderEpoch { .. }
+        ));
         assert_eq!(verdict(&p, "a3"), &Verdict::Keep(Why::KeepOlderEpochs));
     }
 
@@ -848,11 +1238,24 @@ mod tests {
             arch("x2", &[("a", 2, "a2"), ("b", 2, "b2")]),
         ];
         // Only key a is proven at epoch 2.
-        let p = plan(&archives, &l, &proofs(&[("a", 2, "a2", 9 * DAY)]), &settings());
+        let p = plan(
+            &archives,
+            &l,
+            &proofs(&[("a", 2, "a2", 9 * DAY)]),
+            &settings(),
+        );
         assert_eq!(verdict(&p, "x1"), &Verdict::Keep(Why::UnprovenEpoch));
         // Both proven.
-        let p = plan(&archives, &l, &proofs(&[("a", 2, "a2", 9 * DAY), ("b", 2, "b2", 9 * DAY)]), &settings());
-        assert!(matches!(verdict(&p, "x1"), Verdict::DeleteOlderEpoch { .. }));
+        let p = plan(
+            &archives,
+            &l,
+            &proofs(&[("a", 2, "a2", 9 * DAY), ("b", 2, "b2", 9 * DAY)]),
+            &settings(),
+        );
+        assert!(matches!(
+            verdict(&p, "x1"),
+            Verdict::DeleteOlderEpoch { .. }
+        ));
     }
 
     #[test]
@@ -865,7 +1268,12 @@ mod tests {
             arch("x2", &[("a", 1, "a1"), ("b", 2, "b2")]),
             arch("x3", &[("a", 3, "a3"), ("b", 3, "b3")]),
         ];
-        let p = plan(&archives, &l, &proofs(&[("a", 2, "a2", 9 * DAY), ("b", 2, "b2", 9 * DAY)]), &settings());
+        let p = plan(
+            &archives,
+            &l,
+            &proofs(&[("a", 2, "a2", 9 * DAY), ("b", 2, "b2", 9 * DAY)]),
+            &settings(),
+        );
         assert!(p.skip.is_none());
         assert_eq!(verdict(&p, "x1"), &Verdict::Keep(Why::NoProvenArchive));
         assert_eq!(verdict(&p, "x2"), &Verdict::Keep(Why::NoProvenArchive));
@@ -880,9 +1288,23 @@ mod tests {
             arch("a2b", &[("k", 2, "d2")]),
             arch("a3", &[("k", 3, "d3")]),
         ];
-        let p = plan(&archives, &l, &proofs(&[("k", 2, "d2", 9 * DAY)]), &settings());
-        assert_eq!(verdict(&p, "a1"), &Verdict::DeleteOlderEpoch { covered_by: "a2b".into() });
-        assert_eq!(verdict(&p, "a2"), &Verdict::Keep(Why::NothingOlder), "a copy of the proven archive, not an older epoch");
+        let p = plan(
+            &archives,
+            &l,
+            &proofs(&[("k", 2, "d2", 9 * DAY)]),
+            &settings(),
+        );
+        assert_eq!(
+            verdict(&p, "a1"),
+            &Verdict::DeleteOlderEpoch {
+                covered_by: "a2b".into()
+            }
+        );
+        assert_eq!(
+            verdict(&p, "a2"),
+            &Verdict::Keep(Why::NothingOlder),
+            "a copy of the proven archive, not an older epoch"
+        );
         assert_eq!(verdict(&p, "a2b"), &Verdict::Keep(Why::Protected));
     }
 
@@ -891,7 +1313,12 @@ mod tests {
         let p = plan(&[], &live(&[("k", 3, "d3")]), &proofs(&[]), &settings());
         assert!(p.skip.is_none() && p.verdicts.is_empty());
         let one = vec![arch("a3", &[("k", 3, "d3")])];
-        let p = plan(&one, &live(&[("k", 3, "d3")]), &proofs(&[("k", 3, "d3", 9 * DAY)]), &settings());
+        let p = plan(
+            &one,
+            &live(&[("k", 3, "d3")]),
+            &proofs(&[("k", 3, "d3", 9 * DAY)]),
+            &settings(),
+        );
         assert_eq!(verdict(&p, "a3"), &Verdict::Keep(Why::Protected));
     }
 
@@ -942,9 +1369,20 @@ mod tests {
     #[test]
     fn it_reads_the_key_headers_of_a_real_tar_and_skips_journals_and_markers() {
         let d = tempfile::tempdir().unwrap();
-        make_tar(d.path(), "node-1-20261120T000000Z.tar", &[("k.json", v2_file("k", 3, "dd")), ("other.json", v2_file("other", 0, ""))], true);
+        make_tar(
+            d.path(),
+            "node-1-20261120T000000Z.tar",
+            &[
+                ("k.json", v2_file("k", 3, "dd")),
+                ("other.json", v2_file("other", 0, "")),
+            ],
+            true,
+        );
         let files = read_archive(&d.path().join("node-1-20261120T000000Z.tar")).unwrap();
-        assert_eq!(files.keys().cloned().collect::<Vec<_>>(), vec!["k".to_string(), "other".to_string()]);
+        assert_eq!(
+            files.keys().cloned().collect::<Vec<_>>(),
+            vec!["k".to_string(), "other".to_string()]
+        );
         let k = files["k"].as_ref().unwrap();
         assert_eq!((k.epoch, k.digest.as_str(), k.node), (3, "dd", 1));
     }
@@ -952,25 +1390,47 @@ mod tests {
     #[test]
     fn a_v1_file_a_truncated_tar_and_a_bad_checksum_are_not_readable() {
         let d = tempfile::tempdir().unwrap();
-        make_tar(d.path(), "v1.tar", &[("k.json", br#"{"v":1,"sealed":true,"nonce":"00","ct":"00"}"#.to_vec())], false);
+        make_tar(
+            d.path(),
+            "v1.tar",
+            &[(
+                "k.json",
+                br#"{"v":1,"sealed":true,"nonce":"00","ct":"00"}"#.to_vec(),
+            )],
+            false,
+        );
         assert_eq!(read_archive(&d.path().join("v1.tar")).unwrap()["k"], None);
 
-        make_tar(d.path(), "ok.tar", &[("k.json", v2_file("k", 1, "d"))], false);
+        make_tar(
+            d.path(),
+            "ok.tar",
+            &[("k.json", v2_file("k", 1, "d"))],
+            false,
+        );
         let bytes = std::fs::read(d.path().join("ok.tar")).unwrap();
         // GNU tar pads the archive to 10 KiB: cut inside the entries, not inside the padding.
         for (i, cut) in [700usize, 1100, 1600].into_iter().enumerate() {
             let name = format!("cut{i}.tar");
             std::fs::write(d.path().join(&name), &bytes[..cut.min(bytes.len())]).unwrap();
-            assert!(read_archive(&d.path().join(&name)).is_err(), "truncated at {cut}");
+            assert!(
+                read_archive(&d.path().join(&name)).is_err(),
+                "truncated at {cut}"
+            );
         }
         let mut bad = bytes.clone();
         bad[0] ^= 0x55;
         std::fs::write(d.path().join("bad.tar"), &bad).unwrap();
         assert!(read_archive(&d.path().join("bad.tar")).is_err(), "checksum");
         std::fs::write(d.path().join("empty.tar"), b"").unwrap();
-        assert!(read_archive(&d.path().join("empty.tar")).is_err(), "empty file");
+        assert!(
+            read_archive(&d.path().join("empty.tar")).is_err(),
+            "empty file"
+        );
         std::fs::write(d.path().join("junk.tar"), vec![7u8; 2048]).unwrap();
-        assert!(read_archive(&d.path().join("junk.tar")).is_err(), "not a tar");
+        assert!(
+            read_archive(&d.path().join("junk.tar")).is_err(),
+            "not a tar"
+        );
     }
 
     #[test]
@@ -981,7 +1441,12 @@ mod tests {
         std::fs::create_dir_all(&backups).unwrap();
         std::fs::create_dir_all(&keys).unwrap();
         for (i, (epoch, digest)) in [(1u64, "d1"), (2, "d2"), (3, "d3")].iter().enumerate() {
-            make_tar(&backups, &format!("node-1-2026112{i}T000000Z.tar"), &[("k.json", v2_file("k", *epoch, digest))], false);
+            make_tar(
+                &backups,
+                &format!("node-1-2026112{i}T000000Z.tar"),
+                &[("k.json", v2_file("k", *epoch, digest))],
+                false,
+            );
         }
         std::fs::write(keys.join("k.json"), v2_file("k", 3, "d3")).unwrap();
         // A proof of epoch 3, stamped 10 days ago (the marker file itself is new, so its mtime is
@@ -998,15 +1463,49 @@ mod tests {
             statement: crate::proof::STATEMENT.into(),
         };
         std::fs::create_dir_all(keys.join(crate::proof::DIR)).unwrap();
-        std::fs::write(crate::proof::marker_path(&keys, "k", 3), serde_json::to_vec(&marker).unwrap()).unwrap();
+        std::fs::write(
+            crate::proof::marker_path(&keys, "k", 3),
+            serde_json::to_vec(&marker).unwrap(),
+        )
+        .unwrap();
         let p = run(&backups, &keys, &settings(), now, false).unwrap();
-        assert!(p.verdicts.iter().all(|(_, v)| matches!(v, Verdict::Keep(_))), "{p:?}");
-        assert_eq!(std::fs::read_dir(&backups).unwrap().filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().ends_with(".tar")).count(), 3);
+        assert!(
+            p.verdicts
+                .iter()
+                .all(|(_, v)| matches!(v, Verdict::Keep(_))),
+            "{p:?}"
+        );
+        assert_eq!(
+            std::fs::read_dir(&backups)
+                .unwrap()
+                .filter(|e| e
+                    .as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".tar"))
+                .count(),
+            3
+        );
         // ... but seen from 10 days later the file's age agrees with the record: now it deletes.
         let later = now + 10 * DAY;
         let dry = run(&backups, &keys, &settings(), later, true).unwrap();
-        assert_eq!(dry.verdicts.iter().filter(|(_, v)| matches!(v, Verdict::DeleteOlderEpoch { .. })).count(), 2);
-        assert!(std::fs::read_dir(&backups).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().ends_with(".tar")).count() == 3, "dry run deletes nothing");
+        assert_eq!(
+            dry.verdicts
+                .iter()
+                .filter(|(_, v)| matches!(v, Verdict::DeleteOlderEpoch { .. }))
+                .count(),
+            2
+        );
+        assert!(
+            std::fs::read_dir(&backups)
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".tar"))
+                .count()
+                == 3,
+            "dry run deletes nothing"
+        );
         run(&backups, &keys, &settings(), later, false).unwrap();
         let left: Vec<String> = std::fs::read_dir(&backups)
             .unwrap()
@@ -1033,12 +1532,23 @@ mod tests {
             statement: crate::proof::STATEMENT.into(),
         };
         std::fs::create_dir_all(keys.join(crate::proof::DIR)).unwrap();
-        std::fs::write(crate::proof::marker_path(keys, "k", 3), serde_json::to_vec(&m).unwrap()).unwrap();
+        std::fs::write(
+            crate::proof::marker_path(keys, "k", 3),
+            serde_json::to_vec(&m).unwrap(),
+        )
+        .unwrap();
         assert!(read_proofs(keys, now).is_empty(), "dated in the future");
         // Recorded 30 days ago on a clock set back, but the file was written just now.
         m.proven_ms = now - 30 * DAY;
-        std::fs::write(crate::proof::marker_path(keys, "k", 3), serde_json::to_vec(&m).unwrap()).unwrap();
+        std::fs::write(
+            crate::proof::marker_path(keys, "k", 3),
+            serde_json::to_vec(&m).unwrap(),
+        )
+        .unwrap();
         let proofs = read_proofs(keys, now);
-        assert!(proofs[&("k".to_string(), 3)].age_ms < DAY, "the file's age wins: {proofs:?}");
+        assert!(
+            proofs[&("k".to_string(), 3)].age_ms < DAY,
+            "the file's age wins: {proofs:?}"
+        );
     }
 }

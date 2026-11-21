@@ -22,7 +22,10 @@ use rutli_cosigner::service::{PeerPins, PeerSvc, SignerSvc};
 use rutli_cosigner::{DaemonError, Result};
 
 #[derive(Parser)]
-#[command(name = "rutli-cosigner", about = "FROST cosigner daemon for the Rütli Canton KMS")]
+#[command(
+    name = "rutli-cosigner",
+    about = "FROST cosigner daemon for the Rütli Canton KMS"
+)]
 struct Args {
     /// Path to the JSON cluster config for this node. Required by every command except `seal`, `tls spki <CERT>` and `audit-cross-check`.
     #[arg(short, long, env = "RUTLI_COSIGNER_CONFIG")]
@@ -568,22 +571,36 @@ async fn main() -> Result<()> {
             std::env::var("NO_COLOR").ok(),
         ))
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
     let args = Args::parse();
-    if let Some(Command::Key { command: KeyCommand::Fingerprint { r#in } }) = args.command {
+    if let Some(Command::Key {
+        command: KeyCommand::Fingerprint { r#in },
+    }) = args.command
+    {
         return key_fingerprint_command(&r#in);
     }
     if let Some(Command::Seal { command }) = args.command {
         return seal_command(command);
     }
-    if let Some(Command::Tls { command: TlsCommand::Spki { certs, peers: false } }) = &args.command {
+    if let Some(Command::Tls {
+        command: TlsCommand::Spki {
+            certs,
+            peers: false,
+        },
+    }) = &args.command
+    {
         return tls_spki_files_command(certs);
     }
-    if let Some(Command::AuditCrossCheck { driver_audit, journal, min_journals, allow_no_intent }) = args.command {
+    if let Some(Command::AuditCrossCheck {
+        driver_audit,
+        journal,
+        min_journals,
+        allow_no_intent,
+    }) = args.command
+    {
         audit_cross_check_command(&driver_audit, &journal, min_journals, allow_no_intent);
     }
     let config_path = args.config.ok_or_else(|| {
@@ -592,7 +609,12 @@ async fn main() -> Result<()> {
     if let Some(Command::CheckConfig) = args.command {
         check_config_command(&config_path);
     }
-    if let Some(Command::ResidueScan { backup, legacy_master_env, json }) = &args.command {
+    if let Some(Command::ResidueScan {
+        backup,
+        legacy_master_env,
+        json,
+    }) = &args.command
+    {
         residue_scan_command(&config_path, backup, legacy_master_env.as_deref(), *json);
     }
     // Printed with Display, not as main's `Error: Config("…")` debug dump: an operator reading a
@@ -606,17 +628,49 @@ async fn main() -> Result<()> {
     };
 
     match args.command {
-        Some(Command::Refresh { key_id, target, tls_server_name }) => {
-            return refresh_command(&cfg, &key_id, target, tls_server_name).await
-        }
+        Some(Command::Refresh {
+            key_id,
+            target,
+            tls_server_name,
+        }) => return refresh_command(&cfg, &key_id, target, tls_server_name).await,
         Some(Command::Backup { out }) => return backup_command(&cfg, &out),
-        Some(Command::BackupRetain { dir, dry_run, min_proof_age_days, keep_older_epochs, keep_count }) => {
-            return backup_retain_command(&cfg, &dir, dry_run, min_proof_age_days, keep_older_epochs, keep_count)
+        Some(Command::BackupRetain {
+            dir,
+            dry_run,
+            min_proof_age_days,
+            keep_older_epochs,
+            keep_count,
+        }) => {
+            return backup_retain_command(
+                &cfg,
+                &dir,
+                dry_run,
+                min_proof_age_days,
+                keep_older_epochs,
+                keep_count,
+            )
         }
-        Some(Command::ExportKey { key_id, out, passphrase_env, unsafe_plaintext }) => {
-            return export_key_command(&cfg, &key_id, &out, passphrase_env.as_deref(), unsafe_plaintext)
+        Some(Command::ExportKey {
+            key_id,
+            out,
+            passphrase_env,
+            unsafe_plaintext,
+        }) => {
+            return export_key_command(
+                &cfg,
+                &key_id,
+                &out,
+                passphrase_env.as_deref(),
+                unsafe_plaintext,
+            )
         }
-        Some(Command::ImportKey { r#in, passphrase_env, key_id, expect_fingerprint, key_prefix }) => {
+        Some(Command::ImportKey {
+            r#in,
+            passphrase_env,
+            key_id,
+            expect_fingerprint,
+            key_prefix,
+        }) => {
             return import_key_command(
                 &cfg,
                 &r#in,
@@ -626,7 +680,14 @@ async fn main() -> Result<()> {
                 key_prefix.as_deref(),
             )
         }
-        Some(Command::Restore { from, force, break_glass, key_id, expected_epoch, expected_digest }) => {
+        Some(Command::Restore {
+            from,
+            force,
+            break_glass,
+            key_id,
+            expected_epoch,
+            expected_digest,
+        }) => {
             let glass = match (break_glass, key_id, expected_epoch, expected_digest) {
                 (true, Some(key_id), Some(expected_epoch), Some(expected_digest)) => {
                     Some(rutli_cosigner::restore::BreakGlass { key_id, expected_epoch, expected_digest })
@@ -640,23 +701,61 @@ async fn main() -> Result<()> {
             };
             return restore_command(&cfg, &from, force, glass.as_ref());
         }
-        Some(Command::ShareRecipient { key_id, ceremony_id, out, replace }) => {
-            return share_recipient_command(&cfg, &key_id, &ceremony_id, &out, replace)
-        }
+        Some(Command::ShareRecipient {
+            key_id,
+            ceremony_id,
+            out,
+            replace,
+        }) => return share_recipient_command(&cfg, &key_id, &ceremony_id, &out, replace),
         Some(Command::RecipientSas { key_id }) => return recipient_sas_command(&cfg, &key_id),
-        Some(Command::ImportShare { r#in, expect_fingerprint, dry_run }) => {
-            return import_share_command(&cfg, &r#in, &expect_fingerprint, dry_run)
+        Some(Command::ImportShare {
+            r#in,
+            expect_fingerprint,
+            dry_run,
+        }) => return import_share_command(&cfg, &r#in, &expect_fingerprint, dry_run),
+        Some(Command::AbortImport {
+            key_id,
+            ceremony_id,
+            yes_delete_installed_share,
+        }) => return abort_import_command(&cfg, &key_id, &ceremony_id, yes_delete_installed_share),
+        Some(Command::VerifyKey {
+            key_id,
+            expect_fingerprint,
+            sign_test,
+            json,
+        }) => {
+            return verify_key_command(
+                &cfg,
+                "verify-key",
+                &key_id,
+                Some(&expect_fingerprint),
+                sign_test,
+                json,
+            )
+            .await
         }
-        Some(Command::AbortImport { key_id, ceremony_id, yes_delete_installed_share }) => {
-            return abort_import_command(&cfg, &key_id, &ceremony_id, yes_delete_installed_share)
+        Some(Command::VerifyHosted {
+            key_id,
+            expect_fingerprint,
+            json,
+        }) => {
+            return verify_hosted_command(
+                &cfg,
+                "verify-hosted",
+                &key_id,
+                Some(&expect_fingerprint),
+                json,
+            )
+            .await
         }
-        Some(Command::VerifyKey { key_id, expect_fingerprint, sign_test, json }) => {
-            return verify_key_command(&cfg, "verify-key", &key_id, Some(&expect_fingerprint), sign_test, json).await
-        }
-        Some(Command::VerifyHosted { key_id, expect_fingerprint, json }) => {
-            return verify_hosted_command(&cfg, "verify-hosted", &key_id, Some(&expect_fingerprint), json).await
-        }
-        Some(Command::Key { command: KeyCommand::Show { key_id, expect_fingerprint, json } }) => {
+        Some(Command::Key {
+            command:
+                KeyCommand::Show {
+                    key_id,
+                    expect_fingerprint,
+                    json,
+                },
+        }) => {
             let expect = expect_fingerprint.as_deref();
             return match rutli_cosigner::key_cli::KeyKind::of(&key_id) {
                 rutli_cosigner::key_cli::KeyKind::Frost => {
@@ -669,21 +768,30 @@ async fn main() -> Result<()> {
         }
         // Handled before the config is read; named here so that it can never reach `_` below and
         // start the daemon.
-        Some(Command::Key { command: KeyCommand::Fingerprint { r#in } }) => return key_fingerprint_command(&r#in),
+        Some(Command::Key {
+            command: KeyCommand::Fingerprint { r#in },
+        }) => return key_fingerprint_command(&r#in),
         Some(Command::Health) => health_command(&cfg),
-        Some(Command::Tls { command: TlsCommand::Spki { .. } }) => return tls_spki_peers_command(&cfg).await,
-        Some(Command::Ceremony { command: CeremonyCommand::Resolve { ceremony_id, assume_lost } }) => {
-            return ceremony_resolve_command(&cfg, &ceremony_id, &assume_lost).await
-        }
-        Some(Command::Ceremony { command: CeremonyCommand::RecoverCommit { ceremony_id } }) => {
-            return ceremony_recover_commit_command(&cfg, &ceremony_id).await
-        }
-        Some(Command::Ceremony { command: CeremonyCommand::DropQuarantine { ceremony_id } }) => {
-            return ceremony_drop_quarantine_command(&cfg, &ceremony_id)
-        }
-        Some(Command::DiscardPartialKey { key_id, confirm_group_key }) => {
-            return discard_partial_key_command(&cfg, &key_id, &confirm_group_key).await
-        }
+        Some(Command::Tls {
+            command: TlsCommand::Spki { .. },
+        }) => return tls_spki_peers_command(&cfg).await,
+        Some(Command::Ceremony {
+            command:
+                CeremonyCommand::Resolve {
+                    ceremony_id,
+                    assume_lost,
+                },
+        }) => return ceremony_resolve_command(&cfg, &ceremony_id, &assume_lost).await,
+        Some(Command::Ceremony {
+            command: CeremonyCommand::RecoverCommit { ceremony_id },
+        }) => return ceremony_recover_commit_command(&cfg, &ceremony_id).await,
+        Some(Command::Ceremony {
+            command: CeremonyCommand::DropQuarantine { ceremony_id },
+        }) => return ceremony_drop_quarantine_command(&cfg, &ceremony_id),
+        Some(Command::DiscardPartialKey {
+            key_id,
+            confirm_group_key,
+        }) => return discard_partial_key_command(&cfg, &key_id, &confirm_group_key).await,
         Some(Command::Keyfile { command }) => return keyfile_command(&cfg, command),
         Some(Command::DeleteHostedKey {
             key_id,
@@ -705,9 +813,10 @@ async fn main() -> Result<()> {
             .await
         }
         Some(Command::HostedUndelete { key_id }) => return hosted_undelete_command(&cfg, &key_id),
-        Some(Command::HostedClearTombstone { key_id, confirm_key_id }) => {
-            return hosted_clear_tombstone_command(&cfg, &key_id, &confirm_key_id)
-        }
+        Some(Command::HostedClearTombstone {
+            key_id,
+            confirm_key_id,
+        }) => return hosted_clear_tombstone_command(&cfg, &key_id, &confirm_key_id),
         _ => {}
     }
     tracing::info!(identifier = cfg.identifier, listen = %cfg.listen, "starting cosigner");
@@ -779,10 +888,14 @@ async fn main() -> Result<()> {
                      per-node seal bundles (share_seal.secret_file, docs/runbook-per-node-seal.md)"
                 ),
             }
-            Some(Arc::new(keys.sealer(cfg.identifier).with_keyfile(&cfg.keyfile)))
+            Some(Arc::new(
+                keys.sealer(cfg.identifier).with_keyfile(&cfg.keyfile),
+            ))
         }
         None => {
-            tracing::warn!("share sealing DISABLED — key shares stored as plaintext JSON (dev only)");
+            tracing::warn!(
+                "share sealing DISABLED — key shares stored as plaintext JSON (dev only)"
+            );
             None
         }
     };
@@ -806,7 +919,10 @@ async fn main() -> Result<()> {
     // re-sealed now — under the instance lock, before anything serves.
     match keystore.reseal_outdated() {
         Ok(0) => {}
-        Ok(n) => tracing::info!(count = n, "re-sealed key files under the current DEK / format"),
+        Ok(n) => tracing::info!(
+            count = n,
+            "re-sealed key files under the current DEK / format"
+        ),
         Err(e) => tracing::warn!(error = %e, "could not check key files for re-sealing"),
     }
     publish_keyfile_gauges(&keystore);
@@ -847,7 +963,11 @@ async fn main() -> Result<()> {
     }
 
     // Load mTLS material once (if configured). Plaintext otherwise (dev only).
-    let tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose()?;
+    let tls = cfg
+        .tls
+        .as_ref()
+        .map(rutli_cosigner::tls::load)
+        .transpose()?;
     if let Some(t) = &tls {
         // Every anchor of the trust file (2 while a CA rotation's bundle is live), validated by
         // `tls::load`: CA certificates only, valid now unless tls.allow_expired_ca.
@@ -955,7 +1075,9 @@ async fn main() -> Result<()> {
                 policy,
                 rutli_cosigner::intent::now_ms(),
             )?;
-            verifier = verifier.with_delete_policy(delete).with_delete_grants(grants);
+            verifier = verifier
+                .with_delete_policy(delete)
+                .with_delete_grants(grants);
             if h.delete_allowlist.is_empty() {
                 tracing::info!(
                     "hosted-key deletes are disabled (hosted_keys.delete_allowlist is empty): DeleteKey is \
@@ -1042,11 +1164,18 @@ async fn main() -> Result<()> {
                  epochs faster than backups follow — set it back (default 72 h; docs/ceremonies.md)"
             );
         }
-        if let (Some(at), Some(ms)) = (&policy.refresh_interval_waived_at, policy.refresh_waiver_ms()) {
+        if let (Some(at), Some(ms)) = (
+            &policy.refresh_interval_waived_at,
+            policy.refresh_waiver_ms(),
+        ) {
             // Always at warn, live or lapsed, so a waiver left in the config is seen.
             let lapses_ms = ms + rutli_cosigner::config::REFRESH_WAIVER_LIFETIME_MS;
             let lapses_at = rutli_cosigner::audit_check::fmt_ms(lapses_ms);
-            let state = if rutli_cosigner::intent::now_ms() < lapses_ms { "active" } else { "lapsed, no effect" };
+            let state = if rutli_cosigner::intent::now_ms() < lapses_ms {
+                "active"
+            } else {
+                "lapsed, no effect"
+            };
             tracing::warn!(
                 waived_at = %at,
                 lapses_at = %lapses_at,
@@ -1093,7 +1222,10 @@ async fn main() -> Result<()> {
     // OS thread, not a tokio task: on a stalled volume it must keep going when the runtime cannot.
     rutli_cosigner::health::spawn_monitor(node.clone(), rutli_cosigner::health::MONITOR_INTERVAL);
     // `rutli_key_epoch_proven` / `rutli_key_epoch_age_seconds`: read-only, its own thread.
-    rutli_cosigner::proof::spawn_gauge_updater(cfg.data_dir.join("keys"), std::time::Duration::from_secs(60));
+    rutli_cosigner::proof::spawn_gauge_updater(
+        cfg.data_dir.join("keys"),
+        std::time::Duration::from_secs(60),
+    );
 
     // Build the peer roster: this node as a local peer, every other as a lazy gRPC client.
     let mut peers: Vec<Arc<dyn PeerApi>> = Vec::new();
@@ -1105,14 +1237,21 @@ async fn main() -> Result<()> {
             // node's certificate cannot answer at peer 2's endpoint; and, pinned, cosigner2's key,
             // so a certificate minted under the CA or kept from a replaced node cannot either.
             let dial = tls.as_ref().map(|t| t.peer_dial(p)).transpose()?;
-            peers.push(Arc::new(GrpcPeer::connect_lazy(ident(p.identifier)?, &p.endpoint, dial)?));
+            peers.push(Arc::new(GrpcPeer::connect_lazy(
+                ident(p.identifier)?,
+                &p.endpoint,
+                dial,
+            )?));
         }
     }
     peers.sort_by_key(|p| identifier_index(p.identifier()));
     // The mesh: the ceremony resolver asks every peer for its vote directly (never through a
     // leader). A pass now completes anything a crash left STAGED, then every 30 s.
     node.set_mesh(peers.clone())?;
-    rutli_cosigner::ceremony::spawn_resolver(node.clone(), rutli_cosigner::ceremony::RESOLVER_INTERVAL);
+    rutli_cosigner::ceremony::spawn_resolver(
+        node.clone(),
+        rutli_cosigner::ceremony::RESOLVER_INTERVAL,
+    );
     // Stale-share check (audit M1): compare this node's sharing of every FROST key with the peers'
     // now and every few minutes; a share found behind is refused for signing until current.
     rutli_cosigner::epoch_check::spawn(node.clone());
@@ -1120,7 +1259,11 @@ async fn main() -> Result<()> {
     Node::spawn_nonce_pruner(node.clone());
 
     let allowed_cns = cfg.signer_allowlist.as_ref().map(|v| {
-        Arc::new(v.iter().cloned().collect::<std::collections::HashSet<String>>())
+        Arc::new(
+            v.iter()
+                .cloned()
+                .collect::<std::collections::HashSet<String>>(),
+        )
     });
     match &allowed_cns {
         Some(cns) => tracing::info!(?cns, "Signer API restricted to allowlisted client CNs"),
@@ -1131,7 +1274,11 @@ async fn main() -> Result<()> {
     }
 
     let peer_cns = cfg.peer_allowlist.as_ref().map(|v| {
-        Arc::new(v.iter().cloned().collect::<std::collections::HashSet<String>>())
+        Arc::new(
+            v.iter()
+                .cloned()
+                .collect::<std::collections::HashSet<String>>(),
+        )
     });
     match &peer_cns {
         Some(cns) => tracing::info!(?cns, "mesh Peer API restricted to allowlisted cosigner CNs"),
@@ -1142,13 +1289,24 @@ async fn main() -> Result<()> {
         ),
     }
     let operator_cns = cfg.operator_allowlist.as_ref().map(|v| {
-        Arc::new(v.iter().cloned().collect::<std::collections::HashSet<String>>())
+        Arc::new(
+            v.iter()
+                .cloned()
+                .collect::<std::collections::HashSet<String>>(),
+        )
     });
     if let Some(cns) = &operator_cns {
-        tracing::info!(?cns, "operator role: KeyStatus, HostedKeyStatus and CeremonySignTest only");
+        tracing::info!(
+            ?cns,
+            "operator role: KeyStatus, HostedKeyStatus and CeremonySignTest only"
+        );
     }
     let refresh_cns = cfg.refresh_allowlist.as_ref().map(|v| {
-        Arc::new(v.iter().cloned().collect::<std::collections::HashSet<String>>())
+        Arc::new(
+            v.iter()
+                .cloned()
+                .collect::<std::collections::HashSet<String>>(),
+        )
     });
     if let Some(cns) = &refresh_cns {
         tracing::info!(?cns, "refresher role: Refresh and KeyStatus only");
@@ -1176,16 +1334,27 @@ async fn main() -> Result<()> {
         }
         let sweep = (node.clone(), peers.clone());
         let interval = std::time::Duration::from_secs(h.anti_entropy_interval_secs.max(10));
-        rutli_cosigner::supervise::spawn_supervised("anti_entropy", sweep, move |(sweep_node, sweep_peers)| async move {
-            loop {
-                tokio::time::sleep(interval).await;
-                match rutli_cosigner::orchestrator::anti_entropy_sweep(&sweep_node, &sweep_peers).await {
-                    Ok(0) => {}
-                    Ok(pulled) => tracing::info!(pulled, "anti-entropy pulled missing hosted keys"),
-                    Err(e) => tracing::warn!(error = %e, "anti-entropy sweep failed"),
+        rutli_cosigner::supervise::spawn_supervised(
+            "anti_entropy",
+            sweep,
+            move |(sweep_node, sweep_peers)| async move {
+                loop {
+                    tokio::time::sleep(interval).await;
+                    match rutli_cosigner::orchestrator::anti_entropy_sweep(
+                        &sweep_node,
+                        &sweep_peers,
+                    )
+                    .await
+                    {
+                        Ok(0) => {}
+                        Ok(pulled) => {
+                            tracing::info!(pulled, "anti-entropy pulled missing hosted keys")
+                        }
+                        Err(e) => tracing::warn!(error = %e, "anti-entropy sweep failed"),
+                    }
                 }
-            }
-        });
+            },
+        );
     }
 
     let hosted_write_quorum = cfg
@@ -1210,7 +1379,9 @@ async fn main() -> Result<()> {
              ceiling is this times the number of cosigners"
         );
     }
-    let decrypt_limiter = Arc::new(rutli_cosigner::ratelimit::DecryptRateLimiter::new(decrypt_limit));
+    let decrypt_limiter = Arc::new(rutli_cosigner::ratelimit::DecryptRateLimiter::new(
+        decrypt_limit,
+    ));
     if cfg.ceremony_sign_test_rate_limit_per_min == 0 {
         tracing::warn!(
             "CeremonySignTest rate limiting is DISABLED — an operator or driver certificate can \
@@ -1232,8 +1403,17 @@ async fn main() -> Result<()> {
         sign_guard: Some(sign_guard),
         refresh_cns,
     };
-    let peer_pins = tls.as_ref().map(|_| PeerPins::from_config(&cfg)).transpose()?.map(Arc::new);
-    let peer = PeerSvc { node, allowed_cns: peer_cns, peer_ids: Some(Arc::new(cfg.peer_identities())), peer_pins };
+    let peer_pins = tls
+        .as_ref()
+        .map(|_| PeerPins::from_config(&cfg))
+        .transpose()?
+        .map(Arc::new);
+    let peer = PeerSvc {
+        node,
+        allowed_cns: peer_cns,
+        peer_ids: Some(Arc::new(cfg.peer_identities())),
+        peer_pins,
+    };
 
     let addr: std::net::SocketAddr = cfg
         .listen
@@ -1250,7 +1430,10 @@ async fn main() -> Result<()> {
     let incoming = rutli_cosigner::accept::incoming(
         listener,
         connection_limit,
-        rutli_cosigner::accept::Deadline::new(rutli_cosigner::accept::HANDSHAKE_TIMEOUT, tls.is_some()),
+        rutli_cosigner::accept::Deadline::new(
+            rutli_cosigner::accept::HANDSHAKE_TIMEOUT,
+            tls.is_some(),
+        ),
     );
     tracing::info!(%addr, connection_limit, "gRPC serving Signer + Peer");
 
@@ -1277,18 +1460,26 @@ async fn main() -> Result<()> {
         .add_service(PeerServer::new(peer))
         .serve_with_incoming_shutdown(incoming, signal)
         .await;
-    serve_outcome(served, shutdown_requested.load(std::sync::atomic::Ordering::SeqCst))
+    serve_outcome(
+        served,
+        shutdown_requested.load(std::sync::atomic::Ordering::SeqCst),
+    )
 }
 
 /// How the gRPC server ended. It returns on its own only after the shutdown signal; returning
 /// without one means it stopped serving, and the process exits non-zero so the orchestrator
 /// restarts it and the stop is visible.
-fn serve_outcome(served: std::result::Result<(), tonic::transport::Error>, shutdown_requested: bool) -> Result<()> {
+fn serve_outcome(
+    served: std::result::Result<(), tonic::transport::Error>,
+    shutdown_requested: bool,
+) -> Result<()> {
     match served {
         Ok(()) if shutdown_requested => Ok(()),
         Ok(()) => {
             tracing::error!("the gRPC server stopped without a shutdown request; exiting non-zero");
-            Err(DaemonError::Io(std::io::Error::other("the gRPC server stopped without a shutdown request")))
+            Err(DaemonError::Io(std::io::Error::other(
+                "the gRPC server stopped without a shutdown request",
+            )))
         }
         Err(e) => {
             tracing::error!(error = %e, "the gRPC server failed");
@@ -1305,12 +1496,16 @@ fn check_config_command(path: &std::path::Path) -> ! {
     let loaded = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read config file {}: {e}", path.display()))
         .and_then(|text| {
-            serde_json::from_str::<Config>(&text).map_err(|e| format!("config file {}: {e}", path.display()))
+            serde_json::from_str::<Config>(&text)
+                .map_err(|e| format!("config file {}: {e}", path.display()))
         })
         .and_then(|cfg| {
             let mut as_lab = cfg.clone();
             as_lab.profile = Some(Profile::Lab);
-            as_lab.validate().map(|()| cfg).map_err(|e| format!("config file {}: {e}", path.display()))
+            as_lab
+                .validate()
+                .map(|()| cfg)
+                .map_err(|e| format!("config file {}: {e}", path.display()))
         });
     let cfg = match loaded {
         Ok(cfg) => cfg,
@@ -1320,7 +1515,10 @@ fn check_config_command(path: &std::path::Path) -> ! {
         }
     };
     let findings = profile::findings(&cfg);
-    let required = findings.iter().filter(|f| f.level == Level::Required).count();
+    let required = findings
+        .iter()
+        .filter(|f| f.level == Level::Required)
+        .count();
     println!(
         "{}: profile {}, {} required and {} advisory finding(s) ({})",
         path.display(),
@@ -1346,7 +1544,10 @@ fn check_config_command(path: &std::path::Path) -> ! {
 /// INFO only when every setting took effect; otherwise WARN naming what did not.
 fn log_core_dumps(d: &rutli_cosigner::process_hardening::CoreDumps) {
     let pattern = d.core_pattern.as_deref().unwrap_or("unknown");
-    let suid = d.suid_dumpable.map(|v| v.to_string()).unwrap_or_else(|| "unknown".into());
+    let suid = d
+        .suid_dumpable
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "unknown".into());
     let linux = cfg!(target_os = "linux");
     if d.all_applied() && !d.may_dump() {
         tracing::info!(
@@ -1383,7 +1584,10 @@ fn log_core_dumps(d: &rutli_cosigner::process_hardening::CoreDumps) {
 fn log_profile(cfg: &Config) {
     use rutli_cosigner::profile::{self, Level, Profile};
     let findings = profile::findings(cfg);
-    let required = findings.iter().filter(|f| f.level == Level::Required).count();
+    let required = findings
+        .iter()
+        .filter(|f| f.level == Level::Required)
+        .count();
     match cfg.profile {
         Some(Profile::Production) => tracing::info!("profile production: every required enforcement setting is on"),
         Some(Profile::Lab) => tracing::info!(
@@ -1401,7 +1605,9 @@ fn log_profile(cfg: &Config) {
     for f in &findings {
         match (f.level, cfg.profile) {
             (Level::Advisory, _) => tracing::warn!("production profile, advisory: {f}"),
-            (Level::Required, Some(Profile::Lab)) => tracing::info!("production profile, not met: {f}"),
+            (Level::Required, Some(Profile::Lab)) => {
+                tracing::info!("production profile, not met: {f}")
+            }
             (Level::Required, _) => tracing::warn!("production profile, not met: {f}"),
         }
     }
@@ -1420,7 +1626,14 @@ fn audit_cross_check_command(
         for j in journals {
             sets.push((j.display().to_string(), audit_check::read_journal_root(j)?));
         }
-        Ok(audit_check::cross_check(&audit, &sets, &audit_check::Options { min_journals, allow_no_intent }))
+        Ok(audit_check::cross_check(
+            &audit,
+            &sets,
+            &audit_check::Options {
+                min_journals,
+                allow_no_intent,
+            },
+        ))
     };
     match run() {
         Ok(report) => {
@@ -1443,26 +1656,47 @@ fn offline_ceremony_node(cfg: &Config) -> Result<Arc<Node>> {
     // It joins the mesh as this node, with this node's certificate: the daemon's pin rules apply.
     cfg.check_peer_pins_required()?;
     cfg.check_own_peer_pin()?;
-    let sealer = cfg.share_seal.as_ref().map(|_| offline_sealer(cfg)).transpose()?;
+    let sealer = cfg
+        .share_seal
+        .as_ref()
+        .map(|_| offline_sealer(cfg))
+        .transpose()?;
     let keystore = KeyStore::open_with_sealer(cfg.data_dir.join("keys"), sealer)?;
-    let node = Arc::new(Node::new(ident(cfg.identifier)?, cfg.max_signers(), cfg.threshold, keystore));
-    let tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose()?;
+    let node = Arc::new(Node::new(
+        ident(cfg.identifier)?,
+        cfg.max_signers(),
+        cfg.threshold,
+        keystore,
+    ));
+    let tls = cfg
+        .tls
+        .as_ref()
+        .map(rutli_cosigner::tls::load)
+        .transpose()?;
     let mut mesh: Vec<Arc<dyn PeerApi>> = Vec::new();
     for p in cfg.peers.iter().filter(|p| p.identifier != cfg.identifier) {
         let dial = tls.as_ref().map(|t| t.peer_dial(p)).transpose()?;
-        mesh.push(Arc::new(GrpcPeer::connect_lazy(ident(p.identifier)?, &p.endpoint, dial)?));
+        mesh.push(Arc::new(GrpcPeer::connect_lazy(
+            ident(p.identifier)?,
+            &p.endpoint,
+            dial,
+        )?));
     }
     node.set_mesh(mesh)?;
     Ok(node)
 }
 
 /// `ceremony resolve`: see [`CeremonyCommand::Resolve`].
-async fn ceremony_resolve_command(cfg: &Config, ceremony_id: &str, assume_lost: &[u16]) -> Result<()> {
+async fn ceremony_resolve_command(
+    cfg: &Config,
+    ceremony_id: &str,
+    assume_lost: &[u16],
+) -> Result<()> {
     let _lock = rutli_cosigner::instance_lock::InstanceLock::acquire(&cfg.data_dir)?;
     let node = offline_ceremony_node(cfg)?;
-    let rec = node
-        .ceremony_record(ceremony_id)
-        .ok_or_else(|| DaemonError::Config(format!("this node has no record of ceremony {ceremony_id}")))?;
+    let rec = node.ceremony_record(ceremony_id).ok_or_else(|| {
+        DaemonError::Config(format!("this node has no record of ceremony {ceremony_id}"))
+    })?;
     let info = if assume_lost.is_empty() {
         rutli_cosigner::ceremony::resolve(&node, ceremony_id).await?
     } else {
@@ -1496,24 +1730,35 @@ async fn ceremony_recover_commit_command(cfg: &Config, ceremony_id: &str) -> Res
 fn ceremony_drop_quarantine_command(cfg: &Config, ceremony_id: &str) -> Result<()> {
     let _lock = rutli_cosigner::instance_lock::InstanceLock::acquire(&cfg.data_dir)?;
     let node = offline_ceremony_node(cfg)?;
-    let rec = node
-        .ceremony_record(ceremony_id)
-        .ok_or_else(|| DaemonError::Config(format!("this node has no record of ceremony {ceremony_id}")))?;
+    let rec = node.ceremony_record(ceremony_id).ok_or_else(|| {
+        DaemonError::Config(format!("this node has no record of ceremony {ceremony_id}"))
+    })?;
     if !rec.quarantined {
-        return Err(DaemonError::Config(format!("ceremony {ceremony_id} holds no quarantined share here")));
+        return Err(DaemonError::Config(format!(
+            "ceremony {ceremony_id} holds no quarantined share here"
+        )));
     }
     node.drop_quarantine(ceremony_id)?;
-    println!("dropped the quarantined share of ceremony {ceremony_id} ({} of {})", rec.kind, rec.key_id);
+    println!(
+        "dropped the quarantined share of ceremony {ceremony_id} ({} of {})",
+        rec.kind, rec.key_id
+    );
     Ok(())
 }
 
 /// `discard-partial-key`: see [`Command::DiscardPartialKey`].
-async fn discard_partial_key_command(cfg: &Config, key_id: &str, confirm_group_key: &str) -> Result<()> {
+async fn discard_partial_key_command(
+    cfg: &Config,
+    key_id: &str,
+    confirm_group_key: &str,
+) -> Result<()> {
     let _lock = rutli_cosigner::instance_lock::InstanceLock::acquire(&cfg.data_dir)?;
     let confirm: [u8; 32] = hex::decode(confirm_group_key.trim())
         .ok()
         .and_then(|b| b.try_into().ok())
-        .ok_or_else(|| DaemonError::Config("--confirm-group-key must be 64 hex characters".into()))?;
+        .ok_or_else(|| {
+            DaemonError::Config("--confirm-group-key must be 64 hex characters".into())
+        })?;
     let node = offline_ceremony_node(cfg)?;
     let report = rutli_cosigner::ceremony::discard_partial_key(&node, key_id, &confirm).await?;
     println!(
@@ -1537,17 +1782,36 @@ async fn refresh_cluster_id(cfg: &Config) -> Option<String> {
     if let Some(id) = cfg.cluster_id.as_ref().filter(|id| !id.is_empty()) {
         return Some(id.clone());
     }
-    let tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose().ok()?;
+    let tls = cfg
+        .tls
+        .as_ref()
+        .map(rutli_cosigner::tls::load)
+        .transpose()
+        .ok()?;
     let mut answers: Vec<String> = Vec::new();
     for p in &cfg.peers {
-        let Ok(mut c) = roster_signer_client(tls.as_ref(), p).await else { continue };
-        if let Ok(reply) = c.capabilities(rutli_cosigner::pb::CapabilitiesRequest {}).await {
+        let Ok(mut c) = roster_signer_client(tls.as_ref(), p).await else {
+            continue;
+        };
+        if let Ok(reply) = c
+            .capabilities(rutli_cosigner::pb::CapabilitiesRequest {})
+            .await
+        {
             answers.push(reply.into_inner().cluster_id);
         }
     }
     let found = rutli_cosigner::intent::agree_on_cluster_id(&answers, cfg.peers.len());
-    if answers.iter().filter(|a| !a.is_empty()).collect::<std::collections::HashSet<_>>().len() > 1 {
-        tracing::error!(?answers, "the cosigners report DIFFERENT cluster ids — using the majority value, if any");
+    if answers
+        .iter()
+        .filter(|a| !a.is_empty())
+        .collect::<std::collections::HashSet<_>>()
+        .len()
+        > 1
+    {
+        tracing::error!(
+            ?answers,
+            "the cosigners report DIFFERENT cluster ids — using the majority value, if any"
+        );
     }
     found
 }
@@ -1560,7 +1824,12 @@ async fn refresh_command(
     tls_server_name: Option<String>,
 ) -> Result<()> {
     let endpoint = target
-        .or_else(|| cfg.peers.iter().find(|p| p.identifier != cfg.identifier).map(|p| p.endpoint.clone()))
+        .or_else(|| {
+            cfg.peers
+                .iter()
+                .find(|p| p.identifier != cfg.identifier)
+                .map(|p| p.endpoint.clone())
+        })
         .or_else(|| cfg.peers.first().map(|p| p.endpoint.clone()))
         .ok_or_else(|| DaemonError::Config("no target endpoint for refresh".into()))?;
 
@@ -1568,7 +1837,9 @@ async fn refresh_command(
         Some(tls_cfg) => {
             let tls = rutli_cosigner::tls::load(tls_cfg)?;
             let same = |a: &str, b: &str| {
-                a.trim().trim_end_matches('/').eq_ignore_ascii_case(b.trim().trim_end_matches('/'))
+                a.trim()
+                    .trim_end_matches('/')
+                    .eq_ignore_ascii_case(b.trim().trim_end_matches('/'))
             };
             let roster = cfg.peers.iter().find(|p| same(&p.endpoint, &endpoint));
             let name = tls_server_name
@@ -1582,10 +1853,12 @@ async fn refresh_command(
             // No call deadline: a refresh runs a whole ceremony across the mesh.
             operator_channel(&endpoint, &tls, &name, roster, None).await?
         }
-        None => tonic::transport::Endpoint::from_shared(endpoint.clone())
-            .map_err(|e| DaemonError::Config(format!("bad endpoint {endpoint}: {e}")))?
-            .connect()
-            .await?,
+        None => {
+            tonic::transport::Endpoint::from_shared(endpoint.clone())
+                .map_err(|e| DaemonError::Config(format!("bad endpoint {endpoint}: {e}")))?
+                .connect()
+                .await?
+        }
     };
     // The ceremony intent (refresh-fence remediation, L2): signed with the very certificate this
     // client presents, so every cosigner can check that a refresher (or, while signer_may_refresh,
@@ -1605,7 +1878,10 @@ async fn refresh_command(
                 );
                 println!(
                     "ceremony {} (intent signed by {} for cluster {cluster})",
-                    rutli_cosigner::intent::ceremony_id_for(rutli_cosigner::node::CeremonyKind::Refresh, &request_id),
+                    rutli_cosigner::intent::ceremony_id_for(
+                        rutli_cosigner::node::CeremonyKind::Refresh,
+                        &request_id
+                    ),
                     t.cert.display()
                 );
                 Some(rutli_cosigner::intent::sign_intent(&signer, &intent)?)
@@ -1623,7 +1899,13 @@ async fn refresh_command(
     };
     tracing::info!(%endpoint, %key_id, intent = intent.is_some(), "triggering proactive share refresh");
     let mut client = SignerClient::new(channel);
-    let reply = client.refresh(RefreshRequest { key_id: key_id.to_string(), intent }).await?.into_inner();
+    let reply = client
+        .refresh(RefreshRequest {
+            key_id: key_id.to_string(),
+            intent,
+        })
+        .await?
+        .into_inner();
     println!(
         "refresh complete — group key unchanged: {}",
         hex::encode(reply.group_verifying_key)
@@ -1653,8 +1935,16 @@ async fn verify_key_command(
     use rutli_cosigner::pb::{CeremonySignTestRequest, KeyStatusRequest};
     use rutli_cosigner::verify_key::{check_views, sign_test_plan, NodeView};
 
-    let tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose()?;
-    let probe = cfg.tls.as_ref().map(rutli_cosigner::tls_probe::TlsProbe::new).transpose()?;
+    let tls = cfg
+        .tls
+        .as_ref()
+        .map(rutli_cosigner::tls::load)
+        .transpose()?;
+    let probe = cfg
+        .tls
+        .as_ref()
+        .map(rutli_cosigner::tls_probe::TlsProbe::new)
+        .transpose()?;
     let mut peers = cfg.peers.clone();
     peers.sort_by_key(|p| p.identifier);
     let roster: Vec<u16> = peers.iter().map(|p| p.identifier).collect();
@@ -1666,13 +1956,27 @@ async fn verify_key_command(
         // another and make an inconsistent cluster look consistent.
         let client = roster_signer_client(tls.as_ref(), p).await;
         let status = match &client {
-            Ok(c) => match c.clone().key_status(KeyStatusRequest { key_id: key_id.to_string() }).await {
+            Ok(c) => match c
+                .clone()
+                .key_status(KeyStatusRequest {
+                    key_id: key_id.to_string(),
+                })
+                .await
+            {
                 Ok(r) => Ok(r.into_inner()),
-                Err(s) => Err(explain_status(&s, probe.as_ref(), &p.endpoint, &p.server_name()).await),
+                Err(s) => {
+                    Err(explain_status(&s, probe.as_ref(), &p.endpoint, &p.server_name()).await)
+                }
             },
-            Err(e) => Err(explain_unreachable(e, probe.as_ref(), &p.endpoint, &p.server_name()).await),
+            Err(e) => {
+                Err(explain_unreachable(e, probe.as_ref(), &p.endpoint, &p.server_name()).await)
+            }
         };
-        views.push(NodeView { identifier: p.identifier, endpoint: p.endpoint.clone(), status });
+        views.push(NodeView {
+            identifier: p.identifier,
+            endpoint: p.endpoint.clone(),
+            status,
+        });
         clients.push((p.identifier, client));
     }
     let mut report = check_views(key_id, expect_fingerprint, &roster, cfg.threshold, &views);
@@ -1681,13 +1985,20 @@ async fn verify_key_command(
         if report.ok {
             // Every t-subset, leader rotating: every share and every possible quorum is exercised.
             let clients: std::collections::BTreeMap<u16, _> = clients.into_iter().collect();
-            let endpoints: std::collections::BTreeMap<u16, (&str, String)> =
-                peers.iter().map(|p| (p.identifier, (p.endpoint.as_str(), p.server_name()))).collect();
+            let endpoints: std::collections::BTreeMap<u16, (&str, String)> = peers
+                .iter()
+                .map(|p| (p.identifier, (p.endpoint.as_str(), p.server_name())))
+                .collect();
             for (leader, signers) in sign_test_plan(&roster, cfg.threshold) {
-                let (Some((endpoint, server_name)), Some(client)) = (endpoints.get(&leader), clients.get(&leader))
+                let (Some((endpoint, server_name)), Some(client)) =
+                    (endpoints.get(&leader), clients.get(&leader))
                 else {
                     // Through the report, so that it fails and names no fingerprint.
-                    report.record_signature(leader, &signers, Err("the leader is not in the roster".into()));
+                    report.record_signature(
+                        leader,
+                        &signers,
+                        Err("the leader is not in the roster".into()),
+                    );
                     continue;
                 };
                 let endpoint = *endpoint;
@@ -1704,21 +2015,30 @@ async fn verify_key_command(
                             let r = r.into_inner();
                             Ok((r.message, r.signature))
                         }
-                        Err(s) => Err(explain_status(&s, probe.as_ref(), endpoint, server_name).await),
+                        Err(s) => {
+                            Err(explain_status(&s, probe.as_ref(), endpoint, server_name).await)
+                        }
                     },
-                    Err(e) => Err(explain_unreachable(e, probe.as_ref(), endpoint, server_name).await),
+                    Err(e) => {
+                        Err(explain_unreachable(e, probe.as_ref(), endpoint, server_name).await)
+                    }
                 };
                 report.record_signature(leader, &signers, result);
             }
         } else {
-            report.problems.push("sign test skipped: the nodes' views are inconsistent".into());
+            report
+                .problems
+                .push("sign test skipped: the nodes' views are inconsistent".into());
         }
     }
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        println!("{command} {key_id} (FROST) — {}", expectation(report.expected_fingerprint.as_deref()));
+        println!(
+            "{command} {key_id} (FROST) — {}",
+            expectation(report.expected_fingerprint.as_deref())
+        );
         for n in &report.nodes {
             match &n.error {
                 Some(e) => println!("  node {} {}: {e}", n.identifier, n.endpoint),
@@ -1746,15 +2066,22 @@ async fn verify_key_command(
         if let Some(fp) = &report.fingerprint {
             println!("  fingerprint {fp}");
         }
-        if let (Some(origin), Some(epoch), Some(refreshes)) = (&report.origin, report.epoch, report.refresh_count) {
-            println!("  origin {origin} epoch {epoch} refreshes {refreshes} threshold {}", report.threshold);
+        if let (Some(origin), Some(epoch), Some(refreshes)) =
+            (&report.origin, report.epoch, report.refresh_count)
+        {
+            println!(
+                "  origin {origin} epoch {epoch} refreshes {refreshes} threshold {}",
+                report.threshold
+            );
         }
         for s in &report.sign_test {
             println!(
                 "  sign test by {:?} led by node {}: {}",
                 s.signers,
                 s.leader,
-                s.error.as_deref().unwrap_or("ok (verify_strict under the Canton key)")
+                s.error
+                    .as_deref()
+                    .unwrap_or("ok (verify_strict under the Canton key)")
             );
         }
         for p in &report.problems {
@@ -1765,7 +2092,10 @@ async fn verify_key_command(
     if report.ok {
         Ok(())
     } else {
-        Err(DaemonError::Ceremony(format!("{command}: {} problem(s)", report.problems.len())))
+        Err(DaemonError::Ceremony(format!(
+            "{command}: {} problem(s)",
+            report.problems.len()
+        )))
     }
 }
 
@@ -1783,7 +2113,11 @@ async fn verify_hosted_command(
     use rutli_cosigner::pb::HostedKeyStatusRequest;
     use rutli_cosigner::verify_hosted::{check_hosted_views, HostedView};
 
-    let tls = cfg.tls.as_ref().map(rutli_cosigner::tls::load).transpose()?;
+    let tls = cfg
+        .tls
+        .as_ref()
+        .map(rutli_cosigner::tls::load)
+        .transpose()?;
     let mut peers = cfg.peers.clone();
     peers.sort_by_key(|p| p.identifier);
     let roster: Vec<u16> = peers.iter().map(|p| p.identifier).collect();
@@ -1793,20 +2127,29 @@ async fn verify_hosted_command(
         // another and make a key missing on one node look present everywhere.
         let status = match roster_signer_client(tls.as_ref(), p).await {
             Ok(mut c) => c
-                .hosted_key_status(HostedKeyStatusRequest { key_id: key_id.to_string() })
+                .hosted_key_status(HostedKeyStatusRequest {
+                    key_id: key_id.to_string(),
+                })
                 .await
                 .map(|r| r.into_inner())
                 .map_err(|s| status_text(&s)),
             Err(e) => Err(format!("unreachable: {}", error_chain(&e))),
         };
-        views.push(HostedView { identifier: p.identifier, endpoint: p.endpoint.clone(), status });
+        views.push(HostedView {
+            identifier: p.identifier,
+            endpoint: p.endpoint.clone(),
+            status,
+        });
     }
     let report = check_hosted_views(key_id, expect_fingerprint, &roster, &views);
 
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        println!("{command} {key_id} (hosted) — {}", expectation(report.expected_fingerprint.as_deref()));
+        println!(
+            "{command} {key_id} (hosted) — {}",
+            expectation(report.expected_fingerprint.as_deref())
+        );
         for n in &report.nodes {
             match &n.error {
                 Some(e) => println!("  node {} {}: {e}", n.identifier, n.endpoint),
@@ -1835,7 +2178,10 @@ async fn verify_hosted_command(
     if report.ok {
         Ok(())
     } else {
-        Err(DaemonError::Config(format!("{command}: {} problem(s)", report.problems.len())))
+        Err(DaemonError::Config(format!(
+            "{command}: {} problem(s)",
+            report.problems.len()
+        )))
     }
 }
 
@@ -1883,7 +2229,14 @@ async fn roster_signer_client(
 ) -> Result<SignerClient<tonic::transport::Channel>> {
     match tls {
         Some(t) => Ok(SignerClient::new(
-            operator_channel(&p.endpoint, t, &p.server_name(), Some(p), Some(OPERATOR_CALL_TIMEOUT)).await?,
+            operator_channel(
+                &p.endpoint,
+                t,
+                &p.server_name(),
+                Some(p),
+                Some(OPERATOR_CALL_TIMEOUT),
+            )
+            .await?,
         )),
         None => signer_client(&p.endpoint, None).await,
     }
@@ -1909,13 +2262,22 @@ async fn operator_channel(
     let pins = roster.map(|p| p.tls_spki_pins()).transpose()?.flatten();
     match pins {
         Some(pins) => {
-            let dial = tls.dial_as(server_name, Some(pins), roster.map(|p| p.identifier).unwrap_or(0))?;
-            Ok(deadline(dial.endpoint(endpoint)?).connect_with_connector(dial.connector()).await?)
+            let dial = tls.dial_as(
+                server_name,
+                Some(pins),
+                roster.map(|p| p.identifier).unwrap_or(0),
+            )?;
+            Ok(deadline(dial.endpoint(endpoint)?)
+                .connect_with_connector(dial.connector())
+                .await?)
         }
         None => {
             let ep = tonic::transport::Endpoint::from_shared(endpoint.to_string())
                 .map_err(|e| DaemonError::Config(format!("bad endpoint {endpoint}: {e}")))?;
-            Ok(deadline(ep).tls_config(tls.client_for(server_name))?.connect().await?)
+            Ok(deadline(ep)
+                .tls_config(tls.client_for(server_name))?
+                .connect()
+                .await?)
         }
     }
 }
@@ -1926,7 +2288,9 @@ fn log_peer_pins(cfg: &Config) {
     let mut unpinned = Vec::new();
     for p in &cfg.peers {
         match &p.tls_spki_sha256 {
-            Some(pins) => tracing::info!(peer = p.identifier, cn = %p.client_cn(), ?pins, "peer {} TLS key pins", p.identifier),
+            Some(pins) => {
+                tracing::info!(peer = p.identifier, cn = %p.client_cn(), ?pins, "peer {} TLS key pins", p.identifier)
+            }
             None => unpinned.push(p.identifier),
         }
     }
@@ -1954,7 +2318,10 @@ fn tls_spki_files_command(certs: &[std::path::PathBuf]) -> Result<()> {
 /// `tls spki --peers`: the key each roster node presents now, against its pins in this config.
 /// Exits non-zero when a node presents a key its pins do not list, or cannot be reached.
 async fn tls_spki_peers_command(cfg: &Config) -> Result<()> {
-    let tls_cfg = cfg.tls.as_ref().ok_or_else(|| DaemonError::Config("tls spki --peers needs tls in the config".into()))?;
+    let tls_cfg = cfg
+        .tls
+        .as_ref()
+        .ok_or_else(|| DaemonError::Config("tls spki --peers needs tls in the config".into()))?;
     let tls = rutli_cosigner::tls::load(tls_cfg)?;
     let mut bad = 0;
     for p in &cfg.peers {
@@ -1970,7 +2337,12 @@ async fn tls_spki_peers_command(cfg: &Config) -> Result<()> {
                     }
                     None => "no pins configured",
                 };
-                println!("peer {} {} ({cn}): {}  {verdict}", p.identifier, p.endpoint, hex::encode(key));
+                println!(
+                    "peer {} {} ({cn}): {}  {verdict}",
+                    p.identifier,
+                    p.endpoint,
+                    hex::encode(key)
+                );
             }
             Err(e) => {
                 bad += 1;
@@ -1981,7 +2353,9 @@ async fn tls_spki_peers_command(cfg: &Config) -> Result<()> {
     if bad == 0 {
         Ok(())
     } else {
-        Err(DaemonError::Config(format!("tls spki --peers: {bad} node(s) not pinned or unreachable")))
+        Err(DaemonError::Config(format!(
+            "tls spki --peers: {bad} node(s) not pinned or unreachable"
+        )))
     }
 }
 
@@ -2081,14 +2455,23 @@ fn backup_retain_command(
         keep_count,
     };
     let node = cfg.identifier;
-    let plan = r::run(dir, &cfg.data_dir.join("keys"), &settings, rutli_cosigner::intent::now_ms(), dry_run)
-        .map_err(|e| DaemonError::Config(format!("backup-retain: {e}")))?;
+    let plan = r::run(
+        dir,
+        &cfg.data_dir.join("keys"),
+        &settings,
+        rutli_cosigner::intent::now_ms(),
+        dry_run,
+    )
+    .map_err(|e| DaemonError::Config(format!("backup-retain: {e}")))?;
     let (mut deleted, mut kept) = (0, 0);
     for (name, verdict) in &plan.verdicts {
         match verdict {
             Verdict::Keep(why) => {
                 kept += 1;
-                println!("BACKUP_RETENTION node={node} archive={name} verdict=keep reason={}", why.code());
+                println!(
+                    "BACKUP_RETENTION node={node} archive={name} verdict=keep reason={}",
+                    why.code()
+                );
             }
             Verdict::DeleteOlderEpoch { covered_by } => {
                 deleted += 1;
@@ -2107,7 +2490,9 @@ fn backup_retain_command(
         }
     }
     match &plan.skip {
-        Some(Skip::Closed(why)) => println!("BACKUP_RETENTION_SKIPPED node={node} mode=nothing-deleted reason=\"{why}\""),
+        Some(Skip::Closed(why)) => {
+            println!("BACKUP_RETENTION_SKIPPED node={node} mode=nothing-deleted reason=\"{why}\"")
+        }
         Some(Skip::CapOnly(why)) => {
             println!("BACKUP_RETENTION_SKIPPED node={node} mode=count-cap-only reason=\"{why}\"")
         }
@@ -2150,7 +2535,10 @@ fn residue_scan_command(
         sealer: sealer.as_ref(),
         backups,
         legacy_dek,
-        config_names_secret_env: cfg.share_seal.as_ref().is_some_and(|s| s.secret_env.is_some()),
+        config_names_secret_env: cfg
+            .share_seal
+            .as_ref()
+            .is_some_and(|s| s.secret_env.is_some()),
     };
     let report = rutli_cosigner::residue::scan(&input);
     if json {
@@ -2170,13 +2558,20 @@ fn backup_command(cfg: &Config, out: &std::path::Path) -> Result<()> {
     let src = cfg.data_dir.join("keys");
     std::fs::create_dir_all(out)?;
     let n = copy_dir_files(&src, out, true)?;
-    println!("backed up {n} share file(s) from {} to {}", src.display(), out.display());
+    println!(
+        "backed up {n} share file(s) from {} to {}",
+        src.display(),
+        out.display()
+    );
     // The node's sign journals (audit C2): its own record of every share it released, which
     // `audit-cross-check` compares with the driver's audit log. Never restored over a live journal.
     let journal = cfg.data_dir.join("journal");
     if journal.is_dir() {
         let segments = copy_journal(&journal, &out.join("journal"))?;
-        println!("backed up {segments} sign-journal segment(s) to {}", out.join("journal").display());
+        println!(
+            "backed up {segments} sign-journal segment(s) to {}",
+            out.join("journal").display()
+        );
     }
     // The break-glass "cleared delete intent" markers (empty files): `restore` merges them, so a
     // node restored after an undelete keeps ignoring that tombstone (audit F7).
@@ -2193,7 +2588,10 @@ fn backup_command(cfg: &Config, out: &std::path::Path) -> Result<()> {
                 markers += 1;
             }
         }
-        println!("backed up {markers} cleared-delete-intent marker(s) to {}", dst.display());
+        println!(
+            "backed up {markers} cleared-delete-intent marker(s) to {}",
+            dst.display()
+        );
     }
     if cfg.share_seal.is_none() {
         tracing::warn!("shares are NOT sealed — this backup contains plaintext key shares");
@@ -2225,8 +2623,10 @@ fn readiness(cfg: &Config) -> std::result::Result<(), String> {
     // own DNS name: a not-ready pod normally loses its Service DNS record, so a probe that resolved
     // itself would keep itself not-ready forever (the shipped headless Service publishes not-ready
     // addresses, but the probe must not depend on that).
-    let listen: std::net::SocketAddr =
-        cfg.listen.parse().map_err(|e| format!("bad listen addr {}: {e}", cfg.listen))?;
+    let listen: std::net::SocketAddr = cfg
+        .listen
+        .parse()
+        .map_err(|e| format!("bad listen addr {}: {e}", cfg.listen))?;
     let target = match listen.ip() {
         std::net::IpAddr::V4(ip) if ip.is_unspecified() => {
             std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, listen.port()))
@@ -2259,7 +2659,14 @@ fn restore_command(
     }
     let n = rutli_cosigner::restore::apply(&keystore, &plan, false)?;
     for (key_id, _) in &plan.install {
-        println!("  {key_id}: restored{}", if plan.broke_glass.contains(key_id) { " (BREAK-GLASS)" } else { "" });
+        println!(
+            "  {key_id}: restored{}",
+            if plan.broke_glass.contains(key_id) {
+                " (BREAK-GLASS)"
+            } else {
+                ""
+            }
+        );
     }
     for marker in &plan.cleared {
         println!("  .cleared/{marker}: cleared delete intent marker merged");
@@ -2293,7 +2700,9 @@ fn offline_sealer(cfg: &Config) -> Result<Arc<rutli_cosigner::seal::Sealer>> {
         )
     })?;
     let keys = rutli_cosigner::seal::SealKeys::load(seal_cfg, cfg.identifier)?;
-    Ok(Arc::new(keys.sealer(cfg.identifier).with_keyfile(&cfg.keyfile)))
+    Ok(Arc::new(
+        keys.sealer(cfg.identifier).with_keyfile(&cfg.keyfile),
+    ))
 }
 
 /// Say which key-file format this node writes and what it accepts (audit M4 rollout).
@@ -2318,7 +2727,9 @@ fn log_keyfile_policy(cfg: &Config) {
 /// what a v2 migration and a DEK rotation watch go to zero.
 fn publish_keyfile_gauges(keystore: &KeyStore) {
     use rutli_cosigner::seal::DekUse;
-    let Ok(paths) = keystore.key_file_paths() else { return };
+    let Ok(paths) = keystore.key_file_paths() else {
+        return;
+    };
     let mut counts = std::collections::BTreeMap::new();
     for path in paths {
         let (format, dek) = match keystore.file_state(&path) {
@@ -2337,7 +2748,8 @@ fn publish_keyfile_gauges(keystore: &KeyStore) {
     for format in ["v1", "v2", "plaintext"] {
         for dek in ["current", "previous", "unknown", "none"] {
             let n = counts.get(&(format, dek)).copied().unwrap_or(0);
-            metrics::gauge!(rutli_cosigner::metrics::KEYFILES, "format" => format, "dek" => dek).set(n as f64);
+            metrics::gauge!(rutli_cosigner::metrics::KEYFILES, "format" => format, "dek" => dek)
+                .set(n as f64);
         }
     }
 }
@@ -2346,7 +2758,11 @@ fn publish_keyfile_gauges(keystore: &KeyStore) {
 fn seal_command(command: SealCommand) -> Result<()> {
     use rutli_cosigner::seal::NodeSealBundle;
     match command {
-        SealCommand::SplitLegacy { nodes, out_dir, master_env } => {
+        SealCommand::SplitLegacy {
+            nodes,
+            out_dir,
+            master_env,
+        } => {
             let mut ids = nodes.clone();
             ids.sort_unstable();
             ids.dedup();
@@ -2364,10 +2780,15 @@ fn seal_command(command: SealCommand) -> Result<()> {
                 write_new_private_file(&path, &bundle.to_json()?)?;
                 pins.push((id, hex::encode(bundle.dist_public_key()), path));
             }
-            let commitment = hex::encode(rutli_cosigner::wrap::legacy_commitment_key(master.as_bytes()));
+            let commitment = hex::encode(rutli_cosigner::wrap::legacy_commitment_key(
+                master.as_bytes(),
+            ));
             drop(master);
             for (id, _, path) in &pins {
-                println!("wrote {} (node {id}: its share DEK + distribution seed, nothing else)", path.display());
+                println!(
+                    "wrote {} (node {id}: its share DEK + distribution seed, nothing else)",
+                    path.display()
+                );
             }
             println!("\nPublic values to pin (identical on every node; not secret):");
             println!("  hosted_keys.commitment_key = {commitment}");
@@ -2391,7 +2812,10 @@ fn seal_command(command: SealCommand) -> Result<()> {
             let bundle = NodeSealBundle::random(node);
             write_new_private_file(&out, &bundle.to_json()?)?;
             println!("wrote {} (node {node}, fresh random keys)", out.display());
-            println!("  dist_public_key = {}", hex::encode(bundle.dist_public_key()));
+            println!(
+                "  dist_public_key = {}",
+                hex::encode(bundle.dist_public_key())
+            );
             println!(
                 "A new cluster also needs one hosted_keys.commitment_key, the same on every node: \
                  `openssl rand -hex 32`."
@@ -2402,7 +2826,11 @@ fn seal_command(command: SealCommand) -> Result<()> {
             let bundle = NodeSealBundle::parse(&bytes)?;
             println!("node {}", bundle.node);
             println!("dist_public_key {}", hex::encode(bundle.dist_public_key()));
-            println!("share_dek id {} (+{} previous)", bundle.dek_id(), bundle.previous_count());
+            println!(
+                "share_dek id {} (+{} previous)",
+                bundle.dek_id(),
+                bundle.previous_count()
+            );
         }
         SealCommand::RotateDek { r#in, out } => {
             let bundle = NodeSealBundle::parse(&zeroize::Zeroizing::new(std::fs::read(&r#in)?))?;
@@ -2425,7 +2853,10 @@ fn seal_command(command: SealCommand) -> Result<()> {
         SealCommand::DropPrevious { r#in, out } => {
             let bundle = NodeSealBundle::parse(&zeroize::Zeroizing::new(std::fs::read(&r#in)?))?;
             if bundle.previous_count() == 0 {
-                return Err(DaemonError::Config(format!("{} has no previous DEKs", r#in.display())));
+                return Err(DaemonError::Config(format!(
+                    "{} has no previous DEKs",
+                    r#in.display()
+                )));
             }
             let dropped = bundle.without_previous();
             write_new_private_file(&out, &dropped.to_json()?)?;
@@ -2457,28 +2888,50 @@ async fn delete_hosted_key_command(
 ) -> Result<()> {
     use rutli_cosigner::pb;
     let tls_cfg = cfg.tls.as_ref().ok_or_else(|| {
-        DaemonError::Config("delete-hosted-key needs tls: the delete intent is signed with tls.cert / tls.key".into())
+        DaemonError::Config(
+            "delete-hosted-key needs tls: the delete intent is signed with tls.cert / tls.key"
+                .into(),
+        )
     })?;
     let signer = rutli_cosigner::request_auth::NodeSigner::from_files(&tls_cfg.cert, &tls_cfg.key)?;
     let peer = match &target {
-        Some(t) => cfg.peers.iter().find(|p| p.endpoint.trim_end_matches('/') == t.trim_end_matches('/')),
+        Some(t) => cfg
+            .peers
+            .iter()
+            .find(|p| p.endpoint.trim_end_matches('/') == t.trim_end_matches('/')),
         None => cfg.peers.first(),
     };
-    let endpoint = target.clone().or_else(|| peer.map(|p| p.endpoint.clone())).ok_or_else(|| {
-        DaemonError::Config("no target endpoint".into())
-    })?;
-    let name = tls_server_name.or_else(|| peer.map(|p| p.server_name())).or_else(|| tls_cfg.domain.clone()).ok_or_else(
-        || DaemonError::Config(format!("{endpoint} is not a roster endpoint: pass --tls-server-name")),
-    )?;
+    let endpoint = target
+        .clone()
+        .or_else(|| peer.map(|p| p.endpoint.clone()))
+        .ok_or_else(|| DaemonError::Config("no target endpoint".into()))?;
+    let name = tls_server_name
+        .or_else(|| peer.map(|p| p.server_name()))
+        .or_else(|| tls_cfg.domain.clone())
+        .ok_or_else(|| {
+            DaemonError::Config(format!(
+                "{endpoint} is not a roster endpoint: pass --tls-server-name"
+            ))
+        })?;
     let tls = rutli_cosigner::tls::load(tls_cfg)?;
-    let mut client = SignerClient::new(operator_channel(&endpoint, &tls, &name, peer, Some(OPERATOR_CALL_TIMEOUT)).await?);
-    let cluster_id = client.capabilities(pb::CapabilitiesRequest {}).await?.into_inner().cluster_id;
+    let mut client = SignerClient::new(
+        operator_channel(&endpoint, &tls, &name, peer, Some(OPERATOR_CALL_TIMEOUT)).await?,
+    );
+    let cluster_id = client
+        .capabilities(pb::CapabilitiesRequest {})
+        .await?
+        .into_inner()
+        .cluster_id;
     if cluster_id.is_empty() {
-        return Err(DaemonError::Config(format!("{endpoint} reports no cluster id — a cosigner older than intents")));
+        return Err(DaemonError::Config(format!(
+            "{endpoint} reports no cluster id — a cosigner older than intents"
+        )));
     }
     let digest = rutli_cosigner::intent::delete_digest(key_id);
     let (nonce, collected) = match inbox {
-        Some(dir) if approvals > 0 => collect_delete_approvals(dir, key_id, &digest, approvals, approval_timeout)?,
+        Some(dir) if approvals > 0 => {
+            collect_delete_approvals(dir, key_id, &digest, approvals, approval_timeout)?
+        }
         _ => (Vec::new(), Vec::new()),
     };
     let now = rutli_cosigner::intent::now_ms();
@@ -2499,7 +2952,10 @@ async fn delete_hosted_key_command(
     };
     let signed = rutli_cosigner::intent::sign_intent(&signer, &intent)?;
     let reply = client
-        .delete_key(pb::DeleteKeyRequest { key_id: key_id.into(), intent: Some(signed) })
+        .delete_key(pb::DeleteKeyRequest {
+            key_id: key_id.into(),
+            intent: Some(signed),
+        })
         .await
         .map_err(|s| DaemonError::Config(format!("DeleteKey refused: {}", status_text(&s))))?
         .into_inner();
@@ -2529,7 +2985,8 @@ fn collect_delete_approvals(
     // Domain-separated from sign approvals (audit F6): the request id is over `delete:<key>`, and
     // the pending file shows exactly that as its keyId, so `rutli-approve` recomputes the id from
     // what it displays and knows it is approving a DELETE (and checks the digest is the key's).
-    let request_id = rutli_cosigner::intent::delete_approval_request_id(key_id, delete_digest, &nonce);
+    let request_id =
+        rutli_cosigner::intent::delete_approval_request_id(key_id, delete_digest, &nonce);
     let (pending, approvals_dir) = (inbox.join("pending"), inbox.join("approvals"));
     std::fs::create_dir_all(&pending)?;
     std::fs::create_dir_all(&approvals_dir)?;
@@ -2553,17 +3010,22 @@ fn collect_delete_approvals(
         let mut found: std::collections::BTreeMap<String, Vec<u8>> = Default::default();
         for entry in std::fs::read_dir(&approvals_dir)? {
             let path = entry?.path();
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or_default()
+                .to_string();
             if !name.starts_with(&format!("{request_id}.")) || !name.ends_with(".sig") {
                 continue;
             }
-            let Ok(v) = serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path)?) else { continue };
+            let Ok(v) = serde_json::from_slice::<serde_json::Value>(&std::fs::read(&path)?) else {
+                continue;
+            };
             let (Some(id), Some(rid), Some(sig)) = (
                 v.get("approverId").and_then(serde_json::Value::as_str),
                 v.get("requestId").and_then(serde_json::Value::as_str),
                 v.get("signature").and_then(serde_json::Value::as_str),
-            )
-            else {
+            ) else {
                 continue;
             };
             if rid != request_id {
@@ -2579,7 +3041,12 @@ fn collect_delete_approvals(
                 nonce.to_vec(),
                 found
                     .into_iter()
-                    .map(|(approver_id, signature)| rutli_cosigner::pb::IntentApproval { approver_id, signature })
+                    .map(
+                        |(approver_id, signature)| rutli_cosigner::pb::IntentApproval {
+                            approver_id,
+                            signature,
+                        },
+                    )
                     .collect(),
             ));
         }
@@ -2611,12 +3078,18 @@ fn hosted_undelete_command(cfg: &Config, key_id: &str) -> Result<()> {
 /// `hosted-clear-tombstone`: see [`Command::HostedClearTombstone`].
 fn hosted_clear_tombstone_command(cfg: &Config, key_id: &str, confirm: &str) -> Result<()> {
     if key_id != confirm {
-        return Err(DaemonError::Config("--confirm-key-id must repeat --key-id".into()));
+        return Err(DaemonError::Config(
+            "--confirm-key-id must repeat --key-id".into(),
+        ));
     }
     let _lock = rutli_cosigner::instance_lock::InstanceLock::acquire(&cfg.data_dir)?;
     let keystore = offline_keystore(cfg)?;
     let t = keystore.clear_tombstone(key_id)?;
-    tracing::warn!(key_id, deleted_at_ms = t.deleted_at_ms, "BREAK-GLASS: tombstone cleared");
+    tracing::warn!(
+        key_id,
+        deleted_at_ms = t.deleted_at_ms,
+        "BREAK-GLASS: tombstone cleared"
+    );
     println!(
         "{key_id}: tombstone cleared on node {} (its delete intent is now ignored here). Clear it on EVERY \
          node before generating the id again.",
@@ -2631,7 +3104,9 @@ fn keyfile_command(cfg: &Config, command: KeyfileCommand) -> Result<()> {
     let sealer = offline_sealer(cfg)?;
     let lock = match command {
         KeyfileCommand::Status | KeyfileCommand::Prove { .. } => None,
-        _ => Some(rutli_cosigner::instance_lock::InstanceLock::acquire(&cfg.data_dir)?),
+        _ => Some(rutli_cosigner::instance_lock::InstanceLock::acquire(
+            &cfg.data_dir,
+        )?),
     };
     let keystore = KeyStore::open_with_sealer(cfg.data_dir.join("keys"), Some(sealer.clone()))?;
     let recipients = rutli_cosigner::share_delivery::list_recipients(&cfg.data_dir)?;
@@ -2685,7 +3160,11 @@ fn keyfile_command(cfg: &Config, command: KeyfileCommand) -> Result<()> {
             );
         }
         KeyfileCommand::Migrate | KeyfileCommand::Downgrade => {
-            let version = if matches!(command, KeyfileCommand::Migrate) { 2 } else { 1 };
+            let version = if matches!(command, KeyfileCommand::Migrate) {
+                2
+            } else {
+                1
+            };
             let plaintext = keystore.plaintext_files()?;
             if !plaintext.is_empty() {
                 return Err(DaemonError::KeyFile(format!(
@@ -2699,10 +3178,18 @@ fn keyfile_command(cfg: &Config, command: KeyfileCommand) -> Result<()> {
                 n += 1;
             }
             for k in &recipients {
-                rutli_cosigner::share_delivery::reseal_recipient(&cfg.data_dir, &sealer, k, version)?;
+                rutli_cosigner::share_delivery::reseal_recipient(
+                    &cfg.data_dir,
+                    &sealer,
+                    k,
+                    version,
+                )?;
                 n += 1;
             }
-            println!("re-sealed {n} key file(s) as format v{version} under DEK {}", sealer.current_dek_id());
+            println!(
+                "re-sealed {n} key file(s) as format v{version} under DEK {}",
+                sealer.current_dek_id()
+            );
             let tombstones = keystore.list_tombstones()?.len();
             if version == 1 && tombstones > 0 {
                 println!(
@@ -2718,7 +3205,11 @@ fn keyfile_command(cfg: &Config, command: KeyfileCommand) -> Result<()> {
                 );
             }
         }
-        KeyfileCommand::Prove { key_id, epoch, report } => {
+        KeyfileCommand::Prove {
+            key_id,
+            epoch,
+            report,
+        } => {
             let share = keystore.load(&key_id)?;
             if share.epoch != epoch {
                 return Err(DaemonError::Config(format!(
@@ -2729,7 +3220,9 @@ fn keyfile_command(cfg: &Config, command: KeyfileCommand) -> Result<()> {
             let live = rutli_cosigner::proof::Live {
                 key_id: key_id.clone(),
                 epoch,
-                group_key: rutli_frost_core::dkg::group_verifying_key_bytes(&share.public_key_package)?,
+                group_key: rutli_frost_core::dkg::group_verifying_key_bytes(
+                    &share.public_key_package,
+                )?,
                 pkp_digest: share.pkp_digest()?,
                 threshold: *share.key_package.min_signers(),
                 roster: share
@@ -2750,7 +3243,11 @@ fn keyfile_command(cfg: &Config, command: KeyfileCommand) -> Result<()> {
             )?;
             println!(
                 "{} {} epoch {} (group key {}, report sha256 {})",
-                if wrote { "recorded: proven" } else { "already recorded: proven" },
+                if wrote {
+                    "recorded: proven"
+                } else {
+                    "already recorded: proven"
+                },
                 marker.key_id,
                 marker.epoch,
                 marker.group_key,
@@ -2767,9 +3264,18 @@ fn keyfile_command(cfg: &Config, command: KeyfileCommand) -> Result<()> {
             let path = cfg.data_dir.join("keys").join(format!("{key_id}.json"));
             let bytes = std::fs::read(&path)?;
             if rutli_cosigner::seal::Sealer::is_sealed(&bytes) {
-                return Err(DaemonError::Config(format!("{} is already sealed", path.display())));
+                return Err(DaemonError::Config(format!(
+                    "{} is already sealed",
+                    path.display()
+                )));
             }
-            let code = hex::encode(sha2::Sha256::digest(&bytes).iter().copied().take(8).collect::<Vec<u8>>());
+            let code = hex::encode(
+                sha2::Sha256::digest(&bytes)
+                    .iter()
+                    .copied()
+                    .take(8)
+                    .collect::<Vec<u8>>(),
+            );
             let what = match keystore.inspect_plaintext(&key_id) {
                 Ok(rutli_cosigner::keystore::Record::Frost(share)) => format!(
                     "FROST share, group key {}, epoch {}",
@@ -2782,7 +3288,10 @@ fn keyfile_command(cfg: &Config, command: KeyfileCommand) -> Result<()> {
                     hex::encode(rutli_cosigner::keystore::hosted_header_digest(&k))
                 ),
                 Ok(rutli_cosigner::keystore::Record::Tombstone(t)) => {
-                    format!("tombstone of a deleted hosted key, deleted at {} ms", t.deleted_at_ms)
+                    format!(
+                        "tombstone of a deleted hosted key, deleted at {} ms",
+                        t.deleted_at_ms
+                    )
                 }
                 Err(e) => return Err(e),
             };
@@ -2814,7 +3323,10 @@ fn keyfile_command(cfg: &Config, command: KeyfileCommand) -> Result<()> {
 fn write_new_private_file(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write;
     let mut f = rutli_cosigner::share_delivery::private_create_new(path).map_err(|e| {
-        DaemonError::Config(format!("cannot create {} (refusing to overwrite): {e}", path.display()))
+        DaemonError::Config(format!(
+            "cannot create {} (refusing to overwrite): {e}",
+            path.display()
+        ))
     })?;
     if let Err(e) = f.write_all(bytes).and_then(|()| f.sync_all()) {
         // The file is ours (create_new): remove the partial copy, so a retry with the same path is
@@ -2855,7 +3367,15 @@ fn share_recipient_command(
         )
     })?;
     let signer = rutli_cosigner::request_auth::NodeSigner::from_files(&tls.cert, &tls.key)?;
-    let request = share_recipient(&ctx, &keystore, &sealer, &signer, key_id, ceremony_id, replace)?;
+    let request = share_recipient(
+        &ctx,
+        &keystore,
+        &sealer,
+        &signer,
+        key_id,
+        ceremony_id,
+        replace,
+    )?;
     let json = serde_json::to_vec_pretty(&request)?;
     if replace && out.exists() {
         std::fs::remove_file(out)?;
@@ -2880,7 +3400,11 @@ fn share_recipient_command(
     );
     // Gate 0: witnesses read this line here, in a session independent of the file transfer, and
     // the dealer operator must type it back before anything is sealed.
-    println!("SAS node {} {}", request.identifier, rutli_cosigner::request_auth::sas(&request));
+    println!(
+        "SAS node {} {}",
+        request.identifier,
+        rutli_cosigner::request_auth::sas(&request)
+    );
     Ok(())
 }
 
@@ -2916,7 +3440,14 @@ fn import_share_command(
     let keystore = KeyStore::open_with_sealer(cfg.data_dir.join("keys"), Some(sealer.clone()))?;
     let ctx = NodeContext::from_config(cfg)?;
     let bundle = read_bundle(input)?;
-    let report = import_share(&ctx, &keystore, &sealer, &bundle, expect_fingerprint, dry_run)?;
+    let report = import_share(
+        &ctx,
+        &keystore,
+        &sealer,
+        &bundle,
+        expect_fingerprint,
+        dry_run,
+    )?;
     if report.outcome == "installed" {
         // Audible on purpose: the node's log may be the only record that a dealt share arrived.
         tracing::warn!(
@@ -2943,7 +3474,14 @@ fn abort_import_command(
     let sealer = offline_sealer(cfg)?;
     let keystore = KeyStore::open_with_sealer(cfg.data_dir.join("keys"), Some(sealer.clone()))?;
     let ctx = NodeContext::from_config(cfg)?;
-    let report = abort_import(&ctx, &keystore, &sealer, key_id, ceremony_id, delete_installed)?;
+    let report = abort_import(
+        &ctx,
+        &keystore,
+        &sealer,
+        key_id,
+        ceremony_id,
+        delete_installed,
+    )?;
     tracing::warn!(
         key_id,
         ceremony_id,
@@ -2959,7 +3497,9 @@ fn abort_import_command(
         );
     }
     if report.installed_share == "deleted" {
-        println!("restart this cosigner if it is running, so it drops any cached copy of the share");
+        println!(
+            "restart this cosigner if it is running, so it drops any cached copy of the share"
+        );
     }
     Ok(())
 }
@@ -3023,7 +3563,11 @@ fn export_key_command(
     println!(
         "exported {key_id} -> {} ({})",
         out.display(),
-        if unsafe_plaintext { "UNENCRYPTED" } else { "passphrase-protected" }
+        if unsafe_plaintext {
+            "UNENCRYPTED"
+        } else {
+            "passphrase-protected"
+        }
     );
     Ok(())
 }
@@ -3041,9 +3585,9 @@ fn import_key_command(
     let keystore = offline_keystore(cfg)?;
     let raw = zeroize::Zeroizing::new(std::fs::read(input)?);
     let passphrase = match passphrase_env {
-        Some(name) => Some(zeroize::Zeroizing::new(std::env::var(name).map_err(|_| {
-            DaemonError::Config(format!("import passphrase: env var {name} is not set"))
-        })?)),
+        Some(name) => Some(zeroize::Zeroizing::new(std::env::var(name).map_err(
+            |_| DaemonError::Config(format!("import passphrase: env var {name} is not set")),
+        )?)),
         None => None,
     };
 
@@ -3060,7 +3604,8 @@ fn import_key_command(
             ));
         }
         let envelope: rutli_cosigner::export::ExportEnvelope = serde_json::from_slice(&raw)?;
-        let key = rutli_cosigner::export::import(&envelope, passphrase.as_deref().map(|p| p.as_str()))?;
+        let key =
+            rutli_cosigner::export::import(&envelope, passphrase.as_deref().map(|p| p.as_str()))?;
         (envelope.key_id.clone(), key, "a Rütli export".to_string())
     } else {
         let (Some(key_id), Some(expect)) = (canton_key_id, expect_fingerprint) else {
@@ -3074,7 +3619,11 @@ fn import_key_command(
         let prefix = rutli_cosigner::export::hosted_import_key_id(key_id, key_prefix)?;
         println!(
             "{key_id} is reachable by a driver whose frost.key-prefix is {prefix:?}{}",
-            if key_prefix.is_none() { " (pass --key-prefix to enforce it)" } else { "" }
+            if key_prefix.is_none() {
+                " (pass --key-prefix to enforce it)"
+            } else {
+                ""
+            }
         );
         let imported = rutli_cosigner::export::import_canton(
             &raw,
@@ -3082,7 +3631,11 @@ fn import_key_command(
             expect,
             rutli_cosigner::hosted::now_secs(),
         )?;
-        (key_id.to_string(), imported.key, format!("Canton key {}", imported.fingerprint))
+        (
+            key_id.to_string(),
+            imported.key,
+            format!("Canton key {}", imported.fingerprint),
+        )
     };
     drop(raw);
     drop(passphrase);
@@ -3092,7 +3645,9 @@ fn import_key_command(
     // committed to, so refuse unless it is byte-identical. Safe against a running daemon — see
     // export::install_imported.
     use rutli_cosigner::export::Installed;
-    if rutli_cosigner::export::install_imported(&keystore, &key_id, &key)? == Installed::AlreadyPresent {
+    if rutli_cosigner::export::install_imported(&keystore, &key_id, &key)?
+        == Installed::AlreadyPresent
+    {
         println!("{key_id} is already present here and identical — nothing to do");
         return Ok(());
     }
@@ -3118,7 +3673,10 @@ fn import_key_command(
 /// and a backup taken from a live pod (`kubectl exec … backup`) could otherwise catch it mid-probe.
 fn copy_dir_files(src: &std::path::Path, dst: &std::path::Path, overwrite: bool) -> Result<usize> {
     if !src.is_dir() {
-        return Err(DaemonError::Config(format!("{} is not a directory", src.display())));
+        return Err(DaemonError::Config(format!(
+            "{} is not a directory",
+            src.display()
+        )));
     }
     let mut count = 0;
     for entry in std::fs::read_dir(src)? {
@@ -3146,7 +3704,8 @@ fn copy_journal(src: &std::path::Path, dst: &std::path::Path) -> Result<usize> {
     let mut n = 0;
     for key_dir in std::fs::read_dir(src)? {
         let key_dir = key_dir?;
-        if !key_dir.file_type()?.is_dir() || key_dir.file_name().to_string_lossy().starts_with('.') {
+        if !key_dir.file_type()?.is_dir() || key_dir.file_name().to_string_lossy().starts_with('.')
+        {
             continue;
         }
         let target = dst.join(key_dir.file_name());
@@ -3213,7 +3772,10 @@ fn shutdown() -> impl std::future::Future<Output = ()> {
             s = interrupt => s,
             s = terminate => s,
         };
-        tracing::info!(signal, "shutdown signal received, draining in-flight requests");
+        tracing::info!(
+            signal,
+            "shutdown signal received, draining in-flight requests"
+        );
     }
 }
 
@@ -3223,8 +3785,12 @@ mod tests {
 
     #[test]
     fn a_server_that_returns_without_a_shutdown_request_is_an_error() {
-        assert!(serve_outcome(Ok(()), true).is_ok(), "after the signal: a clean stop");
-        let e = serve_outcome(Ok(()), false).expect_err("without the signal: an error, so a non-zero exit");
+        assert!(
+            serve_outcome(Ok(()), true).is_ok(),
+            "after the signal: a clean stop"
+        );
+        let e = serve_outcome(Ok(()), false)
+            .expect_err("without the signal: an error, so a non-zero exit");
         assert!(e.to_string().contains("without a shutdown request"), "{e}");
     }
 
@@ -3248,18 +3814,31 @@ mod tests {
 
         assert_eq!(copy_dir_files(&src, &dst, false).unwrap(), 1);
         assert!(dst.join("k.json").exists());
-        assert!(!dst.join(".readyz-1-2-3").exists(), "a probe file must never land in a backup");
+        assert!(
+            !dst.join(".readyz-1-2-3").exists(),
+            "a probe file must never land in a backup"
+        );
     }
 
     #[test]
     fn backup_copies_the_sign_journals_with_their_layout() {
         let tmp = tempfile::tempdir().unwrap();
-        let (src, dst) = (tmp.path().join("journal"), tmp.path().join("backup").join("journal"));
+        let (src, dst) = (
+            tmp.path().join("journal"),
+            tmp.path().join("backup").join("journal"),
+        );
         std::fs::create_dir_all(src.join("frost-k")).unwrap();
-        std::fs::write(src.join("frost-k").join("00000000000000000001.jsonl"), b"{}\n").unwrap();
+        std::fs::write(
+            src.join("frost-k").join("00000000000000000001.jsonl"),
+            b"{}\n",
+        )
+        .unwrap();
         std::fs::write(src.join("frost-k").join("not-a-segment.tmp"), b"x").unwrap();
         assert_eq!(copy_journal(&src, &dst).unwrap(), 1);
-        assert!(dst.join("frost-k").join("00000000000000000001.jsonl").exists());
+        assert!(dst
+            .join("frost-k")
+            .join("00000000000000000001.jsonl")
+            .exists());
         assert!(!dst.join("frost-k").join("not-a-segment.tmp").exists());
     }
 

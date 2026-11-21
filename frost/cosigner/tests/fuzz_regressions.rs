@@ -16,18 +16,29 @@ mod harness;
 use std::path::{Path, PathBuf};
 
 fn files(dir: &Path) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut out: Vec<PathBuf> = entries.map(|e| e.unwrap().path()).filter(|p| p.is_file()).collect();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<PathBuf> = entries
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.is_file())
+        .collect();
     out.sort();
     out
 }
 
 fn run(target: &str) {
-    let (_, body) = harness::TARGETS.iter().find(|(n, _)| *n == target).expect("known target");
+    let (_, body) = harness::TARGETS
+        .iter()
+        .find(|(n, _)| *n == target)
+        .expect("known target");
     let mut ran = 0;
     for (name, bytes) in harness::generated_seeds(target) {
         let accepted = body(&bytes);
-        assert!(accepted || !name.starts_with("ok-"), "{target}: valid seed {name} was refused");
+        assert!(
+            accepted || !name.starts_with("ok-"),
+            "{target}: valid seed {name} was refused"
+        );
         ran += 1;
     }
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
@@ -38,7 +49,11 @@ fn run(target: &str) {
     if target == "canton_key" {
         for path in files(&root.join("canton-key/testdata/vectors")) {
             if path.extension().is_some_and(|e| e == "bin") {
-                assert!(body(&std::fs::read(&path).unwrap()), "canton_key: vector {} was refused", path.display());
+                assert!(
+                    body(&std::fs::read(&path).unwrap()),
+                    "canton_key: vector {} was refused",
+                    path.display()
+                );
                 ran += 1;
             }
         }
@@ -52,7 +67,10 @@ fn every_fuzz_target_is_here() {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../fuzz/fuzz_targets");
     for path in files(&dir) {
         let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
-        assert!(names.contains(&stem.as_str()), "fuzz target {stem} is not in harness::TARGETS");
+        assert!(
+            names.contains(&stem.as_str()),
+            "fuzz target {stem} is not in harness::TARGETS"
+        );
     }
 }
 

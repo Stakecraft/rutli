@@ -57,7 +57,8 @@ pub struct Marker {
 }
 
 /// What the marker says about itself.
-pub const STATEMENT: &str = "recorded from an operator-supplied `verify-key --sign-test --json` report, checked for \
+pub const STATEMENT: &str =
+    "recorded from an operator-supplied `verify-key --sign-test --json` report, checked for \
 consistency and against this node's live key; the node cannot check who produced it";
 
 /// This node's live sharing of a key: what a report must agree with.
@@ -130,27 +131,38 @@ pub fn prove(
     now_ms: u64,
 ) -> Result<(Marker, bool)> {
     crate::keystore::validate_key_id(&live.key_id)?;
-    let report: Report =
-        serde_json::from_slice(report_bytes).map_err(|e| refuse(format!("the report is not `verify-key --json` output: {e}")))?;
+    let report: Report = serde_json::from_slice(report_bytes)
+        .map_err(|e| refuse(format!("the report is not `verify-key --json` output: {e}")))?;
     let live_group = hex::encode(live.group_key);
     let live_digest = hex::encode(live.pkp_digest);
 
     if report.key_id != live.key_id {
-        return Err(refuse(format!("the report is for key {}, not {}", report.key_id, live.key_id)));
+        return Err(refuse(format!(
+            "the report is for key {}, not {}",
+            report.key_id, live.key_id
+        )));
     }
     if !report.ok || !report.problems.is_empty() {
-        return Err(refuse(format!("the report is not clean ({} problem(s)): {}", report.problems.len(), report.problems.join("; "))));
+        return Err(refuse(format!(
+            "the report is not clean ({} problem(s)): {}",
+            report.problems.len(),
+            report.problems.join("; ")
+        )));
     }
     if report.epoch != Some(live.epoch) {
         return Err(refuse(format!(
             "the report is for epoch {}, this node's live share of {} is at epoch {}",
-            report.epoch.map_or_else(|| "?".to_string(), |e| e.to_string()),
+            report
+                .epoch
+                .map_or_else(|| "?".to_string(), |e| e.to_string()),
             live.key_id,
             live.epoch
         )));
     }
     if report.group_verifying_key.as_deref() != Some(live_group.as_str()) {
-        return Err(refuse("the report's group key is not this node's group key"));
+        return Err(refuse(
+            "the report's group key is not this node's group key",
+        ));
     }
     if report.pkp_digest.as_deref() != Some(live_digest.as_str()) {
         return Err(refuse("the report's sharing digest is not this node's"));
@@ -169,10 +181,18 @@ pub fn prove(
     // Every node of the roster, nothing else, all on this epoch and this sharing, none stale.
     let got: BTreeSet<u16> = report.nodes.iter().map(|n| n.identifier).collect();
     if want.len() != roster.len() || got.len() != report.nodes.len() || want != got {
-        return Err(refuse(format!("the report covers nodes {got:?}, this node's roster is {want:?}")));
+        return Err(refuse(format!(
+            "the report covers nodes {got:?}, this node's roster is {want:?}"
+        )));
     }
     for n in &report.nodes {
-        if !n.present || n.error.is_some() || n.stale || !n.own_share_in_package || n.epoch != live.epoch || n.pkp_digest != live_digest {
+        if !n.present
+            || n.error.is_some()
+            || n.stale
+            || !n.own_share_in_package
+            || n.epoch != live.epoch
+            || n.pkp_digest != live_digest
+        {
             return Err(refuse(format!(
                 "node {} is not on epoch {} of this sharing in the report (present {}, stale {}, epoch {})",
                 n.identifier, live.epoch, n.present, n.stale, n.epoch
@@ -182,10 +202,16 @@ pub fn prove(
 
     // Every t-subset signed, and every signature was accepted by the verifier that wrote the report.
     if threshold < 2 || usize::from(threshold) > roster.len() {
-        return Err(refuse(format!("threshold {threshold} does not fit a roster of {}", roster.len())));
+        return Err(refuse(format!(
+            "threshold {threshold} does not fit a roster of {}",
+            roster.len()
+        )));
     }
     if let Some(bad) = report.sign_test.iter().find(|s| !s.ok) {
-        return Err(refuse(format!("the sign test of quorum {:?} failed in the report", bad.signers)));
+        return Err(refuse(format!(
+            "the sign test of quorum {:?} failed in the report",
+            bad.signers
+        )));
     }
     let signed: BTreeSet<Vec<u16>> = report
         .sign_test
@@ -196,7 +222,9 @@ pub fn prove(
             q
         })
         .collect();
-    for (_, quorum) in crate::verify_key::sign_test_plan(&want.iter().copied().collect::<Vec<_>>(), threshold) {
+    for (_, quorum) in
+        crate::verify_key::sign_test_plan(&want.iter().copied().collect::<Vec<_>>(), threshold)
+    {
         let mut q = quorum;
         q.sort_unstable();
         if !signed.contains(&q) {
@@ -218,7 +246,10 @@ pub fn prove(
     // retention measures the epoch's age by.
     // A marker dated in the future proves nothing (see `proves`), so it is replaced, not kept.
     if let Some(existing) = read_marker(keys_dir, &live.key_id, live.epoch) {
-        if existing.group_key == marker.group_key && existing.pkp_digest == marker.pkp_digest && existing.proven_ms <= now_ms {
+        if existing.group_key == marker.group_key
+            && existing.pkp_digest == marker.pkp_digest
+            && existing.proven_ms <= now_ms
+        {
             return Ok((existing, false));
         }
     }
@@ -232,9 +263,18 @@ fn write_marker(keys_dir: &Path, marker: &Marker) -> Result<()> {
     let dir = keys_dir.join(DIR);
     std::fs::create_dir_all(&dir)?;
     let path = marker_path(keys_dir, &marker.key_id, marker.epoch);
-    let tmp = dir.join(format!(".{}.{}.{}.tmp", marker.key_id, marker.epoch, std::process::id()));
+    let tmp = dir.join(format!(
+        ".{}.{}.{}.tmp",
+        marker.key_id,
+        marker.epoch,
+        std::process::id()
+    ));
     {
-        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(&tmp)?;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)?;
         f.write_all(&serde_json::to_vec_pretty(marker)?)?;
         f.write_all(b"\n")?;
         f.sync_all()?;
@@ -271,15 +311,21 @@ pub fn proof_age_ms(marker: &Marker, pkp_digest_hex: &str, now_ms: u64) -> Optio
 /// header. v1 files carry no clear epoch and are skipped. Reads only; never fails the caller.
 pub fn refresh_gauges(keys_dir: &Path, now_ms: u64) -> BTreeSet<String> {
     let mut seen = BTreeSet::new();
-    let Ok(entries) = std::fs::read_dir(keys_dir) else { return seen };
+    let Ok(entries) = std::fs::read_dir(keys_dir) else {
+        return seen;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         if name.starts_with('.') || !name.ends_with(".json") {
             continue;
         }
-        let Ok(bytes) = std::fs::read(&path) else { continue };
-        let Some(header) = crate::seal::header_of(&bytes) else { continue };
+        let Ok(bytes) = std::fs::read(&path) else {
+            continue;
+        };
+        let Some(header) = crate::seal::header_of(&bytes) else {
+            continue;
+        };
         if header.kind != crate::seal::RecordKind::FrostShare.as_str() {
             continue;
         }
@@ -291,8 +337,10 @@ pub fn refresh_gauges(keys_dir: &Path, now_ms: u64) -> BTreeSet<String> {
             .ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or(0, |t| now_ms.saturating_sub(t.as_millis() as u64) / 1000);
-        metrics::gauge!(crate::metrics::KEY_EPOCH_PROVEN, "key" => header.key_id.clone()).set(if proven { 1.0 } else { 0.0 });
-        metrics::gauge!(crate::metrics::KEY_EPOCH_AGE_SECONDS, "key" => header.key_id.clone()).set(age_s as f64);
+        metrics::gauge!(crate::metrics::KEY_EPOCH_PROVEN, "key" => header.key_id.clone())
+            .set(if proven { 1.0 } else { 0.0 });
+        metrics::gauge!(crate::metrics::KEY_EPOCH_AGE_SECONDS, "key" => header.key_id.clone())
+            .set(age_s as f64);
         seen.insert(header.key_id);
     }
     seen
@@ -301,7 +349,10 @@ pub fn refresh_gauges(keys_dir: &Path, now_ms: u64) -> BTreeSet<String> {
 /// A thread that refreshes the two gauges every `interval`. A hung volume stalls only this thread.
 /// A key that is no longer listed (deleted, replaced by a tombstone) gets age 0, so a frozen old
 /// value cannot keep the alert firing.
-pub fn spawn_gauge_updater(keys_dir: PathBuf, interval: std::time::Duration) -> std::thread::JoinHandle<()> {
+pub fn spawn_gauge_updater(
+    keys_dir: PathBuf,
+    interval: std::time::Duration,
+) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("rutli-epoch-proof-gauges".into())
         .spawn(move || {
@@ -309,8 +360,10 @@ pub fn spawn_gauge_updater(keys_dir: PathBuf, interval: std::time::Duration) -> 
             loop {
                 let seen = refresh_gauges(&keys_dir, crate::intent::now_ms());
                 for gone in before.difference(&seen) {
-                    metrics::gauge!(crate::metrics::KEY_EPOCH_PROVEN, "key" => gone.clone()).set(0.0);
-                    metrics::gauge!(crate::metrics::KEY_EPOCH_AGE_SECONDS, "key" => gone.clone()).set(0.0);
+                    metrics::gauge!(crate::metrics::KEY_EPOCH_PROVEN, "key" => gone.clone())
+                        .set(0.0);
+                    metrics::gauge!(crate::metrics::KEY_EPOCH_AGE_SECONDS, "key" => gone.clone())
+                        .set(0.0);
                 }
                 before = seen;
                 std::thread::sleep(interval);
@@ -326,7 +379,14 @@ mod tests {
     const KEY: &str = "frost-test";
 
     fn live() -> Live {
-        Live { key_id: KEY.into(), epoch: 3, group_key: [7; 32], pkp_digest: [9; 32], threshold: 2, roster: vec![1, 2, 3] }
+        Live {
+            key_id: KEY.into(),
+            epoch: 3,
+            group_key: [7; 32],
+            pkp_digest: [9; 32],
+            threshold: 2,
+            roster: vec![1, 2, 3],
+        }
     }
 
     /// A clean report for `live()` over roster 1..=3, threshold 2.
@@ -357,7 +417,10 @@ mod tests {
         let (m, wrote) = run(d.path(), &report(), &live(), 1_000).unwrap();
         assert!(wrote);
         assert_eq!((m.epoch, m.proven_ms), (3, 1_000));
-        assert_eq!(m.report_sha256, hex::encode(Sha256::digest(report().to_string().as_bytes())));
+        assert_eq!(
+            m.report_sha256,
+            hex::encode(Sha256::digest(report().to_string().as_bytes()))
+        );
         assert_eq!(read_marker(d.path(), KEY, 3).unwrap(), m);
         // Again, later: the original time stays (the age clock does not restart).
         let (again, wrote) = run(d.path(), &report(), &live(), 9_000_000).unwrap();
@@ -459,7 +522,10 @@ mod tests {
         let digest = hex::encode([9u8; 32]);
         assert!(proves(&m, &digest, 5_000));
         assert!(!proves(&m, &digest, 4_999), "dated after now: ignored");
-        assert!(!proves(&m, &hex::encode([1u8; 32]), 9_000), "another sharing");
+        assert!(
+            !proves(&m, &hex::encode([1u8; 32]), 9_000),
+            "another sharing"
+        );
         assert_eq!(proof_age_ms(&m, &digest, 8_000), Some(3_000));
         assert_eq!(proof_age_ms(&m, &digest, 1_000), None);
     }
@@ -483,14 +549,17 @@ mod tests {
         use crate::seal::{KeyFileBinding, Sealer};
         let d = tempfile::tempdir().unwrap();
         let keys = d.path().join("keys");
-        let sealer = Sealer::from_master_secret(b"proof gauge test master secret", 1).with_binding(KeyFileBinding {
-            node: 1,
-            cluster_uuid: Some("2b0c6a52-4c1e-4b7a-9d1e-3f1a7c2e9b10".into()),
-            write_version: 2,
-            accept_v1: true,
-        });
+        let sealer = Sealer::from_master_secret(b"proof gauge test master secret", 1).with_binding(
+            KeyFileBinding {
+                node: 1,
+                cluster_uuid: Some("2b0c6a52-4c1e-4b7a-9d1e-3f1a7c2e9b10".into()),
+                write_version: 2,
+                accept_v1: true,
+            },
+        );
         let ks = KeyStore::open_with_sealer(&keys, Some(std::sync::Arc::new(sealer))).unwrap();
-        let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&[3u8; 32], &[1, 2, 3], 2).unwrap();
+        let (shares, pkp) =
+            rutli_frost_core::dealer::split_ed25519_seed(&[3u8; 32], &[1, 2, 3], 2).unwrap();
         let share = Share {
             key_package: frost_ed25519::keys::KeyPackage::try_from(shares[0].clone()).unwrap(),
             public_key_package: pkp,
@@ -502,7 +571,8 @@ mod tests {
         let live = Live {
             key_id: KEY.into(),
             epoch: 2,
-            group_key: rutli_frost_core::dkg::group_verifying_key_bytes(&share.public_key_package).unwrap(),
+            group_key: rutli_frost_core::dkg::group_verifying_key_bytes(&share.public_key_package)
+                .unwrap(),
             pkp_digest: share.pkp_digest().unwrap(),
             threshold: 2,
             roster: vec![1, 2, 3],
@@ -512,7 +582,13 @@ mod tests {
         let now = crate::intent::now_ms();
         metrics::with_local_recorder(&recorder, || refresh_gauges(&keys, now));
         let out = handle.render();
-        assert!(out.contains(&format!("{}{{key=\"{KEY}\"}} 0", crate::metrics::KEY_EPOCH_PROVEN)), "{out}");
+        assert!(
+            out.contains(&format!(
+                "{}{{key=\"{KEY}\"}} 0",
+                crate::metrics::KEY_EPOCH_PROVEN
+            )),
+            "{out}"
+        );
         assert!(out.contains(crate::metrics::KEY_EPOCH_AGE_SECONDS), "{out}");
 
         let mut r = report();
@@ -525,10 +601,16 @@ mod tests {
         }
         prove(&keys, &live, &[1, 2, 3], 2, r.to_string().as_bytes(), now).unwrap();
         metrics::with_local_recorder(&recorder, || refresh_gauges(&keys, now));
-        assert!(handle.render().contains(&format!("{}{{key=\"{KEY}\"}} 1", crate::metrics::KEY_EPOCH_PROVEN)));
+        assert!(handle.render().contains(&format!(
+            "{}{{key=\"{KEY}\"}} 1",
+            crate::metrics::KEY_EPOCH_PROVEN
+        )));
         // A marker dated after now does not count.
         metrics::with_local_recorder(&recorder, || refresh_gauges(&keys, now - 10_000));
-        assert!(handle.render().contains(&format!("{}{{key=\"{KEY}\"}} 0", crate::metrics::KEY_EPOCH_PROVEN)));
+        assert!(handle.render().contains(&format!(
+            "{}{{key=\"{KEY}\"}} 0",
+            crate::metrics::KEY_EPOCH_PROVEN
+        )));
     }
 
     #[test]

@@ -63,7 +63,9 @@ impl Share {
     /// SHA-256 of the canonical public key package ([`rutli_frost_core::dealer::pkp_digest`]): two
     /// nodes hold shares of the same sharing iff their digests match.
     pub fn pkp_digest(&self) -> Result<[u8; 32]> {
-        Ok(rutli_frost_core::dealer::pkp_digest(&self.public_key_package)?)
+        Ok(rutli_frost_core::dealer::pkp_digest(
+            &self.public_key_package,
+        )?)
     }
 }
 
@@ -114,7 +116,11 @@ const KIND_HOSTED: &str = "hosted";
 const KIND_TOMBSTONE: &str = "tombstone";
 
 /// The record kinds a file under `keys/` may hold.
-const STORE_KINDS: &[RecordKind] = &[RecordKind::FrostShare, RecordKind::HostedKey, RecordKind::Tombstone];
+const STORE_KINDS: &[RecordKind] = &[
+    RecordKind::FrostShare,
+    RecordKind::HostedKey,
+    RecordKind::Tombstone,
+];
 
 #[derive(Serialize)]
 struct TaggedTombstone<'a> {
@@ -175,15 +181,31 @@ fn share_plaintext(key_id: &str, share: &Share) -> Result<(zeroize::Zeroizing<Ve
     Ok((plain, share.pkp_digest()?))
 }
 
-fn hosted_plaintext(key_id: &str, key: &crate::hosted::HostedKey) -> Result<zeroize::Zeroizing<Vec<u8>>> {
-    crate::share_delivery::to_json_zeroizing(&TaggedHosted { key, kind: KIND_HOSTED, key_id })
+fn hosted_plaintext(
+    key_id: &str,
+    key: &crate::hosted::HostedKey,
+) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+    crate::share_delivery::to_json_zeroizing(&TaggedHosted {
+        key,
+        kind: KIND_HOSTED,
+        key_id,
+    })
 }
 
-fn tombstone_plaintext(key_id: &str, t: &crate::hosted::Tombstone) -> Result<zeroize::Zeroizing<Vec<u8>>> {
+fn tombstone_plaintext(
+    key_id: &str,
+    t: &crate::hosted::Tombstone,
+) -> Result<zeroize::Zeroizing<Vec<u8>>> {
     if t.key_id != key_id {
-        return Err(DaemonError::KeyFile(format!("refusing to write the tombstone of {} under {key_id}", t.key_id)));
+        return Err(DaemonError::KeyFile(format!(
+            "refusing to write the tombstone of {} under {key_id}",
+            t.key_id
+        )));
     }
-    crate::share_delivery::to_json_zeroizing(&TaggedTombstone { t, kind: KIND_TOMBSTONE })
+    crate::share_delivery::to_json_zeroizing(&TaggedTombstone {
+        t,
+        kind: KIND_TOMBSTONE,
+    })
 }
 
 /// Fault-injection seam: called with the path a key-store operation is about to touch, before it
@@ -221,7 +243,11 @@ impl KeyStore {
                 std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))?;
             }
         }
-        Ok(Self { dir, sealer, io_hook: None })
+        Ok(Self {
+            dir,
+            sealer,
+            io_hook: None,
+        })
     }
 
     /// Install a fault-injection [`IoHook`]. Tests only — see its docs. Must be set before the
@@ -269,7 +295,10 @@ impl KeyStore {
             for entry in std::fs::read_dir(&dir)? {
                 let entry = entry?;
                 let name = entry.file_name().to_string_lossy().into_owned();
-                if name.starts_with('.') || !name.ends_with(".json") || !entry.file_type()?.is_file() {
+                if name.starts_with('.')
+                    || !name.ends_with(".json")
+                    || !entry.file_type()?.is_file()
+                {
                     continue;
                 }
                 out.push(entry.path());
@@ -295,7 +324,9 @@ impl KeyStore {
     pub fn inspect_plaintext(&self, key_id: &str) -> Result<Record> {
         let bytes = zeroize::Zeroizing::new(std::fs::read(self.path(key_id)?)?);
         if Sealer::is_sealed(&bytes) {
-            return Err(DaemonError::Config(format!("{key_id} is sealed, not plaintext")));
+            return Err(DaemonError::Config(format!(
+                "{key_id} is sealed, not plaintext"
+            )));
         }
         self.parse_record(key_id, &bytes, None)
     }
@@ -303,14 +334,16 @@ impl KeyStore {
     /// Seal a plaintext key file in place (offline `keyfile migrate-plaintext`, under the instance
     /// lock). Refuses a file that is already sealed or does not parse as the record its name says.
     pub fn migrate_plaintext(&self, key_id: &str) -> Result<()> {
-        let sealer = self
-            .sealer
-            .as_ref()
-            .ok_or_else(|| DaemonError::Config("share sealing is not configured — nothing to migrate to".into()))?;
+        let sealer = self.sealer.as_ref().ok_or_else(|| {
+            DaemonError::Config("share sealing is not configured — nothing to migrate to".into())
+        })?;
         let path = self.path(key_id)?;
         let bytes = zeroize::Zeroizing::new(std::fs::read(&path)?);
         if Sealer::is_sealed(&bytes) {
-            return Err(DaemonError::Config(format!("{} is already sealed", path.display())));
+            return Err(DaemonError::Config(format!(
+                "{} is already sealed",
+                path.display()
+            )));
         }
         let record = self.parse_record(key_id, &bytes, None)?;
         tracing::info!(key_id, dek_id = %sealer.current_dek_id(), "sealing a plaintext key file");
@@ -349,7 +382,12 @@ impl KeyStore {
             }
         };
         let digest = record_digest(&record)?;
-        let meta = RecordMeta { kind: record_kind(&record), key_id: &key_id, epoch: record_epoch(&record), digest: &digest };
+        let meta = RecordMeta {
+            kind: record_kind(&record),
+            key_id: &key_id,
+            epoch: record_epoch(&record),
+            digest: &digest,
+        };
         let bytes = sealer.seal_record_as(version, &meta, &plain)?;
         let dir = path.parent().expect("a key file has a parent");
         write_atomic(dir, path, &bytes)
@@ -359,7 +397,9 @@ impl KeyStore {
     /// the start-up pass). `None` for a plaintext file.
     pub fn file_state(&self, path: &Path) -> Result<Option<(u8, crate::seal::DekUse)>> {
         let bytes = std::fs::read(path)?;
-        let Some(version) = crate::seal::file_version(&bytes) else { return Ok(None) };
+        let Some(version) = crate::seal::file_version(&bytes) else {
+            return Ok(None);
+        };
         let dek = match &self.sealer {
             Some(s) => s.dek_use(&bytes),
             None => crate::seal::DekUse::Unknown,
@@ -371,11 +411,15 @@ impl KeyStore {
     /// rotation) and, when writing v2, every v1 file. A file that cannot be rewritten is logged and
     /// left alone (it is reported as unreadable elsewhere). Returns how many were rewritten.
     pub fn reseal_outdated(&self) -> Result<usize> {
-        let Some(sealer) = &self.sealer else { return Ok(0) };
+        let Some(sealer) = &self.sealer else {
+            return Ok(0);
+        };
         let target = sealer.binding().write_version;
         let mut n = 0;
         for path in self.key_file_paths()? {
-            let Some((version, dek)) = self.file_state(&path)? else { continue };
+            let Some((version, dek)) = self.file_state(&path)? else {
+                continue;
+            };
             let outdated_dek = matches!(dek, crate::seal::DekUse::Previous(_));
             let outdated_fmt = version < target;
             if !(outdated_dek || outdated_fmt) {
@@ -392,7 +436,9 @@ impl KeyStore {
                         "re-sealed key file"
                     );
                 }
-                Err(e) => tracing::error!(file = %path.display(), error = %e, "could not re-seal key file"),
+                Err(e) => {
+                    tracing::error!(file = %path.display(), error = %e, "could not re-seal key file")
+                }
             }
         }
         Ok(n)
@@ -400,7 +446,9 @@ impl KeyStore {
 
     fn path(&self, key_id: &str) -> Result<PathBuf> {
         if key_id.is_empty()
-            || !key_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            || !key_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         {
             return Err(DaemonError::Config(format!("invalid key id: {key_id:?}")));
         }
@@ -423,7 +471,12 @@ impl KeyStore {
 
     pub fn save(&self, key_id: &str, share: &Share) -> Result<()> {
         let (plain, digest) = share_plaintext(key_id, share)?;
-        let meta = RecordMeta { kind: RecordKind::FrostShare, key_id, epoch: share.epoch, digest: &digest };
+        let meta = RecordMeta {
+            kind: RecordKind::FrostShare,
+            key_id,
+            epoch: share.epoch,
+            digest: &digest,
+        };
         self.write_sealed(key_id, &meta, &plain)
     }
 
@@ -435,7 +488,12 @@ impl KeyStore {
     /// [`save`]: KeyStore::save
     pub fn create(&self, key_id: &str, share: &Share) -> Result<()> {
         let (plain, digest) = share_plaintext(key_id, share)?;
-        let meta = RecordMeta { kind: RecordKind::FrostShare, key_id, epoch: share.epoch, digest: &digest };
+        let meta = RecordMeta {
+            kind: RecordKind::FrostShare,
+            key_id,
+            epoch: share.epoch,
+            digest: &digest,
+        };
         self.create_bytes(key_id, &meta, &plain)
     }
 
@@ -444,7 +502,12 @@ impl KeyStore {
     pub fn create_hosted(&self, key_id: &str, key: &crate::hosted::HostedKey) -> Result<()> {
         let plain = hosted_plaintext(key_id, key)?;
         let digest = hosted_header_digest(key);
-        let meta = RecordMeta { kind: RecordKind::HostedKey, key_id, epoch: 0, digest: &digest };
+        let meta = RecordMeta {
+            kind: RecordKind::HostedKey,
+            key_id,
+            epoch: 0,
+            digest: &digest,
+        };
         self.create_bytes(key_id, &meta, &plain)
     }
 
@@ -462,14 +525,24 @@ impl KeyStore {
     /// The create-once write behind [`KeyStore::create_bytes`] and [`KeyStore::stage`]: seal
     /// `plain`, write a dotfile temp in `dir` (fsynced), move it to `path` only if nothing is
     /// there, fsync `dir`. `label` names the key in errors and in the temp's name.
-    fn create_sealed_at(&self, dir: &Path, path: &Path, label: &str, meta: &RecordMeta<'_>, plain: &[u8]) -> Result<()> {
+    fn create_sealed_at(
+        &self,
+        dir: &Path,
+        path: &Path,
+        label: &str,
+        meta: &RecordMeta<'_>,
+        plain: &[u8],
+    ) -> Result<()> {
         self.touch(path);
         let bytes = match &self.sealer {
             Some(s) => s.seal_record(meta, plain)?,
             None => plain.to_vec(),
         };
         // A dotfile: never a key file (ids are [A-Za-z0-9_-]+), skipped by backup and the probe.
-        let tmp = dir.join(format!("{CREATE_TMP_PREFIX}{label}-{}.tmp", uuid::Uuid::new_v4()));
+        let tmp = dir.join(format!(
+            "{CREATE_TMP_PREFIX}{label}-{}.tmp",
+            uuid::Uuid::new_v4()
+        ));
         {
             let mut f = private_file(&tmp, true)?;
             f.write_all(&bytes)?;
@@ -512,7 +585,11 @@ impl KeyStore {
         Ok(removed)
     }
 
-    fn sweep_stale_temps_in(&self, dir: &Path, older_than: std::time::Duration) -> Result<Vec<String>> {
+    fn sweep_stale_temps_in(
+        &self,
+        dir: &Path,
+        older_than: std::time::Duration,
+    ) -> Result<Vec<String>> {
         self.touch(dir);
         let mut removed = Vec::new();
         for entry in std::fs::read_dir(dir)? {
@@ -546,7 +623,9 @@ impl KeyStore {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            let Some(key_id) = name.strip_suffix(".json") else { continue };
+            let Some(key_id) = name.strip_suffix(".json") else {
+                continue;
+            };
             if let Ok(Record::Frost(_)) = self.load_record(key_id) {
                 out.push(key_id.to_string());
             }
@@ -564,7 +643,9 @@ impl KeyStore {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            let Some(key_id) = name.strip_suffix(".json") else { continue };
+            let Some(key_id) = name.strip_suffix(".json") else {
+                continue;
+            };
             if let Ok(Record::Frost(share)) = self.load_record(key_id) {
                 if share.origin.as_ref().is_some_and(|o| o.refresh_count == 0) {
                     out.push(key_id.to_string());
@@ -598,7 +679,12 @@ impl KeyStore {
 
     /// Read a key file and unseal it (`kinds`: what the file may hold), without interpreting the
     /// contents. With sealing on, a plaintext file is refused.
-    fn read_plaintext_at(&self, path: &Path, key_id: &str, kinds: &[RecordKind]) -> Result<(Vec<u8>, Option<KeyFileHeader>)> {
+    fn read_plaintext_at(
+        &self,
+        path: &Path,
+        key_id: &str,
+        kinds: &[RecordKind],
+    ) -> Result<(Vec<u8>, Option<KeyFileHeader>)> {
         self.touch(path);
         // try_exists, not exists: an unreadable store must surface as an IO error (INTERNAL), never
         // as UnknownKey (NOT_FOUND) — Canton would take NOT_FOUND to mean the key is gone.
@@ -609,7 +695,12 @@ impl KeyStore {
         self.unseal_bytes(&bytes, key_id, kinds)
     }
 
-    fn unseal_bytes(&self, bytes: &[u8], key_id: &str, kinds: &[RecordKind]) -> Result<(Vec<u8>, Option<KeyFileHeader>)> {
+    fn unseal_bytes(
+        &self,
+        bytes: &[u8],
+        key_id: &str,
+        kinds: &[RecordKind],
+    ) -> Result<(Vec<u8>, Option<KeyFileHeader>)> {
         match (&self.sealer, Sealer::is_sealed(bytes)) {
             (Some(s), true) => s.unseal_record(bytes, key_id, kinds),
             (Some(_), false) => Err(DaemonError::KeyFile(format!(
@@ -636,7 +727,12 @@ impl KeyStore {
     /// A tag that is not a string counts as absent, as it did through `Value::as_str`. One
     /// difference: a field given twice in one object is now an error (the `Value` kept the last).
     /// Our writers never repeat a field.
-    fn parse_record(&self, key_id: &str, plain: &[u8], hdr: Option<&KeyFileHeader>) -> Result<Record> {
+    fn parse_record(
+        &self,
+        key_id: &str,
+        plain: &[u8],
+        hdr: Option<&KeyFileHeader>,
+    ) -> Result<Record> {
         /// Only the tags; every other field (secrets included) is skipped without being copied.
         #[derive(Deserialize)]
         struct Tags {
@@ -659,7 +755,10 @@ impl KeyStore {
         } else if tag == Some(KIND_TOMBSTONE) {
             let t: crate::hosted::Tombstone = serde_json::from_slice(plain)?;
             if t.key_id != key_id {
-                return Err(DaemonError::KeyFile(format!("the file for {key_id} holds the tombstone of {}", t.key_id)));
+                return Err(DaemonError::KeyFile(format!(
+                    "the file for {key_id} holds the tombstone of {}",
+                    t.key_id
+                )));
             }
             Record::Tombstone(Box::new(t))
         } else {
@@ -670,7 +769,12 @@ impl KeyStore {
     }
 
     /// A record must agree with the header it was sealed under, and a share must be this node's.
-    fn check_record(&self, key_id: &str, record: &Record, hdr: Option<&KeyFileHeader>) -> Result<()> {
+    fn check_record(
+        &self,
+        key_id: &str,
+        record: &Record,
+        hdr: Option<&KeyFileHeader>,
+    ) -> Result<()> {
         if let Some(h) = hdr {
             if h.kind != record_kind(record).as_str() {
                 return Err(DaemonError::KeyFile(format!(
@@ -713,7 +817,12 @@ impl KeyStore {
     pub fn save_hosted(&self, key_id: &str, key: &crate::hosted::HostedKey) -> Result<()> {
         let plain = hosted_plaintext(key_id, key)?;
         let digest = hosted_header_digest(key);
-        let meta = RecordMeta { kind: RecordKind::HostedKey, key_id, epoch: 0, digest: &digest };
+        let meta = RecordMeta {
+            kind: RecordKind::HostedKey,
+            key_id,
+            epoch: 0,
+            digest: &digest,
+        };
         self.write_sealed(key_id, &meta, &plain)
     }
 
@@ -733,11 +842,18 @@ impl KeyStore {
     /// replaces a FROST share.
     pub fn save_tombstone(&self, key_id: &str, t: &crate::hosted::Tombstone) -> Result<()> {
         if let Ok(Record::Frost(_)) = self.load_record(key_id) {
-            return Err(DaemonError::Config(format!("{key_id} is a FROST share — never tombstoned")));
+            return Err(DaemonError::Config(format!(
+                "{key_id} is a FROST share — never tombstoned"
+            )));
         }
         let plain = tombstone_plaintext(key_id, t)?;
         let digest = t.intent_digest()?;
-        let meta = RecordMeta { kind: RecordKind::Tombstone, key_id, epoch: 0, digest: &digest };
+        let meta = RecordMeta {
+            kind: RecordKind::Tombstone,
+            key_id,
+            epoch: 0,
+            digest: &digest,
+        };
         self.write_sealed(key_id, &meta, &plain)
     }
 
@@ -746,7 +862,12 @@ impl KeyStore {
     pub fn create_tombstone(&self, key_id: &str, t: &crate::hosted::Tombstone) -> Result<()> {
         let plain = tombstone_plaintext(key_id, t)?;
         let digest = t.intent_digest()?;
-        let meta = RecordMeta { kind: RecordKind::Tombstone, key_id, epoch: 0, digest: &digest };
+        let meta = RecordMeta {
+            kind: RecordKind::Tombstone,
+            key_id,
+            epoch: 0,
+            digest: &digest,
+        };
         self.create_bytes(key_id, &meta, &plain)
     }
 
@@ -756,7 +877,10 @@ impl KeyStore {
     /// bring it back from the nodes not cleared yet.
     fn cleared_marker(&self, key_id: &str, intent_digest: &[u8; 32]) -> Result<PathBuf> {
         self.path(key_id)?;
-        Ok(self.dir.join(CLEARED_DIR).join(format!("{key_id}.{}", hex::encode(intent_digest))))
+        Ok(self
+            .dir
+            .join(CLEARED_DIR)
+            .join(format!("{key_id}.{}", hex::encode(intent_digest))))
     }
 
     pub fn is_cleared(&self, key_id: &str, intent_digest: &[u8; 32]) -> Result<bool> {
@@ -769,7 +893,11 @@ impl KeyStore {
     pub fn clear_tombstone(&self, key_id: &str) -> Result<crate::hosted::Tombstone> {
         let t = match self.load_record(key_id)? {
             Record::Tombstone(t) => *t,
-            _ => return Err(DaemonError::Config(format!("{key_id} is not a tombstone here"))),
+            _ => {
+                return Err(DaemonError::Config(format!(
+                    "{key_id} is not a tombstone here"
+                )))
+            }
         };
         if t.retained.is_some() {
             return Err(DaemonError::Config(format!(
@@ -799,7 +927,11 @@ impl KeyStore {
     pub fn undelete(&self, key_id: &str, now_ms: u64) -> Result<crate::hosted::HostedKey> {
         let t = match self.load_record(key_id)? {
             Record::Tombstone(t) => *t,
-            _ => return Err(DaemonError::Config(format!("{key_id} is not deleted (no tombstone) on this node"))),
+            _ => {
+                return Err(DaemonError::Config(format!(
+                    "{key_id} is not deleted (no tombstone) on this node"
+                )))
+            }
         };
         let mut key = t.retained.clone().ok_or_else(|| {
             DaemonError::Config(format!(
@@ -822,7 +954,9 @@ impl KeyStore {
         let mut out = Vec::new();
         for entry in std::fs::read_dir(&self.dir)? {
             let name = entry?.file_name().to_string_lossy().into_owned();
-            let Some(key_id) = name.strip_suffix(".json") else { continue };
+            let Some(key_id) = name.strip_suffix(".json") else {
+                continue;
+            };
             if let Ok(Record::Tombstone(t)) = self.load_record(key_id) {
                 out.push(*t);
             }
@@ -841,7 +975,11 @@ impl KeyStore {
 
     /// Load the key file at `path` (anywhere — a backup) as if it were this node's file for
     /// `key_id`: unsealed and checked exactly like a live one (restore).
-    pub fn load_foreign(&self, path: &Path, key_id: &str) -> Result<(Record, Option<KeyFileHeader>)> {
+    pub fn load_foreign(
+        &self,
+        path: &Path,
+        key_id: &str,
+    ) -> Result<(Record, Option<KeyFileHeader>)> {
         self.path(key_id)?; // validates the id
         let (plain, hdr) = self.read_plaintext_at(path, key_id, STORE_KINDS)?;
         let plain = zeroize::Zeroizing::new(plain);
@@ -857,7 +995,9 @@ impl KeyStore {
             let entry = entry?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            let Some(key_id) = name.strip_suffix(".json") else { continue };
+            let Some(key_id) = name.strip_suffix(".json") else {
+                continue;
+            };
             // An unreadable file (wrong seal secret after a rotation, a partial restore, disk
             // corruption) is reported loudly and skipped — NOT fatal to the whole listing.
             //
@@ -919,7 +1059,9 @@ impl KeyStore {
     fn staged_path(&self, key_id: &str, ceremony_id: &str) -> Result<PathBuf> {
         self.path(key_id)?; // validates the key id
         validate_ceremony_id(ceremony_id)?;
-        Ok(self.staged_dir().join(format!("{key_id}.{ceremony_id}.json")))
+        Ok(self
+            .staged_dir()
+            .join(format!("{key_id}.{ceremony_id}.json")))
     }
 
     /// Durably write the share ceremony `ceremony_id` produced for `key_id`: sealed, fsynced,
@@ -932,7 +1074,12 @@ impl KeyStore {
         // The same header a committed share has (kind, key id, the new epoch), so committing is a
         // pure rename.
         let (plain, digest) = share_plaintext(key_id, share)?;
-        let meta = RecordMeta { kind: RecordKind::FrostShare, key_id, epoch: share.epoch, digest: &digest };
+        let meta = RecordMeta {
+            kind: RecordKind::FrostShare,
+            key_id,
+            epoch: share.epoch,
+            digest: &digest,
+        };
         self.create_sealed_at(&dir, &path, key_id, &meta, &plain)
     }
 
@@ -948,7 +1095,9 @@ impl KeyStore {
         let plain = zeroize::Zeroizing::new(plain);
         match self.parse_record(key_id, &plain, hdr.as_ref())? {
             Record::Frost(share) => Ok(*share),
-            _ => Err(DaemonError::KeyFile(format!("the staged file for {key_id} is not a FROST share"))),
+            _ => Err(DaemonError::KeyFile(format!(
+                "the staged file for {key_id} is not a FROST share"
+            ))),
         }
     }
 
@@ -956,7 +1105,12 @@ impl KeyStore {
     /// [`Promotion::TargetExists`] otherwise, and the staged file stays. `replace = true` (refresh):
     /// an atomic rename over the old share, so a crash leaves exactly one of the two. Both
     /// directories are fsynced before this returns.
-    pub fn promote_staged(&self, key_id: &str, ceremony_id: &str, replace: bool) -> Result<Promotion> {
+    pub fn promote_staged(
+        &self,
+        key_id: &str,
+        ceremony_id: &str,
+        replace: bool,
+    ) -> Result<Promotion> {
         let from = self.staged_path(key_id, ceremony_id)?;
         let to = self.path(key_id)?;
         self.touch(&to);
@@ -1004,7 +1158,9 @@ impl KeyStore {
             if name.starts_with('.') {
                 continue;
             }
-            let Some(stem) = name.strip_suffix(".json") else { continue };
+            let Some(stem) = name.strip_suffix(".json") else {
+                continue;
+            };
             // Key ids and ceremony ids never contain '.', so the split is unambiguous.
             if let Some((key_id, ceremony_id)) = stem.split_once('.') {
                 if self.staged_path(key_id, ceremony_id).is_ok() {
@@ -1181,13 +1337,19 @@ pub enum Promotion {
 pub fn validate_ceremony_id(ceremony_id: &str) -> Result<()> {
     if ceremony_id.is_empty()
         || ceremony_id.len() > 128
-        || !ceremony_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        || !ceremony_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         // Never echo an unbounded id back (a peer's request, a log line).
         let shown: String = ceremony_id.chars().take(64).collect();
         return Err(DaemonError::Config(format!(
             "invalid ceremony id: {shown:?}{} ({} bytes)",
-            if ceremony_id.len() > shown.len() { "…" } else { "" },
+            if ceremony_id.len() > shown.len() {
+                "…"
+            } else {
+                ""
+            },
             ceremony_id.len()
         )));
     }
@@ -1206,12 +1368,18 @@ pub const MAX_CEREMONY_KEY_ID_LEN: usize = 200;
 pub fn validate_key_id(key_id: &str) -> Result<()> {
     if key_id.is_empty()
         || key_id.len() > MAX_CEREMONY_KEY_ID_LEN
-        || !key_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        || !key_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         let shown: String = key_id.chars().take(64).collect();
         return Err(DaemonError::Config(format!(
             "invalid key id {shown:?}{} ({} bytes)",
-            if key_id.len() > shown.len() { "…" } else { "" },
+            if key_id.len() > shown.len() {
+                "…"
+            } else {
+                ""
+            },
             key_id.len()
         )));
     }
@@ -1270,7 +1438,9 @@ pub(crate) fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<NoRepl
         match err.raw_os_error() {
             Some(libc::EEXIST) => Ok(NoReplace::Exists),
             // ENOTSUP is EOPNOTSUPP on Linux; macOS reports ENOTSUP for a volume without it.
-            Some(libc::EINVAL) | Some(libc::ENOSYS) | Some(libc::ENOTSUP) => Ok(NoReplace::Unsupported),
+            Some(libc::EINVAL) | Some(libc::ENOSYS) | Some(libc::ENOTSUP) => {
+                Ok(NoReplace::Unsupported)
+            }
             _ => Err(err),
         }
     }
@@ -1360,8 +1530,12 @@ mod tests {
     }
 
     fn store(tmp: &tempfile::TempDir, sealed: bool) -> KeyStore {
-        let sealer = sealed
-            .then(|| Arc::new(crate::seal::Sealer::from_master_secret(b"test master secret", 1)));
+        let sealer = sealed.then(|| {
+            Arc::new(crate::seal::Sealer::from_master_secret(
+                b"test master secret",
+                1,
+            ))
+        });
         KeyStore::open_with_sealer(tmp.path().join("keys"), sealer).unwrap()
     }
 
@@ -1380,7 +1554,10 @@ mod tests {
 
         // A fresh store (as after a restart) reloads it and can still decrypt.
         let reloaded = store(&tmp, true).load_hosted("rutli-enc-1").unwrap();
-        assert_eq!(reloaded.decrypt_oaep(&ct).unwrap().as_slice(), b"before restart");
+        assert_eq!(
+            reloaded.decrypt_oaep(&ct).unwrap().as_slice(),
+            b"before restart"
+        );
         assert_eq!(reloaded.created_at, 42);
     }
 
@@ -1393,7 +1570,10 @@ mod tests {
 
         // list_hosted must not report FROST shares, and typed loads must refuse the wrong kind.
         assert_eq!(ks.list_hosted().unwrap(), vec!["rutli-sym-1".to_string()]);
-        assert!(ks.load("rutli-sym-1").is_err(), "a hosted key must not load as a FROST share");
+        assert!(
+            ks.load("rutli-sym-1").is_err(),
+            "a hosted key must not load as a FROST share"
+        );
     }
 
     #[test]
@@ -1404,7 +1584,11 @@ mod tests {
         let dir = tmp.path().join("keys");
         std::fs::create_dir_all(&dir).unwrap();
         let legacy = serde_json::json!({ "key_package": {}, "public_key_package": {} });
-        std::fs::write(dir.join("legacy.json"), serde_json::to_vec(&legacy).unwrap()).unwrap();
+        std::fs::write(
+            dir.join("legacy.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
 
         let ks = KeyStore::open(&dir).unwrap();
         // It is not valid FROST content, but it must be *classified* as a share, not as hosted.
@@ -1447,7 +1631,10 @@ mod tests {
 
             match ks.load_record("frost-a").unwrap() {
                 Record::Frost(s) => {
-                    assert_eq!(s.key_package.signing_share().serialize(), share.key_package.signing_share().serialize());
+                    assert_eq!(
+                        s.key_package.signing_share().serialize(),
+                        share.key_package.signing_share().serialize()
+                    );
                     assert_eq!(s.pkp_digest().unwrap(), share.pkp_digest().unwrap());
                     assert_eq!(s.origin, share.origin);
                     assert_eq!(s.key_id, "frost-a");
@@ -1466,7 +1653,10 @@ mod tests {
                 Record::Tombstone(t) => {
                     assert_eq!(t.key_id, "rutli-t");
                     assert_eq!(t.purge_after_ms, 20);
-                    assert_eq!(t.retained.as_ref().unwrap().private_der, retained.private_der);
+                    assert_eq!(
+                        t.retained.as_ref().unwrap().private_der,
+                        retained.private_der
+                    );
                 }
                 _ => panic!("sealed={sealed}: a tombstone must load as a tombstone"),
             }
@@ -1474,22 +1664,37 @@ mod tests {
             // Unsealed, the plaintext names its key id: a file copied over another id is refused by
             // the tag check (sealed files are refused earlier, by their header's key id).
             if !sealed {
-                for (from, to) in [("frost-a", "frost-b"), ("rutli-h", "rutli-x"), ("rutli-t", "rutli-y")] {
-                    std::fs::copy(dir.join(format!("{from}.json")), dir.join(format!("{to}.json"))).unwrap();
+                for (from, to) in [
+                    ("frost-a", "frost-b"),
+                    ("rutli-h", "rutli-x"),
+                    ("rutli-t", "rutli-y"),
+                ] {
+                    std::fs::copy(
+                        dir.join(format!("{from}.json")),
+                        dir.join(format!("{to}.json")),
+                    )
+                    .unwrap();
                     let err = match ks.load_record(to) {
                         Ok(_) => panic!("{from} copied to {to} must be refused"),
                         Err(e) => e.to_string(),
                     };
-                    assert!(err.contains("holds key") || err.contains("holds the tombstone of"), "{to}: {err}");
+                    assert!(
+                        err.contains("holds key") || err.contains("holds the tombstone of"),
+                        "{to}: {err}"
+                    );
                 }
 
                 // A tag that is not a string counts as absent, as it did when the plaintext went
                 // through a `serde_json::Value`: such a share still loads as a share.
                 let path = dir.join("frost-a.json");
-                let mut odd: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                let mut odd: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
                 odd["kind"] = serde_json::json!(0);
                 std::fs::write(&path, serde_json::to_vec(&odd).unwrap()).unwrap();
-                assert!(matches!(ks.load_record("frost-a"), Ok(Record::Frost(_))), "a non-string kind is ignored");
+                assert!(
+                    matches!(ks.load_record("frost-a"), Ok(Record::Frost(_))),
+                    "a non-string kind is ignored"
+                );
             }
         }
     }
@@ -1499,7 +1704,13 @@ mod tests {
         let (shares, pkp) =
             rutli_frost_core::dealer::split_ed25519_seed(&[5u8; 32], &[1, 2, 3], 2).unwrap();
         let key_package = frost::keys::KeyPackage::try_from(shares[0].clone()).unwrap();
-        Share { key_package, public_key_package: pkp, origin, epoch: 0, key_id: String::new() }
+        Share {
+            key_package,
+            public_key_package: pkp,
+            origin,
+            epoch: 0,
+            key_id: String::new(),
+        }
     }
 
     #[test]
@@ -1508,8 +1719,11 @@ mod tests {
         let ks = KeyStore::open(tmp.path().join("keys")).unwrap();
         let mut share = dealt_share(None);
         let pkp = share.public_key_package.clone();
-        share.public_key_package =
-            frost::keys::PublicKeyPackage::new(pkp.verifying_shares().clone(), *pkp.verifying_key(), Some(2));
+        share.public_key_package = frost::keys::PublicKeyPackage::new(
+            pkp.verifying_shares().clone(),
+            *pkp.verifying_key(),
+            Some(2),
+        );
         ks.create("frost-a", &share).unwrap();
         let err = ks.load("frost-a").err().expect("refused");
         assert!(err.to_string().contains("min_signers"), "{err}");
@@ -1533,15 +1747,30 @@ mod tests {
     fn create_never_clobbers_an_existing_key_file() {
         let tmp = tempfile::tempdir().unwrap();
         let ks = store(&tmp, true);
-        ks.create("frost-import-a", &dealt_share(Some(origin()))).unwrap();
+        ks.create("frost-import-a", &dealt_share(Some(origin())))
+            .unwrap();
         let before = std::fs::read(ks.dir().join("frost-import-a.json")).unwrap();
 
         let again = ks.create("frost-import-a", &dealt_share(None));
-        assert!(matches!(again, Err(DaemonError::KeyExists(_))), "{:?}", again.err());
+        assert!(
+            matches!(again, Err(DaemonError::KeyExists(_))),
+            "{:?}",
+            again.err()
+        );
         // Nor over a hosted key, nor leaving temp files behind.
-        ks.save_hosted("rutli-x", &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap()).unwrap();
-        assert!(matches!(ks.create("rutli-x", &dealt_share(None)), Err(DaemonError::KeyExists(_))));
-        assert_eq!(std::fs::read(ks.dir().join("frost-import-a.json")).unwrap(), before);
+        ks.save_hosted(
+            "rutli-x",
+            &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            ks.create("rutli-x", &dealt_share(None)),
+            Err(DaemonError::KeyExists(_))
+        ));
+        assert_eq!(
+            std::fs::read(ks.dir().join("frost-import-a.json")).unwrap(),
+            before
+        );
         let names: Vec<String> = std::fs::read_dir(ks.dir())
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -1560,7 +1789,9 @@ mod tests {
         let wins: usize = (0..8)
             .map(|_| {
                 let ks = ks.clone();
-                std::thread::spawn(move || ks.create("frost-import-race", &dealt_share(None)).is_ok())
+                std::thread::spawn(move || {
+                    ks.create("frost-import-race", &dealt_share(None)).is_ok()
+                })
             })
             .collect::<Vec<_>>()
             .into_iter()
@@ -1570,7 +1801,13 @@ mod tests {
         // Losers leave no temp behind.
         let temps = std::fs::read_dir(ks.dir())
             .unwrap()
-            .filter(|e| e.as_ref().unwrap().file_name().to_string_lossy().ends_with(".tmp"))
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .file_name()
+                    .to_string_lossy()
+                    .ends_with(".tmp")
+            })
             .count();
         assert_eq!(temps, 0);
     }
@@ -1584,7 +1821,10 @@ mod tests {
         std::fs::write(&b, b"b").unwrap();
         match rename_noreplace(&a, &target).unwrap() {
             NoReplace::Moved => {
-                assert!(matches!(rename_noreplace(&b, &target).unwrap(), NoReplace::Exists));
+                assert!(matches!(
+                    rename_noreplace(&b, &target).unwrap(),
+                    NoReplace::Exists
+                ));
                 assert_eq!(std::fs::read(&target).unwrap(), b"a");
             }
             // Platform without it (e.g. musl): create() falls back to link(2).
@@ -1598,28 +1838,51 @@ mod tests {
     fn stale_create_temps_are_swept_and_fresh_ones_kept() {
         let tmp = tempfile::tempdir().unwrap();
         let ks = store(&tmp, true);
-        let temp = ks.dir().join(format!("{CREATE_TMP_PREFIX}frost-import-x-123.tmp"));
+        let temp = ks
+            .dir()
+            .join(format!("{CREATE_TMP_PREFIX}frost-import-x-123.tmp"));
         std::fs::write(&temp, b"sealed key that never became live").unwrap();
         std::fs::write(ks.dir().join("not-a-temp.json.tmp"), b"x").unwrap();
-        assert!(ks.sweep_stale_create_temps(std::time::Duration::from_secs(3600)).unwrap().is_empty());
-        assert!(temp.exists(), "a fresh temp may belong to a create in flight");
-        let removed = ks.sweep_stale_create_temps(std::time::Duration::ZERO).unwrap();
-        assert_eq!(removed, vec![format!("{CREATE_TMP_PREFIX}frost-import-x-123.tmp")]);
+        assert!(ks
+            .sweep_stale_create_temps(std::time::Duration::from_secs(3600))
+            .unwrap()
+            .is_empty());
+        assert!(
+            temp.exists(),
+            "a fresh temp may belong to a create in flight"
+        );
+        let removed = ks
+            .sweep_stale_create_temps(std::time::Duration::ZERO)
+            .unwrap();
+        assert_eq!(
+            removed,
+            vec![format!("{CREATE_TMP_PREFIX}frost-import-x-123.tmp")]
+        );
         assert!(!temp.exists());
-        assert!(ks.dir().join("not-a-temp.json.tmp").exists(), "only create temps are swept");
+        assert!(
+            ks.dir().join("not-a-temp.json.tmp").exists(),
+            "only create temps are swept"
+        );
     }
 
     #[test]
     fn create_hosted_never_replaces_anything() {
         let tmp = tempfile::tempdir().unwrap();
         let ks = store(&tmp, true);
-        ks.create("frost-import-a", &dealt_share(Some(origin()))).unwrap();
+        ks.create("frost-import-a", &dealt_share(Some(origin())))
+            .unwrap();
         let key = HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
-        assert!(matches!(ks.create_hosted("frost-import-a", &key), Err(DaemonError::KeyExists(_))));
+        assert!(matches!(
+            ks.create_hosted("frost-import-a", &key),
+            Err(DaemonError::KeyExists(_))
+        ));
         assert!(ks.load("frost-import-a").is_ok());
         ks.create_hosted("rutli-sym-1", &key).unwrap();
         assert_eq!(ks.load_hosted("rutli-sym-1").unwrap().created_at, 1);
-        assert!(matches!(ks.create_hosted("rutli-sym-1", &key), Err(DaemonError::KeyExists(_))));
+        assert!(matches!(
+            ks.create_hosted("rutli-sym-1", &key),
+            Err(DaemonError::KeyExists(_))
+        ));
     }
 
     #[test]
@@ -1632,7 +1895,11 @@ mod tests {
             "key_package": share.key_package,
             "public_key_package": share.public_key_package,
         });
-        std::fs::write(ks.dir().join("k.json"), serde_json::to_vec(&legacy).unwrap()).unwrap();
+        std::fs::write(
+            ks.dir().join("k.json"),
+            serde_json::to_vec(&legacy).unwrap(),
+        )
+        .unwrap();
         let loaded = ks.load("k").unwrap();
         assert_eq!(loaded.origin, None, "legacy = DKG");
         // Re-saving a DKG share writes no origin field at all (byte-compatible with old readers).
@@ -1648,20 +1915,37 @@ mod tests {
     fn unrefreshed_dealt_keys_are_listed() {
         let tmp = tempfile::tempdir().unwrap();
         let ks = store(&tmp, true);
-        ks.create("frost-import-new", &dealt_share(Some(origin()))).unwrap();
-        ks.create("frost-import-done", &dealt_share(Some(KeyOrigin { refresh_count: 1, ..origin() })))
+        ks.create("frost-import-new", &dealt_share(Some(origin())))
             .unwrap();
+        ks.create(
+            "frost-import-done",
+            &dealt_share(Some(KeyOrigin {
+                refresh_count: 1,
+                ..origin()
+            })),
+        )
+        .unwrap();
         ks.create("frost-namespace", &dealt_share(None)).unwrap();
-        ks.save_hosted("rutli-x", &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap()).unwrap();
-        assert_eq!(ks.dealt_keys_never_refreshed().unwrap(), vec!["frost-import-new".to_string()]);
+        ks.save_hosted(
+            "rutli-x",
+            &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            ks.dealt_keys_never_refreshed().unwrap(),
+            vec!["frost-import-new".to_string()]
+        );
     }
 
     #[test]
     fn delete_removes_the_key_and_is_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
         let ks = store(&tmp, true);
-        ks.save_hosted("rutli-enc-2", &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap())
-            .unwrap();
+        ks.save_hosted(
+            "rutli-enc-2",
+            &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap(),
+        )
+        .unwrap();
         assert!(ks.exists("rutli-enc-2"));
         ks.delete("rutli-enc-2").unwrap();
         assert!(!ks.exists("rutli-enc-2"));
@@ -1673,10 +1957,16 @@ mod tests {
     fn a_wrong_seal_secret_cannot_open_a_hosted_key() {
         let tmp = tempfile::tempdir().unwrap();
         store(&tmp, true)
-            .save_hosted("rutli-enc-3", &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap())
+            .save_hosted(
+                "rutli-enc-3",
+                &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap(),
+            )
             .unwrap();
 
-        let wrong = Arc::new(crate::seal::Sealer::from_master_secret(b"a different master", 1));
+        let wrong = Arc::new(crate::seal::Sealer::from_master_secret(
+            b"a different master",
+            1,
+        ));
         let ks = KeyStore::open_with_sealer(tmp.path().join("keys"), Some(wrong)).unwrap();
         assert!(ks.load_hosted("rutli-enc-3").is_err());
     }
@@ -1689,22 +1979,40 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let key = HostedKey::generate(HostedSpec::Aes256Gcm, 7).unwrap();
         store(&tmp, false).save_hosted("rutli-sym-9", &key).unwrap(); // unsealed
-        store(&tmp, false).save("frost-a", &dealt_share(None)).unwrap();
+        store(&tmp, false)
+            .save("frost-a", &dealt_share(None))
+            .unwrap();
 
         let sealed = store(&tmp, true);
         assert_eq!(sealed.plaintext_files().unwrap().len(), 2);
         let e = sealed.load_hosted("rutli-sym-9").err().unwrap().to_string();
-        assert!(e.contains("PLAINTEXT") && e.contains("migrate-plaintext"), "{e}");
-        assert!(sealed.list_hosted().unwrap().is_empty(), "a refused file is not inventory");
+        assert!(
+            e.contains("PLAINTEXT") && e.contains("migrate-plaintext"),
+            "{e}"
+        );
+        assert!(
+            sealed.list_hosted().unwrap().is_empty(),
+            "a refused file is not inventory"
+        );
 
         sealed.migrate_plaintext("rutli-sym-9").unwrap();
         sealed.migrate_plaintext("frost-a").unwrap();
         assert!(sealed.plaintext_files().unwrap().is_empty());
         let raw = std::fs::read(tmp.path().join("keys").join("rutli-sym-9.json")).unwrap();
-        assert!(crate::seal::Sealer::is_sealed(&raw), "hosted key must be sealed after migration");
+        assert!(
+            crate::seal::Sealer::is_sealed(&raw),
+            "hosted key must be sealed after migration"
+        );
         assert_eq!(sealed.load_hosted("rutli-sym-9").unwrap().created_at, 7);
-        assert_eq!(sealed.load("frost-a").unwrap().key_id, "frost-a", "the key id is now inside");
-        assert!(sealed.migrate_plaintext("frost-a").is_err(), "already sealed");
+        assert_eq!(
+            sealed.load("frost-a").unwrap().key_id,
+            "frost-a",
+            "the key id is now inside"
+        );
+        assert!(
+            sealed.migrate_plaintext("frost-a").is_err(),
+            "already sealed"
+        );
     }
 
     // ── key-file format v2 (audit M4) ─────────────────────────────────────────────────────────
@@ -1712,14 +2020,16 @@ mod tests {
     const UUID: &str = "6f1d3c1e-8a0b-4a43-9c55-0d4f1f0b7a11";
 
     fn v2_sealer(node: u16, cluster: &str, write: u8) -> Arc<crate::seal::Sealer> {
-        Arc::new(crate::seal::Sealer::from_master_secret(b"test master secret", node).with_binding(
-            crate::seal::KeyFileBinding {
-                node,
-                cluster_uuid: Some(cluster.into()),
-                write_version: write,
-                accept_v1: true,
-            },
-        ))
+        Arc::new(
+            crate::seal::Sealer::from_master_secret(b"test master secret", node).with_binding(
+                crate::seal::KeyFileBinding {
+                    node,
+                    cluster_uuid: Some(cluster.into()),
+                    write_version: write,
+                    accept_v1: true,
+                },
+            ),
+        )
     }
 
     fn v2_store(dir: &Path, node: u16, cluster: &str) -> KeyStore {
@@ -1728,7 +2038,8 @@ mod tests {
 
     /// Edit the clear header of a v2 file in place.
     fn edit_header(path: &Path, f: impl Fn(&mut serde_json::Value)) {
-        let mut v: serde_json::Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let mut v: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
         f(&mut v["hdr"]);
         std::fs::write(path, serde_json::to_vec(&v).unwrap()).unwrap();
     }
@@ -1744,14 +2055,31 @@ mod tests {
         let ks = v2_store(&tmp.path().join("keys"), 1, UUID);
         let share = dealt_share(Some(origin()));
         ks.create("frost-a", &share).unwrap();
-        ks.save_hosted("rutli-x", &HostedKey::generate(HostedSpec::EcP256, 3).unwrap()).unwrap();
+        ks.save_hosted(
+            "rutli-x",
+            &HostedKey::generate(HostedSpec::EcP256, 3).unwrap(),
+        )
+        .unwrap();
         let raw = std::fs::read(ks.dir().join("frost-a.json")).unwrap();
         let h = crate::seal::header_of(&raw).expect("a v2 header");
-        assert_eq!((h.node, h.key_id.as_str(), h.kind.as_str(), h.cluster.as_str()), (1, "frost-a", "frost-share", UUID));
+        assert_eq!(
+            (
+                h.node,
+                h.key_id.as_str(),
+                h.kind.as_str(),
+                h.cluster.as_str()
+            ),
+            (1, "frost-a", "frost-share", UUID)
+        );
         assert_eq!(h.digest, hex::encode(share.pkp_digest().unwrap()));
         assert_eq!(ks.load("frost-a").unwrap().origin, Some(origin()));
         assert_eq!(ks.load_hosted("rutli-x").unwrap().created_at, 3);
-        assert_eq!(crate::seal::header_of(&std::fs::read(ks.dir().join("rutli-x.json")).unwrap()).unwrap().kind, "hosted-key");
+        assert_eq!(
+            crate::seal::header_of(&std::fs::read(ks.dir().join("rutli-x.json")).unwrap())
+                .unwrap()
+                .kind,
+            "hosted-key"
+        );
     }
 
     #[test]
@@ -1771,11 +2099,16 @@ mod tests {
         edit_header(&path, |h| h["node"] = 2.into());
         refused(ks.load("frost-a"), "belongs to node 2");
         reset();
-        edit_header(&path, |h| h["cluster"] = "00000000-0000-4000-8000-000000000000".into());
+        edit_header(&path, |h| {
+            h["cluster"] = "00000000-0000-4000-8000-000000000000".into()
+        });
         refused(ks.load("frost-a"), "another cluster");
         reset();
         edit_header(&path, |h| h["kind"] = "recipient".into());
-        refused(ks.load("frost-a"), "record where a frost-share or hosted-key or tombstone is expected");
+        refused(
+            ks.load("frost-a"),
+            "record where a frost-share or hosted-key or tombstone is expected",
+        );
         reset();
         // A kind the store does hold passes the check and still fails the associated data.
         edit_header(&path, |h| h["kind"] = "hosted-key".into());
@@ -1791,12 +2124,18 @@ mod tests {
         assert!(ks.load("frost-a").is_ok());
 
         // A store expecting another cluster, or run as another node, refuses the file as it is.
-        refused(v2_store(&dir, 1, "00000000-0000-4000-8000-000000000000").load("frost-a"), "another cluster");
+        refused(
+            v2_store(&dir, 1, "00000000-0000-4000-8000-000000000000").load("frost-a"),
+            "another cluster",
+        );
         let node2 = KeyStore::open_with_sealer(&dir, Some(v2_sealer(2, UUID, 2))).unwrap();
         refused(node2.load("frost-a"), "belongs to node 1");
         let no_uuid = KeyStore::open_with_sealer(
             &dir,
-            Some(Arc::new(crate::seal::Sealer::from_master_secret(b"test master secret", 1))),
+            Some(Arc::new(crate::seal::Sealer::from_master_secret(
+                b"test master secret",
+                1,
+            ))),
         )
         .unwrap();
         refused(no_uuid.load("frost-a"), "keyfile.cluster_uuid is not set");
@@ -1813,7 +2152,11 @@ mod tests {
         std::fs::copy(dir.join("frost-a.json"), dir.join("frost-b.json")).unwrap();
         refused(ks.load("frost-b"), "holds key frost-a");
         // A hosted key passed off as a share and vice versa.
-        ks.save_hosted("rutli-x", &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap()).unwrap();
+        ks.save_hosted(
+            "rutli-x",
+            &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap(),
+        )
+        .unwrap();
         std::fs::copy(dir.join("rutli-x.json"), dir.join("frost-a.json")).unwrap();
         refused(ks.load("frost-a"), "holds key rutli-x");
 
@@ -1822,7 +2165,11 @@ mod tests {
         let ks1 = store(&tmp1, true);
         ks1.create("frost-a", &dealt_share(None)).unwrap();
         ks1.create("frost-b", &dealt_share(None)).unwrap();
-        std::fs::copy(ks1.dir().join("frost-a.json"), ks1.dir().join("frost-b.json")).unwrap();
+        std::fs::copy(
+            ks1.dir().join("frost-a.json"),
+            ks1.dir().join("frost-b.json"),
+        )
+        .unwrap();
         refused(ks1.load("frost-b"), "holds key frost-a");
     }
 
@@ -1832,9 +2179,16 @@ mod tests {
         // node-2 share sealed by node 1's sealer.
         let tmp = tempfile::tempdir().unwrap();
         let ks = v2_store(&tmp.path().join("keys"), 1, UUID);
-        let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&[5u8; 32], &[1, 2, 3], 2).unwrap();
+        let (shares, pkp) =
+            rutli_frost_core::dealer::split_ed25519_seed(&[5u8; 32], &[1, 2, 3], 2).unwrap();
         let kp2 = frost::keys::KeyPackage::try_from(shares[1].clone()).unwrap();
-        let share = Share { key_package: kp2, public_key_package: pkp, origin: None, epoch: 0, key_id: String::new() };
+        let share = Share {
+            key_package: kp2,
+            public_key_package: pkp,
+            origin: None,
+            epoch: 0,
+            key_id: String::new(),
+        };
         ks.create("frost-a", &share).unwrap();
         refused(ks.load("frost-a"), "another FROST identifier");
     }
@@ -1846,15 +2200,33 @@ mod tests {
         // A v1 store (this release's default) next to a node that writes v2.
         let v1 = KeyStore::open_with_sealer(&dir, Some(v2_sealer(1, UUID, 1))).unwrap();
         v1.create("frost-a", &dealt_share(None)).unwrap();
-        v1.save_hosted("rutli-x", &HostedKey::generate(HostedSpec::Rsa2048, 1).unwrap()).unwrap();
+        v1.save_hosted(
+            "rutli-x",
+            &HostedKey::generate(HostedSpec::Rsa2048, 1).unwrap(),
+        )
+        .unwrap();
         let path = dir.join("frost-a.json");
-        assert_eq!(crate::seal::file_version(&std::fs::read(&path).unwrap()), Some(1), "v2 is opt-in");
+        assert_eq!(
+            crate::seal::file_version(&std::fs::read(&path).unwrap()),
+            Some(1),
+            "v2 is opt-in"
+        );
 
         let v2 = v2_store(&dir, 1, UUID);
         assert!(v2.load("frost-a").is_ok(), "a v2 writer reads v1");
-        assert_eq!(v2.reseal_outdated().unwrap(), 2, "start-up migrates v1 files when writing v2");
-        assert_eq!(crate::seal::file_version(&std::fs::read(&path).unwrap()), Some(2));
-        assert!(v1.load("frost-a").is_ok(), "this release reads v2 even while writing v1");
+        assert_eq!(
+            v2.reseal_outdated().unwrap(),
+            2,
+            "start-up migrates v1 files when writing v2"
+        );
+        assert_eq!(
+            crate::seal::file_version(&std::fs::read(&path).unwrap()),
+            Some(2)
+        );
+        assert!(
+            v1.load("frost-a").is_ok(),
+            "this release reads v2 even while writing v1"
+        );
         assert_eq!(v2.reseal_outdated().unwrap(), 0, "idempotent");
 
         // `keyfile downgrade`: back to v1, which a release that knows only v1 can open with the
@@ -1864,7 +2236,9 @@ mod tests {
         }
         let raw = std::fs::read(&path).unwrap();
         assert_eq!(crate::seal::file_version(&raw), Some(1));
-        let plain = crate::seal::Sealer::from_master_secret(b"test master secret", 1).unseal(&raw).unwrap();
+        let plain = crate::seal::Sealer::from_master_secret(b"test master secret", 1)
+            .unseal(&raw)
+            .unwrap();
         assert!(serde_json::from_slice::<Share>(&plain).is_ok());
         for p in v2.key_file_paths().unwrap() {
             v2.rewrite(&p, 2).unwrap();
@@ -1875,9 +2249,16 @@ mod tests {
         v1.save("frost-b", &dealt_share(None)).unwrap();
         let strict = KeyStore::open_with_sealer(
             &dir,
-            Some(Arc::new(crate::seal::Sealer::from_master_secret(b"test master secret", 1).with_binding(
-                crate::seal::KeyFileBinding { node: 1, cluster_uuid: Some(UUID.into()), write_version: 2, accept_v1: false },
-            ))),
+            Some(Arc::new(
+                crate::seal::Sealer::from_master_secret(b"test master secret", 1).with_binding(
+                    crate::seal::KeyFileBinding {
+                        node: 1,
+                        cluster_uuid: Some(UUID.into()),
+                        write_version: 2,
+                        accept_v1: false,
+                    },
+                ),
+            )),
         )
         .unwrap();
         refused(strict.load("frost-b"), "accept_v1 is off");
@@ -1888,33 +2269,67 @@ mod tests {
     fn a_dek_rotation_reseals_everything_and_the_old_dek_is_then_not_needed() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("keys");
-        let binding = |node| crate::seal::KeyFileBinding { node, cluster_uuid: Some(UUID.into()), write_version: 2, accept_v1: true };
+        let binding = |node| crate::seal::KeyFileBinding {
+            node,
+            cluster_uuid: Some(UUID.into()),
+            write_version: 2,
+            accept_v1: true,
+        };
         let old = crate::seal::NodeSealBundle::random(1);
-        let ks_old = KeyStore::open_with_sealer(&dir, Some(Arc::new(old.sealer().with_binding(binding(1))))).unwrap();
+        let ks_old =
+            KeyStore::open_with_sealer(&dir, Some(Arc::new(old.sealer().with_binding(binding(1)))))
+                .unwrap();
         ks_old.create("frost-a", &dealt_share(None)).unwrap();
-        ks_old.save_hosted("rutli-x", &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap()).unwrap();
+        ks_old
+            .save_hosted(
+                "rutli-x",
+                &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap(),
+            )
+            .unwrap();
         // A v1 file under the old DEK too (written before v2 was switched on).
         let v1_old = KeyStore::open_with_sealer(&dir, Some(Arc::new(old.sealer()))).unwrap();
         v1_old.save("frost-b", &dealt_share(None)).unwrap();
-        ks_old.stage("frost-c", "dkg-1", &dealt_share(None)).unwrap();
+        ks_old
+            .stage("frost-c", "dkg-1", &dealt_share(None))
+            .unwrap();
 
         let rotated = old.rotated();
         assert_eq!(rotated.previous_count(), 1);
         assert_ne!(rotated.dek_id(), old.dek_id());
-        let ks_rot = KeyStore::open_with_sealer(&dir, Some(Arc::new(rotated.sealer().with_binding(binding(1))))).unwrap();
+        let ks_rot = KeyStore::open_with_sealer(
+            &dir,
+            Some(Arc::new(rotated.sealer().with_binding(binding(1)))),
+        )
+        .unwrap();
         for p in ks_rot.key_file_paths().unwrap() {
-            assert!(matches!(ks_rot.file_state(&p).unwrap(), Some((_, crate::seal::DekUse::Previous(0)))), "{p:?}");
+            assert!(
+                matches!(
+                    ks_rot.file_state(&p).unwrap(),
+                    Some((_, crate::seal::DekUse::Previous(0)))
+                ),
+                "{p:?}"
+            );
         }
         assert_eq!(ks_rot.reseal_outdated().unwrap(), 4);
         for p in ks_rot.key_file_paths().unwrap() {
-            assert_eq!(ks_rot.file_state(&p).unwrap(), Some((2, crate::seal::DekUse::Current)), "{p:?}");
+            assert_eq!(
+                ks_rot.file_state(&p).unwrap(),
+                Some((2, crate::seal::DekUse::Current)),
+                "{p:?}"
+            );
         }
 
         // The old DEK dropped: everything still opens. The old bundle opens nothing.
         let final_bundle = rotated.without_previous();
-        let ks_new = KeyStore::open_with_sealer(&dir, Some(Arc::new(final_bundle.sealer().with_binding(binding(1))))).unwrap();
+        let ks_new = KeyStore::open_with_sealer(
+            &dir,
+            Some(Arc::new(final_bundle.sealer().with_binding(binding(1)))),
+        )
+        .unwrap();
         assert!(ks_new.load("frost-a").is_ok() && ks_new.load("frost-b").is_ok());
-        assert!(ks_new.load_hosted("rutli-x").is_ok() && ks_new.load_staged("frost-c", "dkg-1").is_ok());
+        assert!(
+            ks_new.load_hosted("rutli-x").is_ok() && ks_new.load_staged("frost-c", "dkg-1").is_ok()
+        );
         refused(ks_old.load("frost-a"), "does not hold");
     }
 
@@ -1925,18 +2340,29 @@ mod tests {
         // self-healing. It must be reported and skipped instead.
         let tmp = tempfile::tempdir().unwrap();
         let good = store(&tmp, true);
-        good.save_hosted("rutli-good", &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap())
-            .unwrap();
+        good.save_hosted(
+            "rutli-good",
+            &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap(),
+        )
+        .unwrap();
 
         // A key written under a DIFFERENT master secret, as after a seal-secret rotation.
-        let other = Arc::new(crate::seal::Sealer::from_master_secret(b"a rotated master secret", 1));
+        let other = Arc::new(crate::seal::Sealer::from_master_secret(
+            b"a rotated master secret",
+            1,
+        ));
         KeyStore::open_with_sealer(tmp.path().join("keys"), Some(other))
             .unwrap()
-            .save_hosted("rutli-stale", &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap())
+            .save_hosted(
+                "rutli-stale",
+                &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap(),
+            )
             .unwrap();
 
         // The healthy key is still listed and usable; the unreadable one is simply absent.
-        let listed = good.list_hosted().expect("one bad file must not fail the whole listing");
+        let listed = good
+            .list_hosted()
+            .expect("one bad file must not fail the whole listing");
         assert_eq!(listed, vec!["rutli-good".to_string()]);
         assert!(good.load_hosted("rutli-good").is_ok());
         // Reading the bad one directly still fails loudly — it is skipped, not treated as absent.
@@ -1975,15 +2401,22 @@ mod tests {
         // kept reporting healthy while every Sign failed with EACCES.
         let tmp = tempfile::tempdir().unwrap();
         let ks = store(&tmp, true);
-        ks.save_hosted("rutli-k", &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap())
-            .unwrap();
-        ks.check_readable().expect("a fresh store with a key must pass");
+        ks.save_hosted(
+            "rutli-k",
+            &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap(),
+        )
+        .unwrap();
+        ks.check_readable()
+            .expect("a fresh store with a key must pass");
         let leftovers: Vec<_> = std::fs::read_dir(ks.dir())
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .filter(|n| n.starts_with('.'))
             .collect();
-        assert!(leftovers.is_empty(), "the write probe must clean up after itself: {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "the write probe must clean up after itself: {leftovers:?}"
+        );
 
         if !chmod_enforced(ks.dir(), 0o000, 0o700) {
             return;
@@ -1991,10 +2424,16 @@ mod tests {
         let verdict = ks.check_readable();
         chmod(ks.dir(), 0o700); // restore BEFORE asserting, or a failure leaves an undeletable tempdir
 
-        let msg = verdict.expect_err("an unreadable key dir must fail the probe").to_string();
-        assert!(msg.contains(&ks.dir().display().to_string()), "error must name the path: {msg}");
+        let msg = verdict
+            .expect_err("an unreadable key dir must fail the probe")
+            .to_string();
+        assert!(
+            msg.contains(&ks.dir().display().to_string()),
+            "error must name the path: {msg}"
+        );
         assert!(msg.contains("unreadable"), "{msg}");
-        ks.check_readable().expect("restoring the permissions must clear the verdict");
+        ks.check_readable()
+            .expect("restoring the permissions must clear the verdict");
     }
 
     #[cfg(unix)]
@@ -2003,7 +2442,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ks = store(&tmp, true);
         for id in ["rutli-k", "rutli-other"] {
-            ks.save_hosted(id, &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap()).unwrap();
+            ks.save_hosted(id, &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap())
+                .unwrap();
         }
         let file = ks.dir().join("rutli-k.json");
         let other = ks.dir().join("rutli-other.json");
@@ -2019,19 +2459,30 @@ mod tests {
         let all_bad = ks.check_readable();
         chmod(&file, 0o600);
         chmod(&other, 0o600);
-        assert!(one_bad.is_ok(), "one bad file among good ones must not fail the node: {one_bad:?}");
-        let msg = all_bad.expect_err("every key file unopenable must fail the probe").to_string();
+        assert!(
+            one_bad.is_ok(),
+            "one bad file among good ones must not fail the node: {one_bad:?}"
+        );
+        let msg = all_bad
+            .expect_err("every key file unopenable must fail the probe")
+            .to_string();
         assert!(msg.contains("unreadable"), "{msg}");
-        assert!(msg.contains(&ks.dir().display().to_string()), "error must name the path: {msg}");
+        assert!(
+            msg.contains(&ks.dir().display().to_string()),
+            "error must name the path: {msg}"
+        );
 
         // Readable but not writable (a read-only remount): signing needs to write nonce markers.
         chmod(ks.dir(), 0o500);
         let verdict = ks.check_readable();
         chmod(ks.dir(), 0o700);
-        let msg = verdict.expect_err("a read-only key dir must fail the probe").to_string();
+        let msg = verdict
+            .expect_err("a read-only key dir must fail the probe")
+            .to_string();
         assert!(msg.contains("not writable"), "{msg}");
 
-        ks.check_readable().expect("recovers once permissions are back");
+        ks.check_readable()
+            .expect("recovers once permissions are back");
     }
 
     #[cfg(unix)]
@@ -2040,8 +2491,11 @@ mod tests {
         // NOT_FOUND is the worst possible answer here: Canton would believe the key is gone.
         let tmp = tempfile::tempdir().unwrap();
         let ks = store(&tmp, true);
-        ks.save_hosted("rutli-k", &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap())
-            .unwrap();
+        ks.save_hosted(
+            "rutli-k",
+            &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap(),
+        )
+        .unwrap();
         if !chmod_enforced(ks.dir(), 0o000, 0o700) {
             return;
         }
@@ -2053,7 +2507,10 @@ mod tests {
             "load on an unreadable store must be an IO error: {:?}",
             loaded.err()
         );
-        assert!(matches!(deleted, Err(DaemonError::Io(_))), "delete must not report success");
+        assert!(
+            matches!(deleted, Err(DaemonError::Io(_))),
+            "delete must not report success"
+        );
         assert!(ks.load_hosted("rutli-k").is_ok(), "the key was never gone");
     }
 
@@ -2063,10 +2520,13 @@ mod tests {
         let ks = store(&tmp, false);
         std::fs::create_dir_all(ks.nonce_dir("k")).unwrap(); // a `*.nonces` directory
         std::fs::write(ks.dir().join("k.json.tmp"), b"partial").unwrap(); // an in-flight write
-        // A probe file another prober is still using must survive a concurrent probe.
+                                                                          // A probe file another prober is still using must survive a concurrent probe.
         let fresh = ks.dir().join(format!("{PROBE_PREFIX}1-2-3"));
         std::fs::write(&fresh, b"1").unwrap();
         ks.check_readable().unwrap();
-        assert!(fresh.exists(), "an in-flight probe file of another prober must not be removed");
+        assert!(
+            fresh.exists(),
+            "an in-flight probe file of another prober must not be removed"
+        );
     }
 }

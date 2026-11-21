@@ -20,7 +20,11 @@ fn config(cases: u32) -> ProptestConfig {
 }
 
 fn ed25519_public(seed: [u8; 32]) -> PublicKey {
-    PublicKey::Ed25519(ed25519_dalek::SigningKey::from_bytes(&seed).verifying_key().to_bytes())
+    PublicKey::Ed25519(
+        ed25519_dalek::SigningKey::from_bytes(&seed)
+            .verifying_key()
+            .to_bytes(),
+    )
 }
 
 /// A P-256 public key from a scalar, or `None` for a scalar out of range.

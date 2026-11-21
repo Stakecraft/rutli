@@ -33,7 +33,8 @@ fn the_daemon_turns_core_dumps_off_before_it_opens_a_key_store() {
         .env("NO_COLOR", "1")
         .output()
         .unwrap();
-    let log = String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
+    let log =
+        String::from_utf8_lossy(&out.stdout).into_owned() + &String::from_utf8_lossy(&out.stderr);
     assert!(!out.status.success(), "{log}");
     let line = log
         .lines()

@@ -24,10 +24,10 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion};
-use frost_ed25519 as frost;
 use frost::round1::SigningCommitments;
 use frost::round2::SignatureShare;
 use frost::Identifier;
+use frost_ed25519 as frost;
 use rutli_frost_core::nonce_store::NonceStore;
 use rutli_frost_core::session::{aggregate, Cosigner, SessionBinding, SessionOwner};
 
@@ -65,24 +65,38 @@ fn random_32() -> [u8; 32] {
 
 /// Cosigners 1 and 2 of a 2-of-3 key, each with its own marker directory under `dir`.
 fn cosigners(dir: &std::path::Path) -> (Cosigner, Cosigner) {
-    let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&random_32(), &[1, 2, 3], 2).unwrap();
+    let (shares, pkp) =
+        rutli_frost_core::dealer::split_ed25519_seed(&random_32(), &[1, 2, 3], 2).unwrap();
     let cosigner = |i: usize| {
         let kp = frost::keys::KeyPackage::try_from(shares[i].clone()).unwrap();
-        Cosigner::new(kp, pkp.clone(), NonceStore::open(dir.join(format!("nonces-{}", i + 1))).unwrap())
+        Cosigner::new(
+            kp,
+            pkp.clone(),
+            NonceStore::open(dir.join(format!("nonces-{}", i + 1))).unwrap(),
+        )
     };
     (cosigner(0), cosigner(1))
 }
 
 fn binding(a: &Cosigner, b: &Cosigner, msg: &[u8]) -> SessionBinding {
-    SessionBinding::new(KEY).with_message(msg).with_signers([a.identifier(), b.identifier()])
+    SessionBinding::new(KEY)
+        .with_message(msg)
+        .with_signers([a.identifier(), b.identifier()])
 }
 
 /// Round 1 on both cosigners for a new session: its id and the commitment map round 2 takes.
-fn open_session(a: &Cosigner, b: &Cosigner, msg: &[u8]) -> (String, BTreeMap<Identifier, SigningCommitments>) {
+fn open_session(
+    a: &Cosigner,
+    b: &Cosigner,
+    msg: &[u8],
+) -> (String, BTreeMap<Identifier, SigningCommitments>) {
     let session = session_id();
     let mut commitments = BTreeMap::new();
     for c in [a, b] {
-        commitments.insert(c.identifier(), c.round1(&session, binding(a, b, msg)).unwrap());
+        commitments.insert(
+            c.identifier(),
+            c.round1(&session, binding(a, b, msg)).unwrap(),
+        );
     }
     (session, commitments)
 }
@@ -114,21 +128,30 @@ fn sign_rounds(c: &mut Criterion) {
                 b.abort_as(&session, &SessionOwner::Local).unwrap();
                 (session, commitments)
             },
-            |(session, commitments)| black_box(a.round2(&session, KEY, &msg, &commitments, None).unwrap()),
+            |(session, commitments)| {
+                black_box(a.round2(&session, KEY, &msg, &commitments, None).unwrap())
+            },
             BatchSize::PerIteration,
         )
     });
 
     let markers = NonceStore::open(dir.path().join("markers")).unwrap();
     group.bench_function("nonce_marker_burn", |bench| {
-        bench.iter_batched(session_id, |session| markers.consume(&session).unwrap(), BatchSize::PerIteration)
+        bench.iter_batched(
+            session_id,
+            |session| markers.consume(&session).unwrap(),
+            BatchSize::PerIteration,
+        )
     });
 
     // Aggregation does not consume anything: one signed session serves every iteration.
     let (session, commitments) = open_session(&a, &b, &msg);
     let mut shares: BTreeMap<Identifier, SignatureShare> = BTreeMap::new();
     for c in [&a, &b] {
-        shares.insert(c.identifier(), c.round2(&session, KEY, &msg, &commitments, None).unwrap());
+        shares.insert(
+            c.identifier(),
+            c.round2(&session, KEY, &msg, &commitments, None).unwrap(),
+        );
     }
     let pkp = a.public_key_package().clone();
     group.bench_function("aggregate", |bench| {

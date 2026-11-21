@@ -74,7 +74,9 @@ impl Tls {
     /// [`crate::config::PeerConfig::server_name`]). One per peer: a shared name would let any
     /// cosigner certificate answer for any peer (audit M3).
     pub fn client_for(&self, server_name: &str) -> ClientTlsConfig {
-        self.client_base.clone().domain_name(server_name.to_string())
+        self.client_base
+            .clone()
+            .domain_name(server_name.to_string())
     }
 
     /// The dial for roster peer `peer`: verified under its [`crate::config::PeerConfig::server_name`]
@@ -85,7 +87,12 @@ impl Tls {
 
     /// A dial that verifies the server under `server_name` and, with `pins`, its key; `peer` names
     /// it in errors.
-    pub fn dial_as(&self, server_name: &str, pins: Option<Vec<[u8; 32]>>, peer: u16) -> Result<PeerDial> {
+    pub fn dial_as(
+        &self,
+        server_name: &str,
+        pins: Option<Vec<[u8; 32]>>,
+        peer: u16,
+    ) -> Result<PeerDial> {
         PeerDial::new(self.rustls_client.clone(), server_name, pins, peer)
     }
 }
@@ -101,7 +108,9 @@ pub fn load(cfg: &TlsConfig) -> Result<Tls> {
     let ca = Certificate::from_pem(crate::trust::to_pem(&anchors));
     let identity = Identity::from_pem(read_pem(&cfg.cert)?, read_pem(&cfg.key)?);
 
-    let client_base = ClientTlsConfig::new().ca_certificate(ca.clone()).identity(identity.clone());
+    let client_base = ClientTlsConfig::new()
+        .ca_certificate(ca.clone())
+        .identity(identity.clone());
     let client = match &cfg.domain {
         Some(domain) => client_base.clone().domain_name(domain.clone()),
         None => client_base.clone(),
@@ -110,7 +119,13 @@ pub fn load(cfg: &TlsConfig) -> Result<Tls> {
     let server = ServerTlsConfig::new().identity(identity).client_ca_root(ca);
     let rustls_client = rustls_client(cfg, &anchors)?;
 
-    Ok(Tls { client, client_base, server, anchors, rustls_client })
+    Ok(Tls {
+        client,
+        client_base,
+        server,
+        anchors,
+        rustls_client,
+    })
 }
 
 /// The gRPC client's TLS settings as a rustls client: the validated `anchors` of `ca_cert`, this
@@ -120,10 +135,13 @@ pub(crate) fn rustls_client(
     cfg: &TlsConfig,
     anchors: &[crate::trust::TrustAnchor],
 ) -> Result<Arc<rustls::ClientConfig>> {
-    let bad = |what: &str, e: &dyn std::fmt::Display| DaemonError::Config(format!("tls {what}: {e}"));
+    let bad =
+        |what: &str, e: &dyn std::fmt::Display| DaemonError::Config(format!("tls {what}: {e}"));
     let mut roots = rustls::RootCertStore::empty();
     for a in anchors {
-        roots.add(a.der.clone().into()).map_err(|e| bad("ca_cert", &e))?;
+        roots
+            .add(a.der.clone().into())
+            .map_err(|e| bad("ca_cert", &e))?;
     }
     let certs = rustls_pemfile::certs(&mut read_pem(&cfg.cert)?.as_slice())
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -131,13 +149,14 @@ pub(crate) fn rustls_client(
     let key = rustls_pemfile::private_key(&mut read_pem(&cfg.key)?.as_slice())
         .map_err(|e| bad("key", &e))?
         .ok_or_else(|| bad("key", &"no private key in the file"))?;
-    let mut config =
-        rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()
-            .map_err(|e| bad("config", &e))?
-            .with_root_certificates(roots)
-            .with_client_auth_cert(certs, key)
-            .map_err(|e| bad("cert", &e))?;
+    let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|e| bad("config", &e))?
+    .with_root_certificates(roots)
+    .with_client_auth_cert(certs, key)
+    .map_err(|e| bad("cert", &e))?;
     config.alpn_protocols = vec![ALPN_H2.to_vec()];
     // Every connection is a full handshake with the peer's certificate, which the pin check in
     // [`PeerDial::handshake`] reads. No session store, so nothing is ever resumed (a resumed
@@ -166,7 +185,9 @@ pub fn spki_sha256_of_pem_file(path: &std::path::Path) -> Result<[u8; 32]> {
     let pem = read_pem(path)?;
     let der = rustls_pemfile::certs(&mut pem.as_slice())
         .next()
-        .ok_or_else(|| DaemonError::Config(format!("{}: no certificate in the file", path.display())))?
+        .ok_or_else(|| {
+            DaemonError::Config(format!("{}: no certificate in the file", path.display()))
+        })?
         .map_err(|e| DaemonError::Config(format!("{}: {e}", path.display())))?;
     spki_sha256(der.as_ref())
         .ok_or_else(|| DaemonError::Config(format!("{}: not an X.509 certificate", path.display())))
@@ -206,9 +227,16 @@ impl PeerDial {
         pins: Option<Vec<[u8; 32]>>,
         peer: u16,
     ) -> Result<Self> {
-        let server_name = ServerName::try_from(server_name.to_string())
-            .map_err(|e| DaemonError::Config(format!("peer {peer} tls_server_name {server_name:?}: {e}")))?;
-        Ok(Self { config, server_name, pins: pins.map(Into::into), peer, connect_timeout: DIAL_TIMEOUT })
+        let server_name = ServerName::try_from(server_name.to_string()).map_err(|e| {
+            DaemonError::Config(format!("peer {peer} tls_server_name {server_name:?}: {e}"))
+        })?;
+        Ok(Self {
+            config,
+            server_name,
+            pins: pins.map(Into::into),
+            peer,
+            connect_timeout: DIAL_TIMEOUT,
+        })
     }
 
     /// This dial with another bound on connect plus handshake (default [`DIAL_TIMEOUT`]).
@@ -224,11 +252,16 @@ impl PeerDial {
     /// The TLS handshake over `io`, then the checks tonic's own client would make (ALPN `h2`) and
     /// the pin. A certificate whose key is not pinned fails with `PermissionDenied`, naming the
     /// certificate's CN and the key it carries; nothing has been sent to the peer by then.
-    pub async fn handshake<IO>(&self, io: IO) -> std::io::Result<tokio_rustls::client::TlsStream<IO>>
+    pub async fn handshake<IO>(
+        &self,
+        io: IO,
+    ) -> std::io::Result<tokio_rustls::client::TlsStream<IO>>
     where
         IO: AsyncRead + AsyncWrite + Unpin,
     {
-        let tls = tokio_rustls::TlsConnector::from(self.config.clone()).connect(self.server_name.clone(), io).await?;
+        let tls = tokio_rustls::TlsConnector::from(self.config.clone())
+            .connect(self.server_name.clone(), io)
+            .await?;
         let (_, session) = tls.get_ref();
         if session.alpn_protocol() != Some(ALPN_H2) {
             return Err(std::io::Error::new(
@@ -237,22 +270,31 @@ impl PeerDial {
             ));
         }
         if let Some(pins) = &self.pins {
-            let leaf = session.peer_certificates().and_then(|c| c.first()).map(|c| c.as_ref());
+            let leaf = session
+                .peer_certificates()
+                .and_then(|c| c.first())
+                .map(|c| c.as_ref());
             let seen = leaf.and_then(spki_sha256);
             if !seen.is_some_and(|h| pins.contains(&h)) {
-                metrics::counter!(crate::metrics::PEER_PIN_REFUSALS, "direction" => "outbound").increment(1);
+                metrics::counter!(crate::metrics::PEER_PIN_REFUSALS, "direction" => "outbound")
+                    .increment(1);
                 let cn = leaf
                     .and_then(|d| x509_parser::parse_x509_certificate(d).ok())
                     .and_then(|(_, c)| subject_cn(&c))
                     .unwrap_or_else(|| "?".into());
-                let seen = seen.map(hex::encode).unwrap_or_else(|| "(unreadable certificate)".into());
+                let seen = seen
+                    .map(hex::encode)
+                    .unwrap_or_else(|| "(unreadable certificate)".into());
                 let msg = format!(
                     "peer {} presented a certificate for '{cn}' with TLS key sha256 {seen}, which is not \
                      pinned in peers[id={}].tls_spki_sha256 — a stale pin, or not that node",
                     self.peer, self.peer
                 );
                 tracing::error!(peer = self.peer, %cn, spki_sha256 = %seen, "refused a peer's TLS key (outbound): {msg}");
-                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, msg));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    msg,
+                ));
             }
         }
         Ok(tls)
@@ -263,19 +305,38 @@ impl PeerDial {
     /// say. For `rutli-cosigner tls spki --peers`; writes nothing to the node.
     pub async fn presented_key(&self, endpoint: &str) -> std::io::Result<(String, [u8; 32])> {
         let other = |m: String| std::io::Error::other(m);
-        let uri: Uri = endpoint.parse().map_err(|e| other(format!("bad endpoint {endpoint}: {e}")))?;
-        let host = uri.host().ok_or_else(|| other(format!("no host in {endpoint}")))?;
-        let host = host.trim_start_matches('[').trim_end_matches(']').to_string();
+        let uri: Uri = endpoint
+            .parse()
+            .map_err(|e| other(format!("bad endpoint {endpoint}: {e}")))?;
+        let host = uri
+            .host()
+            .ok_or_else(|| other(format!("no host in {endpoint}")))?;
+        let host = host
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string();
         let port = uri.port_u16().unwrap_or(443);
         let timeout = std::time::Duration::from_secs(5);
-        let unpinned = Self { pins: None, ..self.clone() };
+        let unpinned = Self {
+            pins: None,
+            ..self.clone()
+        };
         let tls = tokio::time::timeout(timeout, async {
             let tcp = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
             unpinned.handshake(tcp).await
         })
         .await
-        .map_err(|_| other(format!("no TLS handshake with {endpoint} within {timeout:?}")))??;
-        let leaf = tls.get_ref().1.peer_certificates().and_then(|c| c.first()).map(|c| c.as_ref().to_vec());
+        .map_err(|_| {
+            other(format!(
+                "no TLS handshake with {endpoint} within {timeout:?}"
+            ))
+        })??;
+        let leaf = tls
+            .get_ref()
+            .1
+            .peer_certificates()
+            .and_then(|c| c.first())
+            .map(|c| c.as_ref().to_vec());
         let leaf = leaf.ok_or_else(|| other("the node presented no certificate".into()))?;
         let key = spki_sha256(&leaf).ok_or_else(|| other("unreadable certificate".into()))?;
         let cn = x509_parser::parse_x509_certificate(&leaf)
@@ -305,16 +366,24 @@ impl PeerDial {
     /// [`PeerDial::connector`] over another transport (`inner` yields a connected stream for a
     /// URI): tests run the mesh over in-memory streams with it.
     pub fn connector_over<C>(&self, inner: C) -> PeerConnector<C> {
-        PeerConnector { inner, dial: self.clone() }
+        PeerConnector {
+            inner,
+            dial: self.clone(),
+        }
     }
 
     /// The tonic endpoint for `endpoint` (`https://host:port`) to use with [`PeerDial::connector`]:
     /// the URI tonic dials is rewritten to `http://` so tonic does not add a TLS layer of its own
     /// (the connector already did), and the original URI is kept as the request origin.
     pub fn endpoint(&self, endpoint: &str) -> Result<tonic::transport::Endpoint> {
-        let bad = |e: &dyn std::fmt::Display| DaemonError::Config(format!("bad endpoint {endpoint}: {e}"));
+        let bad = |e: &dyn std::fmt::Display| {
+            DaemonError::Config(format!("bad endpoint {endpoint}: {e}"))
+        };
         let origin: Uri = endpoint.parse().map_err(|e| bad(&e))?;
-        let authority = origin.authority().ok_or_else(|| bad(&"no host:port"))?.clone();
+        let authority = origin
+            .authority()
+            .ok_or_else(|| bad(&"no host:port"))?
+            .clone();
         let dial = Uri::builder()
             .scheme("http")
             .authority(authority)
@@ -344,7 +413,8 @@ where
 {
     type Response = TokioIo<tokio_rustls::client::TlsStream<TokioIo<C::Response>>>;
     type Error = BoxError;
-    type Future = Pin<Box<dyn Future<Output = std::result::Result<Self::Response, BoxError>> + Send>>;
+    type Future =
+        Pin<Box<dyn Future<Output = std::result::Result<Self::Response, BoxError>> + Send>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<std::result::Result<(), BoxError>> {
         self.inner.poll_ready(cx).map_err(Into::into)
@@ -364,7 +434,10 @@ where
                 Ok(result) => result,
                 Err(_) => Err(Box::new(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
-                    format!("peer {}: no TCP connection and TLS handshake within {limit:?}", dial.peer),
+                    format!(
+                        "peer {}: no TCP connection and TLS handshake within {limit:?}",
+                        dial.peer
+                    ),
                 )) as BoxError),
             }
         })
@@ -385,7 +458,10 @@ pub(crate) fn read_pem(path: &std::path::Path) -> crate::Result<Vec<u8>> {
         } else {
             ""
         };
-        crate::DaemonError::Config(format!("cannot read TLS material {}: {e}{hint}", path.display()))
+        crate::DaemonError::Config(format!(
+            "cannot read TLS material {}: {e}{hint}",
+            path.display()
+        ))
     })
 }
 
@@ -394,7 +470,9 @@ mod tests {
     fn leaf(cn: &str) -> rcgen::Certificate {
         let key = rcgen::KeyPair::generate().unwrap();
         let mut params = rcgen::CertificateParams::new(vec![cn.to_string()]).unwrap();
-        params.distinguished_name.push(rcgen::DnType::CommonName, cn);
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, cn);
         params.self_signed(&key).unwrap()
     }
 
@@ -403,14 +481,22 @@ mod tests {
         // One value format for peers[].tls_spki_sha256 and signing_policy.signer_pins.
         let cert = leaf("cosigner2");
         let pin = super::spki_sha256(cert.der()).unwrap();
-        assert_eq!(pin, crate::intent::Caller::from_leaf_der(cert.der()).unwrap().spki_sha256);
+        assert_eq!(
+            pin,
+            crate::intent::Caller::from_leaf_der(cert.der())
+                .unwrap()
+                .spki_sha256
+        );
         assert_eq!(super::spki_sha256(b"not a certificate"), None);
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("c.crt");
         std::fs::write(&path, cert.pem()).unwrap();
         assert_eq!(super::spki_sha256_of_pem_file(&path).unwrap(), pin);
         std::fs::write(&path, "no pem here").unwrap();
-        assert!(super::spki_sha256_of_pem_file(&path).unwrap_err().to_string().contains("no certificate"));
+        assert!(super::spki_sha256_of_pem_file(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("no certificate"));
     }
 
     /// A certificate made once with openssl, and the pin the documented command printed for it:
@@ -434,7 +520,10 @@ qeM=
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("c.crt");
         std::fs::write(&path, OPENSSL_CERT).unwrap();
-        assert_eq!(hex::encode(super::spki_sha256_of_pem_file(&path).unwrap()), OPENSSL_PIN);
+        assert_eq!(
+            hex::encode(super::spki_sha256_of_pem_file(&path).unwrap()),
+            OPENSSL_PIN
+        );
         // And the command itself, on a certificate made here, where openssl is installed (the
         // digest by `openssl dgst`, as sha256sum is not everywhere).
         let fresh = leaf("cosigner3");
@@ -446,8 +535,15 @@ qeM=
         match std::process::Command::new("sh").args(["-c", &cmd]).output() {
             Ok(out) if out.status.success() => {
                 let printed = String::from_utf8_lossy(&out.stdout);
-                let printed = printed.split_whitespace().next().unwrap_or_default().to_string();
-                assert_eq!(printed, hex::encode(super::spki_sha256(fresh.der()).unwrap()));
+                let printed = printed
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
+                assert_eq!(
+                    printed,
+                    hex::encode(super::spki_sha256(fresh.der()).unwrap())
+                );
             }
             _ => eprintln!("openssl not available: checked the fixed vector only"),
         }
@@ -467,12 +563,18 @@ qeM=
             .with_root_certificates(tokio_rustls::rustls::RootCertStore::empty())
             .with_no_client_auth(),
         );
-        let dial = super::PeerDial::new(config.clone(), "cosigner2", Some(vec![[1; 32]]), 2).unwrap();
+        let dial =
+            super::PeerDial::new(config.clone(), "cosigner2", Some(vec![[1; 32]]), 2).unwrap();
         assert!(dial.is_pinned());
-        let ep = dial.endpoint("https://rutli-node-2.rutli.svc:9101").unwrap();
+        let ep = dial
+            .endpoint("https://rutli-node-2.rutli.svc:9101")
+            .unwrap();
         assert_eq!(ep.uri().to_string(), "http://rutli-node-2.rutli.svc:9101/");
         assert!(dial.endpoint("not a uri at all").is_err());
-        assert!(super::PeerDial::new(config, "", None, 2).is_err(), "an empty server name");
+        assert!(
+            super::PeerDial::new(config, "", None, 2).is_err(),
+            "an empty server name"
+        );
     }
 
     #[test]
@@ -484,7 +586,10 @@ qeM=
         ca.distinguished_name.push(rcgen::DnType::CommonName, "ca");
         let ca = ca.self_signed(&key).unwrap();
         let leaf_key = rcgen::KeyPair::generate().unwrap();
-        let leaf = rcgen::CertificateParams::new(vec!["cosigner1".to_string()]).unwrap().signed_by(&leaf_key, &ca, &key).unwrap();
+        let leaf = rcgen::CertificateParams::new(vec!["cosigner1".to_string()])
+            .unwrap()
+            .signed_by(&leaf_key, &ca, &key)
+            .unwrap();
         let p = |n: &str| tmp.path().join(n);
         std::fs::write(p("ca.pem"), ca.pem()).unwrap();
         std::fs::write(p("c.pem"), leaf.pem()).unwrap();
@@ -497,11 +602,15 @@ qeM=
             allow_expired_ca: false,
             require_peer_pins: None,
         };
-        let anchors = crate::trust::load_trust_anchors(&std::fs::read(p("ca.pem")).unwrap(), false).unwrap();
+        let anchors =
+            crate::trust::load_trust_anchors(&std::fs::read(p("ca.pem")).unwrap(), false).unwrap();
         let config = super::rustls_client(&cfg, &anchors).unwrap();
         assert!(!config.enable_early_data);
         let disabled = format!("{:?}", tokio_rustls::rustls::client::Resumption::disabled());
-        assert_ne!(disabled, format!("{:?}", tokio_rustls::rustls::client::Resumption::default()));
+        assert_ne!(
+            disabled,
+            format!("{:?}", tokio_rustls::rustls::client::Resumption::default())
+        );
         assert_eq!(format!("{:?}", config.resumption), disabled);
         assert_eq!(config.alpn_protocols, vec![b"h2".to_vec()]);
     }

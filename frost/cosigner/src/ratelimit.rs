@@ -93,8 +93,22 @@ impl DecryptRateLimiter {
 
     /// A limiter for another operation: `what` names it in messages, `setting` is the config key
     /// that raises it, `hint` is what sustained use near the ceiling may mean if it is not yours.
-    pub fn named(per_minute: u32, what: &'static str, setting: &'static str, hint: &'static str) -> Self {
-        Self { per_minute, labels: Labels { what, setting, hint }, max_tracked: MAX_TRACKED_KEYS, buckets: Mutex::new(HashMap::new()) }
+    pub fn named(
+        per_minute: u32,
+        what: &'static str,
+        setting: &'static str,
+        hint: &'static str,
+    ) -> Self {
+        Self {
+            per_minute,
+            labels: Labels {
+                what,
+                setting,
+                hint,
+            },
+            max_tracked: MAX_TRACKED_KEYS,
+            buckets: Mutex::new(HashMap::new()),
+        }
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -130,13 +144,17 @@ impl DecryptRateLimiter {
                 });
             }
         }
-        let bucket = buckets
-            .entry(key_id.to_string())
-            .or_insert_with(|| Bucket { tokens: capacity, last_refill: now, last_warned: None });
+        let bucket = buckets.entry(key_id.to_string()).or_insert_with(|| Bucket {
+            tokens: capacity,
+            last_refill: now,
+            last_warned: None,
+        });
 
         // Refill for elapsed time, capped at capacity. `saturating_duration_since` keeps a
         // non-monotonic clock reading from producing a negative refill.
-        let elapsed = now.saturating_duration_since(bucket.last_refill).as_secs_f64();
+        let elapsed = now
+            .saturating_duration_since(bucket.last_refill)
+            .as_secs_f64();
         bucket.tokens = (bucket.tokens + elapsed * per_sec).min(capacity);
         bucket.last_refill = now;
 
@@ -154,7 +172,9 @@ impl DecryptRateLimiter {
         // legitimate traffic needs its limit raised, and finding that out from a warning beats
         // finding it out from failed decryptions.
         if bucket.tokens < capacity * WARN_THRESHOLD {
-            let due = bucket.last_warned.is_none_or(|w| now.saturating_duration_since(w) >= WARN_INTERVAL);
+            let due = bucket
+                .last_warned
+                .is_none_or(|w| now.saturating_duration_since(w) >= WARN_INTERVAL);
             if due {
                 bucket.last_warned = Some(now);
                 tracing::warn!(
@@ -223,7 +243,8 @@ mod tests {
         let rl = DecryptRateLimiter::new(60);
         let t0 = Instant::now();
         for i in 0..60 {
-            rl.check_at("rutli-enc-1", t0).unwrap_or_else(|e| panic!("call {i} refused: {e}"));
+            rl.check_at("rutli-enc-1", t0)
+                .unwrap_or_else(|e| panic!("call {i} refused: {e}"));
         }
         // The 61st within the same instant has no tokens left.
         assert!(rl.check_at("rutli-enc-1", t0).is_err());
@@ -248,7 +269,10 @@ mod tests {
         for _ in 0..60 {
             rl.check_at("rutli-enc-1", t2).unwrap();
         }
-        assert!(rl.check_at("rutli-enc-1", t2).is_err(), "refill must cap at capacity");
+        assert!(
+            rl.check_at("rutli-enc-1", t2).is_err(),
+            "refill must cap at capacity"
+        );
     }
 
     #[test]
@@ -261,7 +285,8 @@ mod tests {
             rl.check_at("rutli-enc-busy", t0).unwrap();
         }
         assert!(rl.check_at("rutli-enc-busy", t0).is_err());
-        rl.check_at("rutli-enc-quiet", t0).expect("a different key has its own budget");
+        rl.check_at("rutli-enc-quiet", t0)
+            .expect("a different key has its own budget");
         assert_eq!(rl.tracked_keys(), 2);
     }
 
@@ -317,7 +342,10 @@ mod tests {
         for i in 0..1000 {
             let _ = rl.check_at(&format!("junk-{i}"), t0);
         }
-        assert!(rl.check_at("rutli-enc-1", t0).is_err(), "the drained bucket must survive the flood");
+        assert!(
+            rl.check_at("rutli-enc-1", t0).is_err(),
+            "the drained bucket must survive the flood"
+        );
     }
 
     #[test]

@@ -29,7 +29,11 @@ fn cosigner(cfg: &Path, args: &[&str]) -> Output {
 }
 
 fn text(o: &Output) -> String {
-    format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr))
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    )
 }
 
 fn config(dir: &Path, write_version: u8) -> PathBuf {
@@ -76,25 +80,69 @@ fn a_plaintext_key_file_stops_the_daemon_until_migrate_plaintext_seals_it_with_c
     let tmp = tempfile::tempdir().unwrap();
     let cfg = config(tmp.path(), 2);
     let key = HostedKey::generate(HostedSpec::EcP256, 5).unwrap();
-    KeyStore::open(keys(tmp.path())).unwrap().save_hosted("rutli-enc-1", &key).unwrap();
+    KeyStore::open(keys(tmp.path()))
+        .unwrap()
+        .save_hosted("rutli-enc-1", &key)
+        .unwrap();
 
     let out = cosigner(&cfg, &["serve"]);
     assert!(!out.status.success());
-    assert!(text(&out).contains("PLAINTEXT key file") && text(&out).contains("rutli-enc-1.json"), "{}", text(&out));
+    assert!(
+        text(&out).contains("PLAINTEXT key file") && text(&out).contains("rutli-enc-1.json"),
+        "{}",
+        text(&out)
+    );
 
     // First run: shows what the file is and a code; seals nothing.
-    let shown = cosigner(&cfg, &["keyfile", "migrate-plaintext", "--key-id", "rutli-enc-1"]);
+    let shown = cosigner(
+        &cfg,
+        &["keyfile", "migrate-plaintext", "--key-id", "rutli-enc-1"],
+    );
     assert!(shown.status.success(), "{}", text(&shown));
     assert!(text(&shown).contains("ec-p256-ecies"), "{}", text(&shown));
     assert_eq!(version_of(&keys(tmp.path()).join("rutli-enc-1.json")), None);
-    let code = text(&shown).split("--confirm ").nth(1).unwrap().trim().to_string();
+    let code = text(&shown)
+        .split("--confirm ")
+        .nth(1)
+        .unwrap()
+        .trim()
+        .to_string();
 
-    let wrong = cosigner(&cfg, &["keyfile", "migrate-plaintext", "--key-id", "rutli-enc-1", "--confirm", "00"]);
+    let wrong = cosigner(
+        &cfg,
+        &[
+            "keyfile",
+            "migrate-plaintext",
+            "--key-id",
+            "rutli-enc-1",
+            "--confirm",
+            "00",
+        ],
+    );
     assert!(!wrong.status.success());
-    let ok = cosigner(&cfg, &["keyfile", "migrate-plaintext", "--key-id", "rutli-enc-1", "--confirm", &code]);
+    let ok = cosigner(
+        &cfg,
+        &[
+            "keyfile",
+            "migrate-plaintext",
+            "--key-id",
+            "rutli-enc-1",
+            "--confirm",
+            &code,
+        ],
+    );
     assert!(ok.status.success(), "{}", text(&ok));
-    assert_eq!(version_of(&keys(tmp.path()).join("rutli-enc-1.json")), Some(2));
-    assert_eq!(sealed_store(tmp.path(), 2).load_hosted("rutli-enc-1").unwrap().created_at, 5);
+    assert_eq!(
+        version_of(&keys(tmp.path()).join("rutli-enc-1.json")),
+        Some(2)
+    );
+    assert_eq!(
+        sealed_store(tmp.path(), 2)
+            .load_hosted("rutli-enc-1")
+            .unwrap()
+            .created_at,
+        5
+    );
 }
 
 #[test]
@@ -102,8 +150,16 @@ fn migrate_downgrade_and_status_rewrite_every_key_file_under_the_instance_lock()
     let tmp = tempfile::tempdir().unwrap();
     let cfg = config(tmp.path(), 2);
     let v1 = sealed_store(tmp.path(), 1);
-    v1.save_hosted("rutli-a", &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap()).unwrap();
-    v1.save_hosted("rutli-b", &HostedKey::generate(HostedSpec::Rsa2048, 1).unwrap()).unwrap();
+    v1.save_hosted(
+        "rutli-a",
+        &HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap(),
+    )
+    .unwrap();
+    v1.save_hosted(
+        "rutli-b",
+        &HostedKey::generate(HostedSpec::Rsa2048, 1).unwrap(),
+    )
+    .unwrap();
     let a = keys(tmp.path()).join("rutli-a.json");
 
     let status = cosigner(&cfg, &["keyfile", "status"]);
@@ -120,10 +176,13 @@ fn migrate_downgrade_and_status_rewrite_every_key_file_under_the_instance_lock()
     assert!(text(&down).contains("set it to 1"), "{}", text(&down));
     assert_eq!(version_of(&a), Some(1));
     // A release that knows only v1 opens it with the v1 unseal.
-    assert!(Sealer::from_master_secret(MASTER.as_bytes(), 1).unseal(&std::fs::read(&a).unwrap()).is_ok());
+    assert!(Sealer::from_master_secret(MASTER.as_bytes(), 1)
+        .unseal(&std::fs::read(&a).unwrap())
+        .is_ok());
 
     // Not while a daemon holds the data directory.
-    let _lock = rutli_cosigner::instance_lock::InstanceLock::acquire(&tmp.path().join("data")).unwrap();
+    let _lock =
+        rutli_cosigner::instance_lock::InstanceLock::acquire(&tmp.path().join("data")).unwrap();
     let locked = cosigner(&cfg, &["keyfile", "migrate"]);
     assert!(!locked.status.success(), "{}", text(&locked));
     assert_eq!(version_of(&a), Some(1));
@@ -131,8 +190,12 @@ fn migrate_downgrade_and_status_rewrite_every_key_file_under_the_instance_lock()
 
 /// A dealt 2-of-3 share for node 1 at `epoch`, and the report `verify-key --sign-test --json` would
 /// print for it when the whole cluster agrees.
-fn share_and_report(key_id: &str, epoch: u64) -> (rutli_cosigner::keystore::Share, serde_json::Value) {
-    let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&[5u8; 32], &[1, 2, 3], 2).unwrap();
+fn share_and_report(
+    key_id: &str,
+    epoch: u64,
+) -> (rutli_cosigner::keystore::Share, serde_json::Value) {
+    let (shares, pkp) =
+        rutli_frost_core::dealer::split_ed25519_seed(&[5u8; 32], &[1, 2, 3], 2).unwrap();
     let share = rutli_cosigner::keystore::Share {
         key_package: frost_ed25519::keys::KeyPackage::try_from(shares[0].clone()).unwrap(),
         public_key_package: pkp,
@@ -141,7 +204,9 @@ fn share_and_report(key_id: &str, epoch: u64) -> (rutli_cosigner::keystore::Shar
         key_id: key_id.into(),
     };
     let digest = hex::encode(share.pkp_digest().unwrap());
-    let group = hex::encode(rutli_frost_core::dkg::group_verifying_key_bytes(&share.public_key_package).unwrap());
+    let group = hex::encode(
+        rutli_frost_core::dkg::group_verifying_key_bytes(&share.public_key_package).unwrap(),
+    );
     let report = serde_json::json!({
         "key_id": key_id, "ok": true, "problems": [], "group_verifying_key": group,
         "pkp_digest": digest, "threshold": 2, "epoch": epoch,
@@ -167,7 +232,10 @@ fn keyfile_prove_writes_a_marker_only_for_this_nodes_live_epoch_and_sharing() {
     ks.create("frost-prove", &share).unwrap();
     // The header digest the gauges and the retention compare is the share's PKP digest.
     let file = std::fs::read(keys(tmp.path()).join("frost-prove.json")).unwrap();
-    assert_eq!(rutli_cosigner::seal::header_of(&file).unwrap().digest, hex::encode(share.pkp_digest().unwrap()));
+    assert_eq!(
+        rutli_cosigner::seal::header_of(&file).unwrap().digest,
+        hex::encode(share.pkp_digest().unwrap())
+    );
 
     let report_path = tmp.path().join("report.json");
     std::fs::write(&report_path, report.to_string()).unwrap();
@@ -175,8 +243,24 @@ fn keyfile_prove_writes_a_marker_only_for_this_nodes_live_epoch_and_sharing() {
     let marker = keys(tmp.path()).join(".proven").join("frost-prove.4.json");
 
     // Another epoch than this node's live one: refused, nothing written.
-    let wrong = cosigner(&cfg, &["keyfile", "prove", "--key-id", "frost-prove", "--epoch", "5", "--report", r]);
-    assert!(!wrong.status.success() && text(&wrong).contains("epoch 4"), "{}", text(&wrong));
+    let wrong = cosigner(
+        &cfg,
+        &[
+            "keyfile",
+            "prove",
+            "--key-id",
+            "frost-prove",
+            "--epoch",
+            "5",
+            "--report",
+            r,
+        ],
+    );
+    assert!(
+        !wrong.status.success() && text(&wrong).contains("epoch 4"),
+        "{}",
+        text(&wrong)
+    );
     assert!(!marker.exists());
 
     // A report whose group key is not this node's: refused.
@@ -184,21 +268,61 @@ fn keyfile_prove_writes_a_marker_only_for_this_nodes_live_epoch_and_sharing() {
     other["group_verifying_key"] = hex::encode([1u8; 32]).into();
     let other_path = tmp.path().join("other.json");
     std::fs::write(&other_path, other.to_string()).unwrap();
-    let bad = cosigner(&cfg, &["keyfile", "prove", "--key-id", "frost-prove", "--epoch", "4", "--report", other_path.to_str().unwrap()]);
-    assert!(!bad.status.success() && text(&bad).contains("group key"), "{}", text(&bad));
+    let bad = cosigner(
+        &cfg,
+        &[
+            "keyfile",
+            "prove",
+            "--key-id",
+            "frost-prove",
+            "--epoch",
+            "4",
+            "--report",
+            other_path.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        !bad.status.success() && text(&bad).contains("group key"),
+        "{}",
+        text(&bad)
+    );
     assert!(!marker.exists());
 
     // The right epoch and report: the marker, and a note that it is the operator's statement.
-    let ok = cosigner(&cfg, &["keyfile", "prove", "--key-id", "frost-prove", "--epoch", "4", "--report", r]);
+    let ok = cosigner(
+        &cfg,
+        &[
+            "keyfile",
+            "prove",
+            "--key-id",
+            "frost-prove",
+            "--epoch",
+            "4",
+            "--report",
+            r,
+        ],
+    );
     assert!(ok.status.success(), "{}", text(&ok));
     assert!(text(&ok).contains("YOUR statement"), "{}", text(&ok));
     let m: serde_json::Value = serde_json::from_slice(&std::fs::read(&marker).unwrap()).unwrap();
     assert_eq!(m["epoch"], 4);
     assert_eq!(m["pkp_digest"], report["pkp_digest"]);
-    assert_eq!(m["report_sha256"], hex::encode(sha2::Sha256::digest(report.to_string().as_bytes())));
+    assert_eq!(
+        m["report_sha256"],
+        hex::encode(sha2::Sha256::digest(report.to_string().as_bytes()))
+    );
     // The key file itself is untouched, and the store still loads (the marker dir is no key file).
-    assert_eq!(sealed_store(tmp.path(), 2).load("frost-prove").unwrap().epoch, 4);
-    assert_eq!(sealed_store(tmp.path(), 2).list_frost().unwrap(), vec!["frost-prove".to_string()]);
+    assert_eq!(
+        sealed_store(tmp.path(), 2)
+            .load("frost-prove")
+            .unwrap()
+            .epoch,
+        4
+    );
+    assert_eq!(
+        sealed_store(tmp.path(), 2).list_frost().unwrap(),
+        vec!["frost-prove".to_string()]
+    );
 
     // A node whose config says another threshold than the key's refuses (no marker for epoch 5).
     let (share5, report5) = share_and_report("frost-prove5", 5);
@@ -209,7 +333,26 @@ fn keyfile_prove_writes_a_marker_only_for_this_nodes_live_epoch_and_sharing() {
     let mut c: serde_json::Value = serde_json::from_slice(&std::fs::read(&cfg).unwrap()).unwrap();
     c["threshold"] = 3.into();
     std::fs::write(&cfg3, c.to_string()).unwrap();
-    let t3 = cosigner(&cfg3, &["keyfile", "prove", "--key-id", "frost-prove5", "--epoch", "5", "--report", p5.to_str().unwrap()]);
-    assert!(!t3.status.success() && text(&t3).contains("threshold"), "{}", text(&t3));
-    assert!(!keys(tmp.path()).join(".proven").join("frost-prove5.5.json").exists());
+    let t3 = cosigner(
+        &cfg3,
+        &[
+            "keyfile",
+            "prove",
+            "--key-id",
+            "frost-prove5",
+            "--epoch",
+            "5",
+            "--report",
+            p5.to_str().unwrap(),
+        ],
+    );
+    assert!(
+        !t3.status.success() && text(&t3).contains("threshold"),
+        "{}",
+        text(&t3)
+    );
+    assert!(!keys(tmp.path())
+        .join(".proven")
+        .join("frost-prove5.5.json")
+        .exists());
 }

@@ -65,13 +65,18 @@ pub const TARGETS: &[(&str, Target)] = &[
 pub fn fuzz(target: &str, data: &[u8]) {
     static SEEDED: std::sync::Once = std::sync::Once::new();
     SEEDED.call_once(|| init(target));
-    let (_, body) = TARGETS.iter().find(|(n, _)| *n == target).expect("known target");
+    let (_, body) = TARGETS
+        .iter()
+        .find(|(n, _)| *n == target)
+        .expect("known target");
     let _ = body(data);
 }
 
 /// With `RUTLI_FUZZ_SEED_DIR` set, write `target`'s generated seeds there.
 pub fn init(target: &str) {
-    let Some(dir) = std::env::var_os("RUTLI_FUZZ_SEED_DIR") else { return };
+    let Some(dir) = std::env::var_os("RUTLI_FUZZ_SEED_DIR") else {
+        return;
+    };
     let dir = PathBuf::from(dir);
     std::fs::create_dir_all(&dir).expect("seed dir");
     for (name, bytes) in generated_seeds(target) {
@@ -83,7 +88,8 @@ pub fn init(target: &str) {
 /// may run targets on several threads).
 fn scratch() -> &'static Path {
     static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
-    DIR.get_or_init(|| tempfile::tempdir().expect("scratch dir")).path()
+    DIR.get_or_init(|| tempfile::tempdir().expect("scratch dir"))
+        .path()
 }
 
 fn scratch_path(stem: &str) -> PathBuf {
@@ -139,9 +145,14 @@ pub fn key_file(data: &[u8]) -> bool {
     static SEALED: OnceLock<KeyStore> = OnceLock::new();
     static PLAIN: OnceLock<KeyStore> = OnceLock::new();
     let sealed_store = SEALED.get_or_init(|| {
-        KeyStore::open_with_sealer(scratch().join("sealed-store"), Some(Arc::new(self::sealer()))).expect("sealed store")
+        KeyStore::open_with_sealer(
+            scratch().join("sealed-store"),
+            Some(Arc::new(self::sealer())),
+        )
+        .expect("sealed store")
     });
-    let plain_store = PLAIN.get_or_init(|| KeyStore::open(scratch().join("plain-store")).expect("plain store"));
+    let plain_store =
+        PLAIN.get_or_init(|| KeyStore::open(scratch().join("plain-store")).expect("plain store"));
     let path = scratch_path("keyfile");
     std::fs::write(&path, data).expect("write scratch file");
     accepted |= sealed_store.load_foreign(&path, KEY_ID).is_ok();
@@ -149,9 +160,16 @@ pub fn key_file(data: &[u8]) -> bool {
 
     // The record parser behind a valid v2 envelope: the input is the sealed plaintext.
     for kind in ALL_KINDS {
-        let meta = RecordMeta { kind: *kind, key_id: KEY_ID, epoch: 0, digest: &[] };
+        let meta = RecordMeta {
+            kind: *kind,
+            key_id: KEY_ID,
+            epoch: 0,
+            digest: &[],
+        };
         let sealed = sealer.seal_record(&meta, data).expect("seal");
-        let (plain, hdr) = sealer.unseal_record(&sealed, KEY_ID, &[*kind]).expect("own seal must open");
+        let (plain, hdr) = sealer
+            .unseal_record(&sealed, KEY_ID, &[*kind])
+            .expect("own seal must open");
         assert_eq!(plain, data, "seal/unseal round trip");
         assert_eq!(hdr.map(|h| h.kind), Some(kind.as_str().to_string()));
         if *kind != rutli_cosigner::seal::RecordKind::Recipient {
@@ -171,7 +189,9 @@ pub fn seal_bundle(data: &[u8]) -> bool {
     if data.len() > MAX_INPUT {
         return false;
     }
-    let Ok(bundle) = NodeSealBundle::parse(data) else { return false };
+    let Ok(bundle) = NodeSealBundle::parse(data) else {
+        return false;
+    };
     // Round trip: what it writes, it reads back as the same keys.
     let json = bundle.to_json().expect("to_json");
     let again = NodeSealBundle::parse(&json).expect("a bundle's own JSON parses");
@@ -206,8 +226,11 @@ fn share_node() -> &'static ShareNode {
             roster: vec![1, 2, 3],
             cluster_id: rutli_cosigner::wrap::cluster_id_from_ca(pki().ca_pem.as_bytes()),
         };
-        let keystore = rutli_cosigner::keystore::KeyStore::open_with_sealer(ctx.keys_dir(), Some(Arc::new(sealer())))
-            .expect("share node key store");
+        let keystore = rutli_cosigner::keystore::KeyStore::open_with_sealer(
+            ctx.keys_dir(),
+            Some(Arc::new(sealer())),
+        )
+        .expect("share node key store");
         let request = rutli_cosigner::share_import::share_recipient(
             &ctx,
             &keystore,
@@ -218,7 +241,11 @@ fn share_node() -> &'static ShareNode {
             false,
         )
         .expect("recipient");
-        ShareNode { ctx, keystore, request }
+        ShareNode {
+            ctx,
+            keystore,
+            request,
+        }
     })
 }
 
@@ -233,11 +260,17 @@ struct Dealt {
 fn dealt_key() -> &'static Dealt {
     static DEALT: OnceLock<Dealt> = OnceLock::new();
     DEALT.get_or_init(|| {
-        let (shares, pkp) = rutli_frost_core::dealer::split_ed25519_seed(&[9u8; 32], &[1, 2, 3], 2).expect("split");
+        let (shares, pkp) =
+            rutli_frost_core::dealer::split_ed25519_seed(&[9u8; 32], &[1, 2, 3], 2).expect("split");
         let group = rutli_frost_core::dkg::group_verifying_key_bytes(&pkp).expect("group key");
         let fingerprint = rutli_cosigner::share_delivery::ed25519_fingerprint(&group);
         let key_id = format!("frost-import-{}", &fingerprint[..8]);
-        Dealt { shares, pkp, fingerprint, key_id }
+        Dealt {
+            shares,
+            pkp,
+            fingerprint,
+            key_id,
+        }
     })
 }
 
@@ -252,7 +285,9 @@ pub fn share_bundle(data: &[u8]) -> bool {
         let _ = request.public_key();
         let _ = rutli_cosigner::request_auth::canonical_bytes(&request);
         if request.validate().is_ok() {
-            accepted |= rutli_cosigner::request_auth::verify_request(&request, pki().ca_pem.as_bytes()).is_ok();
+            accepted |=
+                rutli_cosigner::request_auth::verify_request(&request, pki().ca_pem.as_bytes())
+                    .is_ok();
         }
     }
 
@@ -260,7 +295,11 @@ pub fn share_bundle(data: &[u8]) -> bool {
         let _ = bundle.group_key();
         let _ = share_delivery::canonical_fingerprint(&bundle.canton_fingerprint);
         if let Ok(usage) = bundle.carried_usage() {
-            let _ = rutli_cosigner::carry::check_carried_id(&bundle.key_id, &bundle.canton_fingerprint, usage);
+            let _ = rutli_cosigner::carry::check_carried_id(
+                &bundle.key_id,
+                &bundle.canton_fingerprint,
+                usage,
+            );
         }
         // Against the request it claims to answer, so the package checks run whatever the ids.
         let claimed = RecipientRequest {
@@ -283,8 +322,15 @@ pub fn share_bundle(data: &[u8]) -> bool {
         let node = share_node();
         let _ = bundle.check_against(&node.request);
         let fp = bundle.canton_fingerprint.clone();
-        accepted |= rutli_cosigner::share_import::import_share(&node.ctx, &node.keystore, &sealer(), &bundle, &fp, true)
-            .is_ok();
+        accepted |= rutli_cosigner::share_import::import_share(
+            &node.ctx,
+            &node.keystore,
+            &sealer(),
+            &bundle,
+            &fp,
+            true,
+        )
+        .is_ok();
     }
     accepted
 }
@@ -309,14 +355,22 @@ pub fn canton_key(data: &[u8]) -> bool {
             accepted = true;
             // A Canton container's id is checked against the key it holds: never a mismatch.
             if let Some(id) = &k.canton_id {
-                assert_eq!(id, &k.fingerprint(), "parsed key's container id differs from its fingerprint");
+                assert_eq!(
+                    id,
+                    &k.fingerprint(),
+                    "parsed key's container id differs from its fingerprint"
+                );
             }
             let _ = k.spec();
         }
         accepted |= ck::parse_export(data, password).is_ok();
         let _ = rutli_cosigner::export::import_canton(data, password, EXPECT_FP, 0);
     }
-    for purpose in [None, Some(KeyPurpose::Signing), Some(KeyPurpose::Encryption)] {
+    for purpose in [
+        None,
+        Some(KeyPurpose::Signing),
+        Some(KeyPurpose::Encryption),
+    ] {
         accepted |= ck::parse_stored(data, purpose).is_ok();
     }
     accepted |= ck::parse_pkcs8(data).is_ok();
@@ -348,17 +402,20 @@ pub fn export_file(data: &[u8]) -> bool {
     if let Ok(s) = std::str::from_utf8(data) {
         let _ = export::hosted_import_key_id(s.trim(), None);
     }
-    let Ok(envelope) = serde_json::from_slice::<ExportEnvelope>(data) else { return false };
+    let Ok(envelope) = serde_json::from_slice::<ExportEnvelope>(data) else {
+        return false;
+    };
     let _ = export::hosted_import_key_id(&envelope.key_id, None);
     let _ = export::hosted_import_key_id(&envelope.key_id, Some("tenant-"));
-    let cheap_kdf = envelope
-        .kdf
-        .as_ref()
-        .is_some_and(|k| k.m_cost <= MAX_FUZZ_M_COST && k.t_cost <= MAX_FUZZ_T_COST && k.p_cost <= 1);
+    let cheap_kdf = envelope.kdf.as_ref().is_some_and(|k| {
+        k.m_cost <= MAX_FUZZ_M_COST && k.t_cost <= MAX_FUZZ_T_COST && k.p_cost <= 1
+    });
     if cheap_kdf {
         let _ = export::import(&envelope, Some("fuzz passphrase 0"));
     }
-    let Ok(key) = export::import(&envelope, None) else { return false };
+    let Ok(key) = export::import(&envelope, None) else {
+        return false;
+    };
     // Accepted: the header agrees with the material, and a re-export reads back as the same key.
     assert_eq!(key.spec.as_str(), envelope.spec);
     let again = export::export_plaintext(&envelope.key_id, &key).expect("re-export");
@@ -387,18 +444,30 @@ pub fn pki() -> &'static Pki {
     PKI.get_or_init(|| {
         let ca_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("CA key");
         let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("CA params");
-        params.distinguished_name.push(rcgen::DnType::CommonName, "rutli-frost-cluster-ca");
+        params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "rutli-frost-cluster-ca");
         params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
         let ca = params.self_signed(&ca_key).expect("CA");
         let leaf = |cn: &str| {
-            let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("leaf key");
-            let mut p = rcgen::CertificateParams::new(vec!["rutli-cosigner".to_string()]).expect("leaf params");
+            let key =
+                rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("leaf key");
+            let mut p = rcgen::CertificateParams::new(vec!["rutli-cosigner".to_string()])
+                .expect("leaf params");
             p.distinguished_name.push(rcgen::DnType::CommonName, cn);
             let cert = p.signed_by(&key, &ca, &ca_key).expect("leaf");
-            rutli_cosigner::request_auth::NodeSigner::from_pem(cert.pem().as_bytes(), key.serialize_pem().as_bytes())
-                .expect("signer")
+            rutli_cosigner::request_auth::NodeSigner::from_pem(
+                cert.pem().as_bytes(),
+                key.serialize_pem().as_bytes(),
+            )
+            .expect("signer")
         };
-        Pki { ca_pem: ca.pem(), driver: leaf("driver"), refresher: leaf("refresher"), cosigner1: leaf("cosigner1") }
+        Pki {
+            ca_pem: ca.pem(),
+            driver: leaf("driver"),
+            refresher: leaf("refresher"),
+            cosigner1: leaf("cosigner1"),
+        }
     })
 }
 
@@ -416,7 +485,8 @@ fn verifier() -> &'static rutli_cosigner::intent::IntentVerifier {
             approvers: vec![rutli_cosigner::config::ApproverConfig {
                 id: "approver-1".into(),
                 // RFC 8032 test 1's public key: any valid Ed25519 SPKI will do.
-                public_key_spki_b64: "MCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=".into(),
+                public_key_spki_b64: "MCowBQYDK2VwAyEA11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo="
+                    .into(),
             }],
             ..Default::default()
         };
@@ -444,22 +514,32 @@ pub fn intent(data: &[u8]) -> bool {
     if data.len() > MAX_INPUT {
         return false;
     }
-    let Some((&mode, rest)) = data.split_first() else { return false };
+    let Some((&mode, rest)) = data.split_first() else {
+        return false;
+    };
     let signed = if mode % 2 == 0 {
         match pb::SignedIntent::decode(rest) {
             Ok(s) => s,
             Err(_) => return false,
         }
     } else {
-        let Ok(body) = pb::SignIntent::decode(rest) else { return false };
-        let signer = if mode & 2 == 0 { &pki().driver } else { &pki().refresher };
+        let Ok(body) = pb::SignIntent::decode(rest) else {
+            return false;
+        };
+        let signer = if mode & 2 == 0 {
+            &pki().driver
+        } else {
+            &pki().refresher
+        };
         intent::sign_intent(signer, &body).expect("sign intent")
     };
     let v = verifier();
     let mut accepted = false;
 
     let key_ids: Vec<String> = match pb::SignIntent::decode(signed.intent.as_slice()) {
-        Ok(body) if !body.key_id.is_empty() && body.key_id != KEY_ID => vec![KEY_ID.to_string(), body.key_id],
+        Ok(body) if !body.key_id.is_empty() && body.key_id != KEY_ID => {
+            vec![KEY_ID.to_string(), body.key_id]
+        }
         _ => vec![KEY_ID.to_string()],
     };
     for key_id in &key_ids {
@@ -467,16 +547,32 @@ pub fn intent(data: &[u8]) -> bool {
             accepted = true;
             assert_eq!(&ok.key_id, key_id);
             assert_eq!(ok.digest, intent::intent_digest(&signed));
-            assert_eq!(ok.message.len(), rutli_cosigner::orchestrator::CANTON_DIGEST_LEN);
-            assert!(v.check_live(&ok, NOW_MS).is_ok(), "an intent verified now is live now");
-            assert!(!key_id.starts_with("gated-"), "a gated key verified without an approver's signature");
+            assert_eq!(
+                ok.message.len(),
+                rutli_cosigner::orchestrator::CANTON_DIGEST_LEN
+            );
+            assert!(
+                v.check_live(&ok, NOW_MS).is_ok(),
+                "an intent verified now is live now"
+            );
+            assert!(
+                !key_id.starts_with("gated-"),
+                "a gated key verified without an approver's signature"
+            );
         }
-        for expiry in [Expiry::Enforce, Expiry::Propagated { deleted_at_ms: NOW_MS }] {
+        for expiry in [
+            Expiry::Enforce,
+            Expiry::Propagated {
+                deleted_at_ms: NOW_MS,
+            },
+        ] {
             accepted |= v.verify_delete(&signed, key_id, NOW_MS, expiry).is_ok();
         }
         for kind in [CeremonyKind::Dkg, CeremonyKind::Refresh] {
             let named = intent::ceremony_id_of(&signed, kind);
-            let ceremony_id = named.as_deref().unwrap_or("dkg-00000000000000000000000000000000");
+            let ceremony_id = named
+                .as_deref()
+                .unwrap_or("dkg-00000000000000000000000000000000");
             if let Ok(c) = v.verify_ceremony(&signed, kind, key_id, ceremony_id, NOW_MS) {
                 accepted = true;
                 assert_eq!(c.kind, kind);
@@ -516,13 +612,26 @@ fn template() -> &'static Template {
         let dir = tempfile::tempdir().expect("template dir");
         let (nodes, signer, _) = mesh_in(dir.path());
         rt.block_on(async {
-            rutli_cosigner::orchestrator::run_dkg(&signer.peers, KEY_ID).await.expect("dkg");
+            rutli_cosigner::orchestrator::run_dkg(&signer.peers, KEY_ID)
+                .await
+                .expect("dkg");
             for (key_id, spec) in [(HOSTED_AES, "aes-256-gcm"), (HOSTED_EC, "ec-p256-ecies")] {
-                let req = pb::GenerateKeyRequest { key_id: key_id.into(), spec: spec.into(), intent: None };
-                signer.generate_key(tonic::Request::new(req)).await.expect("generate hosted key");
+                let req = pb::GenerateKeyRequest {
+                    key_id: key_id.into(),
+                    spec: spec.into(),
+                    intent: None,
+                };
+                signer
+                    .generate_key(tonic::Request::new(req))
+                    .await
+                    .expect("generate hosted key");
             }
         });
-        Template { rt, dir, _nodes: nodes }
+        Template {
+            rt,
+            dir,
+            _nodes: nodes,
+        }
     })
 }
 
@@ -531,7 +640,11 @@ fn template() -> &'static Template {
 /// request validation and the node behind them.
 fn mesh_in(
     root: &Path,
-) -> (Vec<Arc<rutli_cosigner::node::Node>>, rutli_cosigner::service::SignerSvc, rutli_cosigner::service::PeerSvc) {
+) -> (
+    Vec<Arc<rutli_cosigner::node::Node>>,
+    rutli_cosigner::service::SignerSvc,
+    rutli_cosigner::service::PeerSvc,
+) {
     use rutli_cosigner::keystore::KeyStore;
     use rutli_cosigner::node::Node;
     use rutli_cosigner::orchestrator::Peers;
@@ -550,7 +663,10 @@ fn mesh_in(
         })
         .collect();
     rutli_cosigner::peer::wire_local_mesh(&nodes).expect("mesh");
-    let peers: Peers = nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    let peers: Peers = nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>)
+        .collect();
     let signer = rutli_cosigner::service::SignerSvc {
         node: nodes[0].clone(),
         peers,
@@ -562,7 +678,12 @@ fn mesh_in(
         sign_guard: None,
         refresh_cns: None,
     };
-    let peer = rutli_cosigner::service::PeerSvc { node: nodes[0].clone(), allowed_cns: None, peer_ids: None, peer_pins: None };
+    let peer = rutli_cosigner::service::PeerSvc {
+        node: nodes[0].clone(),
+        allowed_cns: None,
+        peer_ids: None,
+        peer_pins: None,
+    };
     (nodes, signer, peer)
 }
 
@@ -589,16 +710,22 @@ pub fn grpc(data: &[u8]) -> bool {
     if data.len() > MAX_INPUT {
         return false;
     }
-    let Some((&sel, b)) = data.split_first() else { return false };
+    let Some((&sel, b)) = data.split_first() else {
+        return false;
+    };
     let t = template();
     let root = scratch_path("mesh");
     for i in 1..=MESH_N {
-        let (from, to) = (t.dir.path().join(format!("node-{i}")), root.join(format!("node-{i}")));
+        let (from, to) = (
+            t.dir.path().join(format!("node-{i}")),
+            root.join(format!("node-{i}")),
+        );
         std::fs::create_dir_all(&to).expect("node dir");
         for entry in std::fs::read_dir(&from).expect("template node dir") {
             let path = entry.expect("template entry").path();
             if path.is_file() {
-                std::fs::copy(&path, to.join(path.file_name().expect("file name"))).expect("copy key file");
+                std::fs::copy(&path, to.join(path.file_name().expect("file name")))
+                    .expect("copy key file");
             }
         }
     }
@@ -611,7 +738,13 @@ pub fn grpc(data: &[u8]) -> bool {
         3 => call!(rt, signer, sign, pb::SignRequest, b),
         4 => call!(rt, signer, refresh, pb::RefreshRequest, b),
         5 => call!(rt, signer, key_status, pb::KeyStatusRequest, b),
-        6 => call!(rt, signer, ceremony_sign_test, pb::CeremonySignTestRequest, b),
+        6 => call!(
+            rt,
+            signer,
+            ceremony_sign_test,
+            pb::CeremonySignTestRequest,
+            b
+        ),
         7 => call!(rt, signer, capabilities, pb::CapabilitiesRequest, b),
         8 => call!(rt, signer, public_key, pb::PublicKeyRequest, b),
         9 => call!(rt, signer, key_info, pb::KeyInfoRequest, b),
@@ -678,43 +811,77 @@ pub fn generated_seeds(target: &str) -> Vec<(String, Vec<u8>)> {
             use rutli_cosigner::keystore::KeyStore;
             use rutli_cosigner::seal::{KeyFileBinding, Sealer};
             let t = template();
-            let plain = std::fs::read(t.dir.path().join("node-1").join(format!("{KEY_ID}.json"))).expect("share file");
+            let plain = std::fs::read(t.dir.path().join("node-1").join(format!("{KEY_ID}.json")))
+                .expect("share file");
             put("ok-plaintext-share.json", plain);
-            let share = KeyStore::open(t.dir.path().join("node-1")).expect("store").load(KEY_ID).expect("share");
-            let hosted =
-                rutli_cosigner::hosted::HostedKey::generate(rutli_cosigner::hosted::HostedSpec::Aes256Gcm, 1).expect("aes");
+            let share = KeyStore::open(t.dir.path().join("node-1"))
+                .expect("store")
+                .load(KEY_ID)
+                .expect("share");
+            let hosted = rutli_cosigner::hosted::HostedKey::generate(
+                rutli_cosigner::hosted::HostedSpec::Aes256Gcm,
+                1,
+            )
+            .expect("aes");
             for (v, binding) in [(1u8, KeyFileBinding::v1(NODE)), (2u8, binding_v2())] {
                 let dir = scratch_path("seed-store");
                 let s = Arc::new(Sealer::from_dek(Zeroizing::new(DEK), NODE).with_binding(binding));
                 let ks = KeyStore::open_with_sealer(&dir, Some(s)).expect("sealed store");
                 ks.save(KEY_ID, &share).expect("save share");
-                put(&format!("ok-sealed-v{v}-share.json"), std::fs::read(dir.join(format!("{KEY_ID}.json"))).expect("read"));
+                put(
+                    &format!("ok-sealed-v{v}-share.json"),
+                    std::fs::read(dir.join(format!("{KEY_ID}.json"))).expect("read"),
+                );
                 ks.save_hosted(KEY_ID, &hosted).expect("save hosted");
-                put(&format!("ok-sealed-v{v}-hosted.json"), std::fs::read(dir.join(format!("{KEY_ID}.json"))).expect("read"));
+                put(
+                    &format!("ok-sealed-v{v}-hosted.json"),
+                    std::fs::read(dir.join(format!("{KEY_ID}.json"))).expect("read"),
+                );
             }
         }
         "seal_bundle" => {
             let b = rutli_cosigner::seal::NodeSealBundle::from_legacy_master(b"fuzz master", NODE);
             put("ok-bundle.json", b.to_json().expect("json").to_vec());
-            put("ok-bundle-rotated.json", b.rotated().to_json().expect("json").to_vec());
+            put(
+                "ok-bundle-rotated.json",
+                b.rotated().to_json().expect("json").to_vec(),
+            );
         }
         "share_bundle" => {
             let node = share_node();
-            put("ok-recipient-request.json", serde_json::to_vec_pretty(&node.request).expect("json"));
+            put(
+                "ok-recipient-request.json",
+                serde_json::to_vec_pretty(&node.request).expect("json"),
+            );
             let dealt = dealt_key();
-            let verified = rutli_cosigner::request_auth::verify_request(&node.request, pki().ca_pem.as_bytes())
-                .expect("verify own request");
+            let verified = rutli_cosigner::request_auth::verify_request(
+                &node.request,
+                pki().ca_pem.as_bytes(),
+            )
+            .expect("verify own request");
             let usage = rutli_cosigner::carry::CarriedUsage {
                 expected: "namespace".into(),
                 recorded: Some(vec!["namespace".into()]),
                 namespace_fingerprint: None,
             };
             let me = frost_ed25519::Identifier::try_from(NODE).expect("identifier");
-            let share = dealt.shares.iter().find(|s| *s.identifier() == me).expect("node 1's share");
-            let bundle =
-                rutli_cosigner::share_delivery::seal_share(&verified, share, &dealt.pkp, &dealt.fingerprint, &usage)
-                    .expect("seal share");
-            put("ok-share-bundle.json", serde_json::to_vec_pretty(&bundle).expect("json"));
+            let share = dealt
+                .shares
+                .iter()
+                .find(|s| *s.identifier() == me)
+                .expect("node 1's share");
+            let bundle = rutli_cosigner::share_delivery::seal_share(
+                &verified,
+                share,
+                &dealt.pkp,
+                &dealt.fingerprint,
+                &usage,
+            )
+            .expect("seal share");
+            put(
+                "ok-share-bundle.json",
+                serde_json::to_vec_pretty(&bundle).expect("json"),
+            );
         }
         "export_file" => {
             use rutli_cosigner::export;
@@ -722,11 +889,20 @@ pub fn generated_seeds(target: &str) -> Vec<(String, Vec<u8>)> {
             let aes = HostedKey::generate(HostedSpec::Aes256Gcm, 1).expect("aes");
             let ec = HostedKey::generate(HostedSpec::EcP256, 1).expect("ec");
             let json = |e: &export::ExportEnvelope| serde_json::to_vec_pretty(e).expect("json");
-            put("ok-plaintext-aes.json", json(&export::export_plaintext("rutli-fuzz-aes", &aes).expect("export")));
-            put("ok-plaintext-ec.json", json(&export::export_plaintext("rutli-fuzz-ec", &ec).expect("export")));
+            put(
+                "ok-plaintext-aes.json",
+                json(&export::export_plaintext("rutli-fuzz-aes", &aes).expect("export")),
+            );
+            put(
+                "ok-plaintext-ec.json",
+                json(&export::export_plaintext("rutli-fuzz-ec", &ec).expect("export")),
+            );
             put(
                 "encrypted-aes.json",
-                json(&export::export_encrypted("rutli-fuzz-aes", &aes, "fuzz passphrase 0").expect("export")),
+                json(
+                    &export::export_encrypted("rutli-fuzz-aes", &aes, "fuzz passphrase 0")
+                        .expect("export"),
+                ),
             );
         }
         "intent" => {
@@ -744,12 +920,17 @@ pub fn generated_seeds(target: &str) -> Vec<(String, Vec<u8>)> {
                 ..Default::default()
             };
             let with = |mode: u8, i: &pb::SignIntent| [vec![mode], i.encode_to_vec()].concat();
-            let ceremony = |purpose: &str| pb::SignIntent { purpose: purpose.into(), digest: vec![], ..base.clone() };
+            let ceremony = |purpose: &str| pb::SignIntent {
+                purpose: purpose.into(),
+                digest: vec![],
+                ..base.clone()
+            };
             put("ok-sign.bin", with(1, &base));
             put("ok-dkg.bin", with(1, &ceremony("dkg")));
             put("ok-refresh-by-refresher.bin", with(3, &ceremony("refresh")));
             put("ok-signed-sign.bin", {
-                let signed = rutli_cosigner::intent::sign_intent(&pki().driver, &base).expect("sign");
+                let signed =
+                    rutli_cosigner::intent::sign_intent(&pki().driver, &base).expect("sign");
                 [vec![0u8], signed.encode_to_vec()].concat()
             });
             put(
@@ -771,7 +952,10 @@ pub fn generated_seeds(target: &str) -> Vec<(String, Vec<u8>)> {
                     &pb::SignIntent {
                         key_id: "gated-key".into(),
                         approval_nonce: vec![1; 16],
-                        approvals: vec![pb::IntentApproval { approver_id: "approver-1".into(), signature: vec![0; 64] }],
+                        approvals: vec![pb::IntentApproval {
+                            approver_id: "approver-1".into(),
+                            signature: vec![0; 64],
+                        }],
                         ..base.clone()
                     },
                 ),
@@ -780,16 +964,101 @@ pub fn generated_seeds(target: &str) -> Vec<(String, Vec<u8>)> {
         "grpc" => {
             let g = |sel: u8, m: Vec<u8>| [vec![sel], m].concat();
             let msg = [&[0x12u8, 0x20][..], &[0x5a; 32]].concat();
-            put("health.bin", g(0, pb::HealthRequest::default().encode_to_vec()));
-            put("group-key.bin", g(1, pb::GroupKeyRequest { key_id: KEY_ID.into() }.encode_to_vec()));
-            put("sign.bin", g(3, pb::SignRequest { key_id: KEY_ID.into(), message: msg.clone(), ..Default::default() }.encode_to_vec()));
-            put("key-status.bin", g(5, pb::KeyStatusRequest { key_id: KEY_ID.into() }.encode_to_vec()));
-            put("capabilities.bin", g(7, pb::CapabilitiesRequest::default().encode_to_vec()));
-            put("public-key.bin", g(8, pb::PublicKeyRequest { key_id: HOSTED_EC.into() }.encode_to_vec()));
-            put("ecdh.bin", g(12, pb::EcdhDeriveRequest { key_id: HOSTED_EC.into(), ..Default::default() }.encode_to_vec()));
-            put("symmetric-encrypt.bin", g(13, pb::SymmetricRequest { key_id: HOSTED_AES.into(), data: b"x".to_vec() }.encode_to_vec()));
-            put("symmetric-decrypt.bin", g(14, pb::SymmetricRequest { key_id: HOSTED_AES.into(), data: vec![0; 40] }.encode_to_vec()));
-            put("generate-aes.bin", g(16, pb::GenerateKeyRequest { key_id: "rutli-fuzz-new".into(), spec: "aes-256-gcm".into(), intent: None }.encode_to_vec()));
+            put(
+                "health.bin",
+                g(0, pb::HealthRequest::default().encode_to_vec()),
+            );
+            put(
+                "group-key.bin",
+                g(
+                    1,
+                    pb::GroupKeyRequest {
+                        key_id: KEY_ID.into(),
+                    }
+                    .encode_to_vec(),
+                ),
+            );
+            put(
+                "sign.bin",
+                g(
+                    3,
+                    pb::SignRequest {
+                        key_id: KEY_ID.into(),
+                        message: msg.clone(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                ),
+            );
+            put(
+                "key-status.bin",
+                g(
+                    5,
+                    pb::KeyStatusRequest {
+                        key_id: KEY_ID.into(),
+                    }
+                    .encode_to_vec(),
+                ),
+            );
+            put(
+                "capabilities.bin",
+                g(7, pb::CapabilitiesRequest::default().encode_to_vec()),
+            );
+            put(
+                "public-key.bin",
+                g(
+                    8,
+                    pb::PublicKeyRequest {
+                        key_id: HOSTED_EC.into(),
+                    }
+                    .encode_to_vec(),
+                ),
+            );
+            put(
+                "ecdh.bin",
+                g(
+                    12,
+                    pb::EcdhDeriveRequest {
+                        key_id: HOSTED_EC.into(),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                ),
+            );
+            put(
+                "symmetric-encrypt.bin",
+                g(
+                    13,
+                    pb::SymmetricRequest {
+                        key_id: HOSTED_AES.into(),
+                        data: b"x".to_vec(),
+                    }
+                    .encode_to_vec(),
+                ),
+            );
+            put(
+                "symmetric-decrypt.bin",
+                g(
+                    14,
+                    pb::SymmetricRequest {
+                        key_id: HOSTED_AES.into(),
+                        data: vec![0; 40],
+                    }
+                    .encode_to_vec(),
+                ),
+            );
+            put(
+                "generate-aes.bin",
+                g(
+                    16,
+                    pb::GenerateKeyRequest {
+                        key_id: "rutli-fuzz-new".into(),
+                        spec: "aes-256-gcm".into(),
+                        intent: None,
+                    }
+                    .encode_to_vec(),
+                ),
+            );
             put(
                 "round1.bin",
                 g(
@@ -818,9 +1087,30 @@ pub fn generated_seeds(target: &str) -> Vec<(String, Vec<u8>)> {
                     .encode_to_vec(),
                 ),
             );
-            put("node-info.bin", g(36, pb::NodeInfoRequest::default().encode_to_vec()));
-            put("key-epoch.bin", g(37, pb::KeyEpochRequest { key_id: KEY_ID.into() }.encode_to_vec()));
-            put("ceremony-status.bin", g(39, pb::CeremonyStatusRequest { ceremony_id: "dkg-fuzz".into() }.encode_to_vec()));
+            put(
+                "node-info.bin",
+                g(36, pb::NodeInfoRequest::default().encode_to_vec()),
+            );
+            put(
+                "key-epoch.bin",
+                g(
+                    37,
+                    pb::KeyEpochRequest {
+                        key_id: KEY_ID.into(),
+                    }
+                    .encode_to_vec(),
+                ),
+            );
+            put(
+                "ceremony-status.bin",
+                g(
+                    39,
+                    pb::CeremonyStatusRequest {
+                        ceremony_id: "dkg-fuzz".into(),
+                    }
+                    .encode_to_vec(),
+                ),
+            );
         }
         _ => {}
     }

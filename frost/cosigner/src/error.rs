@@ -63,14 +63,22 @@ pub enum DaemonError {
     /// = which call, `after` = the deadline). The leader's own clock, around the whole call: queue,
     /// connect and RPC ([`crate::peer::CallClass`]). Counts as unreachable for hosted writes.
     #[error("cosigner {peer} did not answer {call} within {after:?}")]
-    PeerDeadline { peer: u16, call: &'static str, after: std::time::Duration },
+    PeerDeadline {
+        peer: u16,
+        call: &'static str,
+        after: std::time::Duration,
+    },
 
     /// Fewer than `needed` cosigners (this one included) can be reached, so a signature cannot be
     /// formed here. UNAVAILABLE with the `rutli-error: no-quorum` trailer: another leader may see
     /// more of the cluster. `missing` names the peers this leader cannot reach; the Signer API
     /// passes it only to an authenticated client.
     #[error("no quorum: {visible} of the {needed} cosigners needed are reachable from this node (missing: {missing:?})")]
-    NoQuorum { needed: usize, visible: usize, missing: Vec<u16> },
+    NoQuorum {
+        needed: usize,
+        visible: usize,
+        missing: Vec<u16>,
+    },
 
     /// This leader is overloaded (its own sign round missed its deadline, or too many signatures are
     /// in flight here): UNAVAILABLE with the `rutli-error: overloaded` trailer, before any member
@@ -85,7 +93,13 @@ pub enum DaemonError {
     /// trailer so the cause shows: retryable, another leader may sign. Below the threshold the
     /// message reads as before ("could not reach signing threshold").
     #[error("{}", attempts_exhausted(*needed, *usable, *attempts, excluded, *out_of_time))]
-    AttemptsExhausted { needed: usize, usable: usize, attempts: usize, excluded: Vec<u16>, out_of_time: bool },
+    AttemptsExhausted {
+        needed: usize,
+        usable: usize,
+        attempts: usize,
+        excluded: Vec<u16>,
+        out_of_time: bool,
+    },
 
     /// A sign round (`0`: "round 1" | "round 2") whose caller's deadline passed while it waited for
     /// a blocking thread: not started. DEADLINE_EXCEEDED (the caller has stopped waiting anyway).
@@ -95,7 +109,10 @@ pub enum DaemonError {
     /// The client's deadline (`grpc-timeout`) leaves less time than one signature needs.
     /// DEADLINE_EXCEEDED; no round was started.
     #[error("the client's deadline leaves {left:?}, less than the {needed:?} a signature needs — no round started")]
-    ClientDeadline { left: std::time::Duration, needed: std::time::Duration },
+    ClientDeadline {
+        left: std::time::Duration,
+        needed: std::time::Duration,
+    },
 
     #[error("unknown key id: {0}")]
     UnknownKey(String),
@@ -107,7 +124,11 @@ pub enum DaemonError {
     KeyExists(String),
 
     #[error("a {kind} ceremony (id {other}) is already in progress for key {key_id}")]
-    CeremonyInProgress { key_id: String, kind: &'static str, other: String },
+    CeremonyInProgress {
+        key_id: String,
+        kind: &'static str,
+        other: String,
+    },
 
     #[error("ceremony {owner} for key {key_id} was superseded by a newer ceremony — refusing to persist")]
     CeremonySuperseded { key_id: String, owner: String },
@@ -155,13 +176,21 @@ pub enum DaemonError {
          epoch {} (pkp {}…) — refusing to sign from a different sharing",
         .peer.0, short(&.peer.1), .leader.0, short(&.leader.1)
     )]
-    EpochMismatch { key_id: String, peer: KeyVersion, leader: KeyVersion },
+    EpochMismatch {
+        key_id: String,
+        peer: KeyVersion,
+        leader: KeyVersion,
+    },
 
     /// This node's epoch check found its share of `key_id` stale (`peer` = its own (epoch, PKP
     /// digest)), so it refuses to sign or lead for the key. FAILED_PRECONDITION with the
     /// `rutli-error: stale-share` trailer.
     #[error("stale share for {key_id} (this node holds epoch {}): {reason}", .peer.0)]
-    StaleShare { key_id: String, peer: KeyVersion, reason: String },
+    StaleShare {
+        key_id: String,
+        peer: KeyVersion,
+        reason: String,
+    },
 
     /// The signing policy refused this signature at this node (audit C2): no intent where one is
     /// required, an invalid or expired intent, a signer the ACL or a pin excludes, missing
@@ -258,26 +287,47 @@ pub const OVERLOADED: &str = "overloaded";
 pub const ATTEMPTS_EXHAUSTED: &str = "attempts-exhausted";
 
 /// [`DaemonError::AttemptsExhausted`]'s message.
-fn attempts_exhausted(needed: usize, usable: usize, attempts: usize, excluded: &[u16], out_of_time: bool) -> String {
+fn attempts_exhausted(
+    needed: usize,
+    usable: usize,
+    attempts: usize,
+    excluded: &[u16],
+    out_of_time: bool,
+) -> String {
     let head = if usable < needed {
         format!("could not reach signing threshold: needed {needed}, got {usable}")
     } else {
         format!("sign gave up with {usable} of the {needed} cosigners needed still usable")
     };
     let clock = if out_of_time { ", out of time" } else { "" };
-    let who = if excluded.is_empty() { String::new() } else { format!(" (excluded: {excluded:?})") };
+    let who = if excluded.is_empty() {
+        String::new()
+    } else {
+        format!(" (excluded: {excluded:?})")
+    };
     format!("{head} after {attempts} attempt(s){clock}{who}")
 }
 
 fn with_reason(code: tonic::Code, message: String, reason: &'static str) -> tonic::Status {
     let mut md = tonic::metadata::MetadataMap::new();
-    md.insert(ERROR_TRAILER, tonic::metadata::MetadataValue::from_static(reason));
+    md.insert(
+        ERROR_TRAILER,
+        tonic::metadata::MetadataValue::from_static(reason),
+    );
     tonic::Status::with_metadata(code, message, md)
 }
 
-fn with_view(code: tonic::Code, message: String, reason: &'static str, view: &KeyVersion) -> tonic::Status {
+fn with_view(
+    code: tonic::Code,
+    message: String,
+    reason: &'static str,
+    view: &KeyVersion,
+) -> tonic::Status {
     let mut md = tonic::metadata::MetadataMap::new();
-    md.insert(ERROR_TRAILER, tonic::metadata::MetadataValue::from_static(reason));
+    md.insert(
+        ERROR_TRAILER,
+        tonic::metadata::MetadataValue::from_static(reason),
+    );
     // Decimal digits and lowercase hex are always valid ASCII metadata values.
     if let Ok(v) = view.0.to_string().parse() {
         md.insert(EPOCH_TRAILER, v);
@@ -294,9 +344,16 @@ impl DaemonError {
     /// own sharing), [`DaemonError::PolicyRefused`] for a signing-policy refusal,
     /// [`DaemonError::RateLimited`] for RESOURCE_EXHAUSTED, else the plain status. `leader` is the
     /// sharing the caller sent.
-    pub fn from_peer_status(status: tonic::Status, key_id: &str, leader: Option<KeyVersion>) -> Self {
+    pub fn from_peer_status(
+        status: tonic::Status,
+        key_id: &str,
+        leader: Option<KeyVersion>,
+    ) -> Self {
         let md = status.metadata();
-        let reason = md.get(ERROR_TRAILER).and_then(|v| v.to_str().ok()).map(str::to_owned);
+        let reason = md
+            .get(ERROR_TRAILER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
         let view = || -> Option<KeyVersion> {
             let epoch = md.get(EPOCH_TRAILER)?.to_str().ok()?.parse().ok()?;
             let digest = hex::decode(md.get(PKP_DIGEST_TRAILER)?.to_str().ok()?).ok()?;
@@ -335,7 +392,11 @@ impl DaemonError {
 /// A peer's refusal of a ceremony fence: [`DaemonError::RefreshTooSoon`] when the status carries
 /// that trailer, else the plain status (as before).
 pub fn from_fence_status(status: tonic::Status) -> DaemonError {
-    let too_soon = status.metadata().get(ERROR_TRAILER).and_then(|v| v.to_str().ok()) == Some(REFRESH_TOO_SOON);
+    let too_soon = status
+        .metadata()
+        .get(ERROR_TRAILER)
+        .and_then(|v| v.to_str().ok())
+        == Some(REFRESH_TOO_SOON);
     if too_soon {
         DaemonError::RefreshTooSoon(status.message().to_owned())
     } else {
@@ -346,32 +407,52 @@ pub fn from_fence_status(status: tonic::Status) -> DaemonError {
 impl From<DaemonError> for tonic::Status {
     fn from(e: DaemonError) -> Self {
         match e {
-            DaemonError::EpochMismatch { peer, .. } => {
-                with_view(tonic::Code::FailedPrecondition, e.to_string(), EPOCH_MISMATCH, &peer)
-            }
-            DaemonError::StaleShare { peer, .. } => {
-                with_view(tonic::Code::FailedPrecondition, e.to_string(), STALE_SHARE, &peer)
-            }
+            DaemonError::EpochMismatch { peer, .. } => with_view(
+                tonic::Code::FailedPrecondition,
+                e.to_string(),
+                EPOCH_MISMATCH,
+                &peer,
+            ),
+            DaemonError::StaleShare { peer, .. } => with_view(
+                tonic::Code::FailedPrecondition,
+                e.to_string(),
+                STALE_SHARE,
+                &peer,
+            ),
             DaemonError::PolicyRefused(_) => {
                 let mut md = tonic::metadata::MetadataMap::new();
-                md.insert(ERROR_TRAILER, tonic::metadata::MetadataValue::from_static(POLICY_REFUSED));
+                md.insert(
+                    ERROR_TRAILER,
+                    tonic::metadata::MetadataValue::from_static(POLICY_REFUSED),
+                );
                 tonic::Status::with_metadata(tonic::Code::PermissionDenied, e.to_string(), md)
             }
             DaemonError::RefreshTooSoon(_) => {
                 let mut md = tonic::metadata::MetadataMap::new();
-                md.insert(ERROR_TRAILER, tonic::metadata::MetadataValue::from_static(REFRESH_TOO_SOON));
+                md.insert(
+                    ERROR_TRAILER,
+                    tonic::metadata::MetadataValue::from_static(REFRESH_TOO_SOON),
+                );
                 tonic::Status::with_metadata(tonic::Code::FailedPrecondition, e.to_string(), md)
             }
-            DaemonError::HostedConflict { .. } => with_reason(tonic::Code::Aborted, e.to_string(), HOSTED_CONFLICT),
+            DaemonError::HostedConflict { .. } => {
+                with_reason(tonic::Code::Aborted, e.to_string(), HOSTED_CONFLICT)
+            }
             DaemonError::HostedUnconfirmed { .. } => {
                 with_reason(tonic::Code::Unavailable, e.to_string(), HOSTED_UNCONFIRMED)
             }
             DaemonError::HostedPushRefused(_) => tonic::Status::failed_precondition(e.to_string()),
             DaemonError::HostedInvalid(_) => tonic::Status::invalid_argument(e.to_string()),
             DaemonError::Journal(_) => tonic::Status::unavailable(e.to_string()),
-            DaemonError::KeystoreDown(_) => with_reason(tonic::Code::Unavailable, e.to_string(), KEYSTORE_DOWN),
-            DaemonError::NoQuorum { .. } => with_reason(tonic::Code::Unavailable, e.to_string(), NO_QUORUM),
-            DaemonError::Overloaded(_) => with_reason(tonic::Code::Unavailable, e.to_string(), OVERLOADED),
+            DaemonError::KeystoreDown(_) => {
+                with_reason(tonic::Code::Unavailable, e.to_string(), KEYSTORE_DOWN)
+            }
+            DaemonError::NoQuorum { .. } => {
+                with_reason(tonic::Code::Unavailable, e.to_string(), NO_QUORUM)
+            }
+            DaemonError::Overloaded(_) => {
+                with_reason(tonic::Code::Unavailable, e.to_string(), OVERLOADED)
+            }
             DaemonError::AttemptsExhausted { .. } => {
                 with_reason(tonic::Code::Unavailable, e.to_string(), ATTEMPTS_EXHAUSTED)
             }
@@ -392,12 +473,15 @@ impl From<DaemonError> for tonic::Status {
             // A round 2 that does not match its session's round-1 binding, or a binding round 1
             // cannot honour: the caller's request is wrong, retrying it elsewhere does not help.
             DaemonError::Core(
-                rutli_frost_core::CoreError::BindingMismatch { .. } | rutli_frost_core::CoreError::InvalidBinding(_),
+                rutli_frost_core::CoreError::BindingMismatch { .. }
+                | rutli_frost_core::CoreError::InvalidBinding(_),
             ) => tonic::Status::failed_precondition(e.to_string()),
             // aborted: this node holds no round-1 nonces for the session any more (it restarted,
             // a ceremony commit replaced the share, the session outlived its TTL). The node and the
             // key are fine and the request was not wrong: a new session will do.
-            DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_)) => tonic::Status::aborted(e.to_string()),
+            DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_)) => {
+                tonic::Status::aborted(e.to_string())
+            }
             // permission_denied: the session is live and belongs to the caller that opened it; this
             // caller may not use it up or drop it.
             DaemonError::Core(rutli_frost_core::CoreError::NotSessionOwner { .. }) => {
@@ -407,7 +491,10 @@ impl From<DaemonError> for tonic::Status {
             // cannot, the driver fails over to another leader, which has its own room here.
             DaemonError::Core(rutli_frost_core::CoreError::SessionsFull { .. }) => {
                 let mut md = tonic::metadata::MetadataMap::new();
-                md.insert(ERROR_TRAILER, tonic::metadata::MetadataValue::from_static(SESSIONS_FULL));
+                md.insert(
+                    ERROR_TRAILER,
+                    tonic::metadata::MetadataValue::from_static(SESSIONS_FULL),
+                );
                 tonic::Status::with_metadata(tonic::Code::Unavailable, e.to_string(), md)
             }
             // ALREADY_EXISTS, like a DKG over an existing key: the id is taken — by the import
@@ -426,9 +513,7 @@ impl From<DaemonError> for tonic::Status {
             DaemonError::CeremonySuperseded { .. } => tonic::Status::aborted(e.to_string()),
             DaemonError::InvalidMessageLength { .. }
             | DaemonError::InvalidPoint(_)
-            | DaemonError::NotHostedKeyId(_) => {
-                tonic::Status::invalid_argument(e.to_string())
-            }
+            | DaemonError::NotHostedKeyId(_) => tonic::Status::invalid_argument(e.to_string()),
             _ => tonic::Status::internal(e.to_string()),
         }
     }
@@ -443,10 +528,18 @@ mod tests {
     #[test]
     fn epoch_refusals_round_trip_through_a_grpc_status() {
         let (peer, leader) = ((3, [7u8; 32]), (4, [9u8; 32]));
-        let status = tonic::Status::from(DaemonError::EpochMismatch { key_id: "k".into(), peer, leader });
+        let status = tonic::Status::from(DaemonError::EpochMismatch {
+            key_id: "k".into(),
+            peer,
+            leader,
+        });
         assert_eq!(status.code(), tonic::Code::FailedPrecondition);
         match DaemonError::from_peer_status(status, "k", Some(leader)) {
-            DaemonError::EpochMismatch { key_id, peer: p, leader: l } => {
+            DaemonError::EpochMismatch {
+                key_id,
+                peer: p,
+                leader: l,
+            } => {
                 assert_eq!((key_id.as_str(), p, l), ("k", peer, leader));
             }
             other => panic!("got {other:?}"),
@@ -474,29 +567,53 @@ mod tests {
             owner: "peer 'cosigner2'".into(),
             caller: "peer 'cosigner3'".into(),
         });
-        assert_eq!(tonic::Status::from(foreign).code(), tonic::Code::PermissionDenied);
+        assert_eq!(
+            tonic::Status::from(foreign).code(),
+            tonic::Code::PermissionDenied
+        );
         for cap_kind in [
             rutli_frost_core::session::PendingCap::Key,
             rutli_frost_core::session::PendingCap::Opener,
             rutli_frost_core::session::PendingCap::Request,
         ] {
-            let full = DaemonError::Core(rutli_frost_core::CoreError::SessionsFull { cap_kind, open: 1, cap: 1 });
+            let full = DaemonError::Core(rutli_frost_core::CoreError::SessionsFull {
+                cap_kind,
+                open: 1,
+                cap: 1,
+            });
             let status = tonic::Status::from(full);
             assert_eq!(status.code(), tonic::Code::Unavailable);
             assert_eq!(status.metadata().get(ERROR_TRAILER).unwrap(), SESSIONS_FULL);
         }
         // A refresh refused for coming too soon keeps its kind across the mesh.
-        let status = tonic::Status::from(DaemonError::RefreshTooSoon("refresh of k refused".into()));
+        let status =
+            tonic::Status::from(DaemonError::RefreshTooSoon("refresh of k refused".into()));
         assert_eq!(status.code(), tonic::Code::FailedPrecondition);
-        assert!(matches!(from_fence_status(status.clone()), DaemonError::RefreshTooSoon(m) if m == "refresh of k refused"));
-        assert!(matches!(DaemonError::from_peer_status(status, "k", None), DaemonError::RefreshTooSoon(_)));
-        assert!(matches!(from_fence_status(tonic::Status::failed_precondition("x")), DaemonError::Status(_)));
+        assert!(
+            matches!(from_fence_status(status.clone()), DaemonError::RefreshTooSoon(m) if m == "refresh of k refused")
+        );
+        assert!(matches!(
+            DaemonError::from_peer_status(status, "k", None),
+            DaemonError::RefreshTooSoon(_)
+        ));
+        assert!(matches!(
+            from_fence_status(tonic::Status::failed_precondition("x")),
+            DaemonError::Status(_)
+        ));
         // A hosted-key conflict and an unconfirmed copy keep their meaning across the mesh.
-        let conflict = tonic::Status::from(DaemonError::HostedConflict { key_id: "k".into(), detail: "x".into() });
+        let conflict = tonic::Status::from(DaemonError::HostedConflict {
+            key_id: "k".into(),
+            detail: "x".into(),
+        });
         assert_eq!(conflict.code(), tonic::Code::Aborted);
-        assert!(matches!(DaemonError::from_peer_status(conflict, "k", None), DaemonError::HostedConflict { .. }));
-        let unconfirmed =
-            tonic::Status::from(DaemonError::HostedUnconfirmed { key_id: "k".into(), detail: "x".into() });
+        assert!(matches!(
+            DaemonError::from_peer_status(conflict, "k", None),
+            DaemonError::HostedConflict { .. }
+        ));
+        let unconfirmed = tonic::Status::from(DaemonError::HostedUnconfirmed {
+            key_id: "k".into(),
+            detail: "x".into(),
+        });
         assert_eq!(unconfirmed.code(), tonic::Code::Unavailable);
         assert!(matches!(
             DaemonError::from_peer_status(unconfirmed, "k", None),
@@ -504,15 +621,36 @@ mod tests {
         ));
 
         // A key store that is down keeps its meaning across the mesh; so do the leader's refusals.
-        let down = tonic::Status::from(DaemonError::KeystoreDown("key store /data/keys failed its readiness probe".into()));
+        let down = tonic::Status::from(DaemonError::KeystoreDown(
+            "key store /data/keys failed its readiness probe".into(),
+        ));
         assert_eq!(down.code(), tonic::Code::Unavailable);
         assert_eq!(down.metadata().get(ERROR_TRAILER).unwrap(), KEYSTORE_DOWN);
         assert!(down.message().contains("readiness probe"), "{down:?}");
-        assert!(matches!(DaemonError::from_peer_status(down, "k", None), DaemonError::KeystoreDown(_)));
-        let nq = tonic::Status::from(DaemonError::NoQuorum { needed: 2, visible: 1, missing: vec![2, 3] });
-        assert_eq!((nq.code(), nq.metadata().get(ERROR_TRAILER).unwrap().to_str().unwrap()), (tonic::Code::Unavailable, NO_QUORUM));
+        assert!(matches!(
+            DaemonError::from_peer_status(down, "k", None),
+            DaemonError::KeystoreDown(_)
+        ));
+        let nq = tonic::Status::from(DaemonError::NoQuorum {
+            needed: 2,
+            visible: 1,
+            missing: vec![2, 3],
+        });
+        assert_eq!(
+            (
+                nq.code(),
+                nq.metadata().get(ERROR_TRAILER).unwrap().to_str().unwrap()
+            ),
+            (tonic::Code::Unavailable, NO_QUORUM)
+        );
         let ov = tonic::Status::from(DaemonError::Overloaded("x".into()));
-        assert_eq!((ov.code(), ov.metadata().get(ERROR_TRAILER).unwrap().to_str().unwrap()), (tonic::Code::Unavailable, OVERLOADED));
+        assert_eq!(
+            (
+                ov.code(),
+                ov.metadata().get(ERROR_TRAILER).unwrap().to_str().unwrap()
+            ),
+            (tonic::Code::Unavailable, OVERLOADED)
+        );
         let gave_up = |usable, out_of_time| DaemonError::AttemptsExhausted {
             needed: 2,
             usable,
@@ -523,18 +661,33 @@ mod tests {
         for (usable, out_of_time) in [(1, false), (3, true)] {
             let s = tonic::Status::from(gave_up(usable, out_of_time));
             assert_eq!(
-                (s.code(), s.metadata().get(ERROR_TRAILER).unwrap().to_str().unwrap()),
+                (
+                    s.code(),
+                    s.metadata().get(ERROR_TRAILER).unwrap().to_str().unwrap()
+                ),
                 (tonic::Code::Unavailable, ATTEMPTS_EXHAUSTED)
             );
-            assert!(s.message().contains("after 2 attempt(s)") && s.message().contains("[2, 3]"), "{s:?}");
+            assert!(
+                s.message().contains("after 2 attempt(s)") && s.message().contains("[2, 3]"),
+                "{s:?}"
+            );
         }
-        assert!(gave_up(1, false).to_string().starts_with("could not reach signing threshold: needed 2, got 1"));
+        assert!(gave_up(1, false)
+            .to_string()
+            .starts_with("could not reach signing threshold: needed 2, got 1"));
         assert!(gave_up(3, true).to_string().contains("out of time"));
-        let late = DaemonError::PeerDeadline { peer: 2, call: "sign_round1", after: std::time::Duration::from_secs(2) };
+        let late = DaemonError::PeerDeadline {
+            peer: 2,
+            call: "sign_round1",
+            after: std::time::Duration::from_secs(2),
+        };
         assert_eq!(tonic::Status::from(late).code(), tonic::Code::Unavailable);
 
         // Any other refusal stays a plain status (an older peer, another reason).
         let plain = tonic::Status::failed_precondition("something else");
-        assert!(matches!(DaemonError::from_peer_status(plain, "k", None), DaemonError::Status(_)));
+        assert!(matches!(
+            DaemonError::from_peer_status(plain, "k", None),
+            DaemonError::Status(_)
+        ));
     }
 }

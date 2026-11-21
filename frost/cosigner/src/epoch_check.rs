@@ -78,7 +78,11 @@ pub enum Verdict {
 /// Decide one key. `mine` is this node's own `KeyEpoch` view (present, FROST), `committed_epoch`
 /// the newest epoch its own COMMITTED ceremony records name for the key, `answers` the peers'
 /// views by identifier.
-pub fn evaluate(mine: &KeyEpochReply, committed_epoch: Option<u64>, answers: &[(u16, KeyEpochReply)]) -> Verdict {
+pub fn evaluate(
+    mine: &KeyEpochReply,
+    committed_epoch: Option<u64>,
+    answers: &[(u16, KeyEpochReply)],
+) -> Verdict {
     if let Some(e) = committed_epoch.filter(|&e| e > mine.epoch) {
         return Verdict::Stale(StaleMark {
             own_epoch: mine.epoch,
@@ -94,20 +98,29 @@ pub fn evaluate(mine: &KeyEpochReply, committed_epoch: Option<u64>, answers: &[(
     let same_key = |v: &KeyEpochReply| {
         v.present && v.origin != "hosted" && v.group_verifying_key == mine.group_verifying_key
     };
-    let holds_mine = |v: &KeyEpochReply| same_key(v) && v.epoch == mine.epoch && v.pkp_digest == mine.pkp_digest;
+    let holds_mine =
+        |v: &KeyEpochReply| same_key(v) && v.epoch == mine.epoch && v.pkp_digest == mine.pkp_digest;
     let proven_superseded = |v: &KeyEpochReply| v.stale && v.stale_by_own_record;
     // A peer marked stale on peers' answers still vouches for the sharing it holds; one whose own
     // ceremony record superseded that sharing does not.
-    let shares_mine = answers.iter().any(|(_, v)| holds_mine(v) && !proven_superseded(v));
-    let mine_superseded = answers.iter().any(|(_, v)| holds_mine(v) && proven_superseded(v));
-    let newer: Vec<&(u16, KeyEpochReply)> =
-        answers.iter().filter(|(_, v)| same_key(v) && !v.stale && v.epoch > mine.epoch).collect();
+    let shares_mine = answers
+        .iter()
+        .any(|(_, v)| holds_mine(v) && !proven_superseded(v));
+    let mine_superseded = answers
+        .iter()
+        .any(|(_, v)| holds_mine(v) && proven_superseded(v));
+    let newer: Vec<&(u16, KeyEpochReply)> = answers
+        .iter()
+        .filter(|(_, v)| same_key(v) && !v.stale && v.epoch > mine.epoch)
+        .collect();
     if mine.staged {
         let voted = newer.iter().find(|(_, v)| {
             v.epoch == mine.staged_new_epoch && v.pkp_digest == mine.staged_new_pkp_digest
         });
         if let Some((_, v)) = voted {
-            return Verdict::PendingCommit { newer_epoch: v.epoch };
+            return Verdict::PendingCommit {
+                newer_epoch: v.epoch,
+            };
         }
     }
     let Some((peer, newest)) = newer.iter().copied().max_by_key(|(_, v)| v.epoch) else {
@@ -116,9 +129,16 @@ pub fn evaluate(mine: &KeyEpochReply, committed_epoch: Option<u64>, answers: &[(
         }
         // Nobody vouches. A stale peer's newer claim, or a peer whose own record superseded this
         // sharing, is doubt: keep the previous verdict. Ahead of lagging peers only: current.
-        let doubt = mine_superseded || answers.iter().any(|(_, v)| same_key(v) && v.epoch > mine.epoch);
+        let doubt = mine_superseded
+            || answers
+                .iter()
+                .any(|(_, v)| same_key(v) && v.epoch > mine.epoch);
         let fresh = answers.iter().any(|(_, v)| same_key(v) && !v.stale);
-        return if fresh && !doubt { Verdict::Current } else { Verdict::Inconclusive };
+        return if fresh && !doubt {
+            Verdict::Current
+        } else {
+            Verdict::Inconclusive
+        };
     };
     if shares_mine {
         tracing::warn!(
@@ -188,10 +208,14 @@ pub async fn check_key(node: &Arc<Node>, key_id: &str) -> crate::Result<Verdict>
     let committed = node.committed_epoch(key_id);
     let mut answers = Vec::new();
     for id in node.mesh_ids() {
-        let Some(peer) = node.mesh_peer(id) else { continue };
+        let Some(peer) = node.mesh_peer(id) else {
+            continue;
+        };
         match peer.key_epoch(key_id).await {
             Ok(v) => answers.push((id, v)),
-            Err(e) => tracing::debug!(key_id, peer = id, error = %e, "epoch check: peer did not answer"),
+            Err(e) => {
+                tracing::debug!(key_id, peer = id, error = %e, "epoch check: peer did not answer")
+            }
         }
     }
     let verdict = evaluate(&mine, committed, &answers);
@@ -215,7 +239,8 @@ pub async fn check_key(node: &Arc<Node>, key_id: &str) -> crate::Result<Verdict>
 
 /// [`RETRY_INTERVAL`] minus a random part of [`RETRY_JITTER`].
 fn retry_delay() -> Duration {
-    let jitter_ms = rand::RngCore::next_u64(&mut rand::rngs::OsRng) % RETRY_JITTER.as_millis() as u64;
+    let jitter_ms =
+        rand::RngCore::next_u64(&mut rand::rngs::OsRng) % RETRY_JITTER.as_millis() as u64;
     RETRY_INTERVAL - Duration::from_millis(jitter_ms)
 }
 
@@ -226,7 +251,12 @@ pub fn spawn(node: Arc<Node>) -> tokio::task::JoinHandle<()> {
     crate::supervise::spawn_supervised("epoch_check", node, |node| async move {
         loop {
             let inconclusive = check_all(&node).await;
-            tokio::time::sleep(if inconclusive > 0 { retry_delay() } else { CHECK_INTERVAL }).await;
+            tokio::time::sleep(if inconclusive > 0 {
+                retry_delay()
+            } else {
+                CHECK_INTERVAL
+            })
+            .await;
         }
     })
 }
@@ -271,29 +301,58 @@ mod tests {
 
     /// The 0.4.0 rule, kept verbatim for comparison: stale peers were dropped before anything else,
     /// and only the newest claim was compared with a staged vote.
-    fn evaluate_040(mine: &KeyEpochReply, committed_epoch: Option<u64>, answers: &[(u16, KeyEpochReply)]) -> Verdict {
+    fn evaluate_040(
+        mine: &KeyEpochReply,
+        committed_epoch: Option<u64>,
+        answers: &[(u16, KeyEpochReply)],
+    ) -> Verdict {
         if let Some(e) = committed_epoch.filter(|&e| e > mine.epoch) {
-            return Verdict::Stale(StaleMark { own_epoch: mine.epoch, newer_epoch: e, by_own_record: true, reason: "record".into() });
+            return Verdict::Stale(StaleMark {
+                own_epoch: mine.epoch,
+                newer_epoch: e,
+                by_own_record: true,
+                reason: "record".into(),
+            });
         }
         let usable: Vec<&(u16, KeyEpochReply)> = answers
             .iter()
             .filter(|(_, v)| {
-                v.present && v.origin != "hosted" && !v.stale && v.group_verifying_key == mine.group_verifying_key
+                v.present
+                    && v.origin != "hosted"
+                    && !v.stale
+                    && v.group_verifying_key == mine.group_verifying_key
             })
             .collect();
         if usable.is_empty() {
             return Verdict::Inconclusive;
         }
-        let shares_mine = usable.iter().any(|(_, v)| v.epoch == mine.epoch && v.pkp_digest == mine.pkp_digest);
-        let newest = usable.iter().filter(|(_, v)| v.epoch > mine.epoch).max_by_key(|(_, v)| v.epoch);
-        let Some((_, newer)) = newest else { return Verdict::Current };
-        if mine.staged && mine.staged_new_epoch == newer.epoch && mine.staged_new_pkp_digest == newer.pkp_digest {
-            return Verdict::PendingCommit { newer_epoch: newer.epoch };
+        let shares_mine = usable
+            .iter()
+            .any(|(_, v)| v.epoch == mine.epoch && v.pkp_digest == mine.pkp_digest);
+        let newest = usable
+            .iter()
+            .filter(|(_, v)| v.epoch > mine.epoch)
+            .max_by_key(|(_, v)| v.epoch);
+        let Some((_, newer)) = newest else {
+            return Verdict::Current;
+        };
+        if mine.staged
+            && mine.staged_new_epoch == newer.epoch
+            && mine.staged_new_pkp_digest == newer.pkp_digest
+        {
+            return Verdict::PendingCommit {
+                newer_epoch: newer.epoch,
+            };
         }
         if shares_mine {
             return Verdict::Current;
         }
-        Verdict::Stale(StaleMark { own_epoch: mine.epoch, newer_epoch: newer.epoch, by_own_record: false, reason: "peers".into() })
+        Verdict::Stale(StaleMark {
+            own_epoch: mine.epoch,
+            newer_epoch: newer.epoch,
+            by_own_record: false,
+            reason: "peers".into(),
+        })
     }
 
     type Rule = fn(&KeyEpochReply, Option<u64>, &[(u16, KeyEpochReply)]) -> Verdict;
@@ -335,8 +394,11 @@ mod tests {
 
         /// One pass of node `i` reaching the peers in `up`; applies the verdict as `check_key` does.
         fn pass(&mut self, i: usize, up: &[usize]) -> Verdict {
-            let answers: Vec<(u16, KeyEpochReply)> =
-                up.iter().filter(|&&p| p != i).map(|&p| (p as u16 + 1, self.reply(p))).collect();
+            let answers: Vec<(u16, KeyEpochReply)> = up
+                .iter()
+                .filter(|&&p| p != i)
+                .map(|&p| (p as u16 + 1, self.reply(p)))
+                .collect();
             let rule: Rule = if self.old[i] { evaluate_040 } else { evaluate };
             let v = rule(&self.shares[i], self.records[i], &answers);
             match &v {
@@ -359,21 +421,42 @@ mod tests {
     #[test]
     fn a_node_behind_every_peer_is_stale() {
         let v = evaluate(&view(2, 2), None, &[(2, view(3, 3)), (3, view(3, 3))]);
-        assert!(matches!(v, Verdict::Stale(StaleMark { own_epoch: 2, newer_epoch: 3, by_own_record: false, .. })), "{v:?}");
+        assert!(
+            matches!(
+                v,
+                Verdict::Stale(StaleMark {
+                    own_epoch: 2,
+                    newer_epoch: 3,
+                    by_own_record: false,
+                    ..
+                })
+            ),
+            "{v:?}"
+        );
         assert!(!unconfirmed(&v), "{v:?}");
         // Behind the one peer that answered: stale, and the reason says it is unconfirmed.
-        assert!(unconfirmed(&evaluate(&view(2, 2), None, &[(3, view(3, 3))])));
+        assert!(unconfirmed(&evaluate(
+            &view(2, 2),
+            None,
+            &[(3, view(3, 3))]
+        )));
     }
 
     #[test]
     fn a_peer_vouching_for_this_nodes_sharing_outweighs_one_claiming_a_newer_one() {
-        assert_eq!(evaluate(&view(2, 2), None, &[(2, view(9, 9)), (3, view(2, 2))]), Verdict::Current);
+        assert_eq!(
+            evaluate(&view(2, 2), None, &[(2, view(9, 9)), (3, view(2, 2))]),
+            Verdict::Current
+        );
     }
 
     #[test]
     fn a_node_waiting_to_commit_is_not_stale() {
         let mine = staged(view(2, 2), 3, 3);
-        assert_eq!(evaluate(&mine, None, &[(2, view(3, 3))]), Verdict::PendingCommit { newer_epoch: 3 });
+        assert_eq!(
+            evaluate(&mine, None, &[(2, view(3, 3))]),
+            Verdict::PendingCommit { newer_epoch: 3 }
+        );
         // A staged vote for something else does not excuse it.
         let other = staged(view(2, 2), 3, 4);
         assert!(is_stale(&evaluate(&other, None, &[(2, view(3, 3))])));
@@ -382,7 +465,16 @@ mod tests {
     #[test]
     fn its_own_commit_record_proves_a_rollback_without_any_peer() {
         let v = evaluate(&view(2, 2), Some(3), &[]);
-        assert!(matches!(v, Verdict::Stale(StaleMark { by_own_record: true, .. })), "{v:?}");
+        assert!(
+            matches!(
+                v,
+                Verdict::Stale(StaleMark {
+                    by_own_record: true,
+                    ..
+                })
+            ),
+            "{v:?}"
+        );
         assert_eq!(evaluate(&view(3, 3), Some(3), &[]), Verdict::Inconclusive);
         // It wins over every voucher, live or stale.
         let vouchers = [(2, view(2, 2)), (3, stale(view(2, 2), false))];
@@ -398,9 +490,15 @@ mod tests {
         let absent = KeyEpochReply::default();
         let answers = [(1, other_key), (3, hosted), (4, absent)];
         assert_eq!(evaluate(&view(2, 2), None, &answers), Verdict::Inconclusive);
-        assert_eq!(evaluate(&view(2, 2), None, &[(2, view(2, 2))]), Verdict::Current);
+        assert_eq!(
+            evaluate(&view(2, 2), None, &[(2, view(2, 2))]),
+            Verdict::Current
+        );
         // Ahead of lagging peers, or level with another sharing: current.
-        assert_eq!(evaluate(&view(2, 2), None, &[(2, view(1, 1)), (3, view(2, 7))]), Verdict::Current);
+        assert_eq!(
+            evaluate(&view(2, 2), None, &[(2, view(1, 1)), (3, view(2, 7))]),
+            Verdict::Current
+        );
     }
 
     #[test]
@@ -448,7 +546,11 @@ mod tests {
             c.old = vec![true; 3];
             c.pass(A, up);
             c.pass(B, up);
-            assert_eq!(c.benched(), [true, true, false], "0.4.0, liar up: {liar_up}");
+            assert_eq!(
+                c.benched(),
+                [true, true, false],
+                "0.4.0, liar up: {liar_up}"
+            );
         }
     }
 
@@ -473,7 +575,10 @@ mod tests {
             let mut c = Cluster::new(n, 3, 3);
             c.shares[A] = view(2, 2);
             let v = c.pass(A, &all);
-            assert!(matches!(&v, Verdict::Stale(m) if m.newer_epoch == 3) && !unconfirmed(&v), "n = {n}: {v:?}");
+            assert!(
+                matches!(&v, Verdict::Stale(m) if m.newer_epoch == 3) && !unconfirmed(&v),
+                "n = {n}: {v:?}"
+            );
             // The others are not affected by it.
             assert_eq!(c.pass(B, &all), Verdict::Current, "n = {n}");
             // Every peer on the newer epoch marked stale (say, by a liar earlier): their claims are
@@ -500,7 +605,16 @@ mod tests {
             c.shares[B] = view(2, 2);
             c.records[B] = Some(3);
             let v = c.pass(B, &all);
-            assert!(matches!(v, Verdict::Stale(StaleMark { by_own_record: true, .. })), "n = {n}: {v:?}");
+            assert!(
+                matches!(
+                    v,
+                    Verdict::Stale(StaleMark {
+                        by_own_record: true,
+                        ..
+                    })
+                ),
+                "n = {n}: {v:?}"
+            );
             let v = c.pass(A, &all);
             assert!(is_stale(&v) && !unconfirmed(&v), "n = {n}: {v:?}");
             // B stays stale on every pass, and so does A.
@@ -525,7 +639,11 @@ mod tests {
             assert!(is_stale(&c.pass(A, &[C])));
             c.pass(B, &[A, C]);
             c.pass(A, &[B, C]);
-            let expect = if old { [true, true, false] } else { [false, false, false] };
+            let expect = if old {
+                [true, true, false]
+            } else {
+                [false, false, false]
+            };
             assert_eq!(c.benched(), expect, "0.4.0: {old}");
         }
     }
@@ -537,8 +655,15 @@ mod tests {
         c.shares[A] = staged(view(2, 2), 3, 3);
         c.shares[B] = view(3, 3);
         c.liar = Some((C, view(4, 4)));
-        assert_eq!(c.pass(A, &[B, C]), Verdict::PendingCommit { newer_epoch: 3 });
-        assert!(is_stale(&evaluate_040(&c.shares[A], None, &[(2, view(3, 3)), (3, view(4, 4))])));
+        assert_eq!(
+            c.pass(A, &[B, C]),
+            Verdict::PendingCommit { newer_epoch: 3 }
+        );
+        assert!(is_stale(&evaluate_040(
+            &c.shares[A],
+            None,
+            &[(2, view(3, 3)), (3, view(4, 4))]
+        )));
         // B, until A commits, has no peer on its sharing: the liar alone benches it.
         assert!(unconfirmed(&c.pass(B, &[A, C])));
         // A's resolver commits epoch 3; B's next pass sees it and clears.
@@ -564,15 +689,43 @@ mod tests {
     #[test]
     fn no_voucher_and_only_stale_newer_claims_keep_the_previous_verdict() {
         // This node at 2, no record; the peers at 3 are all marked stale; one live peer is older.
-        let answers = [(2, stale(view(3, 3), false)), (3, stale(view(3, 3), false)), (4, view(1, 1))];
+        let answers = [
+            (2, stale(view(3, 3), false)),
+            (3, stale(view(3, 3), false)),
+            (4, view(1, 1)),
+        ];
         assert_eq!(evaluate(&view(2, 2), None, &answers), Verdict::Inconclusive);
         // A peer on this sharing proven superseded by its own record is doubt too.
-        assert_eq!(evaluate(&view(2, 2), None, &[(2, stale(view(2, 2), true)), (3, view(1, 1))]), Verdict::Inconclusive);
+        assert_eq!(
+            evaluate(
+                &view(2, 2),
+                None,
+                &[(2, stale(view(2, 2), true)), (3, view(1, 1))]
+            ),
+            Verdict::Inconclusive
+        );
         // Simply ahead of a lagging peer: current.
-        assert_eq!(evaluate(&view(2, 2), None, &[(4, view(1, 1))]), Verdict::Current);
-        assert_eq!(evaluate(&view(2, 2), None, &[(3, stale(view(1, 1), true)), (4, view(1, 1))]), Verdict::Current);
+        assert_eq!(
+            evaluate(&view(2, 2), None, &[(4, view(1, 1))]),
+            Verdict::Current
+        );
+        assert_eq!(
+            evaluate(
+                &view(2, 2),
+                None,
+                &[(3, stale(view(1, 1), true)), (4, view(1, 1))]
+            ),
+            Verdict::Current
+        );
         // A voucher still clears.
-        assert_eq!(evaluate(&view(2, 2), None, &[(2, stale(view(3, 3), false)), (3, stale(view(2, 2), false))]), Verdict::Current);
+        assert_eq!(
+            evaluate(
+                &view(2, 2),
+                None,
+                &[(2, stale(view(3, 3), false)), (3, stale(view(2, 2), false))]
+            ),
+            Verdict::Current
+        );
     }
 
     #[test]
@@ -610,8 +763,16 @@ mod tests {
         // A known limit, the same before and after: an echo of this node's own sharing is
         // indistinguishable from an honest peer without signed ceremony evidence.
         for rule in [evaluate as Rule, evaluate_040] {
-            assert_eq!(rule(&view(2, 2), None, &[(2, view(3, 3)), (3, view(2, 2))]), Verdict::Current);
-            let n5 = [(2, view(3, 3)), (3, view(3, 3)), (4, view(3, 3)), (5, view(2, 2))];
+            assert_eq!(
+                rule(&view(2, 2), None, &[(2, view(3, 3)), (3, view(2, 2))]),
+                Verdict::Current
+            );
+            let n5 = [
+                (2, view(3, 3)),
+                (3, view(3, 3)),
+                (4, view(3, 3)),
+                (5, view(2, 2)),
+            ];
             assert_eq!(rule(&view(2, 2), None, &n5), Verdict::Current);
             // The node's own commit record still catches it when the record survived the restore.
             assert!(is_stale(&rule(&view(2, 2), Some(3), &n5)));
@@ -620,7 +781,12 @@ mod tests {
 
     #[test]
     fn a_new_wording_of_the_same_mark_is_not_a_change() {
-        let m = |own, newer, rec, reason: &str| StaleMark { own_epoch: own, newer_epoch: newer, by_own_record: rec, reason: reason.into() };
+        let m = |own, newer, rec, reason: &str| StaleMark {
+            own_epoch: own,
+            newer_epoch: newer,
+            by_own_record: rec,
+            reason: reason.into(),
+        };
         assert!(m(2, 3, false, "one peer").same_state(&m(2, 3, false, "two peers")));
         assert!(!m(2, 3, false, "x").same_state(&m(2, 4, false, "x")));
         assert!(!m(2, 3, false, "x").same_state(&m(2, 3, true, "x")));
@@ -630,7 +796,10 @@ mod tests {
     fn the_retry_delay_stays_within_its_jitter() {
         for _ in 0..100 {
             let d = retry_delay();
-            assert!(d <= RETRY_INTERVAL && d > RETRY_INTERVAL - RETRY_JITTER, "{d:?}");
+            assert!(
+                d <= RETRY_INTERVAL && d > RETRY_INTERVAL - RETRY_JITTER,
+                "{d:?}"
+            );
         }
     }
 }

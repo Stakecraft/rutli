@@ -114,7 +114,9 @@ impl Class {
 
     fn note(self) -> Option<&'static str> {
         match self {
-            Class::HostedCopy => Some("a hosted key has no threshold at rest: this one copy is the whole key"),
+            Class::HostedCopy => {
+                Some("a hosted key has no threshold at rest: this one copy is the whole key")
+            }
             Class::Tombstone => Some(
                 "a tombstone keeps the deleted key until its purge time; a hosted key has no \
                  threshold at rest, so one copy is the whole key",
@@ -202,7 +204,11 @@ impl Report {
 
     /// The check-config style text report.
     pub fn text(&self) -> String {
-        let mut out = format!("residue-scan: node {}, data_dir {}\n", self.node, printable(&self.data_dir));
+        let mut out = format!(
+            "residue-scan: node {}, data_dir {}\n",
+            self.node,
+            printable(&self.data_dir)
+        );
         for b in &self.backups {
             out.push_str(&format!("  backup {}\n", printable(b)));
         }
@@ -211,19 +217,33 @@ impl Report {
                 "[finding] {}: {} key={} epoch={} dek={}\n",
                 f.class.as_str(),
                 printable(&f.path),
-                f.key_id.as_deref().map(printable).unwrap_or_else(|| "-".into()),
+                f.key_id
+                    .as_deref()
+                    .map(printable)
+                    .unwrap_or_else(|| "-".into()),
                 f.epoch.map(|e| e.to_string()).unwrap_or_else(|| "-".into()),
-                f.dek.as_deref().map(printable).unwrap_or_else(|| "-".into()),
+                f.dek
+                    .as_deref()
+                    .map(printable)
+                    .unwrap_or_else(|| "-".into()),
             ));
             if let Some(n) = f.note {
                 out.push_str(&format!("          {n}\n"));
             }
         }
         for u in &self.unclassified {
-            out.push_str(&format!("[unclassified] {}: {}\n", printable(&u.path), printable(&u.reason)));
+            out.push_str(&format!(
+                "[unclassified] {}: {}\n",
+                printable(&u.path),
+                printable(&u.reason)
+            ));
         }
         for e in &self.errors {
-            out.push_str(&format!("[error] {}: {}\n", printable(&e.path), printable(&e.error)));
+            out.push_str(&format!(
+                "[error] {}: {}\n",
+                printable(&e.path),
+                printable(&e.error)
+            ));
         }
         for c in &self.changed {
             let what = match c.change {
@@ -236,7 +256,10 @@ impl Report {
         for f in &self.findings {
             *by_class.entry(f.class).or_default() += 1;
         }
-        let classes = by_class.iter().map(|(c, n)| format!("{}={n}", c.as_str())).collect::<Vec<_>>();
+        let classes = by_class
+            .iter()
+            .map(|(c, n)| format!("{}={n}", c.as_str()))
+            .collect::<Vec<_>>();
         out.push_str(&format!(
             "summary: {} finding(s){}, {} unclassified, {} read error(s), {} changed during the scan; \
              live keys: {} FROST, {} hosted, {} tombstone(s)\n",
@@ -359,7 +382,15 @@ fn inspect(bytes: &[u8], input: &ScanInput<'_>) -> Option<KeyInfo> {
                 },
                 None => (None, None, None, None),
             };
-            Some(KeyInfo { sealed: true, kind, epoch, key_id: None, dek, dek_use, foreign: None })
+            Some(KeyInfo {
+                sealed: true,
+                kind,
+                epoch,
+                key_id: None,
+                dek,
+                dek_use,
+                foreign: None,
+            })
         }
         _ => {
             let p = serde_json::from_slice::<Probe>(bytes).ok()?;
@@ -439,7 +470,9 @@ fn open_nofollow(path: &Path) -> Opened {
         },
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Opened::Vanished,
         #[cfg(unix)]
-        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => Opened::NotRegular("a symbolic link; not followed"),
+        Err(e) if e.raw_os_error() == Some(libc::ELOOP) => {
+            Opened::NotRegular("a symbolic link; not followed")
+        }
         Err(e) => Opened::Error(e.to_string()),
     }
 }
@@ -485,7 +518,13 @@ impl<'a> Scan<'a> {
         p.to_string_lossy().into_owned()
     }
 
-    fn finding(&mut self, class: Class, path: String, key_id: Option<String>, info: Option<&KeyInfo>) {
+    fn finding(
+        &mut self,
+        class: Class,
+        path: String,
+        key_id: Option<String>,
+        info: Option<&KeyInfo>,
+    ) {
         self.findings.push(Finding {
             class,
             path,
@@ -497,15 +536,24 @@ impl<'a> Scan<'a> {
     }
 
     fn unclassified(&mut self, path: String, reason: impl Into<String>) {
-        self.unclassified.push(Unclassified { path, reason: reason.into() });
+        self.unclassified.push(Unclassified {
+            path,
+            reason: reason.into(),
+        });
     }
 
     fn error(&mut self, path: String, error: impl Into<String>) {
-        self.errors.push(ReadError { path, error: error.into() });
+        self.errors.push(ReadError {
+            path,
+            error: error.into(),
+        });
     }
 
     fn vanished(&mut self, path: String) {
-        self.changed.push(Changed { path, change: Change::Vanished });
+        self.changed.push(Changed {
+            path,
+            change: Change::Vanished,
+        });
     }
 
     /// List a directory: its entry names, or `None` after reporting why not.
@@ -540,10 +588,15 @@ impl<'a> Scan<'a> {
 
     /// After a directory is processed: report entries that appeared since it was listed.
     fn recheck(&mut self, dir: &Path, seen: &BTreeSet<std::ffi::OsString>) {
-        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
         for e in rd.flatten() {
             if !seen.contains(&e.file_name()) {
-                self.changed.push(Changed { path: Self::path_str(&e.path()), change: Change::Appeared });
+                self.changed.push(Changed {
+                    path: Self::path_str(&e.path()),
+                    change: Change::Appeared,
+                });
             }
         }
     }
@@ -585,23 +638,36 @@ impl<'a> Scan<'a> {
         if info.sealed {
             match info.dek_use {
                 Some(DekUse::Current) => {}
-                Some(_) => self.finding(Class::NonCurrentDek, path.clone(), key_id.clone(), Some(&info)),
-                None => self.unclassified(path.clone(), "sealed, and no share_seal is configured to tell its DEK"),
+                Some(_) => self.finding(
+                    Class::NonCurrentDek,
+                    path.clone(),
+                    key_id.clone(),
+                    Some(&info),
+                ),
+                None => self.unclassified(
+                    path.clone(),
+                    "sealed, and no share_seal is configured to tell its DEK",
+                ),
             }
         }
         match info.kind.as_deref() {
             Some("tombstone") => self.finding(Class::Tombstone, path, key_id, Some(&info)),
-            Some("hosted-key") if place != Place::Live => self.finding(Class::HostedCopy, path, key_id, Some(&info)),
+            Some("hosted-key") if place != Place::Live => {
+                self.finding(Class::HostedCopy, path, key_id, Some(&info))
+            }
             Some("recipient") => self.finding(Class::CeremonyMaterial, path, key_id, Some(&info)),
             Some("frost-share") if place == Place::Copy => {
                 let live = key_id.as_ref().and_then(|k| self.live.get(k)).cloned();
                 match live {
                     None => self.finding(Class::NotLiveKey, path, key_id, Some(&info)),
                     Some(l) => match (info.epoch, l.epoch) {
-                        (Some(c), Some(e)) if c < e => self.finding(Class::OlderEpoch, path, key_id, Some(&info)),
-                        (Some(c), Some(e)) if c > e => {
-                            self.unclassified(path, format!("epoch {c}, newer than the live file's {e}"))
+                        (Some(c), Some(e)) if c < e => {
+                            self.finding(Class::OlderEpoch, path, key_id, Some(&info))
                         }
+                        (Some(c), Some(e)) if c > e => self.unclassified(
+                            path,
+                            format!("epoch {c}, newer than the live file's {e}"),
+                        ),
                         _ => {}
                     },
                 }
@@ -618,12 +684,18 @@ impl<'a> Scan<'a> {
 
     /// Read and classify the file at `path`.
     fn file(&mut self, path: &Path, place: Place) {
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         match read_capped(path) {
             Got::Bytes(b) => self.classify(Self::path_str(path), &name, &b, place),
             Got::TooLarge => {
                 if place != Place::Copy || candidate(&name) {
-                    self.unclassified(Self::path_str(path), format!("larger than {MAX_FILE} bytes; not read"))
+                    self.unclassified(
+                        Self::path_str(path),
+                        format!("larger than {MAX_FILE} bytes; not read"),
+                    )
                 }
             }
             Got::Vanished => self.vanished(Self::path_str(path)),
@@ -646,12 +718,18 @@ impl<'a> Scan<'a> {
             if !matches!(self.file_type(&path), Some(t) if t.is_file()) {
                 continue;
             }
-            let Got::Bytes(bytes) = read_capped(&path) else { continue };
-            let Some(info) = inspect(&bytes, self.input) else { continue };
+            let Got::Bytes(bytes) = read_capped(&path) else {
+                continue;
+            };
+            let Some(info) = inspect(&bytes, self.input) else {
+                continue;
+            };
             if info.foreign.is_some() {
                 continue;
             }
-            let Some(key_id) = key_id_from_name(&n) else { continue };
+            let Some(key_id) = key_id_from_name(&n) else {
+                continue;
+            };
             match info.kind.as_deref() {
                 Some("frost-share") => self.counts.frost += 1,
                 Some("hosted-key") => self.counts.hosted += 1,
@@ -668,13 +746,19 @@ impl<'a> Scan<'a> {
         for name in &names {
             let n = name.to_string_lossy().into_owned();
             let path = keys.join(name);
-            let Some(t) = self.file_type(&path) else { continue };
+            let Some(t) = self.file_type(&path) else {
+                continue;
+            };
             if t.is_symlink() {
                 self.unclassified(Self::path_str(&path), "a symbolic link; not followed");
             } else if t.is_dir() {
                 if n == STAGED_DIR {
                     self.staged_dir(&path, keys);
-                } else if n == CEREMONY_DIR || n == CLEARED_DIR || n == PROVEN_DIR || n.ends_with(".nonces") {
+                } else if n == CEREMONY_DIR
+                    || n == CLEARED_DIR
+                    || n == PROVEN_DIR
+                    || n.ends_with(".nonces")
+                {
                     // Ceremony votes, cleared-intent and epoch-proven markers, nonce markers: no
                     // key material.
                 } else {
@@ -686,8 +770,17 @@ impl<'a> Scan<'a> {
             } else if n.ends_with(".tmp") {
                 self.file(&path, Place::Copy);
                 // A temp that is not a key file is still a leftover of a write in the key store.
-                if !self.findings.iter().any(|f| f.class == Class::TempFile && f.path == Self::path_str(&path)) {
-                    self.finding(Class::TempFile, Self::path_str(&path), key_id_from_name(&n), None);
+                if !self
+                    .findings
+                    .iter()
+                    .any(|f| f.class == Class::TempFile && f.path == Self::path_str(&path))
+                {
+                    self.finding(
+                        Class::TempFile,
+                        Self::path_str(&path),
+                        key_id_from_name(&n),
+                        None,
+                    );
                 }
             } else if n.ends_with(".json") && !n.starts_with('.') {
                 self.file(&path, Place::Live);
@@ -752,22 +845,37 @@ impl<'a> Scan<'a> {
         for name in &names {
             let n = name.to_string_lossy().into_owned();
             let path = dir.join(name);
-            let Some(t) = self.file_type(&path) else { continue };
+            let Some(t) = self.file_type(&path) else {
+                continue;
+            };
             if !t.is_file() {
                 self.unclassified(Self::path_str(&path), "not a regular file");
                 continue;
             }
             if n.ends_with(".tmp") {
-                self.finding(Class::TempFile, Self::path_str(&path), key_id_from_name(&n), None);
+                self.finding(
+                    Class::TempFile,
+                    Self::path_str(&path),
+                    key_id_from_name(&n),
+                    None,
+                );
                 continue;
             }
-            let ceremony = n.strip_suffix(".json").and_then(|s| s.split_once('.')).map(|(_, c)| c.to_string());
+            let ceremony = n
+                .strip_suffix(".json")
+                .and_then(|s| s.split_once('.'))
+                .map(|(_, c)| c.to_string());
             let before = self.findings.len();
             let changed_before = self.changed.len();
             self.file(&path, Place::Staged);
             let gone = self.changed.len() > changed_before;
             if !gone && !ceremony.as_ref().is_some_and(|c| open.contains(c)) {
-                let epoch = self.findings.get(before..).unwrap_or_default().iter().find_map(|f| f.epoch);
+                let epoch = self
+                    .findings
+                    .get(before..)
+                    .unwrap_or_default()
+                    .iter()
+                    .find_map(|f| f.epoch);
                 self.findings.push(Finding {
                     class: Class::StagedOrphan,
                     path: Self::path_str(&path),
@@ -787,7 +895,9 @@ impl<'a> Scan<'a> {
         for name in &names {
             let n = name.to_string_lossy().into_owned();
             let path = dir.join(name);
-            let Some(t) = self.file_type(&path) else { continue };
+            let Some(t) = self.file_type(&path) else {
+                continue;
+            };
             if !t.is_file() {
                 self.unclassified(Self::path_str(&path), "not a regular file");
                 continue;
@@ -808,8 +918,17 @@ impl<'a> Scan<'a> {
                 }
                 Got::TooLarge => None,
             };
-            let class = if n.ends_with(".tmp") { Class::TempFile } else { Class::CeremonyMaterial };
-            self.finding(class, Self::path_str(&path), key_id_from_name(&n), info.as_ref());
+            let class = if n.ends_with(".tmp") {
+                Class::TempFile
+            } else {
+                Class::CeremonyMaterial
+            };
+            self.finding(
+                class,
+                Self::path_str(&path),
+                key_id_from_name(&n),
+                info.as_ref(),
+            );
         }
         self.recheck(dir, &names);
     }
@@ -820,18 +939,26 @@ impl<'a> Scan<'a> {
     /// is classified against the live store; tars inside are read too.
     fn walk_copies(&mut self, dir: &Path, depth: usize) {
         if depth > MAX_DEPTH {
-            self.unclassified(Self::path_str(dir), format!("deeper than {MAX_DEPTH} levels; not walked"));
+            self.unclassified(
+                Self::path_str(dir),
+                format!("deeper than {MAX_DEPTH} levels; not walked"),
+            );
             return;
         }
         if self.walked > MAX_WALK_ENTRIES {
-            self.error(Self::path_str(dir), format!("walk limit of {MAX_WALK_ENTRIES} entries reached; not walked"));
+            self.error(
+                Self::path_str(dir),
+                format!("walk limit of {MAX_WALK_ENTRIES} entries reached; not walked"),
+            );
             return;
         }
         let Some(names) = self.list(dir) else { return };
         for name in &names {
             let n = name.to_string_lossy().into_owned();
             let path = dir.join(name);
-            let Some(t) = self.file_type(&path) else { continue };
+            let Some(t) = self.file_type(&path) else {
+                continue;
+            };
             if t.is_symlink() {
                 self.unclassified(Self::path_str(&path), "a symbolic link; not followed");
             } else if t.is_dir() {
@@ -859,7 +986,9 @@ impl<'a> Scan<'a> {
         for name in &names {
             let n = name.to_string_lossy().into_owned();
             let path = dd.join(name);
-            let Some(t) = self.file_type(&path) else { continue };
+            let Some(t) = self.file_type(&path) else {
+                continue;
+            };
             if t.is_symlink() {
                 self.unclassified(Self::path_str(&path), "a symbolic link; not followed");
                 continue;
@@ -870,13 +999,17 @@ impl<'a> Scan<'a> {
                 ("journal", true) => {} // sign journals: no key material
                 ("lost+found", true) => match std::fs::read_dir(&path) {
                     Ok(mut rd) => match rd.next() {
-                        Some(Ok(_)) => self.finding(Class::LostFound, Self::path_str(&path), None, None),
+                        Some(Ok(_)) => {
+                            self.finding(Class::LostFound, Self::path_str(&path), None, None)
+                        }
                         Some(Err(e)) => self.error(Self::path_str(&path), e.to_string()),
                         None => {}
                     },
-                    Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-                        self.unclassified(Self::path_str(&path), "not readable by this user; check it as root")
-                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => self
+                        .unclassified(
+                            Self::path_str(&path),
+                            "not readable by this user; check it as root",
+                        ),
                     Err(e) => self.error(Self::path_str(&path), e.to_string()),
                 },
                 (_, true) => {
@@ -923,7 +1056,10 @@ impl<'a> Scan<'a> {
         match tar_magic(&mut f) {
             Ok(true) => self.tar_open(f, shown),
             Ok(false) => {
-                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 let before = self.findings.len() + self.unclassified.len();
                 let got = match f.seek(SeekFrom::Start(0)) {
                     Ok(_) => read_open(f),
@@ -932,10 +1068,15 @@ impl<'a> Scan<'a> {
                 match got {
                     Got::Bytes(b) => self.classify(shown.clone(), &name, &b, Place::Copy),
                     Got::Error(e) => self.error(shown.clone(), e),
-                    Got::TooLarge => self.unclassified(shown.clone(), format!("larger than {MAX_FILE} bytes; not read")),
+                    Got::TooLarge => self.unclassified(
+                        shown.clone(),
+                        format!("larger than {MAX_FILE} bytes; not read"),
+                    ),
                     Got::Vanished | Got::NotRegular(_) => {}
                 }
-                if self.findings.len() + self.unclassified.len() == before && self.errors.last().is_none_or(|e| e.path != shown) {
+                if self.findings.len() + self.unclassified.len() == before
+                    && self.errors.last().is_none_or(|e| e.path != shown)
+                {
                     self.unclassified(
                         shown,
                         "neither a directory, a plain tar, nor a key file (compressed archives \
@@ -964,8 +1105,12 @@ impl<'a> Scan<'a> {
     /// Read an opened tar, classifying each entry as it is read: one entry in memory at a time.
     fn tar_open(&mut self, f: std::fs::File, shown: String) {
         let res = read_tar(f, &shown, |item| match item {
-            TarItem::Entry { shown, base, bytes } => self.classify(shown, &base, &bytes, Place::Copy),
-            TarItem::TooLarge { shown } => self.unclassified(shown, format!("larger than {MAX_FILE} bytes; not read")),
+            TarItem::Entry { shown, base, bytes } => {
+                self.classify(shown, &base, &bytes, Place::Copy)
+            }
+            TarItem::TooLarge { shown } => {
+                self.unclassified(shown, format!("larger than {MAX_FILE} bytes; not read"))
+            }
         });
         if let Err(e) = res {
             self.error(shown, e);
@@ -974,8 +1119,14 @@ impl<'a> Scan<'a> {
 }
 
 enum TarItem {
-    Entry { shown: String, base: String, bytes: Zeroizing<Vec<u8>> },
-    TooLarge { shown: String },
+    Entry {
+        shown: String,
+        base: String,
+        bytes: Zeroizing<Vec<u8>>,
+    },
+    TooLarge {
+        shown: String,
+    },
 }
 
 /// Whether an open file starts like a tar (ustar or GNU magic at offset 257).
@@ -1002,7 +1153,9 @@ fn tar_num(field: &[u8]) -> Option<u64> {
         }
         return Some(v);
     }
-    let s = std::str::from_utf8(field).ok()?.trim_matches(|c: char| c == '\0' || c == ' ');
+    let s = std::str::from_utf8(field)
+        .ok()?
+        .trim_matches(|c: char| c == '\0' || c == ' ');
     if s.is_empty() {
         return Some(0);
     }
@@ -1033,7 +1186,11 @@ fn pax_path(data: &[u8]) -> Option<String> {
 
 /// Walk an open plain tar, reported as `shown`, handing each candidate entry to `on` as soon as it
 /// is read (one entry in memory at a time). Each is reported as `<shown>!<entry name>`.
-fn read_tar(mut f: std::fs::File, shown: &str, mut on: impl FnMut(TarItem)) -> std::result::Result<(), String> {
+fn read_tar(
+    mut f: std::fs::File,
+    shown: &str,
+    mut on: impl FnMut(TarItem),
+) -> std::result::Result<(), String> {
     let io = |e: std::io::Error| e.to_string();
     let len = f.metadata().map_err(io)?.len();
     let mut pos: u64 = 0;
@@ -1052,16 +1209,32 @@ fn read_tar(mut f: std::fs::File, shown: &str, mut on: impl FnMut(TarItem)) -> s
         }
         entries += 1;
         if entries > MAX_TAR_ENTRIES {
-            return Err(format!("more than {MAX_TAR_ENTRIES} entries; the rest of the archive was not read"));
+            return Err(format!(
+                "more than {MAX_TAR_ENTRIES} entries; the rest of the archive was not read"
+            ));
         }
-        let stored = tar_num(&hdr[148..156]).ok_or_else(|| corrupt(pos, "bad header checksum field"))?;
-        let sum: u64 = hdr.iter().enumerate().map(|(i, b)| if (148..156).contains(&i) { 32 } else { *b as u64 }).sum();
+        let stored =
+            tar_num(&hdr[148..156]).ok_or_else(|| corrupt(pos, "bad header checksum field"))?;
+        let sum: u64 = hdr
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                if (148..156).contains(&i) {
+                    32
+                } else {
+                    *b as u64
+                }
+            })
+            .sum();
         if stored != sum {
             return Err(corrupt(pos, "header checksum mismatch"));
         }
         let size = tar_num(&hdr[124..136]).ok_or_else(|| corrupt(pos, "bad size field"))?;
         let data_at = pos + 512;
-        let padded = size.checked_add(511).map(|s| s / 512 * 512).ok_or_else(|| corrupt(pos, "size overflow"))?;
+        let padded = size
+            .checked_add(511)
+            .map(|s| s / 512 * 512)
+            .ok_or_else(|| corrupt(pos, "size overflow"))?;
         if data_at.checked_add(padded).is_none_or(|end| end > len) {
             return Err(corrupt(pos, "entry runs past the end of the file"));
         }
@@ -1089,8 +1262,16 @@ fn read_tar(mut f: std::fs::File, shown: &str, mut on: impl FnMut(TarItem)) -> s
             b'0' | 0 | b'7' => {
                 let name = next_name.take().unwrap_or_else(|| {
                     let n = cstr(&hdr[0..100]);
-                    let prefix = if &hdr[257..262] == b"ustar" { cstr(&hdr[345..500]) } else { String::new() };
-                    if prefix.is_empty() { n } else { format!("{prefix}/{n}") }
+                    let prefix = if &hdr[257..262] == b"ustar" {
+                        cstr(&hdr[345..500])
+                    } else {
+                        String::new()
+                    };
+                    if prefix.is_empty() {
+                        n
+                    } else {
+                        format!("{prefix}/{n}")
+                    }
                 });
                 let base = name.rsplit('/').next().unwrap_or(&name).to_string();
                 if candidate(&base) {
@@ -1101,7 +1282,11 @@ fn read_tar(mut f: std::fs::File, shown: &str, mut on: impl FnMut(TarItem)) -> s
                         let mut b = Zeroizing::new(vec![0u8; size as usize]);
                         f.seek(SeekFrom::Start(data_at)).map_err(io)?;
                         f.read_exact(&mut b).map_err(io)?;
-                        on(TarItem::Entry { shown, base, bytes: b });
+                        on(TarItem::Entry {
+                            shown,
+                            base,
+                            bytes: b,
+                        });
                     }
                 }
             }
@@ -1136,7 +1321,15 @@ pub fn visit_tar_key_entries(
 
 /// Control characters escaped, so a crafted file name cannot rewrite the terminal.
 fn printable(s: &str) -> String {
-    s.chars().flat_map(|c| if c.is_control() { c.escape_default().collect::<Vec<_>>() } else { vec![c] }).collect()
+    s.chars()
+        .flat_map(|c| {
+            if c.is_control() {
+                c.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
 }
 
 /// Run the scan.
@@ -1188,12 +1381,17 @@ pub fn scan(input: &ScanInput<'_>) -> Report {
         );
     }
     if input.legacy_dek.is_some() && input.sealer.is_none() {
-        not_checked.push("legacy-master check not done: no share_seal is configured to compare with".into());
+        not_checked.push(
+            "legacy-master check not done: no share_seal is configured to compare with".into(),
+        );
     }
     if input.sealer.is_none() {
-        not_checked.push("DEKs: no share_seal is configured, so sealed files are not told apart by DEK".into());
+        not_checked.push(
+            "DEKs: no share_seal is configured, so sealed files are not told apart by DEK".into(),
+        );
     }
-    s.findings.sort_by(|a, b| (a.class, &a.path).cmp(&(b.class, &b.path)));
+    s.findings
+        .sort_by(|a, b| (a.class, &a.path).cmp(&(b.class, &b.path)));
     s.findings.dedup();
     let mut report = Report {
         schema: SCHEMA,
@@ -1226,7 +1424,10 @@ mod tests {
 
     #[test]
     fn pax_records() {
-        assert_eq!(pax_path(b"20 path=keys/a.json\n").as_deref(), Some("keys/a.json"));
+        assert_eq!(
+            pax_path(b"20 path=keys/a.json\n").as_deref(),
+            Some("keys/a.json")
+        );
         assert_eq!(pax_path(b"5 x\n"), None);
         assert_eq!(pax_path(b"99 path=x\n"), None);
     }
@@ -1234,10 +1435,22 @@ mod tests {
     #[test]
     fn names_to_key_ids() {
         assert_eq!(key_id_from_name("frost-a.json").as_deref(), Some("frost-a"));
-        assert_eq!(key_id_from_name("frost-a.c1.json").as_deref(), Some("frost-a"));
-        assert_eq!(key_id_from_name("frost-a.json.tmp").as_deref(), Some("frost-a"));
-        assert_eq!(key_id_from_name(".create-frost-a-1.tmp").as_deref(), Some("frost-a-1"));
-        assert_eq!(key_id_from_name("frost-a.recipient").as_deref(), Some("frost-a"));
+        assert_eq!(
+            key_id_from_name("frost-a.c1.json").as_deref(),
+            Some("frost-a")
+        );
+        assert_eq!(
+            key_id_from_name("frost-a.json.tmp").as_deref(),
+            Some("frost-a")
+        );
+        assert_eq!(
+            key_id_from_name(".create-frost-a-1.tmp").as_deref(),
+            Some("frost-a-1")
+        );
+        assert_eq!(
+            key_id_from_name("frost-a.recipient").as_deref(),
+            Some("frost-a")
+        );
     }
 
     #[test]
@@ -1253,12 +1466,17 @@ mod tests {
         let link = tmp.path().join("frost-a.json");
         std::os::unix::fs::symlink(&target, &link).unwrap();
         // read_capped is what every file read goes through, whatever the walk saw before.
-        assert!(matches!(read_capped(&link), Got::NotRegular(why) if why.contains("symbolic link")));
+        assert!(
+            matches!(read_capped(&link), Got::NotRegular(why) if why.contains("symbolic link"))
+        );
         assert!(matches!(open_nofollow(tmp.path()), Opened::NotRegular(_)));
     }
 
     #[test]
     fn a_vanished_file_is_a_change_not_an_error() {
-        assert!(matches!(read_capped(Path::new("/nonexistent/rutli-residue")), Got::Vanished));
+        assert!(matches!(
+            read_capped(Path::new("/nonexistent/rutli-residue")),
+            Got::Vanished
+        ));
     }
 }
