@@ -290,17 +290,20 @@ pub struct Node {
     /// See [`MIXED_EVIDENCE_REGATHER`].
     regather_delay: Duration,
     /// See [`SignStoreHook`]. Unset in the daemon.
+    #[cfg(feature = "test-hooks")]
     sign_store_hook: Option<SignStoreHook>,
     #[cfg(test)]
     hooks: TestHooks,
 }
 
 /// Fault-injection seam for a sign round 2's store work, for tests (also the integration tests,
-/// which the `#[cfg(test)]` hooks do not reach). Not reachable from config; unset in the daemon.
+/// which the `#[cfg(test)]` hooks do not reach). Only with the `test-hooks` feature, which the
+/// crate's own tests turn on and a release build never has. Not reachable from config.
 /// Called with the key id and session id on the blocking thread at the release step: after the
 /// session's nonces and authorization were taken out of memory, before the journal entry and the
 /// nonce marker. An error is that store work failing with it (an `EIO` is a definite I/O error);
 /// blocking in it is a slow or hung store.
+#[cfg(feature = "test-hooks")]
 #[doc(hidden)]
 pub type SignStoreHook = Arc<dyn Fn(&str, &str) -> std::io::Result<()> + Send + Sync>;
 
@@ -443,6 +446,7 @@ impl Node {
             repair_bucket: Mutex::new((REPAIR_FANOUT_BURST, Instant::now())),
             unknown_no_vote_caps: (MAX_UNKNOWN_NO_VOTES_PER_ASKER, MAX_UNKNOWN_NO_VOTES),
             regather_delay: MIXED_EVIDENCE_REGATHER,
+            #[cfg(feature = "test-hooks")]
             sign_store_hook: None,
             #[cfg(test)]
             hooks: TestHooks::default(),
@@ -1231,7 +1235,8 @@ impl Node {
         self
     }
 
-    /// Install a [`SignStoreHook`]. Tests only.
+    /// Install a [`SignStoreHook`]. Tests only (the `test-hooks` feature).
+    #[cfg(feature = "test-hooks")]
     #[doc(hidden)]
     pub fn with_sign_store_hook(mut self, hook: SignStoreHook) -> Self {
         self.sign_store_hook = Some(hook);
@@ -1239,11 +1244,19 @@ impl Node {
     }
 
     /// Run the [`SignStoreHook`], if any.
+    #[cfg(feature = "test-hooks")]
     fn sign_store_work(&self, key_id: &str, session_id: &str) -> Result<()> {
         match &self.sign_store_hook {
             Some(hook) => hook(key_id, session_id).map_err(DaemonError::Io),
             None => Ok(()),
         }
+    }
+
+    /// No store hook without the `test-hooks` feature.
+    #[cfg(not(feature = "test-hooks"))]
+    #[inline(always)]
+    fn sign_store_work(&self, _key_id: &str, _session_id: &str) -> Result<()> {
+        Ok(())
     }
 
     /// A sign round's store work on the blocking pool ([`Node::blocking`]), counted in this node's

@@ -2091,6 +2091,7 @@ dependencies = [
  "rcgen",
  "rustls-pemfile",
  "rutli-canton-key",
+ "rutli-cosigner",
  "rutli-frost-core",
  "serde",
  "serde_json",
