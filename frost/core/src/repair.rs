@@ -10,8 +10,8 @@
 //!
 //! 1. [`helper_step1`] — each of the `t` helpers derives a "delta" for every helper (incl. itself).
 //! 2. [`helper_step2`] — each helper sums the deltas addressed to it into a "sigma".
-//! 3. [`participant_step3`] — the recovering node sums the `t` sigmas into its [`KeyPackage`],
-//!    checked against the group's public key package. The group public key is unchanged; the node
+//! 3. [`participant_step3`] — the recovering node sums the `t` sigmas into its [`KeyPackage`] and
+//!    checks its verifying share against the group's public key package. The group public key is unchanged; the node
 //!    rejoins with its old share.
 //!
 //! The helpers need only their key packages and the recovering node the public key package, both of
@@ -53,7 +53,20 @@ pub fn participant_step3(
     pkp: &PublicKeyPackage,
     min_signers: u16,
 ) -> Result<KeyPackage> {
+    let n = pkp.verifying_shares().len();
+    if min_signers < 2 || usize::from(min_signers) > n {
+        return Err(crate::CoreError::Dealer(format!("repair: threshold {min_signers} for {n} shares")));
+    }
     let with_threshold =
         PublicKeyPackage::new(pkp.verifying_shares().clone(), *pkp.verifying_key(), Some(min_signers));
-    Ok(repair_share_part3(sigmas, participant, &with_threshold)?)
+    let kp = repair_share_part3(sigmas, participant, &with_threshold)?;
+    // frost 3 only sums the sigmas: the result must be the share the group knows for this node.
+    if pkp.verifying_shares().get(&participant) != Some(kp.verifying_share()) {
+        return Err(crate::CoreError::Dealer(
+            "repair: the rebuilt share does not match the group's verifying share for this node — a \
+             wrong or tampered sigma"
+                .into(),
+        ));
+    }
+    Ok(kp)
 }

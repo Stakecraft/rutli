@@ -300,6 +300,22 @@ impl PeerApi for DownPeer {
     }
 }
 
+#[test]
+fn a_bundle_whose_package_records_min_signers_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (sites, mut bundles, _, fingerprint) = ceremony(tmp.path());
+    let pkp = bundles[0].public_key_package.clone();
+    bundles[0].public_key_package = frost_ed25519::keys::PublicKeyPackage::new(
+        pkp.verifying_shares().clone(),
+        *pkp.verifying_key(),
+        Some(T),
+    );
+    let err = sites[0].import(&bundles[0], &fingerprint).expect_err("refused");
+    assert!(err.to_string().contains("min_signers"), "{err}");
+    // The untouched bundle of another node still installs.
+    sites[1].import(&bundles[1], &fingerprint).unwrap();
+}
+
 #[tokio::test]
 async fn any_two_nodes_sign_with_the_third_down() {
     let tmp = tempfile::tempdir().unwrap();

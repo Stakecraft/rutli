@@ -1013,7 +1013,10 @@ async fn attempt(
             Err(Attempt::Members(
                 blamed
                     .into_iter()
-                    .map(|id| (id, DaemonError::Frost(frost_ed25519::Error::InvalidSignatureShare { culprits: vec![id] })))
+                    .map(|id| {
+                        let e = frost_ed25519::Error::InvalidSignatureShare { culprits: vec![id] };
+                        (id, DaemonError::Core(rutli_frost_core::CoreError::Frost(e)))
+                    })
                     .collect(),
             ))
         }

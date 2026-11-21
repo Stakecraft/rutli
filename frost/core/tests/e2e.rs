@@ -269,6 +269,9 @@ fn lost_share_is_repaired_from_helpers_and_signs() {
     let repaired = participant_step3(&[sigma2, sigma3], id1, &stored, MIN_SIGNERS).unwrap();
     assert_eq!(repaired.signing_share(), shares[&id1].signing_share(), "exactly the lost share");
 
+    // A wrong sigma (here: one helper's sigma used twice) is refused, not turned into a share.
+    assert!(participant_step3(&[sigma2, sigma2], id1, &stored, MIN_SIGNERS).is_err());
+
     // The repaired share signs (with an untouched helper) and verifies under the SAME group key.
     let msg = canton_digest(b"after repair");
     let quorum = [(id1, repaired), (id2, KeyPackage::try_from(shares[&id2].clone()).unwrap())];
