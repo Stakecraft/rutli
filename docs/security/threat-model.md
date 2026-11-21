@@ -453,12 +453,33 @@ gossip; `docs/architecture.md`, "Peer liveness"). Someone who can delay or drop 
 links between cosigners (a router on the path, a noisy neighbour on the network, a compromised node
 host) can make a leader's calls to a chosen peer miss their deadlines, and so steer **which**
 t-subset of cosigners signs: the delayed peer is excluded from that signature and tried last in
-later ones. That is all it buys. A leader never signs with fewer than t cosigners, every member
-still runs every check on every round (policy, intent, epoch, session binding, nonce marker), and a
-down peer is reordered, never skipped — so the attacker cannot prevent a signature while t
-cosigners are reachable from some leader; with fewer it is the ordinary loss of availability.
-Delays cannot cause a nonce to be used twice: a leader never re-sends a round 2, and a member burns
-its nonce marker before it computes a share, whether or not the leader still waits for the reply.
+later ones. A leader never signs with fewer than t cosigners, and every member still runs every
+check on every round (policy, intent, epoch, session binding, nonce marker).
+
+What holds for availability, exactly: a leader makes up to n − t + 1 attempts, and each attempt the
+attacker spoils excludes one member, so it cannot make a leader give up **for lack of attempts**
+while t members answer that leader. It can spend the leader's **time**: each spoiled attempt costs
+up to one round deadline (2 s in round 1, 5 s in round 2), and the client's deadline (the driver's
+5 s attempt) or the 20 s budget can run out first; the driver then tries another leader, which
+starts afresh. Holding back every signature therefore takes delaying enough links from every leader
+for as long as the attack lasts — a denial of service, like cutting those links — never a
+signature with fewer than t, a skipped check, or a nonce used twice. A down peer is tried last,
+never skipped, and gets a trial (a subset with it first) one signature per window, so it rejoins
+once its links are fine again.
+
+Delays cannot cause a nonce to be used twice. A member keeps a session's nonces in memory only;
+its round 2 takes them out of the session map under the session's lock before anything else, so a
+second round 2 or an abort for that session finds nothing; and every attempt uses fresh session ids
+and fresh nonces on every member, so a nonce of an abandoned attempt is never asked to sign anything
+else. A leader never re-sends a round 2. (The nonce marker on disk keeps a burnt session id from
+being used again after a restart.)
+
+A delayed round 2 still signs once: a member whose round 2 arrives after the leader gave up releases
+and journals that share, which the leader discards (if the leader's abort arrives first, nothing is
+released). That is allowed and bounded — single-use nonces, and each such share counts against the
+request's `max_shares_per_request` (8 by default). A delay attacker can use it to make members
+release shares nobody uses until the request's cap is spent; that is a denial of service for that
+request id only, and nothing is signed that a valid intent did not name.
 
 The load a member reports with its replies (`rutli-load`: rounds in flight and completed, its key
 store state) is **self-reported**. It may keep that member's own breaker shut — a member that
@@ -524,9 +545,11 @@ keys stay test material.
 - A driver-key thief signs non-gated keys within the ACL and rate limits (bounded and journaled,
   not prevented).
 - No defence against a TLS-terminating mesh (P3) or a memory snapshot of a running cosigner (L7).
-- Someone who can delay mesh traffic chooses which t cosigners sign, and a member that lies about
-  its own progress costs every signature it joins one round deadline; neither can sign with fewer
-  than t, skip a check, or stop signing while t cosigners are reachable.
+- Someone who can delay mesh traffic chooses which t cosigners sign, can spend a leader's time
+  (one round deadline per member it stalls) and a request's `max_shares_per_request` on shares the
+  leader discards, and can hold signing back only by keeping enough links from every leader
+  delayed; a member that lies about its own progress costs every signature it joins one round
+  deadline. Neither can sign with fewer than t, skip a check, or make a nonce sign twice.
 - A stolen refresher certificate, or the driver certificate while `signer_may_refresh` is on, can
   refresh each key once per `refresh_min_interval_secs` (72 h). Each refresh makes older backups
   unable to restore a node; back up after every refresh. A compromised cosigner cannot lead past the

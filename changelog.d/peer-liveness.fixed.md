@@ -11,19 +11,24 @@
     abort 1 s, `NodeInfo`/`KeyEpoch`/`CeremonyStatus` 3 s; ceremonies and hosted-key writes keep
     10 s), sent to the peer as `grpc-timeout`. Inside a Sign that carries a deadline the rounds fit
     it: a deadline under 1 s is refused at once with `DEADLINE_EXCEEDED`; without one a signature
-    has 20 s (was 45 s). At most two subset attempts per signature (was 10);
+    has 20 s (was 45 s). At most n − t + 1 subset attempts per signature (2 in 2-of-3, 3 in
+    3-of-5; was 10), stopped earlier by that clock; a Sign that gives up answers `UNAVAILABLE` with
+    the `rutli-error: attempts-exhausted` trailer;
   - each leader keeps a liveness state per peer, fed only by its own calls: a peer that is
     unreachable, whose sign rounds stop completing while it reports no progress (`rutli-load` reply
     metadata), or that answers `keystore-down` is tried last — never skipped — until a probe or a
-    trial brings it back. A busy member that keeps making progress is never marked down. DKG,
-    refresh and hosted-key writes do not consult it;
+    trial (one signature per window tries a subset with it first) brings it back. A busy member that
+    keeps making progress is never marked down, nor is a 0.4.x member, which reports no load; a
+    `KeyEpoch` or `CeremonyStatus` past its deadline marks nothing down. DKG, refresh and hosted-key
+    writes do not consult it;
   - a leader that cannot reach t cosigners answers `UNAVAILABLE` with the `rutli-error: no-quorum`
     trailer before round 1; an overloaded leader (512 signatures in flight, or its own round late)
     answers `UNAVAILABLE` `overloaded`; the driver fails over on both as before;
   - a member whose round-2 store work fails with a definite I/O error marks its key store down at
     once and answers with the `rutli-error: keystore-down` trailer; store work still running after
     3 s starts a key-store probe at once. The next probe that finds the store working clears it,
-    with no restart.
+    with no restart. A sign round that waited for a blocking thread past its caller's deadline is
+    not started.
 
   New metrics `rutli_peer_call_duration_seconds{call}`, `rutli_peer_state{peer,state}`,
   `rutli_peer_breaker_transitions_total{peer,to,reason}` and

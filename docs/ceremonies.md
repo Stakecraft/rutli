@@ -333,11 +333,13 @@ Shares of different sharings never combine, so signing is epoch-aware (audit H1,
   signature share fails verification at aggregation (frost's cheater detection names it;
   `rutli_invalid_signature_shares_total`), is excluded for the rest of the request; the session is
   aborted on the members still holding nonces (on the failed member without waiting for it), and
-  the next subset without an excluded member is tried (`rutli_sign_retries_total`). At most 2
-  attempts (10 up to 0.4.x) within 20 s or the client's deadline, whichever is shorter. If `t`
+  the next subset without an excluded member is tried (`rutli_sign_retries_total`). At most
+  n − t + 1 attempts (2 in 2-of-3, 3 in 3-of-5; 10 up to 0.4.x) within 20 s or the client's
+  deadline, whichever is shorter. If `t`
   peers report one sharing that is not older than the leader's, the leader is the odd one out and
   answers UNAVAILABLE so the driver fails over to a node on the cluster's sharing. When no subset
-  can sign, the answer is UNAVAILABLE (`could not reach signing threshold`); a leader that cannot
+  can sign, the answer is UNAVAILABLE (`could not reach signing threshold`, trailer
+  `rutli-error: attempts-exhausted`); a leader that cannot
   reach t cosigners at all answers UNAVAILABLE `no-quorum` before round 1.
 * **Session binding.** Round 1 also declares the message and the attempt's signer set; each node
   binds its nonces to them (and to the key). A round 2 for that session with another message,

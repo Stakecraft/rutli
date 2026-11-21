@@ -539,8 +539,9 @@ impl PeerApi for LocalPeer {
 /// [`crate::DaemonError::PeerDeadline`]: in a sign round the member is excluded from that signature,
 /// in a ceremony it fails the ceremony (which rolls back), and a hosted-key write treats it as
 /// unreachable. It can never cause a nonce reuse: the leader never re-sends a round 2 (it aborts and
-/// starts a fresh session), and a peer burns its nonce marker before it computes a share, whether
-/// or not anyone is still waiting for the reply.
+/// starts a fresh session, fresh nonces on every member), and a member's round 2 takes the session's
+/// nonces out of memory under the session lock before it signs, so a late round 2 or an abort that
+/// races it finds nothing to use again.
 pub const PEER_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 /// Sign round 1 (memory only on the member, with room for a fresh connection).
 pub const ROUND1_DEADLINE: Duration = Duration::from_secs(2);

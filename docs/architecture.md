@@ -183,26 +183,42 @@ starts with less than 1 s left (the last attempt keeps no reserve). A deadline u
 at once with `DEADLINE_EXCEEDED`, before any round. Without one, a signature has 20 s. The client's
 deadline only ever shortens the leader's work. A member that misses its deadline is excluded from
 that signature; its session is aborted without waiting for it, the other members' in parallel, and
-the leader tries one more subset — at most two attempts per signature.
+the leader tries the next subset without it — at most n − t + 1 attempts per signature (2 in 2-of-3,
+3 in 3-of-5), as many as it takes to exclude every member that fails while t remain. A Sign that
+runs out of attempts or time answers `UNAVAILABLE` with the `rutli-error: attempts-exhausted`
+trailer (the members it excluded named to an authenticated client only); the driver fails over.
+
+A member releases at most one share per attempt it is in (each attempt is a fresh session with
+fresh nonces, and a session signs once), so one Sign call costs a member at most n − t + 1 of the
+request's `max_shares_per_request` (8 by default), late shares of abandoned attempts included.
 
 **Breaker.** Each leader keeps a state per peer: up, down (unreachable, stalled or refusing), or on
 trial. It is fed only by the leader's own calls:
 
-- *unreachable*: a connection that failed or closed under a call, a plain `UNAVAILABLE`, a control
-  call past its deadline. A `NodeInfo` probe every second brings it back.
+- *unreachable*: a connection that failed or closed under a call, a plain `UNAVAILABLE`, a
+  `NodeInfo` call or probe past its deadline. `KeyEpoch` and `CeremonyStatus` read the peer's key
+  store: past their deadline they open nothing. A `NodeInfo` probe every second brings it back.
 - *stalled*: a sign round past its deadline while the peer's counters did not move. Every member
   reports `rutli-load: inflight=…; r1done=…; r2done=…; store=ok|down` on its sign and `NodeInfo`
   replies; a member that keeps completing rounds for anyone is busy, not stalled, and stays up.
   Round 1 does not touch the key store, so only completed round 2s count against a round-2 deadline.
+  A member that reports no load (0.4.x) is never marked stalled.
 - *refusing*: the peer answered with the `rutli-error: keystore-down` trailer.
 
 A stalled or refusing peer gets a trial after a window of 2 s, doubling up to 30 s on every failed
-trial: one signature may include it, and a successful round closes it. A probe whose self-reported
-load shows round 2s completing again (or the store back) closes it too. Answered refusals (policy,
-epoch, an unknown session, `sessions-full`, an invalid share) never open a breaker.
+trial: the next signature tries a subset with it first, and a successful round closes it. The trial
+is taken only when that attempt starts (one signature per window per leader), so a signature that
+does not contact the peer never uses it up, and at most one signature per window pays a round
+deadline for it. A probe whose self-reported load shows round 2s completing again (or the store
+back) closes it too. Answered refusals (policy, epoch, an unknown session, `sessions-full`, an
+invalid share) never open a breaker.
 
 The breaker only orders: subsets are sorted by their worst member (up, trial, down), and a down
-peer is tried last, never skipped, so a false open costs latency, never a signature. Signing and
+peer is tried last, never skipped. Within its attempts a leader still reaches a subset of t members
+that answer it, if there is one, so a false open costs a signature time, not the signature — unless
+the time runs out first: each member tried and found failing costs up to one round deadline, and
+the client's deadline (the driver's 5 s attempt) or the 20 s budget can end the Sign before the
+last subset; the driver then tries another leader. Signing and
 the anti-entropy sweep (which does not wait for an unreachable peer) consult it; DKG, refresh and
 hosted-key writes do not. `rutli_peer_state`, `rutli_peer_breaker_transitions_total` and the
 `RutliPeerDown` / `RutliPeerFlapping` alerts show it (`docs/observability.md`).
@@ -224,7 +240,12 @@ whatever the trailer.
 EACCES) marks its key store down at once instead of at the next probe; it then refuses with the
 `keystore-down` trailer. Round-2 store work still running after 3 s starts a key-store probe at once,
 so a hung volume is refused about 9 s after it hung instead of up to 21 s. The mark is not sticky:
-the next readiness probe that finds the store working clears it, with no restart.
+the next readiness probe that finds the store working clears it, with no restart. A sign round that
+waited for a blocking thread past its caller's deadline (the call's `grpc-timeout`) is not started:
+the leader has stopped waiting and its abort may already have come and gone, so a round 1 opened
+then would hold nonces until the TTL. A round 2 that was already in its store work when the leader
+gave up finishes and journals its share once; the leader discards it. Such late shares are allowed
+and bounded: the nonce is single use, and each counts against `max_shares_per_request`.
 
 ## Phase 2 MPC cluster — two Horcrux-informed decisions
 
