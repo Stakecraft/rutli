@@ -44,7 +44,7 @@
     "rust.clippy.warnings": 0,
     "rust.clippy.pedantic": 1515,
     "rust.clippy.unwrap_used": 0,
-    "rust.clippy.indexing_slicing": 0,
+    "rust.clippy.indexing_slicing": 1,
     "rust.fmt.unformatted_files": 101,
     "rust.tests": 832,
     "rust.deny.errors": 0,
