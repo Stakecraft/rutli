@@ -33,9 +33,9 @@ is reviewed as security-critical. This page explains how to get a change in.
 Prerequisites (details in [QUICKSTART.md](QUICKSTART.md)):
 
 - **JDK 17** and **sbt**, for the driver;
-- **Rust** with `clippy`, for the cosigner, dealer and FROST core: the version in
+- **Rust** with `clippy` and `rustfmt`, for the cosigner, dealer and FROST core: the version in
   `frost/rust-toolchain.toml`, which rustup selects inside `frost/` (if it does not install it on
-  first use, run `rustup toolchain install` and `rustup component add clippy` there). CI and the
+  first use, run `rustup toolchain install` and `rustup component add clippy rustfmt` there). CI and the
   release image build with the same version;
 - **Docker** with the compose plugin, for the TLS cluster smoke test;
 - **Helm 3**, `kubectl`, `yq` v4 and `jq`, for the deployment policy checks.
@@ -60,6 +60,7 @@ FROST core, cosigner and dealer (tests and lints):
 
 ```bash
 cd frost && cargo test --locked && cargo clippy --all-targets -- -D warnings
+scripts/fmt-tree.sh   # rustfmt of the pinned toolchain; CI runs `scripts/fmt-tree.sh --check`
 ```
 
 This includes property tests (`proptest`, files `prop_*.rs` under each crate's `tests/`): nonce
@@ -93,6 +94,28 @@ module closure first (`scripts/publish-canton-deps.sh --full v3.6.1`), then:
 ```bash
 CONFORMANCE=1 CANTON_AUTOMATIC_PROTOCOL_VERSION=1 sbt -batch driver/test
 ```
+
+### Formatting, and a branch that predates the format commit
+
+Rust is formatted with the pinned toolchain's rustfmt, defaults, through `scripts/fmt-tree.sh` (it
+runs rustfmt until a pass changes nothing: one pass is not enough on a few constructs). CI fails a
+pull request that `scripts/fmt-tree.sh --check` would change. The tree was formatted once in a single
+commit (`FMT` below, listed in `.git-blame-ignore-revs`; `git config blame.ignoreRevsFile
+.git-blame-ignore-revs` hides it from `git blame`). To bring a branch that started before it across,
+without resolving formatting conflicts by hand (`FMT^` is main just before that commit):
+
+```bash
+git fetch origin
+git merge "$FMT^"          # main as it was before the format: only your real conflicts, if any
+scripts/fmt-tree.sh        # format the result with the same tool
+git commit -am "style: cargo fmt"
+git merge -s ours "$FMT"   # record the format commit as merged; keeps your tree
+git merge origin/main      # everything after it, as usual
+scripts/fmt-tree.sh --check
+```
+
+Do not run the formatter on the branch before the first merge: it would format text that main then
+formats differently around your edits. Merge commits, never a rebase or force-push, as everywhere here.
 
 ## What a good pull request contains
 
