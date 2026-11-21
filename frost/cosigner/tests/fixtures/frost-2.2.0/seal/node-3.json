@@ -1,0 +1,8 @@
+{
+  "v": 1,
+  "kind": "rutli-node-seal",
+  "node": 3,
+  "share_dek": "bf662fbf10938b17b718b7a7d66848e2b84fc513d4e619c0353d5c81bc99232b",
+  "dist_seed": "d911b374168b7eea662503f307fcba7669407fe4e94374da96cafd2643e01aa9",
+  "previous_share_deks": []
+}

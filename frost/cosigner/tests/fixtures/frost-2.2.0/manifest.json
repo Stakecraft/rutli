@@ -1,0 +1,11 @@
+{
+  "cluster_uuid": "3f5c2b1e-7a4d-4c8e-9b0f-2d6e8a1c4b70",
+  "dkg_pkp_digest": "03c8016f9973d2bbc870e206ebf64393d15834daafd0a74547ad265043422d00",
+  "frost_ed25519": "2.2.0",
+  "group_verifying_key": "12afabefdf85e7ba80b1ab8c34bfb03bb46cde19bb6e36ea929ad3b0105e69e1",
+  "refresh_pkp_digest": "275581b899924d2b1dabe1ffb2d995cd2d46b1a63816358029ce09907e1a3c20",
+  "sign_message": "12205c28d7f1c597bc0b185ca79bee8e44ffd7f93dbd063c3eaf26fb3ee0973cc137",
+  "sign_signature": "23862e08c03f8b05d03b2b9326e97c1b8ed73df24e7f9c61e05adf9d07d628cbe484622fec00a3b13be9253d1af0643c118cccbe7ae5a60367fbdbe1e8a18d09",
+  "split_group_verifying_key": "fb18c0ef71eb15963d172a37f8ed5a9de1ac643e3623634941a710132f12d5fd",
+  "split_pkp_digest": "72e7709069953280988ca7bfa654088e7e4581cd92eacece3842c924cdf8d684"
+}
