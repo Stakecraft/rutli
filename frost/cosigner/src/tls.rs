@@ -185,8 +185,19 @@ pub struct PeerDial {
     connect_timeout: std::time::Duration,
 }
 
-/// Default [`PeerDial`] connect bound: the mesh's per-RPC deadline (`peer::PEER_RPC_TIMEOUT`).
-pub const DIAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Default [`PeerDial`] connect bound (TCP connect plus TLS handshake and pin check):
+/// [`crate::peer::CONNECT_TIMEOUT`].
+pub const DIAL_TIMEOUT: std::time::Duration = crate::peer::CONNECT_TIMEOUT;
+
+/// TCP keepalive on mesh sockets ([`PeerDial::connector`]): probes after 10 s idle, every 3 s, 3
+/// unanswered probes close the socket. tonic's own `tcp_keepalive` does not reach a custom
+/// connector, so it is set here. Below the HTTP/2 keepalive ([`crate::peer::H2_KEEPALIVE_INTERVAL`])
+/// it is the kernel's backstop when the process cannot run its timers.
+pub const TCP_KEEPALIVE: std::time::Duration = std::time::Duration::from_secs(10);
+pub const TCP_KEEPALIVE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+pub const TCP_KEEPALIVE_RETRIES: u32 = 3;
+/// `TCP_USER_TIMEOUT` on mesh sockets (Linux): data unacknowledged for this long closes the socket.
+pub const TCP_USER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl PeerDial {
     pub fn new(
@@ -274,14 +285,20 @@ impl PeerDial {
         Ok((cn, key))
     }
 
-    /// A tonic connector: TCP to the URI's host and port (nodelay, as tonic dials), then
-    /// [`PeerDial::handshake`], the two together bounded by the dial's connect timeout. (tonic's
-    /// `Endpoint::connect_timeout` wraps a custom connector too, but this bound does not depend
-    /// on every caller setting it.)
+    /// A tonic connector: TCP to the URI's host and port (nodelay, as tonic dials; TCP keepalive
+    /// and, on Linux, `TCP_USER_TIMEOUT`), then [`PeerDial::handshake`], the two together bounded by
+    /// the dial's connect timeout. (tonic's `Endpoint::connect_timeout` wraps a custom connector
+    /// too, but this bound does not depend on every caller setting it.)
     pub fn connector(&self) -> PeerConnector<HttpConnector> {
         let mut http = HttpConnector::new();
         http.enforce_http(false);
         http.set_nodelay(true);
+        http.set_connect_timeout(Some(self.connect_timeout));
+        http.set_keepalive(Some(TCP_KEEPALIVE));
+        http.set_keepalive_interval(Some(TCP_KEEPALIVE_INTERVAL));
+        http.set_keepalive_retries(Some(TCP_KEEPALIVE_RETRIES));
+        #[cfg(any(target_os = "android", target_os = "fuchsia", target_os = "linux"))]
+        http.set_tcp_user_timeout(Some(TCP_USER_TIMEOUT));
         self.connector_over(http)
     }
 

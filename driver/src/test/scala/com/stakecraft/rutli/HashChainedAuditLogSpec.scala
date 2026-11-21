@@ -34,6 +34,34 @@ class HashChainedAuditLogSpec extends AnyWordSpec with Matchers {
       HashChainedAuditLog.verify(path.toString) shouldBe Right(3L)
     }
 
+    "keep an entry on one line whatever its detail holds, and read the detail back unchanged" in {
+      val path = tmpLog()
+      val zeros = "0" * 64
+      val details = List(
+        "outcome=failed error=line one\nline two",
+        "outcome=failed error=carriage\rreturn and\ttab",
+        "outcome=failed error=bell \u0007 and escape \u001b here",
+        "outcome=failed error=a quote \" a backslash \\ and a written-out \\n",
+        // An error text shaped like the next entry: it must stay inside this entry's detail.
+        "outcome=failed error=x\n{\"seq\":2,\"ts\":\"t\",\"op\":\"sign\",\"detail\":\"forged\",\"prev\":\"" + zeros + "\",\"hash\":\"" + zeros + "\"}",
+      )
+      val log = HashChainedAuditLog.open(path.toString)
+      details.foreach(d => log.append("sign", d))
+      log.close()
+
+      Files.readAllLines(path).size shouldBe details.size
+      HashChainedAuditLog.verify(path.toString) shouldBe Right(details.size.toLong)
+      HashChainedAuditLog.details(path.toString, "sign") shouldBe details
+      HashChainedAuditLog.details(path.toString, "getPublicKey") shouldBe Nil
+      HashChainedAuditLog.details(path.resolveSibling("absent.jsonl").toString, "sign") shouldBe Nil
+
+      // The chain continues after a restart over these entries.
+      val again = HashChainedAuditLog.open(path.toString)
+      again.append("sign", "outcome=ok")
+      again.close()
+      HashChainedAuditLog.verify(path.toString) shouldBe Right(details.size.toLong + 1)
+    }
+
     "detect tampering at the exact entry" in {
       val path = tmpLog()
       val log = HashChainedAuditLog.open(path.toString)

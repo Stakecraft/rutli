@@ -84,6 +84,16 @@ import scala.util.control.NonFatal
   *   - For the operations other than sign, any other status (NOT_FOUND, RESOURCE_EXHAUSTED, ...) is
   *     a real answer from a live node and is returned immediately, never masked by trying another
   *     node. For sign, NOT_FOUND and the other node-state answers do fail over (see above).
+  *   - Where one cosigner's own answer is not the cluster's — "not found" in
+  *     `keyExistsAndIsActive` for a FROST key, in a group-key read and in every call on a hosted
+  *     key that is or may be EC ([[withEcFailover]]); a sign leader's NOT_FOUND,
+  *     FAILED_PRECONDITION, ABORTED, UNIMPLEMENTED or unverifiable signature — the other cosigners
+  *     are asked, and the outcome is decided over the whole roster, whatever the order
+  *     ([[rosterVerdict]]): the answer is final once enough endpoints gave it that the rest could
+  *     not use the key ([[ownAnswerQuorum]]: all but one, 2 of 3, 4 of 5); short of that, while
+  *     an endpoint could not be reached (UNAVAILABLE or DEADLINE_EXCEEDED) the call fails with
+  *     that endpoint's status. That is retryable: Canton never retries a final error, and the
+  *     unreachable cosigner may hold the key.
   * Every hop is logged at WARN and recorded in the operation's own audit entry
   * (`failover=<from>→<to> reason=<CODE>`, see [[withAuditNotes]]). The leader is sticky: the
   * endpoint that last served a request successfully leads the next one, so once a node is found
@@ -308,7 +318,10 @@ class FrostBackend(
     * key (`fresh`) any disagreeing answer fails the call; for an existing key one dissenter (never
     * more) is tolerated, reported and demoted, when [[distinctCosigners]]. A configured
     * `frost.expected-group-keys` value must be the agreed key. Too few answers is retryable; when
-    * none came, the endpoints' own error is rethrown (e.g. NOT_FOUND for an unknown key). */
+    * none came, an endpoint's own error is rethrown: NOT_FOUND (an unknown key) once
+    * [[ownAnswerQuorum]] endpoints said so; short of that an unreachable endpoint's (UNAVAILABLE or
+    * DEADLINE_EXCEEDED, retryable) when there is one, else NOT_FOUND if any endpoint said so, else
+    * the last error. */
   private def agreeOnGroupKey(
       keyId: String,
       answers: Seq[(String, ByteString)],
@@ -333,7 +346,16 @@ class FrostBackend(
         Agreed(p, matching.map(_._1), wrong)
       case None =>
         if (lostPin(keyId)) throw lostPinError(keyId)
-        if (answers.isEmpty && errors.nonEmpty) throw errors.last
+        // Nobody answered with a key. NOT_FOUND is the answer once enough cosigners said so that the
+        // rest could not use the key (ownAnswerQuorum); short of that, a cosigner that could not be
+        // reached may hold it, and its error (which Canton retries) comes first.
+        if (answers.isEmpty && errors.nonEmpty) {
+          val (notFound, rest) = errors.partition(_.getStatus.getCode == Status.Code.NOT_FOUND)
+          throw (
+            if (notFound.size >= ownAnswerQuorum) notFound.last
+            else rest.find(e => isNodeDown(e.getStatus)).orElse(notFound.lastOption).getOrElse(errors.last)
+          )
+        }
         val byKey = answers.groupBy(_._2).toSeq.sortBy { case (_, as) => -as.size }
         val (top, topAnswers) = byKey.headOption.getOrElse(
           throw KmsDriverException(new IllegalStateException(s"no cosigner answered for the group key of $keyId"), retryable = true)
@@ -624,7 +646,17 @@ class FrostBackend(
     *
     * `observed` is the preference this call read when it began (a success replaces only that
     * value), `from` the endpoint it tries first (normally the same), and `tried` is told each
-    * endpoint index just before it is asked. */
+    * endpoint index just before it is asked.
+    *
+    * `wholeRoster` is set by the calls where one cosigner's failure is not the cluster's answer: it
+    * names the failures that are that cosigner's own (a NOT_FOUND for a key the others may hold) —
+    * `Some(true)` for one that says the cosigner cannot use the key, which counts towards
+    * [[ownAnswerQuorum]], `Some(false)` for one that is about the cosigner's state at the moment (a
+    * ceremony in progress), which never becomes final by count, `None` for any other failure.
+    * For such a call, what it fails with once every endpoint has failed is decided over the whole
+    * walk, not by the endpoint that happened to be asked last ([[rosterVerdict]]). Without it the
+    * last endpoint's error is thrown, as before. A failure for which `retryOn` does not hold is
+    * thrown at once either way. */
   private def withCheckedFailover[A](
       what: String,
       retryOn: Status => Boolean,
@@ -638,13 +670,15 @@ class FrostBackend(
       // When the whole call's budget ends (System.nanoTime). A caller that runs this loop more
       // than once for one call (a sign that learns the cluster id again) passes the same value.
       budgetEnd: Long,
+      wholeRoster: Option[Either[StatusRuntimeException, Rejected] => Option[Boolean]] = None,
   )(op: SignerGrpc.SignerBlockingStub => A): A = {
     val n = channels.size
     // One attempt in flight at a time: the next cosigner is asked only once this attempt has failed
     // or hit its deadline, which cancels it (the RPC is reset). Each attempt's deadline is capped
     // by what is left of the budget, and no attempt starts once less than MinAttempt is left.
     def left: Long = budgetEnd - System.nanoTime()
-    @tailrec def attempt(k: Int, lastReason: String): A = {
+    // `seen`: what the endpoints asked so far in this call failed with (for `wholeRoster`).
+    @tailrec def attempt(k: Int, lastReason: String, seen: Seen): A = {
       if (k > 0 && left < MinAttempt.toNanos) {
         logger.warn(s"FROST: $what: request-timeout $requestTimeout spent after $k cosigner(s); last: $lastReason")
         notes.add("request-timeout=spent")
@@ -690,20 +724,89 @@ class FrostBackend(
             case Left(e)  => Option(e.getStatus.getDescription).fold(code)(d => s"$code: $d")
             case Right(r) => s"$code: ${r.error.getMessage}"
           }
+          val seenNow: Seen = failure match {
+            case Left(e) if isNodeDown(e.getStatus)      => seen.copy(unreachable = Some(endpoints(i) -> e))
+            case f =>
+              wholeRoster.flatMap(own => own(f)) match {
+                case Some(counts) => seen.copy(own = seen.own + (if (counts) 1 else 0), lastOwn = Some(code -> error))
+                case None         => seen.copy(other = Some(error))
+              }
+          }
           if (loseLead) demote(i)
           if (!retry) throw error
           if (k + 1 < n) {
             val next = endpoints((i + 1) % n)
             logger.warn(s"FROST: $what via ${endpoints(i)} failed ($reason); failing over to $next")
             notes.add(s"failover=${endpoints(i)}→$next reason=$code")
-            attempt(k + 1, reason)
+            attempt(k + 1, reason, seenNow)
           } else {
             logger.warn(s"FROST: $what via ${endpoints(i)} failed ($reason); no cosigner left to try")
-            throw error
+            throw (if (wholeRoster.isDefined) rosterVerdict(what, notes, seenNow, error) else error)
           }
       }
     }
-    attempt(0, "")
+    attempt(0, "", Seen())
+  }
+
+  /** How many endpoints must give a cosigner's own "I do not have it" before it is the cluster's
+    * answer: all but one (2 of 3, 4 of 5; the lone endpoint of a dev roster). Then at most one
+    * cosigner is left that could hold the key, and that is too few to use it:
+    *   - a FROST key needs t holders to sign. The driver does not know t, and a cosigner accepts
+    *     any threshold up to n, also one below a majority (2-of-5), so n - t + 1 cannot be used; a
+    *     threshold key has t >= 2, for which all but one is always enough;
+    *   - a hosted key is a whole key on every cosigner that holds it, and the driver saw
+    *     [[requiredCopies]] (two) of them before it gave the key id to Canton
+    *     ([[confirmHostedCopies]]), so a key only one cosigner holds is one whose generation was
+    *     never confirmed. */
+  private val ownAnswerQuorum: Int = math.max(1, channels.size - 1)
+
+  /** What a call fails with once every endpoint has failed, for a call where one cosigner's own
+    * answer ("not found", "another key", "I cannot sign") is not the cluster's. Decided over the
+    * whole walk, so the outcome is the same in whatever order the endpoints were asked:
+    *   1. at least [[ownAnswerQuorum]] endpoints gave such an answer of the kind that counts (the
+    *      cosigner cannot use the key): it is final, and the last own answer is thrown. The cosigners that did not answer are then too few to use the key, so
+    *      waiting for them cannot help; this also bounds what Canton retries for a key that exists
+    *      nowhere while a cosigner is down;
+    *   2. otherwise, an endpoint could not be reached (UNAVAILABLE, or DEADLINE_EXCEEDED, which
+    *      includes the driver's own attempt deadline passing): its status is thrown, which the
+    *      driver reports to Canton as retryable — as [[unconfirmed]], with an audit note, when some
+    *      endpoint did give such an answer. The unreachable cosigners may hold the key, and Canton
+    *      never retries a final error;
+    *   3. otherwise every endpoint answered: the last such answer stands, also next to INTERNAL or
+    *      UNKNOWN answers; with none, the last of those errors (`last` when there is neither). */
+  private def rosterVerdict(what: String, notes: AuditNotes, seen: Seen, last: Exception): Exception =
+    seen.lastOwn match {
+      case Some((_, error)) if seen.own >= ownAnswerQuorum => error
+      case own =>
+        seen.unreachable match {
+          case Some((endpoint, down)) =>
+            own.fold[Exception](down) { case (answer, _) => unconfirmed(what, notes, endpoint, down, answer) }
+          case None => own.map(_._2).orElse(seen.other).getOrElse(last)
+        }
+    }
+
+  /** The error of a call whose cosigners answered `answer` (NOT_FOUND, say), fewer of them than
+    * [[ownAnswerQuorum]], while `endpoint` could not be reached: that cosigner may hold the key, so
+    * the answer is not the cluster's. The call fails with the unreachable endpoint's own status —
+    * UNAVAILABLE or DEADLINE_EXCEEDED, which the driver reports to Canton as retryable — and the
+    * audit entry gets `unconfirmed=<endpoint> reason=<CODE>`. `reason=DEADLINE_EXCEEDED` is also
+    * what an endpoint that did not answer within the driver's own attempt deadline gets. */
+  private def unconfirmed(
+      what: String,
+      notes: AuditNotes,
+      endpoint: String,
+      down: StatusRuntimeException,
+      answer: String,
+  ): StatusRuntimeException = {
+    val code = down.getStatus.getCode
+    logger.warn(
+      s"FROST: $what: the cosigners that answered said $answer, but $endpoint did not serve the call ($code) and may " +
+        "hold the key; not a final answer"
+    )
+    notes.add(s"unconfirmed=$endpoint reason=$code")
+    down.getStatus
+      .augmentDescription(s"$what: $answer from the cosigners that answered, but $endpoint did not serve the call; not a final answer")
+      .asRuntimeException()
   }
 
   /** Hosted-key specs learned in this process (`GenerateKey`, `PublicKey`, `KeyInfo` replies), so
@@ -725,7 +828,22 @@ class FrostBackend(
     * `acceptAfterStale` decides whether an answer found after a stale one is used. For a key the
     * driver has not seen yet it is "only if the answer says the key is EC": for any other key type,
     * the first node's NOT_FOUND / does-not-exist stays the answer, exactly as without this path, so
-    * FROST/RSA/AES semantics are unchanged. If every node is stale, the first stale answer stands.
+    * FROST/RSA/AES semantics are unchanged.
+    *
+    * How the walk ends when no answer was used is decided over the whole roster, whatever the order
+    * the endpoints were asked in (the rule of [[rosterVerdict]]):
+    *   1. at least [[ownAnswerQuorum]] endpoints gave a stale answer: the first stale answer
+    *      stands (the key is not there, or no cosigner's secret opens the blob);
+    *   2. otherwise, an endpoint could not be reached (UNAVAILABLE or DEADLINE_EXCEEDED, the
+    *      driver's own attempt deadline included): the call fails with that endpoint's status, which
+    *      is retryable — as [[unconfirmed]] when some endpoint gave a stale answer. The unreachable
+    *      cosigner may hold the key, and a final "not found" would tell Canton the key does not
+    *      exist; Canton never retries a final error;
+    *   3. otherwise every endpoint answered: the first stale answer stands, also next to INTERNAL
+    *      or UNKNOWN answers (those nodes were reached); with no stale answer, the last such error.
+    * One exception, in [[decryptEcies]]: a shared secret that did not open the ciphertext ends the
+    * decrypt as an ECIES failure even when another cosigner was unreachable, because the
+    * ciphertext is the counterparty's and must not be able to buy retries.
     *
     * `staleAnswer` names a stale *answer* (a `Right`) for the WARN and the `ec-failover` note: its
     * reason code and what it may mean. A stale status is named by its gRPC code. Each endpoint is
@@ -739,33 +857,60 @@ class FrostBackend(
   )(op: SignerGrpc.SignerBlockingStub => A): A = {
     val n = channels.size
     val start = startIndex()
-    @tailrec def attempt(k: Int, firstStale: Option[Either[StatusRuntimeException, A]]): A = {
+    // `stales`: how many endpoints gave a stale answer so far, `firstStale` the first of them;
+    // `unreachable`: the endpoint asked most recently that could not be reached; `sick`: the last
+    // INTERNAL or UNKNOWN error.
+    @tailrec def attempt(
+        k: Int,
+        firstStale: Option[Either[StatusRuntimeException, A]],
+        stales: Int,
+        unreachable: Option[(String, StatusRuntimeException)],
+        sick: Option[StatusRuntimeException],
+    ): A = {
       val i = (start + k) % n
-      val outcome =
+      val outcome: Either[StatusRuntimeException, A] =
         try Right(op(stubFor(channels(i))))
         catch { case e: StatusRuntimeException => Left(e) }
       def settle(o: Either[StatusRuntimeException, A]): A = o.fold(e => throw e, identity)
+      // The roster is exhausted without an answer to use (see the three cases above).
+      def exhausted(
+          first: Option[Either[StatusRuntimeException, A]],
+          staleCount: Int,
+          down: Option[(String, StatusRuntimeException)],
+          lastSick: Option[StatusRuntimeException],
+      ): A =
+        (first, down, lastSick) match {
+          case (Some(f), _, _) if staleCount >= ownAnswerQuorum => settle(f)
+          case (Some(f), Some((endpoint, e)), _) =>
+            throw unconfirmed(what, notes, endpoint, e, f.fold(_.getStatus.getCode.toString, a => staleAnswer(a)._1))
+          case (None, Some((_, e)), _) => throw e
+          case (Some(f), None, _)      => settle(f)
+          case (None, None, Some(e))   => throw e
+          case (None, None, None)      => throw new IllegalStateException(s"$what: no cosigner was asked")
+        }
       val next = if (k + 1 < n) Some(endpoints((i + 1) % n)) else None
       outcome match {
         case Left(e) if isLeaderSick(e.getStatus) =>
           demote(i)
+          val down = if (isNodeDown(e.getStatus)) Some(endpoints(i) -> e) else unreachable
+          val lastSick = if (isNodeDown(e.getStatus)) sick else Some(e)
           next match {
             case Some(to) =>
               logger.warn(s"FROST: $what via ${endpoints(i)} failed (${e.getStatus.getCode}); failing over to $to")
               notes.add(s"failover=${endpoints(i)}→$to reason=${e.getStatus.getCode}")
-              attempt(k + 1, firstStale)
-            case None => settle(firstStale.getOrElse(outcome))
+              attempt(k + 1, firstStale, stales, down, lastSick)
+            case None => exhausted(firstStale, stales, down, lastSick)
           }
         case o if stale(o) =>
           demote(i)
           val (reason, meaning) = o.fold(e => (e.getStatus.getCode.toString, MayBeOld), staleAnswer)
-          val first = firstStale.orElse(Some(o))
+          val first = firstStale.getOrElse(o)
           next match {
             case Some(to) =>
               logger.warn(s"FROST: $what via ${endpoints(i)} answered $reason for an EC hosted key — $meaning; asking $to")
               notes.add(s"ec-failover=${endpoints(i)}→$to reason=$reason")
-              attempt(k + 1, first)
-            case None => settle(first.get)
+              attempt(k + 1, Some(first), stales + 1, unreachable, sick)
+            case None => exhausted(Some(first), stales + 1, unreachable, sick)
           }
         case Right(answer) if firstStale.nonEmpty && !acceptAfterStale(answer) =>
           settle(firstStale.get) // not an EC key after all: the first answer stands, as before
@@ -779,7 +924,7 @@ class FrostBackend(
           throw e
       }
     }
-    attempt(0, None)
+    attempt(0, None, 0, None, None)
   }
 
   /** [[clusterCall]] for [[withEcFailover]]. */
@@ -1527,6 +1672,8 @@ class FrostBackend(
                   (i: Int) => lastTried.set(i),
                   signAttemptTimeout,
                   budgetEnd,
+                  // A leader's own "cannot sign" is not the cluster's while a cosigner was unreachable.
+                  Some(signAnswerIsLeaderLocal _),
                 )(_.sign(built))
               catch {
                 // A cosigner says the intent names another cluster: the learned id is wrong (one
@@ -1770,6 +1917,12 @@ class FrostBackend(
           case scala.util.Success(Left(e))          => failedAfterEcdh(e)
           case scala.util.Failure(e: StatusRuntimeException) if oldOrMissing(e) && badZ.get != null =>
             failedAfterEcdh(badZ.get)
+          // A cosigner's secret did not open the blob and another cosigner could not be reached.
+          // The ciphertext comes from a counterparty: a forged one must end here, as an ECIES
+          // failure, and not be retried by Canton for as long as a cosigner is down (each retry
+          // costs an EcdhDerive per reachable cosigner). Final, as before this rule existed.
+          case scala.util.Failure(e: StatusRuntimeException) if isNodeDown(e.getStatus) && badZ.get != null =>
+            failedAfterEcdh(badZ.get)
           case scala.util.Failure(e) => scala.util.Failure(e)
         }
     }
@@ -1822,16 +1975,46 @@ class FrostBackend(
   override def keyExistsAndIsActive(keyId: String): Future[Unit] =
     if (ids.isFrost(keyId)) {
       val req = GroupKeyRequest.newBuilder().setKeyId(keyId).build()
+      // One cosigner's NOT_FOUND is that cosigner's answer, not the cluster's: the next one is
+      // asked, and the key is active when one of them has it. NOT_FOUND (or, for a pinned key,
+      // "another key") is the call's answer only when the whole roster could be asked: while an
+      // endpoint was unreachable the call fails with that endpoint's status, which Canton retries
+      // (see withCheckedFailover, `wholeRoster`, and rosterVerdict).
+      val notFoundOrSick = (s: Status) => isLeaderSick(s) || s.getCode == Status.Code.NOT_FOUND
+      val ownAnswer = (failure: Either[StatusRuntimeException, Rejected]) =>
+        failure match {
+          case Left(e)         => if (e.getStatus.getCode == Status.Code.NOT_FOUND) Some(true) else None
+          case Right(rejected) => if (rejected.code == GroupKeyMismatch) Some(true) else None
+        }
       Option(pinnedKeys.get(keyId)) match {
         case None if lostPin(keyId) => Future.failed(lostPinError(keyId))
-        // groupKey returns NOT_FOUND if the cluster has no such key.
-        case None => clusterCall("groupKey", isLeaderSick, isLeaderSick)(_.groupKey(req)).map(_ => ())
-        case Some(p) =>
-          // Pinned: one cosigner's NOT_FOUND or another key does not make the key gone. Its answer
-          // is checked against the pin and routed around; the key is active when a cosigner
-          // answers the pinned key. Nothing here pins.
+        case None =>
+          // Not pinned: any cosigner's group key answers the question. Nothing here pins. A
+          // NOT_FOUND does not cost its node the lead, as before, and the lead moves only by a
+          // sick node's demotion.
           val notes = currentNotes.get
-          val notFoundOrSick = (s: Status) => isLeaderSick(s) || s.getCode == Status.Code.NOT_FOUND
+          Future(blocking {
+            val start = startIndex()
+            withCheckedFailover[GroupKeyReply](
+              "groupKey",
+              notFoundOrSick,
+              isLeaderSick,
+              notes,
+              (_: String, _: GroupKeyReply) => None,
+              // A cosigner that answers after another one's NOT_FOUND does not take the lead for
+              // that: NOT_FOUND did not cost the first one the lead either.
+              NoPreference,
+              start,
+              (_: Int) => (),
+              attemptTimeout,
+              System.nanoTime() + requestTimeout.toNanos,
+              Some(ownAnswer),
+            )(_.groupKey(req))
+          }).map(_ => ())
+        case Some(p) =>
+          // Pinned: a cosigner's answer is checked against the pin and routed around; the key is
+          // active when a cosigner answers the pinned key. Nothing here pins.
+          val notes = currentNotes.get
           Future(blocking {
             val start = startIndex()
             withCheckedFailover[GroupKeyReply](
@@ -1858,6 +2041,7 @@ class FrostBackend(
               (_: Int) => (),
               attemptTimeout,
               System.nanoTime() + requestTimeout.toNanos,
+              Some(ownAnswer),
             )(_.groupKey(req))
           }).map(_ => ())
       }
@@ -2065,6 +2249,30 @@ object FrostBackend {
       case _ => true
     }
 
+  /** The sign failures that are one leader's own and so do not end a sign as final while another
+    * cosigner could not be reached (`wholeRoster` of [[withCheckedFailover]]). With two cosigners
+    * down and the third answering one of these, the sign fails with an unreachable cosigner's
+    * status, which Canton retries: a final error would be a signature Canton never asks for again,
+    * although the cosigners that were down can produce it.
+    *   - NOT_FOUND (the leader has no share) and a signature the pinned group key does not verify
+    *     say that this cosigner cannot sign with the key: `Some(true)`, they count towards the
+    *     bound at which the answer is final.
+    *   - FAILED_PRECONDITION, ABORTED and UNIMPLEMENTED are about the leader's state at the moment
+    *     (a ceremony holds the key, a session is gone, an old release): `Some(false)`, never final
+    *     by count while a cosigner is unreachable.
+    * INTERNAL and UNKNOWN are not a leader's own answer in this sense (`None`), and the refusals
+    * that are returned at once never get here. */
+  private def signAnswerIsLeaderLocal(failure: Either[StatusRuntimeException, Rejected]): Option[Boolean] =
+    failure match {
+      case Left(e) =>
+        e.getStatus.getCode match {
+          case Status.Code.NOT_FOUND                                                              => Some(true)
+          case Status.Code.FAILED_PRECONDITION | Status.Code.ABORTED | Status.Code.UNIMPLEMENTED => Some(false)
+          case _                                                                                  => None
+        }
+      case Right(rejected) => if (rejected.code == BadSignature) Some(true) else None
+    }
+
   /** Which error statuses take the lead from a SIGN leader (see [[withCheckedFailover]]): every
     * status the sign fails over on, and also the refusals returned at once — with an intent.
     *
@@ -2110,6 +2318,16 @@ object FrostBackend {
   private val Unconfirmed = "UNCONFIRMED"
   /** The failover note's reason for a group key that is not the pin. */
   private val GroupKeyMismatch = "GROUP_KEY_MISMATCH"
+
+  /** What a whole-roster walk has seen ([[FrostBackend.rosterVerdict]]): how many endpoints gave a
+    * cosigner's own answer and the last of them (its code and error), the endpoint asked most
+    * recently that could not be reached, and the last error that is neither. */
+  private final case class Seen(
+      own: Int = 0,
+      lastOwn: Option[(String, Exception)] = None,
+      unreachable: Option[(String, StatusRuntimeException)] = None,
+      other: Option[Exception] = None,
+  )
 
   /** An answer the driver checked and refused to use (see `withCheckedFailover`): `code` names it
     * in the `failover=` note, `error` is what the call fails with when no cosigner is left. */
