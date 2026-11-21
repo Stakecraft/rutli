@@ -123,10 +123,20 @@ pub enum Round {
 }
 
 impl Round {
-    fn idx(self) -> usize {
+    /// This round's entry of a per-round pair.
+    fn pick<T>(self, pair: &[T; 2]) -> &T {
+        let [one, two] = pair;
         match self {
-            Round::One => 0,
-            Round::Two => 1,
+            Round::One => one,
+            Round::Two => two,
+        }
+    }
+
+    fn pick_mut<T>(self, pair: &mut [T; 2]) -> &mut T {
+        let [one, two] = pair;
+        match self {
+            Round::One => one,
+            Round::Two => two,
         }
     }
 }
@@ -150,7 +160,7 @@ pub struct OpGuard {
 impl Drop for OpGuard {
     fn drop(&mut self) {
         self.load.inflight.fetch_sub(1, Ordering::AcqRel);
-        self.load.done[self.round.idx()].fetch_add(1, Ordering::AcqRel);
+        self.round.pick(&self.load.done).fetch_add(1, Ordering::AcqRel);
     }
 }
 
@@ -402,7 +412,7 @@ impl PeerHealth {
 
     /// Whether the peer's counters moved for `round` after `since`.
     fn progressed_since(&self, round: Round, since: Instant) -> bool {
-        self.seen().progress_at[round.idx()].is_some_and(|at| at > since)
+        round.pick(&self.seen().progress_at).is_some_and(|at| at > since)
     }
 
     pub(crate) fn last_probe(&self) -> Option<ProbeRecord> {
@@ -524,10 +534,10 @@ impl PeerHealth {
             if let Some(prev) = seen.last {
                 let restarted = load.r1done < prev.r1done || load.r2done < prev.r2done;
                 if restarted || load.r1done > prev.r1done || load.r2done > prev.r2done {
-                    seen.progress_at[Round::One.idx()] = Some(now);
+                    *Round::One.pick_mut(&mut seen.progress_at) = Some(now);
                 }
                 if restarted || load.r2done > prev.r2done {
-                    seen.progress_at[Round::Two.idx()] = Some(now);
+                    *Round::Two.pick_mut(&mut seen.progress_at) = Some(now);
                 }
             }
             seen.last = Some(load);
@@ -537,7 +547,7 @@ impl PeerHealth {
 
     /// A sign round with the peer completed.
     pub fn note_done(&self, round: Round) {
-        self.done[round.idx()].fetch_add(1, Ordering::AcqRel);
+        round.pick(&self.done).fetch_add(1, Ordering::AcqRel);
     }
 
     /// Publish a state change: the gauge, the transition counter, one log line.
@@ -693,8 +703,7 @@ impl PeerHealth {
     /// counters were seen moving meanwhile; otherwise one probe decides.
     pub fn judge(&self, round: Round, start: &Mark) -> Judged {
         let now = self.mark();
-        if now.done[round.idx()] > start.done[round.idx()] || self.progressed_since(round, start.at)
-        {
+        if round.pick(&now.done) > round.pick(&start.done) || self.progressed_since(round, start.at) {
             return Judged::Busy;
         }
         Judged::Probe

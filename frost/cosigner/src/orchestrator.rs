@@ -527,7 +527,7 @@ pub async fn sign_within(
     let mut busy_retried = false;
     'passes: loop {
         for subset in &subsets {
-            let members: Vec<&Arc<dyn PeerApi>> = subset.iter().map(|&i| ordered[i]).collect();
+            let members: Vec<&Arc<dyn PeerApi>> = subset.iter().filter_map(|&i| ordered.get(i).copied()).collect();
             if members.iter().any(|p| excluded.contains_key(&p.identifier()) || busy.contains(&p.identifier())) {
                 continue;
             }
@@ -874,15 +874,15 @@ async fn attempt(
     }
     let ctx = &crate::node::Round1Ctx { message: Some(message.to_vec()), signers: Some(signers), ..base.clone() };
     let mut commitments: BTreeMap<Identifier, SigningCommitments> = BTreeMap::new();
-    for (i, p) in members.iter().enumerate() {
+    for (p, session) in members.iter().zip(&sessions) {
         let Some(deadline) = clock.round(clock.round1) else {
             open.abort_after_failure(None).await;
             return Err(Attempt::OutOfTime);
         };
         // Noted before asking: a round 1 that times out or errors may still have opened the
         // session on the member, so a failure aborts it there too.
-        open.opened.push(((*p).clone(), sessions[i].clone()));
-        match p.sign_round1_within(key_id, &sessions[i], ctx, deadline).await {
+        open.opened.push(((*p).clone(), session.clone()));
+        match p.sign_round1_within(key_id, session, ctx, deadline).await {
             Ok(c) => {
                 commitments.insert(p.identifier(), c);
             }
@@ -901,13 +901,13 @@ async fn attempt(
     }
     let intent_digest = ctx.intent.as_ref().map(crate::intent::intent_digest);
     let mut shares: BTreeMap<Identifier, SignatureShare> = BTreeMap::new();
-    for (i, p) in members.iter().enumerate() {
+    for (p, session) in members.iter().zip(&sessions) {
         let Some(deadline) = clock.round(clock.round2) else {
             open.abort_after_failure(None).await;
             return Err(Attempt::OutOfTime);
         };
         let started = tokio::time::Instant::now();
-        let answer = p.sign_round2_within(key_id, &sessions[i], message, &commitments, intent_digest.as_ref(), deadline).await;
+        let answer = p.sign_round2_within(key_id, session, message, &commitments, intent_digest.as_ref(), deadline).await;
         if p.is_local() {
             metrics::histogram!(crate::metrics::PEER_CALL_DURATION, "call" => "local_share")
                 .record(started.elapsed().as_secs_f64());
