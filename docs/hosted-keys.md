@@ -231,13 +231,18 @@ skips what it cannot parse, `KeyInfo` says `exists: false`) — the shape that e
      (`ecies-failure=after-ecdh`) only if no cosigner's shared secret opens it. The cost of that,
      for a genuinely forged ciphertext, is bounded: at most **one `EcdhDerive` per roster entry**
      (n calls, never a retry loop), each charged to that node's decryption rate limit (section 5).
-   - "I do not have it" (or a shared secret that does not open the ciphertext) is the call's answer
-     only when **every** cosigner on the roster answered. If one of them could not be reached
-     (`UNAVAILABLE`, or its deadline passed), it may hold the key: the call then fails with that
-     cosigner's status, which Canton retries, and the audit entry carries
+   - "I do not have it" is one cosigner's answer, not the cluster's. Over the whole roster, in
+     whatever order the cosigners were asked: it is final once all but one of them said so (2 of
+     3, 4 of 5 — the driver saw two copies of the key before it gave Canton the id, so fewer than
+     two are left); short of that, if a cosigner could not be reached (`UNAVAILABLE`, or it did
+     not answer within the attempt deadline), it may hold the key, and the call fails with that
+     cosigner's status, which Canton retries. The audit entry then carries
      `unconfirmed=<endpoint> reason=<CODE>`. Before 0.5.0 such a call could end `NOT_FOUND`, which
-     Canton takes as final. The same holds for a FROST key in `keyExistsAndIsActive` and for a
-     group-key read that nobody answered with a key.
+     Canton takes as final. A shared secret that does not open the ciphertext is the exception: it
+     ends the decrypt as an ECIES failure even while a cosigner is unreachable, so a forged
+     ciphertext cannot buy retries. FROST keys follow the same rule with the threshold as the
+     bound (`keyExistsAndIsActive`, a sign whose leader cannot sign for a reason of its own): final
+     once n − t + 1 cosigners said so (2 of 3, 3 of 5).
      A rate-limit refusal (`RESOURCE_EXHAUSTED`) is never routed around: it is surfaced at once.
 
 ```hocon

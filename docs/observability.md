@@ -221,15 +221,14 @@ sum(rate(rutli_sign_duration_seconds_sum{result="ok"}[1h]))
    replica) — investigate it as for `rutli_anti_entropy_conflicts_total`. On a decrypt that failed
    anyway (`ecies-failure=after-ecdh`), every node's secret was refused: the ciphertext is the
    suspect, and it cost one `EcdhDerive` per cosigner.
-   `unconfirmed=<endpoint> reason=UNAVAILABLE|DEADLINE_EXCEEDED` on a failed entry means the
-   cosigners that answered did not have the key (or answered another one) while `<endpoint>` could
-   not be reached: the driver reported a retryable error, not "no such key". It clears when that
-   cosigner is back; if it stays, one cosigner is down and another is missing the key. There is
-   no time bound: for a key that exists nowhere, Canton keeps retrying for as long as a cosigner
-   stays unreachable, and each attempt logs `FROST: <call>: the cosigners that answered said
-   NOT_FOUND, but <endpoint> could not be reached`. Bring the cosigner back (or take it off the
-   driver's roster) to get the final answer. A sign ends the same way when its last leader could
-   not sign for a reason of its own after another cosigner was unreachable.
+   `unconfirmed=<endpoint> reason=UNAVAILABLE|DEADLINE_EXCEEDED` on a failed entry means a
+   cosigner answered "not found" (or another key, or that it cannot sign) while `<endpoint>` could
+   not be reached or did not answer within the attempt deadline: the driver reported a retryable
+   error, not a final one, and logged `FROST: <call>: the cosigners that answered said <answer>,
+   but <endpoint> could not be reached`. It clears when that cosigner is back. It cannot go on
+   for a key that exists nowhere: once enough cosigners gave the answer that the rest could not
+   use the key (2 of 3; 3 of 5 for a FROST key, 4 of 5 for a hosted one), it is final. Repeated
+   entries therefore mean most of the cluster is unreachable from this participant.
    **A hosted key the driver did not accept** (0.5.0): after `GenerateKey` the driver asks every
    cosigner for its own copy and gives the key id to Canton only when at least two hold the
    material the leader reported and none reports other material. If it is short only because
