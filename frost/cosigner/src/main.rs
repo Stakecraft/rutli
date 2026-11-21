@@ -275,6 +275,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Read-only key commands: what the cluster holds under a key id, and the Canton fingerprint
+    /// of a public key file. docs/admin-cli.md.
+    Key {
+        #[command(subcommand)]
+        command: KeyCommand,
+    },
     /// TLS key pins (`peers[].tls_spki_sha256`): `tls spki <CERT>...` prints a certificate's pin
     /// (needs no `--config`); `tls spki --peers` checks the running roster nodes against theirs.
     Tls {
@@ -377,6 +383,34 @@ enum Command {
         /// Do not count signatures made without a signing intent (before require_intent is on).
         #[arg(long)]
         allow_no_intent: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum KeyCommand {
+    /// Print what every cosigner in the roster holds under a key id — public key, Canton
+    /// fingerprint (`1220…`), origin, epoch — and whether the nodes agree. A `<prefix>rutli-…` id
+    /// is read as a cluster-hosted key, any other as a FROST key. The same checks, read-only RPCs and
+    /// certificate as `verify-key` and `verify-hosted` (`operator_allowlist` suffices), and with
+    /// --expect-fingerprint the same verdict. Without it the output is the cluster's own report,
+    /// compared with nothing: never take an import's or a migration's expected fingerprint from
+    /// it. Exits non-zero on any problem.
+    Show {
+        #[arg(long)]
+        key_id: String,
+        /// The Canton fingerprint (`1220…`) the key must have.
+        #[arg(long)]
+        expect_fingerprint: Option<String>,
+        /// Print the report as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print the Canton fingerprint (`1220…`) of a public key file. Offline: needs no `--config`
+    /// and no certificate. Reads SubjectPublicKeyInfo (DER, PEM or hex), a Canton
+    /// `keys.public.download` file, or a raw Ed25519 public key as 64 hex digits. Public keys only.
+    Fingerprint {
+        #[arg(long, value_name = "FILE")]
+        r#in: std::path::PathBuf,
     },
 }
 
@@ -540,6 +574,9 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+    if let Some(Command::Key { command: KeyCommand::Fingerprint { r#in } }) = args.command {
+        return key_fingerprint_command(&r#in);
+    }
     if let Some(Command::Seal { command }) = args.command {
         return seal_command(command);
     }
@@ -614,11 +651,25 @@ async fn main() -> Result<()> {
             return abort_import_command(&cfg, &key_id, &ceremony_id, yes_delete_installed_share)
         }
         Some(Command::VerifyKey { key_id, expect_fingerprint, sign_test, json }) => {
-            return verify_key_command(&cfg, &key_id, &expect_fingerprint, sign_test, json).await
+            return verify_key_command(&cfg, "verify-key", &key_id, Some(&expect_fingerprint), sign_test, json).await
         }
         Some(Command::VerifyHosted { key_id, expect_fingerprint, json }) => {
-            return verify_hosted_command(&cfg, &key_id, &expect_fingerprint, json).await
+            return verify_hosted_command(&cfg, "verify-hosted", &key_id, Some(&expect_fingerprint), json).await
         }
+        Some(Command::Key { command: KeyCommand::Show { key_id, expect_fingerprint, json } }) => {
+            let expect = expect_fingerprint.as_deref();
+            return match rutli_cosigner::key_cli::KeyKind::of(&key_id) {
+                rutli_cosigner::key_cli::KeyKind::Frost => {
+                    verify_key_command(&cfg, "key show", &key_id, expect, false, json).await
+                }
+                rutli_cosigner::key_cli::KeyKind::Hosted => {
+                    verify_hosted_command(&cfg, "key show", &key_id, expect, json).await
+                }
+            };
+        }
+        // Handled before the config is read; named here so that it can never reach `_` below and
+        // start the daemon.
+        Some(Command::Key { command: KeyCommand::Fingerprint { r#in } }) => return key_fingerprint_command(&r#in),
         Some(Command::Health) => health_command(&cfg),
         Some(Command::Tls { command: TlsCommand::Spki { .. } }) => return tls_spki_peers_command(&cfg).await,
         Some(Command::Ceremony { command: CeremonyCommand::Resolve { ceremony_id, assume_lost } }) => {
@@ -1580,12 +1631,22 @@ async fn refresh_command(
     Ok(())
 }
 
+/// What a report was compared with, for its first line.
+fn expectation(expected: Option<&str>) -> String {
+    match expected {
+        Some(fp) => format!("expected {fp}"),
+        None => "no expected fingerprint: the nodes' own report, compared with nothing".to_string(),
+    }
+}
+
 /// Operator command: ask every cosigner for its view of `key_id` and check the cluster agrees on the
-/// expected key. See [`rutli_cosigner::verify_key`].
+/// expected key. See [`rutli_cosigner::verify_key`]. `command` is the name it was run as
+/// (`verify-key`, or `key show`, which may give no expectation).
 async fn verify_key_command(
     cfg: &Config,
+    command: &str,
     key_id: &str,
-    expect_fingerprint: &str,
+    expect_fingerprint: Option<&str>,
     sign_test: bool,
     json: bool,
 ) -> Result<()> {
@@ -1625,7 +1686,8 @@ async fn verify_key_command(
             for (leader, signers) in sign_test_plan(&roster, cfg.threshold) {
                 let (Some((endpoint, server_name)), Some(client)) = (endpoints.get(&leader), clients.get(&leader))
                 else {
-                    report.problems.push(format!("sign test: node {leader} is not in the roster"));
+                    // Through the report, so that it fails and names no fingerprint.
+                    report.record_signature(leader, &signers, Err("the leader is not in the roster".into()));
                     continue;
                 };
                 let endpoint = *endpoint;
@@ -1656,7 +1718,7 @@ async fn verify_key_command(
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        println!("verify-key {key_id} — expected {expect_fingerprint}");
+        println!("{command} {key_id} (FROST) — {}", expectation(report.expected_fingerprint.as_deref()));
         for n in &report.nodes {
             match &n.error {
                 Some(e) => println!("  node {} {}: {e}", n.identifier, n.endpoint),
@@ -1681,6 +1743,12 @@ async fn verify_key_command(
         if let (Some(g), Some(d)) = (&report.group_verifying_key, &report.pkp_digest) {
             println!("  group key {g}\n  pkp digest {d}");
         }
+        if let Some(fp) = &report.fingerprint {
+            println!("  fingerprint {fp}");
+        }
+        if let (Some(origin), Some(epoch), Some(refreshes)) = (&report.origin, report.epoch, report.refresh_count) {
+            println!("  origin {origin} epoch {epoch} refreshes {refreshes} threshold {}", report.threshold);
+        }
         for s in &report.sign_test {
             println!(
                 "  sign test by {:?} led by node {}: {}",
@@ -1697,14 +1765,21 @@ async fn verify_key_command(
     if report.ok {
         Ok(())
     } else {
-        Err(DaemonError::Ceremony(format!("verify-key: {} problem(s)", report.problems.len())))
+        Err(DaemonError::Ceremony(format!("{command}: {} problem(s)", report.problems.len())))
     }
 }
 
 /// Operator command: ask every cosigner for its own copy of hosted key `key_id` and check the
 /// cluster serves one key with the expected Canton fingerprint. See
-/// [`rutli_cosigner::verify_hosted`].
-async fn verify_hosted_command(cfg: &Config, key_id: &str, expect_fingerprint: &str, json: bool) -> Result<()> {
+/// [`rutli_cosigner::verify_hosted`]. `command` is the name it was run as (`verify-hosted`, or `key
+/// show`, which may give no expectation).
+async fn verify_hosted_command(
+    cfg: &Config,
+    command: &str,
+    key_id: &str,
+    expect_fingerprint: Option<&str>,
+    json: bool,
+) -> Result<()> {
     use rutli_cosigner::pb::HostedKeyStatusRequest;
     use rutli_cosigner::verify_hosted::{check_hosted_views, HostedView};
 
@@ -1731,7 +1806,7 @@ async fn verify_hosted_command(cfg: &Config, key_id: &str, expect_fingerprint: &
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
     } else {
-        println!("verify-hosted {key_id} — expected {}", report.expected_fingerprint);
+        println!("{command} {key_id} (hosted) — {}", expectation(report.expected_fingerprint.as_deref()));
         for n in &report.nodes {
             match &n.error {
                 Some(e) => println!("  node {} {}: {e}", n.identifier, n.endpoint),
@@ -1741,8 +1816,16 @@ async fn verify_hosted_command(cfg: &Config, key_id: &str, expect_fingerprint: &
                 ),
             }
         }
-        if let Some(der) = &report.public_key_der {
-            println!("  public key (SPKI) {der}");
+        match (&report.spec, &report.public_key_der) {
+            (Some(spec), Some(der)) if der.is_empty() && report.ok => println!(
+                "  {spec}: a symmetric key has no public key or fingerprint — every node holds a key of \
+                 this spec under the id; that it is the same key is not shown"
+            ),
+            (_, Some(der)) if !der.is_empty() => println!("  public key (SPKI) {der}"),
+            _ => {}
+        }
+        if let Some(fp) = &report.fingerprint {
+            println!("  fingerprint {fp}");
         }
         for p in &report.problems {
             println!("  PROBLEM: {p}");
@@ -1752,8 +1835,23 @@ async fn verify_hosted_command(cfg: &Config, key_id: &str, expect_fingerprint: &
     if report.ok {
         Ok(())
     } else {
-        Err(DaemonError::Config(format!("verify-hosted: {} problem(s)", report.problems.len())))
+        Err(DaemonError::Config(format!("{command}: {} problem(s)", report.problems.len())))
     }
+}
+
+/// `key fingerprint`: the Canton fingerprint of a public key file, alone on stdout; what the file
+/// was read as goes to stderr. Offline. See [`rutli_cosigner::key_cli::parse_public_input`].
+fn key_fingerprint_command(path: &std::path::Path) -> Result<()> {
+    use std::io::Read;
+    let limit = rutli_cosigner::key_cli::MAX_PUBLIC_KEY_INPUT as u64 + 1;
+    let mut input = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|f| f.take(limit).read_to_end(&mut input))
+        .map_err(|e| DaemonError::Config(format!("{}: {e}", path.display())))?;
+    let key = rutli_cosigner::key_cli::parse_public_input(&input)?;
+    eprintln!("{} public key, read as {}", key.spec_name(), key.format);
+    println!("{}", key.public.fingerprint());
+    Ok(())
 }
 
 /// Connect and call deadlines of the operator commands' Signer clients.
