@@ -493,6 +493,16 @@ t-subset of cosigners signs: the delayed peer is excluded from that signature an
 later ones. A leader never signs with fewer than t cosigners, and every member still runs every
 check on every round (policy, intent, epoch, session binding, nonce marker).
 
+Who picks the partners: the leader, from a hash of the intent's request id (`docs/architecture.md`,
+"Which partners a leader signs with"). A member cannot choose to be in a subset. A client that
+chooses its request ids (it signs the intent that carries them) can choose which cosigners are in
+its first subset, and so keep a given cosigner out of its signatures, or pick which degraded peer
+gets a trial. It cannot go below t, and every cosigner in the subset still runs every check. Before
+0.5.0 the lowest identifier was in every other leader's first subset, so that one node saw every
+digest first and could delay any signature by one deadline. With request ids drawn at random, as
+the driver draws them, each cosigner is a first partner for (t − 1)/(n − 1) of the other leaders'
+signatures.
+
 What holds for availability, exactly: a leader makes up to n − t + 1 attempts, and each attempt the
 attacker spoils excludes one member, so it cannot make a leader give up **for lack of attempts**
 while t members answer that leader. It can spend the leader's **time**: each spoiled attempt costs

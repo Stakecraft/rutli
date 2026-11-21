@@ -75,8 +75,9 @@ Only `0` is a pass. Treat `3` as a failed check, not as a quiet week. An empty d
 what a log cut down to nothing looks like, the extreme case of a truncated tail. Empty journals are
 usually the wrong path, or a copy that failed (`kubectl cp` or `kubectl exec … cat` into a file
 leaves an empty file behind when it fails). One empty journal among others only prints a `WARNING:`
-line: with `t < n` a node the leaders never pick journals nothing, and `--min-journals` still holds
-every audited signature to the threshold. A deployment that has not signed anything yet also gets
+line: with `t < n` a node can journal nothing over a short window (since 0.5.0 the partners are
+spread over every cosigner, so over many signatures an empty journal is a reason to look), and
+`--min-journals` still holds every audited signature to the threshold. A deployment that has not signed anything yet also gets
 `3`; that is expected, and the check means nothing until there are signatures to compare. When there
 are discrepancies as well, the exit is `1`.
 

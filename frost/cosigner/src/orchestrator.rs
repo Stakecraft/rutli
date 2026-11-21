@@ -418,9 +418,9 @@ pub const SIGN_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 ///   round 1; a peer on another sharing refuses ([`DaemonError::EpochMismatch`]), and a stale peer
 ///   refuses too. A leader whose own share is stale declines to lead (UNAVAILABLE, the driver
 ///   fails over).
-/// * Candidate t-subsets are the roster's combinations over [`base_order`] (leader first, then by
-///   identifier), stable-sorted by their worst member's liveness tier ([`crate::liveness::Tier`]:
-///   up, trial, down) — a peer this leader knows to be down is tried last, never skipped. A
+/// * Candidate t-subsets are the roster's combinations over [`base_order`] (leader first, then the
+///   other cosigners rotated by a hash of the request id, #193), stable-sorted by their worst
+///   member's liveness tier ([`crate::liveness::Tier`]: up, trial, down) — a peer this leader knows to be down is tried last, never skipped. A
 ///   stalled or refusing peer whose window has passed gets a trial: this signature tries a subset
 ///   with it first, if it takes the trial when that attempt starts
 ///   ([`crate::liveness::PeerHealth::take_trial`], one signature per window); a signature that
@@ -818,18 +818,50 @@ fn request_id_of(intent: &crate::pb::SignedIntent) -> Option<Vec<u8>> {
     crate::pb::SignIntent::decode(intent.intent.as_slice()).ok().map(|i| i.request_id)
 }
 
-/// The order subsets are formed over, before the liveness sort: this leader first, then the rest
-/// in roster order — today's order. `request_id` is the seam for a per-request rotation of the
-/// partners (#193), deliberately unused here: a change of subset choice gets its own review.
+/// The order subsets are formed over, before the liveness sort: this leader first, then the other
+/// cosigners in roster order, rotated by [`partner_offset`] of the request id (#193). The first
+/// subset is the leader and the `t − 1` peers that follow that offset on the ring of the others,
+/// so the partners are spread evenly over the cosigners whichever leader the client prefers. One
+/// leader keeps one order for all its attempts; a failover leader of the same driver call uses the
+/// same offset over its own others. Without a request id (no intent, or an empty id) the offset
+/// is 0: the roster order.
 pub fn base_order<'a>(
     leader: Identifier,
     request_id: Option<&[u8]>,
     peers: &'a Peers,
 ) -> Vec<&'a Arc<dyn PeerApi>> {
-    let _ = request_id;
-    let mut ordered: Vec<&Arc<dyn PeerApi>> = peers.iter().filter(|p| p.identifier() == leader).collect();
-    ordered.extend(peers.iter().filter(|p| p.identifier() != leader));
+    order_around(leader, request_id, peers, |p| p.identifier())
+}
+
+/// [`base_order`] over anything that has an identifier.
+fn order_around<'a, T>(
+    leader: Identifier,
+    request_id: Option<&[u8]>,
+    items: &'a [T],
+    id: impl Fn(&T) -> Identifier,
+) -> Vec<&'a T> {
+    let mut ordered: Vec<&T> = items.iter().filter(|p| id(p) == leader).collect();
+    let mut others: Vec<&T> = items.iter().filter(|p| id(p) != leader).collect();
+    let offset = request_id.map_or(0, |r| partner_offset(r, others.len()));
+    others.rotate_left(offset);
+    ordered.extend(others);
     ordered
+}
+
+/// Where on the ring of the leader's `others` peers a request's partners start: SHA-256 of a
+/// domain tag and the request id, its first 8 bytes as a number, modulo `others`. 0 for an empty
+/// request id or no other peer. The driver draws request ids at random, so over many requests
+/// every offset is equally likely; one request keeps one offset.
+pub fn partner_offset(request_id: &[u8], others: usize) -> usize {
+    use sha2::{Digest, Sha256};
+    if request_id.is_empty() || others == 0 {
+        return 0;
+    }
+    let digest = Sha256::new().chain_update(b"rutli/sign-partners/v1").chain_update(request_id).finalize();
+    let mut head = [0u8; 8];
+    head.copy_from_slice(digest.get(..8).unwrap_or(&[0u8; 8]));
+    // `others` is a roster size (at most u16::MAX), so it fits a u64 and the remainder fits a usize.
+    usize::try_from(u64::from_be_bytes(head) % others as u64).unwrap_or(0)
 }
 
 /// Every `threshold`-subset of `0..n` (indices into the base order), in [`combinations`] order,
@@ -2608,6 +2640,92 @@ mod tests {
         // A refusal with a trailer is an answer, not an absence.
         let conflict = tonic::Status::from(DaemonError::HostedConflict { key_id: "k".into(), detail: "x".into() });
         assert!(!is_unreachable(&DaemonError::Status(conflict)));
+    }
+
+    fn ids(n: u16) -> Vec<Identifier> {
+        (1..=n).map(|i| Identifier::try_from(i).unwrap()).collect()
+    }
+
+    /// The first subset a leader tries, as identifiers (all members up).
+    fn first_subset(leader: u16, request_id: Option<&[u8]>, roster: &[Identifier], t: usize) -> Vec<Identifier> {
+        let leader = Identifier::try_from(leader).unwrap();
+        let ordered = order_around(leader, request_id, roster, |i| *i);
+        order_subsets(ordered.len(), t, &[], None)[0].iter().map(|&i| *ordered[i]).collect()
+    }
+
+    /// Without a request id the order is the roster's, leader first: what every leader did before
+    /// #193. With one, the leader stays first and the others are the roster rotated.
+    #[test]
+    fn the_base_order_is_the_leader_then_the_others_rotated_by_the_request_id() {
+        let roster = ids(5);
+        let leader = roster[2];
+        let plain: Vec<_> = order_around(leader, None, &roster, |i| *i).into_iter().copied().collect();
+        assert_eq!(plain, vec![roster[2], roster[0], roster[1], roster[3], roster[4]]);
+        assert_eq!(order_around(leader, Some(&[]), &roster, |i| *i).into_iter().copied().collect::<Vec<_>>(), plain);
+        for r in 0u8..32 {
+            let rid = [r; 16];
+            let got: Vec<_> = order_around(leader, Some(&rid), &roster, |i| *i).into_iter().copied().collect();
+            let mut others = plain[1..].to_vec();
+            others.rotate_left(partner_offset(&rid, 4));
+            assert_eq!(got[0], leader);
+            assert_eq!(&got[1..], others.as_slice());
+        }
+    }
+
+    /// The offset depends only on the request id and the number of other peers (never on the
+    /// leader), stays within range, and is pinned to its definition: SHA-256 of the tag and the id, first 8 bytes,
+    /// modulo the number of other peers (vectors computed independently).
+    #[test]
+    fn the_partner_offset_is_a_fixed_function_of_the_request_id() {
+        assert_eq!(partner_offset(&[0; 16], 2), 1);
+        assert_eq!(partner_offset(&[0; 16], 4), 1);
+        let counting: Vec<u8> = (0..16).collect();
+        assert_eq!(partner_offset(&counting, 4), 1);
+        assert_eq!(partner_offset(&[0xff; 16], 3), 2);
+        assert_eq!(partner_offset(&[], 4), 0);
+        assert_eq!(partner_offset(&[7; 16], 0), 0);
+        assert_eq!(partner_offset(&[7; 16], 1), 0);
+        for r in 0u8..=255 {
+            assert!(partner_offset(&[r; 16], 4) < 4);
+        }
+    }
+
+    /// The point of #193: over many request ids the partners are spread evenly. With one sticky
+    /// leader in 2-of-3 each other node is in about half the signatures (before: node 2 in all,
+    /// node 3 in none); with leaders spread in 3-of-5 every node is in about 60 % (before: 100,
+    /// 100, 60, 20, 20).
+    #[test]
+    fn hashed_partners_spread_the_signatures_evenly() {
+        let requests: Vec<[u8; 16]> = (0u32..6000).map(|i| {
+            let mut r = [0u8; 16];
+            r[..4].copy_from_slice(&i.to_be_bytes());
+            r
+        }).collect();
+        let share = |roster: &[Identifier], t: usize, leaders: &[u16]| -> Vec<f64> {
+            let mut count = vec![0usize; roster.len()];
+            let mut signs = 0usize;
+            for (k, r) in requests.iter().enumerate() {
+                let leader = leaders[k % leaders.len()];
+                for id in first_subset(leader, Some(r), roster, t) {
+                    count[roster.iter().position(|x| *x == id).unwrap()] += 1;
+                }
+                signs += 1;
+            }
+            count.iter().map(|&c| c as f64 / signs as f64).collect()
+        };
+        let near = |got: &[f64], want: &[f64]| got.iter().zip(want).all(|(g, w)| (g - w).abs() < 0.03);
+
+        let three = ids(3);
+        let sticky = share(&three, 2, &[1]);
+        assert!(near(&sticky, &[1.0, 0.5, 0.5]), "{sticky:?}");
+        let spread = share(&three, 2, &[1, 2, 3]);
+        assert!(near(&spread, &[2.0 / 3.0; 3]), "{spread:?}");
+        let five = ids(5);
+        let spread5 = share(&five, 3, &[1, 2, 3, 4, 5]);
+        assert!(near(&spread5, &[0.6; 5]), "{spread5:?}");
+        // No request id: today's order, the lowest other identifier always.
+        assert_eq!(first_subset(1, None, &three, 2), vec![three[0], three[1]]);
+        assert_eq!(first_subset(3, None, &three, 2), vec![three[2], three[0]]);
     }
 
     /// The liveness sort is stable over whatever base order it is given (the #193 seam): within a

@@ -132,10 +132,11 @@ enum Command {
         prefix: String,
         #[arg(long)]
         same_key: bool,
-        /// Retry a DKG answered ABORTED (another ceremony holds the key) up to this many times,
-        /// with jittered exponential backoff (0.5 s doubling to 4 s), each with a fresh ceremony
-        /// intent: what a client such as Canton does with a retryable failure. A leader that passes
-        /// a member's ABORTED on as INTERNAL ("already in progress", #146) is retried the same way.
+        /// Retry a DKG answered UNAVAILABLE (a node not serving, such as a ceremony still
+        /// resolving: what the driver hands Canton as retryable) or ABORTED (another ceremony holds
+        /// the key) up to this many times, with jittered exponential backoff (0.5 s doubling to
+        /// 4 s), each with a fresh ceremony intent. A leader that passes a member's ABORTED on as
+        /// INTERNAL ("already in progress", #146) is retried the same way.
         #[arg(long, default_value_t = 0)]
         retry_aborted: u32,
         #[command(flatten)]
@@ -352,10 +353,13 @@ fn attempt_deadline(limit: Duration, budget: Option<Duration>, elapsed: Duration
     }
 }
 
-/// A ceremony answer a client retries: ABORTED (another ceremony holds the key), or a leader's
-/// INTERNAL that carries a member's "already in progress" (#146).
+/// A ceremony answer a client retries: UNAVAILABLE (a node not serving, e.g. "a ceremony … is
+/// staged and still resolving — retry shortly"), which the driver reports to Canton as retryable
+/// (`RutliDriver.transient`); ABORTED (another ceremony holds the key); or a leader's INTERNAL that
+/// carries a member's "already in progress" (#146).
 fn contended(s: &tonic::Status) -> bool {
-    s.code() == tonic::Code::Aborted || (s.code() == tonic::Code::Internal && s.message().contains("already in progress"))
+    matches!(s.code(), tonic::Code::Unavailable | tonic::Code::Aborted)
+        || (s.code() == tonic::Code::Internal && s.message().contains("already in progress"))
 }
 
 /// The pause before retry `attempt` (1, 2, ...): 0.5 s doubling to at most 4 s, a random half to
@@ -832,6 +836,20 @@ async fn group_key(ctx: &Ctx, key_id: &str) -> Result<Vec<u8>, tonic::Status> {
     Err(last)
 }
 
+/// The same through `KeyStatus`, which the refresher role may call (it may not call `GroupKey`).
+async fn status_group_key(ctx: &Ctx, key_id: &str) -> Result<Vec<u8>, tonic::Status> {
+    let mut last = tonic::Status::unavailable("no cosigner configured");
+    for i in 0..ctx.targets.len() {
+        let Ok(mut c) = ctx.connect(i) else { continue };
+        match bounded(ctx.timeout, c.key_status(pb::KeyStatusRequest { key_id: key_id.to_string() })).await {
+            Ok(reply) => return Ok(reply.group_verifying_key),
+            Err(status) if not_serving(&status) => last = status,
+            Err(status) => return Err(status),
+        }
+    }
+    Err(last)
+}
+
 fn verifying_key(key_id: &str, bytes: &[u8]) -> Result<ed25519_dalek::VerifyingKey, Fail> {
     let raw: [u8; 32] = bytes.try_into().map_err(|_| format!("{key_id}: a group key of {} bytes", bytes.len()))?;
     Ok(ed25519_dalek::VerifyingKey::from_bytes(&raw).map_err(|e| format!("{key_id}: not an Ed25519 key: {e}"))?)
@@ -1075,9 +1093,11 @@ async fn run(cli: Cli) -> Result<(), Fail> {
         }
         Command::Refresh { key, load } => {
             let cluster = cluster_id(&ctx).await?;
-            let group = group_key(&ctx, &key)
+            // KeyStatus, not GroupKey: a refresh runs with the refresher's certificate, as the
+            // refresh job does, and that role may read a key's status but not call the Signer API.
+            let group = status_group_key(&ctx, &key)
                 .await
-                .map_err(|s| format!("GroupKey of {key}: {:?}: {}", s.code(), s.message()))?;
+                .map_err(|s| format!("KeyStatus of {key}: {:?}: {}", s.code(), s.message()))?;
             print_json(&load_command(ctx, "refresh", Op::Refresh { key_id: key, group_key: group }, cluster, load).await?)
         }
     }
@@ -1195,6 +1215,7 @@ mod tests {
         assert!(contended(&tonic::Status::internal("rpc status: Aborted, message: \"a dkg ceremony … is already in progress\"")));
         assert!(!contended(&tonic::Status::internal("something else")));
         assert!(!contended(&tonic::Status::already_exists("key exists")));
+        assert!(contended(&tonic::Status::unavailable("not serving: a ceremony for k (dkg-x) is staged and still resolving — retry shortly")));
         for (attempt, full) in [(1, 0.5), (2, 1.0), (3, 2.0), (4, 4.0), (9, 4.0)] {
             let b = backoff(attempt).as_secs_f64();
             assert!(b >= full / 2.0 - 1e-9 && b <= full + 1e-9, "attempt {attempt}: {b}");

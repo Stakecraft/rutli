@@ -1014,15 +1014,17 @@ async fn an_abort_during_round_2_finds_nothing_and_the_share_is_journaled_once()
     let mut peers = peers_for(&nodes, 0);
     peers[1] = Arc::new(Watched { inner: peers[1].clone(), round2s: round2s.clone(), aborts: aborts.clone() });
 
+    // Node 2 is this request's first partner (#193), so its round 2 is the one that holds.
+    assert_eq!(rutli_cosigner::orchestrator::partner_offset(&[99; 16], 2), 0);
     store.set(store_fault::Store::Hold);
     let signing = {
-        let (leader, peers, intent, msg) = (nodes[0].clone(), peers.clone(), intent_by(&ids, "driver", KEY, &msg, 93), msg.clone());
+        let (leader, peers, intent, msg) = (nodes[0].clone(), peers.clone(), intent_by(&ids, "driver", KEY, &msg, 99), msg.clone());
         tokio::spawn(async move { sign_with_intent(&leader, &peers, KEY, &msg, Some(&intent)).await })
     };
     until("node 2's round 2 to hold in its store work", || store.held() == 1).await;
     let session = round2s.lock().unwrap()[0].clone();
     assert_eq!(nodes[1].pending_sign_count(KEY), 0, "its nonces are out of memory already");
-    assert_eq!(journal(2, 93), 0);
+    assert_eq!(journal(2, 99), 0);
 
     tokio::time::advance(rutli_cosigner::peer::ROUND2_DEADLINE + std::time::Duration::from_millis(10)).await;
     let sig = signing.await.unwrap().expect("signed with node 3");
@@ -1030,12 +1032,12 @@ async fn an_abort_during_round_2_finds_nothing_and_the_share_is_journaled_once()
     until("the abort to reach node 2", || aborts.lock().unwrap().contains(&session)).await;
     let markers = rutli_frost_core::nonce_store::NonceStore::open(tmp.path().join(format!("node-2/keys/{KEY}.nonces"))).unwrap();
     assert!(!markers.is_consumed(&session).unwrap(), "the abort landed while round 2 held");
-    assert_eq!(journal(2, 93), 0);
+    assert_eq!(journal(2, 99), 0);
 
     store.set(store_fault::Store::Ok);
     until("node 2's round 2 to end", || nodes[1].load_now().inflight == 0).await;
     assert!(markers.is_consumed(&session).unwrap(), "round 2 finished: its marker is burnt");
-    assert_eq!((journal(1, 93), journal(2, 93), journal(3, 93)), (2, 1, 1));
+    assert_eq!((journal(1, 99), journal(2, 99), journal(3, 99)), (2, 1, 1));
     assert_eq!(round2s.lock().unwrap().len(), 1, "the leader never resends a round 2");
 }
 
@@ -1131,15 +1133,17 @@ async fn the_rate_limit_is_charged_once_per_request_id_across_retries_and_surviv
     let policy = SigningPolicyConfig { require_intent: Some(true), sign_rate_limit_per_min: 1, sign_rate_limit_per_day: 100, ..Default::default() };
     let (ids, nodes) = local(tmp.path(), &policy).await;
     let msg = digest(b"retried");
-    let i1 = intent_by(&ids, "driver", KEY, &msg, 70);
+    let i1 = intent_by(&ids, "driver", KEY, &msg, 79);
 
+    // Node 2 is this request's first partner (#193), so the flaky one fails the first subset.
+    assert_eq!(rutli_cosigner::orchestrator::partner_offset(&[79; 16], 2), 0);
     let mut peers = peers_of(&nodes);
     peers[1] = Arc::new(FlakyOnce { inner: peers[1].clone(), failed: Default::default() });
     let sig = sign_with_intent(&nodes[0], &peers, KEY, &msg, Some(&i1)).await.unwrap();
     assert!(rutli_cosigner::verify_key::signature_verifies(&nodes[0].group_key(KEY).unwrap(), &msg, &sig));
     let leader = read_key_dir(&tmp.path().join("node-1/journal").join(KEY)).unwrap().entries;
     assert_eq!(leader.len(), 2, "the leader released a share in both attempts");
-    assert!(leader.iter().all(|e| e.request_id == hex::encode([70u8; 16])));
+    assert!(leader.iter().all(|e| e.request_id == hex::encode([79u8; 16])));
 
     // A replay of the same intent is not a new charge...
     sign_with_intent(&nodes[0], &peers_of(&nodes), KEY, &msg, Some(&i1)).await.unwrap();
