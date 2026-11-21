@@ -133,21 +133,35 @@ roster). Without an intent a TLS cosigner refuses the refresh by default
 ([ceremonies.md](ceremonies.md#ceremony-intents), `deploy/k8s/cronjob-refresh.yaml`). A
 cosigner's own certificate is refused.
 
-Run it on a schedule. Any share an attacker may have captured is now useless — they must re-breach
-≥ `t` cosigners within a single refresh window. This is the closest thing to "rotating" the root, and
-it is Rütli-specific. See [phase-2-frost.md](phase-2-frost.md).
+Run it on a schedule (the shipped CronJob is weekly), and back up every cosigner after each run: a
+refresh leaves the older backups unable to restore a node ([disaster-recovery.md](disaster-recovery.md)).
+Each cosigner takes part in at most one refresh of a key per `refresh_min_interval_secs` (72 h by
+default). Shares an attacker captured before a refresh no longer combine with the new ones, so
+fewer than `t` captured shares do not add up over time. This holds only while the attacker has no
+old copies: a refresh erases nothing and changes no sealing key, and old shares of `t` nodes from
+the same epoch still combine with each other, wherever the copies are (backups, snapshots, free
+blocks) as long as the sealing keys that open them exist
+([key-material-handling.md](key-material-handling.md)). This is the closest thing to "rotating"
+the root, and it is Rütli-specific. See [phase-2-frost.md](phase-2-frost.md).
 
 Best practice combines both: an **offline/delegated** root **and** periodic **share refresh** on
 whatever root material is online.
 
 ## If the root is actually compromised
 
-There is no rotation. If ≥ `t` shares of the namespace key are believed exposed:
+There is no rotation. If shares of the namespace key are believed exposed:
 
-1. **Refresh immediately** — invalidates the exposed shares if the attacker has not already used
-   them.
-2. If the key may already have been misused, escalate to governance: **offboard the node and stand up
-   a new identity** (the "SV failure" path). The old namespace is abandoned.
+1. **Refresh immediately** — the exposed shares then no longer combine with the live ones. This
+   helps while fewer than `t` shares of one epoch are exposed: old shares of `t` nodes from the same
+   epoch still combine with each other, whatever you refresh. The cosigners refuse a refresh within
+   `refresh_min_interval_secs` (72 h) of the last one; for this refresh put
+   `signing_policy.refresh_interval_waived_at` on every node first
+   ([ceremonies.md](ceremonies.md#refresh-interval)). Then back up every node, rotate each node's sealing key and destroy the old one, and delete the
+   backups from before the refresh ([key-material-handling.md](key-material-handling.md),
+   [disaster-recovery.md](disaster-recovery.md)). Deleting a backup file alone does not erase it.
+2. If `t` shares of one epoch may be exposed, or the key may already have been misused, escalate to
+   governance: **offboard the node and stand up a new identity** (the "SV failure" path). The old
+   namespace is abandoned.
 
 This asymmetry is exactly why Rütli layers the other controls around the root — M-of-N approval, the
 audit log and signing journal, share sealing, and frequent refresh — since the ultimate key can

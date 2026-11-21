@@ -439,7 +439,7 @@ async fn refresh_carries_a_dealt_keys_origin_and_counts_refreshes() {
     assert_eq!(run_refresh(&peers, IMPORTED).await.unwrap(), public);
     for i in 1..=N {
         let ks = KeyStore::open(tmp.path().join(format!("node-{i}"))).unwrap();
-        let got = ks.load(IMPORTED).unwrap().origin.expect("origin survives refresh");
+        let got = ks.load(IMPORTED).unwrap().origin.clone().expect("origin survives refresh");
         assert_eq!(got, KeyOrigin { refresh_count: 2, ..origin.clone() });
         assert!(ks.dealt_keys_never_refreshed().unwrap().is_empty());
     }
@@ -524,7 +524,7 @@ async fn signing_continues_on_every_node_under_a_cluster_wide_refresh_fence() {
     for (i, n) in nodes.iter().enumerate() {
         let session = format!("sign-during-refresh-{i}");
         n.sign_round1(KEY_ID, &session, &Default::default()).unwrap_or_else(|e| panic!("node {i}: {e:?}"));
-        n.abort_sign(KEY_ID, &session);
+        n.abort_sign_as(KEY_ID, &session, &rutli_cosigner::node::SessionOwner::Local).unwrap();
     }
     let msg = canton_digest(b"under a refresh fence");
     let sig = sign(&nodes[0], &peers, KEY_ID, &msg).await.unwrap();
@@ -866,8 +866,17 @@ async fn a_node_that_missed_a_write_is_repaired_and_then_serves_decrypts() {
     assert_eq!(nodes[2].hosted_decrypt("rutli-enc-3", &ct).unwrap(), b"after repair");
 }
 
+/// Node `i`'s view of the cluster: every node as a peer calling on node `i`'s behalf, so replies
+/// are wrapped to node `i`, as over gRPC.
+fn as_node(nodes: &[Arc<Node>], i: usize) -> Peers {
+    nodes
+        .iter()
+        .map(|n| Arc::new(LocalPeer::new(n.clone()).on_behalf_of(nodes[i].clone())) as Arc<dyn PeerApi>)
+        .collect()
+}
+
 #[tokio::test]
-async fn anti_entropy_pushes_a_key_to_a_node_that_missed_it() {
+async fn anti_entropy_heals_a_node_that_missed_a_write_by_pulling_never_by_a_push() {
     let tmp = tempfile::tempdir().unwrap();
     let (nodes, peers) = hosted_cluster(&tmp);
     let partial: Peers = peers.iter().take(2).cloned().collect();
@@ -876,13 +885,17 @@ async fn anti_entropy_pushes_a_key_to_a_node_that_missed_it() {
         .unwrap();
     assert!(!nodes[2].hosted_exists("rutli-sym-3"));
 
-    // The sweep on the holder pushes what the peer lacks — this is what heals a 2-of-3 write.
-    let (_pulled, pushed) = anti_entropy_sweep(&nodes[0], &peers).await.unwrap();
-    assert!(pushed >= 1, "sweep should push the missing key");
+    // The holders' sweeps push nothing to the node that lacks the key...
+    assert_eq!(anti_entropy_sweep(&nodes[0], &as_node(&nodes, 0)).await.unwrap(), 0);
+    assert_eq!(anti_entropy_sweep(&nodes[1], &as_node(&nodes, 1)).await.unwrap(), 0);
+    assert!(!nodes[2].hosted_exists("rutli-sym-3"), "the sweep no longer pushes");
+
+    // ...its own sweep pulls it, since two peers hold the same copy: that heals a 2-of-3 write.
+    assert_eq!(anti_entropy_sweep(&nodes[2], &as_node(&nodes, 2)).await.unwrap(), 1);
     assert!(nodes[2].hosted_exists("rutli-sym-3"));
 
     // Converged: a second sweep has nothing to do.
-    assert_eq!(anti_entropy_sweep(&nodes[0], &peers).await.unwrap(), (0, 0));
+    assert_eq!(anti_entropy_sweep(&nodes[2], &as_node(&nodes, 2)).await.unwrap(), 0);
 }
 
 #[tokio::test]
@@ -1000,7 +1013,9 @@ async fn a_peer_cannot_push_a_hosted_key_under_a_frost_id() {
     // Hosted ids keep working whatever the prefix and the Canton name after the tag contain.
     for id in ["rutli-enc-frost-x", "b8-rutli-sym-1"] {
         let as_node3 = LocalPeer::new(nodes[0].clone()).on_behalf_of(nodes[2].clone());
-        as_node3.replicate_key("genkey-ok", id, "aes-256-gcm", &[], &wrapped_by(&nodes[2], &nodes[0], id, &key)).await.unwrap();
+        let cid = format!("genkey-ok-{id}");
+        as_node3.ceremony_fence(&cid, id, "genkey").await.unwrap();
+        as_node3.replicate_key(&cid, id, "aes-256-gcm", &[], &wrapped_by(&nodes[2], &nodes[0], id, &key)).await.unwrap();
         assert!(nodes[0].hosted_exists(id), "{id}");
     }
 }
@@ -1033,7 +1048,7 @@ async fn anti_entropy_does_not_pull_a_hosted_key_under_a_frost_id() {
         let (_, _, wrapped) = as_me[2].fetch_key(id).await.unwrap();
         assert!(me.hosted_unwrap(id, HostedSpec::Aes256Gcm, &wrapped).is_ok());
         // ...and still nothing lands here.
-        let (pulled, _) = anti_entropy_sweep(me, &as_me).await.unwrap();
+        let pulled = anti_entropy_sweep(me, &as_me).await.unwrap();
         assert_eq!(pulled, 0, "node {}", i + 1);
         assert!(repair_hosted_key(me, &as_me, id).await.is_err(), "node {}", i + 1);
         assert!(!me.has_key(id), "node {}", i + 1);
@@ -1315,9 +1330,9 @@ async fn a_hosted_key_can_be_generated_with_one_cosigner_unreachable() {
     let ct = key.encrypt_oaep(b"written while degraded").unwrap();
     assert_eq!(nodes[1].hosted_decrypt("rutli-enc-degraded", &ct).unwrap(), b"written while degraded");
 
-    // ...and the node that was down is healed once it is back, without operator action.
-    let (_pulled, pushed) = anti_entropy_sweep(&nodes[0], &peers).await.unwrap();
-    assert!(pushed >= 1);
+    // ...and the node that was down is healed once it is back, without operator action: its own
+    // sweep pulls the key, which both live nodes hold.
+    assert_eq!(anti_entropy_sweep(&nodes[2], &as_node(&nodes, 2)).await.unwrap(), 1);
     assert_eq!(nodes[2].hosted_decrypt("rutli-enc-degraded", &ct).unwrap(), b"written while degraded");
 }
 
@@ -1351,12 +1366,12 @@ async fn anti_entropy_publishes_the_replica_shortfall() {
         .await
         .unwrap();
 
-    // Before healing: node 3 lacks the key, so the sweep both repairs it and reports the count.
-    let (_pulled, pushed) = anti_entropy_sweep(&nodes[0], &peers).await.unwrap();
-    assert!(pushed >= 1, "the sweep should have pushed the missing replica");
+    // Before healing: node 3 lacks the key, so its sweep both repairs it and reports the count.
+    assert_eq!(anti_entropy_sweep(&nodes[2], &as_node(&nodes, 2)).await.unwrap(), 1, "node 3 pulls the missing replica");
 
     // After healing every node holds it, and a second sweep is a no-op.
-    assert_eq!(anti_entropy_sweep(&nodes[0], &peers).await.unwrap(), (0, 0));
+    assert_eq!(anti_entropy_sweep(&nodes[2], &as_node(&nodes, 2)).await.unwrap(), 0);
+    assert_eq!(anti_entropy_sweep(&nodes[0], &peers).await.unwrap(), 0);
     for n in &nodes {
         assert!(n.hosted_exists("rutli-enc-count"));
     }

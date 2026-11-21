@@ -52,6 +52,8 @@ base64 = { workspace = true }
 # verify-key's TLS probe (tls_probe.rs).
 tokio-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
+# The pinned mesh dial (tls.rs).
+hyper-util = { workspace = true }
 
 [build-dependencies]
 tonic-build = { workspace = true }
@@ -60,3 +62,10 @@ protoc-bin-vendored = { workspace = true }
 [dev-dependencies]
 tempfile = "3"
 rcgen = { workspace = true }
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+# scripts/bench.sh
+[[bench]]
+name = "sign_path"
+harness = false

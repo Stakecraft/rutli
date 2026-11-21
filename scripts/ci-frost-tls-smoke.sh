@@ -48,10 +48,11 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# The example configs keep the default: DKG and refresh need a client-signed ceremony intent. The
-# smoke drives DKG through grpcurl, which cannot sign one, so it runs on copies that opt out
-# (docker-compose.tls.smoke.yml mounts them).
-echo "==> Writing the smoke configs (ceremony intents opted out)"
+# The example configs keep the defaults: DKG and refresh need a client-signed ceremony intent, and a
+# signature a client-signed signing intent. The smoke drives DKG and Sign through grpcurl, which
+# cannot sign either, so it runs on copies that opt out of both (docker-compose.tls.smoke.yml mounts
+# them). Their peers get the TLS key pins of the certificates made below.
+echo "==> Writing the smoke configs (ceremony and signing intents opted out)"
 rm -rf "$SMOKE_CONFIG"
 mkdir -p "$SMOKE_CONFIG"
 python3 - "$SMOKE_CONFIG" deploy/frost/config-tls/cosigner*.json <<'PY'
@@ -61,15 +62,16 @@ for src in sys.argv[2:]:
     with open(src) as f:
         cfg = json.load(f)
     cfg.setdefault("signing_policy", {})["require_ceremony_intent"] = False
+    cfg["signing_policy"]["require_intent"] = False
     with open(os.path.join(out, os.path.basename(src)), "w") as f:
         json.dump(cfg, f, indent=2)
         f.write("\n")
 PY
 chmod -R a+rX "$SMOKE_CONFIG"
 
-echo "==> Generating mTLS certs"
+echo "==> Generating mTLS certs (and pinning their keys in the smoke configs)"
 rm -rf "$CERTS"
-scripts/gen-frost-certs.sh 3 "$CERTS"
+RUTLI_PIN_CONFIGS="$SMOKE_CONFIG" scripts/gen-frost-certs.sh 3 "$CERTS"
 # Resolve the path now: gen-frost-certs.sh creates the directory 0700 (umask 077), and after the chown
 # below the runner user can no longer enter it.
 CERTS_ABS="$(cd "$CERTS" && pwd)"
@@ -98,6 +100,7 @@ echo "==> Building and starting TLS cosigner cluster"
 # gRPC via the compose network — avoids relying on host port binds for the assertions.
 # Proto is mounted (no gRPC reflection on the cosigner).
 GRPC_IMG=fullstorydev/grpcurl:v1.9.3
+# shellcheck disable=SC2016  # the {{ }} is a docker template, not a shell expansion
 NETWORK="$("${COMPOSE[@]}" ps -q cosigner1 | xargs docker inspect -f '{{range $k, $v := .NetworkSettings.Networks}}{{$k}}{{end}}')"
 PROTO_ABS="$(cd frost/cosigner/proto && pwd)"
 grpc() {

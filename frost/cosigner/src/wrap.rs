@@ -228,7 +228,7 @@ pub fn open_with(
 /// `--cluster-id` on the dealer) so that changing the CA file — e.g. adding a second CA during a
 /// CA rotation (docs/ca-rotation.md) — does not change what envelopes are bound to.
 pub fn cluster_id_from_ca(ca_pem: &[u8]) -> String {
-    hex::encode(&Sha256::digest(ca_pem)[..8])
+    hex::encode(Sha256::digest(ca_pem).iter().copied().take(8).collect::<Vec<u8>>())
 }
 
 /// Check that `s` has the shape [`cluster_id_from_ca`] produces: exactly 16 lowercase hex

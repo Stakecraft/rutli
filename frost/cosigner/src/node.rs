@@ -112,6 +112,19 @@ struct CeremonyGuard {
     started: Instant,
     /// The owner has a ceremony session on this node (part 1 ran), not just a fence.
     session: bool,
+    /// A genkey guard only: what the generation was fenced under here. A push is accepted only
+    /// under this guard ([`Node::genkey_push_refusal`]).
+    genkey: Option<GenkeyAuth>,
+}
+
+/// What a genkey guard was taken under: the spec the leader declared at the fence (`None` from a
+/// 0.4.0 leader) and the client's generate intent this node verified there (`None` without one,
+/// accepted only while `signing_policy.require_ceremony_intent` is off, or on a node without a
+/// signing policy).
+#[derive(Clone, Debug, Default)]
+struct GenkeyAuth {
+    spec: Option<String>,
+    intent: Option<crate::intent::VerifiedGenerate>,
 }
 
 /// How long an orphaned ceremony guard blocks a new ceremony for the same key. Longer than any
@@ -137,6 +150,12 @@ pub const NONCE_PRUNE_INTERVAL: Duration = Duration::from_secs(10 * 60);
 /// it is followed by another a few seconds later.
 pub const NONCE_PRUNE_BUDGET: usize = 10_000;
 
+/// Read-repair fan-outs (a request for a hosted key this node lacks asks every peer) allowed per
+/// second on one node, and the burst. Beyond it the request answers UNAVAILABLE, never NOT_FOUND,
+/// so the ceiling cannot hide a key: the driver fails over. The anti-entropy sweep is not counted.
+pub const REPAIR_FANOUT_PER_SEC: f64 = 20.0;
+pub const REPAIR_FANOUT_BURST: f64 = 40.0;
+
 /// The epoch a DKG commits its key at; each committed refresh adds one.
 pub const FIRST_EPOCH: u64 = 1;
 
@@ -148,11 +167,56 @@ pub const FIRST_EPOCH: u64 = 1;
 pub const MAX_UNKNOWN_NO_VOTES_PER_ASKER: usize = 256;
 pub const MAX_UNKNOWN_NO_VOTES: usize = 1024;
 
-/// Most sign sessions (between round 1 and round 2) held in memory per key. Real signs hold a
-/// session for milliseconds; a peer opening round 1 after round 1 (without an intent, while
-/// `require_intent` is off, nothing else limits it) is refused here instead of growing memory
-/// until the pending-session TTL.
+/// Most sign sessions (between round 1 and round 2) held in memory per key, from all openers
+/// together. Real signs hold a session for milliseconds; round 1 after round 1 is refused here
+/// instead of growing memory until the pending-session TTL. Round 1 charges nothing (the rate
+/// limit and `max_shares_per_request` count released shares), and one valid intent verifies again
+/// and again, so this total alone would let one opener fill it and stop the key's signing on this
+/// node for every leader: the two caps below keep each opener, and each of its requests, to a
+/// part of it.
 pub const MAX_PENDING_SIGN_SESSIONS_PER_KEY: usize = 1024;
+
+/// Most sign sessions waiting for round 2 per key from one opener (a peer's certificate CN, this
+/// node's own leader, or on a plaintext mesh all callers together).
+///
+/// What an honest leader holds open on one node: a session lives from round 1 to round 2, one
+/// mesh round trip plus the other members' round 1 (about 100 ms cross-region, docs/performance.md),
+/// so sessions open at once ≈ signs in flight. The driver runs each sign on a fixed pool of
+/// max(4, CPUs) threads, one sign per thread through its failover, so one participant has at most
+/// that many in flight: 64 on a 64-CPU host, 128 for a leader serving two participants. By rate:
+/// the busiest DevNet soak minute was 42 signs (docs/soak-2026-10-devnet.md) and the soak's
+/// signing rule allows 600 a minute, 10/s × 0.1 s ≈ 1 open session. The rest of the room is for
+/// sessions a leader left behind: a sign the driver gave up on (its deadline cancels the leader's
+/// call mid-attempt) or whose abort did not arrive stays open here until the 5-minute TTL.
+///
+/// A quarter of the total, so with one compromised opener at its cap the others share 768, and
+/// only four openers at their caps fill the key.
+pub const MAX_PENDING_SIGN_SESSIONS_PER_OPENER: usize = MAX_PENDING_SIGN_SESSIONS_PER_KEY / 4;
+
+/// Most sign sessions waiting for round 2 per key from one opener for one signing request (the
+/// intent's request id, the same for every attempt and failover leader of one driver call).
+///
+/// One leader's run of one request opens one session per attempt on each member and, when an
+/// attempt fails, aborts it on every member before the next attempt opens
+/// ([`crate::orchestrator`]): normally at most one is open here; if no abort arrives, at most
+/// [`crate::orchestrator::MAX_SIGN_ATTEMPTS`]. The driver sends one request through the same leader
+/// at most twice (one retry after learning the cluster id again), hence twice that. A leader the
+/// driver fails over to is another opener with its own count. `max_shares_per_request` (default 8)
+/// counts shares released for the request over its life, not sessions open at once (a failed
+/// attempt releases nothing), so it does not size this cap. With it, one replayed intent opens at
+/// most 20 sessions per node instead of the opener's 256; a global count per request id would not
+/// do: every member sees the intent in round 1, and could use up the request's room before the
+/// honest leader's round 1 reached the other members.
+pub const MAX_PENDING_SIGN_SESSIONS_PER_REQUEST: usize = 2 * crate::orchestrator::MAX_SIGN_ATTEMPTS;
+
+/// The caps above, as round 1 checks them.
+pub const PENDING_SIGN_CAPS: rutli_frost_core::session::PendingCaps = rutli_frost_core::session::PendingCaps {
+    per_key: MAX_PENDING_SIGN_SESSIONS_PER_KEY,
+    per_owner: MAX_PENDING_SIGN_SESSIONS_PER_OPENER,
+    per_request: MAX_PENDING_SIGN_SESSIONS_PER_REQUEST,
+};
+
+pub use rutli_frost_core::session::SessionOwner;
 
 /// Most ceremony sessions (between part 1 and the vote) held in memory at once. A part 1 beyond
 /// it first drops sessions orphaned past the orphan timeout, then is refused.
@@ -161,6 +225,20 @@ pub const MAX_CEREMONY_SESSIONS: usize = 64;
 /// How long an abort that contradicts a peer's yes-vote waits before the votes are gathered again
 /// (audit F3; see [`crate::ceremony_record::mixed_evidence`]).
 pub const MIXED_EVIDENCE_REGATHER: Duration = Duration::from_secs(2);
+
+/// Whether to log a sign-session refusal of kind `what` by `who` now: at most once a minute per
+/// pair. The refusal is counted every time; the log line names who to look at. Callers are
+/// allowlisted mesh CNs, so the map stays small; it is bounded anyway.
+fn once_a_minute(what: &'static str, who: &SessionOwner) -> bool {
+    static LAST: Mutex<Option<std::collections::HashMap<(&'static str, SessionOwner), u64>>> = Mutex::new(None);
+    let minute = crate::intent::now_ms() / 60_000;
+    let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
+    let map = last.get_or_insert_with(Default::default);
+    if map.len() > 64 {
+        map.clear();
+    }
+    map.insert((what, who.clone()), minute) != Some(minute)
+}
 
 pub struct Node {
     pub identifier: Identifier,
@@ -200,12 +278,19 @@ pub struct Node {
     /// Set when hosted (non-FROST) keys are enabled: this node's derived wrapping key plus the
     /// cluster identity envelopes are bound to. `None` disables every hosted-key operation.
     hosted: Option<HostedCtx>,
-    /// Hosted keys this node created under a genkey ceremony (key id -> ceremony id): the only keys
-    /// a PurgeKey without a delete intent may remove — the rollback of a generation that missed its
-    /// write quorum, while that generation still holds the fence (audit M2).
-    hosted_created_in: Mutex<std::collections::HashMap<String, String>>,
+    /// Hosted keys this node created under a genkey ceremony (key id -> (ceremony id, when that
+    /// ceremony's guard was taken)): the only keys a PurgeKey without a delete intent may remove —
+    /// the rollback of a generation that missed its write quorum, while that very fence (the same
+    /// guard instance, not a later fence under the same ceremony id) is still held (audit M2).
+    hosted_created_in: Mutex<std::collections::HashMap<String, (String, Instant)>>,
     /// `hosted_keys.delete_grace_secs`: how long a tombstone retains the deleted key's material.
     delete_grace: Duration,
+    /// `hosted_keys.write_quorum`: how many nodes a hosted-key write reaches. A node concludes that
+    /// no node holds a key only when at least `n - write_quorum + 1` nodes (itself included) said
+    /// so, since a written key sits on at least `write_quorum` of them.
+    hosted_write_quorum: usize,
+    /// Token bucket for read-repair fan-outs (each asks every peer): (tokens, last refill).
+    repair_bucket: Mutex<(f64, Instant)>,
     /// Caps on no-votes for unknown ceremony ids: (per asker, total). See
     /// [`MAX_UNKNOWN_NO_VOTES_PER_ASKER`].
     unknown_no_vote_caps: (usize, usize),
@@ -348,6 +433,8 @@ impl Node {
             hosted: None,
             hosted_created_in: Mutex::new(Default::default()),
             delete_grace: Duration::from_secs(crate::config::DEFAULT_DELETE_GRACE_SECS),
+            hosted_write_quorum: crate::orchestrator::DEFAULT_WRITE_QUORUM,
+            repair_bucket: Mutex::new((REPAIR_FANOUT_BURST, Instant::now())),
             unknown_no_vote_caps: (MAX_UNKNOWN_NO_VOTES_PER_ASKER, MAX_UNKNOWN_NO_VOTES),
             regather_delay: MIXED_EVIDENCE_REGATHER,
             #[cfg(test)]
@@ -438,11 +525,8 @@ impl Node {
                 Err(_) => false,
             };
             if promoted {
-                let done = CeremonyRecord {
-                    state: RecordState::Committed,
-                    updated_ms: crate::ceremony_record::now_ms(),
-                    ..rec.clone()
-                };
+                let now = crate::ceremony_record::now_ms();
+                let done = CeremonyRecord { state: RecordState::Committed, updated_ms: now, resolved_ms: now, ..rec.clone() };
                 self.record_store.write(Some(&rec), &done)?;
                 records.insert(done.ceremony_id.clone(), done);
                 tracing::info!(
@@ -498,6 +582,33 @@ impl Node {
         Ok(self.book()?.records.values().filter(|r| r.state == RecordState::Staged).cloned().collect())
     }
 
+    /// The DKG ceremony this node committed `key_id` under, while it still holds that sharing: the
+    /// COMMITTED "dkg" record for the key whose group key is `group_key` and whose epoch is the
+    /// share's current one. `None` when the record is gone, the key was refreshed since, or it did
+    /// not come from a DKG (`DkgReply.origin_ceremony_id`).
+    pub fn committed_dkg_ceremony(&self, key_id: &str, group_key: &[u8; 32]) -> Result<Option<String>> {
+        let epoch = match self.keystore.load_record(key_id) {
+            Ok(crate::keystore::Record::Frost(share)) => share.epoch,
+            Ok(_) | Err(DaemonError::UnknownKey(_)) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let gk = hex::encode(group_key);
+        // One DKG commits a key id once; should two records ever match, name the same one every time.
+        Ok(self
+            .book()?
+            .records
+            .values()
+            .filter(|r| {
+                r.state == RecordState::Committed
+                    && r.kind == CeremonyKind::Dkg.as_str()
+                    && r.key_id == key_id
+                    && r.new_epoch == epoch
+                    && r.group_key.eq_ignore_ascii_case(&gk)
+            })
+            .map(|r| r.ceremony_id.clone())
+            .min())
+    }
+
     /// This node's view of key `key_id` for ceremony decisions: its committed share's epoch, PKP
     /// digest and group key (public values only), and whether a ceremony for it is staged here.
     /// Absent key: `present = false`. A hosted key under the id: `present`, origin "hosted".
@@ -520,6 +631,7 @@ impl Node {
         }
         if let Some(mark) = self.stale_mark(key_id) {
             reply.stale = true;
+            reply.stale_by_own_record = mark.by_own_record;
             reply.stale_reason = mark.reason;
         }
         if let Some(r) = self.staged_records_checked()?.into_iter().find(|r| r.key_id == key_id) {
@@ -555,6 +667,7 @@ impl Node {
         kind: &'static str,
         leader: Option<&str>,
         may_create: bool,
+        genkey: Option<GenkeyAuth>,
     ) -> Result<bool> {
         let unfenced = || {
             DaemonError::CeremonyRefused(format!(
@@ -610,6 +723,7 @@ impl Node {
                     kind,
                     started: Instant::now(),
                     session: false,
+                    genkey,
                 },
             );
             preempted
@@ -725,6 +839,9 @@ impl Node {
 
     /// [`Node::ceremony_fence`] asked by the peer whose certificate CN is `leader` (`None`: this
     /// node's own leader), which the guard then binds the ceremony to.
+    ///
+    /// A `genkey` fence through here carries no generate intent and no spec: it is
+    /// [`Node::genkey_begin_from`] without them, refused where intents are required.
     pub fn ceremony_fence_from(
         &self,
         ceremony_id: &str,
@@ -732,12 +849,91 @@ impl Node {
         kind: &'static str,
         leader: Option<&str>,
     ) -> Result<()> {
-        self.fence_created(ceremony_id, key_id, kind, leader).map(|_| ())
+        if kind == "genkey" {
+            return self.genkey_begin_from(ceremony_id, key_id, None, None, leader, None);
+        }
+        self.fence_created(ceremony_id, key_id, kind, leader, None).map(|_| ())
+    }
+
+    /// The fence of a hosted-key generation (`genkey`) for `ceremony_id` of `key_id`, asked by the
+    /// peer whose certificate CN is `leader` (`None`: this node's own leader) and whose roster
+    /// identifier is `leader_id` (`None`: unknown). `spec` is what the leader generates (`None` from
+    /// a 0.4.0 leader).
+    ///
+    /// First, before the guard: the client's generate intent ([`crate::sign_policy::SignGuard::authorize_generate`])
+    /// — signer role and pin, cluster, key, spec, the leader it names == `leader_id`, validity, and
+    /// `ceremony_id` == the id it names. Without one: refused when
+    /// `signing_policy.require_ceremony_intent` is on, else accepted and counted. So a peer that
+    /// fences an id no client asked for takes no guard here, and a peer that was shown an intent in
+    /// its own fence cannot use it: the intent names another leader.
+    ///
+    /// A verified intent's ceremony id is then marked fenced, durably ([`Node::mark_fenced`]): the
+    /// request id is spent on this node, for any leader. The guard keeps the spec and the intent;
+    /// a push is accepted only under it ([`Node::genkey_push_refusal`]).
+    pub fn genkey_begin_from(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        spec: Option<&str>,
+        intent: Option<&crate::pb::SignedIntent>,
+        leader: Option<&str>,
+        leader_id: Option<u16>,
+    ) -> Result<()> {
+        crate::keystore::validate_ceremony_id(ceremony_id)?;
+        crate::keystore::validate_key_id(key_id)?;
+        let spec = spec.filter(|s| !s.is_empty());
+        if let Some(s) = spec {
+            crate::hosted::HostedSpec::parse(s)?;
+        }
+        let verified = match &self.sign_guard {
+            Some(g) => g.authorize_generate(key_id, spec.unwrap_or(""), leader_id, ceremony_id, intent)?,
+            None => None,
+        };
+        if let Some(v) = &verified {
+            tracing::info!(
+                ceremony_id,
+                key_id,
+                spec = %v.spec,
+                requested_by = %v.signer_cn,
+                leader = v.leader,
+                "genkey fence: generate intent verified"
+            );
+        }
+        // A generate intent's id is fenced at most once on this node, and that is durable, as for a
+        // DKG/refresh: the guard lives in memory and goes with a release, a preemption or a restart.
+        // A fence without an intent never writes a mark, but is refused under a marked id all the
+        // same. Only an id of the shape a generate intent names can carry a mark.
+        match &verified {
+            Some(_) => self.mark_fenced(ceremony_id, key_id, leader)?,
+            None if is_generate_ceremony_id(ceremony_id) => self.refuse_if_fenced(ceremony_id)?,
+            None => {}
+        }
+        let auth = GenkeyAuth {
+            spec: verified.as_ref().map(|v| v.spec.clone()).or_else(|| spec.map(str::to_string)),
+            intent: verified.clone(),
+        };
+        let created = self.fence_created(ceremony_id, key_id, "genkey", leader, Some(auth))?;
+        if !created && verified.is_some() {
+            // Unreachable while the mark above holds; kept so a second fence under one intent can
+            // never join a guard.
+            return Err(DaemonError::CeremonyRefused(format!(
+                "ceremony {ceremony_id} already holds the guard for {key_id} on this node — a second \
+                 fence under one generate intent is refused"
+            )));
+        }
+        Ok(())
     }
 
     /// [`Node::ceremony_fence_from`], returning whether this call created the guard (`false`: this
-    /// ceremony id already held it).
-    fn fence_created(&self, ceremony_id: &str, key_id: &str, kind: &'static str, leader: Option<&str>) -> Result<bool> {
+    /// ceremony id already held it). `genkey`: what a genkey guard it creates keeps.
+    fn fence_created(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        kind: &'static str,
+        leader: Option<&str>,
+        genkey: Option<GenkeyAuth>,
+    ) -> Result<bool> {
         // A DKG/refresh participant persists a share at the very end. On a read-only remount
         // `exists()`/`load()` still work, so without this the ceremony would fail only at this
         // node's final save — after the nodes before it had already persisted theirs: a half-applied
@@ -783,7 +979,7 @@ impl Node {
                 )));
             }
         }
-        self.acquire_ceremony(key_id, ceremony_id, kind, leader, true)
+        self.acquire_ceremony(key_id, ceremony_id, kind, leader, true, genkey)
     }
 
     /// Roll back a fence taken by [`ceremony_fence`] (partial cluster fence / aborted ceremony).
@@ -802,7 +998,7 @@ impl Node {
         self.release_ceremony(key_id, ceremony_id);
         // Past its fence a generation can no longer be rolled back.
         let mut created = crate::sync::recover(&self.hosted_created_in, "hosted_created_in");
-        if created.get(key_id).is_some_and(|c| c == ceremony_id) {
+        if created.get(key_id).is_some_and(|(c, _)| c == ceremony_id) {
             created.remove(key_id);
         }
     }
@@ -898,7 +1094,12 @@ impl Node {
             let view = (share.epoch, share.pkp_digest()?);
             let nonce_store = NonceStore::open(self.keystore.nonce_dir(key_id))?;
             let cached = CachedKey {
-                cosigner: Arc::new(Cosigner::new(share.key_package, share.public_key_package, nonce_store)),
+                // Cloned: `share` wipes its own copy when it drops here, the cosigner wipes this one.
+                cosigner: Arc::new(Cosigner::new(
+                    share.key_package.clone(),
+                    share.public_key_package.clone(),
+                    nonce_store,
+                )),
                 view,
             };
             #[cfg(test)]
@@ -962,11 +1163,12 @@ impl Node {
     }
 
     /// Record the epoch check's verdict for `key_id`: `Some` marks the share stale (round 1 and
-    /// leading refused), `None` clears a mark. Keeps `rutli_stale_share{key}` in step.
+    /// leading refused), `None` clears a mark. Keeps `rutli_stale_share{key}` in step. Logs only
+    /// when the state or the epochs change: a new wording of the same reason is stored silently.
     pub fn set_stale(&self, key_id: &str, mark: Option<StaleMark>) {
         let mut stale = self.stale_marks();
         let changed = match &mark {
-            Some(m) => stale.insert(key_id.to_string(), m.clone()).as_ref() != Some(m),
+            Some(m) => !stale.insert(key_id.to_string(), m.clone()).is_some_and(|old| old.same_state(m)),
             None => stale.remove(key_id).is_some(),
         };
         drop(stale);
@@ -1029,9 +1231,9 @@ impl Node {
     /// The background nonce-marker pruner: a pass now (startup), then every
     /// [`NONCE_PRUNE_INTERVAL`] — sooner while a pass hits [`NONCE_PRUNE_BUDGET`]. Each pass runs on
     /// the blocking pool, and the next one starts only after it returns, so a hung volume parks one
-    /// thread, never a pile of them.
+    /// thread, never a pile of them. Restarted after a panic ([`crate::supervise`]).
     pub fn spawn_nonce_pruner(node: Arc<Node>) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
+        crate::supervise::spawn_supervised("nonce_pruner", node, |node| async move {
             loop {
                 let pass = node
                     .blocking(|n| n.prune_nonce_markers(rutli_frost_core::session::MARKER_RETENTION, NONCE_PRUNE_BUDGET))
@@ -1198,7 +1400,21 @@ impl Node {
 
     // -- signing peer ops --
 
+    /// Sign round 1 opened by this node's own leader ([`SessionOwner::Local`]).
     pub fn sign_round1(&self, key_id: &str, session_id: &str, ctx: &Round1Ctx) -> Result<SigningCommitments> {
+        self.sign_round1_as(key_id, session_id, ctx, &SessionOwner::Local)
+    }
+
+    /// Sign round 1 opened by `opener`: only it may then send this session's round 2 or abort it
+    /// ([`Node::sign_round2_as`], [`Node::abort_sign_as`]), and the session counts against its
+    /// caps ([`PENDING_SIGN_CAPS`]).
+    pub fn sign_round1_as(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        ctx: &Round1Ctx,
+        opener: &SessionOwner,
+    ) -> Result<SigningCommitments> {
         // No ceremony fence here. Up to 0.4.0-rc.3 any DKG/refresh guard on the key refused round 1;
         // since a guard could be held by a fence alone, a peer (or a leader dying between fence and
         // part 1) could stop this key's signing on this node until a restart. Signing and a
@@ -1225,15 +1441,18 @@ impl Node {
         // Refusing here makes leaders skip it and sign with the rest.
         self.refuse_if_keystore_down()?;
         let cached = self.cached(key_id)?;
-        if cached.cosigner.pending_count() >= MAX_PENDING_SIGN_SESSIONS_PER_KEY {
-            self.prune_expired_sign_sessions();
-            let pending = cached.cosigner.pending_count();
-            if pending >= MAX_PENDING_SIGN_SESSIONS_PER_KEY {
-                tracing::warn!(key_id, pending, "refusing sign round 1: too many sessions waiting for round 2");
-                return Err(DaemonError::NotServing(format!(
-                    "{pending} sign sessions for {key_id} are waiting for round 2 on this node — refusing more"
-                )));
-            }
+        // Early, before the intent's signature is verified, so an opener at a cap costs a map scan
+        // and no signature check. The request id is read from the intent unverified: that is safe
+        // for a refusal only. A session is stored under a request id only after its intent
+        // verified, and only for this opener; an invented or altered id therefore matches nothing
+        // (and fails verification later), and a real one is refused here only when this opener
+        // already holds that request's cap. Round 1 checks again, under the lock that inserts.
+        let claimed = ctx.intent.as_ref().and_then(|signed| {
+            use prost::Message;
+            crate::pb::SignIntent::decode(signed.intent.as_slice()).ok().map(|i| hex::encode(i.request_id))
+        });
+        if let Err(e) = cached.cosigner.check_room(opener, claimed.as_deref(), PENDING_SIGN_CAPS) {
+            return Err(self.sessions_full(key_id, opener, e));
         }
         self.check_epoch(key_id, &cached, ctx)?;
         let mut binding = ctx.binding(key_id)?;
@@ -1242,15 +1461,49 @@ impl Node {
             Some(g) => Some(g.authorize_round1(key_id, ctx, || self.ceremony_test_message(key_id))?),
             None => None,
         };
+        let mut request = None;
         if let Some(crate::sign_policy::SessionAuth::Intent(v)) = &auth {
             binding = binding.with_message(&v.message);
+            request = Some(hex::encode(v.request_id));
         }
-        let result = cached.cosigner.round1(session_id, binding);
+        let result = cached.cosigner.round1_owned(session_id, binding, opener.clone(), request, PENDING_SIGN_CAPS);
         if let (Ok(_), Some(g), Some(auth)) = (&result, &self.sign_guard, auth) {
-            g.remember(key_id, session_id, auth);
+            g.remember(key_id, session_id, auth, opener.clone());
         }
         self.update_pending_gauge();
-        Ok(result?)
+        match result {
+            Ok(c) => Ok(c),
+            Err(e @ rutli_frost_core::CoreError::SessionsFull { .. }) => Err(self.sessions_full(key_id, opener, e)),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// A round 1 refused by a cap on waiting sessions: counted by cap, logged (at most once a minute
+    /// per opener and cap) with the opener, and answered UNAVAILABLE. An opener at its own cap only
+    /// stops its own sessions: the leader it is excludes this node from its signature, and every
+    /// other leader keeps its room here.
+    fn sessions_full(&self, key_id: &str, opener: &SessionOwner, e: rutli_frost_core::CoreError) -> DaemonError {
+        self.prune_expired_sign_sessions();
+        if let rutli_frost_core::CoreError::SessionsFull { cap_kind, open, cap } = &e {
+            metrics::counter!(crate::metrics::SIGN_SESSIONS_REFUSED, "cap" => cap_kind.as_str()).increment(1);
+            if once_a_minute(cap_kind.as_str(), opener) {
+                tracing::warn!(
+                    key_id,
+                    opener = %opener,
+                    cap = cap_kind.as_str(),
+                    open,
+                    max = cap,
+                    "refusing sign round 1: too many sessions waiting for round 2 ({})",
+                    match cap_kind {
+                        rutli_frost_core::session::PendingCap::Key =>
+                            "the key's total, all openers together; the per-opener lines name who holds them",
+                        _ => "this opener's own cap; other leaders keep their room — an honest leader \
+                              stays below it and aborts what it gives up, so investigate this opener",
+                    }
+                );
+            }
+        }
+        DaemonError::Core(e)
     }
 
     /// Round 1's epoch rules (audit H1/M1): never sign from a stale share, and never from another
@@ -1298,12 +1551,7 @@ impl Node {
         self.sign_round2_with(key_id, session_id, message, commitments, None)
     }
 
-    /// Sign round 2, presenting the digest of the signing intent round 1 carried (`None`: round 1
-    /// had none). With a signing policy: the policy's round-2 checks, then the core binding
-    /// checks, then — before the nonce marker burns — the rate-limit charge and the durable
-    /// journal entry ([`crate::sign_policy::SignGuard`]); a refusal at any step releases nothing
-    /// and drops the session's nonces. A session this node holds no live nonces for is an unknown
-    /// session with or without a signing policy.
+    /// [`Node::sign_round2_as`] for this node's own leader ([`SessionOwner::Local`]).
     pub fn sign_round2_with(
         &self,
         key_id: &str,
@@ -1311,6 +1559,29 @@ impl Node {
         message: &[u8],
         commitments: &BTreeMap<Identifier, SigningCommitments>,
         intent_digest: Option<[u8; 32]>,
+    ) -> Result<SignatureShare> {
+        self.sign_round2_as(key_id, session_id, message, commitments, intent_digest, &SessionOwner::Local)
+    }
+
+    /// Sign round 2, presenting the digest of the signing intent round 1 carried (`None`: round 1
+    /// had none). With a signing policy: the policy's round-2 checks, then the core binding
+    /// checks, then — before the nonce marker burns — the rate-limit charge and the durable
+    /// journal entry ([`crate::sign_policy::SignGuard`]); a refusal at any step releases nothing
+    /// and drops the session's nonces. A session this node holds no live nonces for is an unknown
+    /// session with or without a signing policy.
+    ///
+    /// Sent by `caller`: a live session another caller opened is refused first
+    /// ([`rutli_frost_core::CoreError::NotSessionOwner`], PERMISSION_DENIED), with or without a
+    /// signing policy, before its authorization or nonces are touched; the opener's own round 2
+    /// still signs. Nothing is charged or journaled for it.
+    pub fn sign_round2_as(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        message: &[u8],
+        commitments: &BTreeMap<Identifier, SigningCommitments>,
+        intent_digest: Option<[u8; 32]>,
+        caller: &SessionOwner,
     ) -> Result<SignatureShare> {
         // Defense in depth: the leader already rejects non-Canton payloads in `orchestrator::sign`,
         // but THIS is the function the mesh Peer RPC reaches directly. A caller that got onto the
@@ -1331,14 +1602,31 @@ impl Node {
                 hook(key_id, session_id);
             }
         }
+        // Another caller's session: refused before anything below takes it. Checked again where
+        // the authorization and the nonces are taken.
+        if let Err(e) = cosigner.check_owner(session_id, caller) {
+            return Err(self.not_session_owner("round2", key_id, caller, e));
+        }
         let result = match &self.sign_guard {
-            None => cosigner.round2(session_id, key_id, message, commitments, intent_digest.as_ref()).map_err(DaemonError::from),
+            None => cosigner
+                .round2_guarded_as(caller, session_id, key_id, message, commitments, intent_digest.as_ref(), || Ok(())),
             Some(g) => {
                 // Taken on every path from here on: a round 2 that gets this far uses up the
                 // session's authorization, whatever it then answers. (One refused before this
-                // point, for its message length or because the key cannot be loaded, leaves the
-                // session as it was, nonces and authorization.)
-                let auth = g.take(key_id, session_id);
+                // point, for its message length, because the key cannot be loaded or because
+                // another caller opened the session, leaves the session as it was, nonces and
+                // authorization.)
+                let auth = match g.take_as(key_id, session_id, caller) {
+                    Ok(auth) => auth,
+                    Err(owner) => {
+                        let e = rutli_frost_core::CoreError::NotSessionOwner {
+                            session: session_id.to_string(),
+                            owner: owner.to_string(),
+                            caller: caller.to_string(),
+                        };
+                        return Err(self.not_session_owner("round2", key_id, caller, e));
+                    }
+                };
                 let held = cosigner.holds_session(session_id);
                 #[cfg(test)]
                 {
@@ -1364,7 +1652,7 @@ impl Node {
                     let auth = match auth {
                         Some(a) => a,
                         None if g.require_intent() => {
-                            cosigner.abort(session_id);
+                            let _ = cosigner.abort_as(session_id, caller);
                             self.update_pending_gauge();
                             return Err(crate::intent::refused(
                                 "missing",
@@ -1375,20 +1663,37 @@ impl Node {
                     };
                     match g.check_round2(&auth, message, intent_digest.as_ref()) {
                         Err(e) => {
-                            cosigner.abort(session_id);
+                            let _ = cosigner.abort_as(session_id, caller);
                             Err(e)
                         }
-                        Ok(()) => cosigner.round2_guarded(
-                            session_id,
-                            key_id,
-                            message,
-                            commitments,
-                            intent_digest.as_ref(),
-                            || g.journal_release(key_id, session_id, &auth, message),
-                        ),
+                        Ok(()) => {
+                            let result = cosigner.round2_guarded_as(
+                                caller,
+                                session_id,
+                                key_id,
+                                message,
+                                commitments,
+                                intent_digest.as_ref(),
+                                || g.journal_release(key_id, session_id, &auth, message),
+                            );
+                            // Refused before the nonces were taken (the entry changed hands since
+                            // `take_as`): put the authorization back, so the call leaves the session
+                            // as it found it.
+                            if matches!(result, Err(DaemonError::Core(rutli_frost_core::CoreError::NotSessionOwner { .. }))) {
+                                g.restore(key_id, session_id, auth, caller.clone());
+                            }
+                            result
+                        }
                     }
                 }
             }
+        };
+        let result = match result {
+            // Lost the race to a round 1 by another opener under the same session id.
+            Err(DaemonError::Core(e @ rutli_frost_core::CoreError::NotSessionOwner { .. })) => {
+                Err(self.not_session_owner("round2", key_id, caller, e))
+            }
+            other => other,
         };
         if matches!(result, Err(DaemonError::Core(rutli_frost_core::CoreError::UnknownSession(_)))) {
             metrics::counter!(crate::metrics::SIGN_ROUND2_UNKNOWN_SESSION).increment(1);
@@ -1397,16 +1702,49 @@ impl Node {
         result
     }
 
+    /// A round 2 or abort refused because another caller opened the session: counted by call,
+    /// logged (at most once a minute per caller) with who asked. Not an unknown session: the
+    /// session is live and stays with its opener. An honest cosigner never does this, so it names
+    /// the caller to investigate.
+    fn not_session_owner(
+        &self,
+        call: &'static str,
+        key_id: &str,
+        caller: &SessionOwner,
+        e: rutli_frost_core::CoreError,
+    ) -> DaemonError {
+        metrics::counter!(crate::metrics::SIGN_SESSION_OWNER_REFUSALS, "call" => call).increment(1);
+        if once_a_minute(call, caller) {
+            if let rutli_frost_core::CoreError::NotSessionOwner { session, owner, .. } = &e {
+                tracing::warn!(
+                    key_id,
+                    session,
+                    caller = %caller,
+                    owner = %owner,
+                    "refused a sign {call} from a caller that did not open the session — the session \
+                     stays with its opener; a correct cosigner never does this, investigate the caller"
+                );
+            }
+        }
+        DaemonError::Core(e)
+    }
+
     /// Best-effort abort of an in-flight sign session: free the round-1 nonces held for
     /// `session_id` instead of letting them linger until the pending-TTL sweep. No-op if this node
     /// never held nonces for it (cosigner not cached, or round2 already burned the session).
-    pub fn abort_sign(&self, key_id: &str, session_id: &str) {
+    ///
+    /// Asked by `caller`: a live session another caller opened is refused
+    /// ([`rutli_frost_core::CoreError::NotSessionOwner`], PERMISSION_DENIED) and kept, nonces and
+    /// authorization.
+    pub fn abort_sign_as(&self, key_id: &str, session_id: &str, caller: &SessionOwner) -> Result<()> {
         // The nonces first, then the authorization: a round 2 racing this abort (a leader that
         // timed out on this node and gave up) must not find the nonces without the authorization,
         // which is a policy refusal. In this order it finds no nonces: an unknown session.
         let cached = self.cache().get(key_id).cloned();
         if let Some(c) = cached {
-            c.cosigner.abort(session_id);
+            if let Err(e) = c.cosigner.abort_as(session_id, caller) {
+                return Err(self.not_session_owner("abort", key_id, caller, e));
+            }
         }
         #[cfg(test)]
         {
@@ -1416,9 +1754,10 @@ impl Node {
             }
         }
         if let Some(g) = &self.sign_guard {
-            g.forget(key_id, session_id);
+            g.forget_as(key_id, session_id, caller);
         }
         self.update_pending_gauge();
+        Ok(())
     }
 
     /// In-flight (round-1, not yet round-2) sign sessions currently held for `key_id`; 0 if the
@@ -1569,6 +1908,7 @@ impl Node {
             )));
         }
         self.refuse_if_staged(key_id)?;
+        let mut waived = None;
         match kind {
             CeremonyKind::Dkg => {
                 if self.keystore.exists(key_id) {
@@ -1576,6 +1916,9 @@ impl Node {
                 }
             }
             CeremonyKind::Refresh => {
+                // Before the share is even unsealed, and before any fence mark or guard.
+                let requested_by = verified.as_ref().map(|v| v.signer_cn.as_str());
+                waived = self.check_refresh_interval(key_id, Some(ceremony_id), requested_by, leader)?;
                 let share = self.keystore.load(key_id)?;
                 if let Some((epoch, digest)) = expect {
                     let mine = share.pkp_digest()?;
@@ -1597,6 +1940,7 @@ impl Node {
         // A fence without an intent (allowed only where intents are not required) never writes a
         // mark, but it is refused under a marked id all the same: otherwise a node that opted out
         // would let any peer re-fence a client's ceremony once its leader's guard went.
+        let requested_by = verified.as_ref().map(|v| v.signer_cn.clone());
         match verified {
             Some(_) => self.mark_fenced(ceremony_id, key_id, leader)?,
             None => self.refuse_if_fenced(ceremony_id)?,
@@ -1605,11 +1949,14 @@ impl Node {
         // here is a second leader for the same ceremony — under ceremony intents, two leaders
         // presenting one client intent. Refused, never joined: two leaders must never drive one
         // ceremony id. (A re-fence never extended a guard either; now it is refused outright.)
-        if !self.fence_created(ceremony_id, key_id, kind.as_str(), leader)? {
+        if !self.fence_created(ceremony_id, key_id, kind.as_str(), leader, None)? {
             return Err(DaemonError::CeremonyRefused(format!(
                 "ceremony {ceremony_id} already holds the guard for {key_id} on this node — a second \
                  fence under one ceremony id (a second leader for one client intent) is refused"
             )));
+        }
+        if let Some((last, at)) = &waived {
+            self.note_waiver_used(key_id, ceremony_id, last, *at, requested_by.as_deref(), leader);
         }
         Ok(())
     }
@@ -1665,6 +2012,103 @@ impl Node {
             )));
         }
         Ok(())
+    }
+
+    /// The refresh-interval verdict for `key_id` on this node now
+    /// ([`crate::refresh_interval::verdict`]). No signing policy (a node built by hand, as some
+    /// tests do; the daemon always installs one): no limit, as no intents.
+    pub fn refresh_interval_verdict(&self, key_id: &str) -> Result<crate::refresh_interval::Verdict> {
+        let Some(g) = &self.sign_guard else { return Ok(crate::refresh_interval::Verdict::Allowed) };
+        let policy = g.verifier().policy();
+        let last = crate::refresh_interval::last_counted(self.book()?.records.values(), key_id);
+        Ok(crate::refresh_interval::verdict(
+            last.as_ref(),
+            crate::ceremony_record::now_ms(),
+            policy.refresh_min_interval_secs,
+            policy.refresh_waiver_ms(),
+        ))
+    }
+
+    /// The leader's own refresh-interval check, on `Signer.Refresh` before it contacts any peer:
+    /// a refresh this node would refuse at its own fence is refused before anything starts.
+    /// `requested_by`: the calling client's CN, for the log.
+    pub fn refuse_refresh_too_soon(&self, key_id: &str, requested_by: Option<&str>) -> Result<()> {
+        self.check_refresh_interval(key_id, None, requested_by, None).map(|_| ())
+    }
+
+    /// Log and count a refresh this node let through the interval under the operator's waiver —
+    /// called only once the fence (or part 1's session) was actually taken under it, so a burst of
+    /// fences for a waived key counts the one that got the guard, not every attempt.
+    fn note_waiver_used(
+        &self,
+        key_id: &str,
+        ceremony_id: &str,
+        w: &crate::refresh_interval::CountedRefresh,
+        waived_at_ms: u64,
+        requested_by: Option<&str>,
+        leader: Option<&str>,
+    ) {
+        metrics::counter!(crate::metrics::REFRESH_INTERVAL_WAIVED).increment(1);
+        tracing::warn!(
+            key_id,
+            ceremony_id,
+            node = self.index().unwrap_or_default(),
+            requested_by = requested_by.unwrap_or("<no intent>"),
+            leader = leader.unwrap_or("<this node>"),
+            last_refresh = %w.ceremony_id,
+            last_refresh_at = %crate::audit_check::fmt_ms(w.at_ms),
+            waived_at = %crate::audit_check::fmt_ms(waived_at_ms),
+            "refresh inside refresh_min_interval_secs let through by \
+             signing_policy.refresh_interval_waived_at (one per key after that time) — remove \
+             the waiver from every node's config once the incident refresh is done"
+        );
+    }
+
+    /// Refuse a refresh of `key_id` within `signing_policy.refresh_min_interval_secs` of the last
+    /// one this node took part in ([`crate::refresh_interval`]), before any guard, fence mark,
+    /// session or crypto. `ceremony_id`: the fence or part 1 asking (`None`: the leader's own
+    /// check on `Signer.Refresh`). `Ok(Some(..))`: let through by the waiver — the caller notes it
+    /// ([`Node::note_waiver_used`]) once it holds the guard. Refusals are counted every time and
+    /// logged at most once a minute per key.
+    fn check_refresh_interval(
+        &self,
+        key_id: &str,
+        ceremony_id: Option<&str>,
+        requested_by: Option<&str>,
+        leader: Option<&str>,
+    ) -> Result<Option<(crate::refresh_interval::CountedRefresh, u64)>> {
+        use crate::refresh_interval::Verdict;
+        match self.refresh_interval_verdict(key_id)? {
+            Verdict::Allowed => Ok(None),
+            Verdict::Waived { last, waived_at_ms } => Ok(Some((last, waived_at_ms))),
+            Verdict::TooSoon { last, next_ms } => {
+                metrics::counter!(crate::metrics::REFRESH_INTERVAL_REFUSALS).increment(1);
+                let interval = self.sign_guard.as_ref().map_or(0, |g| g.verifier().policy().refresh_min_interval_secs);
+                let msg = format!(
+                    "refresh of {key_id} refused by node {}: it took part in refresh {} at {}, less than \
+                     signing_policy.refresh_min_interval_secs ({interval} s) ago; it takes part in the next \
+                     refresh of the key from {}. An incident refresh that cannot wait needs \
+                     signing_policy.refresh_interval_waived_at on every node (docs/ceremonies.md, \
+                     \"Refresh interval\")",
+                    self.index().unwrap_or_default(),
+                    last.ceremony_id,
+                    crate::audit_check::fmt_ms(last.at_ms),
+                    crate::audit_check::fmt_ms(next_ms),
+                );
+                if refresh_refusal_log_due(key_id) {
+                    tracing::warn!(
+                        key_id,
+                        ceremony_id = ceremony_id.unwrap_or("<leader pre-check>"),
+                        requested_by = requested_by.unwrap_or("<no intent>"),
+                        leader = leader.unwrap_or("<this node>"),
+                        last_refresh = %last.ceremony_id,
+                        "{msg} — outside a documented incident nobody refreshes this often: check who holds \
+                         the refresher (and, while signer_may_refresh is on, the driver) certificate"
+                    );
+                }
+                Err(DaemonError::RefreshTooSoon(msg))
+            }
+        }
     }
 
     fn refuse_if_staged(&self, key_id: &str) -> Result<()> {
@@ -1736,7 +2180,7 @@ impl Node {
             (true, false) => self.refuse_if_fenced(ceremony_id)?,
             (false, _) => {}
         }
-        let created = self.acquire_ceremony(key_id, ceremony_id, kind.as_str(), leader, may_create)?;
+        let created = self.acquire_ceremony(key_id, ceremony_id, kind.as_str(), leader, may_create, None)?;
         let result = self.open_session(ceremony_id, key_id, kind, roster, old);
         if result.is_err() && created {
             self.release_ceremony(key_id, ceremony_id);
@@ -1869,7 +2313,9 @@ impl Node {
     ) -> Result<round1::Package> {
         crate::keystore::validate_ceremony_id(ceremony_id)?;
         crate::keystore::validate_key_id(key_id)?;
-        let verified = self.authorize_ceremony(kind, key_id, ceremony_id, intent)?.is_some();
+        let verified_by = self.authorize_ceremony(kind, key_id, ceremony_id, intent)?.map(|v| v.signer_cn);
+        let verified = verified_by.is_some();
+        let mut waived = None;
         let old = match kind {
             CeremonyKind::Dkg => {
                 // `…frost-import-…` ids belong to the split ceremony. Refusing them here, on every
@@ -1888,13 +2334,21 @@ impl Node {
                 if !self.keystore.exists(key_id) {
                     return Err(DaemonError::UnknownKey(key_id.to_string()));
                 }
+                // Again at part 1: where intents are not required, part 1 may run with no fence.
+                waived = self.check_refresh_interval(key_id, Some(ceremony_id), verified_by.as_deref(), leader)?;
                 // No reverse fence over in-flight signs: see `ceremony_fence`.
                 let share = self.keystore.load(key_id)?;
                 Some((share.epoch, share.pkp_digest()?))
             }
         };
         self.check_roster(roster)?;
-        self.start_session(ceremony_id, key_id, kind, roster.to_vec(), old, leader, verified)
+        // A waiver use is noted where the guard is taken: here only when no fence took it first.
+        let fenced = self.guards().get(key_id).is_some_and(|g| g.owner == ceremony_id);
+        let package = self.start_session(ceremony_id, key_id, kind, roster.to_vec(), old, leader, verified)?;
+        if let (Some((last, at)), false) = (&waived, fenced) {
+            self.note_waiver_used(key_id, ceremony_id, last, *at, verified_by.as_deref(), leader);
+        }
+        Ok(package)
     }
 
     /// Part 2: check the leader's round-1 map — exactly the roster, and this node's own package
@@ -2215,6 +2669,7 @@ impl Node {
             peers_settled: false,
             created_ms: now,
             updated_ms: now,
+            resolved_ms: 0,
             quarantined: false,
             split_detected_ms: 0,
             unknown_asked_by: None,
@@ -2285,7 +2740,10 @@ impl Node {
         });
         let others = without_self(round1_map, self.identifier);
         let (key_package, public_key_package) =
-            p.part3(&others, round2_for_me, old.public_key_package, old.key_package)?;
+            // Cloned: `old` wipes its own copy when it drops. frost's refresh_dkg_shares consumes
+            // this clone and drops it without wiping (as it does its intermediate scalars); that
+            // needs an upstream change.
+            p.part3(&others, round2_for_me, old.public_key_package.clone(), old.key_package.clone())?;
         if group_verifying_key_bytes(&public_key_package)? != old_group {
             // Never stage a share whose group key drifted — that would change the node identity.
             return Err(DaemonError::Disagreement(format!(
@@ -2511,6 +2969,7 @@ impl Node {
             state,
             reason,
             updated_ms: now,
+            resolved_ms: now,
             quarantined: aborted && quarantine,
             split_detected_ms: if aborted && split { now } else { 0 },
             ..rec.clone()
@@ -2720,6 +3179,33 @@ impl Node {
 
     /// Ceremonies this node aborted while a peer reports them COMMITTED, quarantine still held:
     /// `rutli_ceremonies_split`.
+    /// Publish `rutli_refreshes_6d{key}`: refreshes of each key this node committed in the last
+    /// 6 days (by commit time), from its ceremony records (a key whose refreshes aged out reads 0).
+    pub fn publish_refresh_gauge(&self) {
+        let Ok(book) = self.book() else { return };
+        let since = crate::ceremony_record::now_ms().saturating_sub(6 * 24 * 3600 * 1000);
+        let keys: std::collections::BTreeSet<&str> =
+            book.records.values().filter(|r| r.kind == "refresh" && !r.key_id.is_empty()).map(|r| r.key_id.as_str()).collect();
+        let counts: Vec<(String, usize)> = keys
+            .into_iter()
+            .map(|k| (k.to_string(), crate::refresh_interval::committed_since(book.records.values(), k, since)))
+            .collect();
+        drop(book);
+        // Keys published before whose records have since been garbage-collected read 0, not stale.
+        static PUBLISHED: std::sync::Mutex<std::collections::BTreeSet<String>> =
+            std::sync::Mutex::new(std::collections::BTreeSet::new());
+        let mut published = PUBLISHED.lock().unwrap_or_else(|p| p.into_inner());
+        let gone: Vec<String> = published.iter().filter(|k| !counts.iter().any(|(c, _)| c == *k)).cloned().collect();
+        for key in gone {
+            metrics::gauge!(crate::metrics::REFRESHES_6D, "key" => key.clone()).set(0.0);
+            published.remove(&key);
+        }
+        for (key, n) in counts {
+            metrics::gauge!(crate::metrics::REFRESHES_6D, "key" => key.clone()).set(n as f64);
+            published.insert(key);
+        }
+    }
+
     pub fn split_count(&self) -> usize {
         self.quarantined_records().iter().filter(|r| r.split_detected_ms != 0).count()
     }
@@ -2754,6 +3240,7 @@ impl Node {
             recovered: true,
             reason: format!("recovered by the operator after: {}", rec.reason),
             updated_ms: now,
+            resolved_ms: now,
             ..rec.clone()
         };
         self.record_store.write_recovery(&rec, &done)?;
@@ -2857,7 +3344,16 @@ pub struct StaleMark {
     pub own_epoch: u64,
     /// The newer committed epoch that makes it stale.
     pub newer_epoch: u64,
+    /// The mark comes from this node's own committed ceremony record, not from peers' answers.
+    pub by_own_record: bool,
     pub reason: String,
+}
+
+impl StaleMark {
+    /// Whether `other` says the same thing: the reason's wording may differ between passes.
+    pub(crate) fn same_state(&self, other: &StaleMark) -> bool {
+        (self.own_epoch, self.newer_epoch, self.by_own_record) == (other.own_epoch, other.newer_epoch, other.by_own_record)
+    }
 }
 
 /// What a leader needs to sign with key K: the threshold, its own sharing, and whether it is stale.
@@ -2878,12 +3374,47 @@ pub struct StagedOutcome {
 
 /// Hosted keys may never live under an id reserved for the split ceremony (`…frost-import-…`).
 /// The refusal for a write under a tombstoned id: ALREADY_EXISTS, naming the break-glass.
+/// Whether a refresh-interval refusal for `key_id` should be logged now: at most once a minute per
+/// key (every refusal is counted in `rutli_refresh_interval_refusals_total`), so a client looping
+/// refreshes cannot flood the log.
+fn refresh_refusal_log_due(key_id: &str) -> bool {
+    static LAST: std::sync::Mutex<Option<std::collections::HashMap<String, u64>>> = std::sync::Mutex::new(None);
+    let minute = crate::ceremony_record::now_ms() / 60_000;
+    let mut last = LAST.lock().unwrap_or_else(|p| p.into_inner());
+    let map = last.get_or_insert_with(Default::default);
+    // Key ids that reach this point passed validate_key_id and exist here; bound the map anyway.
+    if map.len() > 256 {
+        map.clear();
+    }
+    map.insert(key_id.to_string(), minute) != Some(minute)
+}
+
 pub(crate) fn tombstoned(key_id: &str) -> DaemonError {
     DaemonError::KeyExists(format!(
         "{key_id} is tombstoned (deleted): hosted key ids are never reused — undelete it \
          (rutli-cosigner hosted-undelete, within the grace period), or clear the tombstone on EVERY \
          node (rutli-cosigner hosted-clear-tombstone) before generating it again"
     ))
+}
+
+/// The refusal of a push into an id this node does not hold, from a caller that does not hold
+/// this node's generation fence for it under the ceremony id it names.
+pub(crate) fn unfenced_push(key_id: &str, ceremony_id: &str, caller: Option<&str>) -> DaemonError {
+    DaemonError::HostedPushRefused(format!(
+        "{key_id} is not held here, and {} holds no generation fence for it on this node under \
+         ceremony {ceremony_id:?} — a key this node lacks is pulled from two agreeing peers, never \
+         accepted from one",
+        caller.map(|c| format!("caller {c:?}")).unwrap_or_else(|| "the caller".into())
+    ))
+}
+
+/// Whether `ceremony_id` has the shape a generate intent names (`genkey-` and 32 lowercase hex
+/// digits, [`crate::intent::generate_ceremony_id`]): the only genkey ids that can carry a fence
+/// mark. A 0.4.0 leader's random ids (`genkey-<uuid>`) never do.
+fn is_generate_ceremony_id(ceremony_id: &str) -> bool {
+    ceremony_id
+        .strip_prefix("genkey-")
+        .is_some_and(|h| h.len() == 2 * crate::intent::REQUEST_ID_LEN && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
 }
 
 /// The refusal of a ceremony part (or a second fence) from a caller that is not the ceremony's
@@ -3102,6 +3633,12 @@ impl Node {
     /// [`Node::hosted_store`], noting the genkey ceremony that created it here (`created_by`), so
     /// that generation — and only it, while it holds its fence — may roll it back.
     pub fn hosted_store_for(&self, key_id: &str, key: &crate::hosted::HostedKey, created_by: Option<&str>) -> Result<()> {
+        self.hosted_store_created(key_id, key, created_by).map(|_| ())
+    }
+
+    /// [`Node::hosted_store_for`], returning whether this call created the file (`false`: an
+    /// identical copy was already here).
+    fn hosted_store_created(&self, key_id: &str, key: &crate::hosted::HostedKey, created_by: Option<&str>) -> Result<bool> {
         self.hosted_ctx()?;
         // A peer may never push a hosted key under an id reserved for the split ceremony: it would
         // squat on an import, or (with a rename-based write) replace an installed share.
@@ -3124,27 +3661,40 @@ impl Node {
                 HostedState::Absent => return Err(DaemonError::UnknownKey(key_id.to_string())),
             };
             if node.hosted_commitment(&existing)? != node.hosted_commitment(key)? {
-                return Err(DaemonError::KeyExists(format!(
-                    "{key_id} already exists here with different material — refusing to overwrite"
-                )));
+                // The wording is matched by leaders of the next release on a 0.4.0 node's refusal
+                // (`orchestrator::is_material_conflict`); keep "different material" in it.
+                return Err(DaemonError::HostedConflict {
+                    key_id: key_id.to_string(),
+                    detail: "it already exists here with different material — refusing to overwrite".into(),
+                });
             }
             Ok(()) // identical replica: idempotent no-op
         };
         if self.keystore.exists(key_id) {
-            return identical_or_conflict(self);
+            return identical_or_conflict(self).map(|_| false);
         }
         // create, not save: a file that appeared since the check (a racing push, a FROST share, a
         // tombstone) is never renamed over; it is compared like any existing one.
         match self.keystore.create_hosted(key_id, key) {
-            Err(DaemonError::KeyExists(_)) => identical_or_conflict(self),
+            Err(DaemonError::KeyExists(_)) => identical_or_conflict(self).map(|_| false),
             Ok(()) => {
+                // Bound to the guard instance the ceremony holds now: a later fence under the same
+                // ceremony id (after this one was released or lapsed) is another instance and can
+                // never roll this key back.
                 if let Some(c) = created_by {
-                    crate::sync::recover(&self.hosted_created_in, "hosted_created_in")
-                        .insert(key_id.to_string(), c.to_string());
+                    let started = self
+                        .guards()
+                        .get(key_id)
+                        .filter(|g| g.owner == c && g.kind == "genkey")
+                        .map(|g| g.started);
+                    if let Some(started) = started {
+                        crate::sync::recover(&self.hosted_created_in, "hosted_created_in")
+                            .insert(key_id.to_string(), (c.to_string(), started));
+                    }
                 }
-                Ok(())
+                Ok(true)
             }
-            other => other,
+            Err(e) => Err(e),
         }
     }
 
@@ -3168,6 +3718,50 @@ impl Node {
     pub fn with_delete_grace(mut self, grace: Duration) -> Self {
         self.delete_grace = grace;
         self
+    }
+
+    /// `hosted_keys.write_quorum` (see the field).
+    pub fn with_hosted_write_quorum(mut self, q: usize) -> Self {
+        self.hosted_write_quorum = q.max(1);
+        self
+    }
+
+    pub fn hosted_write_quorum(&self) -> usize {
+        self.hosted_write_quorum
+    }
+
+    /// Take one read-repair fan-out from this node's ceiling ([`REPAIR_FANOUT_PER_SEC`]).
+    pub fn take_repair_token(&self) -> bool {
+        let mut b = crate::sync::recover(&self.repair_bucket, "rate_limiter");
+        let now = Instant::now();
+        let refill = now.duration_since(b.1).as_secs_f64() * REPAIR_FANOUT_PER_SEC;
+        b.0 = (b.0 + refill).min(REPAIR_FANOUT_BURST);
+        b.1 = now;
+        if b.0 >= 1.0 {
+            b.0 -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// This node's tombstone for `key_id` as `ListKeys` reports it, if it holds one: what a peer's
+    /// `FetchKey` with `include_tombstone` gets, so it never pulls a deleted key back.
+    pub fn hosted_tombstone_manifest(&self, key_id: &str) -> Result<Option<crate::pb::KeyManifest>> {
+        use prost::Message;
+        self.hosted_ctx()?;
+        match self.hosted_state(key_id)? {
+            HostedState::Tombstone(t) => Ok(Some(crate::pb::KeyManifest {
+                commitment: hex::decode(&t.commitment).unwrap_or_default(),
+                delete_intent: t.intent()?.encode_to_vec(),
+                tombstone: true,
+                deleted_at_ms: t.deleted_at_ms,
+                spec: t.spec.clone(),
+                created_at: t.created_at,
+                key_id: t.key_id.clone(),
+            })),
+            _ => Ok(None),
+        }
     }
 
     /// Delete hosted key `key_id` on this node by the client's delete intent (audit M2): verify it
@@ -3276,12 +3870,22 @@ impl Node {
     /// guard, may roll it back — not any peer that learned the generation's ceremony id.
     pub fn hosted_rollback_purge_from(&self, ceremony_id: &str, key_id: &str, leader: Option<&str>) -> Result<bool> {
         self.hosted_ctx()?;
-        let fenced = self.guards().get(key_id).is_some_and(|g| {
-            g.owner == ceremony_id && g.kind == "genkey" && g.leader.as_deref() == leader
-        });
+        let guard_started = self
+            .guards()
+            .get(key_id)
+            .filter(|g| g.owner == ceremony_id && g.kind == "genkey" && g.leader.as_deref() == leader)
+            .map(|g| g.started);
+        let fenced = guard_started.is_some();
         let created_here = crate::sync::recover(&self.hosted_created_in, "hosted_created_in")
             .get(key_id)
-            .is_some_and(|c| c == ceremony_id);
+            .is_some_and(|(c, started)| c == ceremony_id && Some(*started) == guard_started);
+        if fenced && !created_here && matches!(self.hosted_state(key_id)?, HostedState::Absent) {
+            // Nothing this generation created here (its push never landed, or was refused): there
+            // is nothing to roll back. The rollback still ends this fence instance here, so a push
+            // of the same generation that is still checking its peers can no longer store.
+            self.end_genkey_instance(ceremony_id, key_id);
+            return Ok(false);
+        }
         if !(fenced && created_here) {
             return Err(crate::intent::refused_delete(
                 "rollback",
@@ -3291,14 +3895,25 @@ impl Node {
                 ),
             ));
         }
-        match self.hosted_state(key_id)? {
+        let outcome = match self.hosted_state(key_id)? {
             HostedState::Live(_) => {
                 self.keystore.delete(key_id)?;
-                crate::sync::recover(&self.hosted_created_in, "hosted_created_in").remove(key_id);
-                Ok(true)
+                true
             }
-            HostedState::Absent => Ok(false),
-            _ => Err(DaemonError::Config(format!("{key_id} is no longer the key this generation created"))),
+            HostedState::Absent => false,
+            _ => return Err(DaemonError::Config(format!("{key_id} is no longer the key this generation created"))),
+        };
+        self.end_genkey_instance(ceremony_id, key_id);
+        Ok(outcome)
+    }
+
+    /// End generation `ceremony_id`'s fence on `key_id` here after its rollback: the guard and the
+    /// created-by marker go, so nothing of that generation can be stored or purged here any more.
+    fn end_genkey_instance(&self, ceremony_id: &str, key_id: &str) {
+        self.release_ceremony(key_id, ceremony_id);
+        let mut created = crate::sync::recover(&self.hosted_created_in, "hosted_created_in");
+        if created.get(key_id).is_some_and(|(c, _)| c == ceremony_id) {
+            created.remove(key_id);
         }
     }
 
@@ -3441,10 +4056,155 @@ impl Node {
                 "wrapped key spec does not match the declared spec".into(),
             ));
         }
-        // A peer's material must be self-consistent before it is stored: an EC key whose public
-        // half is not its own would have this node serve a public key it cannot decrypt for.
+        // A peer's material must be self-consistent before it is stored: an EC or RSA key whose
+        // public half is not its own would have this node serve a public key it cannot decrypt for.
         key.validate()?;
+        // And its times bounded: a creation or undelete time in the future would make the copy
+        // refuse every delete until then.
+        key.check_times(crate::intent::now_ms(), self.hosted_skew_ms())?;
         Ok(key)
+    }
+
+    /// The clock skew allowance hosted-key timestamps are checked with: the signing policy's
+    /// `clock_skew_secs`, or its default without a policy (tests, tools).
+    pub fn hosted_skew_ms(&self) -> u64 {
+        self.sign_guard
+            .as_ref()
+            .map(|g| g.verifier().skew_ms())
+            .unwrap_or(crate::config::DEFAULT_CLOCK_SKEW_SECS * 1000)
+    }
+
+    /// Whether this node's guard for `key_id` is the generation fence of `ceremony_id`, taken by
+    /// `leader` (the caller's certificate CN; `None` for this node's own in-process leader). The
+    /// same test the rollback purge applies: only the caller that fenced a generation here may
+    /// create the key here.
+    pub fn hosted_genkey_fenced_by(&self, key_id: &str, ceremony_id: &str, leader: Option<&str>) -> bool {
+        self.guards()
+            .get(key_id)
+            .is_some_and(|g| g.owner == ceremony_id && g.kind == "genkey" && g.leader.as_deref() == leader)
+    }
+
+    /// Why a push of a `spec` key under `key_id` from `leader` (the caller's certificate CN; `None`
+    /// for this node's own leader) under generation `ceremony_id` is refused here, if it is: the
+    /// reason for `rutli_hosted_replication_refusals_total` and the error. A push is accepted only
+    /// under the genkey guard that generation's fence took here, from the same caller —
+    /// `unfenced` otherwise — for the spec the fence declared (`spec`), and, where generate intents
+    /// are required, only under a guard taken with a verified intent (`intent`; a guard can only
+    /// lack one if the node's switch was off when it was taken).
+    pub fn genkey_push_refusal(
+        &self,
+        key_id: &str,
+        ceremony_id: &str,
+        leader: Option<&str>,
+        spec: &str,
+    ) -> Option<(&'static str, DaemonError)> {
+        let auth = {
+            let guards = self.guards();
+            match guards.get(key_id) {
+                Some(g) if g.owner == ceremony_id && g.kind == "genkey" && g.leader.as_deref() == leader => {
+                    g.genkey.clone().unwrap_or_default()
+                }
+                _ => return Some(("unfenced", unfenced_push(key_id, ceremony_id, leader))),
+            }
+        };
+        if let Some(declared) = auth.spec.as_deref() {
+            if declared != spec {
+                return Some((
+                    "spec",
+                    DaemonError::HostedPushRefused(format!(
+                        "generation {ceremony_id:?} of {key_id} was fenced here for a {declared} key; a push of \
+                         a {spec} key under it is refused"
+                    )),
+                ));
+            }
+        }
+        if auth.intent.is_none() && self.ceremony_intent_required() {
+            return Some((
+                "intent",
+                DaemonError::HostedPushRefused(format!(
+                    "generation {ceremony_id:?} of {key_id} holds no verified generate intent on this node, \
+                     which requires one (signing_policy.require_ceremony_intent) — refused"
+                )),
+            ));
+        }
+        None
+    }
+
+    /// What a peer's push of `key` under `key_id` meets here, before anything is stored:
+    /// `Some(commitment)` when this node already holds the identical key (an idempotent no-op),
+    /// `None` when the id is absent. A different key here is [`DaemonError::HostedConflict`]; a
+    /// tombstone, a FROST share, a reserved or non-hosted id are refused as by
+    /// [`Node::hosted_store_for`].
+    pub fn hosted_push_check(&self, key_id: &str, key: &crate::hosted::HostedKey) -> Result<Option<Vec<u8>>> {
+        self.hosted_ctx()?;
+        refuse_reserved_for_hosted(key_id)?;
+        refuse_unless_hosted_id(key_id)?;
+        match self.hosted_state(key_id)? {
+            HostedState::Absent => Ok(None),
+            HostedState::Tombstone(_) => Err(tombstoned(key_id)),
+            HostedState::Frost => Err(DaemonError::KeyExists(format!("{key_id} is a FROST share here"))),
+            HostedState::Live(existing) => {
+                let mine = self.hosted_commitment(&existing)?;
+                if mine != self.hosted_commitment(key)? {
+                    return Err(DaemonError::HostedConflict {
+                        key_id: key_id.to_string(),
+                        detail: "it already exists here with different material — refusing to overwrite".into(),
+                    });
+                }
+                Ok(Some(mine))
+            }
+        }
+    }
+
+    /// Store a peer's push: only while `leader` holds this node's generation fence for `key_id`
+    /// under `ceremony_id` ([`Node::hosted_genkey_fenced_by`]), noting the ceremony so that its
+    /// rollback, and only it, may remove the key again. An identical copy already here is a no-op.
+    /// Returns this node's commitment to what it holds.
+    pub fn hosted_store_pushed(
+        &self,
+        key_id: &str,
+        key: &crate::hosted::HostedKey,
+        ceremony_id: &str,
+        leader: Option<&str>,
+    ) -> Result<Vec<u8>> {
+        if let Some(c) = self.hosted_push_check(key_id, key)? {
+            return Ok(c);
+        }
+        if let Some((_, e)) = self.genkey_push_refusal(key_id, ceremony_id, leader, key.spec.as_str()) {
+            return Err(e);
+        }
+        let created = self.hosted_store_created(key_id, key, Some(ceremony_id))?;
+        // The generation may have been rolled back while this push was checking its peers (the
+        // rollback ends the fence instance here): then the copy just written is this push's own
+        // orphan, and it goes again.
+        if created && self.genkey_push_refusal(key_id, ceremony_id, leader, key.spec.as_str()).is_some() {
+            self.keystore.delete(key_id)?;
+            crate::sync::recover(&self.hosted_created_in, "hosted_created_in").remove(key_id);
+            return Err(unfenced_push(key_id, ceremony_id, leader));
+        }
+        self.hosted_commitment(key)
+    }
+
+    /// This node's mesh peers (every other roster node, as this node dials it); empty before the
+    /// mesh is attached (tools, some tests).
+    pub fn mesh_peers(&self) -> Vec<Arc<dyn crate::peer::PeerApi>> {
+        self.mesh.get().cloned().unwrap_or_default()
+    }
+
+    /// Hosted keys held here whose creation or undelete time lies in the future beyond the clock
+    /// skew allowance (they refuse every delete until then): (key id, why). Unreadable files are
+    /// skipped (they are counted by the inventory).
+    pub fn hosted_future_timestamps(&self) -> Result<Vec<(String, String)>> {
+        let (now, skew) = (crate::intent::now_ms(), self.hosted_skew_ms());
+        let mut out = Vec::new();
+        for key_id in self.hosted_list()? {
+            if let Ok(key) = self.hosted_load(&key_id) {
+                if let Err(e) = key.check_times(now, skew) {
+                    out.push((key_id, e.to_string()));
+                }
+            }
+        }
+        Ok(out)
     }
 
     // -- crypto operations served to the driver --
@@ -3632,6 +4392,7 @@ mod guard_tests {
                 kind: "genkey",
                 started: Instant::now(),
                 session: true,
+                genkey: None,
             },
         );
 
@@ -4043,10 +4804,18 @@ mod sign_policy_race_tests {
     /// Three in-process nodes (2-of-3) that require a signing intent for every signature, key
     /// `KEY` generated.
     async fn rig() -> Rig {
+        rig_with(true).await
+    }
+
+    /// [`rig`] with `require_intent` as given.
+    async fn rig_with(require_intent: bool) -> Rig {
         let tmp = tempfile::tempdir().unwrap();
         let pki = TestPki::new();
-        let policy =
-            SigningPolicyConfig { require_intent: true, require_ceremony_intent: Some(false), ..Default::default() };
+        let policy = SigningPolicyConfig {
+            require_intent: Some(require_intent),
+            require_ceremony_intent: Some(false),
+            ..Default::default()
+        };
         let nodes: Vec<Arc<Node>> = (1..=3u16)
             .map(|i| {
                 let root = tmp.path().join(format!("n{i}"));
@@ -4087,6 +4856,7 @@ mod sign_policy_race_tests {
                 not_after_ms: now + 120_000,
                 approval_nonce: Vec::new(),
                 approvals: Vec::new(),
+                ..Default::default()
             };
             intent::sign_intent(&self.pki.signer("driver"), &unsigned).unwrap()
         }
@@ -4178,7 +4948,7 @@ mod sign_policy_race_tests {
         }));
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
-        metrics::with_local_recorder(&recorder, || node.abort_sign(KEY, session));
+        metrics::with_local_recorder(&recorder, || node.abort_sign_as(KEY, session, &SessionOwner::Local)).unwrap();
         *node.hooks.mid_abort_sign.lock().unwrap() = None;
 
         let err = answer.lock().unwrap().take().expect("the round 2 ran").expect_err("an aborted session never signs");
@@ -4188,7 +4958,258 @@ mod sign_policy_race_tests {
         assert!(!out.contains("rutli_sign_policy_refusals_total"), "not counted as a policy refusal:\n{out}");
         assert_eq!(node.pending_sign_count(KEY), 0);
         assert_eq!(r.released(), (0, 0), "no marker burned, nothing journaled");
-        assert!(node.sign_guard().unwrap().take(KEY, session).is_none(), "no authorization is left behind");
+        assert!(!node.sign_guard().unwrap().holds(KEY, session), "no authorization is left behind");
+    }
+
+    fn peer(cn: &str) -> SessionOwner {
+        SessionOwner::Peer(cn.into())
+    }
+
+    fn line(out: &str, series: &str) -> Option<String> {
+        out.lines().find(|l| l.starts_with(series)).map(str::to_owned)
+    }
+
+    /// A member of a session knows its id. Its round 2 or abort for a session another leader
+    /// opened on this node is refused before anything is taken, on that leader's peers and on the
+    /// leader's own share: the nonces and the authorization stay, nothing is charged or journaled,
+    /// the refusal is counted as such (not as an unknown session or a policy refusal), and the
+    /// leader's own round 2 then signs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_round2_or_abort_from_a_caller_that_did_not_open_the_session_takes_nothing() {
+        let r = rig().await;
+        let msg = rutli_frost_core::dealer::canton_test_message(b"owned sessions");
+        let session = "owned";
+        let i1 = r.intent(&msg, 3);
+        let digest = intent::intent_digest(&i1);
+        let ctx =
+            Round1Ctx { message: Some(msg.to_vec()), signers: Some(vec![1, 2]), intent: Some(i1), ..Default::default() };
+        // Node 2 leads: its own share in process, node 1 over the mesh as `cosigner2`.
+        let leader = peer("cosigner2");
+        let c1 = r.nodes[0].sign_round1_as(KEY, session, &ctx, &leader).unwrap();
+        let c2 = r.nodes[1].sign_round1(KEY, session, &ctx).unwrap();
+        let cs = BTreeMap::from([(r.nodes[0].identifier, c1), (r.nodes[1].identifier, c2)]);
+
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            for (n, intruder) in [
+                (&r.nodes[0], peer("cosigner3")),
+                (&r.nodes[0], SessionOwner::Unidentified),
+                (&r.nodes[0], SessionOwner::Local),
+                (&r.nodes[1], peer("cosigner3")),
+                (&r.nodes[1], peer("cosigner1")),
+                (&r.nodes[1], SessionOwner::Unidentified),
+            ] {
+                let err = n.sign_round2_as(KEY, session, &msg, &cs, Some(digest), &intruder).unwrap_err();
+                assert!(
+                    matches!(&err, DaemonError::Core(rutli_frost_core::CoreError::NotSessionOwner { caller, .. }) if *caller == intruder.to_string()),
+                    "{intruder}: {err:?}"
+                );
+                assert_eq!(tonic::Status::from(err).code(), tonic::Code::PermissionDenied);
+                let err = n.abort_sign_as(KEY, session, &intruder).unwrap_err();
+                assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::NotSessionOwner { .. })), "{err:?}");
+            }
+        });
+        let out = handle.render();
+        assert_eq!(line(&out, "rutli_sign_session_owner_refusals_total{call=\"round2\"}").as_deref(),
+            Some("rutli_sign_session_owner_refusals_total{call=\"round2\"} 6"), "{out}");
+        assert_eq!(line(&out, "rutli_sign_session_owner_refusals_total{call=\"abort\"}").as_deref(),
+            Some("rutli_sign_session_owner_refusals_total{call=\"abort\"} 6"), "{out}");
+        assert!(!out.contains("rutli_sign_round2_unknown_session_total"), "not an unknown session:\n{out}");
+        assert!(!out.contains("rutli_sign_policy_refusals_total"), "not a policy refusal:\n{out}");
+        assert!(!out.contains("rutli_sign_journal_entries_total"), "nothing journaled:\n{out}");
+        assert_eq!((r.nodes[0].pending_sign_count(KEY), r.nodes[1].pending_sign_count(KEY)), (1, 1));
+        assert_eq!(r.released(), (0, 0), "no marker burned, nothing journaled");
+
+        // The leader's own round 2s still find nonces and authorization: one signature.
+        let s1 = r.nodes[0].sign_round2_as(KEY, session, &msg, &cs, Some(digest), &leader).unwrap();
+        let s2 = r.nodes[1].sign_round2_with(KEY, session, &msg, &cs, Some(digest)).unwrap();
+        let shares = BTreeMap::from([(r.nodes[0].identifier, s1), (r.nodes[1].identifier, s2)]);
+        let sig = r.nodes[1].aggregate(KEY, &msg, &cs, &shares).unwrap();
+        assert!(crate::verify_key::signature_verifies(&r.group, &msg, &sig));
+        assert_eq!(r.released(), (1, 1), "one marker, one journal entry");
+    }
+
+    /// The opener's own abort still drops its session, nonces and authorization; a stranger's
+    /// abort of a session that is gone is not a refusal.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_opener_aborts_its_own_session() {
+        let r = rig().await;
+        let msg = rutli_frost_core::dealer::canton_test_message(b"opener aborts");
+        let ctx = Round1Ctx {
+            message: Some(msg.to_vec()),
+            signers: Some(vec![1, 2]),
+            intent: Some(r.intent(&msg, 4)),
+            ..Default::default()
+        };
+        let node = &r.nodes[0];
+        node.sign_round1_as(KEY, "mine", &ctx, &peer("cosigner2")).unwrap();
+        node.abort_sign_as(KEY, "mine", &peer("cosigner2")).unwrap();
+        assert_eq!(node.pending_sign_count(KEY), 0);
+        assert!(!node.sign_guard().unwrap().holds(KEY, "mine"), "no authorization is left behind");
+        node.abort_sign_as(KEY, "mine", &peer("cosigner3")).unwrap();
+
+        // The in-process leader's own: `abort_sign` is the local owner.
+        node.sign_round1(KEY, "local", &ctx).unwrap();
+        node.abort_sign_as(KEY, "local", &SessionOwner::Local).unwrap();
+        assert_eq!(node.pending_sign_count(KEY), 0);
+    }
+
+    /// Sessions open at once for one signing request, per opener: a replayed intent opens at most
+    /// [`MAX_PENDING_SIGN_SESSIONS_PER_REQUEST`]; the same opener's other requests, and other
+    /// openers with the same intent, keep their room.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn one_request_opens_a_bounded_number_of_sessions_per_opener() {
+        let r = rig().await;
+        let node = &r.nodes[0];
+        let msg = rutli_frost_core::dealer::canton_test_message(b"one request");
+        let ctx = |request: u8| Round1Ctx {
+            message: Some(msg.to_vec()),
+            signers: Some(vec![1, 2]),
+            intent: Some(r.intent(&msg, request)),
+            ..Default::default()
+        };
+        let (replayed, bad) = (ctx(7), peer("cosigner3"));
+        for i in 0..MAX_PENDING_SIGN_SESSIONS_PER_REQUEST {
+            node.sign_round1_as(KEY, &format!("r7-{i}"), &replayed, &bad).unwrap();
+        }
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        let err = metrics::with_local_recorder(&recorder, || node.sign_round1_as(KEY, "r7-x", &replayed, &bad)).unwrap_err();
+        match &err {
+            DaemonError::Core(rutli_frost_core::CoreError::SessionsFull { cap_kind, open, cap }) => {
+                assert_eq!((*cap_kind, *open, *cap), (rutli_frost_core::session::PendingCap::Request, 20, 20));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(err.to_string().contains("for this signing request from this opener"), "{err}");
+        assert_eq!(tonic::Status::from(err).code(), tonic::Code::Unavailable);
+        let out = handle.render();
+        assert!(out.contains("rutli_sign_sessions_refused_total{cap=\"request\"} 1"), "{out}");
+        node.sign_round1_as(KEY, "r8", &ctx(8), &bad).unwrap();
+        node.sign_round1_as(KEY, "r7-honest", &replayed, &peer("cosigner2")).unwrap();
+        node.sign_round1(KEY, "r7-local", &replayed).unwrap();
+        assert_eq!(node.pending_sign_count(KEY), MAX_PENDING_SIGN_SESSIONS_PER_REQUEST + 3);
+    }
+
+    /// Once one opener holds a request's cap, a further replay of that request is refused before
+    /// its intent is verified: a copy whose signature is broken gets the same cap refusal, which it
+    /// could not if it had been verified. Another request id from the same opener is verified as
+    /// usual (and the broken copy refused for its signature).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_replayed_request_at_its_cap_is_refused_before_its_intent_is_verified() {
+        let r = rig().await;
+        let node = &r.nodes[0];
+        let msg = rutli_frost_core::dealer::canton_test_message(b"replay at the cap");
+        let bad = peer("cosigner3");
+        let ctx = |intent| Round1Ctx { message: Some(msg.to_vec()), signers: Some(vec![1, 2]), intent: Some(intent), ..Default::default() };
+        let broken = |request: u8| {
+            let mut i = r.intent(&msg, request);
+            let last = i.signature.len() - 1;
+            i.signature[last] ^= 1;
+            i
+        };
+        for i in 0..MAX_PENDING_SIGN_SESSIONS_PER_REQUEST {
+            node.sign_round1_as(KEY, &format!("r7-{i}"), &ctx(r.intent(&msg, 7)), &bad).unwrap();
+        }
+        let err = node.sign_round1_as(KEY, "r7-broken", &ctx(broken(7)), &bad).unwrap_err();
+        assert!(
+            matches!(err, DaemonError::Core(rutli_frost_core::CoreError::SessionsFull {
+                cap_kind: rutli_frost_core::session::PendingCap::Request, .. })),
+            "refused at the cap, not for the signature: {err:?}"
+        );
+        let err = node.sign_round1_as(KEY, "r9-broken", &ctx(broken(9)), &bad).unwrap_err();
+        assert!(matches!(err, DaemonError::PolicyRefused(ref m) if m.contains("signature")), "{err:?}");
+        assert_eq!(node.pending_sign_count(KEY), MAX_PENDING_SIGN_SESSIONS_PER_REQUEST);
+    }
+
+    /// A round 2 that took its authorization, then found the session's nonces owned by another
+    /// caller (the session was aborted and opened again under the same id in between), is refused
+    /// and leaves the new session exactly as it was: nonces, authorization, and its own round 2.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_round2_refused_after_taking_its_authorization_leaves_the_new_session_intact() {
+        let r = rig().await;
+        let node = r.nodes[0].clone();
+        let msg = rutli_frost_core::dealer::canton_test_message(b"changed hands");
+        let session = "changes-hands";
+        let i1 = r.intent(&msg, 11);
+        let digest = intent::intent_digest(&i1);
+        let ctx = Round1Ctx { message: Some(msg.to_vec()), signers: Some(vec![1, 2]), intent: Some(i1), ..Default::default() };
+        let (a, b) = (peer("cosigner2"), peer("cosigner3"));
+        node.sign_round1_as(KEY, session, &ctx, &a).unwrap();
+        let c2 = r.nodes[1].sign_round1(KEY, session, &ctx).unwrap();
+
+        // Between A's authorization take and its nonce take: A's session goes, B opens the id.
+        let reopened = Arc::new(Mutex::new(None));
+        *node.hooks.after_round2_held.lock().unwrap() = Some(Arc::new({
+            let (n, ctx, a, b, reopened) = (Arc::downgrade(&node), ctx.clone(), a.clone(), b.clone(), reopened.clone());
+            move |key: &str, session: &str| {
+                let n = n.upgrade().unwrap();
+                n.abort_sign_as(key, session, &a).unwrap();
+                *reopened.lock().unwrap() = Some(n.sign_round1_as(key, session, &ctx, &b).unwrap());
+            }
+        }));
+        let stale = BTreeMap::from([(node.identifier, c2), (r.nodes[1].identifier, c2)]);
+        let err = node.sign_round2_as(KEY, session, &msg, &stale, Some(digest), &a).unwrap_err();
+        *node.hooks.after_round2_held.lock().unwrap() = None;
+        assert!(matches!(err, DaemonError::Core(rutli_frost_core::CoreError::NotSessionOwner { .. })), "{err:?}");
+        assert_eq!(node.pending_sign_count(KEY), 1);
+        assert!(node.sign_guard().unwrap().holds(KEY, session), "B's authorization is still there");
+        assert_eq!(r.released(), (0, 0));
+
+        let c1 = reopened.lock().unwrap().take().unwrap();
+        let cs = BTreeMap::from([(node.identifier, c1), (r.nodes[1].identifier, c2)]);
+        node.sign_round2_as(KEY, session, &msg, &cs, Some(digest), &b).expect("B's round 2 signs");
+        assert_eq!(r.released(), (1, 1));
+    }
+
+    /// With `require_intent` off, round 1 without an intent costs nothing at all, so the cap per
+    /// opener is all that bounds one opener: it fills its own part and every other opener still
+    /// opens sessions. Only four openers at their caps fill the key, and that refusal says so.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn without_intents_one_opener_fills_only_its_own_part_of_the_key() {
+        let r = rig_with(false).await;
+        let node = &r.nodes[0];
+        let ctx = Round1Ctx::default();
+        let openers = [peer("cosigner3"), peer("cosigner2"), SessionOwner::Local, SessionOwner::Unidentified];
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            for (k, opener) in openers.iter().enumerate() {
+                for i in 0..MAX_PENDING_SIGN_SESSIONS_PER_OPENER {
+                    node.sign_round1_as(KEY, &format!("o{k}-{i}"), &ctx, opener).unwrap();
+                }
+                let err = node.sign_round1_as(KEY, &format!("o{k}-x"), &ctx, opener).unwrap_err();
+                assert!(
+                    matches!(err, DaemonError::Core(rutli_frost_core::CoreError::SessionsFull {
+                        cap_kind: rutli_frost_core::session::PendingCap::Opener, .. })),
+                    "{opener}: {err:?}"
+                );
+                // Up to the key's total, the next opener still gets in.
+                if k + 1 < openers.len() {
+                    node.sign_round1_as(KEY, &format!("probe-{k}"), &ctx, &openers[k + 1]).unwrap();
+                    node.abort_sign_as(KEY, &format!("probe-{k}"), &openers[k + 1]).unwrap();
+                }
+            }
+            assert_eq!(node.pending_sign_count(KEY), MAX_PENDING_SIGN_SESSIONS_PER_KEY);
+            let err = node.sign_round1_as(KEY, "fifth", &ctx, &peer("cosigner4")).unwrap_err();
+            assert!(
+                matches!(err, DaemonError::Core(rutli_frost_core::CoreError::SessionsFull {
+                    cap_kind: rutli_frost_core::session::PendingCap::Key, .. })),
+                "{err:?}"
+            );
+            assert!(err.to_string().contains("for this key from all openers"), "{err}");
+        });
+        let out = handle.render();
+        assert!(out.contains("rutli_sign_sessions_refused_total{cap=\"opener\"} 4"), "{out}");
+        assert!(out.contains("rutli_sign_sessions_refused_total{cap=\"key\"} 1"), "{out}");
+        assert!(out.contains("rutli_sign_intent_absent_total"), "accepted without intents:\n{out}");
+
+        // Room comes back as an opener's sessions go.
+        for i in 0..MAX_PENDING_SIGN_SESSIONS_PER_OPENER {
+            node.abort_sign_as(KEY, &format!("o0-{i}"), &openers[0]).unwrap();
+        }
+        node.sign_round1_as(KEY, "fifth", &ctx, &peer("cosigner4")).unwrap();
     }
 }
 
@@ -4224,5 +5245,44 @@ mod hosted_id_tests {
             assert_eq!(routing_tag(id), None, "{id}");
             assert!(matches!(refuse_unless_hosted_id(id), Err(DaemonError::NotHostedKeyId(_))), "{id}");
         }
+    }
+}
+
+#[cfg(test)]
+mod dkg_existing_tests {
+    use super::*;
+    use crate::peer::{LocalPeer, PeerApi};
+
+    /// `DkgReply.existing` / `origin_ceremony_id`: a new key names its own ceremony; a second DKG
+    /// for the id returns the key with `existing`, and the leader can name the DKG that created it.
+    #[tokio::test]
+    async fn a_repeated_dkg_says_the_key_existed_and_which_ceremony_made_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let nodes: Vec<Arc<Node>> = (1..=3u16)
+            .map(|i| {
+                let ks = KeyStore::open(tmp.path().join(format!("n{i}"))).unwrap();
+                Arc::new(Node::new(Identifier::try_from(i).unwrap(), 3, 2, ks))
+            })
+            .collect();
+        crate::peer::wire_local_mesh(&nodes).unwrap();
+        let peers: Vec<Arc<dyn PeerApi>> =
+            nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+
+        let first = crate::orchestrator::run_dkg_outcome(&peers, "k", None).await.unwrap();
+        assert!(!first.existing);
+        let made_by = first.ceremony_id.clone().expect("a new key names its ceremony");
+        assert!(made_by.starts_with("dkg"), "{made_by}");
+
+        let again = crate::orchestrator::run_dkg_outcome(&peers, "k", None).await.unwrap();
+        assert_eq!((again.group_key, again.existing, again.ceremony_id.clone()), (first.group_key, true, None));
+        for n in &nodes {
+            assert_eq!(n.committed_dkg_ceremony("k", &first.group_key).unwrap(), Some(made_by.clone()));
+            assert_eq!(n.committed_dkg_ceremony("k", &[7u8; 32]).unwrap(), None, "another group key");
+            assert_eq!(n.committed_dkg_ceremony("other", &first.group_key).unwrap(), None, "no such key");
+        }
+
+        // After a refresh the sharing is no longer the DKG's: no origin to name.
+        crate::orchestrator::run_refresh(&peers, "k").await.unwrap();
+        assert_eq!(nodes[0].committed_dkg_ceremony("k", &first.group_key).unwrap(), None);
     }
 }

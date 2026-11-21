@@ -1,0 +1,28 @@
+[package]
+name = "rutli-loadgen"
+description = "Load generator for a Rütli cosigner cluster: drives the Signer API as the driver does (mTLS, signed intents, leader failover) and reports latency, outcomes by gRPC code and the cosigners' own metrics as JSON. A test tool: never part of the cosigner image or of a release."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "rutli-loadgen"
+path = "src/main.rs"
+
+[dependencies]
+# The wire types, the intent signer and the cluster-id rule, so the generator speaks exactly what
+# the cosigner verifies. Every crate below is already in Cargo.lock through the cosigner.
+rutli-cosigner = { path = "../cosigner" }
+tonic = { workspace = true }
+tokio = { workspace = true, features = ["time", "net", "io-util"] }
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+# Every signature is checked with verify_strict against the key's group key.
+ed25519-dalek = { workspace = true }
+# P-256 ECDH, to check the cluster's EcdhDerive answer against a locally computed one.
+aws-lc-rs = { workspace = true }

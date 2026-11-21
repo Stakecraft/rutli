@@ -51,10 +51,17 @@ impl Ca {
 }
 
 fn config(dir: &std::path::Path, port: u16, data: &str, trust: &str, leaf: &str) -> std::path::PathBuf {
+    // The node's config pins its own TLS key (required with TLS); the operator's client configs
+    // leave the pin out, which a client config may.
+    let mut peer = serde_json::json!({ "identifier": 1, "endpoint": format!("https://127.0.0.1:{port}") });
+    if leaf == "cosigner1" {
+        let pin = rutli_cosigner::tls::spki_sha256_of_pem_file(&dir.join("cosigner1.crt")).unwrap();
+        peer["tls_spki_sha256"] = serde_json::json!([hex::encode(pin)]);
+    }
     let cfg = serde_json::json!({
         "identifier": 1, "listen": format!("127.0.0.1:{port}"), "threshold": 1,
         "data_dir": dir.join(data),
-        "peers": [{ "identifier": 1, "endpoint": format!("https://127.0.0.1:{port}") }],
+        "peers": [peer],
         "tls": {
             "ca_cert": dir.join(trust), "cert": dir.join(format!("{leaf}.crt")),
             "key": dir.join(format!("{leaf}.key")), "domain": "rutli-cosigner"
@@ -172,9 +179,18 @@ const SEAL: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789ab
 /// A config on the 2-of-3 roster at `ports` for node `identifier`, listening on `listen` and
 /// presenting `<leaf>.crt`, with `extra` merged in.
 fn roster_config(dir: &Path, name: &str, identifier: u16, listen: u16, ports: &[u16], leaf: &str, extra: serde_json::Value) -> PathBuf {
+    // A node's config pins every cosigner's TLS key (required with TLS); the operator's client
+    // config leaves the pins out, which a client config may.
     let peers: Vec<_> = (1u16..)
         .zip(ports)
-        .map(|(i, p)| serde_json::json!({ "identifier": i, "endpoint": format!("https://127.0.0.1:{p}") }))
+        .map(|(i, p)| {
+            let mut peer = serde_json::json!({ "identifier": i, "endpoint": format!("https://127.0.0.1:{p}") });
+            if leaf.starts_with("cosigner") {
+                let pin = rutli_cosigner::tls::spki_sha256_of_pem_file(&dir.join(format!("cosigner{i}.crt"))).unwrap();
+                peer["tls_spki_sha256"] = serde_json::json!([hex::encode(pin)]);
+            }
+            peer
+        })
         .collect();
     let mut cfg = serde_json::json!({
         "identifier": identifier, "listen": format!("127.0.0.1:{listen}"), "threshold": 2,
@@ -258,14 +274,6 @@ fn key_show_reads_both_kinds_with_an_operator_certificate_and_key_fingerprint_ag
         })
         .collect();
     daemons.iter_mut().for_each(Daemon::wait_serving);
-    // "gRPC serving" is logged just before the listener is bound: wait until each port accepts.
-    for port in nodes {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while std::net::TcpStream::connect(("127.0.0.1", *port)).is_err() {
-            assert!(Instant::now() < deadline, "node on port {port} never accepted a connection");
-            std::thread::sleep(Duration::from_millis(50));
-        }
-    }
     // The operator's own `listen` is free: a `key show` that fell through to the daemon would serve
     // there and never exit, rather than fail on a taken port.
     let op = roster_config(dir, "operator", 1, operator_port, nodes, "operator", serde_json::json!({}));
@@ -282,7 +290,7 @@ fn key_show_reads_both_kinds_with_an_operator_certificate_and_key_fingerprint_ag
         let mut driver = pb::signer_client::SignerClient::new(channel.tls_config(tls).unwrap().connect().await.unwrap());
         let dkg = pb::DkgRequest { key_id: frost_id.into(), ..Default::default() };
         let group_key = driver.dkg(dkg).await.unwrap().into_inner().group_verifying_key;
-        let request = pb::GenerateKeyRequest { key_id: hosted_id.into(), spec: "ec-p256-ecies".into() };
+        let request = pb::GenerateKeyRequest { key_id: hosted_id.into(), spec: "ec-p256-ecies".into(), ..Default::default() };
         let generated = driver.generate_key(request).await.unwrap().into_inner();
         assert_eq!(generated.replicas, 3, "`key show` reads each node's own copy: it must be on all three");
         (group_key, generated.public_key_der)

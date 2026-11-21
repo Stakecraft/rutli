@@ -15,8 +15,10 @@
 //!   a Kubernetes deployment must not use it (audit C3). `seal split-legacy` turns a master into
 //!   per-node bundles with the *same* derivations, so existing sealed files open unchanged.
 //!
-//! Threat model: this closes the *at-rest* exposure — a copied disk, snapshot, or stray backup of
-//! `data_dir` no longer yields a usable key share. It does not protect share memory during signing;
+//! Threat model: this closes the *at-rest* exposure only while the node's seal key (or, with the legacy
+//! shared master, the master) is not also obtained: a copied disk, snapshot or backup of `data_dir`
+//! yields a usable key share to anyone who also holds the DEK that sealed that copy, however old
+//! the copy is. It does not protect share memory during signing;
 //! that requires enclave/HSM sealing ("MPC-of-HSM"), for which this module is the software seam:
 //! swap the [`Sealer`] implementation, keep the file format.
 //!
@@ -228,7 +230,7 @@ pub fn dek_id(key: &[u8; 32]) -> String {
     let mut h = Sha256::new();
     h.update(DEK_ID_CONTEXT);
     h.update(key);
-    hex::encode(&h.finalize()[..4])
+    hex::encode(h.finalize().iter().copied().take(4).collect::<Vec<u8>>())
 }
 
 /// The format of a key file's bytes: `Some(1)` for a v1 sealed envelope, `Some(2)` for v2, `None`
@@ -482,6 +484,41 @@ impl Sealer {
                 DekUse::Unknown
             }
             _ => DekUse::Unknown,
+        }
+    }
+
+    /// Open a v1 envelope with the current DEK only (`residue-scan`): `Some` with the plaintext,
+    /// which is wiped when dropped, if the current DEK opens it; `None` otherwise (another DEK, a
+    /// corrupted file, not v1).
+    pub fn trial_open_v1_current(&self, file_bytes: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
+        if file_version(file_bytes) != Some(1) {
+            return None;
+        }
+        let env = serde_json::from_slice::<SealedEnvelope>(file_bytes).ok()?;
+        let nonce = hex::decode(&env.nonce).ok().filter(|n| n.len() == NONCE_LEN)?;
+        let ct = hex::decode(&env.ct).ok()?;
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(self.key.as_ref()));
+        cipher.decrypt(Nonce::from_slice(&nonce), ct.as_slice()).ok().map(Zeroizing::new)
+    }
+
+    /// Which of this sealer's DEKs equals `dek`, compared in constant time over every DEK it
+    /// holds (`residue-scan --legacy-master-env`).
+    pub fn which_dek(&self, dek: &[u8; 32]) -> DekUse {
+        let eq = |k: &Zeroizing<[u8; 32]>| {
+            aws_lc_rs::constant_time::verify_slices_are_equal(k.as_ref(), dek.as_ref()).is_ok()
+        };
+        let mut found = DekUse::Unknown;
+        // No early exit: every DEK is compared whatever matches.
+        let current = eq(&self.key);
+        for (i, k) in self.previous.iter().enumerate() {
+            if eq(k) && found == DekUse::Unknown {
+                found = DekUse::Previous(i);
+            }
+        }
+        if current {
+            DekUse::Current
+        } else {
+            found
         }
     }
 
@@ -914,6 +951,53 @@ mod tests {
         assert!(s.unseal(&tampered).is_err());
     }
 
+    /// Both envelope fields are checked: a v1 envelope that says it is not sealed is refused even
+    /// though it would decrypt.
+    #[test]
+    fn an_envelope_must_be_v1_and_sealed() {
+        let s = Sealer::from_master_secret(b"correct horse battery staple", 1);
+        let sealed = s.seal(b"share bytes").unwrap();
+        for (v, flag) in [(1, false), (2, true)] {
+            let mut env: SealedEnvelope = serde_json::from_slice(&sealed).unwrap();
+            env.v = v;
+            env.sealed = flag;
+            let err = s.unseal(&serde_json::to_vec(&env).unwrap()).unwrap_err();
+            assert!(err.to_string().contains("unsupported sealed envelope"), "v={v} sealed={flag}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_legacy_master_of_exactly_the_minimum_length_is_accepted() {
+        let var = "RUTLI_SEAL_TEST_MIN_LEN_MASTER";
+        std::env::set_var(var, "x".repeat(MIN_MASTER_LEN));
+        let ok = read_master_env(var).map(|m| m.len());
+        std::env::set_var(var, "x".repeat(MIN_MASTER_LEN - 1));
+        let short = read_master_env(var);
+        std::env::remove_var(var);
+        assert_eq!(ok.unwrap(), MIN_MASTER_LEN);
+        assert!(matches!(short, Err(DaemonError::Config(_))));
+    }
+
+    #[test]
+    fn a_sealer_has_previous_deks_only_during_a_rotation() {
+        let bundle = NodeSealBundle::random(1);
+        assert!(!bundle.sealer().has_previous());
+        let rotated = bundle.rotated();
+        assert!(rotated.sealer().has_previous());
+        assert!(!rotated.without_previous().sealer().has_previous());
+    }
+
+    #[test]
+    fn seal_keys_say_where_they_came_from_and_never_the_keys() {
+        let legacy = SealKeys::LegacyMaster { env: "SEAL_ENV".into(), master: Zeroizing::new("s3cret".repeat(8)) };
+        assert!(legacy.is_legacy());
+        assert_eq!(legacy.describe(), "legacy shared master env=SEAL_ENV");
+        let bundle =
+            SealKeys::Bundle { path: std::path::PathBuf::from("/seal/node2.json"), bundle: NodeSealBundle::random(2) };
+        assert!(!bundle.is_legacy());
+        assert_eq!(bundle.describe(), "bundle node=2 file=/seal/node2.json");
+    }
+
     #[test]
     fn plaintext_is_not_sealed() {
         assert!(!Sealer::is_sealed(b"{\"key_package\": {}}"));
@@ -1019,6 +1103,7 @@ mod tests {
             p.dist_public_key = k.map(hex::encode);
         }
         crate::config::Config {
+            profile: None,
             identifier: 2,
             listen: "127.0.0.1:0".into(),
             threshold: 2,

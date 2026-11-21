@@ -149,6 +149,23 @@ private static final long serialVersionUID = 0L;
     return ceremonyProtocol_;
   }
 
+  public static final int HOSTED_PROTOCOL_FIELD_NUMBER = 5;
+  private int hostedProtocol_ = 0;
+  /**
+   * <pre>
+   * The hosted-key creation protocol this node speaks: 2 = it verifies a client generate intent at
+   * its genkey fence (SignIntent purpose "generate-key"); 0 (absent) from a cosigner older than
+   * 0.5.0. A leader asked to generate with an intent refuses while a reachable node reports &lt; 2.
+   * </pre>
+   *
+   * <code>uint32 hosted_protocol = 5;</code>
+   * @return The hostedProtocol.
+   */
+  @java.lang.Override
+  public int getHostedProtocol() {
+    return hostedProtocol_;
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -174,6 +191,9 @@ private static final long serialVersionUID = 0L;
     }
     if (ceremonyProtocol_ != 0) {
       output.writeUInt32(4, ceremonyProtocol_);
+    }
+    if (hostedProtocol_ != 0) {
+      output.writeUInt32(5, hostedProtocol_);
     }
     getUnknownFields().writeTo(output);
   }
@@ -204,6 +224,10 @@ private static final long serialVersionUID = 0L;
       size += com.google.protobuf.CodedOutputStream
         .computeUInt32Size(4, ceremonyProtocol_);
     }
+    if (hostedProtocol_ != 0) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeUInt32Size(5, hostedProtocol_);
+    }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
     return size;
@@ -227,6 +251,8 @@ private static final long serialVersionUID = 0L;
         .equals(other.getHostedKeySpecsList())) return false;
     if (getCeremonyProtocol()
         != other.getCeremonyProtocol()) return false;
+    if (getHostedProtocol()
+        != other.getHostedProtocol()) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -248,6 +274,8 @@ private static final long serialVersionUID = 0L;
     }
     hash = (37 * hash) + CEREMONY_PROTOCOL_FIELD_NUMBER;
     hash = (53 * hash) + getCeremonyProtocol();
+    hash = (37 * hash) + HOSTED_PROTOCOL_FIELD_NUMBER;
+    hash = (53 * hash) + getHostedProtocol();
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -384,6 +412,7 @@ private static final long serialVersionUID = 0L;
       hostedKeySpecs_ =
           com.google.protobuf.LazyStringArrayList.emptyList();
       ceremonyProtocol_ = 0;
+      hostedProtocol_ = 0;
       return this;
     }
 
@@ -430,6 +459,9 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000008) != 0)) {
         result.ceremonyProtocol_ = ceremonyProtocol_;
       }
+      if (((from_bitField0_ & 0x00000010) != 0)) {
+        result.hostedProtocol_ = hostedProtocol_;
+      }
     }
 
     @java.lang.Override
@@ -462,6 +494,9 @@ private static final long serialVersionUID = 0L;
       }
       if (other.getCeremonyProtocol() != 0) {
         setCeremonyProtocol(other.getCeremonyProtocol());
+      }
+      if (other.getHostedProtocol() != 0) {
+        setHostedProtocol(other.getHostedProtocol());
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -510,6 +545,11 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000008;
               break;
             } // case 32
+            case 40: {
+              hostedProtocol_ = input.readUInt32();
+              bitField0_ |= 0x00000010;
+              break;
+            } // case 40
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -814,6 +854,56 @@ private static final long serialVersionUID = 0L;
     public Builder clearCeremonyProtocol() {
       bitField0_ = (bitField0_ & ~0x00000008);
       ceremonyProtocol_ = 0;
+      onChanged();
+      return this;
+    }
+
+    private int hostedProtocol_ ;
+    /**
+     * <pre>
+     * The hosted-key creation protocol this node speaks: 2 = it verifies a client generate intent at
+     * its genkey fence (SignIntent purpose "generate-key"); 0 (absent) from a cosigner older than
+     * 0.5.0. A leader asked to generate with an intent refuses while a reachable node reports &lt; 2.
+     * </pre>
+     *
+     * <code>uint32 hosted_protocol = 5;</code>
+     * @return The hostedProtocol.
+     */
+    @java.lang.Override
+    public int getHostedProtocol() {
+      return hostedProtocol_;
+    }
+    /**
+     * <pre>
+     * The hosted-key creation protocol this node speaks: 2 = it verifies a client generate intent at
+     * its genkey fence (SignIntent purpose "generate-key"); 0 (absent) from a cosigner older than
+     * 0.5.0. A leader asked to generate with an intent refuses while a reachable node reports &lt; 2.
+     * </pre>
+     *
+     * <code>uint32 hosted_protocol = 5;</code>
+     * @param value The hostedProtocol to set.
+     * @return This builder for chaining.
+     */
+    public Builder setHostedProtocol(int value) {
+
+      hostedProtocol_ = value;
+      bitField0_ |= 0x00000010;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * The hosted-key creation protocol this node speaks: 2 = it verifies a client generate intent at
+     * its genkey fence (SignIntent purpose "generate-key"); 0 (absent) from a cosigner older than
+     * 0.5.0. A leader asked to generate with an intent refuses while a reachable node reports &lt; 2.
+     * </pre>
+     *
+     * <code>uint32 hosted_protocol = 5;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearHostedProtocol() {
+      bitField0_ = (bitField0_ & ~0x00000010);
+      hostedProtocol_ = 0;
       onChanged();
       return this;
     }

@@ -583,8 +583,8 @@ async fn refresh_keeps_the_group_key_and_old_and_new_shares_never_combine() {
 
     // Node 1's pre-refresh share with node 2's post-refresh share: no valid signature.
     let tmp = tempfile::tempdir().unwrap();
-    let c1 = Cosigner::new(old1.key_package, old1.public_key_package.clone(), NonceStore::open(tmp.path().join("a")).unwrap());
-    let c2 = Cosigner::new(new2.key_package, new2.public_key_package.clone(), NonceStore::open(tmp.path().join("b")).unwrap());
+    let c1 = Cosigner::new(old1.key_package.clone(), old1.public_key_package.clone(), NonceStore::open(tmp.path().join("a")).unwrap());
+    let c2 = Cosigner::new(new2.key_package.clone(), new2.public_key_package.clone(), NonceStore::open(tmp.path().join("b")).unwrap());
     let msg = rutli_frost_core::dealer::canton_test_message(b"mixed epochs");
     let commitments = BTreeMap::from([(c1.identifier(), c1.round1("s", rutli_frost_core::session::SessionBinding::new(KEY)).unwrap()), (c2.identifier(), c2.round1("s", rutli_frost_core::session::SessionBinding::new(KEY)).unwrap())]);
     let shares = BTreeMap::from([
@@ -1221,16 +1221,28 @@ async fn hosted_key_fences_never_cover_a_frost_key_and_pending_sign_sessions_are
     }
     rig.every_pair_signs(&group).await;
 
+    // One opener fills only its own part of the key; four fill the key.
+    use rutli_cosigner::node::{SessionOwner, MAX_PENDING_SIGN_SESSIONS_PER_KEY, MAX_PENDING_SIGN_SESSIONS_PER_OPENER};
+    use rutli_frost_core::session::PendingCap;
     let n = &rig.nodes[0];
-    let max = rutli_cosigner::node::MAX_PENDING_SIGN_SESSIONS_PER_KEY;
     let ctx = rutli_cosigner::node::Round1Ctx::default();
-    for i in 0..max {
-        n.sign_round1(KEY, &format!("flood-{i}"), &ctx).unwrap();
+    let openers: Vec<SessionOwner> = (1..=4).map(|i| SessionOwner::Peer(format!("flooder{i}"))).collect();
+    let full = |r: rutli_cosigner::Result<_>| match r {
+        Err(DaemonError::Core(rutli_frost_core::CoreError::SessionsFull { cap_kind, .. })) => cap_kind,
+        other => panic!("{other:?}"),
+    };
+    for (k, o) in openers.iter().enumerate() {
+        for i in 0..MAX_PENDING_SIGN_SESSIONS_PER_OPENER {
+            n.sign_round1_as(KEY, &format!("flood-{k}-{i}"), &ctx, o).unwrap();
+        }
+        assert_eq!(full(n.sign_round1_as(KEY, "flood-x", &ctx, o)), PendingCap::Opener);
     }
-    let err = n.sign_round1(KEY, "flood-x", &ctx).unwrap_err();
-    assert!(matches!(err, DaemonError::NotServing(_)), "{err:?}");
-    for i in 0..max {
-        n.abort_sign(KEY, &format!("flood-{i}"));
+    assert_eq!(n.pending_sign_count(KEY), MAX_PENDING_SIGN_SESSIONS_PER_KEY);
+    assert_eq!(full(n.sign_round1(KEY, "flood-x", &ctx)), PendingCap::Key);
+    for (k, o) in openers.iter().enumerate() {
+        for i in 0..MAX_PENDING_SIGN_SESSIONS_PER_OPENER {
+            n.abort_sign_as(KEY, &format!("flood-{k}-{i}"), o).unwrap();
+        }
     }
     rig.every_pair_signs(&group).await;
 }
@@ -1309,7 +1321,7 @@ async fn signing_continues_through_every_phase_of_a_refresh_and_across_its_commi
         .iter()
         .map(|n| (n.identifier, n.sign_round2(KEY, "early", &early_msg, &early).unwrap()))
         .collect();
-    let pkp = KeyStore::open(rig.nodes[0].key_store_dir()).unwrap().load(KEY).unwrap().public_key_package;
+    let pkp = KeyStore::open(rig.nodes[0].key_store_dir()).unwrap().load(KEY).unwrap().public_key_package.clone();
     let signing_package = frost_ed25519::SigningPackage::new(early.clone(), &early_msg);
     let sig = frost_ed25519::aggregate(&signing_package, &shares, &pkp).unwrap().serialize().unwrap();
     assert!(rutli_cosigner::verify_key::signature_verifies(&group, &early_msg, &sig));

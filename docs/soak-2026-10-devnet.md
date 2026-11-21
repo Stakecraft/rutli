@@ -304,7 +304,7 @@ otherwise unaffected.
   Validator down 21:48:23 → 21:56:58Z, about 4 min of it a tooling retry (the console ran before the admin API answered
   through a fresh port-forward).
 - 5.5 destruction (22:00Z): the 4.2 safety dump (sha256 equal to the recorded one) deleted from the database volume; the
-  three password-protected exports (sha256 equal to the export-time record) removed with `rm -P`; no share bundle left,
+  three password-protected exports (sha256 equal to the export-time record) removed with `rm -P` (which unlinks only on current macOS); no share bundle left,
   ceremony records moved to the evidence, cosigner `/tmp` empty, migration dump volume empty, no driver private key in
   the drill workspace. WAL archiving has no target; old WAL and heap blocks stay on the live volume until teardown. The
   backup volume and the pre-migration database volume had been deleted earlier in the drill, unwiped.
@@ -409,6 +409,19 @@ side. Checked read-only at 20:06 UTC.
   685, all `ok` with intents; 0 `ERROR` lines in the participant and validator logs.
 - Not checked: the exact switch time in the participant log, since the retained log starts after it. Also not checked:
   wallet login and balances, and the cosigner metrics across the switch.
+
+**Planned event: cosigners to 0.4.1, 2026-11-20 19:37 → 19:40 UTC (no participant restart).**
+0.4.1 is 0.4.0 plus the cosigner fixes of the patch release (open-file limit and accept loop, `export-key`, SIGTERM);
+no wire, key-file or config change.
+- `helm upgrade` → rev 17, chart from tag `v0.4.1`, image `0.4.1@sha256:16ad19650b580609dfd0b90136cfe07ec65126addcbdbd4c8676da41fd558326`,
+  rolled one pod at a time 19:37–19:40Z (node 3, then 2, then 1). 3/3 Ready, 0 restarts. Each node logs its open-file
+  limit at start (`rutli_fd_limit`).
+- This stand uses the legacy topology (one StatefulSet with three replicas), so the upgrade rolls one pod at a time by
+  itself. The `perNode` topology changes all three StatefulSets in one apply (issue #173).
+- One signature lost a member. At 19:40:41Z a signature excluded the cosigner that had just restarted and completed
+  with the other two. This is the cold-cache race described under the 0.4.0 roll above; it is fixed on `main` (#95) and
+  not in 0.4.x.
+- Rollback, not needed: `helm -n rutli rollback rutli 16` (0.4.0).
 
 ## Drill calendar
 

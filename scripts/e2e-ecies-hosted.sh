@@ -21,7 +21,8 @@
 #      participant2 encrypts views to that key with Canton's own JcePureCrypto and participant1
 #      decrypts them through the driver (EcdhDerive + IESEngine);
 #   B. "migrate without touching the encryption key": B1's throwaway Canton 3.6.1 ECIES key is
-#      imported into the cluster with `import-key` (before the cluster starts), registered on
+#      imported into the cluster with `import-key` on two nodes (before the cluster starts; the
+#      third pulls it from them), registered on
 #      participant1 by KMS id (RegisterKmsEncryptionKey) — its Canton fingerprint must come out
 #      identical to the one on the old node — and rotated in as participant1's encryption key;
 #      pings again, now decrypting with the imported key;
@@ -35,6 +36,12 @@
 #      Canton's crypto init: the driver still advertises EcP256 because a silent cosigner does not
 #      veto it. (A *fresh* participant then needs every cosigner for its namespace DKG, so D stops
 #      once key generation starts; a restarted participant with existing keys would carry on.)
+#   F. (SKIP_RESTART=1 skips it) a participant killed during its namespace DKG adopts the key after
+#      the restart: a fresh participant (key-prefix "e2e3-", frost.pin-dir set) starts, Canton is
+#      killed with SIGKILL as soon as a cosigner commits the DKG, and on the next start (in-memory
+#      storage, so Canton asks for the same key again) the cluster answers `existing` with the
+#      ceremony the first run's driver recorded in the pin store before it sent the request; the
+#      driver takes it as its own and the participant initialises.
 #   E. (KEYFILE_V2_DELETES=1) the cosigners write key-file format v2 only and refuse v1
 #      (keyfile.write_version 2, accept_v1 false, one cluster_uuid; audit M4), and the driver
 #      certificate holds the hosted-key delete role (hosted_keys.delete_allowlist, delete_acl to
@@ -44,12 +51,12 @@
 #      every node (the tombstone included) is v2, and the audit cross-check still agrees.
 #
 # Requires: cargo, sbt, jq, openssl, an OpenJDK 17+ (Oracle's JDK refuses Canton's unsigned
-# BouncyCastle for Cipher; set CANTON_JAVA_HOME, default: Homebrew's openjdk).
+# BouncyCastle for Cipher; set CANTON_JAVA_HOME, otherwise JAVA_HOME, otherwise Homebrew's openjdk).
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 : "${CANTON_HOME:?Set CANTON_HOME to an extracted Canton 3.6.1 release}"
-JAVA_HOME="${CANTON_JAVA_HOME:-/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home}"
+JAVA_HOME="${CANTON_JAVA_HOME:-${JAVA_HOME:-/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home}}"
 export JAVA_HOME
 BASE_PORT="${E2E_BASE_PORT:-19300}"
 CANTON_PORT="${E2E_CANTON_PORT:-15300}"
@@ -92,6 +99,7 @@ COSIGNER="$BIN/rutli-cosigner"
 DRIVER_JAR="$REPO/driver/target/scala-2.13/rutli-driver.jar"
 if [ "${SKIP_BUILD:-0}" != 1 ]; then
   step "Build rutli-cosigner and the driver fat jar from the working tree"
+  # shellcheck disable=SC2086  # CARGO_FLAGS is a list of flags, split on purpose
   (cd "$REPO/frost" && cargo build ${CARGO_FLAGS:-} -p rutli-cosigner --bins)
   (cd "$REPO" && sbt -batch driver/assembly >/dev/null)
 fi
@@ -99,6 +107,8 @@ fi
 [ -f "$DRIVER_JAR" ] || fail "no $DRIVER_JAR"
 
 step "mTLS trust domain, seal secret, cosigner configs (127.0.0.1:$((BASE_PORT + 1))..$((BASE_PORT + 3)))"
+# Every node pins the TLS key of every cosigner (peers[].tls_spki_sha256, required with TLS): the
+# configs take the pins of the certificates just made from certs/peer-pins.json.
 "$REPO/scripts/gen-frost-certs.sh" 3 "$WORK/certs" >/dev/null
 export RUTLI_SEAL_SECRET
 RUTLI_SEAL_SECRET="$(openssl rand -hex 32)"
@@ -108,12 +118,13 @@ DRIVER_PIN="$(openssl x509 -in "$WORK/certs/driver.crt" -noout -pubkey | openssl
   | openssl dgst -sha256 -hex | awk '{print $NF}')"
 # E: key-file v2 only (one cluster_uuid for the cluster), and the driver on the delete role for this
 # run's prefix.
-CLUSTER_UUID="$(uuidgen | tr 'A-Z' 'a-z')"
+CLUSTER_UUID="$( (uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid) | tr '[:upper:]' '[:lower:]')"
 for i in 1 2 3; do
   jq --arg work "$WORK" --argjson base "$BASE_PORT" --arg cert "cosigner$i" --arg pin "$DRIVER_PIN" \
-    --arg v2 "$V2_DELETES" --arg uuid "$CLUSTER_UUID" --arg prefix "$PREFIX" '
+    --arg v2 "$V2_DELETES" --arg uuid "$CLUSTER_UUID" --arg prefix "$PREFIX" \
+    --slurpfile peerpins "$WORK/certs/peer-pins.json" '
       .signing_policy = { require_intent: true, require_ceremony_intent: true, signer_acl_required: true,
-        signer_acl: { driver: ["e2e1-", "e2e2-"] }, signer_pins: { driver: [$pin] } }
+        signer_acl: { driver: ["e2e1-", "e2e2-", "e2e3-"] }, signer_pins: { driver: [$pin] } }
     | if $v2 == "1" then
         .keyfile = { write_version: 2, accept_v1: false, cluster_uuid: $uuid }
         | .hosted_keys.delete_allowlist = ["driver"]
@@ -121,7 +132,8 @@ for i in 1 2 3; do
       else . end
     | .listen = "127.0.0.1:\($base + .identifier)"
     | .data_dir = "\($work)/node\(.identifier)"
-    | .peers |= map(.endpoint = "https://127.0.0.1:\($base + .identifier)")
+    | .peers |= map(.endpoint = "https://127.0.0.1:\($base + .identifier)"
+        | .tls_spki_sha256 = ($peerpins[0].peerPins[.identifier | tostring] // error("no TLS key pin for cosigner\(.identifier)")))
     | .tls.ca_cert = "\($work)/certs/ca.crt"
     | .tls.cert = "\($work)/certs/\($cert).crt"
     | .tls.key = "\($work)/certs/\($cert).key"
@@ -129,19 +141,23 @@ for i in 1 2 3; do
     | del(.metrics_listen)' "$REPO/deploy/frost/config-tls/cosigner$i.json" >"$WORK/c$i.json"
 done
 
-step "B (setup). import-key: B1's Canton ECIES encryption key into node 1, before the cluster starts"
-RUST_LOG=off "$COSIGNER" --config "$WORK/c1.json" import-key --in "$VEC/encryption.export-pw.bin" \
-  --passphrase-env E2E_EXPORT_PASSWORD --key-id "$IMPORTED_ID" --key-prefix "$PREFIX" --expect-fingerprint "$FP" \
-  | tee "$WORK/import.out"
-grep -q "ec-p256-ecies" "$WORK/import.out" || fail "import-key did not report an ec-p256-ecies key"
+step "B (setup). import-key: B1's Canton ECIES encryption key into nodes 1 and 2, before the cluster starts"
+# A node pulls a hosted key it lacks only from two peers that hold the same copy, so the key goes
+# onto two nodes (docs/hosted-keys.md, "Importing a Canton node's ECIES key"); node 3 pulls it.
+for i in 1 2; do
+  RUST_LOG=off "$COSIGNER" --config "$WORK/c$i.json" import-key --in "$VEC/encryption.export-pw.bin" \
+    --passphrase-env E2E_EXPORT_PASSWORD --key-id "$IMPORTED_ID" --key-prefix "$PREFIX" --expect-fingerprint "$FP" \
+    | tee "$WORK/import$i.out"
+  grep -q "ec-p256-ecies" "$WORK/import$i.out" || fail "import-key on node $i did not report an ec-p256-ecies key"
+done
 
 step "Start three cosigners"
 for i in 1 2 3; do
   RUST_LOG=info "$COSIGNER" --config "$WORK/c$i.json" serve >>"$WORK/node$i.log" 2>&1 &
-  PIDS[$i]=$!
+  PIDS[i]=$!
 done
 for i in 1 2 3; do
-  for _ in $(seq 1 120); do
+  for _ in $(seq 1 240); do # up to 60 s
     "$COSIGNER" --config "$WORK/c$i.json" health >/dev/null 2>&1 && break
     sleep 0.25
   done
@@ -153,6 +169,9 @@ P=$CANTON_PORT
 cat >"$WORK/canton.conf" <<EOF
 canton {
   parameters.non-standard-config = yes
+  // Console waits (retry_until_true, admin commands, pings) default to 1 min and 30 s. A loaded CI
+  // runner can be slower than that without anything being wrong; a real failure still fails.
+  parameters.timeouts.console { bounded = 3.minutes, ledger-command = 3.minutes, ping = 2.minutes }
   features.enable-preview-commands = yes
   sequencers.sequencer1 {
     storage.type = memory
@@ -316,7 +335,7 @@ if [ "$V2_DELETES" = 1 ]; then
     tombstoned() {
       grep -F "$DELETED" "$WORK/node$i.log" | grep -q -e "replaced by a tombstone" -e "applied a peer's tombstone"
     }
-    for _ in $(seq 1 60); do tombstoned && break; sleep 0.5; done
+    for _ in $(seq 1 120); do tombstoned && break; sleep 0.5; done
     tombstoned || fail "node $i never tombstoned $DELETED"
     "$COSIGNER" --config "$WORK/c$i.json" keyfile status >"$WORK/keyfile$i.txt" 2>&1 || fail "keyfile status on node $i: $(cat "$WORK/keyfile$i.txt")"
     grep -q "writes v2" "$WORK/keyfile$i.txt" || fail "node $i does not write v2"
@@ -327,6 +346,38 @@ if [ "$V2_DELETES" = 1 ]; then
   "$COSIGNER" audit-cross-check --driver-audit "$WORK/driver-audit.jsonl" \
     --journal "$WORK/node1/journal" --journal "$WORK/node2/journal" --journal "$WORK/node3/journal" \
     --min-journals 2 >/dev/null || fail "audit-cross-check found discrepancies after the delete"
+fi
+
+if [ "${SKIP_RESTART:-0}" != 1 ]; then
+  step "F. Killed during its DKG, a participant adopts its own key after the restart"
+  awk -v d="$WORK/pins3" '{
+    if ($0 ~ /key-prefix = "e2e1-"/) { sub(/e2e1-/, "e2e3-"); print; print "            pin-dir = \"" d "\""; next }
+    print
+  }' "$WORK/canton.conf" >"$WORK/canton-restart.conf"
+  grep -q 'pin-dir = ' "$WORK/canton-restart.conf" || fail "could not add pin-dir to the restart config"
+  printf 'nodes.local.start()\nparticipant1.health.wait_for_initialized()\nprintln("E2E-F-UP")\nsys.exit(0)\n' >"$WORK/restart.canton"
+  run_restart() { # $1: log name
+    cd "$WORK" && EXTRA_CLASSPATH="$DRIVER_JAR" exec "$CANTON_HOME/bin/canton" run "$WORK/restart.canton" \
+      --config "$WORK/canton-restart.conf" --no-tty --log-file-name "$WORK/$1.log" \
+      --kms-log-file-name "$WORK/$1_kms.log" >"$WORK/$1.out" 2>&1
+  }
+  (run_restart restart1) &
+  R1=$!
+  committed() { grep -h "ceremony committed" "$WORK"/node[123].log 2>/dev/null | grep -q "e2e3-frost-participant1-namespace"; }
+  for _ in $(seq 1 600); do committed && break; kill -0 "$R1" 2>/dev/null || break; sleep 0.5; done
+  committed || fail "the first run's namespace DKG never committed on a cosigner"
+  pkill -KILL -P "$R1" 2>/dev/null || true
+  kill -KILL "$R1" 2>/dev/null || true
+  wait "$R1" 2>/dev/null || true
+  [ -s "$WORK/pins3/e2e3-frost-participant1-namespace.dkg" ] || fail "the driver recorded no DKG ceremony id before its request"
+  grep -q "^E2E-F-UP" "$WORK/restart1.out" 2>/dev/null && echo "(the first run finished before the kill; the restart still takes the adoption path)"
+  (run_restart restart2) || fail "the restarted participant did not initialise: $(tail -n 5 "$WORK/restart2.out")"
+  grep -q "^E2E-F-UP" "$WORK/restart2.out" || fail "the restarted participant did not initialise"
+  grep -qh "returned the key of this driver's own ceremony" "$WORK"/restart2*.log \
+    || fail "after the restart the driver did not take the existing key as its own ceremony's"
+  ! grep -qh "the cluster already holds this key" "$WORK"/restart2*.log || fail "after the restart the driver refused its own key"
+  [ -s "$WORK/pins3/e2e3-frost-participant1-namespace.pin" ] || fail "no group-key pin for the adopted key"
+  echo "killed during its DKG, the participant adopted its own key on the next start"
 fi
 
 if [ "${SKIP_DOWN:-0}" != 1 ]; then
@@ -344,7 +395,7 @@ if [ "${SKIP_DOWN:-0}" != 1 ]; then
   ) &
   DOWN_PID=$!
   verdict=""
-  for _ in $(seq 1 240); do
+  for _ in $(seq 1 600); do # up to 5 min for a JVM start and Canton's init; ends at the first verdict
     if grep -qh "not supported by the KMS" "$WORK"/down*.log "$WORK/down.out" 2>/dev/null; then verdict=refused; break; fi
     if grep -qh "initiating distributed key generation for e2e2-" "$WORK"/down*.log 2>/dev/null; then verdict=past-crypto-init; break; fi
     kill -0 "$DOWN_PID" 2>/dev/null || { verdict=exited; break; }

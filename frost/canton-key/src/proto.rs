@@ -51,7 +51,9 @@ pub(crate) fn fields<'a>(buf: &'a [u8], msg: &'static str) -> Result<Vec<Field<'
                     .checked_add(len)
                     .filter(|end| *end <= buf.len())
                     .ok_or_else(|| malformed(msg, format!("field {number}: truncated")))?;
-                let v = Value::Bytes(&buf[pos..end]);
+                let v = Value::Bytes(
+                    buf.get(pos..end).ok_or_else(|| malformed(msg, format!("field {number}: truncated")))?,
+                );
                 pos = end;
                 v
             }

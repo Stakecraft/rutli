@@ -20,4 +20,15 @@ public interface KeyInfoRequestOrBuilder extends
    */
   com.google.protobuf.ByteString
       getKeyIdBytes();
+
+  /**
+   * <pre>
+   * This node's own copy only: no read-repair and no replica count (replicas = 0). Ignored by a
+   * cosigner older than 0.5.0, which answers as without it and sends no commitment.
+   * </pre>
+   *
+   * <code>bool local_only = 2;</code>
+   * @return The localOnly.
+   */
+  boolean getLocalOnly();
 }

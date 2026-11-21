@@ -4,6 +4,11 @@ Runs this repo's `ci.yml` jobs on your own machine instead of GitHub-hosted runn
 hosted minutes are unavailable (for example, an organisation billing block), or when you need
 more CPU or memory than a hosted runner has.
 
+**Release images are never built here.** `publish-image.yml` and `image-build-check.yml` run only
+on GitHub-hosted runners and do not read `vars.CI_RUNNER`. A job on this runner is root on its
+Docker host, and the runner is long-lived and runs every branch of the repository, so it must not
+be where the published cosigner image comes from ([SECURITY.md, "Verify the image"](../../SECURITY.md#verify-the-image)).
+
 ## Trust model
 
 **A job controls the Docker daemon it is given, and that is root on the daemon's host.** The
@@ -52,12 +57,21 @@ Three layers keep fork code off the self-hosted runners:
    security boundary, since a fork PR can edit it.
 2. **Runner guard (the boundary).** [`job-started-guard.sh`](job-started-guard.sh) runs on the
    runner before every job (`ACTIONS_RUNNER_HOOK_JOB_STARTED`) and fails any job that is not a
-   `push`, `schedule`, `workflow_dispatch` or `pull_request` from a branch of `Stakecraft/rutli`.
-   It fails closed. The Docker image here sets it; the KVM runners install it with
+   `push`, `schedule`, `workflow_dispatch` or `pull_request` from a branch of `Stakecraft/rutli`,
+   and any job of a pull request opened by, or a run started by, `dependabot[bot]`. It fails
+   closed. After changing it, reinstall it on every runner. The Docker image here sets it; the KVM runners install it with
    `30-runner-in-vm.sh`. A PR cannot change it.
 3. **Approval (repository setting).** Settings → Actions → General → "Fork pull request workflows
    from outside collaborators": **Require approval for all external contributors**. Before
    approving, read the PR's changes to `.github/` and `scripts/`.
+
+**Dependabot's pull requests stay off this runner too.** Dependabot pushes its branches to this
+repository, so the fork rule alone would let them in, and they bring action versions (new code)
+nobody has reviewed yet. `ci.yml` sends a job to `ubuntu-latest` when the pull request was opened
+by `dependabot[bot]` (`github.event.pull_request.user.login`, which stays the same when a
+maintainer later pushes to the branch) or when the run was started by it (`github.actor`, which a
+re-run keeps). The runner guard refuses both cases as well. A Dependabot pull request a maintainer
+has reviewed still runs on hosted runners; merge it and `main` runs here.
 
 The runner itself must still be treated as running untrusted code from anyone with write access.
 
@@ -82,10 +96,11 @@ colima start --profile rutli-ci --cpu 4 --memory 8 --disk 60 --vm-type vz --arch
   --runtime docker --mount ~/.rutli-ci-empty --vz-rosetta
 ```
 
-`--vz-rosetta` enables Apple's Rosetta for amd64 containers. It is required for the release image
-build (`publish-image.yml`, linux/amd64 + linux/arm64): under QEMU user emulation the amd64 Rust
-link step crashes (`linking with cc failed: signal: 11 (SIGSEGV)`). The script refuses to continue
-on a VM without a Rosetta handler (`RUTLI_CI_ROSETTA=0` skips that check for arm64-only use).
+`--vz-rosetta` enables Apple's Rosetta for amd64 containers. It was required while release images
+were built on this runner (until 0.4.0): under QEMU user emulation the amd64 Rust link step crashes
+(`linking with cc failed: signal: 11 (SIGSEGV)`). Releases are now built on GitHub-hosted runners,
+natively for each platform. The script still refuses to continue on a VM without a Rosetta handler
+(`RUTLI_CI_ROSETTA=0` skips that check for arm64-only use).
 
 **A VM created before this change has no Rosetta.** Enable it in place (the disk and the
 read-only mount are kept; Colima stores the profile config in `~/.colima/rutli-ci/colima.yaml`,
@@ -158,7 +173,7 @@ gh api -X DELETE repos/Stakecraft/rutli/actions/runners/$id
 - **One job at a time.** CI is slower than on GitHub's parallel runners.
 - **The architecture is arm64** (Apple silicon, `--arch aarch64`). All jobs work there, except
   the `conformance` job's `dpm` download, which is amd64 only. That job runs on schedule or
-  manual dispatch, not on pull requests. amd64 image builds run under Rosetta emulation and are slower than native.
+  manual dispatch, not on pull requests. amd64 containers run under Rosetta emulation and are slower than native.
   For full parity, use a Linux amd64 host.
 - **`actions/cache` and artifact upload still use GitHub's service.** If that is blocked, they
   only warn. No job depends on them.

@@ -47,6 +47,10 @@ correctly and the key that resulted is the one the node now carries.
       `"share_seal": { "secret_file": "<path to node-<i>.json>" }` set (`deploy/frost/config-tls/`
       shows the rest of the config; it still uses the legacy `secret_env`). Plaintext / no-TLS is
       disqualifying for a real ceremony.
+- [ ] Every cosigner's TLS key pinned on every node's peer entry for it
+      (`peers[].tls_spki_sha256`): `rutli-cosigner tls spki cosigner<i>.crt` prints the value, and
+      `gen-frost-certs.sh` prints all of them (`RUTLI_PIN_CONFIGS=<dir>` writes them into the configs
+      in `<dir>`; Helm: `-f peer-pins.json`). A node with TLS refuses to start without them.
 - [ ] Approver keys minted: each approver runs
       `java -cp rutli-driver.jar com.stakecraft.rutli.policy.ApproveCli keygen <name>` and hands the
       printed public-key line to the lead.
@@ -67,8 +71,10 @@ On each of the `n` hosts, with the node's seal bundle mounted at its `share_seal
 rutli-cosigner --config /etc/rutli/cosigner-<i>.json serve
 ```
 Confirm each log line shows `mutual TLS enabled` and `share sealing enabled (bundle node=<i>) —
-AES-256-GCM at rest`.
-If any node logs `running WITHOUT TLS` or `share sealing DISABLED`, **halt** — do not proceed.
+AES-256-GCM at rest`, and one `peer N TLS key pins` line for every node.
+If any node logs `running WITHOUT TLS`, `share sealing DISABLED` or `tls.require_peer_pins is off`,
+**halt** — do not proceed. `rutli-cosigner --config /etc/rutli/cosigner-<i>.json tls spki --peers`
+shows each running node's key and whether it is pinned.
 
 **2. Generate the key via node bootstrap (the DKG moment).**
 Start the Canton participant once. Its identity auto-init calls the driver, which runs a distributed
@@ -114,7 +120,9 @@ Record where each backup and each seal secret live.
 - Confirm the signing journal (`signing-journal`) and hash-chained audit log (`audit-log-path`) are
   active.
 - Set the proactive-refresh schedule (cron/systemd timer running `rutli-cosigner refresh --key-id
-  frost-<participant>-namespace`), so any share exposed later has a bounded lifetime. Its client
+  frost-<participant>-namespace`), so a share exposed later stops combining with the live ones after the next refresh (old copies
+  and the sealing keys that open them are a separate matter:
+  [key-material-handling.md](key-material-handling.md)). Its client
   config uses the refresher certificate, whose CN is on every node's `refresh_allowlist` (the driver
   certificate can refresh only while `signing_policy.signer_may_refresh` is on): the command signs a
   ceremony intent with it ([ceremonies.md](ceremonies.md#ceremony-intents)).

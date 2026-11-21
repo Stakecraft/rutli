@@ -152,6 +152,14 @@ object HashChainedAuditLog {
     }
   }
 
+  /** The details of every entry whose operation is `op`, in file order. Read-only, and the chain is
+    * not checked here ([[open]] does that). An absent file has none. */
+  def details(path: String, op: String): List[String] = {
+    val file = new File(path)
+    if (!file.exists()) Nil
+    else Using.resource(Source.fromFile(file, "UTF-8"))(_.getLines().flatMap(parse(_)).filter(_.op == op).map(_.detail).toList)
+  }
+
   /** Offline verification: recompute the whole chain. Returns the number of valid entries, or the
     * 1-based sequence number of the first broken entry as a Left. */
   def verify(path: String): Either[Long, Long] = verifyChain(path).map(_._1)

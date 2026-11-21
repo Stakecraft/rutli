@@ -14,7 +14,8 @@ metadata:
 data:
   backup-loop.sh: |
     #!/bin/sh
-    # Daily at $DAILY_AT_UTC: tar this node's committed, sealed key files (keys/*.json; never
+    # Daily at $DAILY_AT_UTC, and within $CHECK_EVERY_SECS of any change to the key files (a refresh
+    # commit, a new or deleted key): tar this node's committed, sealed key files (keys/*.json; never
     # dotfiles, nonce markers or staged files), its break-glass cleared-delete-intent markers
     # (keys/.cleared/*, empty files; `restore` merges them — audit F7) and its sign journals
     # (journal/<key>/*.jsonl, the node's own record of every signature share it released —
@@ -24,6 +25,7 @@ data:
     # unready.
     set -u
     run() {
+      ok=0
       stamp=$(date -u +%Y%m%dT%H%M%SZ)
       tar="/work/node-${NODE_ID}-${stamp}.tar"
       stage="/work/stage-${stamp}"
@@ -33,60 +35,119 @@ data:
         return
       fi
       rm -rf "$stage" && mkdir -p "$stage" || { echo "BACKUP_FAILED node=${NODE_ID} reason=stage"; return; }
-      # Key ids are [A-Za-z0-9_-], so word splitting of $files is safe.
+      # The stage holds symbolic links, not copies: /work is memory-backed and only the tar needs
+      # to be in it (tar -h stores the files the links point to). Key ids are [A-Za-z0-9_-], so word
+      # splitting of $files is safe.
       for f in $files; do
-        cp -p "/data/keys/$f" "$stage/$f" || { echo "BACKUP_FAILED node=${NODE_ID} reason=copy"; rm -rf "$stage"; return; }
+        ln -s "/data/keys/$f" "$stage/$f" || { echo "BACKUP_FAILED node=${NODE_ID} reason=copy"; rm -rf "$stage"; return; }
       done
       journals=0
       if [ -d /data/journal ]; then
         # A segment copied mid-append may end in a partial line: the journal reader treats a torn
         # final line of the newest segment as an interrupted append.
         if ! (cd /data/journal && find . -type f -name '*.jsonl' | while read -r j; do
-                mkdir -p "$stage/journal/$(dirname "$j")" && cp -p "$j" "$stage/journal/$j" || exit 1
+                mkdir -p "$stage/journal/$(dirname "$j")" && ln -s "/data/journal/$j" "$stage/journal/$j" || exit 1
               done); then
           echo "BACKUP_FAILED node=${NODE_ID} reason=journal-copy"; rm -rf "$stage"; return
         fi
-        journals=$(find "$stage/journal" -type f -name '*.jsonl' 2>/dev/null | wc -l | tr -d ' ')
+        journals=$(find "$stage/journal" -type l -name '*.jsonl' 2>/dev/null | wc -l | tr -d ' ')
       fi
       cleared=0
       if [ -d /data/keys/.cleared ]; then
         # Marker names are <key id>.<hex digest>, so word splitting is safe.
         mkdir -p "$stage/.cleared" || { echo "BACKUP_FAILED node=${NODE_ID} reason=stage"; rm -rf "$stage"; return; }
         for m in $(cd /data/keys/.cleared && find . -maxdepth 1 -type f ! -name '.*' | sed 's|^\./||'); do
-          cp -p "/data/keys/.cleared/$m" "$stage/.cleared/$m" || { echo "BACKUP_FAILED node=${NODE_ID} reason=cleared-copy"; rm -rf "$stage"; return; }
+          ln -s "/data/keys/.cleared/$m" "$stage/.cleared/$m" || { echo "BACKUP_FAILED node=${NODE_ID} reason=cleared-copy"; rm -rf "$stage"; return; }
         done
-        cleared=$(find "$stage/.cleared" -type f | wc -l | tr -d ' ')
+        cleared=$(find "$stage/.cleared" -type l | wc -l | tr -d ' ')
       fi
-      if ! tar -C "$stage" -cf "$tar" .; then
-        echo "BACKUP_FAILED node=${NODE_ID} reason=tar"; rm -rf "$stage" "$tar"; return
+      # tar exits 1 with "file changed as we read it" when a journal segment grew while it was read:
+      # the archive then holds the segment as it was when tar began it, which is what a torn final
+      # line already tolerates (see above). Anything else it says is a failure.
+      err=$(tar -h -C "$stage" -cf "$tar" . 2>&1); rc=$?
+      if [ "$rc" = 1 ] && [ -z "$(printf '%s\n' "$err" | grep -v 'file changed as we read it')" ]; then rc=0; fi
+      if [ "$rc" != 0 ]; then
+        reason=tar
+        case "$err" in *[Nn]o\ space*) reason=work-dir-full ;; esac
+        echo "$err" >&2
+        echo "BACKUP_FAILED node=${NODE_ID} reason=${reason}"; rm -rf "$stage" "$tar"; return
       fi
       rm -rf "$stage"
       n=$(echo "$files" | wc -l | tr -d ' ')
       bytes=$(wc -c < "$tar" | tr -d ' ')
       if sh /destination/ship.sh "$tar" "${NODE_ID}"; then
         echo "BACKUP_OK node=${NODE_ID} files=${n} journal_segments=${journals} cleared_markers=${cleared} bytes=${bytes} dest={{ $backup.destination.type }} stamp=${stamp}"
+        ok=1
       else
         echo "BACKUP_FAILED node=${NODE_ID} reason=ship files=${n} bytes=${bytes} stamp=${stamp}"
       fi
       rm -f "$tar"
     }
-    [ "${RUN_ON_START:-false}" = "true" ] && run
-    while :; do
+    # A fingerprint of the committed key files (names and checksums of keys/*.json; empty when there
+    # are none). A refresh replaces each key's file only when it commits on this node (staged shares
+    # live in keys/.staged/, which is never copied), so a changed fingerprint means a new epoch or a
+    # new or deleted key, and signing never changes it. Every refresh makes this node's older backups
+    # unable to restore it: back up as soon as the fingerprint moves, and retry until it succeeds.
+    keysig() {
+      list=$(cd /data/keys 2>/dev/null && find . -maxdepth 1 -type f -name '*.json' ! -name '.*' | sort)
+      [ -n "$list" ] && (cd /data/keys && echo "$list" | xargs cksum) | cksum
+    }
+    backup_now() { sig=$(keysig); run; [ "$ok" = 1 ] && last="$sig"; }
+    next_daily() {
       now=$(date -u +%s)
-      next=$(date -u -d "$(date -u +%F) ${DAILY_AT_UTC}" +%s)
-      [ "$next" -le "$now" ] && next=$((next + 86400))
-      sleep $((next - now))
-      run
+      t=$(date -u -d "$(date -u +%F) ${DAILY_AT_UTC}" +%s)
+      [ "$t" -le "$now" ] && t=$((t + 86400))
+      echo "$t"
+    }
+    every="${CHECK_EVERY_SECS:-300}"
+    last=""
+    if [ "${RUN_ON_START:-false}" = "true" ]; then backup_now; else last=$(keysig); fi
+    next=$(next_daily)
+    while :; do
+      wait=$((next - $(date -u +%s)))
+      # every=0: no change check, the daily run only (the split ceremony's window).
+      [ "$every" -gt 0 ] && [ "$wait" -gt "$every" ] && wait="$every"
+      [ "$wait" -gt 0 ] && sleep "$wait"
+      if [ "$(date -u +%s)" -ge "$next" ]; then
+        backup_now
+        next=$(next_daily)
+      elif [ "$every" -gt 0 ] && sig=$(keysig) && [ -n "$sig" ] && [ "$sig" != "$last" ]; then
+        echo "BACKUP_TRIGGER node=${NODE_ID} reason=key-files-changed"
+        backup_now
+      fi
     done
   ship.sh: |
     #!/bin/sh
     # $1 = the tar, $2 = the node id. Exit non-zero on failure.
     set -eu
 {{- if eq $backup.destination.type "pvc" }}
-    # This node's own backup PVC at /backup: write atomically, keep the newest {{ int $backup.destination.keep }}.
+    # This node's own backup PVC at /backup: write atomically.
     cp "$1" "/backup/.$(basename "$1").part"
     mv "/backup/.$(basename "$1").part" "/backup/$(basename "$1")"
+{{- if $backup.retention.enabled }}
+    # Retention by epoch (docs/disaster-recovery.md, "Backup retention"): an archive of an older epoch
+    # goes only once the newer epoch is proven (`keyfile prove`) and the proof is {{ int $backup.retention.minProofAgeDays }} days old, and a complete
+    # verified archive of the proven epoch remains. The count cap ({{ int $backup.destination.keep }}) bounds the directory but never
+    # takes the newest or the proven archive. It reads the key files' clear headers only and deletes
+    # nothing when it cannot read an epoch, when this node's live epoch is behind an archive's, or on
+    # any error; one BACKUP_RETENTION line per archive says why.
+    # A skipped run (BACKUP_RETENTION_SKIPPED) deletes nothing and is not an error. If the binary is
+    # missing (a custom backup.image without it) the old count cap runs instead, so the directory
+    # stays bounded; any other failure leaves the directory as it is and is logged.
+    rc=0
+    rutli-cosigner --config "/config/cosigner-$2.json" backup-retain --dir /backup \
+      --min-proof-age-days {{ int $backup.retention.minProofAgeDays }} --keep-older-epochs {{ int $backup.retention.keepOlderEpochs }} \
+      --keep-count {{ int $backup.destination.keep }} || rc=$?
+    if [ "$rc" = 127 ]; then
+      echo "BACKUP_RETENTION_FAILED node=$2 reason=no-rutli-cosigner-binary-in-the-backup-image: using the count cap" >&2
+      ls -1 /backup/node-"$2"-*.tar 2>/dev/null | sort | head -n -{{ int $backup.destination.keep }} | while read -r old; do rm -f "$old"; done
+    elif [ "$rc" != 0 ]; then
+      echo "BACKUP_RETENTION_FAILED node=$2 rc=$rc (see the lines above; some archives may already have been deleted)" >&2
+    fi
+{{- else }}
+    # Retention is off: keep the newest {{ int $backup.destination.keep }}, whatever their epoch.
     ls -1 /backup/node-"$2"-*.tar 2>/dev/null | sort | head -n -{{ int $backup.destination.keep }} | while read -r old; do rm -f "$old"; done
+{{- end }}
 {{- else }}
 {{ $backup.destination.ship | indent 4 }}
 {{- end }}

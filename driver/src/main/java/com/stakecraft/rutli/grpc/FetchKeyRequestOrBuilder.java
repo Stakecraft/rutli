@@ -20,4 +20,16 @@ public interface FetchKeyRequestOrBuilder extends
    */
   com.google.protobuf.ByteString
       getKeyIdBytes();
+
+  /**
+   * <pre>
+   * Set by a 0.5.0 caller: for an id this node holds a tombstone for, answer with `tombstone`
+   * instead of NOT_FOUND, so the caller never pulls a deleted key back. Without it (a 0.4.0
+   * caller) a tombstone reads as NOT_FOUND, as before.
+   * </pre>
+   *
+   * <code>bool include_tombstone = 2;</code>
+   * @return The includeTombstone.
+   */
+  boolean getIncludeTombstone();
 }

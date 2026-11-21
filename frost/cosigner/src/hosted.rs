@@ -124,7 +124,10 @@ impl HostedSpec {
 /// Canton's `PublicKey` expects (for P-256: `id-ecPublicKey`, named curve `prime256v1`,
 /// uncompressed point, byte-identical to what BouncyCastle writes) — and empty for symmetric keys. Both are hex so the record stays plain JSON inside the sealed
 /// envelope, matching how FROST shares are stored.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// `Debug` is written by hand and never prints `private_der` (a test assertion, a `{:?}` in a log
+/// line or a panic message must not leak the key); `Tombstone`'s derived `Debug` relies on it.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct HostedKey {
     pub spec: HostedSpec,
     pub created_at: u64,
@@ -136,6 +139,18 @@ pub struct HostedKey {
     /// re-deleted by the very tombstone it was restored from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub undeleted_at_ms: Option<u64>,
+}
+
+impl std::fmt::Debug for HostedKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostedKey")
+            .field("spec", &self.spec)
+            .field("created_at", &self.created_at)
+            .field("private_der", &"<redacted>")
+            .field("public_der", &self.public_der)
+            .field("undeleted_at_ms", &self.undeleted_at_ms)
+            .finish()
+    }
 }
 
 impl HostedKey {
@@ -276,20 +291,54 @@ impl HostedKey {
             .map_err(|_| DaemonError::Config("stored EC P-256 key is unusable".into()))
     }
 
-    /// Check that the stored material is internally consistent: for EC P-256, that the stored
-    /// public key is the one the private scalar derives. Run on every path that accepts key
-    /// material from outside this node (replication, import), so a peer or an artifact can never
-    /// pair a private key with somebody else's public key — Canton would then publish a key this
-    /// cluster cannot decrypt for. RSA and AES material is checked by its own operations' parsers.
+    /// Check that the stored material is internally consistent: for EC P-256 and RSA, that the
+    /// stored public key is the one the private key derives; for AES-256, that the key is 32 bytes.
+    /// Run on every path that accepts key material from outside this node (replication, import),
+    /// so a peer or an artifact can never pair a private key with somebody else's public key —
+    /// Canton would then publish a key this cluster cannot decrypt for.
     pub fn validate(&self) -> Result<()> {
-        if self.spec == HostedSpec::EcP256 {
-            let sk = self.ec_private_key()?;
-            if ec_spki(&sk)? != self.public_key_der()? {
-                return Err(DaemonError::Config(
-                    "EC P-256 key material is inconsistent: the stored public key is not the one \
-                     the private key derives"
-                        .into(),
-                ));
+        match self.spec {
+            HostedSpec::EcP256 => {
+                let sk = self.ec_private_key()?;
+                if ec_spki(&sk)? != self.public_key_der()? {
+                    return Err(DaemonError::Config(
+                        "EC P-256 key material is inconsistent: the stored public key is not the one \
+                         the private key derives"
+                            .into(),
+                    ));
+                }
+            }
+            // Re-derives the public key from the PKCS#8 and compares it with the stored one.
+            HostedSpec::Rsa2048 => {
+                self.derived_public_key_der()?;
+            }
+            HostedSpec::Aes256Gcm => {
+                if self.private_bytes()?.len() != 32 {
+                    return Err(DaemonError::Config("aes-256-gcm key material is not 32 bytes".into()));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Refuse timestamps that lie in the future: `created_at` (seconds) and `undeleted_at_ms` must
+    /// not be later than `now_ms + skew_ms`. The delete check compares a delete intent's issue time
+    /// with [`HostedKey::live_since_ms`], so a time in the future would make the key refuse every
+    /// delete until then. Checked on every key that arrives from a peer; the times are not part of
+    /// the commitment.
+    pub fn check_times(&self, now_ms: u64, skew_ms: u64) -> Result<()> {
+        let limit = now_ms.saturating_add(skew_ms);
+        if self.created_at.saturating_mul(1000) > limit {
+            return Err(DaemonError::HostedInvalid(format!(
+                "created_at {} s lies in the future (now {} ms, clock skew allowance {} ms)",
+                self.created_at, now_ms, skew_ms
+            )));
+        }
+        if let Some(u) = self.undeleted_at_ms {
+            if u > limit {
+                return Err(DaemonError::HostedInvalid(format!(
+                    "undeleted_at {u} ms lies in the future (now {now_ms} ms, clock skew allowance {skew_ms} ms)"
+                )));
             }
         }
         Ok(())
@@ -453,16 +502,17 @@ impl HostedKey {
         use aes_gcm::aead::{Aead, KeyInit};
         use aes_gcm::{Aes256Gcm, Key, Nonce};
 
-        if blob.len() < 1 + SYM_NONCE_LEN || blob[0] != SYM_FORMAT_V1 {
-            return Err(DaemonError::Config(
-                "malformed symmetric ciphertext (bad version or too short)".into(),
-            ));
+        let malformed = || DaemonError::Config("malformed symmetric ciphertext (bad version or too short)".into());
+        let (version, rest) = blob.split_first().ok_or_else(malformed)?;
+        if *version != SYM_FORMAT_V1 {
+            return Err(malformed());
         }
+        let (nonce_bytes, ciphertext) = rest.split_at_checked(SYM_NONCE_LEN).ok_or_else(malformed)?;
         let key_bytes = self.symmetric_key()?;
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
-        let nonce = Nonce::from_slice(&blob[1..1 + SYM_NONCE_LEN]);
+        let nonce = Nonce::from_slice(nonce_bytes);
         let pt = cipher
-            .decrypt(nonce, &blob[1 + SYM_NONCE_LEN..])
+            .decrypt(nonce, ciphertext)
             .map_err(|_| DaemonError::DecryptFailed)?;
         Ok(Zeroizing::new(pt))
     }
@@ -503,13 +553,13 @@ pub fn check_uncompressed_p256_point(peer_point: &[u8]) -> Result<()> {
             peer_point.len()
         )));
     }
-    if peer_point[0] != 0x04 {
-        return Err(DaemonError::InvalidPoint(format!(
-            "the peer point must be uncompressed (leading byte 0x04), got 0x{:02x}",
-            peer_point[0]
-        )));
+    match peer_point.first() {
+        Some(0x04) => Ok(()),
+        Some(tag) => Err(DaemonError::InvalidPoint(format!(
+            "the peer point must be uncompressed (leading byte 0x04), got 0x{tag:02x}"
+        ))),
+        None => Err(DaemonError::InvalidPoint("the peer point is empty".into())),
     }
-    Ok(())
 }
 
 /// A FROST [`Identifier`] as the small integer the config uses (1..=n).
@@ -524,12 +574,12 @@ pub fn check_uncompressed_p256_point(peer_point: &[u8]) -> Result<()> {
 /// every envelope addressed over gRPC undecryptable by its recipient.
 pub fn identifier_index(id: frost_ed25519::Identifier) -> Result<u16> {
     let bytes = id.serialize();
-    if bytes.len() < 2 || bytes[2..].iter().any(|&b| b != 0) {
-        return Err(DaemonError::Config(
+    match bytes.as_slice() {
+        [lo, hi, rest @ ..] if rest.iter().all(|&b| b == 0) => Ok(u16::from_le_bytes([*lo, *hi])),
+        _ => Err(DaemonError::Config(
             "FROST identifier does not fit in 16 bits — cosigner ids are 1..=65535".into(),
-        ));
+        )),
     }
-    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
 }
 
 /// Seconds since the Unix epoch, for `created_at`.
@@ -608,6 +658,30 @@ mod tests {
         let k = HostedKey::generate(HostedSpec::Rsa2048, 1).unwrap();
         assert!(k.encrypt_oaep(&[0u8; RSA2048_MAX_PLAINTEXT_LEN]).is_ok());
         assert!(k.encrypt_oaep(&[0u8; RSA2048_MAX_PLAINTEXT_LEN + 1]).is_err());
+    }
+
+    #[test]
+    fn a_short_or_misversioned_symmetric_blob_is_an_error_not_a_panic() {
+        let k = HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
+        // Empty, one byte, version byte plus a nonce one byte short, and a wrong version.
+        assert!(k.decrypt_symmetric(&[]).is_err());
+        assert!(k.decrypt_symmetric(&[SYM_FORMAT_V1]).is_err());
+        assert!(k.decrypt_symmetric(&[SYM_FORMAT_V1; SYM_NONCE_LEN]).is_err());
+        assert!(k.decrypt_symmetric(&[SYM_FORMAT_V1.wrapping_add(1); 1 + SYM_NONCE_LEN + 16]).is_err());
+        // Exactly version + nonce and no ciphertext: reaches the AEAD, which refuses it.
+        assert!(k.decrypt_symmetric(&[SYM_FORMAT_V1; 1 + SYM_NONCE_LEN]).is_err());
+    }
+
+    #[test]
+    fn a_malformed_peer_point_is_an_error_not_a_panic() {
+        assert!(check_uncompressed_p256_point(&[]).is_err());
+        assert!(check_uncompressed_p256_point(&[0x04]).is_err());
+        let mut point = vec![0x02; P256_UNCOMPRESSED_POINT_LEN];
+        assert!(check_uncompressed_p256_point(&point).is_err(), "compressed tag");
+        point[0] = 0x04;
+        assert!(check_uncompressed_p256_point(&point).is_ok(), "syntax only; the curve check is aws-lc's");
+        point.push(0);
+        assert!(check_uncompressed_p256_point(&point).is_err(), "one byte too long");
     }
 
     #[test]
@@ -826,5 +900,45 @@ mod tests {
         let n = hex::decode("ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551").unwrap();
         assert!(HostedKey::ec_p256_from_scalar(&n, 1).is_err());
         assert!(HostedKey::ec_p256_from_scalar(&[1u8; 31], 1).is_err(), "wrong length");
+    }
+
+    #[test]
+    fn debug_never_prints_the_private_material() {
+        for spec in [HostedSpec::Aes256Gcm, HostedSpec::EcP256, HostedSpec::Rsa2048] {
+            let key = HostedKey::generate(spec, 1).unwrap();
+            assert!(key.private_der.len() >= 64, "{spec:?}: test needs real material to look for");
+            let shown = format!("{key:?} {key:#?}");
+            assert!(!shown.contains(&key.private_der), "{spec:?}: Debug leaked private_der");
+            // No 16-byte (32 hex) window of the material either, at any byte offset, in case a
+            // format ever truncates or shifts it. PKCS#8 embeds the public half (the EC point, the
+            // RSA modulus) and shares OID bytes with the SPKI, which is printed on purpose, so
+            // windows that also occur in the public half are not secret.
+            for w in key.private_der.as_bytes().windows(32).step_by(2) {
+                let w = std::str::from_utf8(w).unwrap();
+                if !key.public_der.contains(w) {
+                    assert!(!shown.contains(w), "{spec:?}: Debug leaked part of private_der");
+                }
+            }
+            assert!(shown.contains("<redacted>"));
+            if spec.is_asymmetric() {
+                assert!(shown.contains(&key.public_der), "{spec:?}: the public half stays visible");
+            }
+
+            // A tombstone within its grace period holds the key; its derived Debug goes through the
+            // redacting one.
+            let t = Tombstone {
+                key_id: "rutli-test".into(),
+                spec: spec.as_str().into(),
+                created_at: 1,
+                commitment: String::new(),
+                deleted_at_ms: 2,
+                purge_after_ms: 3,
+                delete_intent: String::new(),
+                retained: Some(key.clone()),
+            };
+            let shown = format!("{t:?} {t:#?}");
+            assert!(!shown.contains(&key.private_der), "{spec:?}: Tombstone Debug leaked private_der");
+            assert!(shown.contains("<redacted>"));
+        }
     }
 }

@@ -104,6 +104,85 @@ Backends, added over the phases:
 Routing by key type lets each key sit on the right backend simultaneously (e.g. namespace key on
 FROST threshold, encryption key cluster-hosted or on an HSM) behind one Canton-facing driver.
 
+### Deadlines, keepalive and what Canton waits for
+
+A cosigner that stops answering without closing its connections (its machine powered off, its
+network cut) must cost one short deadline, not a minute. The driver has four settings in its `frost`
+block:
+
+| Setting | Default | What it bounds |
+|---|---|---|
+| `sign-attempt-timeout` | 5 s | One sign attempt at one cosigner. On the deadline the attempt is cancelled and the sign fails over to the next cosigner with the same signing intent. |
+| `attempt-timeout` | 10 s | One attempt of any other call that fails over (reads, decrypt, symmetric crypto, hosted-key writes); at most one such deadline per cosigner. |
+| `request-timeout` | 30 s | The whole driver call, every attempt included. A DKG's attempt gets all that is left of it; a DKG fails over only on a refused connection (no ceremony started), never on a deadline. |
+| `keepalive-time` / `keepalive-timeout` | 10 s / 5 s | HTTP/2 pings on every cosigner channel, also while idle: a dead connection is torn down in about 15 s, and the next call fails over at once instead of waiting for a deadline. |
+
+One attempt is in flight at a time. A failed-over sign keeps its request id. Each cosigner charges
+its rate limit once per request id, and releases at most `signing_policy.max_shares_per_request`
+shares for it, however many leaders the driver tries. In a node's sign journal a failed-over sign
+shows as one more entry under the same `request_id`, with the same digest, from the leader that
+completed it. A deadline takes the lead from that cosigner, so the next calls start at the next
+one. After `leader-recovery` (60 s) the first endpoint in the list gets the lead back. If it still
+fails, it loses the lead again, at the cost of one attempt. Each change of leader is logged at INFO
+with the new leader order (`FROST: leader is now … ; leader order a > b > c`). The driver has no
+metrics endpoint: that line and the `failover=` notes in the audit log show the order.
+
+**Which cosigner leads a sign (`frost.sign-leader`).**
+
+| Value | Where each sign starts | Load for 2-of-3 |
+|---|---|---|
+| `rotate` (default) | The next endpoint in turn, among the healthy ones: not demoted within `leader-recovery`, and not a cosigner that answered another group key for that key. If none is healthy, the sticky choice. | Each node leads 1/3 of the signs. With the cosigners picking the second member by the request id, each node releases a share for 2/3 of them. |
+| `sticky` | The preferred leader, as before 0.5.0. | One node leads every sign and releases a share for all of them; the other two release one for half each. |
+
+Rotation changes only where a sign starts. One Canton call still has one attempt in flight, keeps
+its one signing intent across failovers and stays within its budget. The retryable and final
+errors above are the same in both modes. Ceremonies (DKG) and every hosted-key call stay on the
+preferred leader in both modes: a ceremony is bound to the leader that fenced it, a hosted-key
+write is orchestrated by its leader, and the per-node decrypt limit assumes one leader.
+
+Rotation exercises every node's leader path all the time, so a node that cannot lead shows up at
+once instead of on the day a failover needs it. The cost: a node that is slow but still answers
+inside the sign attempt deadline takes part in about 2/3 of the signs under `rotate`, against 1/2
+under `sticky` with a healthy leader. A node slower than the deadline is demoted and skipped for
+`leader-recovery` in both modes.
+
+**Per-node sign rate limits.** `signing_policy.sign_rate_limit_per_min` / `_per_day` and the
+`rate_limits` rules are counted on each node, once per request id (failovers of one call share the
+charge), for every signature the node takes part in. Under `sticky` the leading node takes part in
+every signature and the other two in about half each. Under `rotate` each node takes part in about
+2/3. Switching to `rotate` lowers the busiest node's count and raises the other two's, from 1/2 to
+2/3 of the key's rate. A limit sized for the key's whole rate holds on every node in both modes. A
+limit sized for the share a non-leading node used to see does not: check those before switching.
+
+**The default.** `rotate` is the default in this release only if it has run on the two test stands
+for at least two weeks before the feature freeze without a finding. If it has not, the default goes
+back to `sticky` for 0.5.0, with `rotate` documented as recommended and made the default in 0.6.
+Operators who want the pre-0.5.0 behaviour set `sign-leader = sticky`.
+
+**What Canton waits for.** Canton puts no deadline on a KMS driver call. It retries a *retryable*
+failure forever, with a backoff up to 10 s (`KmsConfig.retries.failures`, Canton 3.6/3.7). The
+driver reports only "the cluster could not be reached in time" as retryable (`UNAVAILABLE`,
+`DEADLINE_EXCEEDED`, the request budget spent, too few cosigners answering a group-key query). A refusal (`PERMISSION_DENIED`, `RESOURCE_EXHAUSTED`, a bad request, an
+unknown key), a signature that does not verify, a group key that differs from the pin, and
+cosigners that disagree are not retryable, so Canton stops at once rather than retrying a
+condition that will not clear.
+
+**The confirmation window.** Above the KMS, time does matter. A participant's confirmation response
+must be sequenced before `request time + confirmationResponseTimeout`, a dynamic synchronizer
+parameter: **30 s in Canton's defaults**. Splice's value is not verified here. Read the live value
+from the synchronizer's dynamic parameters, through the Canton console's
+`topology.synchronizer_parameters` commands on the participant, as `confirmationResponseTimeout`.
+
+With Canton's session signing keys off (the default), **every confirmation response is a threshold
+signature through the cosigners**. The response must be signed and sequenced inside that window, so
+the per-attempt deadline is what keeps one dead cosigner from costing a confirmation. At 5 s, two
+failed attempts and a third that succeeds fit in about 11 s. A call that uses the whole 30 s budget
+has missed the window anyway. Session signing keys (`crypto.session-signing-keys.enabled`) take the
+cosigners off that path: the KMS key signs a short-lived session key, and the session key signs the
+messages. The trade-off is that the session key's private half sits in the participant's memory
+for its validity (5 minutes by default). Whether that is acceptable is the operator's decision;
+Rütli does not set it either way.
+
 ## Phase 2 MPC cluster — two Horcrux-informed decisions
 
 **1. DKG by default; sharding only to migrate.** Horcrux shards an *existing*
@@ -123,7 +202,9 @@ whole on a server and in that node's backups, and splitting it cannot undo that 
 signing among themselves and the validator-facing side is a dumb client. We adopt the same shape,
 but deliberately **without** a Raft/consensus layer: the node the driver contacts leads that request
 (static leader), the driver fails over to another cosigner if it's unreachable or cannot serve the
-request (`INTERNAL` / `UNKNOWN` — never for a DKG ceremony), and the share nodes
+request (`INTERNAL` / `UNKNOWN` — never for a DKG ceremony; a sign fails over on every status except
+`PERMISSION_DENIED`, `UNAUTHENTICATED`, `RESOURCE_EXHAUSTED` and `INVALID_ARGUMENT`, and on a signature
+that does not verify against the pinned group key), and the share nodes
 coordinate the FROST rounds internally. FROST sessions are independent, so no replicated log is
 needed (see phase-2-frost.md). The `FrostBackend` just submits `sign(hash, keyId)` and awaits the
 aggregated signature. This keeps round orchestration and nonce-session state out of the
@@ -171,8 +252,10 @@ rationale in [hosted-keys-design.md](hosted-keys-design.md)):
   pin, it refuses to start when that pin does not match its seal keys, so a wrong bundle or wrong
   mount is caught *before* any key exists. Without the own pin the mismatch shows only when peers
   refuse to replicate to it.
-- **Anti-entropy and read-repair.** A sweep every 300 s pulls keys this node lacks and pushes keys a
-  peer lacks; a request landing on a lagging replica pulls on demand. Hosted keys are
+- **Anti-entropy and read-repair.** A sweep every 300 s pulls keys this node lacks; a request
+  landing on a lagging replica pulls on demand. Since 0.5.0 a node stores a key it lacks only when
+  two peers return the same copy, the sweep never pushes, and a peer's push into an id the node
+  lacks is accepted only from the leader holding its generation fence (`docs/hosted-keys.md` §4). Hosted keys are
   create-once-immutable (Canton rotates by minting a new id plus a topology transaction), so a
   commitment mismatch between two nodes under one key id is a **hard error** — page-worthy, never
   auto-reconciled.
@@ -210,7 +293,11 @@ The honest framing, to be used wherever this tradeoff comes up:
 ## One cluster, several participants — `frost.key-prefix`
 
 The driver derives FROST key ids **deterministically from Canton's key name** (`namespace` →
-`frost-namespace`, `signing` → `frost-signing`), and hosted ids as `rutli-<kind>-<name>-<uuid>`. The
+`frost-namespace`, `signing` → `frost-signing`), and hosted ids as `rutli-<kind>-<name>-<uuid>`.
+Who names the key matters: a Splice validator calls it `namespace`, Canton's own auto-init calls
+it `<node>-namespace` (so `frost-participant1-namespace`). Rules, ACLs and rate limits match ids by
+prefix, so a rule written for one form never matches the other. Take the real id from the driver
+log ("initiating distributed key generation for …") or `keys.secret.list()`. The
 determinism is deliberate — a retry or a failover must ask for the *same* namespace key, never mint
 a second one — but it means two participants pointed at the same cosigner cluster both ask for
 `frost-namespace`. Before 0.4.0-rc.3 the cluster's create-once guard refused the second
@@ -218,9 +305,30 @@ participant's DKG with `ALREADY_EXISTS`. (The 2026-10-07 DevNet soak bring-up hi
 a second validator; the only way out at the time was retiring the old shares by hand on every
 cosigner.) Since 0.4.0-rc.3 a DKG for an id that every node already holds from a DKG returns the
 existing key, so that Canton's retry succeeds ([ceremonies.md](ceremonies.md#idempotent-dkg)). The
-cluster cannot tell a retry from a second participant: without a prefix the second participant is
-handed the first one's Ed25519 keys, and the two share one identity root. Nothing is overwritten,
-and nothing warns. Set the prefix before the first bootstrap, and give each participant its own
+cluster cannot tell a retry from a second participant. Before 0.5.0, without a prefix, the second
+participant was handed the first one's Ed25519 keys, and the two shared one identity root, with no
+warning.
+
+Since 0.5.0 the DKG reply says whether the key already existed (`existing`), and which DKG created
+it (`origin_ceremony_id`, the ceremony the client's intent named) when the leader still holds that
+ceremony's record: settled records are kept 30 days, and a refresh starts a new sharing, after
+which no origin is named. The driver accepts an existing key only when that ceremony is one it
+asked for itself in this process: Canton's retry after a timeout. Any other existing key is refused, naming `frost.key-prefix` and
+`frost.adopt-existing-keys`. A driver that restarts in the middle of a bootstrap has forgotten its
+own ceremony ids and is refused too, unless `frost.pin-dir` is set. With it, the driver writes
+each ceremony id to the pin directory (`<key-id>.dkg`, fsynced) before the request goes out, and a
+restart between request and reply adopts the key. The refusal says what to do. If another participant uses this cluster with the
+same `frost.key-prefix`, the key is theirs: do not adopt it, give this participant its own prefix
+and driver certificate. Otherwise it is this participant's own key from before the restart: list its
+id in `frost.adopt-existing-keys`, restart the participant, and remove the entry once Canton has
+registered the key. A DKG sent without an intent (no
+TLS, `frost.sign-intents = off`) cannot be matched and is accepted with a warning, and so is a
+reply from a leader older than 0.5.0, which leaves the field out.
+
+The flag is the leader's word. A compromised leader can say `existing = false` for another
+participant's key. The boundary that holds against it is the per-CN `signing_policy.signer_acl`,
+which every cosigner checks on `Signer.Dkg`, together with the key prefix; the flag catches the
+honest misconfiguration, which was silent before. Set the prefix before the first bootstrap, and give each participant its own
 driver certificate with a `signing_policy.signer_acl` entry: the ACL is checked on `Signer.Dkg`
 too, so a driver that asks for another participant's id is refused
 ([approval-quorum.md](approval-quorum.md)).

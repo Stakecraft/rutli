@@ -162,6 +162,22 @@ private static final long serialVersionUID = 0L;
     }
   }
 
+  public static final int NODE_IDENTIFIER_FIELD_NUMBER = 4;
+  private int nodeIdentifier_ = 0;
+  /**
+   * <pre>
+   * This cosigner's roster identifier: what a generate intent sent to it names as SignIntent.leader.
+   * 0 from a cosigner older than 0.5.0; the driver then does not ask it to generate a hosted key.
+   * </pre>
+   *
+   * <code>uint32 node_identifier = 4;</code>
+   * @return The nodeIdentifier.
+   */
+  @java.lang.Override
+  public int getNodeIdentifier() {
+    return nodeIdentifier_;
+  }
+
   private byte memoizedIsInitialized = -1;
   @java.lang.Override
   public final boolean isInitialized() {
@@ -184,6 +200,9 @@ private static final long serialVersionUID = 0L;
     }
     if (!com.google.protobuf.GeneratedMessage.isStringEmpty(clusterId_)) {
       com.google.protobuf.GeneratedMessage.writeString(output, 3, clusterId_);
+    }
+    if (nodeIdentifier_ != 0) {
+      output.writeUInt32(4, nodeIdentifier_);
     }
     getUnknownFields().writeTo(output);
   }
@@ -209,6 +228,10 @@ private static final long serialVersionUID = 0L;
     if (!com.google.protobuf.GeneratedMessage.isStringEmpty(clusterId_)) {
       size += com.google.protobuf.GeneratedMessage.computeStringSize(3, clusterId_);
     }
+    if (nodeIdentifier_ != 0) {
+      size += com.google.protobuf.CodedOutputStream
+        .computeUInt32Size(4, nodeIdentifier_);
+    }
     size += getUnknownFields().getSerializedSize();
     memoizedSize = size;
     return size;
@@ -230,6 +253,8 @@ private static final long serialVersionUID = 0L;
         != other.getHostedKeysEnabled()) return false;
     if (!getClusterId()
         .equals(other.getClusterId())) return false;
+    if (getNodeIdentifier()
+        != other.getNodeIdentifier()) return false;
     if (!getUnknownFields().equals(other.getUnknownFields())) return false;
     return true;
   }
@@ -250,6 +275,8 @@ private static final long serialVersionUID = 0L;
         getHostedKeysEnabled());
     hash = (37 * hash) + CLUSTER_ID_FIELD_NUMBER;
     hash = (53 * hash) + getClusterId().hashCode();
+    hash = (37 * hash) + NODE_IDENTIFIER_FIELD_NUMBER;
+    hash = (53 * hash) + getNodeIdentifier();
     hash = (29 * hash) + getUnknownFields().hashCode();
     memoizedHashCode = hash;
     return hash;
@@ -385,6 +412,7 @@ private static final long serialVersionUID = 0L;
           com.google.protobuf.LazyStringArrayList.emptyList();
       hostedKeysEnabled_ = false;
       clusterId_ = "";
+      nodeIdentifier_ = 0;
       return this;
     }
 
@@ -428,6 +456,9 @@ private static final long serialVersionUID = 0L;
       if (((from_bitField0_ & 0x00000004) != 0)) {
         result.clusterId_ = clusterId_;
       }
+      if (((from_bitField0_ & 0x00000008) != 0)) {
+        result.nodeIdentifier_ = nodeIdentifier_;
+      }
     }
 
     @java.lang.Override
@@ -459,6 +490,9 @@ private static final long serialVersionUID = 0L;
         clusterId_ = other.clusterId_;
         bitField0_ |= 0x00000004;
         onChanged();
+      }
+      if (other.getNodeIdentifier() != 0) {
+        setNodeIdentifier(other.getNodeIdentifier());
       }
       this.mergeUnknownFields(other.getUnknownFields());
       onChanged();
@@ -502,6 +536,11 @@ private static final long serialVersionUID = 0L;
               bitField0_ |= 0x00000004;
               break;
             } // case 26
+            case 32: {
+              nodeIdentifier_ = input.readUInt32();
+              bitField0_ |= 0x00000008;
+              break;
+            } // case 32
             default: {
               if (!super.parseUnknownField(input, extensionRegistry, tag)) {
                 done = true; // was an endgroup tag
@@ -800,6 +839,53 @@ private static final long serialVersionUID = 0L;
       checkByteStringIsUtf8(value);
       clusterId_ = value;
       bitField0_ |= 0x00000004;
+      onChanged();
+      return this;
+    }
+
+    private int nodeIdentifier_ ;
+    /**
+     * <pre>
+     * This cosigner's roster identifier: what a generate intent sent to it names as SignIntent.leader.
+     * 0 from a cosigner older than 0.5.0; the driver then does not ask it to generate a hosted key.
+     * </pre>
+     *
+     * <code>uint32 node_identifier = 4;</code>
+     * @return The nodeIdentifier.
+     */
+    @java.lang.Override
+    public int getNodeIdentifier() {
+      return nodeIdentifier_;
+    }
+    /**
+     * <pre>
+     * This cosigner's roster identifier: what a generate intent sent to it names as SignIntent.leader.
+     * 0 from a cosigner older than 0.5.0; the driver then does not ask it to generate a hosted key.
+     * </pre>
+     *
+     * <code>uint32 node_identifier = 4;</code>
+     * @param value The nodeIdentifier to set.
+     * @return This builder for chaining.
+     */
+    public Builder setNodeIdentifier(int value) {
+
+      nodeIdentifier_ = value;
+      bitField0_ |= 0x00000008;
+      onChanged();
+      return this;
+    }
+    /**
+     * <pre>
+     * This cosigner's roster identifier: what a generate intent sent to it names as SignIntent.leader.
+     * 0 from a cosigner older than 0.5.0; the driver then does not ask it to generate a hosted key.
+     * </pre>
+     *
+     * <code>uint32 node_identifier = 4;</code>
+     * @return This builder for chaining.
+     */
+    public Builder clearNodeIdentifier() {
+      bitField0_ = (bitField0_ & ~0x00000008);
+      nodeIdentifier_ = 0;
       onChanged();
       return this;
     }

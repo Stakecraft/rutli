@@ -1,0 +1,80 @@
+# Copyright 2026 StakeCraft
+# SPDX-License-Identifier: Apache-2.0
+#
+# Every push to main runs the whole set of checks once, unfiltered: CI, E2E ceremonies, Load test,
+# Cluster suite and Image build check each trigger on `push: branches: [main]` without a path
+# filter. This workflow watches them. When one fails it opens the issue "main is red" (labels
+# prio:p0, type:test) or comments on the open one; when every one of them is green on the tip of
+# main it comments and closes it. The run of this workflow is red while the commit that triggered
+# it is red, so its badge in the README is the state of main.
+#
+# The list of watched workflows is WATCHED in scripts/main-status.py; a unit test checks that each
+# of them exists and pushes to main without a path filter. Add the quality workflow there when it lands.
+# A cancelled run, or a watched workflow that never starts on the tip, keeps the issue open until the
+# next push; re-run the workflow to settle it.
+#
+# workflow_run workflows run with the repository's write token on the default branch's code: this
+# one checks out main (never the commit under test), runs nothing from it, and only reads run
+# metadata from the API.
+name: Main status
+
+on:
+  workflow_run:
+    workflows:
+      - CI
+      - E2E ceremonies
+      - Load test
+      - Cluster suite (kind)
+      - Image build check
+      - Generated code
+      - Workflow lint
+    types: [completed]
+    branches: [main]
+  # Only to run the script's tests when it or the workflows change.
+  pull_request:
+    paths:
+      - scripts/main-status.py
+      - scripts/test_main_status.py
+      - .github/workflows/**
+
+permissions:
+  contents: read
+
+# One evaluation per commit at a time, none cancelled: a queued run of the same commit sees the
+# same state as the one it replaces.
+concurrency:
+  group: main-status-${{ github.event.workflow_run.head_sha || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  tests:
+    name: Tests of the script
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 -I scripts/test_main_status.py
+
+  status:
+    name: Open or close "main is red"
+    if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          EVENT_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: python3 -I scripts/main-status.py

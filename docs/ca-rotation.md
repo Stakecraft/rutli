@@ -20,6 +20,11 @@ expire. Rotate when:
 - the CA key may be exposed (rotate **now**, then also drop the old CA as fast as §6 allows);
 - the CA approaches expiry.
 
+One CA per cluster. Never issue a second cluster's certificates (staging, another tenant) from it:
+its driver and operator certificates would be valid here wherever `signing_policy.signer_pins`
+does not pin them, and without a pinned `cluster_id` both clusters would derive the same id from the
+same file (`docs/security/threat-model.md`, "Holder of the cluster CA key").
+
 Loss of the CA key is **not** a key-loss event. No share, hosted key, backup or export depends on
 it (§2). It is an availability deadline: the cluster keeps working on the existing certificates
 until they expire.
@@ -59,8 +64,10 @@ The driver sees the cluster id: it names it in every signing intent. With the co
 the id never changes, which is one more reason to pin it before the CA file changes. If the driver
 pins it too (`frost.cluster-id`, recommended in production — then no cosigner's `Capabilities`
 answer is trusted for it), it must be the same value. In an incident where intents are refused for
-the cluster id and the cosigners do not set `require_intent`, `frost.sign-intents = off` (driver
-restart) stops attaching intents until it is fixed.
+the cluster id, `frost.sign-intents = off` (driver restart) stops attaching intents until it is
+fixed. That works only on cosigners with `require_intent: false`: since 0.5.0 the
+default with TLS refuses a sign without an intent, so the switch also needs that opt-out on every
+node.
 
 So nothing at rest is lost when the id changes. But a rolling restart over a changed CA file leaves
 nodes with **different** ids for the length of the roll, and that happens twice: when the second CA
@@ -117,6 +124,11 @@ Why this order:
   length of the roll. Each rolled pod could then talk only to other rolled pods. Signing would
   survive at 2-of-3 only by luck of ordering. Keep them separate.
 - Gate: never start a phase until **every** pod (and, for C, the participant) runs the previous one.
+- **Peer key pins (0.5.0 and later).** Every new leaf has a new key, so each node's pin changes with
+  its leaf. Phase 1 records the new pins; Phase A also sets every node's pins to `[old, new]`;
+  Phase C swaps the leaves, and each node's own new key is already pinned everywhere; Phase D also
+  sets the pins to `[new]`. The pins ride on rolls the phases already do, and adjacent rows stay
+  compatible: a node with `[old, new]` accepts a peer on either key.
 - Rollback is the reverse order, one phase at a time (§7).
 
 No split ceremony may be in flight from Phase A to the end of Phase D: no pending `share-recipient`.
@@ -182,7 +194,7 @@ export LAYOUT=shared                      # or perNode — see 4.6
 export PIN=453bb4aea2088bb5               # the current derived id; never changes from here on
 export KEY_ID=frost-namespace             # the soak's FROST namespace key
 export NS_FP=12203286ffe27c94c35ee0aa24a359d41e73f4df6e88d2aab2b72860df79ce8f22ea
-export R=~/ca-rotation                    # outside the repo
+export R="${RUTLI_WORK:?mount the memory disk first}/ca-rotation"   # docs/key-material-handling.md; never in your home
 mkdir -p $R/old $R/new $R/client && chmod 700 $R $R/old $R/new $R/client
 kc() { kubectl --context "$KUBECONTEXT" "$@"; }
 
@@ -361,7 +373,7 @@ the pin logs `(derived from tls.ca_cert)`. Do **not** go on to Phase A until all
 
 The driver leaf is **not** issued here. It can sign with the namespace key (CN `driver`, Signer
 API) as soon as Phase A trusts the new CA, and Phase B may be days away, so it is issued from
-escrow in Phase B and shredded minutes later.
+escrow in Phase B and removed minutes later.
 
 ```sh
 cd <rutli checkout at the release tag>
@@ -381,7 +393,7 @@ Compare with
 `kc -n $NS get secret rutli-cosigner-tls -o jsonpath='{.data.cosigner1\.crt}' | base64 -d | openssl x509 -noout -ext subjectAltName`.
 The new CA has a **different CN** from the old one, so the two are easy to tell apart in the bundle.
 
-**Escrow the new CA key now**, before it touches any cluster, then **shred the plaintext**:
+**Escrow the new CA key now**, before it touches any cluster, then **remove the plaintext**:
 
 ```sh
 # PKCS#8 v2, AES-256-CBC, PBKDF2 with 600 000 iterations (a bare `pkey -aes256` is a far weaker KDF).
@@ -389,13 +401,13 @@ The new CA has a **different CN** from the old one, so the two are easy to tell 
 openssl pkcs8 -topk8 -v2 aes-256-cbc -iter 600000 -in $R/new/ca.key -out $R/new/ca.key.enc
 # copy ca.key.enc + ca.crt to the two escrow locations (4.3), then prove a restore works from EACH:
 openssl pkey -in <escrow copy>/ca.key.enc -pubout | diff - <(openssl x509 -in $R/new/ca.crt -pubkey -noout) && echo ESCROW-OK
-shred -u $R/new/ca.key 2>/dev/null || rm -P $R/new/ca.key; ls $R/new/ca.key 2>/dev/null && echo "STOP: ca.key still there"
+rm -f $R/new/ca.key; ls $R/new/ca.key 2>/dev/null && echo "STOP: ca.key still there"   # $R is destroyed as a whole at the end
 ```
 
 Record in the soak log: new CA subject, `shasum -a 256 $R/new/ca.crt`, notAfter, the escrow
-locations, `ESCROW-OK` for each, and the shred. From here on the CA key exists only encrypted.
+locations, `ESCROW-OK` for each, and the removal. From here on the CA key exists only encrypted.
 Whenever a later step needs it (the driver leaf in Phase B, a re-issue for rollback, a later
-operator cert), restore it into a temporary 0700 directory for that one command and shred it
+operator cert), restore it into a temporary 0700 directory for that one command and remove it
 right after:
 
 ```sh
@@ -403,7 +415,7 @@ ca_restore() { # ca_restore <dir> — decrypt the escrowed CA key next to its ce
   mkdir -m 700 "$1" && cp $R/new/ca.crt "$1/" \
     && ( umask 077; openssl pkcs8 -in <escrow copy>/ca.key.enc -out "$1/ca.key" )
 }
-ca_shred() { shred -u "$1/ca.key" 2>/dev/null || rm -P "$1/ca.key"; rm -rf "$1"; }
+ca_remove() { rm -rf "$1"; }   # $1 is under $R, on the memory disk
 ```
 
 Build the trust bundle, old CA first. `printf` guarantees a newline between the two PEM blocks
@@ -420,7 +432,14 @@ export SHA_OLD=$(shasum -a 256 $R/old/ca.crt | cut -d' ' -f1) \
        SHA_NEW=$(shasum -a 256 $R/new/ca.crt | cut -d' ' -f1)
 ```
 
-Keep the old leaves for rollback (sensitive: 0600 in `$R/old`, shredded at the end):
+With pins (0.5.0 and later), record the pins of the new leaves; the old ones are recorded below once
+the old leaves are saved:
+
+```sh
+for i in 1 2 3; do rutli-cosigner tls spki $R/new/cosigner$i.crt; done | tee $R/new/pins.txt
+```
+
+Keep the old leaves for rollback (sensitive: 0600 in `$R/old`, destroyed with `$R` at the end):
 
 ```sh
 ( umask 077; for i in 1 2 3; do
@@ -430,11 +449,21 @@ Keep the old leaves for rollback (sensitive: 0600 in `$R/old`, shredded at the e
   kc -n $NS get secret $s -o jsonpath="{.data.$k}" | base64 -d > $R/old/cosigner$i.key
 done )
 for i in 1 2 3; do openssl verify -CAfile $R/old/ca.crt $R/old/cosigner$i.crt; done   # 3× OK, non-empty
+for i in 1 2 3; do rutli-cosigner tls spki $R/old/cosigner$i.crt; done | tee $R/old/pins.txt  # = the live peerPins
 ```
+
+Write two values files for the pins: `$R/pins-both.yaml` with `peerPins` listing, for every node,
+its old pin and its new pin, and `$R/pins-new.yaml` with the new pin alone (the shape is in the
+chart's `values.yaml`, `peerPins`).
 
 The old driver leaf is saved from the PVC in Phase B.
 
 ### Phase A: cosigners trust old + new [MUTATES]
+
+With pins, first put the overlap pins into the config (`helm upgrade` with the saved values and
+`-f $R/pins-both.yaml`; it changes only the ConfigMap, so no pod restarts). The roll below then
+picks up both changes; the gate adds: every pod logs `peer N TLS key pins` with two values for each
+node.
 
 ```sh
 put_ca $R/bundle.crt
@@ -455,7 +484,7 @@ plaintext only until the end of this phase's copy:
 
 ```sh
 ca_restore $R/ca-tmp && RUTLI_CA_DIR=$R/ca-tmp RUTLI_CERTS=driver <rutli checkout>/scripts/gen-frost-certs.sh 3 $R/new
-ca_shred $R/ca-tmp
+ca_remove $R/ca-tmp
 openssl verify -CAfile $R/new/ca.crt $R/new/driver.crt                                       # OK
 client_cfg drv-bundle $R/bundle.crt $R/new/driver.crt $R/new/driver.key && vk drv-bundle     # OK: accepted by all 3
 ```
@@ -492,11 +521,11 @@ CronJob carries the refresher leaf, not the driver's: issue it from escrow the s
 (`RUTLI_CERTS=refresher`) and replace its Secret (`kc -n $NS create secret tls rutli-refresher-tls
 --cert=$R/new/refresher.crt --key=$R/new/refresher.key --dry-run=client -o yaml | kc apply -f -`)
 before Phase D. If `refreshAllowlist` lists only `operator` (no refresher certificate), put the new
-operator leaf there instead, or add `refresher` to `refreshAllowlist` first. Then shred the
+operator leaf there instead, or add `refresher` to `refreshAllowlist` first. Then remove the
 plaintext key; a rollback or a later client re-issues one from escrow:
 
 ```sh
-shred -u $R/new/driver.key 2>/dev/null || rm -P $R/new/driver.key; rm -rf $R/client/drv-bundle.json $R/client/data-drv-bundle
+rm -f $R/new/driver.key; rm -rf $R/client/drv-bundle.json $R/client/data-drv-bundle
 ```
 
 The files are now in place for the **next** participant start. An unplanned restart in between is
@@ -529,6 +558,11 @@ client_cfg op-new $R/new/ca.crt $R/new/operator.crt $R/new/operator.key && vk op
 gate for Phase D.
 
 ### Phase D: cosigners drop the old CA [MUTATES]
+
+With pins, first `helm upgrade` with `-f $R/pins-new.yaml` instead of the overlap file; the roll
+below picks it up. Once every pod has rolled (pins are read at startup), the old leaves are refused
+by key as well as by issuer; until then a pod not yet rolled still pins them. Keep
+`peerPins` (new values) in the saved values for every later upgrade.
 
 ```sh
 put_ca $R/new/ca.crt
@@ -580,9 +614,10 @@ harmless only if the old key is truly gone; if it may be exposed, do E right aft
 
 ### Close-out
 
-- `shred -u`/`rm -P` `$R/old/*.key`, `$R/new/*.key` and `$R/client` (the CA key and the new
-  driver key were shredded in Phase 1 and Phase B; check they are gone). On APFS/SSD this is not
-  provable erasure; record it like the B4 destruction list.
+- Unmount and delete the place that holds `$R` (the memory disk, or the encrypted image and its
+  passphrase), after checking that the CA key and the new driver key were removed in Phase 1 and
+  Phase B ([key-material-handling.md](key-material-handling.md)). This is not provable erasure;
+  record it like the B4 destruction list.
 - Remove `tls.allowExpiredCa` / `allow-expired-ca` if the rotation needed them (§2).
 - Keep `operator.crt/.key` only where verify-key runs, or re-issue a short-lived one per use from
   escrow (`RUTLI_CA_DIR=<escrow restore dir> RUTLI_CERTS=operator scripts/gen-frost-certs.sh 3 <out>`).
@@ -602,23 +637,25 @@ harmless only if the old key is truly gone; if it may be exposed, do E right aft
 Phases A through D carry no waiting beyond the gates, so the old CA can be gone from the cosigners
 within about 2 h. Do E immediately after D (a second participant restart) instead of waiting for
 a planned one. Until D completes, anyone holding the old key can mint certificates the cosigners
-accept. The signer/peer/operator allowlists are CN-based, so an attacker can mint a cert with CN
-`driver` and use the Signer API. Treat that window as an incident.
+accept. With peer pins (0.5.0 and later) a minted `cosignerN` is refused on the mesh, but the client
+roles are CN-based wherever `signing_policy.signer_pins` does not pin them: an attacker can mint a
+cert with CN `driver` and use the Signer API, and the driver does not pin cosigner keys. Treat that
+window as an incident.
 
 ## 7. Rollback
 
 Always in reverse order, one phase at a time. Undo the later phase before the earlier one. The
 material for every earlier state is in `$R/old` (old CA, old cosigner and driver leaves) and, until
-Phase E, in the PVC `*.pre-ca-rotation` files. After the close-out shreds `$R/old`, there is no way
+Phase E, in the PVC `*.pre-ca-rotation` files. After the close-out destroys `$R/old`, there is no way
 back past Phase D. That is intended: the old CA cannot be re-trusted for leaves nobody can renew.
 
 | Undo | Commands | Precondition |
 |---|---|---|
 | E | Helper pod: `ca.crt` ← bundle. Restart the participant. | — |
-| D | `put_ca $R/bundle.crt`, then `roll_one`/`gate` 2 1 0 with `$SHA_BUNDLE`. | — |
-| C | `put_leaf $i $R/old/cosigner$i.crt $R/old/cosigner$i.key` for i=1..3, then roll 2 1 0. | D undone (cosigners trust old + new) |
+| D | `put_ca $R/bundle.crt` and, with pins, `helm upgrade -f $R/pins-both.yaml`, then `roll_one`/`gate` 2 1 0 with `$SHA_BUNDLE`. | — |
+| C | `put_leaf $i $R/old/cosigner$i.crt $R/old/cosigner$i.key` for i=1..3, then roll 2 1 0. | D undone (cosigners trust old + new, and pin old + new) |
 | B | Helper pod: `for f in ca.crt driver.crt driver.key; do cat $f.pre-ca-rotation > $f; done` (after E, from `$R/old` via `kc cp`), then restart the participant. | C undone, or the driver would no longer trust the new leaves still in use |
-| A | `put_ca $R/old/ca.crt`, then roll 2 1 0 with `$SHA_OLD`. | B undone (the driver's new leaf needs the new CA trusted) |
+| A | `put_ca $R/old/ca.crt` and, with pins, `helm upgrade` with the old pins alone, then roll 2 1 0 with `$SHA_OLD`. | B undone (the driver's new leaf needs the new CA trusted) |
 | 0 | `helm rollback rutli <rev>`, then `for o in 2 1 0; do roll_one $o \|\| break; done` and check each pod's `cluster id` line: `(derived from tls.ca_cert)` with `$PIN`, or no line on an image older than the pin (`gate` expects the pin, so not `gate` here). The pod template has no config checksum, so a rollback that changes only the ConfigMap restarts nothing by itself. Safe at any time *only before A*. Once the CA file changed, an unpinned node derives a different id, and a node with this release refuses to start under it (`cluster id mismatch`). | A undone |
 
 Single-pod failure mid-phase: put the previous phase's material back for the whole Secret, which
@@ -648,9 +685,59 @@ that has the pin, an unpinned rotation is not even possible without
   re-render with `scripts/render-k8s.sh` (and keep it there: each node records its id in
   `data_dir/cluster-id` and refuses another). Secrets as in `secrets.example.yaml` (`perNode`
   layout: `rutli-cosigner-ca` and `rutli-cosigner-tls-<id>`). Roll with `kubectl delete pod` as
-  above, on the pods `rutli-cosigner-n<id>-0`.
+  above, on the pods `rutli-cosigner-n<id>-0`. With pins, Phase A and Phase D change `peerPins` in
+  the same `values.yaml` (old and new, then new only) before the re-render.
 - **Docker Compose** (`deploy/frost`): the same config field. Restart one container at a time
   (`docker compose restart cosignerN`). The certs are bind-mounted, so replace the files in place.
+  With pins, edit `peers[].tls_spki_sha256` in every config in Phase A (each node's old and new pin)
+  and Phase D (new only), before that phase's restarts. Do not point `RUTLI_PIN_CONFIGS` at the
+  live configs in Phase 1: it writes the new pins alone, which belong only in Phase D.
 - **Adding a node or issuing an operator cert later:** restore the CA key from escrow into a
   temporary 0700 dir, then `RUTLI_CA_DIR=<dir> RUTLI_CERTS="operator" scripts/gen-frost-certs.sh 3 <out>`.
-  Delete the plaintext key afterwards.
+  Delete the plaintext key afterwards. A new cosigner's certificate (`RUTLI_CA_DIR=<dir>
+  RUTLI_CERTS=cosigner4 scripts/gen-frost-certs.sh 4 <out>`) needs its pin (`rutli-cosigner tls
+  spki <out>/cosigner4.crt`) in its roster entry on every node, the new node included, before any
+  node starts with that roster.
+
+## 10. Rolling one cosigner's TLS key (peer pins)
+
+From 0.5.0 every node pins every cosigner's TLS key (`peers[].tls_spki_sha256`, chart value
+`peerPins`). A new leaf for one node, for renewal or after a leak, has a new key, so its pin
+changes with it. Pins are read at startup: a values change restarts nothing by itself, and each step
+below ends with a roll, one pod at a time (`roll_one`, as above).
+
+**Planned roll of node N** (renewal; nothing is suspected):
+
+1. Issue the new leaf from escrow (`RUTLI_CA_DIR=<restore dir> RUTLI_CERTS=cosignerN
+   scripts/gen-frost-certs.sh 3 <out>`) and print its pin (`rutli-cosigner tls spki <out>/cosignerN.crt`).
+2. Set N's pins to `[old, new]` and `helm upgrade` with the saved values. Roll every pod. Gate: each
+   pod logs `peer N TLS key pins` with both values.
+3. Put N's new leaf into its Secret (`put_leaf N …`) and restart N. It starts only if its new key is
+   in its own entry, which step 2 did. Check: `rutli-cosigner --config <client config with the
+   pins> tls spki --peers` reports N `pinned`; `rutli_peer_pin_refusals_total` stays flat.
+4. Set N's pins to `[new]`, `helm upgrade`, roll every pod. The old key is refused once every pod
+   has rolled; a pod not yet restarted still accepts it.
+
+Each restart takes out one node, so the others keep signing (n − 1 ≥ t). Run no DKG or refresh
+from step 2 to the end of step 4: they need every node. To undo step 3, put the old leaf back; it
+is still pinned until step 4.
+
+**Emergency eviction** (N's key, or N itself, is compromised): skip the overlap. Issue N's new leaf,
+set N's pins to `[new]`, put the leaf into N's Secret, `helm upgrade`, then restart N first and the
+other nodes one at a time. Until the last node restarts, a node still on the old pins accepts the
+old key and refuses N's new one.
+
+- **2-of-3:** while the first of the other two nodes restarts, the pair still up is N (new key) and
+  a node on the old pins, which refuse each other: no signature completes for the length of that one
+  restart. The eviction is **not done** after that restart: the node still on the old pins accepts
+  the old key until it restarts too. If N itself was compromised, N plus that node is a threshold
+  (2), so a compromised N could still get signatures through it. When N is compromised, either
+  stop signing (pause the driver, or keep N down) until both other nodes run the new pins, or
+  restart the two other nodes back to back and check that both log `peer N TLS key pins` with the
+  new value only before calling it done; then refresh (below). If the gap is not acceptable and N
+  is not suspected, use the planned roll and keep the overlap short.
+- **3-of-5:** the four other nodes stay at or above the threshold through every restart: no gap.
+
+If N itself was compromised, not only its TLS key, the share it held is still a share: refresh every
+key once the roll is done (`rutli-cosigner refresh`), so that share no longer combines with the
+others.

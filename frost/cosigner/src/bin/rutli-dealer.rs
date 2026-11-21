@@ -278,7 +278,7 @@ fn split_key(a: SplitKey) -> Result<()> {
     };
     let requests = read_recipients(&a.recipients, &ca_pem, &cluster_id)?;
     confirm_sas(&requests, a.confirm_sas.as_deref())?;
-    let first = &requests[0];
+    let first = requests.first().ok_or_else(|| refuse("no --recipient given".into()))?;
     if first.key_id != a.key_id {
         return Err(refuse(format!(
             "recipients were made for key id {}, not {}",
@@ -390,8 +390,9 @@ fn split_key(a: SplitKey) -> Result<()> {
                 signer_chain: r.signer_chain.clone(),
             })
             .collect(),
-        bundles: outputs[..bundles.len()]
+        bundles: outputs
             .iter()
+            .take(bundles.len())
             .map(|p| p.file_name().unwrap_or_default().to_string_lossy().into_owned())
             .collect(),
         dealer_binary_sha256: self_sha256(),
@@ -505,7 +506,7 @@ fn read_recipients(paths: &[PathBuf], ca_pem: &[u8], cluster_id: &str) -> Result
         requests.push(verified);
     }
     let first = requests.first().ok_or_else(|| refuse("no --recipient given".into()))?.clone();
-    for r in &requests[1..] {
+    for r in requests.iter().skip(1) {
         if r.ceremony_params() != first.ceremony_params() {
             return Err(refuse(format!(
                 "recipients disagree: node {} expects (ceremony, key, cluster, t, n, roster) = \
@@ -649,19 +650,10 @@ impl Hardening {
 /// Process-level hardening. Best effort, every outcome recorded; the swap policy is enforced by
 /// the caller, the rest only warned about (the air-gapped host is the real control).
 fn harden() -> Hardening {
-    // SAFETY: plain libc calls with valid arguments; no memory is shared with them.
-    let core_dumps_disabled = unsafe {
-        let zero = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
-        libc::setrlimit(libc::RLIMIT_CORE, &zero) == 0
-    };
+    // Core dumps off and not dumpable: the same code the cosigner daemon runs at start.
+    let dumps = rutli_cosigner::process_hardening::disable_core_dumps();
     #[cfg(target_os = "linux")]
-    let (not_dumpable, memory_locked, swap_enabled) = {
-        // SAFETY: as above.
-        // Variadic: pass the unsigned longs the kernel reads, not ints.
-        let not_dumpable = unsafe {
-            let zero: libc::c_ulong = 0;
-            libc::prctl(libc::PR_SET_DUMPABLE, zero, zero, zero, zero) == 0
-        };
+    let (memory_locked, swap_enabled) = {
         // MCL_FUTURE under a finite RLIMIT_MEMLOCK makes later allocations fail once the limit is
         // reached — an abort mid-split. So lock only where it cannot bite: as root (CAP_IPC_LOCK,
         // the live-boot host) or with an unlimited memlock limit.
@@ -676,35 +668,21 @@ fn harden() -> Hardening {
         let swap_enabled = std::fs::read_to_string("/proc/swaps")
             .ok()
             .map(|s| s.lines().skip(1).any(|l| !l.trim().is_empty()));
-        (not_dumpable, memory_locked, swap_enabled)
+        (memory_locked, swap_enabled)
     };
-    // A piped core_pattern hands a crashing process's memory to a user-space handler regardless
-    // of RLIMIT_CORE (systemd-coredump, apport, abrt), and suid_dumpable = 2 dumps even processes
-    // that made themselves non-dumpable. Either defeats the two settings above.
-    #[cfg(target_os = "linux")]
-    let (core_pattern, suid_dumpable) = (
-        std::fs::read_to_string("/proc/sys/kernel/core_pattern").ok().map(|s| s.trim().to_string()),
-        std::fs::read_to_string("/proc/sys/fs/suid_dumpable").ok().and_then(|s| s.trim().parse().ok()),
-    );
     #[cfg(not(target_os = "linux"))]
-    let (core_pattern, suid_dumpable): (Option<String>, Option<u8>) = (None, None);
-    let core_handler_risk = core_handler_risk(core_pattern.as_deref(), suid_dumpable);
-    #[cfg(not(target_os = "linux"))]
-    let (not_dumpable, memory_locked, swap_enabled) = (false, false, None);
+    let (memory_locked, swap_enabled) = (false, None);
+    // A piped core_pattern or suid_dumpable = 2 defeats the two settings above
+    // (`dumps.handler_risk`); the caller refuses to run then unless told otherwise.
     Hardening {
-        core_dumps_disabled,
-        not_dumpable,
+        core_dumps_disabled: dumps.core_limit_zero,
+        not_dumpable: dumps.not_dumpable,
         memory_locked,
         swap_enabled,
-        core_pattern,
-        suid_dumpable,
-        core_handler_risk,
+        core_pattern: dumps.core_pattern,
+        suid_dumpable: dumps.suid_dumpable,
+        core_handler_risk: dumps.handler_risk,
     }
-}
-
-/// Would a crash reach a core handler despite `RLIMIT_CORE = 0` and `PR_SET_DUMPABLE = 0`?
-fn core_handler_risk(core_pattern: Option<&str>, suid_dumpable: Option<u8>) -> bool {
-    core_pattern.is_some_and(|p| p.starts_with('|')) || suid_dumpable == Some(2)
 }
 
 #[cfg(test)]
@@ -717,13 +695,5 @@ mod tests {
         assert_eq!(decode_hex_text(b" 0a ff ").unwrap().as_slice(), &[0x0a, 0xff]);
         assert!(decode_hex_text(b"\\x0af").is_err(), "odd length");
         assert!(decode_hex_text(b"zz").is_err());
-    }
-
-    #[test]
-    fn a_piped_core_pattern_or_suid_dumpable_2_is_a_core_handler_risk() {
-        assert!(core_handler_risk(Some("|/usr/lib/systemd/systemd-coredump %P"), Some(0)));
-        assert!(core_handler_risk(Some("core"), Some(2)));
-        assert!(!core_handler_risk(Some("core"), Some(0)));
-        assert!(!core_handler_risk(None, None), "not Linux: nothing known, nothing claimed");
     }
 }

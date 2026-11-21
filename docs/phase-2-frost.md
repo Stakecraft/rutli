@@ -60,13 +60,14 @@
 >   that node's DEK and hosted-key distribution seed only; `rutli-cosigner seal new-node` /
 >   `seal split-legacy`), with peers' distribution keys pinned in config. The legacy shared master
 >   (`share_seal.secret_env`, per-node keys via HKDF) still works but lets whoever reads it derive
->   every node's key (audit C3; docs/runbook-per-node-seal.md). Closes the at-rest exposure;
+>   every node's key (audit C3; docs/runbook-per-node-seal.md). Closes the at-rest exposure while the node's seal bundle is not also obtained;
 >   enclave/HSM sealing (which also protects share memory during signing) plugs into the same seam.
 >
 > - **Proactive share refresh (done):** `Signer.Refresh` RPC / `rutli-cosigner refresh` — dealer-free
 >   DKG-style re-randomization of all shares, group key (and node identity) unchanged, verified by
->   every node before persisting. Limits an attacker to one refresh epoch; pre-refresh shares are
->   dead afterwards (old+new shares cannot combine — tested).
+>   every node before persisting. Shares of different epochs do not combine (tested), so a share stolen before a refresh
+>   no longer adds to one stolen after it. It erases nothing: old copies, and the sealing keys that
+>   open them, stay usable by t shares of one epoch (key-material-handling.md).
 >
 > - **Cluster-hosted keys, v1 (done, both sides):** the cluster also holds the **non-FROST**
 >   material Canton needs — RSA-2048-OAEP-SHA256 encryption keypairs and AES-256-GCM symmetric
@@ -132,7 +133,8 @@ RutliDriver (JVM)  ──FrostBackend──►  gRPC/mTLS  ──►  Cosigner c
 ```
 
 - `n` cosigners, threshold `t` (e.g. 2-of-3). Each holds one FROST share, each on a separate
-  host / cloud account / region — all operated by the single node operator (self-custody).
+  host / cloud account / region — all within the node operator's organisation (self-custody), each
+  administered by different people (go-live gate, `docs/audit-prep.md`).
 - Each share ideally sealed in an enclave/HSM ("MPC-of-HSM"): breach needs `t` enclaves.
 - A node's keystore may also hold **cluster-hosted keys** (ECIES P-256 and RSA encryption, AES
   symmetric), which are
@@ -146,7 +148,9 @@ The `FrostBackend` is a **dumb client**: it submits `{keyId, digest}` and awaits
 signature. Round orchestration lives *inside* the cluster:
 
 1. The node the driver contacts is the leader for that request (static leader; the driver fails over
-   to another cosigner if it's unreachable or answers `INTERNAL`/`UNKNOWN` — a fresh session there
+   to another cosigner if it's unreachable, answers any status except `PERMISSION_DENIED`,
+   `UNAUTHENTICATED`, `RESOURCE_EXHAUSTED` and `INVALID_ARGUMENT` (those four are returned to Canton
+   at once), or returns a signature that does not verify against the pinned group key — a fresh session there
    with fresh nonces, the abandoned one's nonces burnt by `AbortSign`/TTL — no Raft, see the note
    above). The leader drives the session.
 2. **Round 1 (commit):** leader collects nonce commitments `(Dᵢ, Eᵢ)` from ≥ `t` cosigners.
@@ -348,8 +352,9 @@ wear-levelled SSDs and snapshotted volumes, removing a file does not destroy the
 replaces the key with a tombstone that keeps the material sealed for
 `hosted_keys.delete_grace_secs` (default 7 days, for `hosted-undelete`), then drops it; real
 destruction means rotating the seal key (`seal rotate-dek`, `keyfile migrate`, `seal
-drop-previous`) and destroying the old one, so every old sealed blob — including the ones sitting in
-backups — becomes undecryptable.
+drop-previous`) and destroying the old one, so that every old sealed blob — including the ones sitting in
+backups — becomes undecryptable once every copy of the old DEK is destroyed (and, after a delete,
+once the grace period is over: rotate after it, not during it).
 
 ### Replication wrapping, and why mTLS alone was judged insufficient
 
@@ -507,8 +512,9 @@ from replicated to threshold is a server-side change plus a config flag, not an 
   differently is an error. Every threshold signature is verified (Ed25519, strict) against the pinned
   key before the driver returns it, so a wrong-key or garbage signature is withheld, not handed to
   Canton.
-- **Proactive refresh:** periodically re-randomize shares, same public key — an attacker must breach
-  `t` cosigners within one epoch; old stolen shares become useless.
+- **Proactive refresh:** periodically re-randomize shares, same public key — shares of different epochs
+  do not combine, so an attacker needs `t` shares of one epoch. Old copies of old shares (backups,
+  snapshots, free blocks) stay usable while the sealing keys that open them exist.
 - **DR:** encrypted per-share backups (fast node replacement) + a cold Shamir backup held by
   custodians (last resort). Recovery = re-share from surviving shares; the full key is never
   reconstructed on a live host. This matters because the namespace key is non-rotatable and its

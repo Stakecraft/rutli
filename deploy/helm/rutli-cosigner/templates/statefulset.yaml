@@ -92,6 +92,8 @@ spec:
               chmod 0400 "/certs/cosigner${id}.key"
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.tlsSelect.resources | nindent 12 }}
           volumeMounts:
             - { name: tls-src, mountPath: /tls-src, readOnly: true }
             - { name: certs, mountPath: /certs }
@@ -190,7 +192,11 @@ spec:
           {{- fail "tls.layout must be perNode or shared" }}
           {{- end }}
         - name: tmp
-          emptyDir: {}
+          # In memory, never on the Kubernetes node's disk: it receives share bundles, request files
+          # and key exports during ceremonies. Counted in the cosigner container's memory limit.
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ .Values.tmp.sizeLimit | quote }}
   volumeClaimTemplates:
     - metadata:
         name: data

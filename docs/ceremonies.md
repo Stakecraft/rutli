@@ -89,7 +89,8 @@ one. The leader also checks the intent on `Signer.Dkg`/`Refresh` and requires th
 (CN and certificate key) to be the caller on that connection. This gives the client a clear refusal,
 and an intent cannot be replayed through another client's connection.
 
-**Enforcement:** `signing_policy.require_ceremony_intent`. It is **on by default since 0.4.0-rc.6**
+**Enforcement:** `signing_policy.require_ceremony_intent` (since 0.5.0 it also covers hosted-key
+generation, below). It is **on by default since 0.4.0-rc.6**
 on every node with TLS (a plaintext dev node verifies no intents and leaves it off; setting it there
 is a config error). `require_ceremony_intent: false` is the explicit opt-out, for an upgrade while
 the driver is older than 0.4.0-rc.4 or the refresh job's image predates the cosigners' release: the
@@ -117,10 +118,89 @@ What an intent does **not** bind, and why:
   driver refresh uses its `signer_acl`. `refresh_acl` is not introduced (follow-up if a
   multi-tenant cluster needs per-tenant refreshers).
 
-Hosted-key genkey/delkey fences are not intent-gated. A cosigner can block a hosted id's
-generation or deletion anyway, by refusing. An intent on such a fence is a protocol error. What a
-compromised cosigner keeps is listed in the [threat model](security/threat-model.md): the n-of-n
+**Hosted-key generation** (since 0.5.0) takes a **generate intent** the same way: purpose
+`generate-key`, the key, its spec (`hosted_spec`) and the roster identifier of the cosigner the
+client asked to lead (`leader`). The driver signs a fresh one for every endpoint it tries. Every
+node verifies it at the genkey fence, before the guard, with the DKG rules (`signer_allowlist`,
+`signer_acl`, pins), and also checks the spec and that the cosigner fencing it is the leader it
+names. The ceremony id is `genkey-<hex(request_id)>` and the fence marks it, as above. Binding the
+leader matters here because a genkey fence has no part 1: a peer that was shown the intent cannot
+lead the generation anywhere. Same switch (`require_ceremony_intent`), same counters, with the
+reasons `spec` and `leader` added. Details: [hosted-keys.md](hosted-keys.md), "Generate".
+
+Hosted-key delete (`delkey`) fences take no ceremony intent: every node verifies the client's
+delete intent itself when it tombstones the key. An intent on such a fence is a protocol error. What
+a compromised cosigner keeps is listed in the [threat model](security/threat-model.md): the n-of-n
 veto, and the split (DS-CR4) of a ceremony a client **did** ask for.
+
+### Refresh interval
+
+Since 0.5.0 every node takes part in at most one refresh of a key per
+`signing_policy.refresh_min_interval_secs`: default 259200 (72 h), at most 30 days, `0` turns it
+off (the node then warns at startup).
+
+Why: a refresh moves every node to a new epoch, and from its commit a node's older backups no longer
+restore that node ([disaster-recovery.md](disaster-recovery.md#1-restore-a-single-cosigner-from-backup)).
+Without a limit, whoever holds the refresher certificate, or the driver certificate while
+`signer_may_refresh` is on, could refresh a key again and again, faster than backups follow. The
+nodes' backups would then share no epoch, and a later loss of nodes would lose the key for good.
+
+How it works:
+
+* **Every node checks it itself**, at the fence and at part 1, after the ceremony intent and before
+  it takes the guard, writes a fence mark, unseals its share or opens a session. The leader also
+  checks it on `Signer.Refresh` before it contacts any peer. A refresh needs every roster node, so
+  one honest node that refuses stops it: a leader without the limit (a compromised cosigner, a node
+  on 0.4.0) is held to it by the others.
+* **What counts** is the last refresh of the key that this node **staged**: committed, or aborted
+  after it staged — counted from when it committed (or aborted) on that node, not from when it
+  staged, so a commit delayed past the interval still holds the next refresh off for a full interval
+  after it. The node reads it from its own ceremony records (`keys/.ceremonies/`), so a
+  restart does not reset it. Backups do not carry the records: a node rebuilt or restored from
+  backup enforces nothing until its next refresh, while the other nodes still do (one is enough to
+  stop a refresh); only if every node lost its records is one refresh free. A refresh that failed before staging (a refused fence, a failed
+  part 1 or 2, a leader that died) does not count, so starting and abandoning refreshes cannot block
+  the next one. A refresh aborted after staging does count: only a cosigner that took part can cause
+  that, it could block the refresh anyway by refusing, and otherwise it could loop refreshes that
+  leave a staged share and a record on every node each time. DKGs do not count.
+* **A refused refresh** fails with FAILED_PRECONDITION, `refresh of <key> refused: this node took
+  part in refresh <id> at <time>, less than signing_policy.refresh_min_interval_secs … ago` and the
+  trailer `rutli-error: refresh-too-soon`. Each node logs it at warn (at most once a minute per key)
+  and counts it in `rutli_refresh_interval_refusals_total` (alert `RutliRefreshRefused`). Nothing is
+  staged and no guard is left. Refused at the leader, nothing is written anywhere; refused at a
+  peer's fence, the leader's rollback leaves the usual no-vote that spends the intent's id.
+
+The shipped CronJob refreshes weekly, well outside the interval. A failed run can be retried at once
+if it failed before staging; otherwise 72 h after the last refresh. The rule
+`RutliRefreshOffSchedule` fires when a node commits more than one refresh of a key in 6 days (a day
+shorter than the schedule, so a weekly run that lands a little early does not fire it).
+
+**An incident refresh that cannot wait** (a suspected compromise, a node just evicted or replaced:
+[key-rotation.md](key-rotation.md#if-the-root-is-actually-compromised),
+[disaster-recovery.md](disaster-recovery.md)) uses node config, not a certificate. On every node:
+
+1. Set `signing_policy.refresh_interval_waived_at` to the UTC time of your decision, e.g.
+   `"2026-11-19T14:00:00Z"` (`signingPolicy.refresh_interval_waived_at` in the chart), and roll it
+   out.
+2. Run the refresh (`rutli-cosigner refresh --key-id …`, once per key), then `verify-key`.
+3. Back up every node (disaster-recovery.md), and remove the setting.
+
+Each node then lets **one** refresh of each key through after that time, logs it at warn and counts
+it in `rutli_refresh_interval_waived_total`. The next refresh is held to the interval from that one,
+whether the setting is still there or not. The setting lapses 24 h after its time. A time up to
+`clock_skew_secs` (default 120 s) ahead of the node's clock is accepted, because clocks differ, and
+takes effect once the node's clock reaches it; a time further ahead is a config error and the node
+does not start. Every start with the setting present logs it at warn, with its time and when it
+lapses, so one left behind is seen. No client certificate can set it. A compromised cosigner that sets it
+on itself changes nothing on the honest nodes. While it is set, the one refresh it allows can come
+from any refresher certificate: if `verify-key` shows a refresh you did not run, the key still moved
+to a fresh epoch after your decision; replace the refresher certificate's pin.
+
+**Mixed versions.** A 0.4.0 node enforces no interval. While the cluster is mixed, the 0.5.0 nodes
+enforce it for every refresh, because a refresh needs every node. A refresh led by a 0.4.0 node is
+refused at the first 0.5.0 node's fence, before part 1; the 0.4.0 leader rolls back, and its client
+sees the refusal wrapped in INTERNAL. A 0.4.0 node taking part in a refresh a 0.5.0 node leads
+changes nothing. So the limit holds as soon as one node in the roster runs 0.5.0.
 
 ### Signing during a ceremony
 
@@ -220,6 +300,32 @@ epochs existed, or installed by the split ceremony, reads as 0. `verify-key` rep
 epoch and flags a mix. A refresh is refused unless every node reports the same epoch and PKP
 digest (`Peer.KeyEpoch`).
 
+### Proving an epoch
+
+A committed refresh shows that every node staged and voted for one outcome, and each node checked that
+the new verifying shares interpolate to the group key. It does not show that the shares **sign
+together**. `verify-key --sign-test` does: every `t`-subset of the roster signs, every signature
+verifies under the group key, and every node reports the same epoch and sharing. It runs from a
+workstation, so no node knows its result. To record it, run on **every** node, beside its daemon:
+
+```sh
+rutli-cosigner --config C1 verify-key --key-id "$KEY" --expect-fingerprint "$FP" --sign-test --json > verify.json
+rutli-cosigner --config C<i> keyfile prove --key-id "$KEY" --epoch "$EPOCH" --report verify.json
+```
+
+`keyfile prove` checks the report against this node's own live key and writes the clear marker
+`keys/.proven/<key>.<epoch>.json` (no lock, nothing on the signing path touched). It refuses when the
+report is not clean, does not cover the whole roster and every quorum, names another epoch, group key
+or sharing than this node's live ones, or when this node's live epoch is not the one named: a node
+that missed the refresh cannot stamp it. **The report is the operator's statement**: the node cannot
+check who produced it, so the marker records the report's SHA-256 and this node's clock. A marker
+dated in the future is ignored (and replaced when stamped again); stamping again otherwise keeps the
+first time. `rutli_key_epoch_proven{key}` is `1` while the live epoch has a marker for the live
+sharing; `RutliKeyEpochUnproven` fires when it is `0` and the live key file is more than three days old
+(the file's age is the time since the epoch was installed, or since the file was last re-sealed).
+After upgrading to a release that has this command, every key whose file is older than three days
+alerts until `keyfile prove` has been run for its live epoch.
+
 ### Signing across epochs
 
 Shares of different sharings never combine, so signing is epoch-aware (audit H1, M1):
@@ -231,20 +337,34 @@ Shares of different sharings never combine, so signing is epoch-aware (audit H1,
   A leader on a release before epochs sends no sharing: the check is skipped with a warning and
   `rutli_epoch_check_skipped_total`, unless `signing_policy.require_epoch_match` is set (then it
   is refused). Turn that flag on once every cosigner runs this release.
-* **Stale-share check.** At startup and every 5 minutes (every 30 s while a peer has not
-  answered) each node compares its sharing of every FROST key with its peers' (`Peer.KeyEpoch`).
-  It marks a key **stale** when its own COMMITTED ceremony record names a newer epoch than its
-  share, or when a peer holds the same group key at a newer committed epoch, no peer holds this
-  node's sharing, and this node has no staged vote for the newer one. A stale node refuses every
-  round 1 for the key (`rutli-error: stale-share`), refuses to lead it (UNAVAILABLE, so the driver
-  fails over), and reports `stale` in `KeyEpoch`, `KeyStatus` and `verify-key`; the gauge
-  `rutli_stale_share{key}` is 1. This catches a restore from an old backup, a volume snapshot
-  rollback and backup mix-ups. A node that is only waiting to commit (it voted for the newer
-  sharing) is not stale: its resolver commits it. Recovery is restoring a current backup of that
-  node (daemon stopped) or re-enrolling it; the mark clears by itself once the share is current.
+* **Stale-share check.** At startup and every 5 minutes (every 25–30 s while a peer has not
+  answered or a key is stale) each node compares its sharing of every FROST key with its peers'
+  (`Peer.KeyEpoch`). It marks a key **stale** when its own COMMITTED ceremony record names a newer
+  epoch than its share, or when a peer holds the same group key at a newer committed epoch, no peer
+  vouches for this node's sharing, and this node has no staged vote for the newer one. A peer
+  vouches when it holds this node's exact sharing, also when it is marked stale on peers' answers,
+  so two honest nodes on the same sharing that can reach each other never bench each other. A
+  peer marked stale by its own ceremony record (`stale_by_own_record` in `KeyEpoch`) does not
+  vouch: its record proves that sharing was superseded. A peer on 0.4.0 does not report why it is
+  stale, so it still vouches. A stale peer's claim of a newer epoch never marks a node stale, but
+  without a voucher it keeps an existing mark. The peer evidence is unsigned: while no cosigner
+  that holds this node's sharing answers (the others restarting, or a refresh still committing on
+  them), one wrong or compromised cosigner can bench a healthy node. The stale reason then says
+  the claim is unconfirmed, and the mark clears on the next pass that reaches such a cosigner, at
+  most 30 s later. Before restoring a node flagged by a single cosigner, compare
+  `rutli-cosigner verify-key` across the nodes. A stale node refuses every round 1 for the key
+  (`rutli-error: stale-share`), refuses to lead it (UNAVAILABLE, so the driver fails over), and
+  reports `stale` in `KeyEpoch`, `KeyStatus` and `verify-key`; the gauge `rutli_stale_share{key}`
+  is 1. This catches a restore from an old backup, a volume snapshot rollback and backup mix-ups.
+  What stays true by design: t nodes restored to the same old sharing without their ceremony
+  records (two nodes in 2-of-3) vouch for each other and can sign with it, because t shares of
+  any sharing are the key. A node that is only waiting to commit (it voted for the newer sharing)
+  is not stale: its resolver commits it. Recovery is restoring a current backup of that node
+  (daemon stopped) or re-enrolling it; the mark clears by itself once the share is current.
 * **Quorum selection with retry.** The leader tries t-subsets of the roster, itself first, then
-  by identifier. Each attempt is a fresh session: a new session id and fresh round-1 commitments
-  from every member, never reused across subsets. A member that fails round 1 or round 2, or whose
+  by identifier. Each attempt is a fresh session: a new random session id for each member (since
+  0.5.0; one shared id before) and fresh round-1 commitments from every member, never reused across
+  subsets. A member that fails round 1 or round 2, or whose
   signature share fails verification at aggregation (frost's cheater detection names it;
   `rutli_invalid_signature_shares_total`), is excluded for the rest of the request; the session is
   aborted on the members still holding nonces, and the next subset without an excluded member is
@@ -266,7 +386,7 @@ Shares of different sharings never combine, so signing is epoch-aware (audit H1,
 | Cluster state | Reply |
 |---|---|
 | no node holds it | a fresh DKG |
-| every node committed it, same sharing, DKG origin | the existing group key (Canton's retry succeeds) |
+| every node committed it, same sharing, DKG origin | the existing group key with `existing = true` and the DKG that created it (`origin_ceremony_id`); the driver accepts it only as a retry of its own ceremony ([architecture.md](architecture.md), "One cluster, several participants") |
 | a ceremony for it is staged somewhere | every node is asked to resolve; UNAVAILABLE (retry) |
 | some nodes hold it (a legacy partial key) | FAILED_PRECONDITION naming `discard-partial-key` |
 | an imported or hosted key under the id | ALREADY_EXISTS |
@@ -359,7 +479,8 @@ key-safe: an honest COMMITTED node committed only after confirming every node's 
 outcome, so it is a complete sharing of the same group key. A *lying* COMMITTED report could at
 worst move this node onto a sharing the other honest node does not hold — availability, as before
 — so confirm the committed node is not the suspect first. Then run `verify-key`, and replace the
-compromised node (re-enrol it, then refresh).
+compromised node (re-enrol it, then refresh, with the operator's waiver if the last refresh is inside the
+interval: "Refresh interval" above).
 
 If the share should not be recovered (the committed node is the suspect, or the key will be rebuilt
 anyway), drop it and clear the alert:
@@ -400,6 +521,16 @@ from 0.4.0-rc.6. So before cosigners of 0.4.0-rc.6 or later run with the default
 be 0.4.0-rc.4 or later (it signs DKG intents) and the refresh job's image the cosigners' release
 (it signs refresh intents); until then set `require_ceremony_intent: false` on every node, and
 remove it once both sign them. To roll the driver or the refresh job back, set it to `false` first.
+
+The refresh interval (0.5.0) needs no protocol change either: each 0.5.0 node refuses a refresh
+inside the interval at its own fence, and a 0.4.0 leader passes that refusal on as an error before
+any node stages a share ("Refresh interval" above).
+
+Generate intents (0.5.0) work the same way, with one difference: a 0.4.0 node refuses a genkey
+fence that carries an intent, so a 0.5.0 leader refuses a generation with an intent while a
+reachable node is older (`NodeInfo.hosted_protocol` < 2). The driver must be 0.5.0 before cosigners
+run with the default, or they need `require_ceremony_intent: false` while it is older
+([hosted-keys.md](hosted-keys.md), "Upgrading from 0.4.0").
 
 Every key generated or refreshed on a release before ceremony protocol 2 must be treated as
 exposed to that ceremony's leader (audit C1). A post-upgrade refresh re-isolates the shares of a

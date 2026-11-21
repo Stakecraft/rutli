@@ -319,8 +319,20 @@ fn rig_with_fence_timeout(policy: impl Fn(u16) -> SigningPolicyConfig, fence_tim
     Rig { ids, nodes, peers, _tmp: tmp }
 }
 
+/// Intents enforced. These tests refresh one key several times in a row to exercise the fence and
+/// the intents, so they set the refresh interval to 0; [`limited`] keeps the default.
 fn enforcing() -> SigningPolicyConfig {
-    SigningPolicyConfig { require_ceremony_intent: Some(true), signer_may_refresh: false, ..Default::default() }
+    SigningPolicyConfig {
+        require_ceremony_intent: Some(true),
+        signer_may_refresh: false,
+        refresh_min_interval_secs: 0,
+        ..Default::default()
+    }
+}
+
+/// [`enforcing`] with the default refresh interval (72 h).
+fn limited() -> SigningPolicyConfig {
+    SigningPolicyConfig { refresh_min_interval_secs: SigningPolicyConfig::default().refresh_min_interval_secs, ..enforcing() }
 }
 
 impl Rig {
@@ -639,7 +651,8 @@ async fn a_pinned_out_key_is_refused_at_every_node() {
 /// full and refused if invalid.
 #[tokio::test]
 async fn without_enforcement_an_absent_intent_is_counted_and_a_present_one_verified() {
-    let r = rig(|_| SigningPolicyConfig { require_ceremony_intent: Some(false), ..Default::default() });
+    // Refreshes the key twice: no refresh interval.
+    let r = rig(|_| SigningPolicyConfig { require_ceremony_intent: Some(false), refresh_min_interval_secs: 0, ..Default::default() });
     let group = run_dkg(&r.peers, KEY).await.unwrap();
     assert_eq!(run_refresh(&r.peers, KEY).await.unwrap(), group);
     // A present but invalid intent is refused by every node.
@@ -1268,9 +1281,17 @@ async fn a_same_id_guard_on_another_key_cannot_stand_in_for_the_leaders() {
         map.insert(p.identifier(), p.ceremony_part1(&xid, KEY, CeremonyKind::Refresh, &[1, 2, 3], Some(&x)).await.unwrap());
     }
     for i in 0..8 {
-        match p3[1].ceremony_fence(&xid, &format!("rutli-enc-planted-{i}"), "genkey").await {
+        // A delete fence takes no client intent, so on an enforcing node it reaches the guard
+        // check: the ceremony id already guards KEY here.
+        match p3[1].ceremony_fence(&xid, &format!("rutli-enc-planted-{i}"), "delkey").await {
             Err(DaemonError::CeremonyRefused(m)) => assert!(m.contains("one ceremony id guards one key"), "{m}"),
             other => panic!("a second key under the ceremony id must be refused, got {other:?}"),
+        }
+        // A generation fence (0.5.0) is refused before the guards: it carries no generate intent,
+        // and a valid one could not name this id (generate ceremony ids are `genkey-…`).
+        match p3[1].ceremony_fence(&xid, &format!("rutli-enc-planted-{i}"), "genkey").await {
+            Err(DaemonError::PolicyRefused(m)) => assert!(m.contains("no generate intent"), "{m}"),
+            other => panic!("a genkey fence without an intent must be refused, got {other:?}"),
         }
     }
     not_the_leader(p3[1].ceremony_abort(&xid).await);
@@ -1314,4 +1335,444 @@ async fn an_opted_out_part1_that_takes_the_guard_marks_the_id() {
             other => panic!("a fence under a marked id must be refused, got {other:?}"),
         }
     }
+}
+
+// ── the refresh interval (signing_policy.refresh_min_interval_secs) ────────────────────────────
+
+impl Rig {
+    /// Restart every node on its own data with a new config (a rolling restart): node `i` comes
+    /// back on `policy(i)`, with only what it keeps on disk.
+    fn restart(&mut self, policy: impl Fn(u16) -> SigningPolicyConfig) {
+        let root = self._tmp.path().to_path_buf();
+        self.peers.clear();
+        self.nodes.clear();
+        self.nodes = (1..=3u16)
+            .map(|i| {
+                let ks = KeyStore::open(root.join(format!("n{i}"))).unwrap();
+                Arc::new(Node::new(Identifier::try_from(i).unwrap(), 3, 2, ks).with_sign_guard(guard_for(&self.ids, &root, i, &policy(i))))
+            })
+            .collect();
+        rutli_cosigner::peer::wire_local_mesh(&self.nodes).unwrap();
+        self.peers = self.nodes.iter().map(|n| Arc::new(LocalPeer::new(n.clone())) as Arc<dyn PeerApi>).collect();
+    }
+
+    /// Every file under node `n`'s (0-based) data directory, with its bytes.
+    fn tree(&self, n: usize) -> BTreeMap<std::path::PathBuf, Vec<u8>> {
+        fn walk(dir: &std::path::Path, out: &mut BTreeMap<std::path::PathBuf, Vec<u8>>) {
+            for e in std::fs::read_dir(dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    walk(&p, out);
+                } else {
+                    out.insert(p.clone(), std::fs::read(&p).unwrap());
+                }
+            }
+        }
+        let mut out = BTreeMap::new();
+        walk(&self._tmp.path().join(format!("n{}", n + 1)), &mut out);
+        out
+    }
+
+    /// Node `n` holds no guard for `KEY`: a bare fence on the id (no intent, no mark) takes it at once.
+    fn assert_no_guard(&self, n: usize) {
+        self.nodes[n].ceremony_fence("probe-guard", KEY, "refresh").unwrap();
+        self.nodes[n].ceremony_release_from("probe-guard", KEY, None);
+    }
+
+    /// Nothing moved: every node on `epoch` of the key, nothing staged.
+    fn assert_on_epoch(&self, epoch: u64) {
+        for n in &self.nodes {
+            assert_eq!(n.key_epoch(KEY).unwrap().epoch, epoch);
+            assert!(n.staged_records().is_empty());
+        }
+    }
+}
+
+#[track_caller]
+fn too_soon<T: std::fmt::Debug>(r: rutli_cosigner::Result<T>) -> String {
+    match r {
+        Err(DaemonError::RefreshTooSoon(m)) => {
+            assert!(m.contains("refresh_min_interval_secs") && m.contains("refresh_interval_waived_at"), "{m}");
+            m
+        }
+        other => panic!("expected a refresh-interval refusal, got {other:?}"),
+    }
+}
+
+/// The default interval: a second refresh right after the first is refused, whichever node leads,
+/// before any node stages a share or keeps a guard; the refusal names the refresh it counts from.
+#[tokio::test]
+async fn a_second_refresh_inside_the_interval_is_refused_whoever_leads() {
+    let r = rig(|_| limited());
+    let group =
+        run_dkg_with_intent(&r.peers, KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    // A refresh right after the DKG is fine: DKGs do not count.
+    assert_eq!(
+        run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2))).await.unwrap(),
+        group
+    );
+    for leader in 0..3 {
+        let rid = 10 + leader as u8;
+        let m = too_soon(
+            run_refresh_with_intent(&r.led_by(leader), KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, rid))).await,
+        );
+        assert!(m.contains(&id(CeremonyKind::Refresh, 2)), "{m}");
+        for (n, node) in r.nodes.iter().enumerate() {
+            r.assert_no_guard(n);
+            // The leader's rollback spends the intent's id (a no-vote); nothing else is recorded.
+            if let Some(rec) = node.ceremony_record(&id(CeremonyKind::Refresh, rid)) {
+                assert_eq!(StatusInfo::from_record(&rec).phase, Phase::Aborted);
+            }
+        }
+    }
+    r.assert_on_epoch(2);
+}
+
+/// A compromised cosigner (or a node with no interval: one on 0.4.0, or one whose config was
+/// changed) leads a refresh with a fresh, valid refresher intent: every honest node refuses it at
+/// its own fence and at part 1, writes nothing, and keeps no guard. Led by an honest node, a node
+/// without the interval taking part changes nothing either.
+#[tokio::test]
+async fn a_leader_without_the_interval_is_held_to_it_by_every_honest_node() {
+    let r = rig(|i| if i == 3 { enforcing() } else { limited() });
+    run_dkg_with_intent(&r.peers, KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2))).await.unwrap();
+
+    // Led by node 3: its own check and fence pass; node 1's fence (the first peer) refuses.
+    let m = too_soon(run_refresh_with_intent(&r.led_by(2), KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 3))).await);
+    assert!(m.contains("refused by node 1"), "the refusal comes from a peer's fence: {m}");
+    let m = too_soon(run_refresh_with_intent(&r.led_by(0), KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 4))).await);
+    assert!(m.contains("refused by node 1"), "{m}");
+    r.assert_on_epoch(2);
+
+    // On each honest node's Peer API, as node 3 would call it.
+    for (n, node) in r.nodes.iter().enumerate().take(2) {
+        let rid = 20 + n as u8;
+        let (x, xid) = (r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, rid), id(CeremonyKind::Refresh, rid));
+        let before = r.tree(n);
+        too_soon(node.ceremony_begin_from(&xid, KEY, CeremonyKind::Refresh, r.expect(KEY), Some(&x), Some("cosigner3")));
+        too_soon(node.ceremony_part1_from(&xid, KEY, CeremonyKind::Refresh, &[1, 2, 3], Some(&x), Some("cosigner3")));
+        assert_eq!(r.tree(n), before, "a refused refresh writes nothing on node {}: no fence mark, no record", n + 1);
+        r.assert_no_guard(n);
+    }
+    r.assert_on_epoch(2);
+}
+
+/// The interval is read from the ceremony records: a restart does not reset it, and once the last
+/// refresh is a week old (the shipped CronJob's schedule) the next one runs.
+#[tokio::test]
+async fn the_interval_survives_a_restart_and_the_weekly_refresh_runs() {
+    let mut r = rig(|_| limited());
+    let group =
+        run_dkg_with_intent(&r.peers, KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2))).await.unwrap();
+
+    r.restart(|_| limited());
+    let x = r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 3);
+    for node in &r.nodes {
+        too_soon(node.ceremony_begin(&id(CeremonyKind::Refresh, 3), KEY, CeremonyKind::Refresh, r.expect(KEY), Some(&x)));
+    }
+
+    // A week passes: the refresh records' times move back seven days (what the clock does).
+    const WEEK_MS: u64 = 7 * 24 * 3600 * 1000;
+    for i in 1..=3 {
+        let dir = KeyStore::open(r._tmp.path().join(format!("n{i}"))).unwrap().ceremony_dir();
+        for e in std::fs::read_dir(&dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.extension().is_none_or(|x| x != "json") {
+                continue;
+            }
+            let mut rec: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+            if rec["kind"] == "refresh" {
+                for f in ["created_ms", "updated_ms", "resolved_ms"] {
+                    rec[f] = serde_json::json!(rec[f].as_u64().unwrap() - WEEK_MS);
+                }
+                std::fs::write(&p, serde_json::to_vec(&rec).unwrap()).unwrap();
+            }
+        }
+    }
+    r.restart(|_| limited());
+    assert_eq!(
+        run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 4))).await.unwrap(),
+        group
+    );
+    r.assert_on_epoch(3);
+}
+
+/// No client certificate lifts the interval — not the refresher, not the driver while
+/// signer_may_refresh is on — and the operator role cannot ask for a refresh at all. The
+/// operator's incident path is node config: `refresh_interval_waived_at`, set on every node, lets
+/// exactly one refresh of the key through after its time; set on one node only, it does nothing
+/// for the others.
+#[tokio::test]
+async fn only_the_operators_node_config_waives_the_interval_and_only_for_one_refresh() {
+    let mut r = rig(|_| limited());
+    let group =
+        run_dkg_with_intent(&r.peers, KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2))).await.unwrap();
+
+    r.restart(|_| SigningPolicyConfig { signer_may_refresh: true, ..limited() });
+    too_soon(run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 3))).await);
+    too_soon(run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("driver", CeremonyKind::Refresh, KEY, 4))).await);
+    refused_with(
+        run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("operator", CeremonyKind::Refresh, KEY, 5))).await,
+        "signed by \"operator\"",
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let at = rutli_cosigner::audit_check::fmt_ms(intent::now_ms());
+    let waived = SigningPolicyConfig { refresh_interval_waived_at: Some(at.clone()), ..limited() };
+    // On one node only: the others still refuse.
+    r.restart(|i| if i == 1 { waived.clone() } else { limited() });
+    too_soon(run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 6))).await);
+    r.assert_on_epoch(2);
+    // On every node: one refresh goes through...
+    r.restart(|_| waived.clone());
+    assert_eq!(
+        run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 7))).await.unwrap(),
+        group
+    );
+    r.assert_on_epoch(3);
+    // ...and only one: the next is held to the interval from it, waiver or not, restart or not.
+    let m = too_soon(run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 8))).await);
+    assert!(m.contains(&id(CeremonyKind::Refresh, 7)), "{m}");
+    r.restart(|_| waived.clone());
+    too_soon(run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 9))).await);
+    r.assert_on_epoch(3);
+}
+
+/// `Signer.Refresh` checks the interval at the leader before it contacts any peer: the client gets
+/// FAILED_PRECONDITION with the `rutli-error: refresh-too-soon` trailer, and no node writes anything
+/// (not even the no-vote a refused fence leaves).
+#[tokio::test]
+async fn the_leader_refuses_a_refresh_inside_the_interval_before_it_contacts_any_peer() {
+    use rutli_cosigner::pb::signer_server::Signer as _;
+    let r = rig(|_| limited());
+    run_dkg_with_intent(&r.peers, KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    let svc = rutli_cosigner::service::SignerSvc {
+        node: r.nodes[0].clone(),
+        peers: r.peers.clone(),
+        allowed_cns: None,
+        operator_cns: None,
+        hosted_write_quorum: 2,
+        decrypt_limiter: Arc::new(rutli_cosigner::ratelimit::DecryptRateLimiter::new(0)),
+        ceremony_test_limiter: Arc::new(rutli_cosigner::ratelimit::DecryptRateLimiter::new(0)),
+        sign_guard: r.nodes[0].sign_guard().cloned(),
+        refresh_cns: None,
+    };
+    let refresh = |rid| {
+        tonic::Request::new(pb::RefreshRequest {
+            key_id: KEY.into(),
+            intent: Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, rid)),
+        })
+    };
+    svc.refresh(refresh(2)).await.unwrap();
+    let before: Vec<_> = (0..3).map(|n| r.tree(n)).collect();
+    let err = svc.refresh(refresh(3)).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition, "{err:?}");
+    assert_eq!(err.metadata().get("rutli-error").and_then(|v| v.to_str().ok()), Some("refresh-too-soon"));
+    assert!(err.message().contains("refresh_min_interval_secs"), "{err:?}");
+    for (n, before) in before.iter().enumerate() {
+        assert_eq!(&r.tree(n), before, "node {} wrote something for a refused refresh", n + 1);
+        r.assert_no_guard(n);
+    }
+    r.assert_on_epoch(2);
+}
+
+impl Rig {
+    /// Move a field of node records on disk by `delta_ms` (back when negative), for records that
+    /// `pick` selects; the nodes must be restarted to read them.
+    fn shift_records(&self, pick: impl Fn(&serde_json::Value) -> bool, fields: &[&str], delta_ms: i64) {
+        for i in 1..=3 {
+            let dir = KeyStore::open(self._tmp.path().join(format!("n{i}"))).unwrap().ceremony_dir();
+            for e in std::fs::read_dir(&dir).unwrap() {
+                let p = e.unwrap().path();
+                if p.extension().is_none_or(|x| x != "json") {
+                    continue;
+                }
+                let mut rec: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+                if pick(&rec) {
+                    for f in fields {
+                        let v = rec[*f].as_u64().unwrap_or(0) as i64 + delta_ms;
+                        rec[*f] = serde_json::json!(v);
+                    }
+                    std::fs::write(&p, serde_json::to_vec(&rec).unwrap()).unwrap();
+                }
+            }
+        }
+    }
+}
+
+/// A refresh that staged and then committed only after more than the interval (a node was down,
+/// the resolver ran late) holds the next refresh off for a full interval after the **commit**:
+/// measured from the staging, the next could start before any backup of the new epoch exists.
+#[tokio::test]
+async fn a_late_commit_holds_the_next_refresh_off_from_the_commit() {
+    const H: i64 = 3600 * 1000;
+    let mut r = rig(|_| limited());
+    let group =
+        run_dkg_with_intent(&r.peers, KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    // Stage a refresh on every node, by hand, and do not commit it.
+    let (x, xid) = (r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2), id(CeremonyKind::Refresh, 2));
+    let leader = r.led_by(0);
+    for p in &leader {
+        p.ceremony_begin(&xid, KEY, CeremonyKind::Refresh, r.expect(KEY), Some(&x)).await.unwrap();
+    }
+    let mut map = BTreeMap::new();
+    for p in &leader {
+        map.insert(p.identifier(), p.ceremony_part1(&xid, KEY, CeremonyKind::Refresh, &[1, 2, 3], Some(&x)).await.unwrap());
+    }
+    let mut digest = [0u8; 32];
+    for p in &leader {
+        digest = p.ceremony_part2(&xid, &map).await.unwrap().round1_digest;
+    }
+    for p in &leader {
+        p.ceremony_part3(&xid, &digest).await.unwrap();
+    }
+    for n in &r.nodes {
+        assert_eq!(n.staged_records().len(), 1);
+    }
+    // Four days pass before it resolves (longer than the 72 h interval).
+    r.shift_records(|rec| rec["state"] == "staged", &["created_ms", "updated_ms"], -96 * H);
+    r.restart(|_| limited());
+    for p in &r.led_by(0) {
+        p.ceremony_commit(&xid).await.unwrap();
+    }
+    r.assert_on_epoch(2);
+    // Right after the commit: refused, counted from the commit.
+    let m = too_soon(run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 3))).await);
+    assert!(m.contains(&xid), "{m}");
+    // 73 h after the commit: the next refresh runs.
+    r.shift_records(|rec| rec["state"] == "committed" && rec["kind"] == "refresh", &["created_ms", "updated_ms", "resolved_ms"], -73 * H);
+    r.restart(|_| limited());
+    assert_eq!(
+        run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 4))).await.unwrap(),
+        group
+    );
+    r.assert_on_epoch(3);
+}
+
+/// A waiver use is counted once, where the guard is taken: a burst of fences for the waived key
+/// under other ceremony ids is refused by the guard and counts nothing.
+#[tokio::test]
+async fn a_waiver_use_is_counted_once_where_the_guard_is_taken() {
+    let mut r = rig(|_| limited());
+    run_dkg_with_intent(&r.peers, KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2))).await.unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    let at = rutli_cosigner::audit_check::fmt_ms(intent::now_ms());
+    r.restart(|_| SigningPolicyConfig { refresh_interval_waived_at: Some(at.clone()), ..limited() });
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    let n = r.nodes[0].clone();
+    let e = r.expect(KEY);
+    let intents: Vec<_> = (10..15u8).map(|rid| (id(CeremonyKind::Refresh, rid), r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, rid))).collect();
+    metrics::with_local_recorder(&recorder, || {
+        n.ceremony_begin(&intents[0].0, KEY, CeremonyKind::Refresh, e, Some(&intents[0].1)).unwrap();
+        for (cid, i) in &intents[1..] {
+            let err = n.ceremony_begin(cid, KEY, CeremonyKind::Refresh, e, Some(i)).unwrap_err();
+            assert!(matches!(err, DaemonError::CeremonyInProgress { .. }), "{err:?}");
+        }
+        // Part 1 under the fence that took the guard does not count it again.
+        n.ceremony_part1(&intents[0].0, KEY, CeremonyKind::Refresh, &[1, 2, 3], Some(&intents[0].1)).unwrap();
+    });
+    let out = handle.render();
+    assert!(out.contains("rutli_refresh_interval_waived_total 1"), "{out}");
+}
+
+/// The real late-abort path: nodes 1 and 2 stage, node 3 votes no, and the resolver aborts the
+/// ceremony on nodes 1 and 2. The abort keeps the record's outcome, so it counts: the next refresh
+/// is refused as too soon and names that ceremony — a cosigner voting no after the others staged
+/// cannot repeat it for free.
+#[tokio::test]
+async fn a_refresh_aborted_by_the_resolver_after_staging_counts() {
+    let r = rig(|_| limited());
+    run_dkg_with_intent(&r.peers, KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    let (x, xid) = (r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2), id(CeremonyKind::Refresh, 2));
+    let leader = r.led_by(0);
+    for p in &leader {
+        p.ceremony_begin(&xid, KEY, CeremonyKind::Refresh, r.expect(KEY), Some(&x)).await.unwrap();
+    }
+    let mut map = BTreeMap::new();
+    for p in &leader {
+        map.insert(p.identifier(), p.ceremony_part1(&xid, KEY, CeremonyKind::Refresh, &[1, 2, 3], Some(&x)).await.unwrap());
+    }
+    let mut digest = [0u8; 32];
+    for p in &leader {
+        digest = p.ceremony_part2(&xid, &map).await.unwrap().round1_digest;
+    }
+    for p in &leader[..2] {
+        p.ceremony_part3(&xid, &digest).await.unwrap();
+    }
+    // Node 3 never stages: its leader aborts its session there, a durable no-vote.
+    leader[2].ceremony_abort(&xid).await.unwrap();
+    for p in &leader[..2] {
+        let st = p.ceremony_commit(&xid).await.unwrap();
+        assert_eq!(st.phase, Phase::Aborted);
+    }
+    for n in &r.nodes[..2] {
+        let rec = n.ceremony_record(&xid).unwrap();
+        assert!(!rec.new_pkp_digest.is_empty() && rec.resolved_ms != 0, "{rec:?}");
+    }
+    r.assert_on_epoch(1);
+    let m = too_soon(run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 3))).await);
+    assert!(m.contains(&xid), "{m}");
+    r.assert_on_epoch(1);
+}
+
+/// The limit rests on each node's own records. A node whose ceremony directory is gone (rebuilt,
+/// restored: backups do not carry records) enforces nothing, but its peers still refuse; and two
+/// nodes whose last refresh straddles "now" disagree, so the refresh fails at the refusing node's
+/// fence, before anyone stages, leaving no guard and no staged share.
+#[tokio::test]
+async fn a_node_without_its_records_or_with_an_older_one_is_outvoted_at_the_fence() {
+    const H: i64 = 3600 * 1000;
+    let mut r = rig(|_| limited());
+    run_dkg_with_intent(&r.peers, KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2))).await.unwrap();
+
+    // Node 1 loses its ceremony directory: it would allow, node 2 refuses at its fence.
+    let dir = KeyStore::open(r._tmp.path().join("n1")).unwrap().ceremony_dir();
+    std::fs::remove_dir_all(&dir).unwrap();
+    r.restart(|_| limited());
+    assert_eq!(r.nodes[0].refresh_interval_verdict(KEY).unwrap(), rutli_cosigner::refresh_interval::Verdict::Allowed);
+    let m = too_soon(run_refresh_with_intent(&r.led_by(0), KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 3))).await);
+    assert!(m.contains("refused by node 2"), "{m}");
+    r.assert_on_epoch(2);
+    for n in 0..3 {
+        r.assert_no_guard(n);
+    }
+
+    // Straddling: node 3's last refresh now reads 73 h old (it allows), node 2's is fresh (refuses).
+    let fresh = rig(|_| limited());
+    let mut r = fresh;
+    run_dkg_with_intent(&r.peers, KEY, Some(r.ids.ceremony("driver", CeremonyKind::Dkg, KEY, 1))).await.unwrap();
+    run_refresh_with_intent(&r.peers, KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 2))).await.unwrap();
+    let n3 = KeyStore::open(r._tmp.path().join("n3")).unwrap().ceremony_dir();
+    for e in std::fs::read_dir(&n3).unwrap() {
+        let p = e.unwrap().path();
+        if p.extension().is_some_and(|x| x == "json") {
+            let mut rec: serde_json::Value = serde_json::from_slice(&std::fs::read(&p).unwrap()).unwrap();
+            if rec["kind"] == "refresh" {
+                for f in ["created_ms", "updated_ms", "resolved_ms"] {
+                    rec[f] = serde_json::json!(rec[f].as_i64().unwrap() - 73 * H);
+                }
+                std::fs::write(&p, serde_json::to_vec(&rec).unwrap()).unwrap();
+            }
+        }
+    }
+    r.restart(|_| limited());
+    assert_eq!(r.nodes[2].refresh_interval_verdict(KEY).unwrap(), rutli_cosigner::refresh_interval::Verdict::Allowed);
+    let before = r.tree(1);
+    let m = too_soon(run_refresh_with_intent(&r.led_by(2), KEY, Some(r.ids.ceremony("refresher", CeremonyKind::Refresh, KEY, 3))).await);
+    assert!(m.contains("refused by node 1"), "{m}");
+    r.assert_on_epoch(2);
+    for n in 0..3 {
+        r.assert_no_guard(n);
+    }
+    // Node 2 was never reached (node 1 refused first): nothing written there but the leader's
+    // rollback no-vote for the intent's id.
+    let after = r.tree(1);
+    let new: Vec<_> = after.keys().filter(|k| !before.contains_key(*k)).collect();
+    assert!(new.iter().all(|k| k.to_string_lossy().contains(&id(CeremonyKind::Refresh, 3))), "{new:?}");
 }
