@@ -19,7 +19,10 @@
 //! - hosted writes: a member past its deadline is skipped as unreachable, never read as a conflict
 //!   (T10);
 //! - the member side: a definite I/O error in round 2 marks the store down at once, and a probe that
-//!   finds it working brings it back with no restart (T11, T15);
+//!   finds it working brings it back with no restart (T11, T15); a round 2 still in its store work
+//!   when the leader's deadline cancels the call over gRPC finishes once — one marker, one journal
+//!   entry — and the leader's abort meanwhile finds nothing to drop (T20); a round 1 that waited
+//!   past its caller's deadline for a blocking thread opens no session (T19);
 //! - the client's deadline: it only shortens the leader's work (T12, T13, T4b);
 //! - saturation: slow but progressing members open no breaker, and no signature makes more than
 //!   `n − t + 1` attempts (T14).
@@ -32,6 +35,8 @@
 
 #[path = "common/memnet.rs"]
 mod memnet;
+#[path = "common/store_fault.rs"]
+mod store_fault;
 
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
@@ -42,11 +47,17 @@ use std::time::Duration;
 
 use frost_ed25519::Identifier;
 use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair};
-use rutli_cosigner::config::TlsConfig;
+use async_trait::async_trait;
+use frost_ed25519::round1::SigningCommitments;
+use frost_ed25519::round2::SignatureShare;
+use rutli_cosigner::config::{SigningPolicyConfig, TlsConfig};
+use rutli_cosigner::journal::{read_key_dir, JournalEntry, Retention, SignJournal};
 use rutli_cosigner::keystore::KeyStore;
 use rutli_cosigner::liveness::{DownReason, PeerHealth};
 use rutli_cosigner::node::{Node, Round1Ctx};
-use rutli_cosigner::orchestrator::{run_dkg, sign, Peers, DEFAULT_WRITE_QUORUM};
+use rutli_cosigner::orchestrator::{
+    max_sign_attempts, run_dkg, sign, Peers, DEFAULT_WRITE_QUORUM,
+};
 use rutli_cosigner::pb;
 use rutli_cosigner::pb::peer_server::PeerServer;
 use rutli_cosigner::pb::signer_client::SignerClient;
@@ -64,6 +75,7 @@ use tonic::codegen::http;
 use tonic::transport::server::{TcpConnectInfo, TlsConnectInfo};
 
 use memnet::{Fault, MemNet};
+use store_fault::{Store, StoreFault};
 
 const N: u16 = 3;
 const T: u16 = 2;
@@ -253,6 +265,8 @@ struct Mesh {
     /// `peers[i]`: node i+1's view, itself as `LocalPeer`, the others over gRPC.
     peers: Vec<Peers>,
     controls: Vec<Arc<Control>>,
+    /// Each node's round-2 store work ([`StoreFault`]).
+    stores: Vec<Arc<StoreFault>>,
     tls: Vec<Tls>,
     driver: Tls,
     servers: Mutex<HashMap<u16, tokio::task::JoinHandle<()>>>,
@@ -270,19 +284,27 @@ impl Drop for Mesh {
 impl Mesh {
     /// Three nodes, mTLS mesh over memnet, the key `KEY` generated.
     async fn new() -> Self {
-        let m = Self::build(false);
+        let m = Self::build(false, false);
         run_dkg(&m.peers[0], KEY).await.unwrap();
         m
     }
 
     /// [`Mesh::new`] with hosted keys on every node.
     async fn hosted() -> Self {
-        let m = Self::build(true);
+        let m = Self::build(true, false);
         run_dkg(&m.peers[0], KEY).await.unwrap();
         m
     }
 
-    fn build(hosted: bool) -> Self {
+    /// [`Mesh::new`] with a signing policy and sign journal on every node (no intents required, no
+    /// rate limit): every released share is journaled with its session id and digest.
+    async fn journaled() -> Self {
+        let m = Self::build(false, true);
+        run_dkg(&m.peers[0], KEY).await.unwrap();
+        m
+    }
+
+    fn build(hosted: bool, journaled: bool) -> Self {
         let net = MemNet::new();
         let ca = ca();
         let tmp = tempfile::tempdir().unwrap();
@@ -290,10 +312,45 @@ impl Mesh {
             .map(|i| rutli_cosigner::tls::load(&leaf(tmp.path(), &ca, &cn(i))).unwrap())
             .collect();
         let driver = rutli_cosigner::tls::load(&leaf(tmp.path(), &ca, "driver")).unwrap();
+        let stores: Vec<Arc<StoreFault>> = (0..N).map(|_| StoreFault::new()).collect();
+        let policy = SigningPolicyConfig {
+            require_intent: Some(false),
+            require_ceremony_intent: Some(false),
+            sign_rate_limit_per_min: 0,
+            sign_rate_limit_per_day: 0,
+            ..Default::default()
+        };
         let nodes: Vec<Arc<Node>> = (1..=N)
             .map(|i| {
                 let ks = KeyStore::open(tmp.path().join(format!("node-{i}"))).unwrap();
-                let node = Node::new(Identifier::try_from(i).unwrap(), N, T, ks);
+                let mut node = Node::new(Identifier::try_from(i).unwrap(), N, T, ks)
+                    .with_sign_store_hook(stores[i as usize - 1].hook());
+                if journaled {
+                    let verifier = rutli_cosigner::intent::IntentVerifier::new(
+                        ca.0.pem().into_bytes(),
+                        false,
+                        CLUSTER.into(),
+                        ["driver".to_string()],
+                        &policy,
+                    )
+                    .unwrap();
+                    let journal = SignJournal::open(
+                        tmp.path().join(format!("journal-{i}")),
+                        i,
+                        Retention {
+                            days: 90,
+                            max_bytes: 64 << 20,
+                        },
+                    )
+                    .unwrap();
+                    node = node.with_sign_guard(Arc::new(
+                        rutli_cosigner::sign_policy::SignGuard::new(
+                            Arc::new(verifier),
+                            journal,
+                            10,
+                        ),
+                    ));
+                }
                 Arc::new(if hosted {
                     node.with_hosted_keys(MASTER, CLUSTER.to_string()).unwrap()
                 } else {
@@ -331,6 +388,7 @@ impl Mesh {
             nodes,
             peers,
             controls: (0..N).map(|_| Arc::default()).collect(),
+            stores,
             tls,
             driver,
             servers: Mutex::new(HashMap::new()),
@@ -418,6 +476,26 @@ impl Mesh {
 
     fn control(&self, id: u16) -> &Control {
         &self.controls[id as usize - 1]
+    }
+
+    fn store(&self, id: u16) -> &StoreFault {
+        &self.stores[id as usize - 1]
+    }
+
+    /// Node `id`'s sign journal for `KEY` ([`Mesh::journaled`]).
+    fn journal(&self, id: u16) -> Vec<JournalEntry> {
+        let dir = self._tmp.path().join(format!("journal-{id}")).join(KEY);
+        if !dir.exists() {
+            return Vec::new();
+        }
+        read_key_dir(&dir).unwrap().entries
+    }
+
+    /// Nonce markers node `id` has burnt for `KEY`.
+    fn markers(&self, id: u16) -> usize {
+        std::fs::read_dir(nonce_dir(self, id))
+            .map(|d| d.count())
+            .unwrap_or(0)
     }
 
     async fn sign(&self, leader: u16, tag: &str) -> rutli_cosigner::Result<[u8; 64]> {
@@ -990,31 +1068,15 @@ fn nonce_dir(m: &Mesh, id: u16) -> std::path::PathBuf {
         .join(format!("{KEY}.nonces"))
 }
 
-fn set_mode(path: &Path, mode: u32) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
-}
-
-fn root() -> bool {
-    // SAFETY: geteuid has no preconditions and touches no memory.
-    let root = unsafe { libc::geteuid() } == 0;
-    if root {
-        eprintln!("skipped: running as root, a read-only directory would still be writable");
-    }
-    root
-}
-
-/// T11. A definite I/O error in a member's round-2 store work (EACCES on its nonce markers, as an
-/// EROFS or EIO would) marks its key store down at once — not at the next probe — and the leader
-/// signs with the other member in the same call.
+/// T11. A definite I/O error in a member's round-2 store work (an injected EIO, as an EROFS or
+/// EACCES would be) marks its key store down at once — not at the next probe — and the leader signs
+/// with the other member in the same call. The failed round 2 burns no marker.
 #[tokio::test(start_paused = true)]
 async fn t11_a_definite_io_error_in_round_2_marks_the_store_down_at_once() {
-    if root() {
-        return;
-    }
     let m = Mesh::new().await;
     m.sign(1, "t11-warm").await.unwrap();
-    set_mode(&nonce_dir(&m, 2), 0o500);
+    let markers = m.markers(2);
+    m.store(2).set(Store::Fail(libc::EIO));
     let t = Instant::now();
     m.sign(1, "t11").await.unwrap();
     assert!(
@@ -1027,7 +1089,8 @@ async fn t11_a_definite_io_error_in_round_2_marks_the_store_down_at_once() {
         "marked down by the failed round 2 itself"
     );
     assert_eq!(m.health(1, 2).down_reason(), Some(DownReason::Refusing));
-    set_mode(&nonce_dir(&m, 2), 0o700);
+    assert_eq!(m.markers(2), markers, "no marker for the failed round 2");
+    m.store(2).set(Store::Ok);
 }
 
 /// T15. One I/O error does not take a node out until a restart: down at once, then the next
@@ -1035,12 +1098,9 @@ async fn t11_a_definite_io_error_in_round_2_marks_the_store_down_at_once() {
 /// node's own report, and it signs again.
 #[tokio::test(start_paused = true)]
 async fn t15_a_single_io_error_is_cleared_by_the_next_probe_without_a_restart() {
-    if root() {
-        return;
-    }
     let m = Mesh::new().await;
     m.sign(1, "t15-warm").await.unwrap();
-    set_mode(&nonce_dir(&m, 2), 0o500);
+    m.store(2).set(Store::Fail(libc::EIO));
     m.sign(1, "t15-eio").await.unwrap();
     assert!(m.node(2).keystore_health().is_down());
     // Down: it refuses round 1 with the trailer, so no leader includes it meanwhile.
@@ -1050,7 +1110,7 @@ async fn t15_a_single_io_error_is_cleared_by_the_next_probe_without_a_restart() 
         .unwrap_err();
     assert!(matches!(err, DaemonError::KeystoreDown(_)), "{err:?}");
 
-    set_mode(&nonce_dir(&m, 2), 0o700);
+    m.store(2).set(Store::Ok);
     m.node(2).check_keystore().unwrap(); // the monitor's next tick
     assert!(!m.node(2).keystore_health().is_down());
     settle(2.5).await;
@@ -1167,6 +1227,87 @@ async fn t13_the_client_deadline_only_ever_shortens_the_leaders_work() {
     );
 }
 
+// ── T20: a late round 2 over gRPC ──────────────────────────────────────────────────────────────
+
+/// Yield until `done`, moving no time (a held blocking thread stops paused time from advancing by
+/// itself, and none is needed here).
+async fn until(what: &str, done: impl Fn() -> bool) {
+    for _ in 0..100_000 {
+        if done() {
+            return;
+        }
+        tokio::task::yield_now().await;
+    }
+    panic!("never happened: {what}");
+}
+
+/// T20. The real cancel-while-blocking path: a member's round 2 is inside its store work (after it
+/// took the session out of memory, before the journal entry and the marker) when the leader's
+/// round-2 deadline passes. The leader's call is cancelled over gRPC and its abort reaches the
+/// member, which finds nothing to drop; the leader signs with the other member. When the store
+/// moves again the round 2 finishes once: exactly one marker and one journal entry for that
+/// session, and the leader never resends it.
+#[tokio::test(start_paused = true)]
+async fn t20_a_round_2_cancelled_in_its_store_work_finishes_once() {
+    let m = Arc::new(Mesh::journaled().await);
+    m.sign(1, "t20-warm").await.unwrap();
+    let (markers, journaled) = (m.markers(2), m.journal(2).len());
+    let aborts = m.control(2).seen("AbortSign");
+    m.store(2).set(Store::Hold);
+    let signing = {
+        let m = m.clone();
+        tokio::spawn(async move { m.sign(1, "t20").await })
+    };
+    until("node 2's round 2 to reach its store work", || {
+        m.stores[1].held() == 1
+    })
+    .await;
+    assert_eq!(
+        m.node(2).pending_sign_count(KEY),
+        0,
+        "its nonces are out of memory"
+    );
+    let t0 = Instant::now();
+    tokio::time::advance(ROUND2_DEADLINE + Duration::from_millis(10)).await;
+    signing
+        .await
+        .unwrap()
+        .expect("signed with the other member");
+    assert!(t0.elapsed() < ROUND2_DEADLINE + Duration::from_millis(200));
+    until("the abort to reach node 2", || {
+        m.control(2).seen("AbortSign") > aborts
+    })
+    .await;
+    assert_eq!(
+        (m.markers(2), m.journal(2).len()),
+        (markers, journaled),
+        "nothing released yet"
+    );
+
+    m.store(2).set(Store::Ok);
+    until("node 2's round 2 to end", || {
+        m.node(2).load_now().inflight == 0
+    })
+    .await;
+    let late: Vec<_> = m.journal(2).into_iter().skip(journaled).collect();
+    assert_eq!(
+        late.len(),
+        1,
+        "the abandoned session released one share: {late:?}"
+    );
+    assert_eq!(m.markers(2), markers + 1, "and burnt one marker");
+    let session = &late[0].session_id;
+    let store =
+        rutli_frost_core::nonce_store::NonceStore::open(nonce_dir(&m, 2)).unwrap();
+    assert!(store.is_consumed(session).unwrap());
+    assert_eq!(
+        m.control(2).seen("SignRound2"),
+        2,
+        "warm-up plus the cancelled one: never resent"
+    );
+    m.sign(1, "t20-after").await.unwrap();
+}
+
 // ── T19: a round that waited past its caller's deadline ───────────────────────────────────────
 
 /// T19. A sign round 1 queued behind a jammed blocking pool until its caller's deadline passed
@@ -1228,28 +1369,180 @@ fn t19_a_round_1_queued_past_its_callers_deadline_opens_no_session() {
 
 // ── T14: saturation ───────────────────────────────────────────────────────────────────────────
 
+/// The sign round 1s leaders sent: (message, sent to the leader's own node).
+type Round1Log = Arc<Mutex<Vec<(Vec<u8>, bool)>>>;
+
+/// A leader's view of one member that logs the leader's sign round 1s ([`Round1Log`]) and forwards
+/// everything, liveness included.
+struct Counted {
+    inner: Arc<dyn PeerApi>,
+    round1s: Round1Log,
+}
+
+#[async_trait]
+impl PeerApi for Counted {
+    fn identifier(&self) -> Identifier {
+        self.inner.identifier()
+    }
+    fn is_local(&self) -> bool {
+        self.inner.is_local()
+    }
+    fn health(&self) -> Option<&Arc<PeerHealth>> {
+        self.inner.health()
+    }
+    async fn reachable_within(&self, fresh: Duration, wait: Duration) -> bool {
+        self.inner.reachable_within(fresh, wait).await
+    }
+    async fn sign_round1_within(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        ctx: &Round1Ctx,
+        deadline: Duration,
+    ) -> rutli_cosigner::Result<SigningCommitments> {
+        self.round1s.lock().unwrap().push((
+            ctx.message.clone().unwrap_or_default(),
+            self.inner.is_local(),
+        ));
+        self.inner
+            .sign_round1_within(key_id, session_id, ctx, deadline)
+            .await
+    }
+    async fn sign_round2_within(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        message: &[u8],
+        commitments: &std::collections::BTreeMap<Identifier, SigningCommitments>,
+        intent_digest: Option<&[u8; 32]>,
+        deadline: Duration,
+    ) -> rutli_cosigner::Result<SignatureShare> {
+        self.inner
+            .sign_round2_within(
+                key_id,
+                session_id,
+                message,
+                commitments,
+                intent_digest,
+                deadline,
+            )
+            .await
+    }
+    async fn abort_sign_within(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        deadline: Duration,
+    ) -> rutli_cosigner::Result<()> {
+        self.inner
+            .abort_sign_within(key_id, session_id, deadline)
+            .await
+    }
+    async fn sign_round1(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        ctx: &Round1Ctx,
+    ) -> rutli_cosigner::Result<SigningCommitments> {
+        self.inner.sign_round1(key_id, session_id, ctx).await
+    }
+    async fn sign_round2(
+        &self,
+        key_id: &str,
+        session_id: &str,
+        message: &[u8],
+        commitments: &std::collections::BTreeMap<Identifier, SigningCommitments>,
+        intent_digest: Option<&[u8; 32]>,
+    ) -> rutli_cosigner::Result<SignatureShare> {
+        self.inner
+            .sign_round2(key_id, session_id, message, commitments, intent_digest)
+            .await
+    }
+    async fn abort_sign(&self, key_id: &str, session_id: &str) -> rutli_cosigner::Result<()> {
+        self.inner.abort_sign(key_id, session_id).await
+    }
+    async fn ceremony_fence(
+        &self,
+        c: &str,
+        k: &str,
+        kind: &'static str,
+    ) -> rutli_cosigner::Result<()> {
+        self.inner.ceremony_fence(c, k, kind).await
+    }
+    async fn ceremony_release(&self, c: &str, k: &str) -> rutli_cosigner::Result<()> {
+        self.inner.ceremony_release(c, k).await
+    }
+    async fn node_info(&self) -> rutli_cosigner::Result<(u16, [u8; 32])> {
+        self.inner.node_info().await
+    }
+    async fn replicate_key(
+        &self,
+        a: &str,
+        b: &str,
+        s: &str,
+        d: &[u8],
+        w: &rutli_cosigner::wrap::Wrapped,
+    ) -> rutli_cosigner::Result<Vec<u8>> {
+        self.inner.replicate_key(a, b, s, d, w).await
+    }
+    async fn fetch_key(
+        &self,
+        k: &str,
+    ) -> rutli_cosigner::Result<(String, Vec<u8>, rutli_cosigner::wrap::Wrapped)> {
+        self.inner.fetch_key(k).await
+    }
+    async fn list_keys(&self) -> rutli_cosigner::Result<Vec<(String, String, Vec<u8>)>> {
+        self.inner.list_keys().await
+    }
+    async fn purge_key(&self, c: &str, k: &str) -> rutli_cosigner::Result<bool> {
+        self.inner.purge_key(c, k).await
+    }
+}
+
 /// T14. Every member a single slow server (sign rounds queued, 150 ms each) under three leaders
-/// signing at once: round deadlines are missed, but every member keeps making progress — no breaker
-/// opens, no signature makes more than two attempts, and no member releases more than two shares for
-/// one request (the per-request share cap is 8).
+/// signing at once: round deadlines are missed, but every member keeps making progress. Counted
+/// per signature, not in aggregate: no signature makes more than `n − t + 1` attempts (one round 1
+/// to the leader's own node per attempt), no member journals more shares for one signature than
+/// that (nor more than `max_shares_per_request`), and no breaker opens.
 #[tokio::test(start_paused = true)]
 async fn t14_saturated_but_progressing_members_open_no_breaker() {
-    let m = Arc::new(Mesh::new().await);
+    let m = Arc::new(Mesh::journaled().await);
     for id in 1..=N {
         *m.control(id).queue.lock().unwrap() = Some((
             Arc::new(tokio::sync::Semaphore::new(1)),
             Duration::from_millis(150),
         ));
     }
+    let round1s: Round1Log = Arc::default();
+    let views: Vec<Peers> = (0..N as usize)
+        .map(|i| {
+            m.peers[i]
+                .iter()
+                .map(|p| {
+                    Arc::new(Counted {
+                        inner: p.clone(),
+                        round1s: round1s.clone(),
+                    }) as Arc<dyn PeerApi>
+                })
+                .collect()
+        })
+        .collect();
+    let views = Arc::new(views);
     let slow = Arc::new(AtomicUsize::new(0));
     let mut tasks = tokio::task::JoinSet::new();
     let per_leader = 15;
     for leader in 1..=N {
         for i in 0..per_leader {
-            let (m, slow) = (m.clone(), slow.clone());
+            let (m, views, slow) = (m.clone(), views.clone(), slow.clone());
             tasks.spawn(async move {
                 let t = Instant::now();
-                let r = m.sign(leader, &format!("t14-{leader}-{i}")).await;
+                let r = sign(
+                    m.node(leader),
+                    &views[leader as usize - 1],
+                    KEY,
+                    &msg(&format!("t14-{leader}-{i}")),
+                )
+                .await;
                 if t.elapsed() >= ROUND1_DEADLINE {
                     slow.fetch_add(1, Ordering::SeqCst);
                 }
@@ -1261,7 +1554,6 @@ async fn t14_saturated_but_progressing_members_open_no_breaker() {
     while let Some(r) = tasks.join_next().await {
         ok += usize::from(r.unwrap());
     }
-    let signatures = N as usize * per_leader;
     assert!(
         slow.load(Ordering::SeqCst) > 0,
         "the members were saturated (some signature waited a deadline)"
@@ -1270,17 +1562,30 @@ async fn t14_saturated_but_progressing_members_open_no_breaker() {
     settle(3.0).await;
     assert_eq!(m.transitions(), 0, "no breaker opened");
     assert!(m.all_up());
-    // Each attempt sends one remote round 1 and at most one remote round 2 (t = 2, leader first).
-    let r1: usize = (1..=N).map(|id| m.control(id).seen("SignRound1")).sum();
-    let r2: usize = (1..=N).map(|id| m.control(id).seen("SignRound2")).sum();
+
+    let cap = max_sign_attempts(N as usize, T as usize);
+    let mut attempts: HashMap<Vec<u8>, usize> = HashMap::new();
+    for (message, own) in round1s.lock().unwrap().iter() {
+        if *own {
+            *attempts.entry(message.clone()).or_default() += 1;
+        }
+    }
+    assert_eq!(attempts.len(), N as usize * per_leader, "every signature counted");
     assert!(
-        r1 <= 2 * signatures,
-        "{r1} remote round 1s for {signatures} signatures"
+        attempts.values().all(|&a| (1..=cap).contains(&a)),
+        "attempts per signature: {attempts:?}"
     );
-    assert!(
-        r2 <= 2 * signatures,
-        "{r2} remote round 2s for {signatures} signatures"
-    );
+    let max_shares = SigningPolicyConfig::default().max_shares_per_request as usize;
+    for id in 1..=N {
+        let mut shares: HashMap<String, usize> = HashMap::new();
+        for e in m.journal(id) {
+            *shares.entry(e.digest).or_default() += 1;
+        }
+        assert!(
+            shares.values().all(|&n| n <= cap && n <= max_shares),
+            "node {id}: shares per signature {shares:?}"
+        );
+    }
     for id in 1..=N {
         m.control(id).clear();
     }

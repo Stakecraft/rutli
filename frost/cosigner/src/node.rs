@@ -289,9 +289,20 @@ pub struct Node {
     unknown_no_vote_caps: (usize, usize),
     /// See [`MIXED_EVIDENCE_REGATHER`].
     regather_delay: Duration,
+    /// See [`SignStoreHook`]. Unset in the daemon.
+    sign_store_hook: Option<SignStoreHook>,
     #[cfg(test)]
     hooks: TestHooks,
 }
+
+/// Fault-injection seam for a sign round 2's store work, for tests (also the integration tests,
+/// which the `#[cfg(test)]` hooks do not reach). Not reachable from config; unset in the daemon.
+/// Called with the key id and session id on the blocking thread at the release step: after the
+/// session's nonces and authorization were taken out of memory, before the journal entry and the
+/// nonce marker. An error is that store work failing with it (an `EIO` is a definite I/O error);
+/// blocking in it is a slow or hung store.
+#[doc(hidden)]
+pub type SignStoreHook = Arc<dyn Fn(&str, &str) -> std::io::Result<()> + Send + Sync>;
 
 #[cfg(test)]
 type OnceHook = Box<dyn FnOnce(&Node) + Send>;
@@ -432,6 +443,7 @@ impl Node {
             repair_bucket: Mutex::new((REPAIR_FANOUT_BURST, Instant::now())),
             unknown_no_vote_caps: (MAX_UNKNOWN_NO_VOTES_PER_ASKER, MAX_UNKNOWN_NO_VOTES),
             regather_delay: MIXED_EVIDENCE_REGATHER,
+            sign_store_hook: None,
             #[cfg(test)]
             hooks: TestHooks::default(),
         };
@@ -1219,6 +1231,21 @@ impl Node {
         self
     }
 
+    /// Install a [`SignStoreHook`]. Tests only.
+    #[doc(hidden)]
+    pub fn with_sign_store_hook(mut self, hook: SignStoreHook) -> Self {
+        self.sign_store_hook = Some(hook);
+        self
+    }
+
+    /// Run the [`SignStoreHook`], if any.
+    fn sign_store_work(&self, key_id: &str, session_id: &str) -> Result<()> {
+        match &self.sign_store_hook {
+            Some(hook) => hook(key_id, session_id).map_err(DaemonError::Io),
+            None => Ok(()),
+        }
+    }
+
     /// A sign round's store work on the blocking pool ([`Node::blocking`]), counted in this node's
     /// load while it runs — queued or running, until `op` really ends, even when the caller stopped
     /// waiting. A round 2 still running after [`crate::health::STORE_SLOW_AFTER`] kicks an
@@ -1568,8 +1595,9 @@ impl Node {
             return Err(self.not_session_owner("round2", key_id, caller, e));
         }
         let result = match &self.sign_guard {
-            None => cosigner
-                .round2_guarded_as(caller, session_id, key_id, message, commitments, intent_digest.as_ref(), || Ok(())),
+            None => cosigner.round2_guarded_as(caller, session_id, key_id, message, commitments, intent_digest.as_ref(), || {
+                self.sign_store_work(key_id, session_id)
+            }),
             Some(g) => {
                 // Taken on every path from here on: a round 2 that gets this far uses up the
                 // session's authorization, whatever it then answers. (One refused before this
@@ -1634,7 +1662,10 @@ impl Node {
                                 message,
                                 commitments,
                                 intent_digest.as_ref(),
-                                || g.journal_release(key_id, session_id, &auth, message),
+                                || {
+                                    self.sign_store_work(key_id, session_id)?;
+                                    g.journal_release(key_id, session_id, &auth, message)
+                                },
                             );
                             // Refused before the nonces were taken (the entry changed hands since
                             // `take_as`): put the authorization back, so the call leaves the session
