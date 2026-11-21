@@ -167,13 +167,16 @@ groups:
         # One node's liveness view of one peer (0.5.0): `peer` is the roster number. Fed only by
         # that node's own calls; a peer down for one node and up for the others is a link, down for
         # every node is the peer. Down peers are still tried last, so signing goes on while t are up.
-        expr: max by (instance, peer) (rutli_peer_state{job="rutli-cosigner",state="up"}) == 0
+        # On `state="down"`: a peer on trial is being tried again, not down. A stalled peer whose
+        # trials fail goes down → trial (≤ 7 s) → down with windows of at most 30 s, so "down at some
+        # point in every minute" for 5 minutes, not "down at every scrape", which a trial would reset.
+        expr: max by (instance, peer) (max_over_time(rutli_peer_state{job="rutli-cosigner",state="down"}[1m])) == 1
         for: 5m
         labels:
           severity: warning
         annotations:
           summary: "Rütli cosigner {{ $labels.instance }} has seen peer {{ $labels.peer }} down for 5 minutes"
-          description: "{{ $labels.instance }} has held cosigner {{ $labels.peer }} as down (unreachable, stalled or refusing) or on trial for at least 5 minutes, and tries it last in every signature. Check rutli_peer_breaker_transitions_total{peer=\"{{ $labels.peer }}\"} for the reason: unreachable is the network or the process (connect, TLS, keepalive), stalled is a member whose sign rounds stopped completing (a hung volume), refusing is a member whose key store is down (RutliKeystoreUnreadable on it). If every node reports the same peer, look at that peer; if only one does, look at the link between them. At 2-of-3 the margin is gone while it lasts."
+          description: "{{ $labels.instance }} has held cosigner {{ $labels.peer }} as down (unreachable, stalled or refusing) for at least 5 minutes (trials in between failed), and tries it last in every signature but one trial per window. Check rutli_peer_breaker_transitions_total{peer=\"{{ $labels.peer }}\"} for the reason: unreachable is the network or the process (connect, TLS, keepalive), stalled is a member whose sign rounds stopped completing (a hung volume), refusing is a member whose key store is down (RutliKeystoreUnreadable on it). If every node reports the same peer, look at that peer; if only one does, look at the link between them. At 2-of-3 the margin is gone while it lasts."
 
       - alert: RutliNoQuorum
         # Leaders refusing signatures because fewer than t cosigners are reachable from them, on two
