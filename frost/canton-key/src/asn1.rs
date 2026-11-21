@@ -62,7 +62,12 @@ const fn hex_lit<const N: usize>(s: &[u8]) -> [u8; N] {
     let mut out = [0u8; N];
     let mut i = 0;
     while i < N {
-        out[i] = (nib(s[2 * i]) << 4) | nib(s[2 * i + 1]);
+        // Const evaluation only (a bad literal fails the build); `s.len() == 2 * N` is asserted above
+        // and `i < N`, so both indices are in range.
+        #[allow(clippy::indexing_slicing)]
+        {
+            out[i] = (nib(s[2 * i]) << 4) | nib(s[2 * i + 1]);
+        }
         i += 1;
     }
     out
@@ -365,7 +370,7 @@ const PEM_PKCS8_LABEL: &str = "PRIVATE KEY";
 /// Whether `input` looks like PEM (after optional leading whitespace).
 pub(crate) fn looks_like_pem(input: &[u8]) -> bool {
     let start = input.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(input.len());
-    input[start..].starts_with(PEM_BEGIN.as_bytes())
+    input.get(start..).is_some_and(|rest| rest.starts_with(PEM_BEGIN.as_bytes()))
 }
 
 /// Strict single-block RFC 7468 PEM decoding of an unencrypted PKCS#8 `PRIVATE KEY`. Anything

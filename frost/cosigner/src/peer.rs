@@ -98,6 +98,27 @@ pub trait PeerApi: Send + Sync {
     async fn ceremony_fence(&self, ceremony_id: &str, key_id: &str, kind: &'static str) -> Result<()>;
     /// Release a fence taken by [`ceremony_fence`].
     async fn ceremony_release(&self, ceremony_id: &str, key_id: &str) -> Result<()>;
+    /// The fence of a hosted-key generation ([`Node::genkey_begin_from`]): the per-key guard for
+    /// `ceremony_id`, taken only once the peer verified the client's generate `intent` (forwarded
+    /// unchanged) for this key, `spec` and leader. The default — a peer that cannot carry an
+    /// intent — fences without one and refuses a generation that has one.
+    async fn genkey_fence(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        _spec: &str,
+        intent: Option<&pb::SignedIntent>,
+    ) -> Result<()> {
+        if intent.is_some() {
+            return Err(unsupported("generate intents"));
+        }
+        self.ceremony_fence(ceremony_id, key_id, "genkey").await
+    }
+    /// The hosted-key creation protocol this peer speaks (`NodeInfo.hosted_protocol`; 0 from a
+    /// 0.4.0 cosigner, and the default here).
+    async fn hosted_protocol(&self) -> Result<u32> {
+        Ok(0)
+    }
     // -- hosted-key replication --
 
     /// This peer's identifier and X25519 distribution public key, so material can be wrapped to it.
@@ -343,6 +364,31 @@ impl PeerApi for LocalPeer {
     async fn ceremony_release(&self, ceremony_id: &str, key_id: &str) -> Result<()> {
         self.node.ceremony_release_from(ceremony_id, key_id, self.asker().as_deref());
         Ok(())
+    }
+    async fn genkey_fence(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        spec: &str,
+        intent: Option<&pb::SignedIntent>,
+    ) -> Result<()> {
+        // Who leads, as the serving node would see it over gRPC: the caller this handle acts for
+        // (its roster identifier, from its certificate), or this node itself.
+        let leader = self.asker();
+        let leader_id = match &self.caller {
+            Some(c) => c.index().ok(),
+            None => self.node.index().ok(),
+        };
+        let (ceremony_id, key_id, spec, intent) =
+            (ceremony_id.to_owned(), key_id.to_owned(), spec.to_owned(), intent.cloned());
+        self.node
+            .blocking(move |n| {
+                n.genkey_begin_from(&ceremony_id, &key_id, Some(&spec), intent.as_ref(), leader.as_deref(), leader_id)
+            })
+            .await
+    }
+    async fn hosted_protocol(&self) -> Result<u32> {
+        Ok(crate::orchestrator::HOSTED_PROTOCOL)
     }
     async fn node_info(&self) -> Result<(u16, [u8; 32])> {
         Ok((crate::hosted::identifier_index(self.node.identifier)?, self.node.dist_public_key()?))
@@ -1210,6 +1256,46 @@ impl PeerApi for GrpcPeer {
         Ok(reply.hosted_key_specs)
     }
 
+    async fn genkey_fence(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        spec: &str,
+        intent: Option<&pb::SignedIntent>,
+    ) -> Result<()> {
+        let d = self.inner.deadline(CallClass::Ceremony);
+        let msg = pb::CeremonyFenceRequest {
+            ceremony_id: ceremony_id.into(),
+            key_id: key_id.into(),
+            kind: "genkey".into(),
+            spec: spec.into(),
+            intent: intent.cloned(),
+            ..Default::default()
+        };
+        // A peer's policy refusal keeps its type (the `policy-refused` trailer), so the leader
+        // answers its client PERMISSION_DENIED too.
+        self.inner
+            .call(
+                CallClass::Ceremony,
+                d,
+                |s| crate::DaemonError::from_peer_status(s, key_id, None),
+                |mut c| async move { c.ceremony_fence(timed(msg, d)).await },
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn hosted_protocol(&self) -> Result<u32> {
+        let d = self.inner.deadline(CallClass::Control);
+        let reply = self
+            .inner
+            .call(CallClass::Control, d, crate::DaemonError::Status, |mut c| async move {
+                c.node_info(timed(pb::NodeInfoRequest {}, d)).await
+            })
+            .await?;
+        Ok(reply.hosted_protocol)
+    }
+
     async fn replicate_key(
         &self,
         ceremony_id: &str,
@@ -1343,6 +1429,7 @@ impl PeerApi for GrpcPeer {
             expected_pkp_digest: expect.map(|e| e.1.to_vec()).unwrap_or_default(),
             protocol: crate::ceremony::CEREMONY_PROTOCOL,
             intent: intent.cloned(),
+            spec: String::new(),
         };
         self.inner
             .call(CallClass::Ceremony, d, crate::error::from_fence_status, |mut c| async move {

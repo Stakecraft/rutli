@@ -112,6 +112,19 @@ struct CeremonyGuard {
     started: Instant,
     /// The owner has a ceremony session on this node (part 1 ran), not just a fence.
     session: bool,
+    /// A genkey guard only: what the generation was fenced under here. A push is accepted only
+    /// under this guard ([`Node::genkey_push_refusal`]).
+    genkey: Option<GenkeyAuth>,
+}
+
+/// What a genkey guard was taken under: the spec the leader declared at the fence (`None` from a
+/// 0.4.0 leader) and the client's generate intent this node verified there (`None` without one,
+/// accepted only while `signing_policy.require_ceremony_intent` is off, or on a node without a
+/// signing policy).
+#[derive(Clone, Debug, Default)]
+struct GenkeyAuth {
+    spec: Option<String>,
+    intent: Option<crate::intent::VerifiedGenerate>,
 }
 
 /// How long an orphaned ceremony guard blocks a new ceremony for the same key. Longer than any
@@ -678,6 +691,7 @@ impl Node {
         kind: &'static str,
         leader: Option<&str>,
         may_create: bool,
+        genkey: Option<GenkeyAuth>,
     ) -> Result<bool> {
         let unfenced = || {
             DaemonError::CeremonyRefused(format!(
@@ -733,6 +747,7 @@ impl Node {
                     kind,
                     started: Instant::now(),
                     session: false,
+                    genkey,
                 },
             );
             preempted
@@ -848,6 +863,9 @@ impl Node {
 
     /// [`Node::ceremony_fence`] asked by the peer whose certificate CN is `leader` (`None`: this
     /// node's own leader), which the guard then binds the ceremony to.
+    ///
+    /// A `genkey` fence through here carries no generate intent and no spec: it is
+    /// [`Node::genkey_begin_from`] without them, refused where intents are required.
     pub fn ceremony_fence_from(
         &self,
         ceremony_id: &str,
@@ -855,12 +873,91 @@ impl Node {
         kind: &'static str,
         leader: Option<&str>,
     ) -> Result<()> {
-        self.fence_created(ceremony_id, key_id, kind, leader).map(|_| ())
+        if kind == "genkey" {
+            return self.genkey_begin_from(ceremony_id, key_id, None, None, leader, None);
+        }
+        self.fence_created(ceremony_id, key_id, kind, leader, None).map(|_| ())
+    }
+
+    /// The fence of a hosted-key generation (`genkey`) for `ceremony_id` of `key_id`, asked by the
+    /// peer whose certificate CN is `leader` (`None`: this node's own leader) and whose roster
+    /// identifier is `leader_id` (`None`: unknown). `spec` is what the leader generates (`None` from
+    /// a 0.4.0 leader).
+    ///
+    /// First, before the guard: the client's generate intent ([`crate::sign_policy::SignGuard::authorize_generate`])
+    /// — signer role and pin, cluster, key, spec, the leader it names == `leader_id`, validity, and
+    /// `ceremony_id` == the id it names. Without one: refused when
+    /// `signing_policy.require_ceremony_intent` is on, else accepted and counted. So a peer that
+    /// fences an id no client asked for takes no guard here, and a peer that was shown an intent in
+    /// its own fence cannot use it: the intent names another leader.
+    ///
+    /// A verified intent's ceremony id is then marked fenced, durably ([`Node::mark_fenced`]): the
+    /// request id is spent on this node, for any leader. The guard keeps the spec and the intent;
+    /// a push is accepted only under it ([`Node::genkey_push_refusal`]).
+    pub fn genkey_begin_from(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        spec: Option<&str>,
+        intent: Option<&crate::pb::SignedIntent>,
+        leader: Option<&str>,
+        leader_id: Option<u16>,
+    ) -> Result<()> {
+        crate::keystore::validate_ceremony_id(ceremony_id)?;
+        crate::keystore::validate_key_id(key_id)?;
+        let spec = spec.filter(|s| !s.is_empty());
+        if let Some(s) = spec {
+            crate::hosted::HostedSpec::parse(s)?;
+        }
+        let verified = match &self.sign_guard {
+            Some(g) => g.authorize_generate(key_id, spec.unwrap_or(""), leader_id, ceremony_id, intent)?,
+            None => None,
+        };
+        if let Some(v) = &verified {
+            tracing::info!(
+                ceremony_id,
+                key_id,
+                spec = %v.spec,
+                requested_by = %v.signer_cn,
+                leader = v.leader,
+                "genkey fence: generate intent verified"
+            );
+        }
+        // A generate intent's id is fenced at most once on this node, and that is durable, as for a
+        // DKG/refresh: the guard lives in memory and goes with a release, a preemption or a restart.
+        // A fence without an intent never writes a mark, but is refused under a marked id all the
+        // same. Only an id of the shape a generate intent names can carry a mark.
+        match &verified {
+            Some(_) => self.mark_fenced(ceremony_id, key_id, leader)?,
+            None if is_generate_ceremony_id(ceremony_id) => self.refuse_if_fenced(ceremony_id)?,
+            None => {}
+        }
+        let auth = GenkeyAuth {
+            spec: verified.as_ref().map(|v| v.spec.clone()).or_else(|| spec.map(str::to_string)),
+            intent: verified.clone(),
+        };
+        let created = self.fence_created(ceremony_id, key_id, "genkey", leader, Some(auth))?;
+        if !created && verified.is_some() {
+            // Unreachable while the mark above holds; kept so a second fence under one intent can
+            // never join a guard.
+            return Err(DaemonError::CeremonyRefused(format!(
+                "ceremony {ceremony_id} already holds the guard for {key_id} on this node — a second \
+                 fence under one generate intent is refused"
+            )));
+        }
+        Ok(())
     }
 
     /// [`Node::ceremony_fence_from`], returning whether this call created the guard (`false`: this
-    /// ceremony id already held it).
-    fn fence_created(&self, ceremony_id: &str, key_id: &str, kind: &'static str, leader: Option<&str>) -> Result<bool> {
+    /// ceremony id already held it). `genkey`: what a genkey guard it creates keeps.
+    fn fence_created(
+        &self,
+        ceremony_id: &str,
+        key_id: &str,
+        kind: &'static str,
+        leader: Option<&str>,
+        genkey: Option<GenkeyAuth>,
+    ) -> Result<bool> {
         // A DKG/refresh participant persists a share at the very end. On a read-only remount
         // `exists()`/`load()` still work, so without this the ceremony would fail only at this
         // node's final save — after the nodes before it had already persisted theirs: a half-applied
@@ -906,7 +1003,7 @@ impl Node {
                 )));
             }
         }
-        self.acquire_ceremony(key_id, ceremony_id, kind, leader, true)
+        self.acquire_ceremony(key_id, ceremony_id, kind, leader, true, genkey)
     }
 
     /// Roll back a fence taken by [`ceremony_fence`] (partial cluster fence / aborted ceremony).
@@ -1021,7 +1118,12 @@ impl Node {
             let view = (share.epoch, share.pkp_digest()?);
             let nonce_store = NonceStore::open(self.keystore.nonce_dir(key_id))?;
             let cached = CachedKey {
-                cosigner: Arc::new(Cosigner::new(share.key_package, share.public_key_package, nonce_store)),
+                // Cloned: `share` wipes its own copy when it drops here, the cosigner wipes this one.
+                cosigner: Arc::new(Cosigner::new(
+                    share.key_package.clone(),
+                    share.public_key_package.clone(),
+                    nonce_store,
+                )),
                 view,
             };
             #[cfg(test)]
@@ -1972,7 +2074,7 @@ impl Node {
         // here is a second leader for the same ceremony — under ceremony intents, two leaders
         // presenting one client intent. Refused, never joined: two leaders must never drive one
         // ceremony id. (A re-fence never extended a guard either; now it is refused outright.)
-        if !self.fence_created(ceremony_id, key_id, kind.as_str(), leader)? {
+        if !self.fence_created(ceremony_id, key_id, kind.as_str(), leader, None)? {
             return Err(DaemonError::CeremonyRefused(format!(
                 "ceremony {ceremony_id} already holds the guard for {key_id} on this node — a second \
                  fence under one ceremony id (a second leader for one client intent) is refused"
@@ -2203,7 +2305,7 @@ impl Node {
             (true, false) => self.refuse_if_fenced(ceremony_id)?,
             (false, _) => {}
         }
-        let created = self.acquire_ceremony(key_id, ceremony_id, kind.as_str(), leader, may_create)?;
+        let created = self.acquire_ceremony(key_id, ceremony_id, kind.as_str(), leader, may_create, None)?;
         let result = self.open_session(ceremony_id, key_id, kind, roster, old);
         if result.is_err() && created {
             self.release_ceremony(key_id, ceremony_id);
@@ -2763,7 +2865,10 @@ impl Node {
         });
         let others = without_self(round1_map, self.identifier);
         let (key_package, public_key_package) =
-            p.part3(&others, round2_for_me, old.public_key_package, old.key_package)?;
+            // Cloned: `old` wipes its own copy when it drops. frost's refresh_dkg_shares consumes
+            // this clone and drops it without wiping (as it does its intermediate scalars); that
+            // needs an upstream change.
+            p.part3(&others, round2_for_me, old.public_key_package.clone(), old.key_package.clone())?;
         if group_verifying_key_bytes(&public_key_package)? != old_group {
             // Never stage a share whose group key drifted — that would change the node identity.
             return Err(DaemonError::Disagreement(format!(
@@ -3426,6 +3531,15 @@ pub(crate) fn unfenced_push(key_id: &str, ceremony_id: &str, caller: Option<&str
          accepted from one",
         caller.map(|c| format!("caller {c:?}")).unwrap_or_else(|| "the caller".into())
     ))
+}
+
+/// Whether `ceremony_id` has the shape a generate intent names (`genkey-` and 32 lowercase hex
+/// digits, [`crate::intent::generate_ceremony_id`]): the only genkey ids that can carry a fence
+/// mark. A 0.4.0 leader's random ids (`genkey-<uuid>`) never do.
+fn is_generate_ceremony_id(ceremony_id: &str) -> bool {
+    ceremony_id
+        .strip_prefix("genkey-")
+        .is_some_and(|h| h.len() == 2 * crate::intent::REQUEST_ID_LEN && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')))
 }
 
 /// The refusal of a ceremony part (or a second fence) from a caller that is not the ceremony's
@@ -4095,6 +4209,52 @@ impl Node {
             .is_some_and(|g| g.owner == ceremony_id && g.kind == "genkey" && g.leader.as_deref() == leader)
     }
 
+    /// Why a push of a `spec` key under `key_id` from `leader` (the caller's certificate CN; `None`
+    /// for this node's own leader) under generation `ceremony_id` is refused here, if it is: the
+    /// reason for `rutli_hosted_replication_refusals_total` and the error. A push is accepted only
+    /// under the genkey guard that generation's fence took here, from the same caller —
+    /// `unfenced` otherwise — for the spec the fence declared (`spec`), and, where generate intents
+    /// are required, only under a guard taken with a verified intent (`intent`; a guard can only
+    /// lack one if the node's switch was off when it was taken).
+    pub fn genkey_push_refusal(
+        &self,
+        key_id: &str,
+        ceremony_id: &str,
+        leader: Option<&str>,
+        spec: &str,
+    ) -> Option<(&'static str, DaemonError)> {
+        let auth = {
+            let guards = self.guards();
+            match guards.get(key_id) {
+                Some(g) if g.owner == ceremony_id && g.kind == "genkey" && g.leader.as_deref() == leader => {
+                    g.genkey.clone().unwrap_or_default()
+                }
+                _ => return Some(("unfenced", unfenced_push(key_id, ceremony_id, leader))),
+            }
+        };
+        if let Some(declared) = auth.spec.as_deref() {
+            if declared != spec {
+                return Some((
+                    "spec",
+                    DaemonError::HostedPushRefused(format!(
+                        "generation {ceremony_id:?} of {key_id} was fenced here for a {declared} key; a push of \
+                         a {spec} key under it is refused"
+                    )),
+                ));
+            }
+        }
+        if auth.intent.is_none() && self.ceremony_intent_required() {
+            return Some((
+                "intent",
+                DaemonError::HostedPushRefused(format!(
+                    "generation {ceremony_id:?} of {key_id} holds no verified generate intent on this node, \
+                     which requires one (signing_policy.require_ceremony_intent) — refused"
+                )),
+            ));
+        }
+        None
+    }
+
     /// What a peer's push of `key` under `key_id` meets here, before anything is stored:
     /// `Some(commitment)` when this node already holds the identical key (an idempotent no-op),
     /// `None` when the id is absent. A different key here is [`DaemonError::HostedConflict`]; a
@@ -4135,14 +4295,14 @@ impl Node {
         if let Some(c) = self.hosted_push_check(key_id, key)? {
             return Ok(c);
         }
-        if !self.hosted_genkey_fenced_by(key_id, ceremony_id, leader) {
-            return Err(unfenced_push(key_id, ceremony_id, leader));
+        if let Some((_, e)) = self.genkey_push_refusal(key_id, ceremony_id, leader, key.spec.as_str()) {
+            return Err(e);
         }
         let created = self.hosted_store_created(key_id, key, Some(ceremony_id))?;
         // The generation may have been rolled back while this push was checking its peers (the
         // rollback ends the fence instance here): then the copy just written is this push's own
         // orphan, and it goes again.
-        if created && !self.hosted_genkey_fenced_by(key_id, ceremony_id, leader) {
+        if created && self.genkey_push_refusal(key_id, ceremony_id, leader, key.spec.as_str()).is_some() {
             self.keystore.delete(key_id)?;
             crate::sync::recover(&self.hosted_created_in, "hosted_created_in").remove(key_id);
             return Err(unfenced_push(key_id, ceremony_id, leader));
@@ -4357,6 +4517,7 @@ mod guard_tests {
                 kind: "genkey",
                 started: Instant::now(),
                 session: true,
+                genkey: None,
             },
         );
 
@@ -4820,6 +4981,7 @@ mod sign_policy_race_tests {
                 not_after_ms: now + 120_000,
                 approval_nonce: Vec::new(),
                 approvals: Vec::new(),
+                ..Default::default()
             };
             intent::sign_intent(&self.pki.signer("driver"), &unsigned).unwrap()
         }

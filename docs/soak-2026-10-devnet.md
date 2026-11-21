@@ -304,7 +304,7 @@ otherwise unaffected.
   Validator down 21:48:23 → 21:56:58Z, about 4 min of it a tooling retry (the console ran before the admin API answered
   through a fresh port-forward).
 - 5.5 destruction (22:00Z): the 4.2 safety dump (sha256 equal to the recorded one) deleted from the database volume; the
-  three password-protected exports (sha256 equal to the export-time record) removed with `rm -P`; no share bundle left,
+  three password-protected exports (sha256 equal to the export-time record) removed with `rm -P` (which unlinks only on current macOS); no share bundle left,
   ceremony records moved to the evidence, cosigner `/tmp` empty, migration dump volume empty, no driver private key in
   the drill workspace. WAL archiving has no target; old WAL and heap blocks stay on the live volume until teardown. The
   backup volume and the pre-migration database volume had been deleted earlier in the drill, unwiped.

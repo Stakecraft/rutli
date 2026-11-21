@@ -201,11 +201,12 @@ driver audit [5.1]. Observe for at least 24 h.
 
 For each location in your inventory: act, keep before/after evidence, fill in the destruction record ([split-ceremony.md](split-ceremony.md) §8)
 [5.4].
-- **Local files:** on macOS use `/bin/rm -P`, not a bare `rm` (Lessons f).
+- **Local files:** keep them only on the memory disk or encrypted image of [key-material-handling.md](key-material-handling.md) and destroy that place; `rm -P` does nothing on current macOS (Lessons f).
 - **Database:** `DROP DATABASE OLD_DB` (it holds the old namespace, signing and encryption keys). Let the WAL recycle; drop replicas and PITR base backups.
 - **Logical dumps:** delete every dump taken while `OLD_DB` existed. Your backup schedule keeps adding copies until the DROP, so drop early.
 - **Object storage:** delete every **version and delete marker**, not just the current objects. If object lock is on, record the retention end date.
 - **Snapshots, identities dumps, export files, laptops, dealer media, ceremony bundles, pre-refresh cosigner backups.**
+- **On the Rütli side:** each cosigner's data volume and backup volume and their snapshots (free blocks hold the dealt shares and the pending recipient files), old backup and retired directories, the Kubernetes nodes' scratch disks, old values of the seal Secret, the legacy master and its escrow, operator workstation copies. Rotate every node's sealing key after the first refresh and destroy the old one; deleting alone does not close this ([key-material-handling.md](key-material-handling.md)).
 - State the residual exposure in the record. SSDs, copy-on-write filesystems and cloud deletes are not provable erasure.
 
 Optionally, remove the offboarded member's owner-to-key mapping, which still lists the old keys [5.2]. Run it on the new
@@ -437,8 +438,8 @@ d. **A `kubectl port-forward` bound to a replaced pod dies on the first request.
    command; a dropped forward changes nothing on the node.
 e. **`kubectl cp` preserves the laptop uid.** `chown` the jar and certificates to the participant uid (1001), and check that the state
    volume is writable, before the first start.
-f. **macOS:** GNU coreutils `rm` can shadow `/bin/rm`, which has `-P`. Use `/bin/rm -P` for shredding. On APFS and SSD that is still
-   not provable erasure.
+f. **macOS:** `rm -P` has no effect on current macOS and there is no `shred`, so deleting a file leaves its bytes on the disk. Work on a
+   memory disk or encrypted image and destroy it ([key-material-handling.md](key-material-handling.md)). Even that is not provable erasure.
 g. **`parties.list(filterParticipant = …)` scans the whole synchronizer** on DevNet and takes minutes. Prefer `ledger_api.parties.list()`
    on the node.
 h. **`synchronizer_trust_certificates.list(filterUid = …)` matches the exact UID**, not a prefix.

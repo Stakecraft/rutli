@@ -436,6 +436,9 @@ impl Signer for SignerSvc {
             hosted_key_specs: specs,
             hosted_keys_enabled: enabled,
             cluster_id: self.sign_guard.as_ref().map(|g| g.verifier().cluster_id().to_string()).unwrap_or_default(),
+            // Public: the roster slot this endpoint serves, which a generate intent sent here names
+            // as its leader.
+            node_identifier: self.node.index().map(u32::from).unwrap_or(0),
         }))
     }
 
@@ -444,16 +447,31 @@ impl Signer for SignerSvc {
         req: Request<pb::GenerateKeyRequest>,
     ) -> Result<Response<pb::GenerateKeyReply>, Status> {
         self.authorize_key(&req, |r| &r.key_id)?;
+        let caller = caller_of(&req);
         let r = req.into_inner();
         let spec = crate::hosted::HostedSpec::parse(&r.spec).map_err(Status::from)?;
+        // The generate intent, checked here first for a clear refusal from the leader (and so an
+        // intent cannot be replayed through another client's connection or another leader). Every
+        // node checks it again at its fence, this one included, before anything is minted.
+        if let Err(refused) = self.check_generate_intent(caller.as_ref(), &r.key_id, spec.as_str(), r.intent.as_ref()) {
+            record_hosted_op("generate", false);
+            tracing::warn!(
+                key_id = %r.key_id,
+                client = caller.as_ref().map(|c| c.cn.as_str()).unwrap_or("<unauthenticated>"),
+                reason = %refused.message(),
+                "hosted-key generation refused at the leader: no valid client generate intent"
+            );
+            return Err(refused);
+        }
         let result = match self.node.refuse_if_keystore_down() {
             Ok(()) => {
-                orchestrator::generate_hosted_key(
+                orchestrator::generate_hosted_key_with_intent(
                     &self.node,
                     &self.peers,
                     &r.key_id,
                     spec,
                     self.hosted_write_quorum,
+                    r.intent.as_ref(),
                 )
                 .await
             }
@@ -778,6 +796,54 @@ impl SignerSvc {
         Ok(())
     }
 
+    /// The leader's own check of a `GenerateKey` request's generate intent: valid here (role, pin,
+    /// cluster, key, spec, validity), naming THIS node as its leader, and signed by the very client
+    /// calling (CN and certificate key). No intent: refused when this node requires one
+    /// (`signing_policy.require_ceremony_intent`), else every node decides. Not load-bearing —
+    /// every node verifies the intent at its fence, this one included — but it gives the client a
+    /// clear PERMISSION_DENIED before anything is fenced.
+    fn check_generate_intent(
+        &self,
+        caller: Option<&crate::intent::Caller>,
+        key_id: &str,
+        spec: &str,
+        intent: Option<&pb::SignedIntent>,
+    ) -> Result<(), Status> {
+        let Some(g) = &self.sign_guard else { return Ok(()) };
+        let Some(signed) = intent else {
+            if g.require_ceremony_intent() {
+                return Err(Status::from(crate::intent::refused_ceremony(
+                    "missing",
+                    format!(
+                        "GenerateKey for {key_id} carries no generate intent and this node requires one \
+                         (signing_policy.require_ceremony_intent) — upgrade the driver to 0.5.0, or set \
+                         require_ceremony_intent to false on every cosigner while it is upgraded"
+                    ),
+                )));
+            }
+            return Ok(());
+        };
+        let ceremony_id = crate::intent::generate_ceremony_id_of(signed).map_err(Status::from)?;
+        let me = self.node.index().map_err(Status::from)?;
+        let v = g
+            .verifier()
+            .verify_generate(signed, key_id, spec, me, &ceremony_id, crate::intent::now_ms())
+            .map_err(Status::from)?;
+        if let Some(c) = caller {
+            if c.cn != v.signer_cn || c.spki_sha256 != v.signer_spki_sha256 {
+                return Err(Status::from(crate::intent::refused_ceremony(
+                    "signer",
+                    format!(
+                        "the generate intent is signed by {:?}, but the caller is {:?} with another \
+                         certificate key — an intent is only valid on its signer's own connection",
+                        v.signer_cn, c.cn
+                    ),
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Charge one decryption against `key_id`'s budget, or refuse.
     ///
     /// Applies to every decrypt path (RSA `Decrypt`, `SymmetricDecrypt`, ECIES `EcdhDerive`) and
@@ -871,9 +937,10 @@ fn caller_of<T>(req: &Request<T>) -> Option<crate::intent::Caller> {
     req.peer_certs().and_then(|certs| certs.first().and_then(|leaf| crate::intent::Caller::from_leaf_der(leaf.as_ref())))
 }
 
-/// A DKG/refresh fence or part 1 a mesh peer asked for and this node refused on its ceremony
-/// intent: the peer led a ceremony no authorized client signed for (or one an older leader drops
-/// the intent of, when this node requires one). Logged with the asking peer, a compromise signal.
+/// A DKG/refresh fence or part 1, or a hosted-key generation's fence, a mesh peer asked for and this
+/// node refused on its ceremony or generate intent: the peer led a ceremony or a generation no
+/// authorized client signed for (or one an older leader drops the intent of, when this node
+/// requires one). Logged with the asking peer and the key, a compromise signal.
 fn warn_if_intent_refused<T>(
     result: &crate::Result<T>,
     asker: Option<&str>,
@@ -1046,6 +1113,17 @@ impl PeerSvc {
         Ok(id)
     }
 
+    /// The roster identifier of the peer whose certificate CN is `cn` (exact match, as
+    /// [`PeerSvc::authenticated_peer`]); `None` without a caller identity or for a CN that is no
+    /// roster node's.
+    fn roster_id_of(&self, cn: Option<&str>) -> Option<u16> {
+        let cn = cn?;
+        match &self.peer_ids {
+            Some(ids) => ids.get(cn).copied(),
+            None => crate::request_auth::identifier_from_cn(cn),
+        }
+    }
+
     /// The node identifier of the authenticated caller, taken from its client-cert CN: the roster
     /// node whose configured `tls_client_cn` (default `cosigner<N>`) it equals exactly.
     ///
@@ -1197,11 +1275,33 @@ impl Peer for PeerSvc {
                 warn_if_intent_refused(&result, asker.as_deref(), "fence", &ceremony_id, &key_id);
                 result.map_err(Status::from)?;
             }
-            // Hosted-key fences are not client-intent gated (a cosigner can block a hosted id's
-            // generation or deletion anyway, by refusing); an intent there is a protocol error.
+            // A generation's fence carries the client's generate intent (0.5.0): verified here
+            // before the guard, against the spec the leader declares and the roster identifier of
+            // the calling peer, which the intent must name as its leader.
+            "genkey" => {
+                let leader_id = self.roster_id_of(asker.as_deref());
+                let (ceremony_id, key_id, leader) = (r.ceremony_id.clone(), r.key_id.clone(), asker.clone());
+                let result = self
+                    .node
+                    .blocking(move |n| {
+                        n.genkey_begin_from(
+                            &r.ceremony_id,
+                            &r.key_id,
+                            Some(&r.spec),
+                            r.intent.as_ref(),
+                            leader.as_deref(),
+                            leader_id,
+                        )
+                    })
+                    .await;
+                warn_if_intent_refused(&result, asker.as_deref(), "genkey fence", &ceremony_id, &key_id);
+                result.map_err(Status::from)?;
+            }
+            // A delete's fence is not client-intent gated: every node verifies the delete intent
+            // itself when it tombstones the key (PurgeKey). An intent here is a protocol error.
             _ if r.intent.is_some() => {
                 return Err(Status::invalid_argument(format!(
-                    "a ceremony intent is only valid on a dkg or refresh fence, not {kind}"
+                    "a ceremony intent is only valid on a dkg, refresh or genkey fence, not {kind}"
                 )))
             }
             _ => {
@@ -1469,6 +1569,7 @@ impl Peer for PeerSvc {
             dist_public_key: self.node.dist_public_key().map(|k| k.to_vec()).unwrap_or_default(),
             hosted_key_specs: self.node.hosted_specs(),
             ceremony_protocol: crate::ceremony::CEREMONY_PROTOCOL,
+            hosted_protocol: crate::orchestrator::HOSTED_PROTOCOL,
         });
         with_load(&self.node, reply)
     }

@@ -127,6 +127,8 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
       budget: FiniteDuration = 10.seconds,
       signAttempt: FiniteDuration = 5.seconds,
       recovery: FiniteDuration = 60.seconds,
+      // The tests above describe the sticky leader; the rotation tests below turn rotate on.
+      rotate: Boolean = false,
   )(
       body: (FrostBackend, IndexedSeq[FakeCosigner]) => A
   ): A = {
@@ -145,6 +147,7 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
         hostedKeys,
         signAttemptTimeout = signAttempt,
         leaderRecovery = recovery,
+        rotateSigns = rotate,
       ) {
         override protected def buildChannel(endpoint: String): io.grpc.ManagedChannel =
           InProcessChannelBuilder.forName(endpoint).directExecutor().build()
@@ -606,6 +609,43 @@ class FrostFailoverSpec extends AnyWordSpec with Matchers {
       withCluster(3, hostedKeys = true) { case (b, fakes) =>
         fakes.foreach(_.signLies = true)
         failure(driverOf(b).sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519)(Context.root())).retryable shouldBe false
+      }
+    }
+  }
+
+  "FrostBackend sign leader (frost.sign-leader)" should {
+
+    "rotate: start each sign at the next endpoint in turn" in {
+      withCluster(3, rotate = true) { case (b, fakes) =>
+        (1 to 6).foreach(_ => await(b.sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519)) shouldBe Signed)
+        fakes.map(_.signCalls.get) shouldBe Seq(2, 2, 2)
+      }
+    }
+
+    "rotate: never start at an endpoint demoted within leader-recovery, and take it back after" in {
+      withCluster(3, rotate = true, recovery = 400.millis) { case (b, Seq(a, x, y)) =>
+        a.signGate = call => if (call == 1) Some(Status.UNAVAILABLE) else None
+        (1 to 6).foreach(_ => await(b.sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519)) shouldBe Signed)
+        a.signCalls.get shouldBe 1 // asked once (and demoted), never again as a start
+        (x.signCalls.get + y.signCalls.get) shouldBe 6
+        Thread.sleep(600)
+        (1 to 3).foreach(_ => await(b.sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519)) shouldBe Signed)
+        a.signCalls.get should be >= 2 // healthy again: back in the rotation
+      }
+    }
+
+    "sticky: keep every sign on the preferred leader, as before" in {
+      withCluster(3) { case (b, fakes) =>
+        (1 to 6).foreach(_ => await(b.sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519)) shouldBe Signed)
+        fakes.map(_.signCalls.get) shouldBe Seq(6, 0, 0)
+      }
+    }
+
+    "leave ceremonies on the preferred leader in rotate mode" in {
+      withCluster(3, rotate = true) { case (b, fakes) =>
+        (1 to 3).foreach(_ => await(b.sign(Digest, "frost-ns", SigningAlgoSpec.Ed25519)))
+        await(b.generateSigningKeyPair(SigningKeySpec.EcCurve25519, Some("ns2")))
+        fakes.map(_.dkgCalls.get) shouldBe Seq(1, 0, 0)
       }
     }
   }

@@ -37,13 +37,14 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Tests of the scripts
         run: |
           python3 -I scripts/perf/test_compare.py
+          python3 -I scripts/perf/test_diagnose.py
           python3 -I scripts/perf/test_k8s_loadgen.py
 
       - name: Tools (checksum-pinned)
@@ -71,7 +72,7 @@ jobs:
           kubectl get nodes -o wide
 
       - name: Install the previous release
-        run: scripts/perf/k8s-deploy.sh install --previous --image rutli-perf:local --work "${RUNNER_TEMP}/work"
+        run: scripts/perf/k8s-deploy.sh install --previous --generators 2 --image rutli-perf:local --work "${RUNNER_TEMP}/work"
 
       - name: Suites
         env:
@@ -83,21 +84,30 @@ jobs:
             --env-name kind --out perf-out/cluster.json --upgrade-image rutli-perf:local --work "$WORK" \
             --disrupt-secs 90 --commit "$GITHUB_SHA"
 
+      # The diagnostic pass, tiny: it checks the wiring (cgroup and pressure readings, the flush
+      # probe, load spread over two generators, the key-count step), not the numbers.
+      - name: Diagnostic pass
+        run: |
+          python3 -I scripts/perf/cluster.py --namespace rutli-perf --profile scripts/perf/profiles/smoke.json \
+            --env-name kind --diagnose --out perf-out/diagnose.json --commit "$GITHUB_SHA"
+
       - name: Report
         if: always()
         run: |
           mkdir -p perf-out
-          if [ -f perf-out/cluster.json ]; then
-            python3 -I scripts/perf/compare.py --markdown perf-out/report.md perf-out/no-previous.json perf-out/cluster.json \
-              >> "$GITHUB_STEP_SUMMARY" || true
-          fi
+          for r in cluster diagnose; do
+            if [ -f "perf-out/$r.json" ]; then
+              python3 -I scripts/perf/compare.py --markdown "perf-out/$r.md" perf-out/no-previous.json "perf-out/$r.json" \
+                >> "$GITHUB_STEP_SUMMARY" || true
+            fi
+          done
           kubectl -n rutli-perf get pods -o wide > perf-out/pods.txt 2>&1 || true
           kubectl get events -A --sort-by=.lastTimestamp > perf-out/events.txt 2>&1 || true
           for i in 1 2 3; do
             kubectl -n rutli-perf logs "rutli-cosigner-n$i-0" -c cosigner --tail=3000 > "perf-out/cosigner$i.log" 2>&1 || true
           done
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: cluster-suite-kind

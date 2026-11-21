@@ -439,7 +439,7 @@ async fn refresh_carries_a_dealt_keys_origin_and_counts_refreshes() {
     assert_eq!(run_refresh(&peers, IMPORTED).await.unwrap(), public);
     for i in 1..=N {
         let ks = KeyStore::open(tmp.path().join(format!("node-{i}"))).unwrap();
-        let got = ks.load(IMPORTED).unwrap().origin.expect("origin survives refresh");
+        let got = ks.load(IMPORTED).unwrap().origin.clone().expect("origin survives refresh");
         assert_eq!(got, KeyOrigin { refresh_count: 2, ..origin.clone() });
         assert!(ks.dealt_keys_never_refreshed().unwrap().is_empty());
     }

@@ -502,16 +502,17 @@ impl HostedKey {
         use aes_gcm::aead::{Aead, KeyInit};
         use aes_gcm::{Aes256Gcm, Key, Nonce};
 
-        if blob.len() < 1 + SYM_NONCE_LEN || blob[0] != SYM_FORMAT_V1 {
-            return Err(DaemonError::Config(
-                "malformed symmetric ciphertext (bad version or too short)".into(),
-            ));
+        let malformed = || DaemonError::Config("malformed symmetric ciphertext (bad version or too short)".into());
+        let (version, rest) = blob.split_first().ok_or_else(malformed)?;
+        if *version != SYM_FORMAT_V1 {
+            return Err(malformed());
         }
+        let (nonce_bytes, ciphertext) = rest.split_at_checked(SYM_NONCE_LEN).ok_or_else(malformed)?;
         let key_bytes = self.symmetric_key()?;
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
-        let nonce = Nonce::from_slice(&blob[1..1 + SYM_NONCE_LEN]);
+        let nonce = Nonce::from_slice(nonce_bytes);
         let pt = cipher
-            .decrypt(nonce, &blob[1 + SYM_NONCE_LEN..])
+            .decrypt(nonce, ciphertext)
             .map_err(|_| DaemonError::DecryptFailed)?;
         Ok(Zeroizing::new(pt))
     }
@@ -552,13 +553,13 @@ pub fn check_uncompressed_p256_point(peer_point: &[u8]) -> Result<()> {
             peer_point.len()
         )));
     }
-    if peer_point[0] != 0x04 {
-        return Err(DaemonError::InvalidPoint(format!(
-            "the peer point must be uncompressed (leading byte 0x04), got 0x{:02x}",
-            peer_point[0]
-        )));
+    match peer_point.first() {
+        Some(0x04) => Ok(()),
+        Some(tag) => Err(DaemonError::InvalidPoint(format!(
+            "the peer point must be uncompressed (leading byte 0x04), got 0x{tag:02x}"
+        ))),
+        None => Err(DaemonError::InvalidPoint("the peer point is empty".into())),
     }
-    Ok(())
 }
 
 /// A FROST [`Identifier`] as the small integer the config uses (1..=n).
@@ -573,12 +574,12 @@ pub fn check_uncompressed_p256_point(peer_point: &[u8]) -> Result<()> {
 /// every envelope addressed over gRPC undecryptable by its recipient.
 pub fn identifier_index(id: frost_ed25519::Identifier) -> Result<u16> {
     let bytes = id.serialize();
-    if bytes.len() < 2 || bytes[2..].iter().any(|&b| b != 0) {
-        return Err(DaemonError::Config(
+    match bytes.as_slice() {
+        [lo, hi, rest @ ..] if rest.iter().all(|&b| b == 0) => Ok(u16::from_le_bytes([*lo, *hi])),
+        _ => Err(DaemonError::Config(
             "FROST identifier does not fit in 16 bits — cosigner ids are 1..=65535".into(),
-        ));
+        )),
     }
-    Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
 }
 
 /// Seconds since the Unix epoch, for `created_at`.
@@ -657,6 +658,30 @@ mod tests {
         let k = HostedKey::generate(HostedSpec::Rsa2048, 1).unwrap();
         assert!(k.encrypt_oaep(&[0u8; RSA2048_MAX_PLAINTEXT_LEN]).is_ok());
         assert!(k.encrypt_oaep(&[0u8; RSA2048_MAX_PLAINTEXT_LEN + 1]).is_err());
+    }
+
+    #[test]
+    fn a_short_or_misversioned_symmetric_blob_is_an_error_not_a_panic() {
+        let k = HostedKey::generate(HostedSpec::Aes256Gcm, 1).unwrap();
+        // Empty, one byte, version byte plus a nonce one byte short, and a wrong version.
+        assert!(k.decrypt_symmetric(&[]).is_err());
+        assert!(k.decrypt_symmetric(&[SYM_FORMAT_V1]).is_err());
+        assert!(k.decrypt_symmetric(&[SYM_FORMAT_V1; SYM_NONCE_LEN]).is_err());
+        assert!(k.decrypt_symmetric(&[SYM_FORMAT_V1.wrapping_add(1); 1 + SYM_NONCE_LEN + 16]).is_err());
+        // Exactly version + nonce and no ciphertext: reaches the AEAD, which refuses it.
+        assert!(k.decrypt_symmetric(&[SYM_FORMAT_V1; 1 + SYM_NONCE_LEN]).is_err());
+    }
+
+    #[test]
+    fn a_malformed_peer_point_is_an_error_not_a_panic() {
+        assert!(check_uncompressed_p256_point(&[]).is_err());
+        assert!(check_uncompressed_p256_point(&[0x04]).is_err());
+        let mut point = vec![0x02; P256_UNCOMPRESSED_POINT_LEN];
+        assert!(check_uncompressed_p256_point(&point).is_err(), "compressed tag");
+        point[0] = 0x04;
+        assert!(check_uncompressed_p256_point(&point).is_ok(), "syntax only; the curve check is aws-lc's");
+        point.push(0);
+        assert!(check_uncompressed_p256_point(&point).is_err(), "one byte too long");
     }
 
     #[test]

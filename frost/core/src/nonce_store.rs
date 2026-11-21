@@ -209,6 +209,51 @@ mod tests {
     }
 
     #[test]
+    fn a_second_consume_is_nonce_reuse_and_nothing_else() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = NonceStore::open(tmp.path().join("k.nonces")).unwrap();
+        store.consume("s1").unwrap();
+        match store.consume("s1") {
+            Err(CoreError::NonceReuse(s)) => assert_eq!(s, "s1"),
+            other => panic!("expected NonceReuse, got {other:?}"),
+        }
+        // Reopening the store (a restart) does not forget it.
+        let store = NonceStore::open(tmp.path().join("k.nonces")).unwrap();
+        assert!(matches!(store.consume("s1"), Err(CoreError::NonceReuse(_))));
+        assert!(store.is_consumed("s1").unwrap() && !store.is_consumed("s2").unwrap());
+    }
+
+    #[test]
+    fn a_marker_that_cannot_be_written_is_an_io_error_not_reuse() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = NonceStore::open(tmp.path().join("k.nonces")).unwrap();
+        let set = |mode| fs::set_permissions(&store.dir, fs::Permissions::from_mode(mode)).unwrap();
+        set(0o500);
+        if File::create(store.dir.join("probe")).is_ok() {
+            set(0o700);
+            eprintln!("permission bits not enforced (running as root?) — skipping");
+            return;
+        }
+        let verdict = store.consume("s1");
+        set(0o700);
+        assert!(matches!(verdict, Err(CoreError::Io(_))), "got {verdict:?}");
+    }
+
+    #[test]
+    fn invalid_session_ids_are_refused_before_touching_the_disk() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = NonceStore::open(tmp.path().join("k.nonces")).unwrap();
+        for bad in ["", "../x", "a/b", "a.b", "a b", "ü"] {
+            assert!(matches!(store.consume(bad), Err(CoreError::NonceStore(_))), "{bad:?}");
+            assert!(matches!(store.is_consumed(bad), Err(CoreError::NonceStore(_))), "{bad:?}");
+        }
+        for good in ["a", "A-9_z", "123e4567-e89b-12d3-a456-426614174000"] {
+            store.consume(good).unwrap();
+        }
+        assert_eq!(fs::read_dir(&store.dir).unwrap().count(), 3);
+    }
+
+    #[test]
     fn is_consumed_fails_closed_when_the_store_cannot_be_read() {
         let tmp = tempfile::tempdir().unwrap();
         let store = NonceStore::open(tmp.path().join("k.nonces")).unwrap();

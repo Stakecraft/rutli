@@ -9,7 +9,7 @@
 # it is red, so its badge in the README is the state of main.
 #
 # The list of watched workflows is WATCHED in scripts/main-status.py; a unit test checks that each
-# of them exists and pushes to main without a path filter. Add the quality workflow there when it lands.
+# of them exists and pushes to main without a path filter.
 # A cancelled run, or a watched workflow that never starts on the tip, keeps the issue open until the
 # next push; re-run the workflow to settle it.
 #
@@ -26,6 +26,9 @@ on:
       - Load test
       - Cluster suite (kind)
       - Image build check
+      - Generated code
+      - Workflow lint
+      - Quality
     types: [completed]
     branches: [main]
   # Only to run the script's tests when it or the workflows change.
@@ -51,7 +54,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: python3 -I scripts/test_main_status.py
@@ -66,7 +69,7 @@ jobs:
       actions: read
       issues: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 

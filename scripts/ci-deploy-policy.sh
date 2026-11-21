@@ -107,6 +107,20 @@ for mutation in \
 done
 echo "mutated sidecars: rejected, as they must be"
 
+echo "==> policy: a disk-backed or unbounded emptyDir on a cosigner pod must be rejected"
+for mutation in \
+  '(.spec.template.spec.volumes[] | select(.name == "tmp") | .emptyDir) = {}' \
+  '(.spec.template.spec.volumes[] | select(.name == "tmp") | .emptyDir) = {"medium": "Memory"}' \
+  '(.spec.template.spec.volumes[] | select(.name == "backup-work") | .emptyDir) = {"sizeLimit": "1Gi"}'; do
+  yq "(select(.kind == \"StatefulSet\") | select(.metadata.name | test(\"n1\"))) |= ($mutation)" \
+    "$OUT/pernode-values.yaml" >"$OUT/mutated.yaml"
+  if "$REPO/scripts/check-deploy-policy.sh" "$OUT/mutated.yaml" 2>/dev/null; then
+    echo "check-deploy-policy.sh ACCEPTED: $mutation — the checker is broken" >&2
+    exit 1
+  fi
+done
+echo "disk-backed or unbounded scratch volumes: rejected, as they must be"
+
 echo "==> the soak's values still render the legacy StatefulSet (no topology/PVC change on upgrade)"
 sts="$(yq -N 'select(.kind == "StatefulSet") | .metadata.name' "$OUT/soak.yaml")"
 claims="$(yq -N 'select(.kind == "StatefulSet") | .spec.volumeClaimTemplates[].spec.accessModes[]' "$OUT/soak.yaml")"

@@ -494,7 +494,7 @@ impl KeyJournal {
         let now = std::time::UNIX_EPOCH + std::time::Duration::from_millis(now_ms);
         let mut removed = false;
         while sized.len() > 1 {
-            let (path, len, modified) = &sized[0];
+            let Some((path, len, modified)) = sized.first() else { break };
             let too_old = modified.is_some_and(|m| now.duration_since(m).is_ok_and(|age| age > max_age));
             if !(too_old || total > retention.max_bytes) {
                 break;
@@ -556,7 +556,9 @@ fn read_segment(path: &Path) -> Result<(Vec<JournalEntry>, usize)> {
     } else {
         bytes.len() - bytes.iter().rposition(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0)
     };
-    let body = &bytes[..bytes.len() - torn];
+    let body = bytes
+        .get(..bytes.len().saturating_sub(torn))
+        .ok_or_else(|| corrupt(path, "the torn tail is longer than the segment"))?;
     let mut out = Vec::new();
     for (i, line) in body.split(|&b| b == b'\n').filter(|l| !l.is_empty()).enumerate() {
         let e: JournalEntry = serde_json::from_slice(line)
@@ -568,13 +570,15 @@ fn read_segment(path: &Path) -> Result<(Vec<JournalEntry>, usize)> {
 
 /// Each entry's hash, and the chain within the slice.
 fn verify_entries(entries: &[JournalEntry], path: &Path) -> Result<()> {
-    for (i, e) in entries.iter().enumerate() {
+    let mut before: Option<&JournalEntry> = None;
+    for e in entries {
         if e.hash != e.compute_hash() {
             return Err(corrupt(path, &format!("entry seq {} does not match its hash", e.seq)));
         }
-        if i > 0 && (e.prev != entries[i - 1].hash || e.seq != entries[i - 1].seq + 1) {
+        if before.is_some_and(|p| e.prev != p.hash || p.seq.checked_add(1) != Some(e.seq)) {
             return Err(corrupt(path, &format!("the chain breaks at seq {}", e.seq)));
         }
+        before = Some(e);
     }
     Ok(())
 }
@@ -675,6 +679,77 @@ mod tests {
             j.append_charged(e, LIMITS, t0 + DAY_MS + 3 * MINUTE_MS + i).unwrap();
         }
         assert_eq!(read_key_dir(&tmp.path().join("k")).unwrap().entries.len(), 17);
+    }
+
+    /// The window lengths and the segment size are the documented ones.
+    #[test]
+    fn window_lengths_and_segment_size() {
+        assert_eq!((MINUTE_MS, DAY_MS), (60_000, 86_400_000));
+        assert_eq!(SEGMENT_BYTES, 4 << 20);
+    }
+
+    /// The windows are half-open: a charge counts for exactly one minute and one day, not a
+    /// millisecond more — in memory and after a reopen.
+    #[test]
+    fn a_charge_leaves_the_minute_and_the_day_window_exactly_on_time() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t0 = 1_800_000_000_000u64;
+        let per_min = Limits { per_min: 1, per_day: 100, max_shares_per_charge: 1 };
+        let j = SignJournal::open(tmp.path(), 1, KEEP).unwrap();
+        j.append_charged(entry("m", "a"), per_min, t0).unwrap();
+        assert!(matches!(j.append_charged(entry("m", "b"), per_min, t0 + MINUTE_MS - 1), Err(DaemonError::RateLimited(_))));
+        j.append_charged(entry("m", "b"), per_min, t0 + MINUTE_MS).unwrap();
+
+        let per_day = Limits { per_min: 0, per_day: 1, max_shares_per_charge: 1 };
+        j.append_charged(entry("d", "a"), per_day, t0).unwrap();
+        assert!(matches!(j.append_charged(entry("d", "b"), per_day, t0 + DAY_MS - 1), Err(DaemonError::RateLimited(_))));
+        drop(j);
+        // Reopened exactly a day later: the old charge is not replayed into the ledger.
+        let j = SignJournal::open(tmp.path(), 1, KEEP).unwrap();
+        j.append_charged(entry("d", "b"), per_day, t0 + DAY_MS).unwrap();
+        assert!(matches!(j.append_charged(entry("d", "c"), per_day, t0 + DAY_MS + 1), Err(DaemonError::RateLimited(_))));
+        // Kept in memory past the day: pruned on time too.
+        j.append_charged(entry("d", "c"), per_day, t0 + 2 * DAY_MS).unwrap();
+    }
+
+    /// A sign without an intent is charged per session: the rate limit holds for an older driver
+    /// too, and each session counts once however many shares it releases.
+    #[test]
+    fn signs_without_an_intent_are_charged_per_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t0 = 1_800_000_000_000u64;
+        let limits = Limits { per_min: 2, per_day: 100, max_shares_per_charge: 1 };
+        let j = SignJournal::open(tmp.path(), 1, KEEP).unwrap();
+        let no_intent = |session: &str| JournalEntry {
+            key_id: "k".into(),
+            purpose: PURPOSE_NO_INTENT.into(),
+            digest: "12".repeat(34),
+            session_id: session.into(),
+            ..Default::default()
+        };
+        j.append_charged(no_intent("s1"), limits, t0).unwrap();
+        assert!(matches!(j.append_charged(no_intent("s1"), limits, t0 + 1), Err(DaemonError::RateLimited(_))));
+        j.append_charged(no_intent("s2"), limits, t0 + 2).unwrap();
+        assert!(matches!(j.append_charged(no_intent("s3"), limits, t0 + 3), Err(DaemonError::RateLimited(_))));
+    }
+
+    /// A key id is a directory name: anything that could leave the journal directory is refused
+    /// before a file is touched.
+    #[test]
+    fn path_unsafe_key_ids_are_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let j = SignJournal::open(tmp.path().join("j"), 1, KEEP).unwrap();
+        for bad in ["", "..", "../k", "a/b", "a.b", "a b", "k\\x"] {
+            let err = j.append_charged(entry(bad, "r"), LIMITS, 1).unwrap_err();
+            assert!(matches!(err, DaemonError::Config(_)), "{bad:?}: {err:?}");
+        }
+        assert_eq!(std::fs::read_dir(tmp.path().join("j")).map(|d| d.count()).unwrap_or(0), 0);
+        for good in ["k", "frost-participant1_namespace-2"] {
+            j.append_charged(entry(good, good), LIMITS, 1).unwrap();
+            let report = read_key_dir(&tmp.path().join("j").join(good)).unwrap();
+            assert_eq!((report.entries.len(), report.segments, report.torn_tail_bytes), (1, 1, 0), "{good}");
+            assert_eq!(report.entries[0].key_id, good);
+        }
     }
 
     /// Audit R1: the charge binds the authorized operation. One request id re-used for two intents

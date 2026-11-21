@@ -181,6 +181,7 @@ spec:
             - { name: data, mountPath: /data, readOnly: true }
             - { name: destination, mountPath: /destination, readOnly: true }
             - { name: backup-work, mountPath: /work }
+            - { name: config, mountPath: /config, readOnly: true }
             {{- if eq $backup.destination.type "pvc" }}
             - { name: backup-dest, mountPath: /backup }
             {{- else if $node.backupSecret }}
@@ -217,14 +218,22 @@ spec:
           persistentVolumeClaim:
             claimName: {{ $node.dataClaim }}
         - name: tmp
-          emptyDir: {}
+          # In memory, never on the Kubernetes node's disk: it receives share bundles, request files
+          # and key exports during ceremonies. Counted in the cosigner container's memory limit.
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ $.Values.tmp.sizeLimit | quote }}
         {{- if $backup.enabled }}
         - name: destination
           configMap:
             name: {{ $fullname }}-backup
             defaultMode: 0555
         - name: backup-work
-          emptyDir: {}
+          # In memory, never on the Kubernetes node's disk: the staged and tarred sealed key files of
+          # every run. Counted in the backup container's memory limit (backup.resources).
+          emptyDir:
+            medium: Memory
+            sizeLimit: {{ $backup.workSizeLimit | quote }}
         {{- if eq $backup.destination.type "pvc" }}
         - name: backup-dest
           persistentVolumeClaim:

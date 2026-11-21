@@ -17,6 +17,9 @@
 #      journals; it never needs the node's TLS key).
 #   5. A container other than `cosigner` that mounts a cosigner's `data` volume writable — the
 #      backup sidecar reads it, it never writes it.
+#   6. An emptyDir in a StatefulSet pod that is not memory-backed with a sizeLimit — scratch space
+#      (the cosigner's /tmp, the backup sidecar's work directory) receives share bundles and the
+#      tar of sealed key files, and a disk-backed emptyDir would leave them on the Kubernetes node.
 #
 #   scripts/check-deploy-policy.sh FILE...            (FILE '-' = stdin)
 #   helm template rutli deploy/helm/rutli-cosigner -f deploy/helm/rutli-cosigner/ci/pernode-values.yaml \
@@ -95,7 +98,11 @@ violations="$(jq -rs --arg seal "$SEAL_SECRET_REGEX" --arg tls "$TLS_SECRET_REGE
         # 5. the data volume is read-only for everything but the cosigner
           ( containers($ps)[] | select(.name != "cosigner") | . as $c
             | (.volumeMounts // [])[] | select(.name == "data" and (.readOnly // false) != true)
-            | "\($w): container \($c.name) mounts the data volume writable — only the cosigner container may write it" )
+            | "\($w): container \($c.name) mounts the data volume writable — only the cosigner container may write it" ),
+        # 6. scratch space is memory-backed and bounded
+          ( select(.kind == "StatefulSet") | ($ps.volumes // [])[] | select(.emptyDir != null)
+            | select(.emptyDir.medium != "Memory" or ((.emptyDir.sizeLimit // "") | tostring | length) == 0)
+            | "\($w): emptyDir volume \(.name) is not memory-backed with a sizeLimit — scratch space must not reach the Kubernetes node'"'"'s disk" )
       )
     ]
   | unique | .[]

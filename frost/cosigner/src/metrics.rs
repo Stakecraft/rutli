@@ -64,6 +64,11 @@ pub const EPOCH_CHECK_SKIPPED: &str = "rutli_epoch_check_skipped_total";
 /// sharing this node never voted for — typically a restore from an old backup), else 0. A stale
 /// node refuses to sign or lead for the key. Labels: `key`. Alert on any 1.
 pub const STALE_SHARE: &str = "rutli_stale_share";
+/// Per FROST key (label `key`): 1 when the live epoch has a `keyfile prove` marker for the live
+/// sharing, else 0 (`proof::refresh_gauges`).
+pub const KEY_EPOCH_PROVEN: &str = "rutli_key_epoch_proven";
+/// Per FROST key (label `key`): seconds since the live key file was written.
+pub const KEY_EPOCH_AGE_SECONDS: &str = "rutli_key_epoch_age_seconds";
 /// Sign attempts beyond the first within one Sign request: a t-subset failed and the leader
 /// retried with another (fresh session, fresh commitments).
 /// Sign rounds this node took part in without a signing intent (a driver or leader older than
@@ -82,10 +87,11 @@ pub const SIGNER_ACL_ABSENT: &str = "rutli_signer_acl_absent_total";
 pub const SIGN_JOURNAL_ENTRIES: &str = "rutli_sign_journal_entries_total";
 /// Sign journal failures (corrupt on open, append failed): the share was refused.
 pub const SIGN_JOURNAL_ERRORS: &str = "rutli_sign_journal_errors_total";
-/// Counter, label `reason`: DKG/refresh ceremony intents this node refused — at the fence or part 1
-/// of a ceremony a peer leads, or as leader on Signer.Dkg/Refresh (certificate, signer, pin,
-/// signature, cluster, purpose, key, expiry, acl, malformed, ceremony-id, missing). A refusal on the
-/// mesh path means a leader asked for a ceremony no authorized client requested: alert on it.
+/// Counter, label `reason`: DKG/refresh ceremony intents and hosted-key generate intents this node
+/// refused — at the fence or part 1 of a ceremony a peer leads, at the fence of a generation, or as
+/// leader on Signer.Dkg/Refresh/GenerateKey (certificate, signer, pin, signature, cluster, purpose,
+/// key, spec, leader, expiry, acl, malformed, ceremony-id, missing). A refusal on the mesh path
+/// means a leader asked for a ceremony or a key no authorized client requested: alert on it.
 pub const CEREMONY_INTENT_REFUSALS: &str = "rutli_ceremony_intent_refusals_total";
 /// Counter: refreshes this node refused to take part in (as leader, at a fence or at part 1)
 /// because it took part in a refresh of the same key less than
@@ -100,8 +106,9 @@ pub const REFRESH_INTERVAL_WAIVED: &str = "rutli_refresh_interval_waived_total";
 /// window is a day shorter so a weekly run that lands a little early is not two in the window.
 /// Above 1 means a refresh outside the schedule.
 pub const REFRESHES_6D: &str = "rutli_refreshes_6d";
-/// Counter: DKG/refresh fences and part 1s this node accepted without a ceremony intent (a leader
-/// or client that predates them), because `signing_policy.require_ceremony_intent` is off.
+/// Counter: DKG/refresh fences and part 1s, and hosted-key generation fences, this node accepted
+/// without a ceremony or generate intent (a leader or client that predates them), because
+/// `signing_policy.require_ceremony_intent` is off.
 pub const CEREMONY_INTENT_ABSENT: &str = "rutli_ceremony_intent_absent_total";
 /// Counter, label `reason`: hosted-key delete intents this node refused (audit M2) — on DeleteKey,
 /// on a peer's PurgeKey, and on a tombstone a peer propagated in anti-entropy. A forged or
@@ -273,12 +280,14 @@ pub const CEREMONY_INTENT_REASONS: &[&str] = &[
     "cluster",
     "expiry",
     "key",
+    "leader",
     "malformed",
     "missing",
     "pin",
     "purpose",
     "signature",
     "signer",
+    "spec",
 ];
 /// Every `reason` of `rutli_delete_intent_refusals_total` (`refused_delete(..)` and the shared
 /// signer checks it drives). Primed for `RutliDeleteIntentRefused`.
@@ -335,7 +344,12 @@ pub const BACKGROUND_LOOPS: &[&str] = &["anti_entropy", "ceremony_resolver", "ep
 /// - `timestamp`: material whose creation or undelete time lies in the future;
 /// - `generate-conflict`: a generation this node led, aborted because a peer holds other material;
 /// - `unverifiable`: a push refused because another peer answered with a copy this node cannot check;
-/// - `throttled`: a read-repair refused because this node's fan-out ceiling is reached.
+/// - `throttled`: a read-repair refused because this node's fan-out ceiling is reached;
+/// - `spec`: a push of another spec than the generation's fence declared on this node;
+/// - `intent`: a push under a genkey guard taken without a generate intent, on a node that now
+///   requires one;
+/// - `mixed-version`: a generation with a client intent this node led, refused before fencing
+///   because a reachable cosigner does not verify generate intents (a 0.4.0 node).
 pub const HOSTED_REFUSAL_REASONS: &[&str] = &[
     "unfenced",
     "conflict",
@@ -346,6 +360,9 @@ pub const HOSTED_REFUSAL_REASONS: &[&str] = &[
     "generate-conflict",
     "unverifiable",
     "throttled",
+    "spec",
+    "intent",
+    "mixed-version",
 ];
 /// Counter: nodes the rollback of an aborted hosted-key generation did not reach (each may keep a
 /// copy the generation wrote). The log line names the node and the key.
@@ -505,7 +522,10 @@ pub fn describe() {
     describe_counter!(SIGN_ROUND2_UNKNOWN_SESSION, "Sign round 2 requests refused as an unknown signing session (no round-1 nonces held for it)");
     describe_counter!(SIGN_INTENT_ABSENT, "Sign rounds accepted without a signing intent (require_intent off)");
     describe_counter!(SIGN_POLICY_REFUSALS, "Signing-policy refusals at this node, by reason");
-    describe_counter!(CEREMONY_INTENT_REFUSALS, "DKG/refresh ceremony intents refused at this node, by reason");
+    describe_counter!(
+        CEREMONY_INTENT_REFUSALS,
+        "DKG/refresh ceremony intents and hosted-key generate intents refused at this node, by reason"
+    );
     describe_counter!(
         REFRESH_INTERVAL_REFUSALS,
         "Refreshes refused at this node because the key was refreshed less than refresh_min_interval_secs ago"
@@ -517,7 +537,7 @@ pub fn describe() {
     describe_gauge!(REFRESHES_6D, "Refreshes of the key this node committed in the last 6 days");
     describe_counter!(
         CEREMONY_INTENT_ABSENT,
-        "DKG/refresh fences and part 1s accepted without a ceremony intent (require_ceremony_intent off)"
+        "DKG/refresh fences, part 1s and hosted-key generation fences accepted without a client intent (require_ceremony_intent off)"
     );
     describe_counter!(SIGN_RATE_LIMITED, "Signature shares refused by the per-key sign rate limit or share cap");
     describe_counter!(SIGNER_ACL_ABSENT, "Key operations by a client CN without a signer_acl entry");
@@ -526,6 +546,11 @@ pub fn describe() {
     describe_counter!(EPOCH_MISMATCH, "Sign round-1 refusals: the leader signed with another sharing (epoch)");
     describe_counter!(EPOCH_CHECK_SKIPPED, "Sign round-1 requests without the leader's sharing (pre-epoch leader)");
     describe_gauge!(STALE_SHARE, "1 while this node's share of the key is stale (refuses to sign), else 0");
+    describe_gauge!(
+        KEY_EPOCH_PROVEN,
+        "1 while the live epoch of the key has a `keyfile prove` marker for the live sharing, else 0"
+    );
+    describe_gauge!(KEY_EPOCH_AGE_SECONDS, "Seconds since the live key file of the key was written (the epoch installed)");
     describe_counter!(SIGN_RETRIES, "Sign attempts beyond the first (a t-subset failed; retried with another)");
     describe_counter!(INVALID_SIGNATURE_SHARES, "Signature shares that failed verification at aggregation");
     describe_counter!(NONCE_MARKERS_PRUNED, "Burned-session nonce markers removed past their retention");

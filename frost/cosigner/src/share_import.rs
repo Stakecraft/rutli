@@ -608,7 +608,7 @@ mod tests {
         assert_eq!(done.canton_fingerprint, fingerprint());
         assert_eq!(done.pkp_digest, bundles[0].pkp_digest);
         let installed = n.keystore.load(KEY).unwrap();
-        let origin = installed.origin.unwrap();
+        let origin = installed.origin.clone().unwrap();
         assert_eq!((origin.ceremony_id.as_str(), origin.refresh_count), (CEREMONY, 0));
         assert_eq!((origin.carried_usage.as_ref(), done.carried_usage.as_ref()), (Some(&usage()), Some(&usage())));
         assert!(!share_delivery::recipient_path(&n.ctx.data_dir, KEY).unwrap().exists());

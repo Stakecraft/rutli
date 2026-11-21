@@ -269,7 +269,10 @@ async fn dkg_preflight(
              share"
         )));
     }
-    let first = &views[0].1;
+    // `holders` is not empty, so neither is `views`; checked anyway, no panic in a preflight.
+    let Some((_, first)) = views.first() else {
+        return Err(DaemonError::CeremonyRefused(format!("no cosigner answered for {key_id}")));
+    };
     let same = views.iter().all(|(_, v)| {
         v.epoch == first.epoch && v.pkp_digest == first.pkp_digest && v.group_verifying_key == first.group_verifying_key
     });
@@ -307,12 +310,14 @@ async fn refresh_preflight(
             v.origin
         )));
     }
-    let first = &views[0].1;
+    let Some((first_id, first)) = views.first() else {
+        return Err(DaemonError::CeremonyRefused(format!("no cosigner answered for {key_id}")));
+    };
     if let Some((id, v)) = views.iter().find(|(_, v)| v.epoch != first.epoch || v.pkp_digest != first.pkp_digest) {
         return Err(DaemonError::CeremonyRefused(format!(
             "refusing to refresh {key_id}: cosigner {id} is on epoch {} but cosigner {} is on epoch {} \
              (or their sharings differ) — the nodes must hold one sharing (verify-key shows which)",
-            v.epoch, views[0].0, first.epoch
+            v.epoch, first_id, first.epoch
         )));
     }
     let digest: [u8; 32] = first
@@ -934,6 +939,7 @@ async fn attempt(
     }
     let ctx = &crate::node::Round1Ctx { message: Some(message.to_vec()), signers: Some(signers), ..base.clone() };
     let mut commitments: BTreeMap<Identifier, SigningCommitments> = BTreeMap::new();
+    // `sessions` has one id per member (built from `members` above), so the zip drops nothing.
     for (p, session) in members.iter().zip(&sessions) {
         let Some(deadline) = clock.round(clock.round1) else {
             open.abort_after_failure(None).await;
@@ -1284,12 +1290,35 @@ fn is_unreachable(e: &DaemonError) -> bool {
 /// Idempotent by `key_id`: if the key already exists anywhere, this repairs replicas instead of
 /// minting a second key, so a client retry or driver failover can never produce two different keys
 /// under one name.
+///
+/// Without a client generate intent: see [`generate_hosted_key_with_intent`].
 pub async fn generate_hosted_key(
     node: &Arc<Node>,
     peers: &Peers,
     key_id: &str,
     spec: crate::hosted::HostedSpec,
     write_quorum: usize,
+) -> Result<(crate::hosted::HostedKey, bool, usize)> {
+    generate_hosted_key_with_intent(node, peers, key_id, spec, write_quorum, None).await
+}
+
+/// [`generate_hosted_key`] for a client's generate intent (purpose `generate-key`): the ceremony id
+/// is the one the intent names (`genkey-<hex(request_id)>`), and the intent goes, unchanged, with
+/// the fence to every node, which verifies it itself — key, spec, and that this node is the leader
+/// it names — before it takes the guard. A node that does not verify generate intents (a 0.4.0
+/// cosigner, `NodeInfo.hosted_protocol` < 2) is refused before anything is fenced. Without an
+/// intent (an older client) the id is random and every node decides whether it accepts that
+/// (`signing_policy.require_ceremony_intent`).
+///
+/// The leader fences its own node first, and that fence must succeed: it is where the leader's
+/// own node verifies the intent, before anything is minted.
+pub async fn generate_hosted_key_with_intent(
+    node: &Arc<Node>,
+    peers: &Peers,
+    key_id: &str,
+    spec: crate::hosted::HostedSpec,
+    write_quorum: usize,
+    intent: Option<&pb::SignedIntent>,
 ) -> Result<(crate::hosted::HostedKey, bool, usize)> {
     // A hosted key squatting on an import id would make the split ceremony's install fail, and one
     // under a FROST id that key's DKG. Every node refuses both too; this answers before the mesh.
@@ -1300,7 +1329,13 @@ pub async fn generate_hosted_key(
     if spec.needs_every_node() {
         ensure_every_peer_supports(node, peers, spec).await?;
     }
-    let ceremony_id = new_id("genkey");
+    let ceremony_id = match intent {
+        Some(i) => crate::intent::generate_ceremony_id_of(i)?,
+        None => new_id(crate::intent::GENKEY_CEREMONY_PREFIX),
+    };
+    if intent.is_some() {
+        require_hosted_protocol(node, peers, key_id).await?;
+    }
 
     // Fence the key cluster-wide: the guard is per-key, so this also serializes against a
     // concurrent generate for the same id on another leader.
@@ -1311,15 +1346,24 @@ pub async fn generate_hosted_key(
     // anyway. A peer that is reachable and *refuses* (something else holds the guard) still aborts,
     // because that is a genuine conflict. Without this distinction the 2-of-3 write quorum could
     // never actually be used with a node down, which is the entire point of it.
+    //
+    // The leader's own node first, and it may not be skipped: its fence is where this node checks
+    // the client's intent before anything is minted, and it binds the generation to this leader
+    // here before any peer has seen the intent.
     let mut fenced: Vec<&Arc<dyn PeerApi>> = Vec::new();
     let mut reachable: Vec<&Arc<dyn PeerApi>> = Vec::new();
-    for p in peers {
-        match p.ceremony_fence(&ceremony_id, key_id, "genkey").await {
+    let own_first = peers
+        .iter()
+        .filter(|p| p.identifier() == node.identifier)
+        .chain(peers.iter().filter(|p| p.identifier() != node.identifier));
+    for p in own_first {
+        let own = p.identifier() == node.identifier;
+        match p.genkey_fence(&ceremony_id, key_id, spec.as_str(), intent).await {
             Ok(()) => {
                 fenced.push(p);
                 reachable.push(p);
             }
-            Err(e) if is_unreachable(&e) => {
+            Err(e) if !own && is_unreachable(&e) => {
                 tracing::warn!(peer = ?p.identifier(), key_id, error = %e, "cosigner unreachable while fencing a hosted-key write; continuing without it");
             }
             Err(e) => {
@@ -1339,6 +1383,39 @@ pub async fn generate_hosted_key(
     release_fences(&fenced, &ceremony_id, key_id).await;
     outcome
 }
+
+/// Refuse a generation that carries a client generate intent while a reachable cosigner does not
+/// verify generate intents (`NodeInfo.hosted_protocol` below [`HOSTED_PROTOCOL`]: a 0.4.0 node).
+/// Such a node would refuse the fence anyway (a 0.4.0 node refuses an intent on a genkey fence);
+/// this says why, before anything is fenced. A node that cannot be reached is skipped, as by the
+/// fence: it takes no part in this generation and pulls the key later. One that answers but
+/// cannot say is refused.
+async fn require_hosted_protocol(node: &Arc<Node>, peers: &Peers, key_id: &str) -> Result<()> {
+    for p in peers {
+        if p.identifier() == node.identifier {
+            continue;
+        }
+        let who = peer_label(p.identifier());
+        let problem = match p.hosted_protocol().await {
+            Ok(v) if v >= HOSTED_PROTOCOL => continue,
+            Err(e) if is_unreachable(&e) => continue,
+            Ok(v) => format!("{who} speaks hosted-key protocol {v}"),
+            Err(e) => format!("{who} could not report its hosted-key protocol ({e})"),
+        };
+        hosted_refusal("mixed-version");
+        tracing::warn!(key_id, peer = %who, problem = %problem, "hosted-key generation refused before fencing: a reachable cosigner does not verify generate intents");
+        return Err(DaemonError::CeremonyRefused(format!(
+            "{problem}; a hosted-key generation with a client intent needs protocol {HOSTED_PROTOCOL} on \
+             every reachable cosigner — finish upgrading the cluster first (existing hosted keys keep \
+             working), or see docs/hosted-keys.md, Upgrading from 0.4.0"
+        )));
+    }
+    Ok(())
+}
+
+/// The hosted-key creation protocol this node speaks (`NodeInfo.hosted_protocol`): 2 = it verifies
+/// a client generate intent at its genkey fence. 0.4.0 nodes report 0.
+pub const HOSTED_PROTOCOL: u32 = 2;
 
 /// Refuse to create a `spec` key unless every other cosigner reports the spec (`NodeInfo`).
 ///
@@ -1818,7 +1895,7 @@ impl Tally {
         (self.holders.len() > 1).then(|| {
             self.holders
                 .iter()
-                .flat_map(|(c, holders)| holders.iter().map(move |(p, _)| (*p, hex::encode(&c[..6]))))
+                .flat_map(|(c, holders)| holders.iter().map(move |(p, _)| (*p, hex::encode(c.get(..6).unwrap_or(c.as_slice())))))
                 .collect()
         })
     }
@@ -1842,7 +1919,7 @@ impl Tally {
         if holders.len() < PULL_AGREEMENT {
             return None;
         }
-        let mut key = holders[0].1.clone();
+        let mut key = holders.first()?.1.clone();
         key.created_at = holders.iter().map(|(_, k)| k.created_at).max().unwrap_or(key.created_at);
         key.undeleted_at_ms = holders.iter().filter_map(|(_, k)| k.undeleted_at_ms).max();
         Some((key, holders.iter().map(|(p, _)| *p).collect()))
@@ -2125,7 +2202,9 @@ async fn adopt_existing(
 /// - Identical material already here: a no-op. Different material here: refused,
 ///   [`DaemonError::HostedConflict`].
 /// - An id this node does not hold: accepted only while `leader` holds this node's generation
-///   fence for the id under `ceremony_id` (FAILED_PRECONDITION otherwise), and only if no other
+///   fence for the id under `ceremony_id`, for the spec that fence declared, and — where generate
+///   intents are required — taken under a verified client generate intent
+///   ([`Node::genkey_push_refusal`]; FAILED_PRECONDITION otherwise), and only if no other
 ///   peer that answers holds different material (HostedConflict), a tombstone (refused as
 ///   tombstoned, the tombstone applied here) or a copy this node cannot check
 ///   (HostedUnconfirmed). A silent peer does not block the push, or one node down would stop
@@ -2167,17 +2246,33 @@ pub async fn accept_replica(
         }
         Err(e) => return Err(e),
     }
-    if !node.hosted_genkey_fenced_by(key_id, ceremony_id, leader) {
-        hosted_refusal("unfenced");
-        tracing::warn!(
-            key_id,
-            peer = %from,
-            ceremony_id,
-            "refused a pushed hosted key: the id is not held here and the caller holds no \
-             generation fence for it under that ceremony (a 0.4.0 node's anti-entropy push looks \
-             like this; this node pulls the key itself once two peers agree)"
-        );
-        return Err(crate::node::unfenced_push(key_id, ceremony_id, leader));
+    if let Some((reason, e)) = node.genkey_push_refusal(key_id, ceremony_id, leader, spec.as_str()) {
+        match reason {
+            "spec" => hosted_refusal("spec"),
+            "intent" => hosted_refusal("intent"),
+            _ => hosted_refusal("unfenced"),
+        }
+        if reason == "unfenced" {
+            tracing::warn!(
+                key_id,
+                peer = %from,
+                ceremony_id,
+                "refused a pushed hosted key: the id is not held here and the caller holds no \
+                 generation fence for it under that ceremony (a 0.4.0 node's anti-entropy push looks \
+                 like this; this node pulls the key itself once two peers agree)"
+            );
+        } else {
+            tracing::warn!(
+                key_id,
+                peer = %from,
+                ceremony_id,
+                reason,
+                error = %e,
+                "refused a pushed hosted key: it does not match what the generation's fence was taken \
+                 under on this node — if that peer runs this release, investigate it as compromised"
+            );
+        }
+        return Err(e);
     }
     // Each such check asks every peer: charged to this node's fan-out ceiling, so a peer that fences
     // and pushes made-up ids in a loop is bounded. Over it: "try again" (UNAVAILABLE), which the
@@ -2338,7 +2433,8 @@ pub async fn anti_entropy_sweep(node: &Arc<Node>, peers: &Peers) -> Result<usize
     answers.sort_by_key(|(i, _)| *i);
     let mut inventories: Vec<(&Arc<dyn PeerApi>, Vec<pb::KeyManifest>)> = Vec::new();
     for (i, answer) in answers {
-        let p = &peers[i];
+        // `i` is an index into `peers` from the loop above, so it is always present.
+        let Some(p) = peers.get(i) else { continue };
         // Never skip a peer silently: an unreachable peer — e.g. an mTLS UnknownIssuer while the
         // cluster CA is being rotated (docs/ca-rotation.md) — is exactly what an operator must see.
         // With hosted keys on, every node sweeps every peer each interval, so this line covers
@@ -2475,6 +2571,13 @@ pub(crate) async fn hosted_exists(node: &Arc<Node>, key_id: &str) -> Result<bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_preflight_with_no_answers_is_refused_not_a_panic() {
+        // refresh_preflight used to index views[0]; no answers is an error, never a panic.
+        let peers: Peers = Vec::new();
+        assert!(matches!(refresh_preflight(&peers, "k", &[]).await, Err(DaemonError::CeremonyRefused(_))));
+    }
 
     #[test]
     fn a_peer_rpc_timeout_counts_as_unreachable_but_a_refusal_does_not() {
