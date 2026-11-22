@@ -19,6 +19,13 @@ mode="${1:-write}"
 
 crates=("$REPO/frost" "$REPO/frost/fuzz")
 
+# frost/fuzz pins a nightly compiler for libFuzzer (frost/fuzz/rust-toolchain.toml); its sources are
+# formatted with the toolchain of the workspace, like the rest, and a nightly may not have rustfmt.
+toolchain="$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$REPO/frost/rust-toolchain.toml")"
+if [ -n "$toolchain" ] && command -v rustup >/dev/null 2>&1; then
+  export RUSTUP_TOOLCHAIN="$toolchain"
+fi
+
 check() { # dir
   (cd "$1" && cargo fmt --all -- --check >/dev/null 2>&1)
 }
@@ -51,7 +58,10 @@ case "$mode" in
         (cd "$c" && cargo fmt --all)
         if check "$c"; then break; fi
       done
-      check "$c" || { echo "scripts/fmt-tree.sh: $c did not settle after four passes" >&2; exit 1; }
+      check "$c" || {
+        echo "scripts/fmt-tree.sh: $c did not settle after four passes" >&2
+        exit 1
+      }
     done
     echo "rustfmt: formatted"
     ;;
