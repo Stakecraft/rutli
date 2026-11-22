@@ -23,7 +23,9 @@ pub const PEER_CALL_DURATION: &str = rutli_cosigner::metrics::PEER_CALL_DURATION
 /// none). `control` also covers the liveness probe, whose deadline (2 s) is shorter than the 3 s
 /// used here; its calls are few next to `NodeInfo`, `KeyEpoch` and `CeremonyStatus`.
 pub fn peer_call_deadline(call: &str) -> Option<Duration> {
-    use rutli_cosigner::peer::{ABORT_DEADLINE, CONTROL_DEADLINE, ROUND1_DEADLINE, ROUND2_DEADLINE};
+    use rutli_cosigner::peer::{
+        ABORT_DEADLINE, CONTROL_DEADLINE, ROUND1_DEADLINE, ROUND2_DEADLINE,
+    };
     match call {
         "sign_round1" => Some(ROUND1_DEADLINE),
         "sign_round2" => Some(ROUND2_DEADLINE),
@@ -291,7 +293,11 @@ pub fn report(
                 }
             } else if base == Some(PEER_CALL_DURATION) && metric.ends_with("_bucket") {
                 if let (Some(call), Some(le)) = (label(series, "call"), label(series, "le")) {
-                    *peer_buckets.entry(call.to_string()).or_default().entry(le.to_string()).or_default() += delta;
+                    *peer_buckets
+                        .entry(call.to_string())
+                        .or_default()
+                        .entry(le.to_string())
+                        .or_default() += delta;
                 }
             } else if base == Some(SIGN_DURATION) && label(series, "result") == Some("ok") {
                 if metric.ends_with("_bucket") {
@@ -342,7 +348,11 @@ fn peer_call_report(call: &str, buckets: &BTreeMap<String, f64>) -> Option<PeerC
     let mut cumulative: Vec<(f64, f64)> = buckets
         .iter()
         .filter_map(|(le, &n)| {
-            let bound = if le == "+Inf" { f64::INFINITY } else { le.parse().ok()? };
+            let bound = if le == "+Inf" {
+                f64::INFINITY
+            } else {
+                le.parse().ok()?
+            };
             Some((bound, n))
         })
         .collect();
@@ -352,7 +362,10 @@ fn peer_call_report(call: &str, buckets: &BTreeMap<String, f64>) -> Option<PeerC
     // The bucket edge at a third of the deadline, within 5 ms of it: the edges are rounded (0.33,
     // 0.67, 1.67), each a little above the exact third, which makes the rule that much lenient.
     let within_third = deadline.and_then(|d| {
-        cumulative.iter().find(|(bound, _)| (bound - d / 3.0).abs() < 0.005).map(|&(_, n)| n / total)
+        cumulative
+            .iter()
+            .find(|(bound, _)| (bound - d / 3.0).abs() < 0.005)
+            .map(|&(_, n)| n / total)
     });
     let q = |q: f64| round3(quantile(q, &cumulative) * 1000.0);
     Some(PeerCallReport {
@@ -554,11 +567,17 @@ rutli_untyped_thing 7
             ))
         };
         let names = vec!["c1".to_string(), "c2".to_string()];
-        let before = BTreeMap::from([("c1".to_string(), page([5, 5, 5, 5], [5, 5, 5], 9)), ("c2".to_string(), page([0; 4], [0; 3], 0))]);
+        let before = BTreeMap::from([
+            ("c1".to_string(), page([5, 5, 5, 5], [5, 5, 5], 9)),
+            ("c2".to_string(), page([0; 4], [0; 3], 0)),
+        ]);
         // Run: round 1 on c1 10000 calls, 9995 within 0.67 s; c2 adds 990 of 1000 within 0.25 s.
         // Round 2: every call within 1.67 s.
         let after = BTreeMap::from([
-            ("c1".to_string(), page([9005, 10000, 10005, 10005], [2005, 2005, 2005], 9)),
+            (
+                "c1".to_string(),
+                page([9005, 10000, 10005, 10005], [2005, 2005, 2005], 9),
+            ),
             ("c2".to_string(), page([990, 1000, 1000, 1000], [0; 3], 0)),
         ]);
         let r = report(&before, &after, &names, &[], Vec::new());
@@ -571,9 +590,16 @@ rutli_untyped_thing 7
         // 99.95 % within 0.67 s puts p99.9 inside that bucket.
         assert!(r1.p999_ms > 250.0 && r1.p999_ms <= 670.0, "{r1:?}");
         let r2 = &r.peer_calls["sign_round2"];
-        assert_eq!((r2.count, r2.within_third, r2.margin_3x), (2000.0, Some(1.0), Some(true)));
+        assert_eq!(
+            (r2.count, r2.within_third, r2.margin_3x),
+            (2000.0, Some(1.0), Some(true))
+        );
         // The leader's own share has no deadline, and a call class that saw no call is left out.
-        assert!(!r.peer_calls.contains_key("local_share"), "{:?}", r.peer_calls);
+        assert!(
+            !r.peer_calls.contains_key("local_share"),
+            "{:?}",
+            r.peer_calls
+        );
 
         // One call in 500 past a third of the deadline breaks the rule.
         let after = BTreeMap::from([
